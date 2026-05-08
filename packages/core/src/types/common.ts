@@ -148,6 +148,11 @@ export interface TextRunData {
   baseline?: number;
   /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */
   fieldType?: string;
+  /**
+   * Hyperlink target URL resolved from rPr > a:hlinkClick @r:id via the slide's _rels.
+   * Undefined for runs without a hyperlink. ECMA-376 §21.1.2.3.5 (CT_Hyperlink).
+   */
+  hyperlink?: string;
 }
 
 export interface LineBreak {

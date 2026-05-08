@@ -523,6 +523,10 @@ struct TextRunData {
     baseline: Option<i32>,
     /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)
     field_type: Option<String>,
+    /// Hyperlink target URL resolved from rPr > hlinkClick @r:id via slide _rels.
+    /// None for runs without a:hlinkClick.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hyperlink: Option<String>,
 }
 
 // ===========================
@@ -1928,6 +1932,7 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
 fn parse_text_body(
     tx_body: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
     inherited_font_size: Option<f64>,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
@@ -1997,7 +2002,7 @@ fn parse_text_body(
 
     let paragraphs = children_vec(tx_body, "p")
         .into_iter()
-        .map(|p| parse_paragraph(p, theme, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
+        .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
         .collect();
 
     TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit }
@@ -2006,6 +2011,7 @@ fn parse_text_body(
 fn parse_paragraph(
     p_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
     body_default_alignment: Option<&str>,
     body_default_space_before: Option<i64>,
     body_default_space_after: Option<i64>,
@@ -2090,7 +2096,7 @@ fn parse_paragraph(
     for node in p_node.children().filter(|n| n.is_element()) {
         match node.tag_name().name() {
             "r" => {
-                if let Some(run) = parse_run(node, def_rpr, theme) {
+                if let Some(run) = parse_run(node, def_rpr, theme, rels) {
                     runs.push(TextRun::Text(run));
                 }
             }
@@ -2117,6 +2123,7 @@ fn parse_paragraph(
                     font_family,
                     baseline: None,
                     field_type: if fld_type == "slidenum" { Some("slidenum".to_string()) } else { None },
+                    hyperlink: None,
                 }));
             }
             _ => {}
@@ -2186,6 +2193,7 @@ fn parse_run(
     r_node: roxmltree::Node<'_, '_>,
     def_rpr: Option<roxmltree::Node<'_, '_>>,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
 ) -> Option<TextRunData> {
     let t_node = child(r_node, "t")?;
     let text  = t_node.text().unwrap_or("").to_owned();
@@ -2229,7 +2237,15 @@ fn parse_run(
         .and_then(|v| v.parse::<i32>().ok())
         .filter(|&v| v != 0);
 
-    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, baseline, field_type: None })
+    // a:hlinkClick — hyperlink. r:id refers to the slide rels (Target = URL or local target).
+    // Resolve immediately so the renderer doesn't need access to the rels table.
+    let hyperlink = r_pr
+        .and_then(|n| child(n, "hlinkClick"))
+        .and_then(|h| attr_r(&h, "id"))
+        .and_then(|rid| rels.get(&rid).cloned())
+        .filter(|s| !s.is_empty());
+
+    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, baseline, field_type: None, hyperlink })
 }
 
 // ===========================
@@ -2690,6 +2706,7 @@ fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
     group_fill: Option<&Fill>,
 ) -> Option<ShapeElement> {
     // --- Placeholder info (for layout fallback) ---
@@ -2907,7 +2924,7 @@ fn parse_shape(
     };
 
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing));
+        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing));
 
     // Shadow from spPr > effectLst > outerShdw
     let shadow = sp_pr
@@ -3199,6 +3216,7 @@ fn parse_table(
     tbl: roxmltree::Node<'_, '_>,
     t: &Transform,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
 ) -> Option<TableElement> {
     // Parse tblPr attributes and look up table style
@@ -3249,7 +3267,7 @@ fn parse_table(
     let mut rows: Vec<TableRow> = tbl
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tr")
-        .map(|tr| parse_table_row(tr, theme))
+        .map(|tr| parse_table_row(tr, theme, rels))
         .collect();
 
     let row_count = rows.len();
@@ -3370,12 +3388,13 @@ fn parse_table(
 fn parse_table_row(
     tr: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
 ) -> TableRow {
     let height = attr_i64(&tr, "h").unwrap_or(0);
     let cells: Vec<TableCell> = tr
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tc")
-        .map(|tc| parse_table_cell(tc, theme))
+        .map(|tc| parse_table_cell(tc, theme, rels))
         .collect();
     TableRow { height, cells }
 }
@@ -3383,11 +3402,12 @@ fn parse_table_row(
 fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
 ) -> TableCell {
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
     let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, anchor, None, None, None, None));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, None, None, anchor, None, None, None, None));
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
@@ -3586,7 +3606,7 @@ fn parse_sp_tree_node(
                     }
                 }
             }
-            if let Some(shape) = parse_shape(node, lph, theme, group_fill) {
+            if let Some(shape) = parse_shape(node, lph, theme, rels, group_fill) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -3687,7 +3707,7 @@ fn parse_sp_tree_node(
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl");
             if let Some(tbl_node) = tbl_node {
-                if let Some(table) = parse_table(tbl_node, &t, theme, zip) {
+                if let Some(table) = parse_table(tbl_node, &t, theme, rels, zip) {
                     out.push(SlideElement::Table(table));
                 }
                 return;
@@ -3835,7 +3855,7 @@ fn parse_smartart_drawing(
         // branches (sp/cxnSp/grpSp) directly.
         match node.tag_name().name() {
             "sp" => {
-                if let Some(shape) = parse_shape(node, &empty_lph, theme, None) {
+                if let Some(shape) = parse_shape(node, &empty_lph, theme, &empty_rels, None) {
                     out.push(SlideElement::Shape(shape));
                 }
             }
@@ -3874,7 +3894,7 @@ fn parse_smartart_drawing(
                 for child_node in node.children().filter(|n| n.is_element()) {
                     match child_node.tag_name().name() {
                         "sp" => {
-                            if let Some(shape) = parse_shape(child_node, &empty_lph, theme, None) {
+                            if let Some(shape) = parse_shape(child_node, &empty_lph, theme, &empty_rels, None) {
                                 out.push(SlideElement::Shape(shape));
                             }
                         }
@@ -4319,5 +4339,41 @@ mod tests {
         }
     }
 
+    /// ECMA-376 §21.1.2.3.5 — a:hlinkClick @r:id resolves via slide _rels Target.
+    #[test]
+    fn test_parse_run_hyperlink_resolves_rid() {
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><rPr lang="en-US"><hlinkClick r:id="rId7"/></rPr><t>Open site</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r_node = doc.root_element();
+        let theme = HashMap::new();
+        let mut rels = HashMap::new();
+        rels.insert("rId7".to_owned(), "https://example.com/".to_owned());
 
+        let parsed = parse_run(r_node, None, &theme, &rels).expect("run should parse");
+        assert_eq!(parsed.text, "Open site");
+        assert_eq!(parsed.hyperlink.as_deref(), Some("https://example.com/"));
+    }
+
+    /// A run without hlinkClick should have hyperlink = None.
+    #[test]
+    fn test_parse_run_without_hyperlink_is_none() {
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr lang="en-US"/><t>plain</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let parsed = parse_run(doc.root_element(), None, &theme, &rels).expect("run should parse");
+        assert!(parsed.hyperlink.is_none());
+    }
+
+    /// hlinkClick with an unknown r:id should produce hyperlink = None
+    /// rather than emitting a placeholder string.
+    #[test]
+    fn test_parse_run_hyperlink_unknown_rid_is_none() {
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><rPr lang="en-US"><hlinkClick r:id="rIdNope"/></rPr><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let parsed = parse_run(doc.root_element(), None, &theme, &rels).expect("run should parse");
+        assert!(parsed.hyperlink.is_none());
+    }
 }
