@@ -4,6 +4,13 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.27.0 — 2026-05-08
+
+### Features
+
+- **vscode-extension**: auto-install integration for `ooxml-mcp-server`. When the workspace contains an `.xlsx`, `.docx`, or `.pptx` file, the extension offers to enable the MCP server so AI agents (Copilot Agent, Claude, etc.) can read those files via dedicated tools instead of unzipping XML by hand. The binary is downloaded on demand from GitHub Releases (~5 MB, SHA256-verified) into the extension's globalStorage; existing `cargo install` / Homebrew users on `PATH` are reused as-is. New settings: `ooxmlViewer.mcpServer.enabled` (`auto` / `always` / `never`) and `ooxmlViewer.mcpServer.binaryPath`. Requires VS Code 1.101+ for the finalised MCP API.
+- **mcp-server**: each release now ships prebuilt binaries for macOS (arm64 / x64), Linux (x64 / arm64), and Windows (x64) on the GitHub Release page, removing the Rust toolchain requirement for end users.
+
 ## 0.26.0 — 2026-05-08
 
 ### Fixes
