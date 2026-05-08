@@ -202,6 +202,8 @@ type LayoutSegment = {
   underline: boolean;
   /** OOXML rPr @u value when not the default "sng": "dbl"/"dotted"/"wavy"/etc. */
   underlineStyle?: string;
+  /** rgba() colour for the underline when uFill overrides the text colour. */
+  underlineColor?: string;
   strikethrough: boolean;
   /** Two parallel strike lines (rPr strike="dblStrike"). */
   strikeDouble?: boolean;
@@ -335,7 +337,7 @@ function layoutParagraph(
     underline: boolean,
     strikethrough: boolean,
     baseline?: number,
-    extras?: { strikeDouble?: boolean; letterSpacingPx?: number; underlineStyle?: string },
+    extras?: { strikeDouble?: boolean; letterSpacingPx?: number; underlineStyle?: string; underlineColor?: string },
   ) => {
     if (!text) return;
     ctx.font = font;
@@ -348,11 +350,13 @@ function layoutParagraph(
     const w = baseW + lsPx * text.length;
     const strikeDouble = extras?.strikeDouble;
     const underlineStyle = extras?.underlineStyle;
+    const underlineColor = extras?.underlineColor;
     const sameMeta = (a: LayoutSegment) =>
       a.font === font &&
       a.color === color &&
       a.underline === underline &&
       (a.underlineStyle ?? '') === (underlineStyle ?? '') &&
+      (a.underlineColor ?? '') === (underlineColor ?? '') &&
       a.strikethrough === strikethrough &&
       (a.strikeDouble ?? false) === (strikeDouble ?? false) &&
       (a.letterSpacingPx ?? 0) === lsPx &&
@@ -363,7 +367,7 @@ function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, underlineStyle, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
+        segs.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
       }
     } else {
       lineW += w;
@@ -371,7 +375,7 @@ function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
+        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
       }
     }
   };
@@ -426,6 +430,7 @@ function layoutParagraph(
       strikeDouble: segStrikeDouble,
       letterSpacingPx: lsPx,
       underlineStyle: run.underlineStyle,
+      underlineColor: run.underlineColor ? hexToRgba(run.underlineColor) : undefined,
     };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
@@ -3250,7 +3255,7 @@ function renderTextBody(
       }
 
       if (seg.underline) {
-        drawUnderline(ctx, penX, segBaseline, segW, seg.sizePx, seg.color, seg.underlineStyle);
+        drawUnderline(ctx, penX, segBaseline, segW, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle);
       }
 
       if (seg.strikethrough) {

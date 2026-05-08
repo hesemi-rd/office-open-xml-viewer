@@ -558,6 +558,11 @@ struct TextRunData {
     /// ECMA-376 §21.1.2.3.16 (ST_TextUnderlineType).
     #[serde(skip_serializing_if = "Option::is_none")]
     underline_style: Option<String>,
+    /// Underline-specific colour from rPr > uFill > solidFill. None means the
+    /// underline follows the text colour (uFillTx behaviour, the default).
+    /// ECMA-376 §21.1.2.3.20 (CT_TextUnderlineFillGroupWrapper).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    underline_color: Option<String>,
     /// true when strike == "sngStrike" or "dblStrike"
     strikethrough: bool,
     /// true only when strike == "dblStrike" (renderer draws two parallel lines)
@@ -2236,6 +2241,7 @@ fn parse_paragraph(
                     italic,
                     underline: false,
                     underline_style: None,
+                    underline_color: None,
                     strikethrough: false,
                     strike_double: false,
                     font_size,
@@ -2337,6 +2343,13 @@ fn parse_run(
     let underline = underline_attr.as_deref().map(|v| v != "none").unwrap_or(false);
     let underline_style = underline_attr.filter(|v| v != "none" && v != "sng");
 
+    // ECMA-376 §21.1.2.3.20 — uFill specifies a per-underline colour that
+    // overrides the text colour. uFillTx (or absence) means "follow text".
+    let underline_color = r_pr.and_then(|n| child(n, "uFill"))
+        .or_else(|| def_rpr.and_then(|n| child(n, "uFill")))
+        .and_then(|n| child(n, "solidFill"))
+        .and_then(|n| parse_color_node(n, theme));
+
     // strikethrough: "sngStrike" or "dblStrike" → true; double tracked separately
     let strike_attr = r_pr.and_then(|n| attr(&n, "strike"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "strike")));
@@ -2386,7 +2399,7 @@ fn parse_run(
         .filter(|s| !s.is_empty());
 
     Some(TextRunData {
-        text, bold, italic, underline, underline_style,
+        text, bold, italic, underline, underline_style, underline_color,
         strikethrough, strike_double,
         font_size, color, font_family, baseline,
         caps, letter_spacing,
@@ -4677,6 +4690,25 @@ mod tests {
             assert_eq!(r.underline, *expected_bool, "u={val}");
             assert_eq!(r.underline_style.as_deref(), *expected_style, "u={val}");
         }
+    }
+
+    /// ECMA-376 §21.1.2.3.20 — rPr > uFill > solidFill yields a per-run
+    /// underline colour distinct from the text colour. uFillTx (or absent)
+    /// leaves underline_color as None so the renderer falls back to text.
+    #[test]
+    fn test_parse_run_underline_color() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+
+        let with_ufill = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr u="sng"><uFill><solidFill><srgbClr val="FF0000"/></solidFill></uFill></rPr><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(with_ufill).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(r.underline_color.as_deref().map(str::to_uppercase).as_deref(), Some("FF0000"));
+
+        let with_ufilltx = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr u="sng"><uFillTx/></rPr><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(with_ufilltx).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert!(r.underline_color.is_none());
     }
 
     /// ECMA-376 §20.1.8.17 — glow has a single rad attribute and a colour

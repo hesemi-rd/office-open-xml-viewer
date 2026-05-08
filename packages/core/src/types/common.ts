@@ -169,6 +169,11 @@ export interface TextRunData {
    * no underline (when `underline` is false) or the default single line.
    */
   underlineStyle?: string;
+  /**
+   * Underline-only colour from rPr > uFill (ECMA-376 §21.1.2.3.20). Absent
+   * means the underline follows the text colour (uFillTx default).
+   */
+  underlineColor?: string;
   /** True when rPr strike is sngStrike or dblStrike. */
   strikethrough: boolean;
   /**
