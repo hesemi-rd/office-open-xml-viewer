@@ -2573,24 +2573,34 @@ function renderQuadrant(
           right: suppressRightGridCol.has(ci) ? null : mergedBorder.right,
         };
       }
-      // Each shared edge is owned by exactly two cells. To avoid stacking two
-      // strokes on the same coordinate (which compounds antialiasing and reads
-      // as a thicker line), we draw shared edges only on the *lower* / *right*
-      // cell — i.e. as that cell's top / left — and merge in the neighbour's
-      // bottom / right by visual precedence. Excel's actual behaviour at a
-      // conflict is "stronger style wins" (e.g. medium beats thin), so picking
-      // the higher-precedence edge here also fixes the bug where a row's
-      // medium bottom was half-erased by the next row's thin top.
+      // Inherit the cell-above's bottom edge as our top, and the cell-left's
+      // right edge as our left. Two adjacent cells share an edge along the row
+      // / column boundary; the upper cell drew its bottom during its own
+      // iteration, but our cell's fill (drawn just above) over-paints the
+      // half of that line lying inside our cell. Re-drawing it as our top
+      // (after our fill) restores the boundary line.
       //
-      // The cell at row r drew its top *after* its own fill in this same
-      // iteration, so the boundary line is not over-painted by fills.
+      // When *both* cells define an edge, Excel renders the stronger style at
+      // a conflict (e.g. a medium bottom is not erased by a thin top below
+      // it). `pickStrongerEdge` returns the higher-precedence edge so the
+      // inherit picks the visually dominant style instead of always favouring
+      // the lower cell's own.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
       const aboveBottom = aboveCell
         ? resolveXf(styles, aboveCell.styleIndex).border.bottom
         : null;
+      let invertedTop = false;
       if (aboveBottom?.style) {
-        mergedBorder = { ...mergedBorder, top: pickStrongerEdge(mergedBorder.top, aboveBottom) };
+        const before = mergedBorder.top;
+        const picked = pickStrongerEdge(before, aboveBottom);
+        mergedBorder = { ...mergedBorder, top: picked };
+        // We only invert the double-border drawing when the top edge ends up
+        // being a *redraw* of the upper cell's bottom (rather than a fresh
+        // line for our own xf.top). That is true when the picked edge came
+        // from the neighbour — i.e. our own top was unset or weaker.
+        invertedTop = picked === aboveBottom && before !== aboveBottom;
       }
+      let invertedLeft = false;
       if (!suppressLeftGridCol.has(ci)) {
         // Skip the inherit when the left edge was deliberately suppressed for
         // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
@@ -2601,29 +2611,13 @@ function renderQuadrant(
           ? resolveXf(styles, leftCell.styleIndex).border.right
           : null;
         if (leftRight?.style) {
-          mergedBorder = { ...mergedBorder, left: pickStrongerEdge(mergedBorder.left, leftRight) };
+          const before = mergedBorder.left;
+          const picked = pickStrongerEdge(before, leftRight);
+          mergedBorder = { ...mergedBorder, left: picked };
+          invertedLeft = picked === leftRight && before !== leftRight;
         }
       }
-      // Defer bottom / right drawing to the neighbour cell whenever a neighbour
-      // will iterate next: that cell will pick up our edge via the
-      // max-precedence inherit above and stroke the shared edge exactly once.
-      // Skip the deferral when:
-      //   * the neighbour is outside the visible viewport (it won't iterate),
-      //   * the neighbour is the inside of a merge (mergeSkipSet — no edge
-      //     drawn there), or
-      //   * we are a merged anchor (its bottom / right span columns the
-      //     neighbour cell wouldn't redraw uniformly).
-      if (!mergeInfo) {
-        const belowKey = `${rowIndex + 1}:${colIndex}`;
-        const rightKey = `${rowIndex}:${colIndex + 1}`;
-        if (ri < numRows - 1 && !mergeSkipSet.has(belowKey)) {
-          mergedBorder = { ...mergedBorder, bottom: null };
-        }
-        if (ci < numCols - 1 && !mergeSkipSet.has(rightKey) && !suppressRightGridCol.has(ci)) {
-          mergedBorder = { ...mergedBorder, right: null };
-        }
-      }
-      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH);
+      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft);
 
       // Excel Table style overlay: thin horizontal rules between rows and a
       // thicker bottom edge under the header row (ECMA-376 §18.5). Drawn on
@@ -3973,7 +3967,21 @@ function mergeBorders(base: Border, overlay: Border | undefined): Border {
   };
 }
 
-function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
+function renderBorder(
+  ctx: CanvasRenderingContext2D,
+  border: Border,
+  x: number, y: number, w: number, h: number,
+  /** When set, the cell's top edge was inherited from the cell above's bottom
+   *  to redraw the part over-painted by this cell's fill. Double-border
+   *  rendering uses inverted "outer / inner" extensions in that case so the
+   *  line that the upper cell drew as its bottom *outer* (extended past the
+   *  corner, at y + 1 from this cell's perspective) is the one we extend
+   *  here too — otherwise the inherited redraw shortens that line and
+   *  leaves a 1-px gap at every outer corner of the upper cell's double box.
+   *  Same idea for `invertedLeft` (inherited from the left cell's right). */
+  invertedTop = false,
+  invertedLeft = false,
+): void {
   type EdgeRef = {
     edge: BorderEdge | null | undefined;
     x1: number; y1: number; x2: number; y2: number;
@@ -4009,14 +4017,21 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
       ctx.beginPath();
       if (kind === 'h') {
         const isTop = y1 === y;
-        const outerY = isTop ? y - off : y + h + off;
-        const innerY = isTop ? y + off : y + h - off;
+        // For an inherited top, the line at y - off is the upper cell's
+        // bottom *inner* (which survives our fill, sitting above the fill
+        // band) and the line at y + off is the upper cell's bottom *outer*
+        // (which our fill erased and which we are restoring). Swap which
+        // side gets the extension so the restored line is the extended one.
+        const swap = isTop && invertedTop;
+        const outerY = isTop ? (swap ? y + off : y - off) : y + h + off;
+        const innerY = isTop ? (swap ? y - off : y + off) : y + h - off;
         ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
         ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
       } else {
         const isLeft = x1 === x;
-        const outerX = isLeft ? x - off : x + w + off;
-        const innerX = isLeft ? x + off : x + w - off;
+        const swap = isLeft && invertedLeft;
+        const outerX = isLeft ? (swap ? x + off : x - off) : x + w + off;
+        const innerX = isLeft ? (swap ? x - off : x + off) : x + w - off;
         ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
         ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
       }
