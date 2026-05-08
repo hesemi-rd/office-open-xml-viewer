@@ -2573,26 +2573,25 @@ function renderQuadrant(
           right: suppressRightGridCol.has(ci) ? null : mergedBorder.right,
         };
       }
-      // Inherit the cell-above's bottom edge as our top, and the cell-left's
-      // right edge as our left, when our own edge is unset. The neighbor's
-      // edge was drawn during its row/col iteration, but our cell's fill
-      // (drawn just above) over-painted the half of that line lying inside
-      // our cell. Re-drawing it as our top/left (after our fill) restores
-      // the boundary line. Without this, e.g. a row whose every cell defines
-      // a medium bottom but the row below leaves top unset (sample-7 row 2)
-      // ends up with the bottom border half-erased on every cell except the
-      // ones whose row-below cell happens to define a top border — making
-      // the row look uneven.
-      if (!mergedBorder.top?.style) {
-        const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
-        const aboveBottom = aboveCell
-          ? resolveXf(styles, aboveCell.styleIndex).border.bottom
-          : null;
-        if (aboveBottom?.style) {
-          mergedBorder = { ...mergedBorder, top: aboveBottom };
-        }
+      // Each shared edge is owned by exactly two cells. To avoid stacking two
+      // strokes on the same coordinate (which compounds antialiasing and reads
+      // as a thicker line), we draw shared edges only on the *lower* / *right*
+      // cell — i.e. as that cell's top / left — and merge in the neighbour's
+      // bottom / right by visual precedence. Excel's actual behaviour at a
+      // conflict is "stronger style wins" (e.g. medium beats thin), so picking
+      // the higher-precedence edge here also fixes the bug where a row's
+      // medium bottom was half-erased by the next row's thin top.
+      //
+      // The cell at row r drew its top *after* its own fill in this same
+      // iteration, so the boundary line is not over-painted by fills.
+      const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
+      const aboveBottom = aboveCell
+        ? resolveXf(styles, aboveCell.styleIndex).border.bottom
+        : null;
+      if (aboveBottom?.style) {
+        mergedBorder = { ...mergedBorder, top: pickStrongerEdge(mergedBorder.top, aboveBottom) };
       }
-      if (!mergedBorder.left?.style && !suppressLeftGridCol.has(ci)) {
+      if (!suppressLeftGridCol.has(ci)) {
         // Skip the inherit when the left edge was deliberately suppressed for
         // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
         // neighbour's xf.right re-introduces the internal vertical that we
@@ -2602,7 +2601,26 @@ function renderQuadrant(
           ? resolveXf(styles, leftCell.styleIndex).border.right
           : null;
         if (leftRight?.style) {
-          mergedBorder = { ...mergedBorder, left: leftRight };
+          mergedBorder = { ...mergedBorder, left: pickStrongerEdge(mergedBorder.left, leftRight) };
+        }
+      }
+      // Defer bottom / right drawing to the neighbour cell whenever a neighbour
+      // will iterate next: that cell will pick up our edge via the
+      // max-precedence inherit above and stroke the shared edge exactly once.
+      // Skip the deferral when:
+      //   * the neighbour is outside the visible viewport (it won't iterate),
+      //   * the neighbour is the inside of a merge (mergeSkipSet — no edge
+      //     drawn there), or
+      //   * we are a merged anchor (its bottom / right span columns the
+      //     neighbour cell wouldn't redraw uniformly).
+      if (!mergeInfo) {
+        const belowKey = `${rowIndex + 1}:${colIndex}`;
+        const rightKey = `${rowIndex}:${colIndex + 1}`;
+        if (ri < numRows - 1 && !mergeSkipSet.has(belowKey)) {
+          mergedBorder = { ...mergedBorder, bottom: null };
+        }
+        if (ci < numCols - 1 && !mergeSkipSet.has(rightKey) && !suppressRightGridCol.has(ci)) {
+          mergedBorder = { ...mergedBorder, right: null };
         }
       }
       renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH);
@@ -4028,6 +4046,11 @@ function borderStyleWidth(style: string): number {
 
 function borderStyleDash(style: string): number[] {
   switch (style) {
+    // ECMA-376 §18.18.3 ST_BorderStyle "hair" — Excel renders this as a very
+    // fine dashed line (the finest dashing in the border style picker). A 1-px
+    // on / 1-px off pattern at the hair lineWidth (0.5) reproduces that look;
+    // without a dash pattern, hair would read as a faint solid line.
+    case 'hair': return [1, 1];
     case 'dashed': case 'mediumDashed': return [4, 3];
     case 'dotted': return [2, 2];
     case 'dashDot': case 'mediumDashDot': return [4, 2, 1, 2];
@@ -4035,6 +4058,43 @@ function borderStyleDash(style: string): number[] {
     case 'slantDashDot': return [5, 3, 1, 3];
     default: return [];
   }
+}
+
+/**
+ * Visual precedence per ECMA-376 ST_BorderStyle. Higher = stronger / more
+ * visually prominent. Excel's behaviour at a shared edge between two adjacent
+ * cells that both define a border is to render the stronger one — this lets
+ * the renderer pick a single edge to draw instead of stacking two strokes
+ * (which compounds antialiasing and visually thickens the line).
+ */
+function borderPrecedence(style: string | null | undefined): number {
+  switch (style) {
+    case 'double': return 13;
+    case 'thick': return 12;
+    case 'medium': return 11;
+    case 'mediumDashed': return 10;
+    case 'mediumDashDot': return 9;
+    case 'slantDashDot': return 8;
+    case 'mediumDashDotDot': return 7;
+    case 'thin': return 6;
+    case 'dashed': return 5;
+    case 'dashDot': return 4;
+    case 'dashDotDot': return 3;
+    case 'dotted': return 2;
+    case 'hair': return 1;
+    default: return 0;
+  }
+}
+
+function pickStrongerEdge(
+  a: BorderEdge | null | undefined,
+  b: BorderEdge | null | undefined,
+): BorderEdge | null {
+  const aP = borderPrecedence(a?.style);
+  const bP = borderPrecedence(b?.style);
+  if (aP === 0 && bP === 0) return null;
+  if (aP >= bP) return a ?? null;
+  return b ?? null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
