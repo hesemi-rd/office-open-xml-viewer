@@ -185,6 +185,12 @@ export interface TextRunData {
   fontSize: number | null;
   color: string | null;
   fontFamily: string | null;
+  /**
+   * East Asian font family from rPr > a:ea (ECMA-376 §21.1.2.3.7),
+   * resolved through the theme. Renderer uses this for CJK glyphs when
+   * present; absent means CJK falls back to fontFamily.
+   */
+  fontFamilyEa?: string;
   /** Baseline shift in thousandths of a point. Positive = superscript, negative = subscript. */
   baseline?: number;
   /**

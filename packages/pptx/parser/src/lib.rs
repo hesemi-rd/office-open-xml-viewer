@@ -571,6 +571,11 @@ struct TextRunData {
     font_size: Option<f64>,
     color: Option<String>,
     font_family: Option<String>,
+    /// East Asian font family from rPr > ea (resolved through the theme).
+    /// Renderer uses this for CJK runs. None = inherit from latin font.
+    /// ECMA-376 §21.1.2.3.7 (CT_TextFont, ea variant).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_family_ea: Option<String>,
     /// Baseline shift in thousandths of a point. Positive = superscript, negative = subscript.
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline: Option<i32>,
@@ -2247,6 +2252,7 @@ fn parse_paragraph(
                     font_size,
                     color,
                     font_family,
+                    font_family_ea: None,
                     baseline: None,
                     caps: None,
                     letter_spacing: None,
@@ -2384,6 +2390,13 @@ fn parse_run(
     let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
         .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")))
         .map(|tf| resolve_theme_typeface(&tf, theme));
+    // ECMA-376 §21.1.2.3.7 — <a:ea typeface="..."/> sets a separate font for
+    // East Asian glyphs (CJK). Defaults to the theme's +mn-ea slot when the
+    // run doesn't specify one explicitly.
+    let font_family_ea = r_pr.and_then(|n| child(n, "ea")).and_then(|n| attr(&n, "typeface"))
+        .or_else(|| def_rpr.and_then(|n| child(n, "ea")).and_then(|n| attr(&n, "typeface")))
+        .map(|tf| resolve_theme_typeface(&tf, theme))
+        .filter(|tf| !tf.is_empty());
 
     // baseline in thousandths of a point; 30000=superscript, -25000=subscript (OOXML typical)
     let baseline = r_pr.and_then(|n| attr(&n, "baseline"))
@@ -2401,7 +2414,7 @@ fn parse_run(
     Some(TextRunData {
         text, bold, italic, underline, underline_style, underline_color,
         strikethrough, strike_double,
-        font_size, color, font_family, baseline,
+        font_size, color, font_family, font_family_ea, baseline,
         caps, letter_spacing,
         field_type: None, hyperlink,
     })
@@ -4709,6 +4722,34 @@ mod tests {
         let doc = roxmltree::Document::parse(with_ufilltx).unwrap();
         let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
         assert!(r.underline_color.is_none());
+    }
+
+    /// ECMA-376 §21.1.2.3.7 — rPr > ea sets a separate East Asian font.
+    /// Resolves through the theme map: "+mn-ea" should expand to whatever
+    /// the theme registered, while a literal name is preserved.
+    #[test]
+    fn test_parse_run_ea_typeface() {
+        let rels = HashMap::new();
+        let mut theme = HashMap::new();
+        theme.insert("+mn-ea".to_owned(), "MS Mincho".to_owned());
+
+        // Theme reference resolves through the map.
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><ea typeface="+mn-ea"/></rPr><t>あ</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(r.font_family_ea.as_deref(), Some("MS Mincho"));
+
+        // Literal name passes through unchanged.
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><ea typeface="Yu Gothic"/></rPr><t>あ</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(r.font_family_ea.as_deref(), Some("Yu Gothic"));
+
+        // Empty typeface is filtered out.
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><ea typeface=""/></rPr><t>あ</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert!(r.font_family_ea.is_none());
     }
 
     /// ECMA-376 §20.1.8.17 — glow has a single rad attribute and a colour

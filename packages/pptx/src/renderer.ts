@@ -389,6 +389,11 @@ function layoutParagraph(
     const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
     // Font family cascade: run → paragraph defFontFamily → theme minor font → 'sans-serif'
     const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
+    // East Asian font (rPr > ea) — used for CJK glyphs when set; otherwise
+    // CJK characters reuse the latin font. ECMA-376 §21.1.2.3.7.
+    const familyEa = run.fontFamilyEa
+      ? normalizeFontFamily(run.fontFamilyEa, rc)
+      : null;
     // Hyperlink runs without an explicit colour pick up the theme hlink colour
     // (ECMA-376 §20.1.2.3.5 — hyperlinks inherit theme hyperlink slot).
     let color: string;
@@ -403,6 +408,9 @@ function layoutParagraph(
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
     const isItalic = run.italic ?? para.defItalic ?? defaultItalic;
     const font   = buildFont(isBold, isItalic, sizePx, family, rc);
+    const fontEa = familyEa
+      ? buildFont(isBold, isItalic, sizePx, familyEa, rc)
+      : font;
     ctx.font = font;
 
     // ECMA-376 §21.1.2.3.13 — caps transforms the rendered glyphs without
@@ -476,13 +484,18 @@ function layoutParagraph(
       // CJK characters allow line-breaking at any character boundary (no whitespace
       // needed). When a token contains CJK, wrap character-by-character so that CJK
       // text flows onto the same line as preceding Latin text (e.g. "EC市場で…").
-      const hasCJK = /[\u3000-\u9FFF\uAC00-\uD7FF\uF900-\uFAFF\uFF00-\uFFEF]/.test(token);
+      // Per-character font dispatch picks `fontEa` for CJK glyphs when the run
+      // declared an explicit East Asian typeface (rPr > ea); other characters
+      // keep the Latin font so the latin/ea boundary mid-token stays clean.
+      const CJK_RE = /[\u3000-\u9FFF\uAC00-\uD7FF\uF900-\uFAFF\uFF00-\uFFEF]/;
+      const hasCJK = CJK_RE.test(token);
       if (hasCJK) {
         for (const ch of token) {
-          ctx.font = font;
+          const chFont = CJK_RE.test(ch) ? fontEa : font;
+          ctx.font = chFont;
           const chW = ctx.measureText(ch).width;
           if (lineW + chW > maxWidthPx && lineW > 0) newLine();
-          push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+          push(ch, chFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
         continue;
       }
