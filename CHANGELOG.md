@@ -4,6 +4,19 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.26.0 — 2026-05-08
+
+### Fixes
+
+- **xlsx renderer**: pick the higher-precedence ST_BorderStyle (none<hair<dotted<…<medium<thick<double) when two adjacent cells specify a border on the shared edge. Previously the lower / right cell's thinner top / left would partially erase the upper / left cell's medium or thick edge — most visible on sample-27 row 9 where the medium top was shown as roughly the same weight as the thick bottom even though the styles differed. ECMA-376 §18.3.1.4 doesn't spell out conflict resolution, but Excel renders the stronger style at a conflict.
+- **xlsx renderer**: render `hair` as a 1-px on / 1-px off dashed pattern instead of a faint solid line. ECMA-376 §18.18.3 ST_BorderStyle "hair" is the finest dashing in Excel's border picker; the previous solid render was indistinguishable from `thin` (e.g. sample-27 G13 outer frame).
+- **xlsx renderer**: close `double`-border corners when the lower / right cell has to redraw the over-painted segment. The inherited top / left now uses the upper / left cell's outer-vs-inner extension so the line restored after the lower cell's fill is the *outer* (extended) one — eliminating 1-px gaps at the four outer corners (visible on isolated double-bordered cells such as sample-27 E5).
+- **xlsx renderer**: widen `medium` (1.5 → 2) and `thick` (2 → 3) `lineWidth` to match Excel's pt convention (thin=1pt / medium=2pt / thick=3pt). Previously medium and thick both rasterised to roughly a 2-pixel band on canvas, so a row with medium-on-top and thick-on-bottom (e.g. sample-27 row 9 driven by `thickBot` / `thickTop` row attributes) read as the same weight.
+
+### Tooling
+
+- **vrt**: dropped the GitHub Actions VRT workflow and rebuilt the flow as local-only. The `private/sample-*` fixtures are not redistributable so cannot be committed; running VRT on CI provided no signal beyond `demo/sample-*`. `pnpm vrt` now expects the developer to have private fixtures locally and gates reference updates behind `UPDATE_REFS=1`.
+
 ## 0.25.0 — 2026-04-30
 
 ### Breaking Changes
