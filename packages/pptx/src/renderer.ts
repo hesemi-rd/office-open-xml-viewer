@@ -108,12 +108,100 @@ function resolveShapeFill(
 
 // ===== Text layout helpers =====
 
+/**
+ * Draw a text underline at the given baseline. ECMA-376 §21.1.2.3.16
+ * defines the OOXML underline enum; we map each value to a Canvas dash
+ * pattern + line-weight pair. "wavy*" is approximated by a sine curve
+ * traced as a polyline so the glyph stays legibly distinct from "dotted".
+ */
+function drawUnderline(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  baseline: number,
+  width: number,
+  sizePx: number,
+  color: string,
+  style: string | undefined,
+): void {
+  const baseLineW = Math.max(1, sizePx * 0.05);
+  const heavy = style?.endsWith('Heavy') ?? false;
+  const lineW = heavy ? baseLineW * 1.8 : baseLineW;
+  const y = baseline + Math.max(2, lineW);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineW;
+  ctx.setLineDash([]);
+
+  // Dash patterns scaled by lineW so they stay proportional at any font size.
+  // Values mirror prstDash (§20.1.10.49 ST_PresetLineDashVal) where the
+  // underline enum reuses the same shape names.
+  const dashFor = (s: string): number[] => {
+    switch (s) {
+      case 'dotted':
+      case 'dottedHeavy':         return [1.5, 3];
+      case 'dash':
+      case 'dashHeavy':           return [6, 3];
+      case 'dashLong':
+      case 'dashLongHeavy':       return [10, 4];
+      case 'dotDash':
+      case 'dotDashHeavy':        return [6, 3, 1.5, 3];
+      case 'dotDotDash':
+      case 'dotDotDashHeavy':     return [6, 3, 1.5, 3, 1.5, 3];
+      default:                    return [];
+    }
+  };
+
+  if (style && style.startsWith('wavy')) {
+    // Sine wave with amplitude ≈ lineW and wavelength ≈ 6×lineW.
+    const amp = lineW;
+    const wavelength = lineW * 6;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    const step = Math.max(1, lineW * 0.5);
+    for (let dx = 0; dx <= width; dx += step) {
+      const yy = y + Math.sin((dx / wavelength) * Math.PI * 2) * amp;
+      ctx.lineTo(x + dx, yy);
+    }
+    ctx.stroke();
+    if (style === 'wavyDbl') {
+      // Second wave below, offset by 2.5×amp.
+      ctx.beginPath();
+      ctx.moveTo(x, y + amp * 2.5);
+      for (let dx = 0; dx <= width; dx += step) {
+        const yy = y + amp * 2.5 + Math.sin((dx / wavelength) * Math.PI * 2) * amp;
+        ctx.lineTo(x + dx, yy);
+      }
+      ctx.stroke();
+    }
+    return;
+  }
+
+  if (style === 'dbl') {
+    const offset = lineW * 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x, y - offset / 2);
+    ctx.lineTo(x + width, y - offset / 2);
+    ctx.moveTo(x, y + offset / 2);
+    ctx.lineTo(x + width, y + offset / 2);
+    ctx.stroke();
+    return;
+  }
+
+  ctx.setLineDash(dashFor(style ?? 'sng').map((v) => v * lineW));
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + width, y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 type LayoutSegment = {
   text: string;
   font: string;
   sizePx: number;
   color: string;
   underline: boolean;
+  /** OOXML rPr @u value when not the default "sng": "dbl"/"dotted"/"wavy"/etc. */
+  underlineStyle?: string;
   strikethrough: boolean;
   /** Two parallel strike lines (rPr strike="dblStrike"). */
   strikeDouble?: boolean;
@@ -247,7 +335,7 @@ function layoutParagraph(
     underline: boolean,
     strikethrough: boolean,
     baseline?: number,
-    extras?: { strikeDouble?: boolean; letterSpacingPx?: number },
+    extras?: { strikeDouble?: boolean; letterSpacingPx?: number; underlineStyle?: string },
   ) => {
     if (!text) return;
     ctx.font = font;
@@ -259,10 +347,12 @@ function layoutParagraph(
     // same way so this stays consistent with measureText below.
     const w = baseW + lsPx * text.length;
     const strikeDouble = extras?.strikeDouble;
+    const underlineStyle = extras?.underlineStyle;
     const sameMeta = (a: LayoutSegment) =>
       a.font === font &&
       a.color === color &&
       a.underline === underline &&
+      (a.underlineStyle ?? '') === (underlineStyle ?? '') &&
       a.strikethrough === strikethrough &&
       (a.strikeDouble ?? false) === (strikeDouble ?? false) &&
       (a.letterSpacingPx ?? 0) === lsPx &&
@@ -273,7 +363,7 @@ function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
+        segs.push({ text, font, sizePx, color, underline, underlineStyle, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
       }
     } else {
       lineW += w;
@@ -281,7 +371,7 @@ function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
+        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
       }
     }
   };
@@ -332,7 +422,11 @@ function layoutParagraph(
     // letterSpacing arrives in points; convert to canvas px using the same
     // EMU→px scale the renderer applies to font sizes.
     const lsPx = run.letterSpacing != null ? run.letterSpacing * PT_TO_EMU * scale : 0;
-    const segExtras = { strikeDouble: segStrikeDouble, letterSpacingPx: lsPx };
+    const segExtras = {
+      strikeDouble: segStrikeDouble,
+      letterSpacingPx: lsPx,
+      underlineStyle: run.underlineStyle,
+    };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
     const tokens = runText.split(/(\s+)/);
@@ -3156,13 +3250,7 @@ function renderTextBody(
       }
 
       if (seg.underline) {
-        ctx.beginPath();
-        ctx.moveTo(penX, segBaseline + 2);
-        ctx.lineTo(penX + segW, segBaseline + 2);
-        ctx.strokeStyle = seg.color;
-        ctx.lineWidth = Math.max(1, seg.sizePx * 0.05);
-        ctx.setLineDash([]);
-        ctx.stroke();
+        drawUnderline(ctx, penX, segBaseline, segW, seg.sizePx, seg.color, seg.underlineStyle);
       }
 
       if (seg.strikethrough) {

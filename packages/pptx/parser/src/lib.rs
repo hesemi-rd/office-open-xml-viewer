@@ -552,6 +552,12 @@ struct TextRunData {
     /// None = not set; Some(true/false) = explicit
     italic: Option<bool>,
     underline: bool,
+    /// OOXML rPr @u value when explicit and != "sng" — e.g. "dbl", "dotted",
+    /// "dash", "wavy", "heavy", "dotDash", … None means either no underline
+    /// or the default single-line style (rPr @u = "sng" or unset truthy).
+    /// ECMA-376 §21.1.2.3.16 (ST_TextUnderlineType).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    underline_style: Option<String>,
     /// true when strike == "sngStrike" or "dblStrike"
     strikethrough: bool,
     /// true only when strike == "dblStrike" (renderer draws two parallel lines)
@@ -2229,6 +2235,7 @@ fn parse_paragraph(
                     bold,
                     italic,
                     underline: false,
+                    underline_style: None,
                     strikethrough: false,
                     strike_double: false,
                     font_size,
@@ -2321,9 +2328,14 @@ fn parse_run(
     let italic = r_pr.and_then(|n| attr(&n, "i"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "i")))
         .map(|v| v == "1" || v == "true");
-    let underline = r_pr.and_then(|n| attr(&n, "u"))
-        .or_else(|| def_rpr.and_then(|n| attr(&n, "u")))
-        .map(|v| v != "none").unwrap_or(false);
+    // ECMA-376 §21.1.2.3.16 — underline style enum: none/sng/dbl/heavy/dotted/
+    // dash/dashLong/dotDash/dotDotDash/wavy plus *Heavy variants. Carry the
+    // exact value through for the renderer to dispatch on; the bool stays
+    // true for any non-"none" value so existing code paths keep working.
+    let underline_attr = r_pr.and_then(|n| attr(&n, "u"))
+        .or_else(|| def_rpr.and_then(|n| attr(&n, "u")));
+    let underline = underline_attr.as_deref().map(|v| v != "none").unwrap_or(false);
+    let underline_style = underline_attr.filter(|v| v != "none" && v != "sng");
 
     // strikethrough: "sngStrike" or "dblStrike" → true; double tracked separately
     let strike_attr = r_pr.and_then(|n| attr(&n, "strike"))
@@ -2374,7 +2386,8 @@ fn parse_run(
         .filter(|s| !s.is_empty());
 
     Some(TextRunData {
-        text, bold, italic, underline, strikethrough, strike_double,
+        text, bold, italic, underline, underline_style,
+        strikethrough, strike_double,
         font_size, color, font_family, baseline,
         caps, letter_spacing,
         field_type: None, hyperlink,
@@ -4636,6 +4649,34 @@ mod tests {
         assert!((s.dir - 45.0).abs() < 0.001);
         assert!((s.alpha - 0.5).abs() < 0.01);
         assert_eq!(s.color.to_lowercase(), "000000");
+    }
+
+    /// ECMA-376 §21.1.2.3.16 — underline_style carries non-default underline
+    /// values (dbl, dotted, wavy, …) verbatim. The plain bool stays true for
+    /// any non-"none" value; "sng" and absent both leave underline_style None
+    /// because the renderer's default is already a single line.
+    #[test]
+    fn test_parse_run_underline_style_passthrough() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let cases: &[(&str, bool, Option<&str>)] = &[
+            ("none",    false, None),
+            ("sng",     true,  None),
+            ("dbl",     true,  Some("dbl")),
+            ("heavy",   true,  Some("heavy")),
+            ("dotted",  true,  Some("dotted")),
+            ("wavy",    true,  Some("wavy")),
+            ("dashLong",true,  Some("dashLong")),
+        ];
+        for (val, expected_bool, expected_style) in cases {
+            let xml = format!(
+                r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr u="{val}"/><t>x</t></r>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+            assert_eq!(r.underline, *expected_bool, "u={val}");
+            assert_eq!(r.underline_style.as_deref(), *expected_style, "u={val}");
+        }
     }
 
     /// ECMA-376 §20.1.8.17 — glow has a single rad attribute and a colour

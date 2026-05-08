@@ -160,6 +160,15 @@ export interface TextRunData {
   /** null = not set, inherit from paragraph/body defaults */
   italic: boolean | null;
   underline: boolean;
+  /**
+   * Specific underline style when not the default single line. Values come
+   * from ECMA-376 §21.1.2.3.16 (ST_TextUnderlineType): "dbl", "heavy",
+   * "dotted", "dottedHeavy", "dash", "dashHeavy", "dashLong",
+   * "dashLongHeavy", "dotDash", "dotDashHeavy", "dotDotDash",
+   * "dotDotDashHeavy", "wavy", "wavyHeavy", "wavyDbl". Absent means either
+   * no underline (when `underline` is false) or the default single line.
+   */
+  underlineStyle?: string;
   /** True when rPr strike is sngStrike or dblStrike. */
   strikethrough: boolean;
   /**
