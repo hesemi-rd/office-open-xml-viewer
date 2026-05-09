@@ -969,143 +969,15 @@ fn parse_color_node(
     None
 }
 
-/// Apply OOXML color transforms (lumMod, lumOff, shade, tint, alpha) to a base hex color.
-/// Returns 6-char hex when fully opaque, or 8-char hex (RRGGBBAA) when alpha < 1.
+/// PowerPoint's interpretation of OOXML color modifiers. Wraps the shared
+/// `ooxml_common::color::apply_color_transforms` with TintMode::PowerPointLinear
+/// — `tint` is applied as a `lerp(input, white, val)` in linear sRGB.
+/// Verified against PDF exports of SmartArt accent recolors.
 fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
-    if hex.len() < 6 {
-        return hex.to_owned();
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-
-    let mut rf = r as f64 / 255.0;
-    let mut gf = g as f64 / 255.0;
-    let mut bf = b as f64 / 255.0;
-    let mut alpha = 1.0_f64;
-
-    for t in node.children().filter(|n| n.is_element()) {
-        match t.tag_name().name() {
-            "lumMod" => {
-                let val = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
-                let (h, l, s) = rgb_to_hls(rf, gf, bf);
-                let (nr, ng, nb) = hls_to_rgb(h, (l * val).min(1.0), s);
-                rf = nr; gf = ng; bf = nb;
-            }
-            "lumOff" => {
-                let val = attr_f64(&t, "val").unwrap_or(0.0) / 100_000.0;
-                let (h, l, s) = rgb_to_hls(rf, gf, bf);
-                let (nr, ng, nb) = hls_to_rgb(h, (l + val).clamp(0.0, 1.0), s);
-                rf = nr; gf = ng; bf = nb;
-            }
-            "shade" => {
-                // shade=100000 → no change; shade=0 → black
-                let val = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
-                rf *= val; gf *= val; bf *= val;
-            }
-            "tint" => {
-                // PowerPoint renders tint as a lerp toward white in LINEAR sRGB
-                // space (val = fraction of shift toward white). Sampling PDF
-                // exports of SmartArt confirms this: accent1 #156082 with
-                // tint=60000 produces ~#D1D6DB, which matches only the
-                // linear-RGB formulation. HSL-space luminance shift keeps the
-                // color too saturated (#83C3EB-ish); straight sRGB lerp yields
-                // a different midpoint. Linear RGB matches pixel-for-pixel.
-                let val = attr_f64(&t, "val").unwrap_or(0.0) / 100_000.0;
-                let lr = srgb_to_linear(rf);
-                let lg = srgb_to_linear(gf);
-                let lb = srgb_to_linear(bf);
-                let nr_l = lr + (1.0 - lr) * val;
-                let ng_l = lg + (1.0 - lg) * val;
-                let nb_l = lb + (1.0 - lb) * val;
-                rf = linear_to_srgb(nr_l.clamp(0.0, 1.0));
-                gf = linear_to_srgb(ng_l.clamp(0.0, 1.0));
-                bf = linear_to_srgb(nb_l.clamp(0.0, 1.0));
-            }
-            "alpha" => {
-                // ECMA-376 §20.1.2.3.1 — sets absolute alpha. val=100000 → opaque.
-                alpha = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
-            }
-            "alphaModFix" => {
-                // ECMA-376 §20.1.8.4 — fixed (absolute) alpha modulation; amt
-                // is in thousandths of a percent like alpha @val. PowerPoint
-                // uses this inside effectLst > outerShdw / innerShdw / glow
-                // colours rather than @val, so without handling it here those
-                // effects render at full opacity.
-                alpha = attr_f64(&t, "amt").unwrap_or(100_000.0) / 100_000.0;
-            }
-            "alphaMod" => {
-                // ECMA-376 §20.1.2.3.2 — multiply current alpha by val/100000.
-                let factor = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
-                alpha *= factor;
-            }
-            "alphaOff" => {
-                // ECMA-376 §20.1.2.3.3 — additive offset to alpha; val/100000
-                // can be positive or negative. Clamp at write time below.
-                alpha += attr_f64(&t, "val").unwrap_or(0.0) / 100_000.0;
-            }
-            _ => {}
-        }
-    }
-
-    let r = (rf.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let g = (gf.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let b = (bf.clamp(0.0, 1.0) * 255.0).round() as u8;
-    if (alpha - 1.0).abs() < 0.004 {
-        format!("{:02X}{:02X}{:02X}", r, g, b)
-    } else {
-        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-        format!("{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
-    }
-}
-
-/// sRGB → linear light. IEC 61966-2-1 transfer function.
-fn srgb_to_linear(c: f64) -> f64 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
-/// Linear light → sRGB.
-fn linear_to_srgb(c: f64) -> f64 {
-    if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
-}
-
-fn rgb_to_hls(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let d = max - min;
-    if d < 1e-10 {
-        return (0.0, l, 0.0);
-    }
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
-    let h = if (max - r).abs() < 1e-10 {
-        (g - b) / d + if g < b { 6.0 } else { 0.0 }
-    } else if (max - g).abs() < 1e-10 {
-        (b - r) / d + 2.0
-    } else {
-        (r - g) / d + 4.0
-    };
-    (h / 6.0, l, s)
-}
-
-fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
-    if s < 1e-10 {
-        return (l, l, l);
-    }
-    fn hue2rgb(p: f64, q: f64, mut t: f64) -> f64 {
-        if t < 0.0 { t += 1.0; }
-        if t > 1.0 { t -= 1.0; }
-        if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
-        if t < 0.5        { return q; }
-        if t < 2.0 / 3.0  { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
-        p
-    }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
-    let p = 2.0 * l - q;
-    (
-        hue2rgb(p, q, h + 1.0 / 3.0),
-        hue2rgb(p, q, h),
-        hue2rgb(p, q, h - 1.0 / 3.0),
+    ooxml_common::color::apply_color_transforms(
+        hex,
+        node,
+        ooxml_common::color::TintMode::PowerPointLinear,
     )
 }
 

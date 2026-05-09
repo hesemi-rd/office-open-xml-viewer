@@ -14,3 +14,4 @@ zip = { workspace = true }
 roxmltree = { workspace = true }
 console_error_panic_hook = { workspace = true }
 base64 = { workspace = true }
+ooxml-common = { workspace = true }

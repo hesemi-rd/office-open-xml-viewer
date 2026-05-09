@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "packages/ooxml-common",
   "packages/pptx/parser",
   "packages/docx/parser",
   "packages/xlsx/parser",
@@ -15,6 +16,7 @@ zip = { version = "2", default-features = false, features = ["deflate-miniz"] }
 roxmltree = "0.20"
 base64 = "0.22"
 console_error_panic_hook = "0.1"
+ooxml-common = { path = "packages/ooxml-common" }
 
 [profile.release]
 opt-level = "s"
