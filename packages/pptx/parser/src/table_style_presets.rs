@@ -123,7 +123,7 @@ fn solid(color: &str) -> Fill {
 }
 
 fn stroke(color: &str) -> Stroke {
-    Stroke { color: color.to_owned(), width: 12700, dash_style: None, head_end: None, tail_end: None }
+    Stroke { color: color.to_owned(), width: 12700, dash_style: None, head_end: None, tail_end: None, cmpd: None }
 }
 
 // ── Family generators ────────────────────────────────────────────────────────

@@ -235,6 +235,14 @@ struct ShapeElement {
     /// ECMA-376 §20.1.8.17 (CT_GlowEffect).
     #[serde(skip_serializing_if = "Option::is_none")]
     glow: Option<Glow>,
+    /// Soft (feathered) edge from spPr > effectLst > softEdge.
+    /// ECMA-376 §20.1.8.31 (CT_SoftEdgesEffect).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    soft_edge: Option<SoftEdge>,
+    /// Mirrored reflection from spPr > effectLst > reflection.
+    /// ECMA-376 §20.1.8.27 (CT_ReflectionEffect).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reflection: Option<Reflection>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -371,6 +379,45 @@ struct Glow {
     radius: i64,
 }
 
+/// ECMA-376 §20.1.8.31 (CT_SoftEdgesEffect) — feathers the shape's alpha
+/// edge by `rad` EMU. The effect itself has no colour child; it consumes
+/// the shape's existing fill / stroke alpha at the perimeter.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SoftEdge {
+    /// Feather radius in EMU.
+    radius: i64,
+}
+
+/// ECMA-376 §20.1.8.27 (CT_ReflectionEffect) — mirrored copy below the shape
+/// with a linear alpha gradient. The full spec exposes 14 attributes; this
+/// model carries the ones that meaningfully change the visual: blur radius,
+/// distance, direction, the start/end alpha+position pair, and per-axis
+/// scale. Unsupported attributes (kx/ky skew, algn, fadeDir, rotWithShape)
+/// fall back to their spec defaults at render time.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Reflection {
+    /// Blur radius in EMU.
+    blur: i64,
+    /// Offset distance from the shape, EMU.
+    dist: i64,
+    /// Direction in degrees, clockwise from East.
+    dir: f64,
+    /// Start alpha (0–1). Top of the gradient.
+    st_a: f64,
+    /// Start position along the gradient (0–1).
+    st_pos: f64,
+    /// End alpha (0–1).
+    end_a: f64,
+    /// End position along the gradient (0–1).
+    end_pos: f64,
+    /// Horizontal scale (1.0 = same width). Negative flips horizontally.
+    sx: f64,
+    /// Vertical scale (-1.0 default for a true mirror).
+    sy: f64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 enum Fill {
@@ -423,6 +470,10 @@ struct Stroke {
     /// Arrow at the end of the line (tailEnd)
     #[serde(skip_serializing_if = "Option::is_none")]
     tail_end: Option<ArrowEnd>,
+    /// ECMA-376 §20.1.8.42 ST_CompoundLine — "sng" (default) | "dbl" |
+    /// "thinThick" | "thickThin" | "tri". None = single line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cmpd: Option<String>,
 }
 
 /// A single path command inside a custGeom pathLst.
@@ -1173,7 +1224,10 @@ fn parse_stroke(
     let tail_end = child(ln_node, "tailEnd")
         .map(parse_arrow_end)
         .filter(|a| a.kind != "none");
-    Some(Stroke { color, width, dash_style, head_end, tail_end })
+    // ECMA-376 §20.1.8.42 ST_CompoundLine. Default "sng" stays absent so the
+    // renderer keeps its single-stroke fast path.
+    let cmpd = attr(&ln_node, "cmpd").filter(|v| v != "sng");
+    Some(Stroke { color, width, dash_style, head_end, tail_end, cmpd })
 }
 
 // ===========================
@@ -1235,6 +1289,34 @@ fn parse_glow(
         (color_str, 1.0)
     };
     Some(Glow { color, alpha, radius })
+}
+
+/// Parse spPr > effectLst > softEdge into a SoftEdge — ECMA-376 §20.1.8.31.
+fn parse_soft_edge(effect_lst: roxmltree::Node<'_, '_>) -> Option<SoftEdge> {
+    let n = child(effect_lst, "softEdge")?;
+    let radius = attr_i64(&n, "rad").unwrap_or(0);
+    Some(SoftEdge { radius })
+}
+
+/// Parse spPr > effectLst > reflection — ECMA-376 §20.1.8.27. Defaults
+/// follow the spec table: blur=0, dist=0, dir=0, stA=100000 (=1.0),
+/// stPos=0, endA=0, endPos=100000 (=1.0), sx=100000, sy=-100000.
+fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Reflection> {
+    let r = child(effect_lst, "reflection")?;
+    let pct = |name: &str, default: f64| -> f64 {
+        attr_f64(&r, name).map(|v| v / 100_000.0).unwrap_or(default)
+    };
+    Some(Reflection {
+        blur: attr_i64(&r, "blurRad").unwrap_or(0),
+        dist: attr_i64(&r, "dist").unwrap_or(0),
+        dir: attr_f64(&r, "dir").unwrap_or(0.0) / 60_000.0,
+        st_a:   pct("stA",   1.0),
+        st_pos: pct("stPos", 0.0),
+        end_a:  pct("endA",  0.0),
+        end_pos: pct("endPos", 1.0),
+        sx: pct("sx",  1.0),
+        sy: pct("sy", -1.0),
+    })
 }
 
 // ===========================
@@ -3040,7 +3122,7 @@ fn parse_shape(
                         .get(&format!("+lnRef-{}", idx))
                         .and_then(|s| s.parse::<i64>().ok())
                         .unwrap_or(9525);
-                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None }
+                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None, cmpd: None }
                 })
             }
         });
@@ -3098,19 +3180,21 @@ fn parse_shape(
     let text_body = child(sp_node, "txBody")
         .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing));
 
-    // Effects from spPr > effectLst (outerShdw / innerShdw / glow are
-    // independent siblings — ECMA-376 §20.1.8.16). Pull each separately.
+    // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
+    // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
     let effect_lst = sp_pr.and_then(|p| child(p, "effectLst"));
     let shadow = effect_lst.and_then(|n| parse_shadow(n, theme));
     let inner_shadow = effect_lst.and_then(|n| parse_inner_shadow(n, theme));
     let glow = effect_lst.and_then(|n| parse_glow(n, theme));
+    let soft_edge = effect_lst.and_then(parse_soft_edge);
+    let reflection = effect_lst.and_then(parse_reflection);
 
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
         geometry, fill, stroke, text_body, default_text_color, cust_geom,
         adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8,
-        shadow, inner_shadow, glow,
+        shadow, inner_shadow, glow, soft_edge, reflection,
     })
 }
 
@@ -3336,7 +3420,7 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
                     if idx == 0 { return None; }
                     let color = parse_color_node(ln_ref, theme)?;
                     let width: i64 = match idx { 1 => 6350, 2 => 12700, _ => 19050 };
-                    return Some(Stroke { color, width, dash_style: None, head_end: None, tail_end: None });
+                    return Some(Stroke { color, width, dash_style: None, head_end: None, tail_end: None, cmpd: None });
                 }
                 None
             };
@@ -3524,7 +3608,7 @@ fn parse_table(
             } else {
                 // ── Fallback for built-in styles not defined in tableStyles.xml ──
                 // Approximate "Medium Style 2": accent1 header fill + thin outer box + row separators.
-                let thin = Stroke { color: "A0A096".to_string(), width: 9525, dash_style: None, head_end: None, tail_end: None };
+                let thin = Stroke { color: "A0A096".to_string(), width: 9525, dash_style: None, head_end: None, tail_end: None, cmpd: None };
                 if cell.fill.is_none() && first_row && ri == 0 {
                     if let Some(color) = theme.get("accent1") {
                         cell.fill = Some(Fill::Solid { color: color.clone() });
@@ -4133,7 +4217,7 @@ fn parse_connector(
                         .get(&format!("+lnRef-{}", idx))
                         .and_then(|s| s.parse::<i64>().ok())
                         .unwrap_or(9525);
-                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None }
+                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None, cmpd: None }
                 })
             }
         });
@@ -4156,6 +4240,7 @@ fn parse_connector(
                     .filter(|v| v != "solid");
                 let ln_head = child(ln, "headEnd").map(parse_arrow_end).filter(|a| a.kind != "none");
                 let ln_tail = child(ln, "tailEnd").map(parse_arrow_end).filter(|a| a.kind != "none");
+                let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
                 match (ln_color, style_stroke) {
                     (Some(c), base) => Some(Stroke {
                         color: c,
@@ -4163,6 +4248,7 @@ fn parse_connector(
                         dash_style: ln_dash.or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
                         head_end: ln_head.or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
                         tail_end: ln_tail.or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
+                        cmpd: ln_cmpd.or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
                     }),
                     (None, Some(base)) => Some(Stroke {
                         color: base.color,
@@ -4170,6 +4256,7 @@ fn parse_connector(
                         dash_style: ln_dash.or(base.dash_style),
                         head_end: ln_head.or(base.head_end),
                         tail_end: ln_tail.or(base.tail_end),
+                        cmpd: ln_cmpd.or(base.cmpd),
                     }),
                     (None, None) => None,
                 }
@@ -4241,6 +4328,8 @@ fn parse_connector(
         shadow,
         inner_shadow: None,
         glow: None,
+        soft_edge: None,
+        reflection: None,
     })
 }
 
@@ -4767,5 +4856,52 @@ mod tests {
         assert_eq!(g.radius, 38_100);
         assert_eq!(g.color.to_uppercase(), "FF0000");
         assert!((g.alpha - 0.8).abs() < 0.01);
+    }
+
+    /// ECMA-376 §20.1.8.31 — softEdge has a single `rad` attribute in EMU.
+    #[test]
+    fn test_parse_soft_edge_extracts_radius() {
+        let xml = r#"<effectLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <softEdge rad="63500"/>
+        </effectLst>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let s = parse_soft_edge(doc.root_element()).expect("softEdge should resolve");
+        assert_eq!(s.radius, 63_500);
+    }
+
+    /// ECMA-376 §20.1.8.27 — reflection: blur, dist, dir, stA/stPos/endA/endPos
+    /// (1000ths of percent), sx/sy (1000ths of percent, sy negative for mirror).
+    #[test]
+    fn test_parse_reflection_attributes() {
+        let xml = r#"<effectLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <reflection blurRad="6350" stA="50000" endA="0" endPos="35000" dist="50800" dir="5400000" sy="-100000" algn="bl" rotWithShape="0"/>
+        </effectLst>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_reflection(doc.root_element()).expect("reflection should resolve");
+        assert_eq!(r.blur, 6_350);
+        assert_eq!(r.dist, 50_800);
+        assert!((r.dir - 90.0).abs() < 0.001);
+        assert!((r.st_a - 0.5).abs() < 0.01);
+        assert!((r.end_a - 0.0).abs() < 0.01);
+        assert!((r.end_pos - 0.35).abs() < 0.01);
+        assert!((r.sy + 1.0).abs() < 0.01);
+        // sx defaults to 1.0 when not specified
+        assert!((r.sx - 1.0).abs() < 0.01);
+    }
+
+    /// ECMA-376 §20.1.8.42 — `<a:ln cmpd="dbl"/>` should round-trip.
+    /// `cmpd="sng"` is the spec default and stays absent in the model.
+    #[test]
+    fn test_parse_stroke_cmpd() {
+        let theme = HashMap::new();
+        let dbl = r#"<ln xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" w="38100" cmpd="dbl"><solidFill><srgbClr val="000000"/></solidFill></ln>"#;
+        let doc = roxmltree::Document::parse(dbl).unwrap();
+        let s = parse_stroke(doc.root_element(), &theme).expect("stroke should parse");
+        assert_eq!(s.cmpd.as_deref(), Some("dbl"));
+
+        let sng = r#"<ln xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" w="38100" cmpd="sng"><solidFill><srgbClr val="000000"/></solidFill></ln>"#;
+        let doc = roxmltree::Document::parse(sng).unwrap();
+        let s = parse_stroke(doc.root_element(), &theme).expect("stroke should parse");
+        assert!(s.cmpd.is_none());
     }
 }
