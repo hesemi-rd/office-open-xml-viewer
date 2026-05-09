@@ -204,15 +204,15 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   darkGray:   [0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101],
 
   // ── Horizontal / vertical lines ───────────────────────────────────────
-  // dark* and light* variants share the same line *count* and *spacing* —
-  // they differ only in line *thickness*: dark bars are 2 px wide, light
-  // lines are 1 px wide. This matches Excel's actual rendering where the
-  // light forms read as "thin version" of the dark forms instead of "fewer
-  // lines". (ECMA-376 §18.8.22 specifies the names only.)
+  // dark*: 2-px-thick bars at 4-px spacing (2 thick bars per 8-px tile).
+  // light*: 1-px-thick lines at 2-px spacing (4 thin lines per 8-px tile).
+  // → light has *more* lines than dark at half the thickness, matching
+  // Excel where lightHorizontal is a denser, finer-strokes version of
+  // darkHorizontal rather than a sparser one.
   darkHorizontal:  [0b11111111, 0b11111111, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b00000000, 0b00000000],
-  lightHorizontal: [0b11111111, 0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b00000000, 0b00000000, 0b00000000],
+  lightHorizontal: [0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000],
   darkVertical:    [0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100],
-  lightVertical:   [0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000],
+  lightVertical:   [0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010],
 
   // ── Diagonals ─────────────────────────────────────────────────────────
   // darkDown / darkUp: 2-px-wide diagonal stripes every 4 cells.
@@ -225,8 +225,8 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // ── Grid (horizontal + vertical) ──────────────────────────────────────
   // darkGrid = darkHorizontal | darkVertical — thick lattice.
   darkGrid:   [0b11111111, 0b11111111, 0b11001100, 0b11001100, 0b11111111, 0b11111111, 0b11001100, 0b11001100],
-  // lightGrid = lightHorizontal | lightVertical — thin lattice.
-  lightGrid:  [0b11111111, 0b10001000, 0b10001000, 0b10001000, 0b11111111, 0b10001000, 0b10001000, 0b10001000],
+  // lightGrid = lightHorizontal | lightVertical — thin dense lattice.
+  lightGrid:  [0b11111111, 0b10101010, 0b11111111, 0b10101010, 0b11111111, 0b10101010, 0b11111111, 0b10101010],
 
   // ── Trellis (both diagonals) ──────────────────────────────────────────
   // darkTrellis = darkDown | darkUp.
