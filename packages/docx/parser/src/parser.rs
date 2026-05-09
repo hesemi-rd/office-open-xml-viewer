@@ -92,13 +92,19 @@ pub struct ThemeColors {
     /// rFonts @asciiTheme / @hAnsiTheme / @eastAsiaTheme / @cstheme.
     /// Keys: "minor" + "major" crossed with "latin"/"ea"/"cs".
     fonts: HashMap<String, String>,
+    /// Raw theme XML, retained so wps:style/fillRef → fillStyleLst /
+    /// bgFillStyleLst lookups (ECMA-376 §20.1.4.1.7) can be resolved on demand.
+    /// Re-parsing per shape is fine — the cover usually has only a handful of
+    /// shapes that take a fillRef, and theme XML is small.
+    theme_xml: Option<String>,
 }
 
 impl ThemeColors {
     fn parse(xml: &str) -> Self {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut fonts: HashMap<String, String> = HashMap::new();
-        let doc = match XmlDoc::parse(xml) { Ok(d) => d, Err(_) => return Self { map, fonts } };
+        let theme_xml = Some(xml.to_string());
+        let doc = match XmlDoc::parse(xml) { Ok(d) => d, Err(_) => return Self { map, fonts, theme_xml } };
         let root = doc.root_element();
         if let Some(scheme) = root.descendants().find(|n| n.is_element() && n.tag_name().name() == "clrScheme") {
             for child in scheme.children().filter(|n| n.is_element()) {
@@ -135,7 +141,7 @@ impl ThemeColors {
                 }
             }
         }
-        Self { map, fonts }
+        Self { map, fonts, theme_xml }
     }
 
     fn resolve(&self, scheme_name: &str) -> Option<String> {
@@ -936,8 +942,8 @@ fn parse_inline_drawing(
     };
 
     // Parse positionH / positionV with relativeFrom
-    let (pos_x, x_from_margin) = parse_anchor_pos_h(&container);
-    let (pos_y, y_from_para)   = parse_anchor_pos_v(&container);
+    let (pos_x, x_from_margin, x_align) = parse_anchor_pos_h(&container);
+    let (pos_y, y_from_para,   y_align) = parse_anchor_pos_v(&container);
     let anchor_meta = parse_anchor_wrap(&container);
 
     // behindDoc="1" flag — renderer uses this to draw shapes before text
@@ -951,6 +957,8 @@ fn parse_inline_drawing(
         }
         for mut shp in parse_wgp_shapes(wgp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta) {
             shp.behind_doc = behind_doc;
+            shp.anchor_x_align = x_align.clone();
+            shp.anchor_y_align = y_align.clone();
             out.push(DocRun::Shape(shp));
         }
         return out;
@@ -960,6 +968,8 @@ fn parse_inline_drawing(
     if let Some(wsp) = container.descendants().find(|n| n.tag_name().name() == "wsp") {
         if let Some(mut shp) = parse_wsp_shape(wsp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta, 1.0, 1.0, 0.0, 0.0, 0) {
             shp.behind_doc = behind_doc;
+            shp.anchor_x_align = x_align;
+            shp.anchor_y_align = y_align;
             return vec![DocRun::Shape(shp)];
         }
     }
@@ -1046,10 +1056,10 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
 
 /// Parse positionH — returns (posOffset_pt, needs_margin_offset).
 /// "column" and "margin" relative offsets both mean: add marginLeft in the renderer.
-fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool) {
+fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>) {
     let pos = match container.children().find(|n| n.tag_name().name() == "positionH") {
         Some(p) => p,
-        None => return (0.0, false),
+        None => return (0.0, false, None),
     };
     let rel = pos.attribute("relativeFrom").unwrap_or("page");
     let offset = pos.children()
@@ -1058,15 +1068,22 @@ fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool) {
         .and_then(|t| t.parse::<f64>().ok())
         .map(|emu| emu / 12700.0)
         .unwrap_or(0.0);
+    // ECMA-376 §20.4.3.1: <wp:align>left|center|right</wp:align> takes
+    // precedence over posOffset when both are present.
+    let align = pos.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "align")
+        .and_then(|n| n.text())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let from_margin = matches!(rel, "column" | "margin" | "leftMargin" | "insideMargin");
-    (offset, from_margin)
+    (offset, from_margin, align)
 }
 
-/// Parse positionV — returns (posOffset_pt, is_paragraph_relative).
-fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool) {
+/// Parse positionV — returns (posOffset_pt, is_paragraph_relative, align).
+fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool, Option<String>) {
     let pos = match container.children().find(|n| n.tag_name().name() == "positionV") {
         Some(p) => p,
-        None => return (0.0, false),
+        None => return (0.0, false, None),
     };
     let rel = pos.attribute("relativeFrom").unwrap_or("page");
     let offset = pos.children()
@@ -1075,8 +1092,13 @@ fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool) {
         .and_then(|t| t.parse::<f64>().ok())
         .map(|emu| emu / 12700.0)
         .unwrap_or(0.0);
+    let align = pos.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "align")
+        .and_then(|n| n.text())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let from_para = matches!(rel, "paragraph" | "line");
-    (offset, from_para)
+    (offset, from_para, align)
 }
 
 /// Expand a wp:wgp group into individual ImageRun entries.
@@ -1273,7 +1295,16 @@ fn parse_wsp_shape(
     };
     if subpaths.is_empty() { return None; }
 
-    let fill = parse_shape_fill(sp_pr, theme);
+    // Direct fills on spPr take priority over wps:style/fillRef. ECMA-376
+    // §20.1.4.1.30: when no direct fill is set, the shape's appearance comes
+    // from the theme's fillStyleLst / bgFillStyleLst entry referenced by idx,
+    // recolored using the schemeClr embedded in the fillRef.
+    let fill = parse_shape_fill(sp_pr, theme).or_else(|| {
+        wsp.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "style")
+            .and_then(|st| st.children().find(|n| n.is_element() && n.tag_name().name() == "fillRef"))
+            .and_then(|fr| resolve_fill_ref(fr, theme))
+    });
     let (stroke, stroke_width) = sp_pr.children()
         .find(|n| n.is_element() && n.tag_name().name() == "ln")
         .map(|ln| {
@@ -1302,6 +1333,7 @@ fn parse_wsp_shape(
         stroke_width,
         rotation,
         wrap_mode: anchor_meta.wrap_mode.clone(),
+        ..Default::default()
     })
 }
 
@@ -1322,12 +1354,67 @@ fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> Option<Shape
     None
 }
 
+/// Resolve a wps:style/a:fillRef into a concrete ShapeFill using the theme's
+/// fmtScheme/fillStyleLst (idx 1..) or bgFillStyleLst (idx 1000+). The fillRef
+/// also carries a `<a:schemeClr>` child whose name substitutes for `phClr`
+/// placeholders in the recipe (ECMA-376 §20.1.4.1.7 / §20.1.4.1.30).
+///
+/// Resume / cover templates lean on this: their backgrounds are described
+/// indirectly as `fillRef idx="1003"` with the actual color and gradient
+/// parameters living in the theme part. Without this lookup, the shape ends
+/// up with no fill and the cover panel renders blank.
+fn resolve_fill_ref(
+    fill_ref: roxmltree::Node,
+    theme: &ThemeColors,
+) -> Option<ShapeFill> {
+    let idx: u32 = fill_ref.attribute("idx")?.parse().ok()?;
+    if idx == 0 { return None; }
+    let scheme_clr = fill_ref.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "schemeClr")
+        .and_then(|n| n.attribute("val"))
+        .unwrap_or("dk1");
+
+    let xml = theme.theme_xml.as_ref()?;
+    let doc = XmlDoc::parse(xml).ok()?;
+    let fmt = doc.root_element()
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")?;
+    // ECMA-376 §20.1.4.1.30: fillRef idx is 1-indexed.
+    //   idx 1..999  → fillStyleLst[idx - 1]
+    //   idx 1001+   → bgFillStyleLst[idx - 1001]
+    let (lst_name, local_idx) = if idx >= 1001 {
+        ("bgFillStyleLst", (idx - 1001) as usize)
+    } else {
+        ("fillStyleLst", (idx - 1) as usize)
+    };
+    let lst = fmt.children().find(|n| n.is_element() && n.tag_name().name() == lst_name)?;
+    let entry = lst.children().filter(|n| n.is_element()).nth(local_idx)?;
+
+    match entry.tag_name().name() {
+        "solidFill" => {
+            resolve_color_element_with_phclr(entry, theme, scheme_clr)
+                .map(|c| ShapeFill::Solid { color: c })
+        }
+        "gradFill" => parse_grad_fill_phclr(entry, theme, scheme_clr),
+        // blipFill / pattFill recipes aren't supported yet — fall back to no fill.
+        _ => None,
+    }
+}
+
 fn parse_grad_fill(node: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
+    parse_grad_fill_phclr(node, theme, "")
+}
+
+fn parse_grad_fill_phclr(
+    node: roxmltree::Node,
+    theme: &ThemeColors,
+    ph_clr: &str,
+) -> Option<ShapeFill> {
     let gs_lst = node.children().find(|n| n.is_element() && n.tag_name().name() == "gsLst")?;
     let mut stops: Vec<GradientStop> = Vec::new();
     for gs in gs_lst.children().filter(|n| n.is_element() && n.tag_name().name() == "gs") {
         let pos = gs.attribute("pos").and_then(|v| v.parse::<f64>().ok()).map(|p| p / 100000.0).unwrap_or(0.0);
-        if let Some(color) = resolve_color_element(gs, theme) {
+        if let Some(color) = resolve_color_element_with_phclr(gs, theme, ph_clr) {
             stops.push(GradientStop { position: pos, color });
         }
     }
@@ -1421,10 +1508,26 @@ fn parse_custom_geometry(cust_geom: roxmltree::Node) -> Vec<Vec<PathCmd>> {
 /// inspecting its child: <a:srgbClr>, <a:schemeClr>, or <a:sysClr>, applying
 /// any lumMod/lumOff/alpha modifiers declared on the inner color element.
 fn resolve_color_element(container: roxmltree::Node, theme: &ThemeColors) -> Option<String> {
+    resolve_color_element_with_phclr(container, theme, "")
+}
+
+/// Like `resolve_color_element` but, when an inner `<a:schemeClr val="phClr"/>`
+/// is encountered, substitutes the scheme name `ph_clr` (the `<a:schemeClr>`
+/// child of the wps:style/fillRef that triggered theme lookup). Pass an empty
+/// string to disable the substitution.
+fn resolve_color_element_with_phclr(
+    container: roxmltree::Node,
+    theme: &ThemeColors,
+    ph_clr: &str,
+) -> Option<String> {
     for c in container.children().filter(|n| n.is_element()) {
         let base = match c.tag_name().name() {
             "srgbClr" => c.attribute("val").map(|v| v.to_uppercase()),
-            "schemeClr" => c.attribute("val").and_then(|name| theme.resolve(name)),
+            "schemeClr" => {
+                let raw_name = c.attribute("val")?;
+                let name = if raw_name == "phClr" && !ph_clr.is_empty() { ph_clr } else { raw_name };
+                theme.resolve(name)
+            }
             "sysClr" => c.attribute("lastClr").map(|v| v.to_uppercase())
                 .or_else(|| c.attribute("val").map(|v| v.to_uppercase())),
             _ => None,
@@ -1451,8 +1554,12 @@ fn apply_color_mods(hex: &str, color_node: roxmltree::Node) -> String {
             "satOff" => s += val,
             "hueMod" => h *= val,
             "hueOff" => h += val,
-            "shade" => { l *= val; s *= val; }
-            "tint" => { l = l + (1.0 - l) * val; }
+            // ECMA-376 §20.1.2.3.31 shade: result = val·input + (1-val)·black,
+            // i.e. scale lightness by val. Saturation is unaffected.
+            "shade" => l *= val,
+            // ECMA-376 §20.1.2.3.34 tint: result = val·input + (1-val)·white.
+            // In HSL we approximate by interpolating lightness toward 1.
+            "tint" => l = val * l + (1.0 - val),
             _ => {}
         }
     }

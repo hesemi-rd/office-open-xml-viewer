@@ -1360,17 +1360,71 @@ function renderAnchorImages(
 }
 
 /** Draw a wps:wsp shape via core's custGeom primitive. */
+/** Resolve a shape's page X by combining the explicit `anchorXPt` offset with
+ *  any `anchorXAlign` (ECMA-376 §20.4.3.1 wp:align). When align is set we
+ *  position the shape inside the container indicated by `anchorXFromMargin`:
+ *  the page margin area when true, the full page rect when false. */
+/** Resolve the page X for an anchored shape. With `align` unset the result is
+ *  the existing offset semantics; with `align` set we interpret `offsetPt` as
+ *  a child offset RELATIVE to the aligned origin of the group container. */
+function resolveAnchorX(
+  align: string | null | undefined,
+  fromMargin: boolean,
+  offsetPt: number,
+  widthPx: number,
+  state: RenderState,
+): number {
+  const { scale } = state;
+  if (!align) {
+    return fromMargin ? (state.marginLeft + offsetPt) * scale : offsetPt * scale;
+  }
+  const containerStart = fromMargin ? state.marginLeft * scale : 0;
+  const containerEnd = fromMargin
+    ? state.marginLeft * scale + state.contentW
+    : state.marginLeft * scale + state.contentW + state.marginLeft * scale; // page width
+  const containerW = containerEnd - containerStart;
+  const offsetPx = offsetPt * scale;
+  switch (align) {
+    case 'center': return containerStart + (containerW - widthPx) / 2 + offsetPx;
+    case 'right':  return containerEnd - widthPx + offsetPx;
+    case 'inside':
+    case 'outside':
+    case 'left':
+    default:       return containerStart + offsetPx;
+  }
+}
+
+function resolveAnchorY(
+  align: string | null | undefined,
+  fromPara: boolean,
+  offsetPt: number,
+  heightPx: number,
+  paragraphTopPx: number,
+  state: RenderState,
+): number {
+  const { scale } = state;
+  if (!align) {
+    return fromPara ? paragraphTopPx + offsetPt * scale : offsetPt * scale;
+  }
+  const containerStart = fromPara ? paragraphTopPx : 0;
+  const containerEnd = state.pageH;
+  const containerH = containerEnd - containerStart;
+  const offsetPx = offsetPt * scale;
+  switch (align) {
+    case 'center': return containerStart + (containerH - heightPx) / 2 + offsetPx;
+    case 'bottom': return containerEnd - heightPx + offsetPx;
+    case 'top':
+    default:       return containerStart + offsetPx;
+  }
+}
+
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
   const { ctx, scale } = state;
   const w = shape.widthPt * scale;
   const h = shape.heightPt * scale;
   if (w <= 0 || h <= 0) return;
-  const x = shape.anchorXFromMargin
-    ? (state.marginLeft + shape.anchorXPt) * scale
-    : shape.anchorXPt * scale;
-  const y = shape.anchorYFromPara
-    ? paragraphTopPx + shape.anchorYPt * scale
-    : shape.anchorYPt * scale;
+  const x = resolveAnchorX(shape.anchorXAlign, shape.anchorXFromMargin, shape.anchorXPt, w, state);
+  const y = resolveAnchorY(shape.anchorYAlign, shape.anchorYFromPara, shape.anchorYPt, h, paragraphTopPx, state);
 
   const rot = shape.rotation ?? 0;
   ctx.save();

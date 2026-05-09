@@ -153,6 +153,12 @@ export interface ShapeRun {
   anchorYPt: number;
   anchorXFromMargin: boolean;
   anchorYFromPara: boolean;
+  /** ECMA-376 §20.4.3.1 wp:align horizontal: "left" | "center" | "right" |
+   *  "inside" | "outside". When set the renderer aligns the shape inside the
+   *  container indicated by `anchorXFromMargin` and ignores `anchorXPt`. */
+  anchorXAlign?: string | null;
+  /** Vertical equivalent of anchorXAlign: "top" | "center" | "bottom". */
+  anchorYAlign?: string | null;
   /** Draw behind text when true (wp:anchor behindDoc="1"). */
   behindDoc?: boolean;
   /** Document-order index within a group; lower values render first. */

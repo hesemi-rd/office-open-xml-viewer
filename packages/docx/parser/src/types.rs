@@ -217,12 +217,22 @@ pub struct ShapeRun {
     pub width_pt: f64,
     /// pt
     pub height_pt: f64,
-    /// anchor X (pt)
+    /// anchor X (pt). Ignored if `anchor_x_align` is set.
     pub anchor_x_pt: f64,
-    /// anchor Y (pt)
+    /// anchor Y (pt). Ignored if `anchor_y_align` is set.
     pub anchor_y_pt: f64,
     pub anchor_x_from_margin: bool,
     pub anchor_y_from_para: bool,
+    /// ECMA-376 §20.4.3.1 wp:align (positionH/wp:align). When present the
+    /// renderer centers / left-aligns / right-aligns the shape within the
+    /// container indicated by `anchor_x_from_margin`. Values: "left",
+    /// "center", "right" (others fall back to "left").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_align: Option<String>,
+    /// Vertical equivalent of anchor_x_align (positionV/wp:align).
+    /// Values: "top", "center", "bottom".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_align: Option<String>,
     /// If true, draw the shape behind text (wp:anchor behindDoc="1"). Renderer
     /// should draw background shapes BEFORE body text.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
