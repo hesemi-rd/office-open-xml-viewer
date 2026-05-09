@@ -217,41 +217,27 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // grey at typical zoom while still showing the texture.
   darkGray:   [0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101], // ≈ 75%
 
-  // ── 12×12 — horizontal / vertical / grid (matched line count) ─────────
-  // 4 lines per tile in both dark and light variants. dark uses a 2-px-thick
-  // bar at each line position, light uses a 1-px-thick line — so the cells
-  // read as the same line *count* with different stroke thickness, instead
-  // of the prior "fewer thicker lines vs more thinner lines" mismatch.
-  // Pitch is 3 px (2 lit + 1 unlit for dark, or 1 lit + 2 unlit for light).
-  darkHorizontal: [
-    0b111111111111, 0b111111111111, 0b000000000000,
-    0b111111111111, 0b111111111111, 0b000000000000,
-    0b111111111111, 0b111111111111, 0b000000000000,
-    0b111111111111, 0b111111111111, 0b000000000000,
-  ],
-  lightHorizontal: [
-    0b111111111111, 0b000000000000, 0b000000000000,
-    0b111111111111, 0b000000000000, 0b000000000000,
-    0b111111111111, 0b000000000000, 0b000000000000,
-    0b111111111111, 0b000000000000, 0b000000000000,
-  ],
-  // darkVertical: 2-col-wide bar at cols 0,1 / 3,4 / 6,7 / 9,10
-  //   bits set: 11,10 + 8,7 + 5,4 + 2,1 = 0b110110110110 = 0xDB6
-  darkVertical:   Array(12).fill(0xDB6),
-  // lightVertical: 1-col-wide bar at cols 0 / 3 / 6 / 9
-  //   bits set: 11 + 8 + 5 + 2 = 0b100100100100 = 0x924
-  lightVertical:  Array(12).fill(0x924),
+  // ── 8×8 — horizontal / vertical / grid ───────────────────────────────
+  // dark*: 2-px-thick bar + 2-px gap = 4-px pitch (2 thick bars per 8-px tile)
+  // light*: 1-px-thick line + 1-px gap = 2-px pitch (4 thin lines per 8-px tile)
+  //
+  // We previously tried matching line *count* between dark and light at a
+  // 12×12 / 3-px pitch, but Excel shows that light variants are denser AND
+  // thinner than dark — a typical row gives Excel ~6-8 thick bars in the
+  // dark cell vs ~12 thin lines in the light cell. This 8×8 sizing tracks
+  // those ratios more closely (4 dark bars vs 4 light lines per tile gives
+  // ~2× more lines in light at half the thickness).
+  darkHorizontal:  [0b11111111, 0b11111111, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b00000000, 0b00000000],
+  lightHorizontal: [0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000],
+  // darkVertical: 2-col bars at cols 0,1 / 4,5 → 0xCC = 0b11001100
+  darkVertical:    Array(8).fill(0xCC),
+  // lightVertical: 1-col lines at every other col (0,2,4,6) → 0xAA = 0b10101010
+  lightVertical:   Array(8).fill(0xAA),
 
   // darkGrid = darkHorizontal | darkVertical
-  darkGrid: [
-    0xFFF, 0xFFF, 0xDB6, 0xFFF, 0xFFF, 0xDB6,
-    0xFFF, 0xFFF, 0xDB6, 0xFFF, 0xFFF, 0xDB6,
-  ],
+  darkGrid: [0xFF, 0xFF, 0xCC, 0xCC, 0xFF, 0xFF, 0xCC, 0xCC],
   // lightGrid = lightHorizontal | lightVertical
-  lightGrid: [
-    0xFFF, 0x924, 0x924, 0xFFF, 0x924, 0x924,
-    0xFFF, 0x924, 0x924, 0xFFF, 0x924, 0x924,
-  ],
+  lightGrid: [0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA],
 
   // ── 8×8 — diagonals & trellis ─────────────────────────────────────────
   // darkDown / darkUp: 2-px-wide diagonal stripes every 4 cells.
@@ -276,17 +262,18 @@ function hatchPattern(
   fgHex: string,
   bgHex: string,
 ): CanvasPattern | null {
-  // Pre-bake the inverse of the destination context's current scale into the
-  // pattern transform so each source bit lands on exactly one destination
-  // *device* pixel — the visual minimum the user can perceive. Without this,
-  // a Storybook scale=1.5 (or DPR=2 retina) draws our 1-pixel source bits at
-  // 1.5–2 device px each, producing the chunky-looking dots / lines the user
-  // flagged. Scale is part of the cache key below so two render passes at
-  // different scales don't reuse each other's matrices.
+  // Read the destination context's effective scale so the offscreen tile is
+  // sized at the destination's device-pixel resolution. Drawing the source
+  // pre-scaled keeps each "1 bit" at exactly one destination *device* pixel
+  // when the rendering context is doing ctx.scale(dpr * cs) for hi-DPI /
+  // Storybook zoom — without this the crisp 1-px source bits get linearly
+  // resampled to 1.5–2 device px and either chunky (integer scale) or
+  // blurred-out-of-existence (non-integer scale, the prior pat.setTransform
+  // approach lost lightHorizontal entirely at scale=1.5).
   const t = ctx.getTransform();
-  const sx = Math.hypot(t.a, t.b) || 1;
-  const sy = Math.hypot(t.c, t.d) || 1;
-  const key = `${pt}|${fgHex}|${bgHex}|${sx.toFixed(3)}|${sy.toFixed(3)}`;
+  const sx = Math.max(1, Math.round(Math.hypot(t.a, t.b)));
+  const sy = Math.max(1, Math.round(Math.hypot(t.c, t.d)));
+  const key = `${pt}|${fgHex}|${bgHex}|${sx}|${sy}`;
   if (PATTERN_CACHE.has(key)) return PATTERN_CACHE.get(key)!;
 
   const rows = PATTERN_BITMAPS[pt];
@@ -297,25 +284,35 @@ function hatchPattern(
 
   // Square tile — size inferred from the row count. Bit (size-1) is
   // leftmost so the binary literals read left-to-right at any tile width.
-  const size = rows.length;
+  // The offscreen canvas is sized at sx × tileSize device pixels so each
+  // "1 bit" becomes a sx × sy rect when the destination context's scale
+  // multiplies it back. Result: the source bit lands on exactly one
+  // destination device pixel regardless of the user's CSS zoom.
+  const tile = rows.length;
   const off = document.createElement('canvas');
-  off.width = size;
-  off.height = size;
+  off.width = tile;
+  off.height = tile;
   const octx = off.getContext('2d');
   if (!octx) { PATTERN_CACHE.set(key, null); return null; }
 
   octx.fillStyle = hexToRgba(bgHex);
-  octx.fillRect(0, 0, size, size);
+  octx.fillRect(0, 0, tile, tile);
   octx.fillStyle = hexToRgba(fgHex);
-  for (let y = 0; y < size; y++) {
+  for (let y = 0; y < tile; y++) {
     const row = rows[y];
-    for (let x = 0; x < size; x++) {
-      if (row & (1 << (size - 1 - x))) octx.fillRect(x, y, 1, 1);
+    for (let x = 0; x < tile; x++) {
+      if (row & (1 << (tile - 1 - x))) octx.fillRect(x, y, 1, 1);
     }
   }
 
   const pat = ctx.createPattern(off, 'repeat');
-  if (pat && typeof DOMMatrix !== 'undefined') {
+  // Pre-bake an inverse-scale matrix only when the scale rounds to an
+  // integer (1, 2, 3, …). Fractional inverses (e.g. 1/1.5 ≈ 0.67) trigger
+  // the canvas's bilinear pattern resampler and smear 1-px features into
+  // a uniform half-tone — which is exactly what wiped out lightHorizontal
+  // at Storybook scale=1.5. For non-integer ctx scales we leave the tile
+  // unscaled and accept ~1.5-device-px bits (slightly chunky but crisp).
+  if (pat && typeof DOMMatrix !== 'undefined' && (sx >= 2 || sy >= 2)) {
     const m = new DOMMatrix();
     m.scaleSelf(1 / sx, 1 / sy);
     pat.setTransform(m);
