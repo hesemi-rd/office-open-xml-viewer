@@ -4035,8 +4035,27 @@ function renderBorder(
     // doubled edges close cleanly; the inner line is *shortened* by `off`
     // on each end so the two perpendicular inner lines meet exactly at the
     // inner corner (without the trim they cross past the corner forming a
-    // small "+" overhang). Diagonals fall back to single line (Excel
-    // doesn't render a doubled diagonal either).
+    // small "+" overhang). Diagonals are handled separately further down.
+    if (edge.style === 'double' && kind === 'd') {
+      // Two parallel diagonal lines offset perpendicular to the diagonal
+      // direction. Excel renders <diagonal style="double"/> the same way it
+      // does horizontal/vertical doubles — two thin lines with a small gap.
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      // Perpendicular unit vector. ±off shifts the line ~1px to either side.
+      const off = 1;
+      const px = (-dy / len) * off;
+      const py = (dx / len) * off;
+      ctx.beginPath();
+      ctx.moveTo(x1 + px, y1 + py); ctx.lineTo(x2 + px, y2 + py);
+      ctx.moveTo(x1 - px, y1 - py); ctx.lineTo(x2 - px, y2 - py);
+      ctx.stroke();
+      continue;
+    }
     if (edge.style === 'double' && kind !== 'd') {
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
