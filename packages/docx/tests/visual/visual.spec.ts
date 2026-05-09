@@ -8,6 +8,7 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   { name: 'private/sample-2', pageCount: 1, width: 595 },
   { name: 'private/sample-3', pageCount: 3, width: 595 },
   { name: 'private/sample-4', pageCount: 1, width: 595 },
+  { name: 'private/sample-5', pageCount: 7, width: 595 },
   { name: 'demo/sample-1', pageCount: 6, width: 595 },
 ];
 
