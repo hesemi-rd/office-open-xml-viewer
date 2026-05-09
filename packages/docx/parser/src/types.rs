@@ -70,7 +70,14 @@ pub struct SectionProps {
 pub enum BodyElement {
     Paragraph(DocParagraph),
     Table(DocTable),
-    PageBreak,
+    /// Page break. `parity` carries section-break parity intent:
+    /// `Some("odd")` = oddPage break (next content must start on an odd
+    /// 1-based page), `Some("even")` = evenPage. `None` = a plain `nextPage`
+    /// or `<w:br w:type="page"/>` break.
+    PageBreak {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parity: Option<String>,
+    },
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -439,13 +446,27 @@ pub struct DocTableRow {
     pub cells: Vec<DocTableCell>,
     /// pt, None = auto
     pub row_height: Option<f64>,
+    /// ECMA-376 §17.4.80 w:trHeight/@hRule. "auto" (default) = treat row_height
+    /// as informational and size to content; "atLeast" = use as a lower bound;
+    /// "exact" = honor the value exactly. Stored as the raw OOXML token so the
+    /// renderer can branch without re-parsing.
+    pub row_height_rule: String,
     pub is_header: bool,
+}
+
+/// One block-level entry inside a table cell. ECMA-376 §17.4.7 (w:tc) allows
+/// any BlockLevelElts inside a cell — paragraphs and nested tables.
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum CellElement {
+    Paragraph(DocParagraph),
+    Table(DocTable),
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocTableCell {
-    pub content: Vec<DocParagraph>,
+    pub content: Vec<CellElement>,
     pub col_span: u32,
     /// VMerge: None = no merge, Some(true) = start of vertical merge, Some(false) = continuation
     pub v_merge: Option<bool>,

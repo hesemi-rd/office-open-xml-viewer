@@ -227,17 +227,23 @@ fn parse_body_elements(
                     DocRun::Break { break_type: BreakType::Page }
                 );
                 if is_page_break_only {
-                    body.push(BodyElement::PageBreak);
+                    body.push(BodyElement::PageBreak { parity: None });
                     continue;
                 }
                 body.push(BodyElement::Paragraph(result));
-                // A section break inside pPr (that isn't the final body-level sectPr)
-                // terminates the current section and starts a new one on a new page.
-                let has_mid_section_break = child_w(child, "pPr")
-                    .and_then(|ppr| child_w(ppr, "sectPr"))
-                    .is_some();
-                if has_mid_section_break {
-                    body.push(BodyElement::PageBreak);
+                // ECMA-376 §17.6.1: a section break inside pPr defines the
+                // section that ENDS at this paragraph. The break TYPE
+                // (`<w:type w:val>`) controls how the next section starts:
+                //   - "continuous" → no page break
+                //   - "nextPage" / missing → plain page break
+                //   - "oddPage" / "evenPage" → page break + parity padding
+                if let Some(sect_pr) = child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr")) {
+                    match read_section_break_type(sect_pr).as_deref() {
+                        Some("continuous") => { /* no page break */ }
+                        Some("oddPage") => body.push(BodyElement::PageBreak { parity: Some("odd".to_string()) }),
+                        Some("evenPage") => body.push(BodyElement::PageBreak { parity: Some("even".to_string()) }),
+                        _ => body.push(BodyElement::PageBreak { parity: None }),
+                    }
                 }
             }
             "tbl" => {
@@ -248,13 +254,28 @@ fn parse_body_elements(
                 // Mid-body loose sectPr (rare) would behave like a page break.
                 // The final body-level sectPr only defines section settings — skip it.
                 if Some(child.id()) != body_level_sect_id {
-                    body.push(BodyElement::PageBreak);
+                    match read_section_break_type(child).as_deref() {
+                        Some("continuous") => {}
+                        Some("oddPage") => body.push(BodyElement::PageBreak { parity: Some("odd".to_string()) }),
+                        Some("evenPage") => body.push(BodyElement::PageBreak { parity: Some("even".to_string()) }),
+                        _ => body.push(BodyElement::PageBreak { parity: None }),
+                    }
                 }
             }
             _ => {}
         }
     }
     body
+}
+
+/// Read `<w:type w:val>` from a sectPr node, normalized to the ECMA-376
+/// ST_SectionMark values ("continuous" | "nextPage" | "oddPage" | "evenPage" |
+/// "nextColumn"). `None` if the element is absent (default = "nextPage").
+fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
+    sect_pr
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "type")
+        .find_map(|n| attr_w(n, "val"))
 }
 
 fn load_media_map(
@@ -700,10 +721,12 @@ fn parse_run_inner(
     let rpr_node = child_w(node, "rPr");
     let mut fmt = base_run.clone();
 
-    // Apply rStyle
+    // Apply rStyle. ECMA-376 §17.7.5: character styles overlay on top of the
+    // paragraph's run formatting; they must not re-introduce docDefaults or
+    // the default paragraph style — those are already baked into base_run.
     if let Some(rpr) = rpr_node {
         if let Some(rs) = child_w(rpr, "rStyle").and_then(|n| attr_w(n, "val")) {
-            let (_, style_run) = style_map.resolve_para(Some(&rs), None);
+            let style_run = style_map.resolve_run_style(&rs);
             apply_direct_run(&mut fmt, &style_run);
         }
         let direct = parse_run_fmt(rpr);
@@ -788,6 +811,19 @@ fn parse_run_inner(
                     _ => BreakType::Line,
                 }).unwrap_or(BreakType::Line);
                 runs.push(DocRun::Break { break_type });
+            }
+            "ruby" => {
+                // ECMA-376 §17.3.3.25 w:ruby — phonetic guide (furigana).
+                // Layout: w:rubyBase carries the base glyph(s); w:rt carries
+                // the small annotation rendered above. We emit only the base
+                // text for now (full ruby layout is not implemented), which
+                // is what would otherwise be silently dropped — leaving
+                // ruby-annotated kanji missing from the output.
+                if let Some(rb) = child_w(child, "rubyBase") {
+                    for inner in rb.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
+                        parse_run_inner(inner, &fmt, style_map, media_map, theme, runs, link_href.clone());
+                    }
+                }
             }
             "drawing" => {
                 for r in parse_inline_drawing(child, media_map, theme) {
@@ -1221,7 +1257,20 @@ fn parse_wsp_shape(
     let anchor_y_pt = anchor_pos_y + group_off_pt_y + oy * sy / 12700.0;
 
     let cust_geom = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "custGeom");
-    let subpaths = cust_geom.map(parse_custom_geometry).unwrap_or_default();
+    let subpaths = if let Some(cg) = cust_geom {
+        parse_custom_geometry(cg)
+    } else {
+        // Fall back to prstGeom when custGeom is absent. Generate normalized
+        // [0,1] subpaths for the preset shapes used by our sample corpus
+        // (rect, line). Unknown presets fall back to rect so they remain
+        // visible — adj values (avLst) are intentionally not honored here.
+        let prst = sp_pr
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "prstGeom")
+            .and_then(|n| n.attribute("prst"))
+            .unwrap_or("rect");
+        preset_subpaths(prst)
+    };
     if subpaths.is_empty() { return None; }
 
     let fill = parse_shape_fill(sp_pr, theme);
@@ -1295,6 +1344,27 @@ fn parse_grad_fill(node: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFi
     };
 
     Some(ShapeFill::Gradient { stops, angle, grad_type })
+}
+
+/// Generate normalized [0,1] subpaths for OOXML preset geometries used by
+/// our docx sample corpus. Unknown presets fall back to rect so the shape
+/// remains visible at its bounding box. `avLst` adjustment values are not
+/// honored — add per-shape handling here if a sample needs it.
+fn preset_subpaths(prst: &str) -> Vec<Vec<PathCmd>> {
+    match prst {
+        "line" => vec![vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 1.0, y: 1.0 },
+        ]],
+        // "rect" | unknown
+        _ => vec![vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 1.0, y: 0.0 },
+            PathCmd::LineTo { x: 1.0, y: 1.0 },
+            PathCmd::LineTo { x: 0.0, y: 1.0 },
+            PathCmd::Close,
+        ]],
+    }
 }
 
 /// Parse <a:custGeom><a:pathLst><a:path w="W" h="H">...</a:path></a:pathLst>.
@@ -1516,10 +1586,14 @@ fn parse_table_row(
     table_style_id: Option<&str>,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
-    let row_height = tr_pr
-        .and_then(|p| child_w(p, "trHeight"))
+    let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
+    let row_height = tr_height_node
         .and_then(|h| attr_w(h, "val"))
         .map(|v| twips_to_pt(&v));
+    // ECMA-376 §17.4.80: default hRule is "auto".
+    let row_height_rule = tr_height_node
+        .and_then(|h| attr_w(h, "hRule"))
+        .unwrap_or_else(|| "auto".to_string());
     let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
 
     let mut cells = vec![];
@@ -1528,7 +1602,7 @@ fn parse_table_row(
         cells.push(cell);
     }
 
-    DocTableRow { cells, row_height, is_header }
+    DocTableRow { cells, row_height, row_height_rule, is_header }
 }
 
 fn parse_table_cell(
@@ -1580,9 +1654,19 @@ fn parse_table_cell(
             }
         });
 
-    let mut content = vec![];
-    for p_node in children_w_flat(node, "p") {
-        content.push(parse_paragraph(p_node, style_map, num_map, media_map, rel_map, theme, table_style_id));
+    // ECMA-376 §17.4.7: a cell may contain paragraphs AND nested tables in
+    // any order. element_children_flat unwraps sdt wrappers like elsewhere.
+    let mut content: Vec<CellElement> = vec![];
+    for child in element_children_flat(node) {
+        match child.tag_name().name() {
+            "p" => content.push(CellElement::Paragraph(
+                parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, table_style_id)
+            )),
+            "tbl" => content.push(CellElement::Table(
+                parse_table(child, style_map, num_map, media_map, rel_map, theme)
+            )),
+            _ => {}
+        }
     }
 
     DocTableCell { content, col_span, v_merge, borders, background, v_align, width_pt }

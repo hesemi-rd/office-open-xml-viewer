@@ -219,6 +219,22 @@ impl StyleMap {
             apply_run(merged_run, &def.para.run);
         }
     }
+
+    /// Resolve a character style (rStyle) chain WITHOUT prepending docDefaults
+    /// or the default paragraph style. ECMA-376 §17.7.5: rStyle layers ON TOP
+    /// of the paragraph's already-resolved run formatting — pulling docDefaults
+    /// in here would overwrite values the paragraph style legitimately set
+    /// (e.g. Normal's Meiryo UI 9pt being clobbered by docDefault Calibri 11pt
+    /// for a run that only says `<w:rStyle w:val="PlaceholderText"/>`).
+    pub fn resolve_run_style(&self, style_id: &str) -> RunFmt {
+        let mut merged_run = RunFmt::default();
+        // Walk only the rStyle's basedOn chain. No docDefaults, no table
+        // style, no default paragraph style — those are baseline contributions
+        // already folded into the caller's `base_run`.
+        let mut merged_para = ParaFmt::default();
+        self.apply_style_chain(style_id, &mut merged_para, &mut merged_run);
+        merged_run
+    }
 }
 
 fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
