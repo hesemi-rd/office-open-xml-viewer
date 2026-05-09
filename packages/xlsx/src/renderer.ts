@@ -250,6 +250,51 @@ function hatchPattern(
 }
 
 /**
+ * Paint a cell background according to its <patternFill> / <gradientFill>.
+ *
+ * ECMA-376 §18.8.20 / §18.8.22 specifies fg/bg defaults: when the colour
+ * children are absent, fg defaults to the system foreground (black) and bg
+ * to the system background (white). Without those defaults the directional
+ * hatches that Excel emits with no explicit colours (`<patternFill
+ * patternType="darkHorizontal"/>` etc.) would render as nothing because
+ * the prior gate required a non-null fgColor.
+ *
+ * Returns true when the cell was painted so the caller can short-circuit
+ * its tableStyle / banded fallbacks.
+ */
+function paintCellPatternFill(
+  ctx: CanvasRenderingContext2D,
+  fill: Fill,
+  x: number, y: number, w: number, h: number,
+): boolean {
+  if (fill.gradient && fill.gradient.stops.length > 0) {
+    ctx.fillStyle = buildGradientFill(ctx, fill.gradient, x, y, w, h);
+    ctx.fillRect(x, y, w, h);
+    return true;
+  }
+  const pt = fill.patternType;
+  if (!pt || pt === 'none') return false;
+  const fg = fill.fgColor ?? '000000';
+  const bg = fill.bgColor ?? 'FFFFFF';
+  if (pt === 'solid') {
+    ctx.fillStyle = hexToRgba(fg);
+    ctx.fillRect(x, y, w, h);
+    return true;
+  }
+  const hatch = hatchPattern(ctx, pt, fg, bg);
+  if (hatch) {
+    ctx.fillStyle = hatch;
+  } else {
+    const coverage = patternCoverage(pt);
+    ctx.fillStyle = coverage >= 1
+      ? hexToRgba(fg)
+      : blendHex(fg, bg, coverage);
+  }
+  ctx.fillRect(x, y, w, h);
+  return true;
+}
+
+/**
  * Build a Canvas gradient object for an xlsx `<gradientFill>`. Linear uses
  * the degree attribute (0° = left→right, 90° = top→bottom). Path gradients
  * radiate from a rectangular inner bounds defined by left/right/top/bottom
@@ -2342,10 +2387,7 @@ function renderQuadrant(
     const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? []);
     const effectiveFill = cf.fill ?? fill;
 
-    if (effectiveFill.patternType !== 'none' && effectiveFill.patternType !== '' && effectiveFill.fgColor) {
-      ctx.fillStyle = hexToRgba(effectiveFill.fgColor);
-      ctx.fillRect(aCx, aCy, cW, cH);
-    }
+    paintCellPatternFill(ctx, effectiveFill, aCx, aCy, cW, cH);
     if (cf.dataBar && cf.dataBar.ratio > 0) {
       const bInset = 2;
       const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
@@ -2480,22 +2522,8 @@ function renderQuadrant(
       // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
-      if (effectiveFill.gradient && effectiveFill.gradient.stops.length > 0) {
-        ctx.fillStyle = buildGradientFill(ctx, effectiveFill.gradient, cx, cy, cellW, cellH);
-        ctx.fillRect(cx, cy, cellW, cellH);
-      } else if (effectiveFill.patternType && effectiveFill.patternType !== 'none' && effectiveFill.fgColor) {
-        const pt = effectiveFill.patternType;
-        const bg = effectiveFill.bgColor ?? 'FFFFFF';
-        const hatch = hatchPattern(ctx, pt, effectiveFill.fgColor, bg);
-        if (hatch) {
-          ctx.fillStyle = hatch;
-        } else {
-          const coverage = patternCoverage(pt);
-          ctx.fillStyle = coverage >= 1
-            ? hexToRgba(effectiveFill.fgColor)
-            : blendHex(effectiveFill.fgColor, bg, coverage);
-        }
-        ctx.fillRect(cx, cy, cellW, cellH);
+      if (paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH)) {
+        // own fill painted; tableStyle fallbacks intentionally skipped
       } else if (tableStyle && tableStyle.isHeader && tsDxfHeader?.fill?.fgColor) {
         ctx.fillStyle = hexToRgba(tsDxfHeader.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
