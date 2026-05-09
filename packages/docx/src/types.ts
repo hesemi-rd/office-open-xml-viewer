@@ -43,7 +43,7 @@ export interface SectionProps {
 export type BodyElement =
   | { type: 'paragraph' } & DocParagraph
   | { type: 'table' } & DocTable
-  | { type: 'pageBreak' };
+  | { type: 'pageBreak'; parity?: 'odd' | 'even' };
 
 export interface DocParagraph {
   /**
@@ -291,11 +291,19 @@ export interface BorderSpec {
 export interface DocTableRow {
   cells: DocTableCell[];
   rowHeight: number | null;  // pt
+  /** ECMA-376 §17.4.80 hRule. "auto" (default) = informational; "atLeast" =
+   *  lower bound; "exact" = fixed clip. */
+  rowHeightRule: 'auto' | 'atLeast' | 'exact' | string;
   isHeader: boolean;
 }
 
+/** ECMA-376 §17.4.7: a table cell may contain paragraphs AND nested tables. */
+export type CellElement =
+  | { type: 'paragraph' } & DocParagraph
+  | { type: 'table' } & DocTable;
+
 export interface DocTableCell {
-  content: DocParagraph[];
+  content: CellElement[];
   colSpan: number;
   vMerge: boolean | null;  // null=no merge, true=start, false=continuation
   borders: CellBorders;

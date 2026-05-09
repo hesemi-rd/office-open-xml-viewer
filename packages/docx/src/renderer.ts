@@ -1,5 +1,5 @@
 import type {
-  Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
+  Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
@@ -115,15 +115,18 @@ function collectImagePairs(doc: Document): ImagePair[] {
       }
     }
   };
+  const walkTable = (tbl: DocTable) => {
+    for (const row of tbl.rows)
+      for (const cell of row.cells)
+        for (const ce of cell.content) {
+          if (ce.type === 'paragraph') walk((ce as unknown as DocParagraph).runs);
+          else if (ce.type === 'table') walkTable(ce as unknown as DocTable);
+        }
+  };
   const walkBody = (body: BodyElement[]) => {
     for (const el of body) {
       if (el.type === 'paragraph') walk((el as unknown as DocParagraph).runs);
-      if (el.type === 'table') {
-        const tbl = el as unknown as DocTable;
-        for (const row of tbl.rows)
-          for (const cell of row.cells)
-            for (const para of cell.content) walk(para.runs);
-      }
+      if (el.type === 'table') walkTable(el as unknown as DocTable);
     }
   };
   walkBody(doc.body);
@@ -321,6 +324,17 @@ export function computePages(
       pages.push([]);
       y = 0;
       prevPara = null;
+      prevSpaceAfter = 0;
+      measureState.y = section.marginTop;
+      measureState.floats = [];
+      // ECMA-376 §17.18.79 ST_SectionMark: oddPage / evenPage breaks pad
+      // with a blank page when the new section would otherwise start on the
+      // wrong parity. pages.length here is the next page's 1-based index.
+      if (el.parity === 'odd' && pages.length % 2 === 0) {
+        pages.push([]);
+      } else if (el.parity === 'even' && pages.length % 2 === 1) {
+        pages.push([]);
+      }
       continue;
     }
     if (el.type === 'paragraph') {
@@ -436,19 +450,23 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
   const colWidths = table.colWidths.map((w) => w * colScale);
   let h = 0;
   for (const row of table.rows) {
-    if (row.rowHeight != null) {
+    if (row.rowHeight != null && row.rowHeightRule === 'exact') {
       h += row.rowHeight;
       continue;
     }
-    let rowH = 10;
+    let rowH = row.rowHeight != null ? row.rowHeight : 10;
     let ci = 0;
     for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
       const innerW = Math.max(1, cellW - table.cellMarginLeft - table.cellMarginRight);
       let ch = table.cellMarginTop + table.cellMarginBottom;
-      for (const para of cell.content) {
-        ch += estimateParagraphHeight(state, para, innerW);
+      for (const ce of cell.content) {
+        if (ce.type === 'paragraph') {
+          ch += estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
+        } else if (ce.type === 'table') {
+          ch += estimateTableHeight(state, ce as unknown as DocTable, innerW);
+        }
       }
       if (ch > rowH) rowH = ch;
       ci += span;
@@ -1526,9 +1544,21 @@ function calculateRowHeight(
   scale: number,
   state: RenderState,
 ): number {
-  if (row.rowHeight != null) return row.rowHeight * scale;
+  // ECMA-376 §17.4.80:
+  //   exact   — honor w:trHeight verbatim, clip overflow.
+  //   atLeast / auto (default) — w:trHeight is a lower bound that content
+  //                               can exceed. In practice Word treats the
+  //                               default `auto` like `atLeast` when a value
+  //                               is present: it preserves the saved layout
+  //                               height even though the spec text describes
+  //                               auto as content-driven. Resume / cover
+  //                               templates rely on this — their row heights
+  //                               (trHeight=1872, 2448, 1152 …) shape the
+  //                               whole page composition.
+  if (row.rowHeight != null && row.rowHeightRule === 'exact') return row.rowHeight * scale;
+  const minH = row.rowHeight != null ? row.rowHeight * scale : 10 * scale;
 
-  let maxH = 10 * scale;
+  let maxH = minH;
   let ci = 0;
   for (const cell of row.cells) {
     const span = Math.min(cell.colSpan, colWidths.length - ci);
@@ -1536,9 +1566,8 @@ function calculateRowHeight(
     const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
 
     let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
-    for (const para of cell.content) {
-      h += measureParaHeight(state, para, contentW, scale);
-      h += (para.spaceBefore + para.spaceAfter) * scale;
+    for (const ce of cell.content) {
+      h += measureCellElementHeight(state, ce, contentW, scale);
     }
     if (h > maxH) maxH = h;
     ci += span;
@@ -1572,9 +1601,27 @@ function measureCellContent(
   const ml = table.cellMarginLeft * scale;
   const mr = table.cellMarginRight * scale;
   const innerW = cellW - ml - mr;
-  for (const para of cell.content) {
-    measureParaHeight(state, para, innerW, scale);
+  for (const ce of cell.content) {
+    measureCellElementHeight(state, ce, innerW, scale);
   }
+}
+
+/** Measure a cell-level element (paragraph or nested table) at the rendering
+ *  scale. Returns total occupied height including paragraph spacing. */
+function measureCellElementHeight(
+  state: RenderState,
+  ce: CellElement,
+  innerWPx: number,
+  scale: number,
+): number {
+  if (ce.type === 'paragraph') {
+    const para = ce as unknown as DocParagraph;
+    return measureParaHeight(state, para, innerWPx, scale)
+      + (para.spaceBefore + para.spaceAfter) * scale;
+  }
+  // Nested table — estimateTableHeight works in pt; convert to px.
+  const tbl = ce as unknown as DocTable;
+  return estimateTableHeight(state, tbl, innerWPx / scale) * scale;
 }
 
 function renderCell(
@@ -1615,13 +1662,60 @@ function renderCell(
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
-    const contentH = cell.content.reduce((s, p) =>
-      s + measureParaHeight(cellState, p, w - ml - mr, scale) + (p.spaceBefore + p.spaceAfter) * scale, 0);
+    // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When a cell's
+    // visible content is a nested table, Word emits a trailing empty paragraph
+    // purely as that syntactic anchor. Including it in the centering content
+    // height would balloon contentH ≈ rowHeight and pin the visible block to
+    // the top of the cell — matching neither Word nor LibreOffice's
+    // rendering of resume "bar chart" cells. Skip a single trailing empty
+    // paragraph after a non-paragraph block.
+    const visibleContent = trimTrailingStructuralMarker(cell.content);
+    const contentH = visibleContent.reduce(
+      (s, ce) => s + measureCellElementHeight(cellState, ce, w - ml - mr, scale), 0);
     if (cell.vAlign === 'center') cellState.y = y + (h - contentH) / 2;
     else cellState.y = y + h - contentH - mb;
   }
 
-  renderParaList(cell.content, cellState);
+  renderCellContent(cell.content, cellState);
+}
+
+/** Drop a trailing empty paragraph that follows a non-paragraph block (nested
+ *  table). ECMA-376 §17.4.7 requires every cell to end with a paragraph; when
+ *  the visible content is a nested table, Word's emitted trailing <w:p/> is a
+ *  structural anchor with no visible role. Returns the original array if no
+ *  such pattern matches. */
+function trimTrailingStructuralMarker(content: CellElement[]): CellElement[] {
+  if (content.length < 2) return content;
+  const last = content[content.length - 1];
+  const prev = content[content.length - 2];
+  if (last.type !== 'paragraph' || prev.type === 'paragraph') return content;
+  const lastPara = last as unknown as DocParagraph;
+  if (lastPara.runs.length > 0) return content;
+  return content.slice(0, -1);
+}
+
+/** Render a cell's interleaved paragraphs and nested tables in document order.
+ *  Mirrors renderBodyElements but without page-break handling (cells never
+ *  contain page breaks in our model). */
+function renderCellContent(content: CellElement[], state: RenderState): void {
+  let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
+  for (const ce of content) {
+    if (ce.type === 'paragraph') {
+      const para = ce as unknown as DocParagraph;
+      const suppress = contextualSuppressed(prevPara, para);
+      const effBefore = suppress ? 0 : para.spaceBefore;
+      const overlap = Math.min(prevSpaceAfter, effBefore);
+      state.y -= overlap * state.scale;
+      renderParagraph(para, state, suppress);
+      prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
+    } else if (ce.type === 'table') {
+      renderTable(ce as unknown as DocTable, state);
+      prevPara = null;
+      prevSpaceAfter = 0;
+    }
+  }
 }
 
 function drawCellBorders(
