@@ -467,11 +467,12 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | **Strokes** | Solid line color and width | ✅ |
 | | Dash / dot styles | ✅ |
 | | Arrow heads (`headEnd` / `tailEnd`) | ✅ |
-| | Compound / double lines | ❌ |
+| | Compound / double lines (`<a:ln cmpd="dbl|thinThick|thickThin|tri">` — straight connectors) | ✅ |
 | **Shape effects** | Drop shadow (`outerShdw`) | ✅ |
 | | Glow (`glow` — radius + colour) | ✅ |
 | | Inner shadow (`innerShdw` — parsed; rendering follow-up) | ⚠️ |
-| | Reflection / soft edge | ❌ |
+| | Soft edge (`softEdge` — parsed; rendering follow-up) | ⚠️ |
+| | Reflection (`reflection` — parsed; rendering follow-up) | ⚠️ |
 | | Bevel / 3D extrusion | ❌ |
 | **Text — characters** | Bold, italic, strikethrough (incl. `dblStrike`) | ✅ |
 | | Underline styles (`sng` / `dbl` / `dotted` / `dash` / `dashLong` / `dotDash` / `dotDotDash` / `wavy` / `wavyDbl` and `*Heavy` variants) | ✅ |
