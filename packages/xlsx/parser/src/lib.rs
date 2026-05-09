@@ -963,6 +963,13 @@ pub struct RunFont {
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// ECMA-376 §18.4.13 ST_UnderlineValues — see Font.underline_style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline_style: Option<String>,
+    /// ECMA-376 §18.4.6 ST_VerticalAlignRun — "superscript" | "subscript" |
+    /// "baseline". Absent leaves the run on the baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert_align: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -1007,6 +1014,15 @@ pub struct Font {
     pub size: f64,
     pub color: Option<String>,
     pub name: Option<String>,
+    /// ECMA-376 §18.4.13 ST_UnderlineValues. Only emitted when not the default
+    /// "single" — values: "double", "singleAccounting", "doubleAccounting".
+    /// "none" sets `underline = false` and leaves this field absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline_style: Option<String>,
+    /// ECMA-376 §18.4.6 ST_VerticalAlignRun on a cell-level <font> —
+    /// "superscript" | "subscript". Absent leaves the run on the baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert_align: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -1489,8 +1505,27 @@ fn parse_si_node(
                                 match rp.tag_name().name() {
                                     "b" => f.bold = true,
                                     "i" => f.italic = true,
-                                    "u" => f.underline = true,
+                                    "u" => {
+                                        // ECMA-376 §18.4.13 ST_UnderlineValues:
+                                        // single (default) | double | singleAccounting |
+                                        // doubleAccounting | none.
+                                        let v = rp.attribute("val").unwrap_or("single");
+                                        if v != "none" {
+                                            f.underline = true;
+                                            if v != "single" {
+                                                f.underline_style = Some(v.to_string());
+                                            }
+                                        }
+                                    }
                                     "strike" => f.strike = true,
+                                    "vertAlign" => {
+                                        // ECMA-376 §18.4.6 ST_VerticalAlignRun.
+                                        if let Some(v) = rp.attribute("val") {
+                                            if v != "baseline" {
+                                                f.vert_align = Some(v.to_string());
+                                            }
+                                        }
+                                    }
                                     "sz" => {
                                         f.size = rp.attribute("val").and_then(|s| s.parse().ok());
                                     }
@@ -1592,8 +1627,23 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                             match fc.tag_name().name() {
                                 "b" => f.bold = true,
                                 "i" => f.italic = true,
-                                "u" => f.underline = true,
+                                "u" => {
+                                    let v = fc.attribute("val").unwrap_or("single");
+                                    if v != "none" {
+                                        f.underline = true;
+                                        if v != "single" {
+                                            f.underline_style = Some(v.to_string());
+                                        }
+                                    }
+                                }
                                 "strike" => f.strike = true,
+                                "vertAlign" => {
+                                    if let Some(v) = fc.attribute("val") {
+                                        if v != "baseline" {
+                                            f.vert_align = Some(v.to_string());
+                                        }
+                                    }
+                                }
                                 "sz" => {
                                     if let Some(v) = fc.attribute("val").and_then(|s| s.parse().ok()) {
                                         f.size = v;
@@ -1694,8 +1744,23 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                     match child.tag_name().name() {
                         "b" => f.bold = true,
                         "i" => f.italic = true,
-                        "u" => f.underline = true,
+                        "u" => {
+                            let v = child.attribute("val").unwrap_or("single");
+                            if v != "none" {
+                                f.underline = true;
+                                if v != "single" {
+                                    f.underline_style = Some(v.to_string());
+                                }
+                            }
+                        }
                         "strike" => f.strike = true,
+                        "vertAlign" => {
+                            if let Some(v) = child.attribute("val") {
+                                if v != "baseline" {
+                                    f.vert_align = Some(v.to_string());
+                                }
+                            }
+                        }
                         "sz" => {
                             if let Some(v) = child.attribute("val").and_then(|s| s.parse().ok()) {
                                 f.size = v;

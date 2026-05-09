@@ -395,6 +395,32 @@ function buildFont(font: Font, cs = 1): string {
 }
 
 /**
+ * Stroke a single or double horizontal text-decoration line
+ * (underline / strikethrough). ECMA-376 §18.4.13 ST_UnderlineValues
+ * "double" / "doubleAccounting" both render as two parallel lines with a
+ * small gap. The two strokes straddle the requested baseline ±1px so the
+ * pair reads as a ~3px-thick rule and the visual centre matches Excel.
+ */
+function drawTextDecoLine(
+  ctx: CanvasRenderingContext2D,
+  x1: number, x2: number, y: number,
+  color: string, double: boolean,
+): void {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  if (double) {
+    ctx.moveTo(x1, y - 1); ctx.lineTo(x2, y - 1);
+    ctx.moveTo(x1, y + 1); ctx.lineTo(x2, y + 1);
+  } else {
+    ctx.moveTo(x1, y); ctx.lineTo(x2, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
  * Resolve a Run's font against a base Font. Per ECMA-376, a run's <rPr>
  * completely specifies bold/italic/underline/strike for that run, while
  * size/color/name fall back to the base when omitted. A run with no
@@ -407,10 +433,12 @@ function applyRunFont(base: Font, run: Run): Font {
     bold: rf.bold,
     italic: rf.italic,
     underline: rf.underline,
+    underlineStyle: rf.underlineStyle,
     strike: rf.strike,
     size: rf.size ?? base.size,
     color: rf.color ?? base.color,
     name: rf.name ?? base.name,
+    vertAlign: rf.vertAlign,
   };
 }
 
@@ -2975,11 +3003,9 @@ function renderQuadrant(
             ctx.fillText(seg.text, xx, yy);
             const rSizePx = Math.round(seg.font.size * PT_TO_PX);
             if (seg.font.underline) {
-              ctx.save();
-              ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
-              ctx.lineWidth = 0.5;
-              ctx.beginPath(); ctx.moveTo(xx, yy + rSizePx + 1); ctx.lineTo(xx + seg.width, yy + rSizePx + 1); ctx.stroke();
-              ctx.restore();
+              const stroke = segColor ? hexToRgba(segColor) : '#000000';
+              const dbl = seg.font.underlineStyle === 'double' || seg.font.underlineStyle === 'doubleAccounting';
+              drawTextDecoLine(ctx, xx, xx + seg.width, yy + rSizePx + 1, stroke, dbl);
             }
             if (seg.font.strike) {
               ctx.save();
@@ -3005,10 +3031,21 @@ function renderQuadrant(
           ctx.fillText(lines[li], textX, startY + li * lineH);
         }
       } else if (hasRichText) {
-        // Per-run drawing: compute font for each run, measure widths, draw LTR
-        const runFonts = runs.map(r => applyRunFont(fontForDraw, r));
+        // Per-run drawing: compute font for each run, measure widths, draw LTR.
+        // Layout uses the run's *base* font size (line height & x-position
+        // budget); super/subscript runs are rendered at ~65% size with a
+        // baseline shift, matching how Excel paints them. ECMA-376 §18.4.6
+        // (ST_VerticalAlignRun) leaves the exact ratio implementation-defined.
+        const baseRunFonts = runs.map(r => applyRunFont(fontForDraw, r));
+        const runVAlign = runs.map(r => r.font?.vertAlign);
+        const drawRunFonts = baseRunFonts.map((f, i) => {
+          if (runVAlign[i] === 'superscript' || runVAlign[i] === 'subscript') {
+            return { ...f, size: f.size * 0.65 };
+          }
+          return f;
+        });
         const runWidths: number[] = runs.map((r, i) => {
-          ctx.font = buildFont(runFonts[i], cs);
+          ctx.font = buildFont(drawRunFonts[i], cs);
           return ctx.measureText(r.text).width;
         });
         const totalWidth = runWidths.reduce((a, b) => a + b, 0);
@@ -3024,30 +3061,37 @@ function renderQuadrant(
         else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
         let runX = startX;
         for (let i = 0; i < runs.length; i++) {
-          const rf = runFonts[i];
+          const rf = drawRunFonts[i];
+          const baseRf = baseRunFonts[i];
           ctx.font = buildFont(rf, cs);
           const runColor = cf.fontColor ?? rf.color;
           ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
-          ctx.fillText(runs[i].text, runX, textY);
+          // Baseline shift for super/subscript. With textBaseline 'bottom'
+          // (the typical case) shift up for super and slightly down for sub
+          // so each run sits at the right vertical band relative to the line.
+          const baseSizePx = Math.round(baseRf.size * PT_TO_PX);
+          let yShift = 0;
+          if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
+          else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
+          ctx.fillText(runs[i].text, runX, textY + yShift);
           const rSizePx = Math.round(rf.size * PT_TO_PX);
           if (rf.underline) {
-            const uy = alignV === 'top'
+            const uyBase = alignV === 'top'
               ? cy + paddingY + rSizePx + 1
               : alignV === 'center'
                 ? cy + cellH / 2 + Math.round(rSizePx * 0.55)
                 : cy + cellH - paddingY + 1;
-            ctx.save();
-            ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
-            ctx.lineWidth = 0.5;
-            ctx.beginPath(); ctx.moveTo(runX, uy); ctx.lineTo(runX + runWidths[i], uy); ctx.stroke();
-            ctx.restore();
+            const uy = uyBase + yShift;
+            const stroke = runColor ? hexToRgba(runColor) : '#000000';
+            drawTextDecoLine(ctx, runX, runX + runWidths[i], uy, stroke, rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting');
           }
           if (rf.strike) {
-            const sy = alignV === 'top'
+            const syBase = alignV === 'top'
               ? cy + paddingY + Math.round(rSizePx * 0.5)
               : alignV === 'center'
                 ? cy + cellH / 2
                 : cy + cellH - paddingY - Math.round(rSizePx * 0.35);
+            const sy = syBase + yShift;
             ctx.save();
             ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
             ctx.lineWidth = 0.5;
@@ -3057,6 +3101,22 @@ function renderQuadrant(
           runX += runWidths[i];
         }
       } else {
+        // ECMA-376 §18.4.6 — cell-level super/subscript: render the glyphs at
+        // ~65% size, shifted off the baseline so the cell still reads at the
+        // right vertical band. Excel uses these defaults (size ratio is
+        // implementation-defined; ratios match Office's visual output).
+        const cellVertAlign = fontForDraw.vertAlign;
+        const baseSizePxOrig = Math.round(font.size * PT_TO_PX);
+        let vaYShift = 0;
+        if (cellVertAlign === 'superscript') vaYShift = -Math.round(baseSizePxOrig * 0.35);
+        else if (cellVertAlign === 'subscript') vaYShift = Math.round(baseSizePxOrig * 0.10);
+        const drawFont: Font = cellVertAlign
+          ? { ...fontForDraw, size: fontForDraw.size * 0.65 }
+          : fontForDraw;
+        if (cellVertAlign) {
+          ctx.font = buildFont(drawFont, cs);
+        }
+
         // Measure once for both underline and strike
         let overlayMetrics: TextMetrics | null = null;
         const measureOverlay = () => overlayMetrics ??= ctx.measureText(text);
@@ -3069,29 +3129,27 @@ function renderQuadrant(
             width: tW,
           };
         };
-        const sizePx = Math.round(font.size * PT_TO_PX);
+        const sizePx = Math.round(drawFont.size * PT_TO_PX);
 
         if (fontForDraw.underline || hyperlinkUrl) {
           const { x: ux, width: tW } = overlayX();
-          const uy = alignV === 'top'
+          const uy = (alignV === 'top'
             ? cy + paddingY + sizePx + 1
             : alignV === 'center'
               ? cy + cellH / 2 + Math.round(sizePx * 0.55)
-              : cy + cellH - paddingY + 1;
-          ctx.save();
-          ctx.strokeStyle = hyperlinkUrl ? '#0563C1' : (textColor ? hexToRgba(textColor) : '#000000');
-          ctx.lineWidth = 0.5;
-          ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
-          ctx.restore();
+              : cy + cellH - paddingY + 1) + vaYShift;
+          const stroke = hyperlinkUrl ? '#0563C1' : (textColor ? hexToRgba(textColor) : '#000000');
+          const dbl = fontForDraw.underlineStyle === 'double' || fontForDraw.underlineStyle === 'doubleAccounting';
+          drawTextDecoLine(ctx, ux, ux + tW, uy, stroke, dbl);
         }
         if (fontForDraw.strike) {
           const { x: sx, width: tW } = overlayX();
           // Strike line sits roughly at the x-height mid-line (~45% up from baseline)
-          const sy = alignV === 'top'
+          const sy = (alignV === 'top'
             ? cy + paddingY + Math.round(sizePx * 0.5)
             : alignV === 'center'
               ? cy + cellH / 2
-              : cy + cellH - paddingY - Math.round(sizePx * 0.35);
+              : cy + cellH - paddingY - Math.round(sizePx * 0.35)) + vaYShift;
           ctx.save();
           ctx.strokeStyle = textColor ? hexToRgba(textColor) : '#000000';
           ctx.lineWidth = 0.5;
@@ -3109,14 +3167,14 @@ function renderQuadrant(
           else if (alignV === 'center') { startY = cy + (cellH - totalTextH) / 2; ctx.textBaseline = 'top'; }
           else { startY = cy + cellH - totalTextH - paddingY; ctx.textBaseline = 'top'; }
           for (let li = 0; li < lines.length; li++) {
-            ctx.fillText(lines[li], textX, startY + li * lineH);
+            ctx.fillText(lines[li], textX, startY + li * lineH + vaYShift);
           }
         } else {
           let textY: number;
           if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
           else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
           else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
-          ctx.fillText(drawText, textX, textY);
+          ctx.fillText(drawText, textX, textY + vaYShift);
         }
       }
 

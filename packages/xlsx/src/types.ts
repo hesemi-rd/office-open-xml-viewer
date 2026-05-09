@@ -570,6 +570,17 @@ export interface RunFont {
   size?: number;
   color?: string | null;
   name?: string | null;
+  /**
+   * Underline style when not the default single line. ECMA-376 §18.4.13
+   * (`ST_UnderlineValues`): "double" | "singleAccounting" | "doubleAccounting".
+   * Absent means single (when `underline` is true) or no underline.
+   */
+  underlineStyle?: string;
+  /**
+   * ECMA-376 §18.4.6 (`ST_VerticalAlignRun`): "superscript" | "subscript".
+   * Absent leaves the run on the baseline.
+   */
+  vertAlign?: 'superscript' | 'subscript';
 }
 
 export interface SharedString {
@@ -610,6 +621,10 @@ export interface Font {
   size: number;
   color: string | null;
   name: string | null;
+  /** ECMA-376 §18.4.13 ST_UnderlineValues — see RunFont.underlineStyle. */
+  underlineStyle?: string;
+  /** ECMA-376 §18.4.6 ST_VerticalAlignRun on a cell-level <font>. */
+  vertAlign?: 'superscript' | 'subscript';
 }
 
 export interface Fill {
