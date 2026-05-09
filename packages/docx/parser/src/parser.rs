@@ -1661,86 +1661,176 @@ fn resolve_color_element_with_phclr(
     None
 }
 
-/// Apply OOXML color modifiers (lumMod / lumOff) declared as child elements.
-/// lumMod multiplies L by mod/100000; lumOff adds off/100000 to L. Both are
-/// evaluated in HSL space per ECMA-376.
+/// Apply OOXML color transforms (lumMod, lumOff, shade, tint, alpha and
+/// friends) to a base hex color. Returns 6-char hex when fully opaque, or
+/// 8-char hex (RRGGBBAA) when alpha < 1.
+///
+/// Mirrors the implementation used by the pptx parser: tint is computed in
+/// LINEAR sRGB (matches PowerPoint's pixel output exactly — HSL-space tint is
+/// noticeably wrong on saturated colors), and the full alpha family
+/// (alpha / alphaMod / alphaModFix / alphaOff) is honored so effects defined
+/// inside fillRef recipes carry their opacity through.
 fn apply_color_mods(hex: &str, color_node: roxmltree::Node) -> String {
-    let (r, g, b) = hex_to_rgb(hex);
-    let (mut h, mut s, mut l) = rgb_to_hsl(r, g, b);
-
-    for m in color_node.children().filter(|n| n.is_element()) {
-        let val = m.attribute("val").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 100000.0;
-        match m.tag_name().name() {
-            "lumMod" => l *= val,
-            "lumOff" => l += val,
-            "satMod" => s *= val,
-            "satOff" => s += val,
-            "hueMod" => h *= val,
-            "hueOff" => h += val,
-            // ECMA-376 §20.1.2.3.31 shade: result = val·input + (1-val)·black,
-            // i.e. scale lightness by val. Saturation is unaffected.
-            "shade" => l *= val,
-            // ECMA-376 §20.1.2.3.34 tint: result = val·input + (1-val)·white.
-            // In HSL we approximate by interpolating lightness toward 1.
-            "tint" => l = val * l + (1.0 - val),
-            _ => {}
-        }
+    if hex.len() < 6 {
+        return hex.to_owned();
     }
-    l = l.clamp(0.0, 1.0);
-    s = s.clamp(0.0, 1.0);
-    let (nr, ng, nb) = hsl_to_rgb(h, s, l);
-    format!("{:02X}{:02X}{:02X}", nr, ng, nb)
-}
-
-fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
     let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-    (r, g, b)
+
+    let mut rf = r as f64 / 255.0;
+    let mut gf = g as f64 / 255.0;
+    let mut bf = b as f64 / 255.0;
+    let mut alpha = if hex.len() >= 8 {
+        u8::from_str_radix(&hex[6..8], 16).unwrap_or(255) as f64 / 255.0
+    } else {
+        1.0
+    };
+
+    let attr_pct = |t: &roxmltree::Node, name: &str, default: f64| -> f64 {
+        t.attribute(name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(default)
+            / 100_000.0
+    };
+
+    for t in color_node.children().filter(|n| n.is_element()) {
+        match t.tag_name().name() {
+            "lumMod" => {
+                let val = attr_pct(&t, "val", 100_000.0);
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb(h, (l * val).min(1.0), s);
+                rf = nr; gf = ng; bf = nb;
+            }
+            "lumOff" => {
+                let val = attr_pct(&t, "val", 0.0);
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb(h, (l + val).clamp(0.0, 1.0), s);
+                rf = nr; gf = ng; bf = nb;
+            }
+            "satMod" => {
+                let val = attr_pct(&t, "val", 100_000.0);
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb(h, l, (s * val).clamp(0.0, 1.0));
+                rf = nr; gf = ng; bf = nb;
+            }
+            "satOff" => {
+                let val = attr_pct(&t, "val", 0.0);
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb(h, l, (s + val).clamp(0.0, 1.0));
+                rf = nr; gf = ng; bf = nb;
+            }
+            "hueMod" => {
+                let val = attr_pct(&t, "val", 100_000.0);
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb((h * val).rem_euclid(1.0), l, s);
+                rf = nr; gf = ng; bf = nb;
+            }
+            "hueOff" => {
+                // hueOff is in 60000ths of a degree per ECMA-376 §20.1.2.3.16.
+                let val_deg = t.attribute("val").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 60_000.0;
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb((h + val_deg / 360.0).rem_euclid(1.0), l, s);
+                rf = nr; gf = ng; bf = nb;
+            }
+            "shade" => {
+                // ECMA-376 §20.1.2.3.31: result = val·input + (1-val)·black.
+                let val = attr_pct(&t, "val", 100_000.0);
+                rf *= val; gf *= val; bf *= val;
+            }
+            "tint" => {
+                // ECMA-376 §20.1.2.3.34 says "10% tint = 10% input + 90%
+                // white". Word reads val as the *retained* fraction of the
+                // input color (literal spec), so result = val·input +
+                // (1-val)·white. PowerPoint instead reads val as the *shift*
+                // toward white in linear sRGB — that produces visibly
+                // lighter colors. Sample-5's cover (dk2 + tint=93000) only
+                // matches the Word reference under the literal-spec
+                // formulation, so we apply that here. (pptx uses its own
+                // PowerPoint-tuned formulation; the divergence is real.)
+                let val = attr_pct(&t, "val", 0.0);
+                rf = val * rf + (1.0 - val);
+                gf = val * gf + (1.0 - val);
+                bf = val * bf + (1.0 - val);
+            }
+            "alpha" => {
+                // ECMA-376 §20.1.2.3.1 — sets absolute alpha.
+                alpha = attr_pct(&t, "val", 100_000.0);
+            }
+            "alphaModFix" => {
+                // ECMA-376 §20.1.8.4 — fixed (absolute) alpha modulation.
+                alpha = attr_pct(&t, "amt", 100_000.0);
+            }
+            "alphaMod" => {
+                // ECMA-376 §20.1.2.3.2 — multiply current alpha by val/100000.
+                alpha *= attr_pct(&t, "val", 100_000.0);
+            }
+            "alphaOff" => {
+                // ECMA-376 §20.1.2.3.3 — additive offset to alpha.
+                alpha += attr_pct(&t, "val", 0.0);
+            }
+            _ => {}
+        }
+    }
+
+    let r = (rf.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (gf.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (bf.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if (alpha - 1.0).abs() < 0.004 {
+        format!("{:02X}{:02X}{:02X}", r, g, b)
+    } else {
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        format!("{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
+    }
 }
 
-fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
-    let rf = r as f64 / 255.0;
-    let gf = g as f64 / 255.0;
-    let bf = b as f64 / 255.0;
-    let max = rf.max(gf.max(bf));
-    let min = rf.min(gf.min(bf));
+/// sRGB → linear light. IEC 61966-2-1 transfer function.
+fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Linear light → sRGB.
+fn linear_to_srgb(c: f64) -> f64 {
+    if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+}
+
+fn rgb_to_hls(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
     let l = (max + min) / 2.0;
     let d = max - min;
-    if d == 0.0 { return (0.0, 0.0, l); }
+    if d < 1e-10 {
+        return (0.0, l, 0.0);
+    }
     let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
-    let h = if max == rf {
-        ((gf - bf) / d + if gf < bf { 6.0 } else { 0.0 }) / 6.0
-    } else if max == gf {
-        ((bf - rf) / d + 2.0) / 6.0
+    let h = if (max - r).abs() < 1e-10 {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if (max - g).abs() < 1e-10 {
+        (b - r) / d + 2.0
     } else {
-        ((rf - gf) / d + 4.0) / 6.0
+        (r - g) / d + 4.0
     };
-    (h, s, l)
+    (h / 6.0, l, s)
 }
 
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
-    if s == 0.0 {
-        let v = (l * 255.0).round().clamp(0.0, 255.0) as u8;
-        return (v, v, v);
+fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
+    if s < 1e-10 {
+        return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
-    let p = 2.0 * l - q;
-    let hue2rgb = |p: f64, q: f64, mut t: f64| -> f64 {
+    fn hue2rgb(p: f64, q: f64, mut t: f64) -> f64 {
         if t < 0.0 { t += 1.0; }
         if t > 1.0 { t -= 1.0; }
         if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
-        if t < 1.0 / 2.0 { return q; }
-        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+        if t < 0.5        { return q; }
+        if t < 2.0 / 3.0  { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
         p
-    };
-    let r = hue2rgb(p, q, h + 1.0 / 3.0);
-    let g = hue2rgb(p, q, h);
-    let b = hue2rgb(p, q, h - 1.0 / 3.0);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
     (
-        (r * 255.0).round().clamp(0.0, 255.0) as u8,
-        (g * 255.0).round().clamp(0.0, 255.0) as u8,
-        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+        hue2rgb(p, q, h + 1.0 / 3.0),
+        hue2rgb(p, q, h),
+        hue2rgb(p, q, h - 1.0 / 3.0),
     )
 }
 
