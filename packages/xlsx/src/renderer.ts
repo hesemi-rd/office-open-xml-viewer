@@ -204,35 +204,34 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   darkGray:   [0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101],
 
   // ── Horizontal / vertical lines ───────────────────────────────────────
-  // Dark variants render as a 1-px line every other row / column (50%
-  // coverage, ≈ 2-px pitch); light variants drop to every fourth (25%,
-  // ≈ 4-px pitch). Earlier 25%/12.5% revisions read as too-sparse for Excel
-  // parity. ECMA-376 §18.8.22 doesn't pin down the geometry, so these
-  // match the Office implementation's visual.
-  darkHorizontal:  [0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000],
+  // dark* and light* variants share the same line *count* and *spacing* —
+  // they differ only in line *thickness*: dark bars are 2 px wide, light
+  // lines are 1 px wide. This matches Excel's actual rendering where the
+  // light forms read as "thin version" of the dark forms instead of "fewer
+  // lines". (ECMA-376 §18.8.22 specifies the names only.)
+  darkHorizontal:  [0b11111111, 0b11111111, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b00000000, 0b00000000],
   lightHorizontal: [0b11111111, 0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b00000000, 0b00000000, 0b00000000],
-  darkVertical:    [0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010],
+  darkVertical:    [0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100],
   lightVertical:   [0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000],
 
   // ── Diagonals ─────────────────────────────────────────────────────────
-  // darkDown: 2-px-wide diagonal stripes every 4 columns (≈ 50% coverage).
-  // lightDown: single 1-px diagonal stripes every 4 columns (≈ 25%).
+  // darkDown / darkUp: 2-px-wide diagonal stripes every 4 cells.
+  // lightDown / lightUp: 1-px-wide diagonal stripes at the same 4-cell pitch.
   darkDown:   [0b11001100, 0b01100110, 0b00110011, 0b10011001, 0b11001100, 0b01100110, 0b00110011, 0b10011001],
   lightDown:  [0b10001000, 0b01000100, 0b00100010, 0b00010001, 0b10001000, 0b01000100, 0b00100010, 0b00010001],
   darkUp:     [0b00110011, 0b01100110, 0b11001100, 0b10011001, 0b00110011, 0b01100110, 0b11001100, 0b10011001],
   lightUp:    [0b00010001, 0b00100010, 0b01000100, 0b10001000, 0b00010001, 0b00100010, 0b01000100, 0b10001000],
 
   // ── Grid (horizontal + vertical) ──────────────────────────────────────
-  // darkGrid = darkHorizontal | darkVertical (≈ 75% — Excel's darkGrid is a
-  // very dense lattice, not a sparse one).
-  darkGrid:   [0b11111111, 0b10101010, 0b11111111, 0b10101010, 0b11111111, 0b10101010, 0b11111111, 0b10101010],
-  // lightGrid = lightHorizontal | lightVertical.
+  // darkGrid = darkHorizontal | darkVertical — thick lattice.
+  darkGrid:   [0b11111111, 0b11111111, 0b11001100, 0b11001100, 0b11111111, 0b11111111, 0b11001100, 0b11001100],
+  // lightGrid = lightHorizontal | lightVertical — thin lattice.
   lightGrid:  [0b11111111, 0b10001000, 0b10001000, 0b10001000, 0b11111111, 0b10001000, 0b10001000, 0b10001000],
 
   // ── Trellis (both diagonals) ──────────────────────────────────────────
-  // darkTrellis = darkDown | darkUp (≈ 75% cross-hatch).
+  // darkTrellis = darkDown | darkUp.
   darkTrellis:  [0b11111111, 0b01100110, 0b11111111, 0b10011001, 0b11111111, 0b01100110, 0b11111111, 0b10011001],
-  // lightTrellis = lightDown | lightUp (≈ 50% diagonal cross).
+  // lightTrellis = lightDown | lightUp.
   lightTrellis: [0b10011001, 0b01100110, 0b01100110, 0b10011001, 0b10011001, 0b01100110, 0b01100110, 0b10011001],
 };
 
