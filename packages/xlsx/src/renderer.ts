@@ -171,15 +171,21 @@ function patternCoverage(pt: string): number {
 const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
 
 /**
- * Canonical 8x8 bitmaps for ECMA-376 ST_PatternType (§18.8.22). Each entry is
- * 8 bytes; bit 7 (0x80) is the leftmost pixel of each row. A `1` bit places
- * fg on the tile, `0` leaves bg.
+ * Bitmaps for ECMA-376 ST_PatternType (§18.8.22). Each entry is a square tile
+ * — the row count (rows.length) is the tile size in pixels, and bit
+ * (size - 1) of each row is the leftmost pixel. A `1` bit places fg on the
+ * tile, `0` leaves bg.
  *
- * Values follow the long-standing Office pattern set used by LibreOffice /
- * POI for the same names — which is the only practical reference, since the
- * spec only describes them by name.  The dark/light split is encoded in the
- * bitmap itself (no line-width fudging) so the tile renders pixel-perfect at
- * any zoom level.
+ * Mixing tile sizes lets us pick the smallest square that exactly fits each
+ * pattern's natural pitch: gray and diagonal families fit in 8×8, but the
+ * horizontal / vertical / grid families need a 12×12 tile so dark and light
+ * variants can share the same line pitch (3 px) while differing only in
+ * stroke thickness (2 px vs 1 px). At 8×8 this would have forced a 4-px
+ * pitch on dark vs 2-px on light — visibly different line counts instead of
+ * the matched-count, different-thickness pair Excel renders.
+ *
+ * Values follow the long-standing Office pattern set; the spec only names
+ * the patterns, never their pixel geometry.
  *
  * Coverage targets:
  *   gray125    12.5%   sparse dot  (1 dot per 8 pixels)
@@ -187,14 +193,9 @@ const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
  *   lightGray  25%      checker dot (1 in 4)
  *   mediumGray 50%      full checker
  *   darkGray   75%      inverse of lightGray
- *
- * The directional hatches use lines spaced every 2px (dark) or every 4px
- * (light), so the cell reads as a continuous hatch instead of a single
- * far-apart line. The grid / trellis variants are AND/OR combinations of
- * the directional bitmaps so the corners line up cleanly across tile seams.
  */
 const PATTERN_BITMAPS: Record<string, number[]> = {
-  // ── Gray-family dot patterns ──────────────────────────────────────────
+  // ── 8×8 — gray-family dot patterns ────────────────────────────────────
   gray125:    [0b10000000, 0b00000000, 0b00001000, 0b00000000, 0b10000000, 0b00000000, 0b00001000, 0b00000000],
   gray0625:   [0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000],
   lightGray:  [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000],
@@ -203,32 +204,49 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // dark grey, not as alternating black/dot stripes.
   darkGray:   [0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101],
 
-  // ── Horizontal / vertical lines ───────────────────────────────────────
-  // dark*: 2-px-thick bars at 4-px spacing (2 thick bars per 8-px tile).
-  // light*: 1-px-thick lines at 2-px spacing (4 thin lines per 8-px tile).
-  // → light has *more* lines than dark at half the thickness, matching
-  // Excel where lightHorizontal is a denser, finer-strokes version of
-  // darkHorizontal rather than a sparser one.
-  darkHorizontal:  [0b11111111, 0b11111111, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b00000000, 0b00000000],
-  lightHorizontal: [0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000],
-  darkVertical:    [0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100, 0b11001100],
-  lightVertical:   [0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010, 0b10101010],
+  // ── 12×12 — horizontal / vertical / grid (matched line count) ─────────
+  // 4 lines per tile in both dark and light variants. dark uses a 2-px-thick
+  // bar at each line position, light uses a 1-px-thick line — so the cells
+  // read as the same line *count* with different stroke thickness, instead
+  // of the prior "fewer thicker lines vs more thinner lines" mismatch.
+  // Pitch is 3 px (2 lit + 1 unlit for dark, or 1 lit + 2 unlit for light).
+  darkHorizontal: [
+    0b111111111111, 0b111111111111, 0b000000000000,
+    0b111111111111, 0b111111111111, 0b000000000000,
+    0b111111111111, 0b111111111111, 0b000000000000,
+    0b111111111111, 0b111111111111, 0b000000000000,
+  ],
+  lightHorizontal: [
+    0b111111111111, 0b000000000000, 0b000000000000,
+    0b111111111111, 0b000000000000, 0b000000000000,
+    0b111111111111, 0b000000000000, 0b000000000000,
+    0b111111111111, 0b000000000000, 0b000000000000,
+  ],
+  // darkVertical: 2-col-wide bar at cols 0,1 / 3,4 / 6,7 / 9,10
+  //   bits set: 11,10 + 8,7 + 5,4 + 2,1 = 0b110110110110 = 0xDB6
+  darkVertical:   Array(12).fill(0xDB6),
+  // lightVertical: 1-col-wide bar at cols 0 / 3 / 6 / 9
+  //   bits set: 11 + 8 + 5 + 2 = 0b100100100100 = 0x924
+  lightVertical:  Array(12).fill(0x924),
 
-  // ── Diagonals ─────────────────────────────────────────────────────────
+  // darkGrid = darkHorizontal | darkVertical
+  darkGrid: [
+    0xFFF, 0xFFF, 0xDB6, 0xFFF, 0xFFF, 0xDB6,
+    0xFFF, 0xFFF, 0xDB6, 0xFFF, 0xFFF, 0xDB6,
+  ],
+  // lightGrid = lightHorizontal | lightVertical
+  lightGrid: [
+    0xFFF, 0x924, 0x924, 0xFFF, 0x924, 0x924,
+    0xFFF, 0x924, 0x924, 0xFFF, 0x924, 0x924,
+  ],
+
+  // ── 8×8 — diagonals & trellis ─────────────────────────────────────────
   // darkDown / darkUp: 2-px-wide diagonal stripes every 4 cells.
   // lightDown / lightUp: 1-px-wide diagonal stripes at the same 4-cell pitch.
   darkDown:   [0b11001100, 0b01100110, 0b00110011, 0b10011001, 0b11001100, 0b01100110, 0b00110011, 0b10011001],
   lightDown:  [0b10001000, 0b01000100, 0b00100010, 0b00010001, 0b10001000, 0b01000100, 0b00100010, 0b00010001],
   darkUp:     [0b00110011, 0b01100110, 0b11001100, 0b10011001, 0b00110011, 0b01100110, 0b11001100, 0b10011001],
   lightUp:    [0b00010001, 0b00100010, 0b01000100, 0b10001000, 0b00010001, 0b00100010, 0b01000100, 0b10001000],
-
-  // ── Grid (horizontal + vertical) ──────────────────────────────────────
-  // darkGrid = darkHorizontal | darkVertical — thick lattice.
-  darkGrid:   [0b11111111, 0b11111111, 0b11001100, 0b11001100, 0b11111111, 0b11111111, 0b11001100, 0b11001100],
-  // lightGrid = lightHorizontal | lightVertical — thin dense lattice.
-  lightGrid:  [0b11111111, 0b10101010, 0b11111111, 0b10101010, 0b11111111, 0b10101010, 0b11111111, 0b10101010],
-
-  // ── Trellis (both diagonals) ──────────────────────────────────────────
   // darkTrellis = darkDown | darkUp.
   darkTrellis:  [0b11111111, 0b01100110, 0b11111111, 0b10011001, 0b11111111, 0b01100110, 0b11111111, 0b10011001],
   // lightTrellis = lightDown | lightUp.
@@ -254,7 +272,9 @@ function hatchPattern(
     return null;
   }
 
-  const size = 8;
+  // Square tile — size inferred from the row count. Bit (size-1) is
+  // leftmost so the binary literals read left-to-right at any tile width.
+  const size = rows.length;
   const off = document.createElement('canvas');
   off.width = size;
   off.height = size;
@@ -267,7 +287,7 @@ function hatchPattern(
   for (let y = 0; y < size; y++) {
     const row = rows[y];
     for (let x = 0; x < size; x++) {
-      if (row & (1 << (7 - x))) octx.fillRect(x, y, 1, 1);
+      if (row & (1 << (size - 1 - x))) octx.fillRect(x, y, 1, 1);
     }
   }
 
