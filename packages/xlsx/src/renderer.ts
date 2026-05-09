@@ -213,9 +213,10 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // five gray tiers stay visually distinguishable. The earlier 50% checker
   // had E17 reading nearly as dark as the mediumGray cell next to it.
   lightGray:  [0b10101010, 0b00100010, 0b01010101, 0b00100010, 0b10101010, 0b00100010, 0b01010101, 0b00100010], // ≈ 37%
-  // 65% — a 25% sparse mask added on top of the 50% checker so the cell
-  // reads visibly denser than lightGray without horizontal banding.
-  mediumGray: [0b11101010, 0b01010101, 0b10111010, 0b01010101, 0b10101110, 0b01010101, 0b10101011, 0b01010101], // ≈ 65%
+  // 50% — clean 1×1 checker. Earlier "65%" attempts that added an extra
+  // bit per row caused a visible diagonal moiré at typical cell sizes
+  // because the offset bit shifted by one column on each lit row.
+  mediumGray: [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101], // ≈ 50%
   // 80% — solid rows alternated with a checker so it reads as near-black
   // grey at typical zoom while still showing the texture.
   darkGray:   [0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101], // ≈ 75%
