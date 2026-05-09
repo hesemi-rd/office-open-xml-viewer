@@ -217,22 +217,31 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // grey at typical zoom while still showing the texture.
   darkGray:   [0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101], // ≈ 75%
 
-  // ── 8×8 — horizontal / vertical / grid ───────────────────────────────
-  // dark*: 2-px-thick bar + 2-px gap = 4-px pitch (2 thick bars per 8-px tile)
-  // light*: 1-px-thick line + 1-px gap = 2-px pitch (4 thin lines per 8-px tile)
-  //
-  // We previously tried matching line *count* between dark and light at a
-  // 12×12 / 3-px pitch, but Excel shows that light variants are denser AND
-  // thinner than dark — a typical row gives Excel ~6-8 thick bars in the
-  // dark cell vs ~12 thin lines in the light cell. This 8×8 sizing tracks
-  // those ratios more closely (4 dark bars vs 4 light lines per tile gives
-  // ~2× more lines in light at half the thickness).
-  darkHorizontal:  [0b11111111, 0b11111111, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b00000000, 0b00000000],
-  lightHorizontal: [0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000, 0b11111111, 0b00000000],
-  // darkVertical: 2-col bars at cols 0,1 / 4,5 → 0xCC = 0b11001100
-  darkVertical:    Array(8).fill(0xCC),
-  // lightVertical: 1-col lines at every other col (0,2,4,6) → 0xAA = 0b10101010
-  lightVertical:   Array(8).fill(0xAA),
+  // ── 12×12 — horizontal / vertical (matched line count) ───────────────
+  // dark* and light* share the same 4-line-per-tile count and 3-px pitch;
+  // they differ only in stroke thickness — dark uses a 2-px bar and a
+  // 1-px gap, light uses a 1-px line and a 2-px gap. Per user feedback
+  // the visual rule is "B19 has the same number of horizontal lines as
+  // B18, just thinner", so the matched-count construction is restored
+  // here. The earlier "more lines in light" 8×8 attempt was Excel-wrong.
+  darkHorizontal: [
+    0b111111111111, 0b111111111111, 0b000000000000,
+    0b111111111111, 0b111111111111, 0b000000000000,
+    0b111111111111, 0b111111111111, 0b000000000000,
+    0b111111111111, 0b111111111111, 0b000000000000,
+  ],
+  lightHorizontal: [
+    0b111111111111, 0b000000000000, 0b000000000000,
+    0b111111111111, 0b000000000000, 0b000000000000,
+    0b111111111111, 0b000000000000, 0b000000000000,
+    0b111111111111, 0b000000000000, 0b000000000000,
+  ],
+  // darkVertical: 2-col bars at cols 0,1 / 3,4 / 6,7 / 9,10
+  //   bits set per row: 11,10 + 8,7 + 5,4 + 2,1 = 0b110110110110 = 0xDB6
+  darkVertical:   Array(12).fill(0xDB6),
+  // lightVertical: 1-col lines at cols 0 / 3 / 6 / 9
+  //   bits set per row: 11 + 8 + 5 + 2 = 0b100100100100 = 0x924
+  lightVertical:  Array(12).fill(0x924),
 
   // darkGrid: Excel renders this as a fine 2×2 checkerboard, not a thick
   // horizontal+vertical lattice. Each black/white "cell" is 2×2 source
