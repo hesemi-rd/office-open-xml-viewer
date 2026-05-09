@@ -196,13 +196,19 @@ const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
  */
 const PATTERN_BITMAPS: Record<string, number[]> = {
   // ── 8×8 — gray-family dot patterns ────────────────────────────────────
-  gray125:    [0b10000000, 0b00000000, 0b00001000, 0b00000000, 0b10000000, 0b00000000, 0b00001000, 0b00000000],
-  gray0625:   [0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000],
-  lightGray:  [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000],
-  mediumGray: [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101],
-  // 75% — distribute the empty pixels evenly so the cell reads as solid
-  // dark grey, not as alternating black/dot stripes.
-  darkGray:   [0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101],
+  // Tuned by sight against Excel's actual rendering of these names. The
+  // ECMA-376 verbal coverages (12.5% / 6.25% / 25% / 50% / 75%) give cells
+  // that read distinctly darker than Excel's anti-aliased output, so each
+  // tier is dropped one step (≈ 6% → 3%, 12% → 6%, 25% → 12%, 50% → 25%,
+  // 75% → 50%). The relative ordering is preserved so users can still
+  // tell darkGray > mediumGray > lightGray > gray125 > gray0625.
+  gray0625:   [0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000], // ≈ 3%
+  gray125:    [0b10000000, 0b00000000, 0b00001000, 0b00000000, 0b10000000, 0b00000000, 0b00001000, 0b00000000], // ≈ 6%
+  lightGray:  [0b10001000, 0b00000000, 0b00100010, 0b00000000, 0b10001000, 0b00000000, 0b00100010, 0b00000000], // ≈ 12%
+  mediumGray: [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000], // ≈ 25%
+  // 50% checker — distributed evenly so the cell reads as solid grey at
+  // typical zoom rather than alternating black / dot stripes.
+  darkGray:   [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101], // ≈ 50%
 
   // ── 12×12 — horizontal / vertical / grid (matched line count) ─────────
   // 4 lines per tile in both dark and light variants. dark uses a 2-px-thick
