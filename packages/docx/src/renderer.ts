@@ -435,11 +435,11 @@ function estimateParagraphHeight(
       startPageY: state.y,
       paraX: paraXPt,
       floats: state.floats,
-      lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid),
+      lineBoxH: (a, d, hasRuby) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, hasRuby),
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
-    textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid), 0);
+    textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, l.hasRuby), 0);
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
 }
@@ -610,14 +610,14 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid),
+    lineBoxH: (a, d, hasRuby) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid, hasRuby),
     pageH: state.pageH,
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
   if (para.shading && !dryRun) {
-    const totalTextH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid), 0);
+    const totalTextH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, l.hasRuby), 0);
     ctx.fillStyle = `#${para.shading}`;
     ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
   }
@@ -650,7 +650,7 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     // Word centers the font's natural line (ascent+descent) within the expanded
     // line box — extra space from auto/exact/atLeast goes half above and half
     // below the glyphs. Baseline = top + halfExtra + ascent.
-    const lineH = lineBoxHeight(para.lineSpacing, line.ascent, line.descent, scale, state.docGrid);
+    const lineH = lineBoxHeight(para.lineSpacing, line.ascent, line.descent, scale, state.docGrid, line.hasRuby);
     const naturalLineH = line.ascent + line.descent;
     const baseline = state.y + (lineH - naturalLineH) / 2 + line.ascent;
 
@@ -879,6 +879,9 @@ interface LayoutLine {
   availWidth: number;
   /** When wrap context is active, the absolute canvas Y where this line begins. */
   topY?: number;
+  /** Set when at least one segment on this line carries a ruby annotation —
+   *  enables docGrid pitch snapping in lineBoxHeight. */
+  hasRuby?: boolean;
 }
 
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
@@ -887,7 +890,7 @@ interface WrapLayoutCtx {
   paraX: number;        // absolute canvas X of the paragraph's content left edge
   floats: FloatRect[];  // floats active on the current page
   /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
-  lineBoxH: (ascentPx: number, descentPx: number) => number;
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -1134,6 +1137,7 @@ function layoutLines(
   // Default tab interval when no matching explicit stop exists (Word's default is 720 twips = 36pt)
   const DEFAULT_TAB_PT = 36;
 
+  let lineHasRuby = false;
   const flush = (forceHeight?: number) => {
     const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
     // If the line has no measured content (empty/line-break line), synthesize
@@ -1150,9 +1154,10 @@ function layoutLines(
       xOffset: lineXOffset,
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
+      hasRuby: lineHasRuby,
     });
     if (wrapCtx) {
-      currentLineTopY += wrapCtx.lineBoxH(asc, desc);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby);
     }
     currentLine = [];
     currentWidth = 0;
@@ -1160,6 +1165,7 @@ function layoutLines(
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
+    lineHasRuby = false;
     isFirst = false;
     startLine();
   };
@@ -1178,6 +1184,7 @@ function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
+    if (!('isTab' in s) && !('dataUrl' in s) && (s as LayoutTextSeg).ruby) lineHasRuby = true;
   };
 
   const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
@@ -1721,7 +1728,7 @@ function measureParaHeight(
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid);
   }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, l.hasRuby), 0);
 }
 
 function measureCellContent(
@@ -1987,6 +1994,7 @@ function lineBoxHeight(
   descentPx: number,
   scale: number,
   grid?: DocGridCtx,
+  hasRuby?: boolean,
 ): number {
   const natural = ascentPx + descentPx;
   const hasGrid = isGridLineRule(grid);
@@ -1998,14 +2006,28 @@ function lineBoxHeight(
   // multiply against the pitch as usual. This is what makes Word render
   // ESSAY (9 pt, no explicit line) at ~1 pitch (~18 pt) while a 1.33×
   // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
+  //
+  // Word additionally snaps the line up to an INTEGER multiple of the grid
+  // pitch when the line carries furigana (`<w:ruby>`). The annotation runs
+  // raise the natural ascent past one pitch; without snapping, ruby lines
+  // overlap the previous line's descent because Word reserves whole grid
+  // slots for them. We only enable that snap when (a) the line actually
+  // carries ruby and (b) the natural height already exceeds the pitch —
+  // otherwise tall headings on a docGrid section would also get snapped
+  // upward, which doesn't match Word's render of e.g. a 24-pt heading on
+  // a docGrid="lines" pitch=18 section.
+  const snapUpward = (h: number): number =>
+    hasGrid && hasRuby && h > pitchPx
+      ? Math.ceil(h / pitchPx) * pitchPx
+      : h;
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
-    return hasGrid ? Math.max(natural, pitchPx) : natural;
+    return hasGrid ? snapUpward(Math.max(natural, pitchPx)) : natural;
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      if (inheritedOnly) return Math.max(natural, pitchPx);
-      return Math.max(natural, pitchPx * ls.value);
+      if (inheritedOnly) return snapUpward(Math.max(natural, pitchPx));
+      return snapUpward(Math.max(natural, pitchPx * ls.value));
     }
     return natural * ls.value;
   }
