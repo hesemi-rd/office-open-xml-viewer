@@ -240,8 +240,18 @@ pub struct ShapeRun {
     /// Document order within the wp:anchor (for correct z-ordering among shapes
     /// sharing the same behindDoc value). Lower value = drawn first.
     pub z_order: u32,
-    /// normalized [0,1] custom path commands (one or more sub-paths)
+    /// normalized [0,1] custom path commands (one or more sub-paths). Empty
+    /// when `preset_geometry` is set; the renderer chooses between
+    /// buildCustomPath (custGeom) and buildShapePath (prstGeom).
     pub subpaths: Vec<Vec<PathCmd>>,
+    /// OOXML <a:prstGeom prst="..."> name (e.g. "rect", "ellipse",
+    /// "roundRect", "rtTriangle"). Empty when the shape is custGeom.
+    /// `adj_values` carries up to four <a:gd name="adj{n}"> values (0–100000
+    /// scale) for shapes that support adjustment handles (trapezoid, callouts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_geometry: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub adj_values: Vec<f64>,
     /// Fill (solid or gradient). None = no fill.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill: Option<ShapeFill>,

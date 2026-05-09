@@ -3,7 +3,7 @@ import type {
   DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
-import { buildCustomPath, hexToRgba, resolveFill } from '@silurus/ooxml-core';
+import { buildCustomPath, buildShapePath, hexToRgba, resolveFill } from '@silurus/ooxml-core';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -1470,7 +1470,23 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
   ctx.beginPath();
-  buildCustomPath(ctx as CanvasRenderingContext2D, shape.subpaths, x, y, w, h);
+  if (shape.presetGeometry) {
+    // OOXML <a:prstGeom> — delegate to core's buildShapePath which has the
+    // full preset shape catalog (rect / ellipse / triangles / arrows /
+    // callouts / ribbons / flowchart / …) shared with the pptx renderer.
+    const adj = shape.adjValues ?? [];
+    buildShapePath(
+      ctx as CanvasRenderingContext2D,
+      shape.presetGeometry,
+      x, y, w, h,
+      adj[0] ?? null,
+      adj[1] ?? null,
+      adj[2] ?? null,
+      adj[3] ?? null,
+    );
+  } else {
+    buildCustomPath(ctx as CanvasRenderingContext2D, shape.subpaths, x, y, w, h);
+  }
   const fillStyle = resolveFill(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);
   if (fillStyle) {
     ctx.fillStyle = fillStyle;

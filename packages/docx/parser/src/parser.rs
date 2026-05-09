@@ -1313,21 +1313,38 @@ fn parse_wsp_shape(
     let anchor_y_pt = anchor_pos_y + group_off_pt_y + oy * sy / 12700.0;
 
     let cust_geom = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "custGeom");
-    let subpaths = if let Some(cg) = cust_geom {
-        parse_custom_geometry(cg)
+    let (subpaths, preset_geometry, adj_values) = if let Some(cg) = cust_geom {
+        (parse_custom_geometry(cg), None, Vec::new())
     } else {
-        // Fall back to prstGeom when custGeom is absent. Generate normalized
-        // [0,1] subpaths for the preset shapes used by our sample corpus
-        // (rect, line). Unknown presets fall back to rect so they remain
-        // visible — adj values (avLst) are intentionally not honored here.
-        let prst = sp_pr
+        // Defer prstGeom rendering to core's buildShapePath. Carry the preset
+        // name + adjustment values so the renderer can call into the shared
+        // catalog (matches pptx coverage: ellipse, roundRect, triangles,
+        // arrows, callouts, ribbons, …). Unknown presets are still passed
+        // through; buildShapePath falls back to rect for anything it doesn't
+        // recognize.
+        let prst_node = sp_pr
             .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "prstGeom")
+            .find(|n| n.is_element() && n.tag_name().name() == "prstGeom");
+        let prst = prst_node
             .and_then(|n| n.attribute("prst"))
-            .unwrap_or("rect");
-        preset_subpaths(prst)
+            .unwrap_or("rect")
+            .to_string();
+        let adj_values = prst_node
+            .and_then(|p| p.children().find(|n| n.is_element() && n.tag_name().name() == "avLst"))
+            .map(|av| {
+                av.children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                    .filter_map(|gd| {
+                        gd.attribute("fmla")
+                            .and_then(|f| f.strip_prefix("val "))
+                            .and_then(|s| s.parse::<f64>().ok())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        (Vec::new(), Some(prst), adj_values)
     };
-    if subpaths.is_empty() { return None; }
+    if subpaths.is_empty() && preset_geometry.is_none() { return None; }
 
     // Direct fills on spPr take priority over wps:style/fillRef. ECMA-376
     // §20.1.4.1.30: when no direct fill is set, the shape's appearance comes
@@ -1367,6 +1384,8 @@ fn parse_wsp_shape(
         behind_doc: false,
         z_order,
         subpaths,
+        preset_geometry,
+        adj_values,
         fill,
         stroke,
         stroke_width,
@@ -1554,27 +1573,6 @@ fn parse_grad_fill_phclr(
     };
 
     Some(ShapeFill::Gradient { stops, angle, grad_type })
-}
-
-/// Generate normalized [0,1] subpaths for OOXML preset geometries used by
-/// our docx sample corpus. Unknown presets fall back to rect so the shape
-/// remains visible at its bounding box. `avLst` adjustment values are not
-/// honored — add per-shape handling here if a sample needs it.
-fn preset_subpaths(prst: &str) -> Vec<Vec<PathCmd>> {
-    match prst {
-        "line" => vec![vec![
-            PathCmd::MoveTo { x: 0.0, y: 0.0 },
-            PathCmd::LineTo { x: 1.0, y: 1.0 },
-        ]],
-        // "rect" | unknown
-        _ => vec![vec![
-            PathCmd::MoveTo { x: 0.0, y: 0.0 },
-            PathCmd::LineTo { x: 1.0, y: 0.0 },
-            PathCmd::LineTo { x: 1.0, y: 1.0 },
-            PathCmd::LineTo { x: 0.0, y: 1.0 },
-            PathCmd::Close,
-        ]],
-    }
 }
 
 /// Parse <a:custGeom><a:pathLst><a:path w="W" h="H">...</a:path></a:pathLst>.

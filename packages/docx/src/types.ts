@@ -163,8 +163,14 @@ export interface ShapeRun {
   behindDoc?: boolean;
   /** Document-order index within a group; lower values render first. */
   zOrder: number;
-  /** Normalized [0,1] custom-geometry sub-paths */
+  /** Normalized [0,1] custom-geometry sub-paths. Empty when `presetGeometry`
+   *  is set; the renderer chooses between buildCustomPath and buildShapePath. */
   subpaths: PathCmd[][];
+  /** OOXML <a:prstGeom prst> name (e.g. "rect", "ellipse", "rtTriangle").
+   *  When set the renderer calls core's buildShapePath with `adjValues`. */
+  presetGeometry?: string | null;
+  /** Up to four <a:gd name="adj{n}"> values from prstGeom/avLst (0–100000). */
+  adjValues?: number[];
   fill: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
