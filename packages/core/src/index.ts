@@ -6,6 +6,7 @@ export { renderChart } from './chart/renderer';
 export { autoResize, type AutoResizeOptions } from './autoResize';
 export { buildCustomPath } from './shape/custGeom';
 export { hexToRgba, resolveFill, applyStroke } from './shape/paint';
+export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
 export {
   renderSparkline,
   type SparklineKind,
