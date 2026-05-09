@@ -4,6 +4,8 @@ export type {
   Fill, SolidFill, NoFill, GradientFill, GradientStop,
   Shadow,
   Glow,
+  SoftEdge,
+  Reflection,
   Stroke,
   TextBody,
   SpaceLine,
@@ -19,7 +21,7 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody, Shadow, Glow, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+import type { Fill, Stroke, TextBody, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
 
 export interface Presentation {
   slideWidth: number;
@@ -106,6 +108,10 @@ export interface ShapeElement {
   innerShadow?: Shadow;
   /** Coloured glow halo from effectLst > glow. ECMA-376 §20.1.8.17. */
   glow?: Glow;
+  /** Soft (feathered) edge — ECMA-376 §20.1.8.31. */
+  softEdge?: SoftEdge;
+  /** Mirrored reflection — ECMA-376 §20.1.8.27. */
+  reflection?: Reflection;
 }
 
 export interface TableElement {

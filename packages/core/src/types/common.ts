@@ -64,6 +64,33 @@ export interface Glow {
   radius: number;
 }
 
+/** ECMA-376 §20.1.8.31 (CT_SoftEdgesEffect) — feather radius in EMU. */
+export interface SoftEdge {
+  radius: number;
+}
+
+/** ECMA-376 §20.1.8.27 (CT_ReflectionEffect) — mirrored copy below the
+ *  shape with a linear alpha gradient. Carries the spec attributes whose
+ *  defaults the renderer needs to interpret correctly. */
+export interface Reflection {
+  blur: number;      // EMU
+  dist: number;      // EMU
+  /** Direction in degrees, clockwise from East. */
+  dir: number;
+  /** Start alpha (0–1). Default 1.0. */
+  stA: number;
+  /** Start position along the gradient (0–1). Default 0. */
+  stPos: number;
+  /** End alpha. Default 0. */
+  endA: number;
+  /** End position. Default 1.0. */
+  endPos: number;
+  /** Horizontal scale (1.0 = same width). */
+  sx: number;
+  /** Vertical scale (-1.0 = full mirror). */
+  sy: number;
+}
+
 export interface ArrowEnd {
   /** OOXML type: "none" | "triangle" | "stealth" | "diamond" | "oval" | "arrow" */
   type: string;
@@ -83,6 +110,11 @@ export interface Stroke {
   headEnd?: ArrowEnd;
   /** Arrow head at the end of the line */
   tailEnd?: ArrowEnd;
+  /**
+   * ECMA-376 §20.1.8.42 ST_CompoundLine. "sng" (default) | "dbl" |
+   * "thinThick" | "thickThin" | "tri". Absent means single line.
+   */
+  cmpd?: string;
 }
 
 export interface TextBody {
