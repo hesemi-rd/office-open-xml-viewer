@@ -3,7 +3,7 @@ import type {
   DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
-import { buildCustomPath, hexToRgba } from '@silurus/ooxml-core';
+import { buildCustomPath, hexToRgba, resolveFill } from '@silurus/ooxml-core';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -1471,7 +1471,7 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   }
   ctx.beginPath();
   buildCustomPath(ctx as CanvasRenderingContext2D, shape.subpaths, x, y, w, h);
-  const fillStyle = resolveShapeFillStyle(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);
+  const fillStyle = resolveFill(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);
   if (fillStyle) {
     ctx.fillStyle = fillStyle;
     ctx.fill();
@@ -1541,38 +1541,6 @@ function renderShapeText(
     ctx.fillText(block.text, tx, baseline);
     cursorY += lineHeights[i];
   }
-}
-
-function resolveShapeFillStyle(
-  fill: ShapeRun['fill'],
-  ctx: CanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number,
-): string | CanvasGradient | null {
-  if (!fill) return null;
-  if (fill.fillType === 'solid') return hexToRgba(fill.color);
-  if (fill.fillType === 'gradient') {
-    if (fill.stops.length === 0) return null;
-    if (fill.stops.length === 1) return hexToRgba(fill.stops[0].color);
-    let gradient: CanvasGradient;
-    if (fill.gradType === 'radial') {
-      const cx = x + w / 2, cy = y + h / 2;
-      const r = Math.sqrt(w * w + h * h) / 2;
-      gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-    } else {
-      const rad = (fill.angle * Math.PI) / 180;
-      const cx = x + w / 2, cy = y + h / 2;
-      const gradLen = (Math.abs(Math.cos(rad)) * w + Math.abs(Math.sin(rad)) * h) / 2;
-      gradient = ctx.createLinearGradient(
-        cx - Math.cos(rad) * gradLen, cy - Math.sin(rad) * gradLen,
-        cx + Math.cos(rad) * gradLen, cy + Math.sin(rad) * gradLen,
-      );
-    }
-    for (const s of fill.stops) {
-      gradient.addColorStop(Math.min(1, Math.max(0, s.position)), hexToRgba(s.color));
-    }
-    return gradient;
-  }
-  return null;
 }
 
 function isWrapFloat(mode?: string): boolean {
