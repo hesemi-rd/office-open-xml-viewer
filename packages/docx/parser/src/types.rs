@@ -282,6 +282,7 @@ pub struct ShapeRun {
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeFill {
     Solid { color: String },
+    #[serde(rename_all = "camelCase")]
     Gradient {
         stops: Vec<GradientStop>,
         /// degrees: 0 = left→right, 90 = top→bottom
