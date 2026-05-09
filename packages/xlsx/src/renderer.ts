@@ -234,10 +234,17 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // lightVertical: 1-col lines at every other col (0,2,4,6) → 0xAA = 0b10101010
   lightVertical:   Array(8).fill(0xAA),
 
-  // darkGrid = darkHorizontal | darkVertical
-  darkGrid: [0xFF, 0xFF, 0xCC, 0xCC, 0xFF, 0xFF, 0xCC, 0xCC],
-  // lightGrid = lightHorizontal | lightVertical
-  lightGrid: [0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA],
+  // darkGrid: Excel renders this as a fine 2×2 checkerboard, not a thick
+  // horizontal+vertical lattice. Each black/white "cell" is 2×2 source
+  // pixels, so the cell reads as a clear "市松模様" rather than a solid
+  // 50% gray (the 1×1 checkerboard mediumGray we already ship).
+  darkGrid:  [0b11001100, 0b11001100, 0b00110011, 0b00110011, 0b11001100, 0b11001100, 0b00110011, 0b00110011],
+  // lightGrid: a sparse grid with 4-px pitch — horizontal lines at rows
+  // 0 and 4, vertical lines at cols 0 and 4. Grid cells (white squares
+  // between the lines) are 3×3 source pixels, matching Excel's rendering
+  // of lightGrid where the lattice is clearly larger than the dense
+  // version and a true "格子" pattern is recognisable.
+  lightGrid: [0b11111111, 0b10001000, 0b10001000, 0b10001000, 0b11111111, 0b10001000, 0b10001000, 0b10001000],
 
   // ── 8×8 — diagonals & trellis ─────────────────────────────────────────
   // darkDown / darkUp: 2-px-wide diagonal stripes every 4 cells.
