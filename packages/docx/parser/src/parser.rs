@@ -786,6 +786,7 @@ fn parse_run_inner(
                         small_caps,
                         double_strikethrough,
                         highlight: highlight.clone(),
+                        ruby: None,
                     }));
                 }
             }
@@ -808,6 +809,7 @@ fn parse_run_inner(
                     small_caps,
                     double_strikethrough,
                     highlight: highlight.clone(),
+                    ruby: None,
                 }));
             }
             "br" => {
@@ -820,14 +822,45 @@ fn parse_run_inner(
             }
             "ruby" => {
                 // ECMA-376 §17.3.3.25 w:ruby — phonetic guide (furigana).
-                // Layout: w:rubyBase carries the base glyph(s); w:rt carries
-                // the small annotation rendered above. We emit only the base
-                // text for now (full ruby layout is not implemented), which
-                // is what would otherwise be silently dropped — leaving
-                // ruby-annotated kanji missing from the output.
+                // The rubyBase carries the base glyph(s); the rt carries the
+                // small annotation rendered above. We emit each rubyBase run
+                // as a TextRun, attaching the rt text as a `ruby` annotation
+                // so the renderer can draw it above the base.
+                let rt_text: String = child_w(child, "rt")
+                    .map(|rt| {
+                        rt.descendants()
+                            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                            .filter_map(|n| n.text())
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let rt_size_pt: f64 = child_w(child, "rubyPr")
+                    .and_then(|rp| child_w(rp, "hps"))
+                    .and_then(|hps| attr_w(hps, "val"))
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|hp| hp / 2.0) // half-points → points
+                    .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
+                let ruby = if !rt_text.is_empty() {
+                    Some(RubyAnnotation { text: rt_text, font_size_pt: rt_size_pt })
+                } else {
+                    None
+                };
                 if let Some(rb) = child_w(child, "rubyBase") {
+                    let before = runs.len();
                     for inner in rb.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
                         parse_run_inner(inner, &fmt, style_map, media_map, theme, runs, link_href.clone());
+                    }
+                    // Attach ruby to the FIRST text run produced from rubyBase
+                    // (typical case is a single base run carrying one or two
+                    // glyphs). Splitting the annotation across multiple runs
+                    // is uncommon — sample data has 1 base run per ruby.
+                    if let Some(rb_anno) = ruby {
+                        for r in &mut runs[before..] {
+                            if let DocRun::Text(t) = r {
+                                t.ruby = Some(rb_anno.clone());
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -860,6 +893,7 @@ fn parse_run_inner(
                     small_caps,
                     double_strikethrough,
                     highlight: highlight.clone(),
+                    ruby: None,
                 }));
             }
             "AlternateContent" => {

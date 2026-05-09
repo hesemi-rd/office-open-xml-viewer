@@ -732,6 +732,24 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
         ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
         ctx.fillText(s.text, x, baseline + yOffset);
 
+        // Ruby annotation: small text centered above the base glyphs.
+        if (s.ruby) {
+          const rubySizePx = s.ruby.fontSizePt * scale;
+          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily);
+          ctx.save();
+          ctx.font = rubyFont;
+          const rubyW = ctx.measureText(s.ruby.text).width;
+          const rubyX = x + (s.measuredWidth - rubyW) / 2;
+          // Sit the ruby's baseline a small gap above the base ascent so the
+          // characters don't touch. fillText baseline is at the line of the
+          // characters, so subtract the ruby descent + small gap from the
+          // base's ascent line to position correctly.
+          const rubyBaseline = baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
+          ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
+          ctx.fillText(s.ruby.text, rubyX, rubyBaseline);
+          ctx.restore();
+        }
+
         if (state.onTextRun && s.text) {
           state.onTextRun({
             text: s.text,
@@ -812,6 +830,8 @@ interface LayoutTextSeg {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** Ruby annotation rendered in a small font directly above this segment. */
+  ruby?: { text: string; fontSizePt: number };
 }
 
 /**
@@ -880,6 +900,13 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     vertAlign: 'super' | 'sub' | null,
   ) => {
     const displayText = (base.allCaps || base.smallCaps) ? text.toUpperCase() : text;
+    // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
+    // Splitting on word boundaries would lose the association, so attach
+    // the annotation only to the first emitted segment.
+    const ruby = (base as TextRun).ruby
+      ? { text: (base as TextRun).ruby!.text, fontSizePt: (base as TextRun).ruby!.fontSizePt }
+      : undefined;
+    let firstSeg = true;
     for (const word of splitTextForLayout(displayText)) {
       segs.push({
         text: word,
@@ -895,7 +922,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         smallCaps: base.smallCaps ?? false,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
+        ruby: firstSeg ? ruby : undefined,
       });
+      firstSeg = false;
     }
   };
 
@@ -1220,8 +1249,15 @@ function layoutLines(
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
     // line boxes do not jitter based on the specific characters on each line.
-    const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
+    let asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
     const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    // Ruby annotation: a small string rendered above the base. Reserve space
+    // for it in the line's ascent so the line box grows to fit (ECMA-376
+    // §17.3.3.25). 1.1× of the annotation font gives a small gap above the
+    // base glyphs.
+    if (s.ruby) {
+      asc = asc + s.ruby.fontSizePt * scale * 1.1;
+    }
     // Wrap-fit check uses two standard typographic allowances:
     //   1. Trailing-space collapse: if this word becomes the last on the
     //      line, its trailing space (if any) collapses. We subtract it from

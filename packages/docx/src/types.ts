@@ -221,6 +221,15 @@ export interface TextRun {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** ECMA-376 §17.3.3.25 ruby annotation (furigana). Renders above the
+   *  base text in a smaller font; line height is expanded to fit it. */
+  ruby?: RubyAnnotation;
+}
+
+export interface RubyAnnotation {
+  text: string;
+  /** Annotation font size in pt. Word stores this as half-points in `<w:hps>`. */
+  fontSizePt: number;
 }
 
 export interface ImageRun {

@@ -352,6 +352,21 @@ pub struct TextRun {
     /// OOXML highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub highlight: Option<String>,
+    /// ECMA-376 §17.3.3.25 ruby annotation (furigana). Set on the rubyBase
+    /// text run; renders as a small inline annotation above the base glyphs.
+    /// `text` is the annotation string (e.g. "すわ" above "坐"). `font_size_pt`
+    /// is the annotation's font size in pt — Word stores this as `<w:hps>`
+    /// (half-points) inside the rubyPr.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<RubyAnnotation>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RubyAnnotation {
+    pub text: String,
+    /// pt
+    pub font_size_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone)]
