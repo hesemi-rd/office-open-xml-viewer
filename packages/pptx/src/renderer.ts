@@ -664,6 +664,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
     const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8]);
     if (anchors) {
+      // ECMA-376 §20.1.8.42 — compound line styles. For straight lines /
+      // connectors we re-stroke the segment with multiple parallel lines
+      // along the perpendicular of the line direction. Curved connectors
+      // fall through to the single-stroke fast path (parallel curves are
+      // a non-trivial geometric operation).
+      const cmpd = el.stroke.cmpd;
+      const isStraight = geom === 'line' || geom === 'straightconnector1';
+      if (cmpd && isStraight) {
+        drawCompoundLine(ctx, anchors.start, anchors.end, el.stroke, cmpd, scale);
+      }
       if (el.stroke.tailEnd) {
         drawArrowHead(ctx, anchors.end.x, anchors.end.y, anchors.end.angle, el.stroke.tailEnd, el.stroke, scale);
       }
@@ -3447,6 +3457,97 @@ async function renderMedia(
 }
 
 // ===== Table renderer =====
+
+/**
+ * Re-stroke a straight connector under one of the ECMA-376 §20.1.8.42
+ * compound-line styles. Each sub-line gets its own offset along the
+ * perpendicular and its own thickness; widths are taken from Office's
+ * usual interpretation:
+ *
+ *   dbl       → two equal-thickness lines, each w/3, gap w/3
+ *   thinThick → thin (w/4) + gap (w/4) + thick (w/2)
+ *   thickThin → thick (w/2) + gap (w/4) + thin (w/4)
+ *   tri       → three lines: thin(w/5), thick(w/5*3 ≈ 3w/5), thin(w/5)
+ *
+ * The starting position of each sub-line is computed so the *outer envelope*
+ * stays w wide — i.e. centred on the original geometry. The base stroke
+ * already drew at the centre line; we erase it (destination-out) and then
+ * paint the compound sub-lines on top so dash/headEnd remain consistent.
+ */
+function drawCompoundLine(
+  ctx: CanvasRenderingContext2D,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  stroke: Stroke,
+  cmpd: string,
+  scale: number,
+): void {
+  const totalW = Math.max(0.5, emuToPx(stroke.width, scale));
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return;
+  const px = -dy / len;
+  const py = dx / len;
+
+  // sub: relative position along the perpendicular axis (-1..1, with 0 being
+  // the centre line) and width as a fraction of totalW.
+  type Sub = { offset: number; widthFrac: number };
+  let subs: Sub[];
+  switch (cmpd) {
+    case 'dbl':
+      subs = [
+        { offset: -1 / 3, widthFrac: 1 / 3 },
+        { offset:  1 / 3, widthFrac: 1 / 3 },
+      ];
+      break;
+    case 'thinThick':
+      subs = [
+        { offset: -3 / 8, widthFrac: 1 / 4 },
+        { offset:  1 / 4, widthFrac: 1 / 2 },
+      ];
+      break;
+    case 'thickThin':
+      subs = [
+        { offset: -1 / 4, widthFrac: 1 / 2 },
+        { offset:  3 / 8, widthFrac: 1 / 4 },
+      ];
+      break;
+    case 'tri':
+      subs = [
+        { offset: -2 / 5, widthFrac: 1 / 5 },
+        { offset:  0,     widthFrac: 3 / 5 },
+        { offset:  2 / 5, widthFrac: 1 / 5 },
+      ];
+      break;
+    default:
+      return;
+  }
+
+  ctx.save();
+  // 1. Erase the centre line that was already drawn at full width.
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = totalW + 0.5; // small overshoot to fully erase antialiasing fringe
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+
+  // 2. Paint each sub-line.
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.strokeStyle = hexToRgba(stroke.color);
+  for (const sub of subs) {
+    const ox = px * (totalW * sub.offset);
+    const oy = py * (totalW * sub.offset);
+    ctx.lineWidth = Math.max(0.5, totalW * sub.widthFrac);
+    ctx.beginPath();
+    ctx.moveTo(start.x + ox, start.y + oy);
+    ctx.lineTo(end.x + ox, end.y + oy);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 
 /** Draw an arrowhead at `tip` pointing in `angle` radians (0 = right). */
 function drawArrowHead(
