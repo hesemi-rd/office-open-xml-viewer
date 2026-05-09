@@ -1482,6 +1482,65 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     ctx.stroke();
   }
   ctx.restore();
+
+  // Body text inside the shape (wps:txbx). Drawn AFTER fill/stroke so text
+  // sits on top of the panel. Rotation is intentionally not applied to body
+  // text — the cover-template usage we care about uses anchor-only text.
+  if (shape.textBlocks && shape.textBlocks.length > 0) {
+    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale);
+  }
+}
+
+/** Render a shape's body text inside its bounding box, honoring lIns/tIns/
+ *  rIns/bIns and the wps:bodyPr @anchor (t / ctr / b). Alignment within each
+ *  line is read from the per-block paragraph alignment. */
+function renderShapeText(
+  shape: ShapeRun,
+  x: number, y: number, w: number, h: number,
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+): void {
+  const blocks = shape.textBlocks ?? [];
+  const lIns = (shape.textInsetL ?? 0) * scale;
+  const tIns = (shape.textInsetT ?? 0) * scale;
+  const rIns = (shape.textInsetR ?? 0) * scale;
+  const bIns = (shape.textInsetB ?? 0) * scale;
+  const innerX = x + lIns;
+  const innerW = Math.max(0, w - lIns - rIns);
+  const innerY = y + tIns;
+  const innerH = Math.max(0, h - tIns - bIns);
+
+  // First pass: measure each block's natural height (one line at fontSize px)
+  const lineHeights = blocks.map((b) => b.fontSizePt * scale * 1.2);
+  const totalH = lineHeights.reduce((s, lh) => s + lh, 0);
+
+  const anchor = shape.textAnchor ?? 't';
+  let cursorY: number;
+  if (anchor === 'b') {
+    cursorY = innerY + Math.max(0, innerH - totalH);
+  } else if (anchor === 'ctr') {
+    cursorY = innerY + Math.max(0, (innerH - totalH) / 2);
+  } else {
+    cursorY = innerY;
+  }
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const fontPx = block.fontSizePt * scale;
+    ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null);
+    ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
+    const m = ctx.measureText(block.text);
+    let tx = innerX;
+    if (block.alignment === 'center' || block.alignment === 'distribute') {
+      tx = innerX + Math.max(0, (innerW - m.width) / 2);
+    } else if (block.alignment === 'right' || block.alignment === 'end') {
+      tx = innerX + Math.max(0, innerW - m.width);
+    }
+    // Baseline = cursorY + ascent (approx 0.85 of font size for default fonts).
+    const baseline = cursorY + fontPx * 0.85;
+    ctx.fillText(block.text, tx, baseline);
+    cursorY += lineHeights[i];
+  }
 }
 
 function resolveShapeFillStyle(

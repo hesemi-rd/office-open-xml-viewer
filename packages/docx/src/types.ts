@@ -170,6 +170,24 @@ export interface ShapeRun {
   strokeWidth?: number;
   rotation?: number;
   wrapMode?: string | null;
+  /** Text rendered INSIDE the shape's bounding box (`<wps:txbx><w:txbxContent>`). */
+  textBlocks?: ShapeText[];
+  /** "t" | "ctr" | "b" — vertical anchor for the shape's text body (`<wps:bodyPr @anchor>`). */
+  textAnchor?: string | null;
+  textInsetL?: number;  // pt
+  textInsetT?: number;  // pt
+  textInsetR?: number;  // pt
+  textInsetB?: number;  // pt
+}
+
+export interface ShapeText {
+  text: string;
+  fontSizePt: number;
+  color?: string | null;
+  fontFamily?: string | null;
+  bold?: boolean;
+  italic?: boolean;
+  alignment: string;
 }
 
 export type ShapeFill =

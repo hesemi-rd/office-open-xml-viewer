@@ -1352,6 +1352,11 @@ fn parse_wsp_shape(
         })
         .unwrap_or((None, 0.0));
 
+    // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
+    // and the bodyPr (insets / vertical anchor).
+    let (text_blocks, text_anchor, text_inset_l, text_inset_t, text_inset_r, text_inset_b) =
+        parse_shape_text_body(wsp, theme);
+
     Some(ShapeRun {
         width_pt,
         height_pt,
@@ -1367,7 +1372,91 @@ fn parse_wsp_shape(
         stroke_width,
         rotation,
         wrap_mode: anchor_meta.wrap_mode.clone(),
+        text_blocks,
+        text_anchor,
+        text_inset_l,
+        text_inset_t,
+        text_inset_r,
+        text_inset_b,
         ..Default::default()
+    })
+}
+
+/// Extract text blocks and bodyPr from a wsp shape.
+/// Returns (blocks, anchor, inset_l, inset_t, inset_r, inset_b).
+fn parse_shape_text_body(
+    wsp: roxmltree::Node,
+    theme: &ThemeColors,
+) -> (Vec<ShapeText>, Option<String>, f64, f64, f64, f64) {
+    let txbx = wsp.children().find(|n| n.is_element() && n.tag_name().name() == "txbx");
+    let body_pr = wsp.children().find(|n| n.is_element() && n.tag_name().name() == "bodyPr");
+
+    let anchor = body_pr
+        .and_then(|b| b.attribute("anchor"))
+        .map(|s| s.to_string());
+    let emu_to_pt = |v: &str| v.parse::<f64>().ok().map(|e| e / 12700.0).unwrap_or(0.0);
+    let l = body_pr.and_then(|b| b.attribute("lIns")).map(emu_to_pt).unwrap_or(0.0);
+    let t = body_pr.and_then(|b| b.attribute("tIns")).map(emu_to_pt).unwrap_or(0.0);
+    let r = body_pr.and_then(|b| b.attribute("rIns")).map(emu_to_pt).unwrap_or(0.0);
+    let b = body_pr.and_then(|b| b.attribute("bIns")).map(emu_to_pt).unwrap_or(0.0);
+
+    let blocks: Vec<ShapeText> = txbx
+        .and_then(|t| t.children().find(|n| n.is_element() && n.tag_name().name() == "txbxContent"))
+        .map(|content| {
+            children_w_flat(content, "p")
+                .into_iter()
+                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (blocks, anchor, l, t, r, b)
+}
+
+/// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
+/// formatting from the FIRST run encountered; ignores mixed-format runs.
+fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeText> {
+    let mut text = String::new();
+    let mut first_rpr: Option<roxmltree::Node> = None;
+    for r in p.descendants().filter(|n| n.is_element() && n.tag_name().name() == "r") {
+        if first_rpr.is_none() {
+            first_rpr = child_w(r, "rPr");
+        }
+        for t in r.descendants().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+            if let Some(text_node) = t.text() {
+                text.push_str(text_node);
+            }
+        }
+    }
+    if text.is_empty() { return None; }
+
+    let alignment = child_w(p, "pPr")
+        .and_then(|ppr| child_w(ppr, "jc"))
+        .and_then(|jc| attr_w(jc, "val"))
+        .unwrap_or_else(|| "left".to_string());
+
+    let (font_size_pt, color, font_family, bold, italic) = if let Some(rpr) = first_rpr {
+        let fmt = parse_run_fmt(rpr);
+        (
+            fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+            fmt.color.clone(),
+            theme.resolve_font_ref(fmt.font_family_ascii.clone())
+                .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+            fmt.bold.unwrap_or(false),
+            fmt.italic.unwrap_or(false),
+        )
+    } else {
+        (DEFAULT_FONT_SIZE, None, None, false, false)
+    };
+
+    Some(ShapeText {
+        text,
+        font_size_pt,
+        color,
+        font_family,
+        bold,
+        italic,
+        alignment: normalize_align(&alignment).to_string(),
     })
 }
 

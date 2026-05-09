@@ -253,6 +253,26 @@ pub struct ShapeRun {
     /// rotation in degrees (clockwise).
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub rotation: f64,
+    /// Text blocks from <wps:txbx><w:txbxContent> — text rendered INSIDE the
+    /// shape's bounding box (ECMA-376 §17.3.4.7). Each block is one paragraph
+    /// reduced to plain text + the first run's formatting; advanced layout
+    /// (numbering, paragraph styles, mixed-format runs within a single
+    /// paragraph) isn't supported in shape bodies yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub text_blocks: Vec<ShapeText>,
+    /// Vertical anchor for the shape text box: "t" (top), "ctr" (center),
+    /// "b" (bottom). Read from <wps:bodyPr @anchor>. Default = "t".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_anchor: Option<String>,
+    /// Body-pr text insets in pt (left/top/right/bottom). Default 0 each.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub text_inset_l: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub text_inset_t: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub text_inset_r: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub text_inset_b: f64,
     /// Wrap mode matching ImageRun.wrap_mode semantics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_mode: Option<String>,
@@ -367,6 +387,27 @@ pub struct RubyAnnotation {
     pub text: String,
     /// pt
     pub font_size_pt: f64,
+}
+
+/// One paragraph of text rendered inside a shape (`<wps:txbx><w:txbxContent>`).
+/// Reduced to a single combined string + the first run's effective formatting
+/// — the shape-text layouts in our current sample corpus carry one run per
+/// paragraph, so we don't yet support mixed runs / full inline layout here.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeText {
+    pub text: String,
+    pub font_size_pt: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    /// Paragraph alignment ("left" | "center" | "right" | "both").
+    pub alignment: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
