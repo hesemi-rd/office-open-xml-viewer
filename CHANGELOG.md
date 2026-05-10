@@ -4,6 +4,12 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.29.1 — 2026-05-10
+
+### Fixes
+
+- **docs**: Storybook Introduction page (GitHub Pages) showed broken screenshots because `docs/images/` are bundled via `import` in `.storybook/Introduction.mdx`. Retook all three screenshots using `canvas.toDataURL()` (canvas-only, no Storybook UI chrome) and triggered a fresh deploy.
+
 ## 0.29.0 — 2026-05-10
 
 ### Features
