@@ -463,14 +463,32 @@ function estimateParagraphHeight(
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
     if (paraHasRuby) {
-      // Word uses the same line height for every line in a ruby paragraph.
-      const uniform = Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, true)));
+      // Word uses the same line height for every line in a ruby paragraph,
+      // snapped to an integer docGrid pitch.
+      const uniform = snapParaLineToGrid(
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, true))),
+        state.docGrid,
+        1,
+      );
       textH = uniform * lines.length;
     } else {
       textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, false), 0);
     }
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
+}
+
+/** Snap a paragraph's uniform line height up to an integer multiple of the
+ *  docGrid pitch. Mirrors Word's docGrid handling for ruby paragraphs:
+ *  the grid pitch widens to accommodate the tallest required line, and
+ *  every line in the paragraph then uses that widened pitch. */
+function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: number): number {
+  if (!grid || !grid.linePitchPt || grid.linePitchPt <= 0) return h;
+  if (grid.type !== 'lines' && grid.type !== 'linesAndChars') return h;
+  const pitchPx = grid.linePitchPt * scale;
+  if (pitchPx <= 0) return h;
+  if (h <= pitchPx) return pitchPx;
+  return Math.ceil(h / pitchPx) * pitchPx;
 }
 
 /** Return true when any text run in the paragraph carries a `ruby` annotation.
@@ -525,7 +543,9 @@ function splitParagraphAcrossPages(
   const paraHasRuby = paragraphHasRuby(para);
 
   const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby);
-  const uniformH = paraHasRuby ? Math.max(0, ...lines.map(perLineH)) : 0;
+  const uniformH = paraHasRuby
+    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
+    : 0;
   const lineHeights = lines.map(l => paraHasRuby ? uniformH : perLineH(l));
   const spaceBefore = suppressSpaceBefore ? 0 : para.spaceBefore;
   const spaceAfter = para.spaceAfter;
@@ -768,11 +788,19 @@ function renderParagraph(
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
   // For paragraphs that carry any ruby annotation, Word renders every line
-  // at the SAME height (the tallest natural line in the paragraph). Without
-  // that consistency, ruby and non-ruby lines alternate vertically and the
-  // baseline grid drifts. Compute it once here and reuse it below.
+  // at the SAME height. Per the user's note: when the section's docGrid is
+  // active, Word widens the grid pitch to accommodate the tallest required
+  // line (ruby + base + leading), then ALL lines in the paragraph use that
+  // widened pitch — both ruby-bearing and non-ruby lines share the same
+  // baseline grid, otherwise the lines drift. We mimic this by computing
+  // uniformLineH = ceil(max natural / pitch) * pitch when docGrid is on,
+  // else just the max natural.
   const uniformLineH = paraHasRuby
-    ? Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, true)))
+    ? snapParaLineToGrid(
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, true))),
+        state.docGrid,
+        scale,
+      )
     : 0;
   const lineHForLine = (l: typeof lines[number]): number =>
     paraHasRuby
@@ -1439,15 +1467,17 @@ function layoutLines(
     // line boxes do not jitter based on the specific characters on each line.
     let asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
     const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
-    // Ruby annotation: small text rendered above the base. Reserve enough
-    // ascent room so the line box grows for it (ECMA-376 §17.3.3.25). The
-    // 3.5× rt-size reserve was tuned against sample-5 page-3 — Word
-    // renders a 13.5pt base + 8pt rt line at ~45pt total, which is what
-    //   base_natural (~13.5pt) + 3.5 × rt_size (28pt) + descent (~3pt)
-    // produces. Snapping to integer grid pitches over-rounded; Word does
-    // not snap ruby lines.
+    // Ruby annotation: small text rendered above the base. Reserve ascent
+    // room for the rt glyphs (ECMA-376 §17.3.3.25). The actual line spacing
+    // in docGrid sections is set further down by the paragraph-wide
+    // pitch snap — see the doc-grid-aware path in renderParagraph /
+    // estimateParagraphHeight that takes max(perLineH) and snaps it to
+    // an integer grid pitch. The reserve here just ensures the natural
+    // line height EXCEEDS the docGrid pitch when ruby is present, so the
+    // snap actually picks the next pitch slot. 1.5× rt-size is enough for
+    // any rt size that fits in one extra pitch above the base.
     if (s.ruby) {
-      asc = asc + s.ruby.fontSizePt * scale * 3.5;
+      asc = asc + s.ruby.fontSizePt * scale * 1.5;
     }
     // Wrap-fit check uses two standard typographic allowances:
     //   1. Trailing-space collapse: if this word becomes the last on the
