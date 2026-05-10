@@ -495,7 +495,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Vertical / RTL text | ❌ |
 | **Text — body** | Text padding (insets) | ✅ |
 | | normAutoFit (shrink to fit) | ✅ |
-| | spAutoFit (expand box; disables horizontal wrap per spec) | ✅ |
+| | spAutoFit (expand box; suppresses wrap when text fits in one line) | ✅ |
 | | Word wrap / no wrap | ✅ |
 | | Multi-column text body (`numCol` / `spcCol` — balanced flow) | ✅ |
 | | Theme object-default inheritance (`<a:objectDefaults><a:txDef\|spDef>` bodyPr fallback) | ✅ |

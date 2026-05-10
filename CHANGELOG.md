@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.31.0 — 2026-05-10
+
+### Fixes
+
+- **pptx**: `<a:bodyPr><a:spAutoFit/>` + `wrap="square"` interaction now matches ECMA-376 §20.1.10.5 / §20.1.10.7 — text wraps when its natural single-line width exceeds the bbox, otherwise the shape stays auto-fit at one line. PR #242 had unconditionally suppressed wrap on spAutoFit to keep sample-2 slide-13's "20代" textbox on one line, but that broke the much more common case (slide-16's right-column callouts: "認知拡大によりインバウンド案件が増加し…") where the same XML pattern is supposed to wrap. New `naturalWidthExceedsBbox()` pre-pass picks the right behaviour per shape.
+- **pptx**: chartEx waterfall callout connectors now align with the candle's lower-left corner. PR #248 had over-shrunk top padding (8% → 6%), moving bar bottoms below the absolute-slide-coord callout tips. Solving the EMU geometry from sample-2 slide-8's "CS部門増員による人件費を計上" callout (`<a:prstGeom prst="callout1" adj3="-67286" adj4="95815">`) shows PowerPoint uses padT ≈ 12% with padB ≈ 14% — set those values.
+- **pptx**: chartEx waterfall now honors `<cx:catScaling gapWidth>` (sample-2 slide-8: `gapWidth="0.8"`). Previously the bar/catGap ratio was hardcoded 0.55; now the parser reads the chartEx fraction, converts to legacy percentage form, and the shared renderer applies `barW = catGap / (1 + gapWidth/100)` (ECMA-376 §17.18.34) — same formula `<c:barChart>` already uses. Default 150% per spec when omitted.
+- **core/chart**: `niceAxisMax` adds a step of breathing room when `dataMax / niceMax ≥ 0.9`, matching PowerPoint's stacked-bar auto-axis behaviour. sample-2 slide-16 (data 9715, niceMax 10000 = 97% fill) now snaps to 12000 so the bars don't spill past the right text column.
+- **pptx**: chartEx waterfall data labels honor per-data-point colour overrides (`<cx:dataLabel idx><cx:txPr><a:solidFill>`) and position negative-value labels *below* the bar instead of above. sample-2 slide-8 negative steps `△ 52`, `△ 40`, `△ 108` now render in red (accent1) below their respective candles, matching PowerPoint.
+- **pptx**: callout1 family `<a:ln><a:tailEnd type="oval">` is now drawn at the line's tip. Previously arrow ends were only rendered for `CONNECTOR_GEOMS`; sample-2 slide-8 callouts have a filled oval terminator that pointed nowhere. Per ECMA-376 callout1 gd, the line endpoints are `(x1, y1) = (w·adj2/100000, h·adj1/100000)` (attach) and `(x2, y2) = (w·adj4/100000, h·adj3/100000)` (tip).
+- **pptx**: `<p:pic>` honors `<a:custGeom>` clipping. sample-2 slide-12's website inset image is now trimmed to the laptop silhouette (was previously overlaying the bezel).
+- **pptx**: `<a:bodyPr numCol>` collapses to a single column when total content fits in one column, matching PowerPoint. sample-2 slide-13's 従来 box has `numCol="2"` but only 4 paragraphs — PowerPoint stacks them vertically, not 2+2. Pre-existing balanced split (#243) still kicks in for the 新機能 box (9 paragraphs that overflow).
+- **pptx**: chart bar data labels honor `<c:dLbls><c:txPr><a:defRPr sz>` (was clamped at 11px by a `barW * 0.6` heuristic). Vertical (column) bar labels now centered horizontally on the bar — `drawBarDataLabel` was being called with `barW`/`barH` swapped, putting labels far to the right of each bar.
+- **pptx**: every `LayoutPlaceholders` lookup with a by_idx map (`fill`, `font_size`, `blip_fill`, `stroke`, `color`, `line_spacing`) is now idx-strict per ECMA-376 §19.7.16 — a slide shape with `<p:ph idx="N">` may only inherit from the layout placeholder with the matching idx, never a sibling-by-type. Closes the gap that was already known about from the PR #241 `lookup_fill` fix.
+- **pptx**: bullet color follows ECMA-376 §21.1.2.4 chain `<a:buClr>` → first run's color → paraDefault → bodyDefault. Previously skipped the first-run step, so bullets without explicit `buClr` rendered in the (often white) shape default and disappeared on darker styles.
+
+### Features
+
+- **pptx**: theme `<a:objectDefaults>` (txDef / spDef) inheritance for `<a:bodyPr>` defaults. `parse_shape` reads `<p:cNvSpPr txBox="1"/>` to pick the right defaults slot — txDef for true text boxes, spDef for placeholders / shape-with-text. Without this, the theme's declared `<a:spAutoFit/>` (etc.) didn't propagate to slide-level shapes that left attributes blank.
+- **pptx**: `<a:bodyPr numCol>` / `<a:bodyPr spcCol>` (§20.1.10.34) — multi-column text body with balanced paragraph distribution.
+- **pptx**: `<c:plotArea><c:layout><c:manualLayout>` (§21.2.2.32) — explicit plot-area placement now flows through `parse_legacy_chart` and the shared renderer; the bar chart honours it the way the scatter chart already did.
+
 ## 0.30.0 — 2026-05-10
 
 ### Features
