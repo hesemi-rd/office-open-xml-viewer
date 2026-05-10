@@ -80,7 +80,17 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let major_font = theme.theme_font("major", "latin");
     let minor_font = theme.theme_font("minor", "latin");
 
-    Ok(Document { section, body, headers, footers, major_font, minor_font })
+    // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
+    // Resolve via relationship (Type ending in "/fontTable"); fall back to
+    // "word/fontTable.xml" for documents that omit the relationship.
+    let font_table_path = find_rel_target(&rels_xml, "fontTable")
+        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .unwrap_or_else(|| "word/fontTable.xml".to_string());
+    let font_family_classes = read_zip_entry(&mut zip, &font_table_path)
+        .map(|s| parse_font_table(&s))
+        .unwrap_or_default();
+
+    Ok(Document { section, body, headers, footers, major_font, minor_font, font_family_classes })
 }
 
 /// Resolve scheme color names (accent1..6, dk1, dk2, lt1, lt2, hlink, folHlink)
@@ -205,6 +215,33 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
     None
 }
 
+/// Parse `word/fontTable.xml` and build a map from font name to family class.
+///
+/// ECMA-376 §17.8.3.10 defines `<w:font w:name="…"><w:family w:val="…"/></w:font>`
+/// where val is one of: `roman` (serif), `swiss` (sans-serif), `modern`
+/// (monospace), `script`, `decorative`, `auto` (no info). The renderer uses
+/// this map as the primary source of serif/sans-serif classification, falling
+/// back to name-pattern matching only when the font is absent or classified
+/// as `auto`.
+fn parse_font_table(xml: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(doc) = XmlDoc::parse(xml) else { return map };
+    let w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for font in doc.root_element()
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "font" && n.tag_name().namespace() == Some(w_ns))
+    {
+        let Some(name) = font.attribute((w_ns, "name")) else { continue };
+        let family = font.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "family" && n.tag_name().namespace() == Some(w_ns))
+            .and_then(|n| n.attribute((w_ns, "val")));
+        if let Some(f) = family {
+            map.insert(name.to_string(), f.to_string());
+        }
+    }
+    map
+}
+
 fn parse_body_elements(
     body_node: roxmltree::Node,
     style_map: &StyleMap,
@@ -298,11 +335,20 @@ enum ParaPiece {
 /// Two break flavors are recognized:
 ///   - `BreakType::Page`         — hard `<w:br w:type="page"/>`, always honored.
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
-///     (ECMA-376 §17.3.1.20). Only honored inside paragraphs that carry
-///     ruby annotations, where our own line-height calc tends to drift
-///     from Word's; outside that context the marker is ignored to avoid
-///     introducing breaks that conflict with our paginator's own
-///     measurement.
+///     (ECMA-376 §17.3.1.20).
+///
+/// HEURISTIC — ruby-only gate: `lastRenderedPageBreak` is currently honored
+/// only in paragraphs that carry ruby annotations, because our ruby
+/// line-height calculation tends to drift from Word's measurement and
+/// causes page-break positions to differ. Gating to ruby paragraphs limits
+/// the blast radius while the underlying issue exists.
+///
+/// This gate is a spec violation: §17.3.1.20 makes no distinction between
+/// ruby and non-ruby paragraphs. The correct fix is to implement §17.3.4.x
+/// (rubyPr/rubyAlign) line-height calculation accurately, after which this
+/// gate should be removed and `lastRenderedPageBreak` honored uniformly
+/// (or ignored uniformly if the self-paginator becomes authoritative).
+/// TODO: remove gate after fixing ruby line-height per §17.3.4.6 / §17.3.4.20.
 ///
 /// `<w:lastRenderedPageBreak/>` is often emitted by Word at the very
 /// start of a paragraph too (echoing the page break that produced the
@@ -1097,10 +1143,25 @@ fn parse_inline_drawing(
     // Parse positionH / positionV with relativeFrom
     let (pos_x, x_from_margin, x_align) = parse_anchor_pos_h(&container);
     let (pos_y, y_from_para,   y_align) = parse_anchor_pos_v(&container);
+    let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
+    let (size_w_pct, size_h_pct, size_w_rel, size_h_rel) = parse_anchor_size_rel(&container);
     let anchor_meta = parse_anchor_wrap(&container);
 
     // behindDoc="1" flag — renderer uses this to draw shapes before text
     let behind_doc = container.attribute("behindDoc").map(|v| v == "1" || v == "true").unwrap_or(false);
+
+    let apply_pos_meta = |shp: &mut ShapeRun| {
+        shp.anchor_x_align = x_align.clone();
+        shp.anchor_y_align = y_align.clone();
+        shp.pct_pos_h = pct_h;
+        shp.pct_pos_v = pct_v;
+        shp.anchor_x_relative_from = rel_h.clone();
+        shp.anchor_y_relative_from = rel_v.clone();
+        shp.width_pct = size_w_pct;
+        shp.height_pct = size_h_pct;
+        shp.width_relative_from = size_w_rel.clone();
+        shp.height_relative_from = size_h_rel.clone();
+    };
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries
     if let Some(wgp) = container.descendants().find(|n| n.tag_name().name() == "wgp") {
@@ -1110,8 +1171,7 @@ fn parse_inline_drawing(
         }
         for mut shp in parse_wgp_shapes(wgp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta) {
             shp.behind_doc = behind_doc;
-            shp.anchor_x_align = x_align.clone();
-            shp.anchor_y_align = y_align.clone();
+            apply_pos_meta(&mut shp);
             out.push(DocRun::Shape(shp));
         }
         return out;
@@ -1121,8 +1181,7 @@ fn parse_inline_drawing(
     if let Some(wsp) = container.descendants().find(|n| n.tag_name().name() == "wsp") {
         if let Some(mut shp) = parse_wsp_shape(wsp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta, 1.0, 1.0, 0.0, 0.0, 0) {
             shp.behind_doc = behind_doc;
-            shp.anchor_x_align = x_align;
-            shp.anchor_y_align = y_align;
+            apply_pos_meta(&mut shp);
             return vec![DocRun::Shape(shp)];
         }
     }
@@ -1209,8 +1268,30 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
 
 /// Parse positionH — returns (posOffset_pt, needs_margin_offset).
 /// "column" and "margin" relative offsets both mean: add marginLeft in the renderer.
+/// `<wp:positionH>` / `<wp:positionV>` may live directly under `<wp:anchor>`,
+/// or be wrapped in `<mc:AlternateContent>` for Word 2010+ pct-based positioning.
+/// In the wrapped form `<mc:Choice>` holds the wp14 pct-based variant and
+/// `<mc:Fallback>` holds a posOffset variant. Always pick Choice (matches what
+/// Word renders in 2010+); never read from Fallback.
+fn find_position_node<'a, 'i>(
+    container: &roxmltree::Node<'a, 'i>,
+    name: &str,
+) -> Option<roxmltree::Node<'a, 'i>> {
+    if let Some(n) = container.children().find(|n| n.tag_name().name() == name) {
+        return Some(n);
+    }
+    for ac in container.children().filter(|n| n.tag_name().name() == "AlternateContent") {
+        if let Some(choice) = ac.children().find(|n| n.tag_name().name() == "Choice") {
+            if let Some(n) = choice.descendants().find(|n| n.is_element() && n.tag_name().name() == name) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
 fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>) {
-    let pos = match container.children().find(|n| n.tag_name().name() == "positionH") {
+    let pos = match find_position_node(container, "positionH") {
         Some(p) => p,
         None => return (0.0, false, None),
     };
@@ -1234,7 +1315,7 @@ fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>
 
 /// Parse positionV — returns (posOffset_pt, is_paragraph_relative, align).
 fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool, Option<String>) {
-    let pos = match container.children().find(|n| n.tag_name().name() == "positionV") {
+    let pos = match find_position_node(container, "positionV") {
         Some(p) => p,
         None => return (0.0, false, None),
     };
@@ -1252,6 +1333,65 @@ fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool, Option<String>
         .filter(|s| !s.is_empty());
     let from_para = matches!(rel, "paragraph" | "line");
     (offset, from_para, align)
+}
+
+/// Read ECMA-376 §20.4.2.7 wp14:pctPos{H,V}Offset and the positionH/V
+/// relativeFrom strings. Both values are normalized into a fraction in
+/// `[0, 1]`; the renderer multiplies them by the relative container's
+/// dimension. The relativeFrom string is captured raw ("page", "margin",
+/// "topMargin", "rightMargin", "insideMargin", "paragraph", "line", …)
+/// so the renderer can pick the right container and edge.
+fn parse_anchor_pct_pos(
+    container: &roxmltree::Node,
+) -> (Option<f64>, Option<f64>, Option<String>, Option<String>) {
+    let read_pct = |pos_node: roxmltree::Node| -> Option<f64> {
+        // <wp14:pctPos*Offset> may be wrapped in <mc:AlternateContent>/<mc:Choice>
+        // — search descendants under positionH/V to be safe.
+        pos_node
+            .descendants()
+            .filter(|n| n.is_element())
+            .find(|n| matches!(n.tag_name().name(), "pctPosHOffset" | "pctPosVOffset"))
+            .and_then(|n| n.text())
+            .and_then(|t| t.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+    };
+    let read_rel = |pos_node: roxmltree::Node| -> Option<String> {
+        pos_node.attribute("relativeFrom").map(|s| s.to_string())
+    };
+    let h_node = find_position_node(container, "positionH");
+    let v_node = find_position_node(container, "positionV");
+    (
+        h_node.and_then(read_pct),
+        v_node.and_then(read_pct),
+        h_node.and_then(read_rel),
+        v_node.and_then(read_rel),
+    )
+}
+
+/// Read ECMA-376 §20.4.2.18 wp14:sizeRelH / sizeRelV — width/height as a
+/// fraction of the relativeFrom container. Returns
+/// `(width_pct, height_pct, width_relative_from, height_relative_from)`.
+/// `pct == 0` is treated as None (fall back to extent), matching Word.
+fn parse_anchor_size_rel(
+    container: &roxmltree::Node,
+) -> (Option<f64>, Option<f64>, Option<String>, Option<String>) {
+    let read = |outer_tag: &str, inner_tag: &str| -> (Option<f64>, Option<String>) {
+        let node = container.children().find(|n| n.tag_name().name() == outer_tag);
+        let pct = node
+            .and_then(|n| {
+                n.descendants()
+                    .find(|c| c.is_element() && c.tag_name().name() == inner_tag)
+                    .and_then(|c| c.text())
+                    .and_then(|t| t.parse::<f64>().ok())
+            })
+            .map(|v| v / 100_000.0)
+            .filter(|v| *v > 0.0);
+        let rel = node.and_then(|n| n.attribute("relativeFrom").map(|s| s.to_string()));
+        (pct, rel)
+    };
+    let (w_pct, w_rel) = read("sizeRelH", "pctWidth");
+    let (h_pct, h_rel) = read("sizeRelV", "pctHeight");
+    (w_pct, h_pct, w_rel, h_rel)
 }
 
 /// Expand a wp:wgp group into individual ImageRun entries.
@@ -1377,9 +1517,16 @@ fn parse_wgp_shapes(
     let group_page_off_x_emu = off_x - ch_off_x * sx;
     let group_page_off_y_emu = off_y - ch_off_y * sy;
 
+    // Outer group dimensions in pt — passed to each child so the renderer can
+    // resolve align/pctPos against the GROUP's bounding box, then offset each
+    // child within it. Falls back to the child-coord-space ext when the group
+    // omits an outer ext (rare).
+    let group_w_pt = (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0;
+    let group_h_pt = (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0;
+
     let mut results = Vec::new();
     for (idx, wsp) in wgp.descendants().filter(|n| n.is_element() && n.tag_name().name() == "wsp").enumerate() {
-        if let Some(shape) = parse_wsp_shape(
+        if let Some(mut shape) = parse_wsp_shape(
             wsp, theme,
             anchor_pos_x, x_from_margin,
             anchor_pos_y, y_from_para,
@@ -1388,6 +1535,8 @@ fn parse_wgp_shapes(
             group_page_off_x_emu / 12700.0, group_page_off_y_emu / 12700.0,
             idx as u32,
         ) {
+            shape.group_width_pt = Some(group_w_pt);
+            shape.group_height_pt = Some(group_h_pt);
             results.push(shape);
         }
     }
@@ -1522,6 +1671,14 @@ fn parse_wsp_shape(
 
 /// Extract text blocks and bodyPr from a wsp shape.
 /// Returns (blocks, anchor, inset_l, inset_t, inset_r, inset_b).
+///
+/// Per ECMA-376 §21.1.2.1.1, lIns/tIns/rIns/bIns are the distance from
+/// the rendered (page-space) bounding-box edge to the text, measured in
+/// page-space EMU. They are independent of any enclosing group's coordinate
+/// transform — the rendered shape edge and the rendered text position both
+/// live in page space, so the inset is invariant to the group's sx/sy scale.
+/// Defaults follow §21.1.2.1.1: lIns=rIns=91440 EMU (0.1in = 7.2pt),
+/// tIns=bIns=45720 EMU (0.05in = 3.6pt).
 fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
@@ -1533,10 +1690,11 @@ fn parse_shape_text_body(
         .and_then(|b| b.attribute("anchor"))
         .map(|s| s.to_string());
     let emu_to_pt = |v: &str| v.parse::<f64>().ok().map(|e| e / 12700.0).unwrap_or(0.0);
-    let l = body_pr.and_then(|b| b.attribute("lIns")).map(emu_to_pt).unwrap_or(0.0);
-    let t = body_pr.and_then(|b| b.attribute("tIns")).map(emu_to_pt).unwrap_or(0.0);
-    let r = body_pr.and_then(|b| b.attribute("rIns")).map(emu_to_pt).unwrap_or(0.0);
-    let b = body_pr.and_then(|b| b.attribute("bIns")).map(emu_to_pt).unwrap_or(0.0);
+    // ECMA-376 §21.1.2.1.1 defaults: lIns=rIns=91440 EMU, tIns=bIns=45720 EMU
+    let l = body_pr.and_then(|b| b.attribute("lIns")).map(emu_to_pt).unwrap_or(91440.0 / 12700.0);
+    let t = body_pr.and_then(|b| b.attribute("tIns")).map(emu_to_pt).unwrap_or(45720.0 / 12700.0);
+    let r = body_pr.and_then(|b| b.attribute("rIns")).map(emu_to_pt).unwrap_or(91440.0 / 12700.0);
+    let b = body_pr.and_then(|b| b.attribute("bIns")).map(emu_to_pt).unwrap_or(45720.0 / 12700.0);
 
     let blocks: Vec<ShapeText> = txbx
         .and_then(|t| t.children().find(|n| n.is_element() && n.tag_name().name() == "txbxContent"))

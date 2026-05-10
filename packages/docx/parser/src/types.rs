@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +19,14 @@ pub struct Document {
     /// document has no theme part or no Latin minor typeface is declared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minor_font: Option<String>,
+    /// ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
+    /// Maps font name to `<w:family @w:val>` (one of: "roman", "swiss", "modern",
+    /// "script", "decorative", "auto"). Used by the renderer to select the
+    /// correct CSS generic family (roman→serif, swiss→sans-serif, modern→monospace)
+    /// without relying on name-pattern heuristics. Empty when fontTable.xml
+    /// is absent or malformed.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub font_family_classes: HashMap<String, String>,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
@@ -238,6 +247,48 @@ pub struct ShapeRun {
     /// Values: "top", "center", "bottom".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_align: Option<String>,
+    /// ECMA-376 §20.4.2.7 wp14:pctPosHOffset / pctPosVOffset — fraction
+    /// of the relativeFrom container's width / height in 1/100,000ths of
+    /// a percent. When set, renderer ignores anchor_x_pt / anchor_y_pt
+    /// and computes the offset as `container_size * pct / 100000`. The
+    /// container is `anchor_*_relative_from` (page / margin / etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct_pos_h: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct_pos_v: Option<f64>,
+    /// `<wp:positionH/V relativeFrom="…">` — overrides the looser
+    /// `anchor_x_from_margin`/`anchor_y_from_para` booleans for the
+    /// pct-pos and align paths. Common values: "page", "margin",
+    /// "leftMargin"/"rightMargin", "insideMargin"/"outsideMargin",
+    /// "topMargin"/"bottomMargin", "paragraph", "line".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_relative_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_relative_from: Option<String>,
+    /// ECMA-376 §20.4.2.18 wp14:sizeRelH/sizeRelV — width/height as a
+    /// fraction of the relativeFrom container, in 1/100,000ths of a percent.
+    /// When set, the renderer uses this in place of `width_pt` / `height_pt`
+    /// for layout (text frame, align centering, shape draw rect). The
+    /// container is resolved by `width_relative_from` / `height_relative_from`
+    /// using the same rules as anchor positioning. `pct == 0` is treated as
+    /// "fall back to extent" (matches Word's empirical behavior).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_relative_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_relative_from: Option<String>,
+    /// Parent wgp group dimensions (pt). Set only when this shape is a child
+    /// of a `<wpg:wgp>` group; `None` for standalone wsp anchors. The renderer
+    /// uses these for align/pctPos math so the GROUP is positioned within
+    /// the relativeFrom container, and per-shape offsets (`anchor_x_pt` /
+    /// `anchor_y_pt`) carry the child's offset within the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_width_pt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_height_pt: Option<f64>,
     /// If true, draw the shape behind text (wp:anchor behindDoc="1"). Renderer
     /// should draw background shapes BEFORE body text.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

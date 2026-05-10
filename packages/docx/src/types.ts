@@ -9,6 +9,15 @@ export interface Document {
   majorFont?: string;
   /** Theme `<a:fontScheme><a:minorFont><a:latin@typeface>` (body face). */
   minorFont?: string;
+  /**
+   * ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
+   * Maps font name to `<w:family @w:val>`: "roman" | "swiss" | "modern" |
+   * "script" | "decorative" | "auto". The renderer uses this as the primary
+   * source for serif/sans-serif decisions (roman→serif, swiss→sans-serif,
+   * modern→monospace), falling back to name-pattern matching only when the
+   * entry is absent or classified as "auto".
+   */
+  fontFamilyClasses?: Record<string, string>;
 }
 
 export interface HeadersFooters {
@@ -168,6 +177,31 @@ export interface ShapeRun {
   anchorXAlign?: string | null;
   /** Vertical equivalent of anchorXAlign: "top" | "center" | "bottom". */
   anchorYAlign?: string | null;
+  /** ECMA-376 §20.4.2.7 wp14:pctPosHOffset / pctPosVOffset normalised to a
+   *  fraction in `[0, 1]`. When set the renderer multiplies it by the
+   *  relativeFrom container's width / height and uses that as the
+   *  shape's offset within the container, ignoring anchorXPt / anchorYPt. */
+  pctPosH?: number | null;
+  pctPosV?: number | null;
+  /** Raw `relativeFrom` value from `<wp:positionH>` / `<wp:positionV>` —
+   *  e.g. "page", "margin", "topMargin", "rightMargin",
+   *  "insideMargin", "paragraph", "line". Drives container selection
+   *  for both pctPos* and anchor*Align positioning. */
+  anchorXRelativeFrom?: string | null;
+  anchorYRelativeFrom?: string | null;
+  /** ECMA-376 §20.4.2.18 wp14:sizeRelH/sizeRelV — width/height as a
+   *  fraction of the relativeFrom container. When set, the renderer uses
+   *  this in place of `widthPt` / `heightPt` for layout. `pct == 0` from
+   *  the source is dropped at parse time (treated as "use extent"). */
+  widthPct?: number | null;
+  heightPct?: number | null;
+  widthRelativeFrom?: string | null;
+  heightRelativeFrom?: string | null;
+  /** Parent wgp group dimensions (pt) — set only when this shape is a child
+   *  of a `<wpg:wgp>`. Used by `resolveAnchor*` so align/pctPos resolve the
+   *  GROUP's origin, then `anchor[XY]Pt` adds the within-group offset. */
+  groupWidthPt?: number | null;
+  groupHeightPt?: number | null;
   /** Draw behind text when true (wp:anchor behindDoc="1"). */
   behindDoc?: boolean;
   /** Document-order index within a group; lower values render first. */

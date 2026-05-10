@@ -75,3 +75,13 @@ cd packages/docx/parser && wasm-pack build --target web --out-dir ../src/wasm
 ```bash
 npx playwright test packages/docx/tests/visual
 ```
+
+## ヒューリスティック禁止 (root CLAUDE.md と整合)
+
+DOCX 描画では特に anchor / wgp / docGrid / ruby 周りでヒューリスティックを入れたくなる場面が多い。以下を遵守すること:
+
+- **anchor 位置**: `positionH/V` の `relativeFrom` と `posOffset` / `align` / `pctPos` の意味は ECMA-376 §20.4.3.x で完全に定義されている。「sample-N に合わせるための定数 / 特殊分岐」は禁止。
+- **wgp グループ変換**: `lIns/tIns/rIns/bIns` は page-space EMU（グループ変換後の寸法で測る）。`anchorXPt/anchorYPt` は子座標系の offset に sx/sy を掛けて page-relative にする。`widthPt/heightPt` も cx/cy × sx/sy。これら全てが一貫したスケーリングを受けていないと位置ズレが積み重なる。
+- **フォント分類**: 名前パターンマッチではなく `word/fontTable.xml` の `<w:family w:val=…/>` (§17.8.3.10) を使う。パターンマッチはフォントテーブルにないケースへのフォールバックとしてのみ残す。
+- **改ページヒント**: `<w:lastRenderedPageBreak/>` (§17.3.1.20) は Word のレイアウトキャッシュ。「自前計算が壊れている特定パスでだけ信用する」のは禁止。自前計算を直すか、常に無視するかのいずれかを選ぶ。混在させない。
+- **仕様デフォルト値**: 属性省略時の `unwrap_or(0.0)` は多くの場合誤り。§21.1.2.1.1 の lIns=91440 EMU のように ECMA-376 にデフォルト値が定義されているものは必ずその値を使う。
