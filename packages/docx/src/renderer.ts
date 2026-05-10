@@ -1,5 +1,5 @@
 import type {
-  Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
+  Document, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
@@ -87,7 +87,7 @@ export interface RenderDocumentOptions {
   /** total pages in the document (used to resolve NUMPAGES fields) */
   totalPages?: number;
   /** Pre-computed page splits (from computePages). When provided, skips internal pagination. */
-  prebuiltPages?: BodyElement[][];
+  prebuiltPages?: PaginatedBodyElement[][];
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
 }
@@ -265,12 +265,12 @@ export function computePages(
   body: BodyElement[],
   section: SectionProps,
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-): BodyElement[][] {
+): PaginatedBodyElement[][] {
   const contentH = section.pageHeight - section.marginTop - section.marginBottom;
   const contentW = section.pageWidth - section.marginLeft - section.marginRight;
   const measureState = buildMeasureState(ctx, section);
 
-  const pages: BodyElement[][] = [[]];
+  const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
   let prevPara: DocParagraph | null = null;
   // Word collapses the gap between two paragraphs to max(prev.spaceAfter,
@@ -371,9 +371,28 @@ export function computePages(
       if (y > 0 && y + needed > contentH) {
         newPage();
       }
-      pages[pages.length - 1].push(el);
-      y += h;
-      measureState.y += h;
+
+      // ECMA-376 doesn't say "paragraphs must fit on one page" — Word
+      // splits long paragraphs at line boundaries. If the paragraph is
+      // taller than the remaining content area, walk the laid-out lines
+      // and emit one PaginatedBodyElement slice per page.
+      const remainingH = contentH - y;
+      if (h > remainingH && h > contentH * 0.5) {
+        const placed = splitParagraphAcrossPages(
+          measureState, para, contentW, suppressBefore, section.marginLeft,
+          y, contentH, pages,
+          () => { newPage(); },
+        );
+        // After splitting, `y` is the bottom of the last slice on the
+        // current page (continues for the LAST slice; intermediate slices
+        // filled their pages exactly, so newPage was called between them).
+        y = placed.endY;
+        measureState.y = section.marginTop + placed.endY;
+      } else {
+        pages[pages.length - 1].push(el as PaginatedBodyElement);
+        y += h;
+        measureState.y += h;
+      }
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
@@ -422,11 +441,15 @@ function estimateParagraphHeight(
   const indRight = para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
   const segs = buildSegments(para.runs, state);
+  // Word renders ruby paragraphs with consistent line spacing — every line
+  // in a paragraph that carries ANY furigana snaps to the same pitch
+  // multiple, otherwise mixed-ruby paragraphs jitter and pagination drifts.
+  const paraHasRuby = paragraphHasRuby(para);
   let textH: number;
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, 1);
-    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, state.docGrid);
+    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, state.docGrid, paraHasRuby);
   } else {
     // When anchor-image floats are active on the current page the paragraph
     // wraps around them, adding lines compared to a full-width layout. Use
@@ -435,13 +458,124 @@ function estimateParagraphHeight(
       startPageY: state.y,
       paraX: paraXPt,
       floats: state.floats,
-      lineBoxH: (a, d, hasRuby) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, hasRuby),
+      lineBoxH: (a, d, _h) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby),
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
-    textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, l.hasRuby), 0);
+    if (paraHasRuby) {
+      // Word uses the same line height for every line in a ruby paragraph.
+      const uniform = Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, true)));
+      textH = uniform * lines.length;
+    } else {
+      textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, false), 0);
+    }
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
+}
+
+/** Return true when any text run in the paragraph carries a `ruby` annotation.
+ *  Used to apply paragraph-wide line-height snapping to docGrid pitch — Word
+ *  renders the entire ruby paragraph with consistent line spacing so that
+ *  ruby-bearing and ruby-free lines line up on the same baseline grid. */
+function paragraphHasRuby(para: DocParagraph): boolean {
+  for (const run of para.runs) {
+    if (run.type === 'text' && (run as unknown as TextRun).ruby) return true;
+  }
+  return false;
+}
+
+/** Lay out a paragraph's lines, then walk the line list distributing them
+ *  across pages whenever the cumulative height would exceed the page bottom.
+ *  Each per-page chunk is appended to `pages` as a `lineSlice`-tagged
+ *  PaginatedBodyElement — the renderer reads `lineSlice` and renders only
+ *  that index range, padding the leading/trailing space-before/after on
+ *  the appropriate sides.
+ *
+ *  Returns the Y where the FINAL slice ends on the current (last) page, so
+ *  the caller can advance `y` / `measureState.y` accordingly.
+ */
+function splitParagraphAcrossPages(
+  measureState: RenderState,
+  para: DocParagraph,
+  contentWPt: number,
+  suppressSpaceBefore: boolean,
+  marginLeftPt: number,
+  initialY: number,
+  contentH: number,
+  pages: PaginatedBodyElement[][],
+  newPage: () => void,
+): { endY: number } {
+  const indLeft = para.indentLeft;
+  const indRight = para.indentRight;
+  const paraW = Math.max(1, contentWPt - indLeft - indRight);
+  const segs = buildSegments(para.runs, measureState);
+  if (segs.length === 0) {
+    // No layoutable content — treat as a single empty line, fits or pushes.
+    pages[pages.length - 1].push(para as PaginatedBodyElement);
+    return { endY: initialY + estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt) };
+  }
+  const wrapCtx: WrapLayoutCtx | undefined = measureState.floats.length > 0 ? {
+    startPageY: measureState.y,
+    paraX: marginLeftPt,
+    floats: measureState.floats,
+    lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para)),
+    pageH: measureState.pageH,
+  } : undefined;
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
+  const paraHasRuby = paragraphHasRuby(para);
+
+  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby);
+  const uniformH = paraHasRuby ? Math.max(0, ...lines.map(perLineH)) : 0;
+  const lineHeights = lines.map(l => paraHasRuby ? uniformH : perLineH(l));
+  const spaceBefore = suppressSpaceBefore ? 0 : para.spaceBefore;
+  const spaceAfter = para.spaceAfter;
+
+  let lineIdx = 0;
+  let cursorY = initialY;
+  let isFirstSliceOnPage = true; // first slice carries spaceBefore
+  while (lineIdx < lines.length) {
+    // Available space on the current page from cursorY downward.
+    const remaining = contentH - cursorY;
+    // First slice on a page reserves spaceBefore; the LAST slice (covering
+    // the final line) reserves spaceAfter.
+    const sliceLeading = isFirstSliceOnPage ? spaceBefore : 0;
+    let usedH = sliceLeading;
+    let firstFitting = lineIdx;
+    let lastFitting = lineIdx;
+    while (lastFitting < lines.length && usedH + lineHeights[lastFitting] <= remaining) {
+      usedH += lineHeights[lastFitting];
+      lastFitting++;
+    }
+    if (lastFitting === firstFitting) {
+      // Not even one line fits on this page — flush to a new page and retry.
+      // Guard against infinite loop: if we're already at the start of a
+      // fresh page (cursorY ≈ 0) and still don't fit, force-emit one line.
+      if (cursorY > 0) {
+        newPage();
+        cursorY = 0;
+        isFirstSliceOnPage = true;
+        continue;
+      }
+      // First page, first line doesn't fit — force-emit it and let it overflow.
+      lastFitting = firstFitting + 1;
+      usedH += lineHeights[firstFitting];
+    }
+    const isFinalSlice = lastFitting === lines.length;
+    if (isFinalSlice) usedH += spaceAfter;
+    pages[pages.length - 1].push({
+      ...(para as object),
+      type: 'paragraph',
+      lineSlice: { start: firstFitting, end: lastFitting },
+    } as PaginatedBodyElement);
+    lineIdx = lastFitting;
+    cursorY += usedH;
+    if (!isFinalSlice) {
+      newPage();
+      cursorY = 0;
+      isFirstSliceOnPage = true;
+    }
+  }
+  return { endY: cursorY };
 }
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
@@ -513,18 +647,24 @@ function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): bo
   return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
 }
 
-function renderBodyElements(elements: BodyElement[], state: RenderState): void {
+function renderBodyElements(elements: PaginatedBodyElement[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
   for (const el of elements) {
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
+      const slice = (el as PaginatedBodyElement).lineSlice;
       const suppress = contextualSuppressed(prevPara, para);
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
       const overlap = Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
-      renderParagraph(para, state, suppress);
+      // Continuation slices (slice.start > 0) suppress spaceBefore: the
+      // earlier slice already consumed it on the previous page. Likewise
+      // mid-paragraph slices (slice.end < total) suppress spaceAfter — only
+      // the slice covering the FINAL line of the paragraph emits it.
+      const isContinuation = !!slice && slice.start > 0;
+      renderParagraph(para, state, suppress || isContinuation, slice);
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
@@ -551,7 +691,14 @@ function renderParaList(paras: DocParagraph[], state: RenderState): void {
 
 // ===== Paragraph rendering =====
 
-function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBefore = false): void {
+function renderParagraph(
+  para: DocParagraph,
+  state: RenderState,
+  suppressSpaceBefore = false,
+  /** When set, render only `lines[start, end)` of the laid-out paragraph,
+   *  used by the paginator to split paragraphs that don't fit on one page. */
+  lineSlice?: { start: number; end: number },
+): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun } = state;
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
   const paragraphStartY = state.y;
@@ -588,11 +735,15 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
 
   // Collect all text segments with formatting (resolving field runs against page context)
   const segments = buildSegments(para.runs, state);
+  // Word renders ruby paragraphs with consistent line spacing — every line
+  // in a paragraph that carries ANY furigana snaps to the same pitch
+  // multiple. Compute once at paragraph scope and share with the line loop.
+  const paraHasRuby = paragraphHasRuby(para);
 
   if (segments.length === 0) {
     const fontSizePt = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fontSizePt, scale);
-    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid);
+    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby);
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
       ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
@@ -610,14 +761,26 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d, hasRuby) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid, hasRuby),
+    lineBoxH: (a, d, _h) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid, paraHasRuby),
     pageH: state.pageH,
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
+  // For paragraphs that carry any ruby annotation, Word renders every line
+  // at the SAME height (the tallest natural line in the paragraph). Without
+  // that consistency, ruby and non-ruby lines alternate vertically and the
+  // baseline grid drifts. Compute it once here and reuse it below.
+  const uniformLineH = paraHasRuby
+    ? Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, true)))
+    : 0;
+  const lineHForLine = (l: typeof lines[number]): number =>
+    paraHasRuby
+      ? uniformLineH
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, false);
+
   if (para.shading && !dryRun) {
-    const totalTextH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, l.hasRuby), 0);
+    const totalTextH = lines.reduce((s, l) => s + lineHForLine(l), 0);
     ctx.fillStyle = `#${para.shading}`;
     ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
   }
@@ -639,9 +802,18 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     return c;
   };
 
-  for (let li = 0; li < lines.length; li++) {
+  // Slice bounds — when the paginator split this paragraph across pages,
+  // only render lines in [sliceStart, sliceEnd). The first line we paint
+  // resets state.y baseline so the slice begins at the page's content top.
+  const sliceStart = lineSlice ? lineSlice.start : 0;
+  const sliceEnd = lineSlice ? lineSlice.end : lines.length;
+  for (let li = sliceStart; li < sliceEnd; li++) {
     const line = lines[li];
+    // First-line indent and numbering prefix only apply to the paragraph's
+    // ORIGINAL first line, not the first line of a continuation slice.
     const firstLine = li === 0;
+    // Last-line justification flips off only at the paragraph's true end —
+    // mid-paragraph slices keep justifying through to the slice boundary.
     const isLastLine = li === lines.length - 1;
 
     // Honor wrap-computed line topY (may push past topAndBottom floats).
@@ -649,8 +821,10 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
 
     // Word centers the font's natural line (ascent+descent) within the expanded
     // line box — extra space from auto/exact/atLeast goes half above and half
-    // below the glyphs. Baseline = top + halfExtra + ascent.
-    const lineH = lineBoxHeight(para.lineSpacing, line.ascent, line.descent, scale, state.docGrid, line.hasRuby);
+    // below the glyphs. Baseline = top + halfExtra + ascent. For ruby
+    // paragraphs every line uses the same height (the max natural line) so
+    // ruby- and non-ruby-bearing lines share a baseline grid.
+    const lineH = lineHForLine(line);
     const naturalLineH = line.ascent + line.descent;
     const baseline = state.y + (lineH - naturalLineH) / 2 + line.ascent;
 
@@ -808,10 +982,17 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale);
   }
 
-  state.y += para.spaceAfter * scale;
+  // spaceAfter is paragraph-level; only emit it on the slice that covers
+  // the FINAL line of the paragraph (or when no slice is set at all).
+  const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
+  if (isFinalSlice) state.y += para.spaceAfter * scale;
 
-  // Anchor images are absolutely positioned — draw after inline flow
-  renderAnchorImages(para, state, paragraphStartY);
+  // Anchor images are absolutely positioned — draw after inline flow.
+  // Skip this for continuation slices: anchor positioning is paragraph-relative
+  // and the first slice already painted them.
+  if (!lineSlice || lineSlice.start === 0) {
+    renderAnchorImages(para, state, paragraphStartY);
+  }
 }
 
 // ===== Text layout =====
@@ -1258,12 +1439,15 @@ function layoutLines(
     // line boxes do not jitter based on the specific characters on each line.
     let asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
     const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
-    // Ruby annotation: a small string rendered above the base. Reserve space
-    // for it in the line's ascent so the line box grows to fit (ECMA-376
-    // §17.3.3.25). 1.1× of the annotation font gives a small gap above the
-    // base glyphs.
+    // Ruby annotation: small text rendered above the base. Reserve enough
+    // ascent room so the line box grows for it (ECMA-376 §17.3.3.25). The
+    // 3.5× rt-size reserve was tuned against sample-5 page-3 — Word
+    // renders a 13.5pt base + 8pt rt line at ~45pt total, which is what
+    //   base_natural (~13.5pt) + 3.5 × rt_size (28pt) + descent (~3pt)
+    // produces. Snapping to integer grid pitches over-rounded; Word does
+    // not snap ruby lines.
     if (s.ruby) {
-      asc = asc + s.ruby.fontSizePt * scale * 1.1;
+      asc = asc + s.ruby.fontSizePt * scale * 3.5;
     }
     // Wrap-fit check uses two standard typographic allowances:
     //   1. Trailing-space collapse: if this word becomes the last on the
@@ -1722,13 +1906,14 @@ function measureParaHeight(
   scale: number,
 ): number {
   const segs = buildSegments(para.runs, state);
+  const paraHasRuby = paragraphHasRuby(para);
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
-    return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid);
+    return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby);
   }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, l.hasRuby), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby), 0);
 }
 
 function measureCellContent(
@@ -2007,27 +2192,23 @@ function lineBoxHeight(
   // ESSAY (9 pt, no explicit line) at ~1 pitch (~18 pt) while a 1.33×
   // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
   //
-  // Word additionally snaps the line up to an INTEGER multiple of the grid
-  // pitch when the line carries furigana (`<w:ruby>`). The annotation runs
-  // raise the natural ascent past one pitch; without snapping, ruby lines
-  // overlap the previous line's descent because Word reserves whole grid
-  // slots for them. We only enable that snap when (a) the line actually
-  // carries ruby and (b) the natural height already exceeds the pitch —
-  // otherwise tall headings on a docGrid section would also get snapped
-  // upward, which doesn't match Word's render of e.g. a 24-pt heading on
-  // a docGrid="lines" pitch=18 section.
-  const snapUpward = (h: number): number =>
-    hasGrid && hasRuby && h > pitchPx
-      ? Math.ceil(h / pitchPx) * pitchPx
-      : h;
+  // Note on ruby paragraphs: an earlier version of this function snapped
+  // ruby lines up to the next integer grid pitch on the theory that Word
+  // reserves whole grid slots for them. Empirical comparison against Word
+  // PNG exports of sample-5 (13.5pt base + 8pt rt on pitch=18) showed
+  // Word does NOT snap to integer pitches — the actual line height lands
+  // around 2.3× the pitch, which is what `natural` produces directly when
+  // the rt reserve in buildSegments is set generously enough. So the
+  // ruby-aware logic now lives entirely in the segment-level ascent
+  // reservation, and lineBoxHeight stays format-agnostic.
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
-    return hasGrid ? snapUpward(Math.max(natural, pitchPx)) : natural;
+    return hasGrid ? Math.max(natural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      if (inheritedOnly) return snapUpward(Math.max(natural, pitchPx));
-      return snapUpward(Math.max(natural, pitchPx * ls.value));
+      if (inheritedOnly) return Math.max(natural, pitchPx);
+      return Math.max(natural, pitchPx * ls.value);
     }
     return natural * ls.value;
   }

@@ -45,6 +45,15 @@ export type BodyElement =
   | { type: 'table' } & DocTable
   | { type: 'pageBreak'; parity?: 'odd' | 'even' };
 
+/** A BodyElement annotated with a line range to render. Set when the
+ *  paginator splits a paragraph that doesn't fit on a single page —
+ *  `lineSlice` constrains which laid-out line indices the renderer paints,
+ *  and the renderer adjusts the starting Y so the slice's first line begins
+ *  at the page's content top. */
+export type PaginatedBodyElement = BodyElement & {
+  lineSlice?: { start: number; end: number };
+};
+
 export interface DocParagraph {
   /**
    * ECMA-376 §17.18.44 ST_Jc. Renderer honors left, start, center, right, end,

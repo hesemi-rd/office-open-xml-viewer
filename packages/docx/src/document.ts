@@ -1,7 +1,7 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
-import type { BodyElement, Document, RenderPageOptions, WorkerResponse } from './types';
+import type { PaginatedBodyElement, Document, RenderPageOptions, WorkerResponse } from './types';
 import { computePages, renderDocumentToCanvas } from './renderer';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
@@ -29,7 +29,7 @@ export type LoadOptions = CoreLoadOptions;
 
 export class DocxDocument {
   private _document: Document | null = null;
-  private _pages: BodyElement[][] | null = null;
+  private _pages: PaginatedBodyElement[][] | null = null;
   private _worker: Worker;
 
   private constructor() {
@@ -88,7 +88,7 @@ export class DocxDocument {
     return this._document;
   }
 
-  private _getPages(): BodyElement[][] {
+  private _getPages(): PaginatedBodyElement[][] {
     if (this._pages) return this._pages;
     if (!this._document) return [];
     const measure = new OffscreenCanvas(1, 1);
