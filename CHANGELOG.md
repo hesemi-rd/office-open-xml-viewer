@@ -4,6 +4,23 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.32.0 — 2026-05-11
+
+This release is **MCP-server-focused**. The renderer (xlsx / docx / pptx viewers) is byte-identical to 0.31.0 — confirmed by running the full demo VRT against the rebuilt WASM (xlsx 5/5, docx 6/6, pptx 9/9 at 100% match). No README screenshot updates because of this.
+
+### Features
+
+- **mcp-server**: 30 new tools, bringing the total from 14 to 41. The previous toolkit was limited to text extraction and cell reads; the new tools expose chart data, named ranges, conditional formats, sheet layout, table / picture / shape drill-down, paragraph run formatting, document outlines, comments, footnotes, track changes, data validations, slide notes, and inferred shape relations on PPTX slides.
+- **mcp-server**: `pptx_get_shape_relations` infers connector hookups (with arrow direction when `headEnd` / `tailEnd` are arrows), bbox containment, overlap (with IoU), and axis-aligned alignment groups on a slide. Detection is purely spatial — `confidence: "inferred"` flags this — and uses the new shape `id` / `name` parser fields for stable referencing.
+- **pptx-parser**: `<p:cNvPr @id @name>` and `<p:nvPr><p:ph @type @idx>` are now serialized on every `ShapeElement` as `id` / `name` / `placeholderType` / `placeholderIdx`. The placeholder fields fix `slide_title` resolution: agents can now filter for `placeholderType ∈ {"title", "ctrTitle"}` instead of returning whichever shape happens to be first in z-order.
+- **pptx-parser**: `ppt/notesSlides/notesSlideN.xml` and legacy `ppt/comments/commentN.xml` (with author resolution from `ppt/commentAuthors.xml`) are now parsed and surfaced on each `Slide` as `notes` and `comments`. Modern Office365 threaded comments still TODO.
+- **docx-parser**: `<w:outlineLvl>` is surfaced on `DocParagraph` (was internal in `ParaFmt` only). `<w:ins>` / `<w:del>` track-changes events are collected with author / date / text in `Document.revisions` (a non-disturbing second pass — body parse logic and rendering unchanged). `word/comments.xml`, `word/footnotes.xml`, and `word/endnotes.xml` are now parsed into `Document.comments` / `footnotes` / `endnotes`.
+- **xlsx-parser**: `<dataValidation>` rules (ECMA-376 §18.3.1.32) are now parsed into `Worksheet.dataValidations`. Comment full text and resolved author are now in `Worksheet.comments`; `comment_refs` (used by the renderer for the red-triangle indicator) is derived from this list and remains stable.
+
+### Fixes
+
+- **mcp-server/pptx**: `pptx_extract_text`, `pptx_search_text`, and `pptx_get_slide_structure` had three latent bugs that all silently produced empty output: the helper matched run-tag strings (`"textRun" / "run"`) that don't exist (pptx-parser emits `"text"` / `"break"` after `rename_all = "camelCase"`); `slide_title` checked a `placeholderType` field that the parser hadn't been serializing yet; and table-cell extraction looked at `cell.paragraphs` instead of `cell.textBody.paragraphs`. All three are fixed with regression tests against sample-1.pptx.
+
 ## 0.31.0 — 2026-05-10
 
 ### Fixes
