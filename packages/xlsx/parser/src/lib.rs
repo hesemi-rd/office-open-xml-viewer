@@ -3871,8 +3871,14 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
     let mut data_label_position: Option<String> = None;
-    let mut data_label_font_color: Option<String> = None;
     let mut data_label_format_code: Option<String> = None;
+    // Data-label text color is theme-aware, so we hoist the extraction to a
+    // shared helper backed by an `XlsxColorResolver`. It walks chart-level
+    // and per-series `<c:dLbls><c:txPr>...<a:solidFill>` in document order
+    // and returns the first one it can resolve.
+    let xlsx_resolver = XlsxColorResolver { theme_colors };
+    let data_label_font_color =
+        ooxml_common::chart::extract_data_label_font_color(chart_root, &xlsx_resolver);
 
     // Recognised chart-type element names → our internal type strings
     let type_map: &[(&str, &str)] = &[
@@ -4065,22 +4071,8 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                                         .filter(|s| !s.is_empty() && s != "General");
                                 }
                             }
-                            "txPr" => {
-                                // Resolve first solidFill under defRPr/rPr for
-                                // the data label text color. Common Excel
-                                // pattern: <a:solidFill><a:schemeClr val="bg1"/>
-                                // → white when bars are dark.
-                                if data_label_font_color.is_none() {
-                                    for desc in d.descendants().filter(|n| n.is_element()) {
-                                        if desc.tag_name().namespace() != Some(a_ns) { continue; }
-                                        if desc.tag_name().name() != "solidFill" { continue; }
-                                        if let Some(c) = resolve_fill_color(&desc, theme_colors) {
-                                            data_label_font_color = Some(c);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                            // txPr (data-label text color) is now resolved
+                            // up front via ooxml_common::chart::extract_data_label_font_color.
                             _ => {}
                         }
                     }
@@ -4132,18 +4124,8 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                                     .filter(|s| !s.is_empty() && s != "General");
                             }
                         }
-                        "txPr" => {
-                            if data_label_font_color.is_none() {
-                                for desc in d.descendants().filter(|n| n.is_element()) {
-                                    if desc.tag_name().namespace() != Some(a_ns) { continue; }
-                                    if desc.tag_name().name() != "solidFill" { continue; }
-                                    if let Some(c) = resolve_fill_color(&desc, theme_colors) {
-                                        data_label_font_color = Some(c);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                        // txPr (data-label text color) handled by the
+                        // shared helper before this loop runs.
                         _ => {}
                     }
                 }
@@ -4414,6 +4396,20 @@ fn extract_chart_title(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> 
 /// Theme colors use drawingML names (`accent1`..`accent6`, `dk1`/`dk2`/`lt1`/`lt2`)
 /// which map to the parser's natural-order theme array (dk1@0, lt1@1, dk2@2,
 /// lt2@3, accent1@4 … accent6@9).
+/// `ooxml_common::chart::ColorResolver` implementation backed by xlsx's
+/// indexed `theme_colors` slice. Drives the chart helpers in ooxml-common
+/// that need theme-aware color resolution (e.g. data-label text color)
+/// without leaking the slice shape into the shared crate.
+struct XlsxColorResolver<'a> {
+    theme_colors: &'a [String],
+}
+
+impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
+    fn resolve_solid_fill(&self, node: roxmltree::Node<'_, '_>) -> Option<String> {
+        resolve_fill_color(&node, self.theme_colors)
+    }
+}
+
 fn resolve_fill_color(fill_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
     // Accept either a `<a:solidFill>` directly or a `<c:spPr>` whose first
     // fill-ish child is `<a:solidFill>`. Looking at *direct* children (not
