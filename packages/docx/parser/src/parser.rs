@@ -2057,8 +2057,11 @@ fn parse_table_cell(
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
+    // ECMA-376 §17.4.85: ST_Merge default is "continue", so a <w:vMerge/>
+    // element with no val attribute means the cell continues the merged
+    // region from the row above. Only val="restart" begins a new merge.
     let v_merge = tc_pr.and_then(|p| child_w(p, "vMerge")).map(|m| {
-        attr_w(m, "val").map(|v| v == "restart").unwrap_or(true)
+        attr_w(m, "val").map(|v| v == "restart").unwrap_or(false)
     });
 
     let borders = tc_pr.and_then(|p| child_w(p, "tcBorders"))

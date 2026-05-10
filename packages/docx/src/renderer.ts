@@ -625,10 +625,14 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
   const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
   const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
   const colWidths = table.colWidths.map((w) => w * colScale);
-  let h = 0;
-  for (const row of table.rows) {
+
+  const rowHs: number[] = [];
+  const restartInfo: Array<{ ri: number; ci: number; contentH: number }> = [];
+
+  for (let ri = 0; ri < table.rows.length; ri++) {
+    const row = table.rows[ri];
     if (row.rowHeight != null && row.rowHeightRule === 'exact') {
-      h += row.rowHeight;
+      rowHs.push(row.rowHeight);
       continue;
     }
     let rowH = row.rowHeight != null ? row.rowHeight : 10;
@@ -645,12 +649,52 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
           ch += estimateTableHeight(state, ce as unknown as DocTable, innerW);
         }
       }
-      if (ch > rowH) rowH = ch;
+      // ECMA-376 §17.4.85: vMerge=restart cell content spans the merged region;
+      // do not inflate the first row alone. vMerge=false (continue) renders no
+      // content. Both are deferred to the post-pass below.
+      if (cell.vMerge === true) {
+        restartInfo.push({ ri, ci, contentH: ch });
+      } else if (cell.vMerge !== false) {
+        if (ch > rowH) rowH = ch;
+      }
       ci += span;
     }
-    h += rowH;
+    rowHs.push(rowH);
   }
-  return h;
+
+  for (const info of restartInfo) {
+    const endRi = findMergeEndRow(table, info.ri, info.ci);
+    let spanH = 0;
+    for (let rj = info.ri; rj <= endRi; rj++) spanH += rowHs[rj];
+    if (spanH < info.contentH) {
+      rowHs[endRi] += info.contentH - spanH;
+    }
+  }
+
+  return rowHs.reduce((s, x) => s + x, 0);
+}
+
+/** Find the last row index in a vMerge span starting at (startRi, startCi) —
+ *  i.e. walk forward while subsequent rows have a cell at column-start ci with
+ *  vMerge=false (continue). ECMA-376 §17.4.85. */
+function findMergeEndRow(table: DocTable, startRi: number, startCi: number): number {
+  let endRi = startRi;
+  for (let rj = startRi + 1; rj < table.rows.length; rj++) {
+    const row = table.rows[rj];
+    let ci = 0;
+    let matched = false;
+    for (const cell of row.cells) {
+      if (ci === startCi) {
+        if (cell.vMerge === false) matched = true;
+        break;
+      }
+      if (ci > startCi) break;
+      ci += cell.colSpan;
+    }
+    if (!matched) break;
+    endRi = rj;
+  }
+  return endRi;
 }
 
 function pickHeaderFooter(
@@ -2004,6 +2048,28 @@ function renderTable(table: DocTable, state: RenderState): void {
     rowHeights.push(rowH);
   }
 
+  // ECMA-376 §17.4.85: extend each vMerge span's last row when the restart
+  // cell's content exceeds the sum of its rows. calculateRowHeight excluded
+  // restart cells from per-row height to keep the FIRST row from absorbing
+  // all the content of a tall merged cell.
+  for (let ri = 0; ri < table.rows.length; ri++) {
+    let ci = 0;
+    for (const cell of table.rows[ri].cells) {
+      const span = Math.min(cell.colSpan, colWidths.length - ci);
+      if (cell.vMerge === true) {
+        const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+        const contentH = measureRestartCellContentHeight(cell, table, cellW, scale, state);
+        const endRi = findMergeEndRow(table, ri, ci);
+        let spanH = 0;
+        for (let rj = ri; rj <= endRi; rj++) spanH += rowHeights[rj];
+        if (spanH < contentH) {
+          rowHeights[endRi] += contentH - spanH;
+        }
+      }
+      ci += span;
+    }
+  }
+
   let y = state.y;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
@@ -2015,8 +2081,18 @@ function renderTable(table: DocTable, state: RenderState): void {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
 
-      if (cell.vMerge !== false) {
-        if (!dryRun) renderCell(cell, table, x, y, cellW, rowH, state);
+      if (cell.vMerge === false) {
+        // continue cell — content is rendered by its restart partner.
+      } else {
+        // ECMA-376 §17.4.85: a vMerge=restart cell visually occupies the full
+        // merged span; use the sum of row heights for its render box.
+        let drawH = rowH;
+        if (cell.vMerge === true) {
+          const endRi = findMergeEndRow(table, ri, ci);
+          drawH = 0;
+          for (let rj = ri; rj <= endRi; rj++) drawH += rowHeights[rj];
+        }
+        if (!dryRun) renderCell(cell, table, x, y, cellW, drawH, state);
         else measureCellContent(cell, table, cellW, scale, state);
       }
 
@@ -2058,6 +2134,24 @@ function calculateRowHeight(
     const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
     const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
 
+    // ECMA-376 §17.4.85 (w:vMerge): a vMerge=restart cell's content occupies
+    // the entire merged span (this row + following rows whose same column
+    // carries vMerge=continue). Including its content height in THIS row's
+    // height would inflate the first row of the span and push subsequent
+    // content downward — Word distributes the merged-cell content across the
+    // full span instead. We exclude such cells here; the calling code applies
+    // a second pass to extend the span's last row when the merged sum is
+    // shorter than the restart cell's content.
+    if (cell.vMerge === true) {
+      ci += span;
+      continue;
+    }
+    // vMerge=false (continue) cells contain no rendered content.
+    if (cell.vMerge === false) {
+      ci += span;
+      continue;
+    }
+
     let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
     for (const ce of cell.content) {
       h += measureCellElementHeight(state, ce, contentW, scale);
@@ -2066,6 +2160,23 @@ function calculateRowHeight(
     ci += span;
   }
   return maxH;
+}
+
+/** Measure a vMerge=restart cell's full content height including cell margins.
+ *  Used by the pass-2 merge-span extension in renderTable / estimateTableHeight. */
+function measureRestartCellContentHeight(
+  cell: DocTableCell,
+  table: DocTable,
+  cellW: number,
+  scale: number,
+  state: RenderState,
+): number {
+  const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
+  let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
+  for (const ce of cell.content) {
+    h += measureCellElementHeight(state, ce, contentW, scale);
+  }
+  return h;
 }
 
 function measureParaHeight(
