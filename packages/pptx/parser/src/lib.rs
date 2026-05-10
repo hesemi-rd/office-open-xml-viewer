@@ -961,6 +961,20 @@ fn resolve_theme_typeface(typeface: &str, theme: &HashMap<String, String>) -> St
     typeface.to_string()
 }
 
+/// `ooxml_common::chart::ColorResolver` implementation backed by pptx's
+/// `HashMap<String, String>` theme palette and PowerPoint's tint formula.
+/// Used by chart helpers in ooxml-common that need to resolve
+/// `<a:solidFill>` text colors without owning the theme storage.
+struct PptxColorResolver<'a> {
+    theme: &'a HashMap<String, String>,
+}
+
+impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
+    fn resolve_solid_fill(&self, node: roxmltree::Node<'_, '_>) -> Option<String> {
+        parse_color_node(node, self.theme)
+    }
+}
+
 /// Resolve a color node (solidFill child / run rPr child) to a hex string.
 /// Handles srgbClr, sysClr, prstClr, and schemeClr (with transform support).
 fn parse_color_node(
@@ -2693,22 +2707,12 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let data_label_position = ooxml_common::chart::extract_data_label_position(root);
     let data_label_format_code = ooxml_common::chart::extract_data_label_format_code(root);
 
-    // Data-label font color still needs theme-aware color resolution, which
-    // pptx does via parse_color_node + a HashMap theme map. Keep that part
-    // local until ooxml-common gains a generic ColorResolver.
-    let mut data_label_font_color: Option<String> = None;
-    for dlbls in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "dLbls") {
-        if let Some(txpr) = dlbls.children().find(|n| n.is_element() && n.tag_name().name() == "txPr") {
-            for desc in txpr.descendants().filter(|n| n.is_element()) {
-                if desc.tag_name().name() != "solidFill" { continue; }
-                if let Some(c) = parse_color_node(desc, theme) {
-                    data_label_font_color = Some(c);
-                    break;
-                }
-            }
-            if data_label_font_color.is_some() { break; }
-        }
-    }
+    // Data-label font color uses the shared helper too — pptx supplies a
+    // ColorResolver wrapper around `parse_color_node` so the
+    // ECMA-376 §21.2.2.16 dLbls > txPr > solidFill walk lives in one place.
+    let resolver = PptxColorResolver { theme };
+    let data_label_font_color =
+        ooxml_common::chart::extract_data_label_font_color(root, &resolver);
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);

@@ -36,6 +36,27 @@ fn child<'a, 'i>(parent: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
     parent.children().find(|n| n.is_element() && n.tag_name().name() == name)
 }
 
+/// Theme-aware color resolution for chart text-color helpers.
+///
+/// pptx and xlsx store their theme palettes in different shapes
+/// (`HashMap<String, String>` vs. `&[String]`) and apply DrawingML
+/// transforms with different `tint` formulas (Word-literal vs. linear
+/// sRGB lerp), so each crate keeps its own resolver. The shared chart
+/// helpers take a `&dyn ColorResolver` instead of either concrete type so
+/// fields like `<c:dLbls><c:txPr>...<a:solidFill>` can be extracted once.
+pub trait ColorResolver {
+    /// Resolve an `<a:solidFill>` node to a hex string (no leading `#`),
+    /// or `None` when the contained color child can't be mapped to a
+    /// concrete RGB value (for example a `<a:schemeClr val="phClr"/>`
+    /// that the implementation chooses not to substitute).
+    ///
+    /// The node passed in is the `<a:solidFill>` element itself; the
+    /// implementation reads its direct children for the actual color
+    /// (`<a:srgbClr>` / `<a:schemeClr>` / `<a:sysClr>` / `<a:prstClr>`)
+    /// and applies the surrounding lumMod/lumOff/tint/shade transforms.
+    fn resolve_solid_fill(&self, node: Node) -> Option<String>;
+}
+
 /// `<c:legend>` presence + `<c:legendPos val>` (ECMA-376 §21.2.2.10).
 ///
 /// `(show_legend, legend_pos)`. When the chart omits `<c:legend>` Office
@@ -162,6 +183,32 @@ pub fn extract_data_label_font_size(root: Node) -> Option<i32> {
         })
 }
 
+/// First `<c:dLbls><c:txPr>...<a:solidFill>` resolved to a hex color.
+///
+/// Walks each `<c:dLbls>` (chart-level + per-series) in document order,
+/// drills into its `<c:txPr>` and looks for the first descendant
+/// `<a:solidFill>` whose color the resolver can map. Stops on the first
+/// successful resolution — this matches the chart-then-series fallback
+/// pattern Office writers actually emit (e.g. a top-level `<c:dLbls>`
+/// declaring the label color globally and the `<c:ser><c:dLbls>` blocks
+/// inheriting it).
+///
+/// Note we deliberately scope the search to inside `<c:txPr>` so a
+/// sibling `<c:dLbls><c:spPr><a:solidFill>` (the label *background*
+/// fill, distinct from the text color) can't shadow the answer.
+pub fn extract_data_label_font_color(root: Node, resolver: &dyn ColorResolver) -> Option<String> {
+    for dlbls in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "dLbls") {
+        let Some(txpr) = child(dlbls, "txPr") else { continue; };
+        for desc in txpr.descendants().filter(|n| n.is_element()) {
+            if desc.tag_name().name() != "solidFill" { continue; }
+            if let Some(c) = resolver.resolve_solid_fill(desc) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
 /// chartEx (`<cx:chartSpace>`) axis visibility. ChartEx encodes the
 /// scale type via a `<cx:catScaling>` / `<cx:valScaling>` child rather
 /// than separate `<c:catAx>` / `<c:valAx>` elements, so callers can't just
@@ -282,6 +329,73 @@ mod tests {
         </c:valAx>"#;
         let d = root_of(xml);
         assert_eq!(extract_axis_format_code(d.root_element()).as_deref(), Some("0.0%"));
+    }
+
+    /// Test resolver: returns the schemeClr@val verbatim, or the srgbClr@val
+    /// uppercased. Just enough to drive `extract_data_label_font_color`.
+    struct StubResolver;
+    impl ColorResolver for StubResolver {
+        fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+            for c in node.children().filter(|n| n.is_element()) {
+                match c.tag_name().name() {
+                    "srgbClr" => return c.attribute("val").map(|v| v.to_uppercase()),
+                    "schemeClr" => return c.attribute("val").map(|v| v.to_string()),
+                    _ => {}
+                }
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn data_label_font_color_resolves_via_resolver() {
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:plotArea>
+                <c:dLbls>
+                    <c:txPr><a:p><a:r><a:rPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:rPr></a:r></a:p></c:txPr>
+                </c:dLbls>
+            </c:plotArea>
+        </c:chart>"#;
+        let d = root_of(xml);
+        let got = extract_data_label_font_color(d.root_element(), &StubResolver);
+        assert_eq!(got.as_deref(), Some("bg1"));
+    }
+
+    #[test]
+    fn data_label_font_color_skips_label_background_fill() {
+        // `<c:spPr><a:solidFill>` (label background) must not be picked up;
+        // only the text fill inside `<c:txPr>` counts.
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:plotArea>
+                <c:dLbls>
+                    <c:spPr><a:solidFill><a:srgbClr val="aabbcc"/></a:solidFill></c:spPr>
+                </c:dLbls>
+            </c:plotArea>
+        </c:chart>"#;
+        let d = root_of(xml);
+        let got = extract_data_label_font_color(d.root_element(), &StubResolver);
+        assert!(got.is_none(), "spPr fill must not leak into the font color: got {got:?}");
+    }
+
+    #[test]
+    fn data_label_font_color_first_dlbls_wins() {
+        // Mimics Office writers that put a chart-level dLbls block AND
+        // per-series ones — the first txPr resolution wins.
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:plotArea>
+                <c:dLbls>
+                    <c:txPr><a:p><a:r><a:rPr><a:solidFill><a:srgbClr val="ffffff"/></a:solidFill></a:rPr></a:r></a:p></c:txPr>
+                </c:dLbls>
+                <c:barChart>
+                    <c:ser><c:dLbls>
+                        <c:txPr><a:p><a:r><a:rPr><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:rPr></a:r></a:p></c:txPr>
+                    </c:dLbls></c:ser>
+                </c:barChart>
+            </c:plotArea>
+        </c:chart>"#;
+        let d = root_of(xml);
+        let got = extract_data_label_font_color(d.root_element(), &StubResolver);
+        assert_eq!(got.as_deref(), Some("FFFFFF"));
     }
 
     #[test]
