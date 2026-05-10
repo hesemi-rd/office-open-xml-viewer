@@ -3082,6 +3082,18 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
     // vs. val (chartEx doesn't declare axis kind via the `id` attribute).
     let (cat_axis_hidden, val_axis_hidden) = ooxml_common::chart::extract_chartex_axis_hidden(root);
 
+    // `<cx:catScaling gapWidth>` (chartEx) — same semantics as legacy
+    // `<c:gapWidth>` but stored as a *fraction* (e.g. 0.8 ≡ 80%) instead of
+    // an integer percentage. Convert to the legacy percentage form so the
+    // shared renderer's `barW = catGap / (1 + gapWidth/100)` formula works
+    // uniformly across chart types. Default 1.5 (= legacy 150%) per PowerPoint
+    // when the attribute is omitted.
+    let bar_gap_width = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "catScaling")
+        .and_then(|n| attr(&n, "gapWidth"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|frac| (frac * 100.0).round() as i32);
+
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
         chart_type,
@@ -3105,7 +3117,7 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         val_axis_font_size_hpt: None,
         data_label_font_size_hpt: None,
         legend_pos: None,
-        bar_gap_width: None,
+        bar_gap_width,
         bar_overlap: None,
         data_label_position: None,
         data_label_font_color: None,

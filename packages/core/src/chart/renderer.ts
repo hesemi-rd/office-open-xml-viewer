@@ -1873,12 +1873,14 @@ function dashPatternForPreset(preset: string | undefined): number[] {
 
 function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
   const { x, y, w, h } = r;
-  // No need to reserve room for value-axis tick labels when the value axis
-  // is hidden — give the bars the full width instead.
-  const padL = chart.valAxisHidden ? w * 0.04 : w * 0.11;
-  const padR = w * 0.04;
-  const padT = h * 0.08;
-  const padB = h * 0.18;
+  // PowerPoint's chartEx waterfall uses very thin side margins when the
+  // value axis is hidden — there's no axis label area to reserve. Our prior
+  // 4% pads on each side made the plot ~8% narrower than the file intended,
+  // visibly shrinking the bars relative to PowerPoint's PDF export.
+  const padL = chart.valAxisHidden ? w * 0.01 : w * 0.11;
+  const padR = w * 0.01;
+  const padT = h * 0.06;
+  const padB = h * 0.14;
   const px0 = x + padL;
   const py0 = y + padT;
   const pw  = w - padL - padR;
@@ -1961,8 +1963,15 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   const colorPos = '#5BA4E6';
   const colorNeg = '#E46970';
 
-  const barW = (pw / n) * 0.55;
+  // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
+  // adjacent categories expressed as a percentage of the bar width
+  // (legacy `<c:gapWidth val>`) or as a fraction (chartEx
+  // `<cx:catScaling gapWidth>`, normalised to the same percent form by the
+  // parser). The bar then occupies `catGap / (1 + gapWidth/100)`. Default
+  // 150% per the spec when neither attribute is present.
   const gapW = pw / n;
+  const gapWidthPct = chart.barGapWidth ?? 150;
+  const barW = gapW / (1 + gapWidthPct / 100);
 
   bars.forEach((bar, i) => {
     const bx = px0 + gapW * i + (gapW - barW) / 2;
