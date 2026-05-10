@@ -2,12 +2,19 @@
 //
 // Resolution order:
 //   1. User override (`ooxmlViewer.mcpServer.binaryPath` setting)
-//   2. Cached binary previously downloaded into the extension's globalStorage
+//   2. Cached binary previously downloaded into the extension's globalStorage,
+//      *and* its sibling `<binary>.version` pin file matches the current
+//      extension version. A mismatch (or missing pin) means the cached binary
+//      is from a previous extension release and would skip release-bundled
+//      bug fixes (e.g. v0.31.0 cached binary would silently miss the
+//      pptx_extract_text fix shipped in v0.32.0). Mismatched caches fall
+//      through to step 4 to redownload.
 //   3. Binary on PATH (e.g. installed via `cargo install` or Homebrew)
 //   4. Download from GitHub Releases (only when the caller consents)
 //
 // The binary is intentionally NOT bundled into the extension — keeping the VSIX
-// small. Users who want the MCP server pay the ~5 MB download once.
+// small. Users who want the MCP server pay the ~5 MB download once per
+// extension release.
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -48,10 +55,21 @@ export async function resolveBinaryPath(
   }
 
   const cached = cachedBinaryPath(context);
-  if (fs.existsSync(cached)) return cached;
+  const expected = (context.extension.packageJSON as { version: string }).version;
+  if (fs.existsSync(cached) && readVersionPin(context) === expected) {
+    return cached;
+  }
 
-  const onPath = await findOnPath(binaryFileName());
-  if (onPath) return onPath;
+  // Stale cache → fall through to redownload. We deliberately don't trust an
+  // on-PATH binary as a substitute when the cache is stale: the user might
+  // have a globally-installed older `ooxml-mcp-server` that lacks the new
+  // release's fixes. PATH lookup only kicks in when there's no cached binary
+  // at all (fresh install, or user manually deleted the cache).
+  const cacheExists = fs.existsSync(cached);
+  if (!cacheExists) {
+    const onPath = await findOnPath(binaryFileName());
+    if (onPath) return onPath;
+  }
 
   if (opts.consentToDownload) {
     await downloadBinary(context);
@@ -63,6 +81,24 @@ export async function resolveBinaryPath(
 
 export function cachedBinaryPath(context: vscode.ExtensionContext): string {
   return path.join(context.globalStorageUri.fsPath, 'bin', binaryFileName());
+}
+
+/**
+ * Sibling file recording the extension version that produced the cached
+ * binary. Lets us detect "this binary is from a previous extension release"
+ * and force a redownload, rather than serving a stale binary forever.
+ */
+function versionPinPath(context: vscode.ExtensionContext): string {
+  return path.join(context.globalStorageUri.fsPath, 'bin', `${binaryFileName()}.version`);
+}
+
+function readVersionPin(context: vscode.ExtensionContext): string | undefined {
+  try {
+    const v = fs.readFileSync(versionPinPath(context), 'utf8').trim();
+    return v.length > 0 ? v : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function binaryFileName(): string {
@@ -139,6 +175,11 @@ export async function downloadBinary(context: vscode.ExtensionContext): Promise<
       if (process.platform !== 'win32') {
         await fs.promises.chmod(dest, 0o755);
       }
+      // Pin the version. Future `resolveBinaryPath` calls compare this against
+      // the running extension's packageJSON.version and force a redownload on
+      // mismatch — so a 0.31.0 → 0.32.0 extension upgrade no longer keeps
+      // serving the old cached binary indefinitely.
+      await fs.promises.writeFile(versionPinPath(context), version, 'utf8');
     },
   );
 }
