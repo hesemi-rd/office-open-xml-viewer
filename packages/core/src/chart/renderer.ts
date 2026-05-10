@@ -43,7 +43,17 @@ function niceStep(range: number, targetSteps = 5): number {
 function niceAxisMax(dataMax: number, step: number): number {
   if (dataMax <= 0) return step;
   const ax = Math.ceil(dataMax / step) * step;
-  return Math.abs(ax - dataMax) < step * 1e-9 ? ax + step : ax;
+  // Bump up by one step when the data fills the computed axis too tightly.
+  // PowerPoint adds breathing room above the highest bar so the data
+  // doesn't run flush against the plot edge; without this our stacked
+  // bar charts spill into adjacent shapes (sample-2 slide-16's right
+  // text column gets overlapped because the 9715 stack lands at exactly
+  // 9715/10000 = 97% of plot, with only 3% of slack). Threshold 0.9
+  // matches Excel's observed behaviour: data in [0.9, 1.0] of niceMax
+  // triggers the bump; below 0.9 the breathing room comes from the
+  // existing margin.
+  if (dataMax / ax >= 0.9) return ax + step;
+  return ax;
 }
 
 function niceAxisMin(dataMin: number, step: number): number {

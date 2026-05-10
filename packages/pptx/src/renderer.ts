@@ -303,6 +303,57 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
  *
  * @param marLPx  Paragraph left margin in canvas px (used for tab stop position calculation)
  */
+/**
+ * Decide whether `<a:spAutoFit/>` should let text wrap based on the paragraphs'
+ * natural single-line width. Returns true when at least one paragraph would
+ * exceed the available text width if rendered without wrapping — that's the
+ * cue PowerPoint uses to switch from "grow shape horizontally" to "wrap and
+ * grow shape vertically" mode (ECMA-376 §20.1.10.5).
+ *
+ * The measurement is intentionally conservative: it sums all run widths in a
+ * paragraph at the run's own font size, ignoring tab stops and explicit
+ * `\t` runs. That matches what PowerPoint compares — "one continuous line
+ * of glyphs" — and avoids over-eager wrap when a paragraph is barely wider
+ * than the bbox due to font-measurement drift.
+ */
+function naturalWidthExceedsBbox(
+  ctx: CanvasRenderingContext2D,
+  body: TextBody,
+  bw: number,
+  lPad: number,
+  rPad: number,
+  scale: number,
+  rc: RenderContext,
+): boolean {
+  const bodyDefaultFontPx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale;
+  for (const para of body.paragraphs) {
+    const marLPx = emuToPx(para.marL, scale);
+    const marRPx = emuToPx(para.marR, scale);
+    const indentPx = emuToPx(para.indent, scale);
+    // First-line indent eats into the available width when positive; a
+    // negative indent (hanging) is the bullet's gutter and doesn't reduce
+    // the usable text room.
+    const firstLineIndent = Math.max(0, indentPx);
+    const textMaxW = bw - lPad - rPad - marLPx - marRPx - firstLineIndent;
+    let lineW = 0;
+    for (const run of para.runs) {
+      if (run.type !== 'text') continue;
+      const sizePx = run.fontSize != null
+        ? run.fontSize * PT_TO_EMU * scale
+        : (para.defFontSize != null
+            ? para.defFontSize * PT_TO_EMU * scale
+            : bodyDefaultFontPx);
+      const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
+      const isBold = run.bold ?? para.defBold ?? body.defaultBold ?? false;
+      const isItalic = run.italic ?? para.defItalic ?? body.defaultItalic ?? false;
+      ctx.font = buildFont(isBold, isItalic, sizePx, family, rc);
+      lineW += ctx.measureText(run.text).width;
+      if (lineW > textMaxW) return true;
+    }
+  }
+  return false;
+}
+
 function layoutParagraph(
   ctx: CanvasRenderingContext2D,
   para: Paragraph,
@@ -908,7 +959,26 @@ function renderTextBody(
   // horizontal axis keeps mixed-size sequences (e.g. "20代", "YoY+11.9%")
   // on one line, matching PowerPoint. Vertical growth is handled below by
   // the spAutoFit branch in the height calculation.
-  const doWrap = body.wrap !== 'none' && body.autoFit !== 'sp';
+  // ECMA-376 §20.1.10.5 spAutoFit + §20.1.10.7 wrap interaction:
+  // - `wrap="none"`: text never wraps (regardless of autoFit).
+  // - `wrap="square"` + `<a:spAutoFit/>`: PowerPoint auto-fits the SHAPE to
+  //   the text. If the text's natural single-line width fits the bbox, the
+  //   shape stays at its current width and the text doesn't wrap (sample-2
+  //   slide-13's "20代" textbox: ~50px text in ~70px bbox → no wrap). If
+  //   the natural width exceeds the bbox, text wraps and the shape grows
+  //   vertically (sample-2 slide-16's "1Q業績 要因" callouts: a single
+  //   long Japanese paragraph that has to wrap within a fixed-width bbox).
+  // - `wrap="square"` (default) without spAutoFit: always wrap.
+  //
+  // The pre-pass below measures the paragraphs' total natural width; if
+  // every paragraph fits the bbox without wrapping, we keep the spAutoFit
+  // "no-wrap" semantics. Otherwise we wrap normally so the long text
+  // doesn't run off the side of the shape.
+  const baseDoWrap = body.wrap !== 'none';
+  const isSpAutoFit = body.autoFit === 'sp';
+  const doWrap = isSpAutoFit
+    ? (baseDoWrap && naturalWidthExceedsBbox(ctx, body, bw, lPad, rPad, scale, rc))
+    : baseDoWrap;
   // ECMA-376 §20.1.10.34 numCol — distribute paragraphs across N text columns.
   const numCol = Math.max(1, body.numCol ?? 1);
   const spcColPx = emuToPx(body.spcCol ?? 0, scale);
