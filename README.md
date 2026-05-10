@@ -457,7 +457,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Video / audio (poster + interactive playback) | ✅ |
 | | Ink / handwriting (`p:contentPart`, raster fallback) | ✅ |
 | **Shape geometry** | 130+ preset shapes (`prstGeom`) | ✅ |
-| | Custom geometry (`custGeom`) | ✅ |
+| | Custom geometry (`custGeom`) on shapes and pictures (clipping) | ✅ |
 | | Rotation and flip (flipH / flipV) | ✅ |
 | | 3D preset shapes | ❌ |
 | **Fills** | Solid fill (`solidFill`) | ✅ |
@@ -495,8 +495,10 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Vertical / RTL text | ❌ |
 | **Text — body** | Text padding (insets) | ✅ |
 | | normAutoFit (shrink to fit) | ✅ |
-| | spAutoFit (expand box) | ✅ |
+| | spAutoFit (expand box; disables horizontal wrap per spec) | ✅ |
 | | Word wrap / no wrap | ✅ |
+| | Multi-column text body (`numCol` / `spcCol` — balanced flow) | ✅ |
+| | Theme object-default inheritance (`<a:objectDefaults><a:txDef\|spDef>` bodyPr fallback) | ✅ |
 | **Tables** | Cells, rows, columns | ✅ |
 | | Cell merges (horizontal / vertical) | ✅ |
 | | Cell borders | ✅ |
