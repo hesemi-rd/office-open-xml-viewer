@@ -4,6 +4,15 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.32.1 — 2026-05-11
+
+Two bug fixes that surfaced shortly after 0.32.0. Renderer is unchanged from 0.32.0.
+
+### Fixes
+
+- **vscode-extension**: redownload the bundled `ooxml-mcp-server` binary when the extension upgrades. `resolveBinaryPath` previously kept any cached binary as long as it existed on disk, so after `silurus.office-open-xml-viewer` updated 0.31.0 → 0.32.0 the workspace kept running the old 0.31.0 binary indefinitely — silently missing the v0.32.0 fixes (the `pptx_extract_text` empty-text bug being the most visible). Now writes a sibling `<binary>.version` pin file at download time and forces a redownload on extension-version mismatch. Explicit user override paths are still honored unchanged. PATH fallback only applies on a clean install (no cache yet) so a stale globally-installed `cargo install`'d binary can no longer mask the version-pin check.
+- **stories (xlsx / docx / pptx)**: the "Debug – raw parse JSON" story silently returned from the file-change handler when wasm `init()` had not yet resolved, leaving the placeholder visible forever. The change handler now `await`s the same init promise (idempotent + cached, so subsequent awaits resolve instantly) and shows a "Parsing `<filename>`…" status as soon as a file is picked, regardless of init latency.
+
 ## 0.32.0 — 2026-05-11
 
 This release is **MCP-server-focused**. The renderer (xlsx / docx / pptx viewers) is byte-identical to 0.31.0 — confirmed by running the full demo VRT against the rebuilt WASM (xlsx 5/5, docx 6/6, pptx 9/9 at 100% match). No README screenshot updates because of this.
