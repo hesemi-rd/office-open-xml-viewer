@@ -1874,12 +1874,21 @@ function dashPatternForPreset(preset: string | undefined): number[] {
 function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
   const { x, y, w, h } = r;
   // PowerPoint's chartEx waterfall uses very thin side margins when the
-  // value axis is hidden — there's no axis label area to reserve. Our prior
-  // 4% pads on each side made the plot ~8% narrower than the file intended,
-  // visibly shrinking the bars relative to PowerPoint's PDF export.
+  // value axis is hidden — there's no axis label area to reserve.
   const padL = chart.valAxisHidden ? w * 0.01 : w * 0.11;
   const padR = w * 0.01;
-  const padT = h * 0.06;
+  // Top / bottom padding sets where bar bottoms (value 0) and tops (value
+  // padded) land in absolute slide coordinates. Sibling shapes — e.g. the
+  // sample-2 slide-8 callouts whose `<a:prstGeom prst="callout1">` adj3/adj4
+  // tips are placed in absolute slide EMU — assume a specific y for the
+  // bar's lower-left corner (the running-total line). Working that
+  // backwards from id=14's tip at ((5015880 + 1468672*0.95815),
+  // (3748214 + 516167*(-0.67286))) = (6423117, 3400921) EMU and solving
+  // for the padT that puts 人件費変化's bar.start (value 388, the
+  // running-total line for that bar) at that y gives padT ≈ 12% with
+  // padB ≈ 14%. Smaller padT shifts bar bottoms upward and the callout
+  // tips render below the bars (the regression PR #248 introduced).
+  const padT = h * 0.12;
   const padB = h * 0.14;
   const px0 = x + padL;
   const py0 = y + padT;
