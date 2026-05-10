@@ -63,6 +63,18 @@ pub struct Worksheet {
     /// Cell refs (A1-style) that have an associated <comment> in xl/commentsN.xml.
     /// Excel shows a small red triangle in the top-right corner of each.
     pub comment_refs: Vec<String>,
+    /// Full-fidelity comment bodies (text + author) for each `<comment>` in
+    /// xl/commentsN.xml — agents that want to read the comment content (not
+    /// just the cell that has one) consume this. Empty when the sheet has no
+    /// comments file. Keep in sync with `comment_refs` (one entry per ref).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub comments: Vec<XlsxComment>,
+    /// `<dataValidations>` rules (ECMA-376 §18.3.1.32). Each rule covers one
+    /// or more cell ranges and constrains permitted input ("list", "decimal",
+    /// "date", "textLength", "custom", …). Empty when the sheet declares
+    /// none. Renderer ignores this for now — exposed for tooling.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub data_validations: Vec<DataValidation>,
     /// Defined names in scope for this sheet. Includes workbook-global names and
     /// any names whose `localSheetId` matches this sheet's position in the
     /// workbook. Used by conditional-formatting `expression` rules that call
@@ -229,6 +241,53 @@ pub struct TableColumnInfo {
     /// `<tableColumn totalsRowDxfId>` — applied to the totals cell of this column.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub totals_row_dxf_id: Option<u32>,
+}
+
+/// One `<comment>` from xl/commentsN.xml (ECMA-376 §18.7). `text` is the
+/// joined plain text of every `<r><t>` run; rich-text formatting is dropped.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XlsxComment {
+    /// A1-style cell reference (`@ref` on the comment element).
+    pub cell_ref: String,
+    /// Resolved author name from the parent `<authors>` block (`@authorId`
+    /// indexes into that list). `None` when the workbook omits authors or
+    /// the `authorId` is out of range.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Concatenated plain text of every text run.
+    pub text: String,
+}
+
+/// One `<dataValidation>` rule (ECMA-376 §18.3.1.32). `type` covers the
+/// constraint class ("list", "whole", "decimal", "date", "time", "textLength",
+/// "custom"). `operator` qualifies it ("between", "notBetween", "equal",
+/// "notEqual", "lessThan", …). `formula1` / `formula2` are the rule operands.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataValidation {
+    /// Affected cell ranges, written verbatim from `@sqref` (space-separated).
+    pub sqref: String,
+    /// Constraint class. None means the validator is the spec's default
+    /// (`"none"`, treated as no constraint).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula2: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub allow_blank: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 /// Workbook- or sheet-scoped defined name (ECMA-376 §18.2.5 `definedName`).
@@ -1183,7 +1242,8 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
     ws.shape_groups = load_sheet_shape_groups(&mut archive, &sheet_path, &theme_colors);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
-    ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
+    ws.comments = load_sheet_comments(&mut archive, &sheet_path);
+    ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
     ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
@@ -2298,6 +2358,8 @@ fn parse_worksheet(
 
     conditional_formats.extend(x14_icon_formats);
 
+    let data_validations = parse_data_validations(doc.root_element());
+
     Ok((Worksheet {
         name: name.to_string(),
         rows,
@@ -2318,6 +2380,8 @@ fn parse_worksheet(
         auto_filter,
         hyperlinks: Vec::new(),
         comment_refs: Vec::new(),
+        comments: Vec::new(),
+        data_validations,
         defined_names: Vec::new(),
         tables: Vec::new(),
         slicers: Vec::new(),
@@ -2345,10 +2409,13 @@ fn parse_rels_map(xml: &str) -> HashMap<String, String> {
 /// list of A1-style cell refs that have a `<comment>` associated. The
 /// renderer draws a small red triangle in each cell's top-right corner to
 /// indicate the presence of a comment (ECMA-376 §18.7.3 commentList).
-fn load_sheet_comment_refs(
+/// Reads xl/commentsN.xml for the given sheet and returns each `<comment>` as
+/// a structured `XlsxComment` (cell ref, resolved author name, plain text).
+/// Callers can derive `comment_refs: Vec<String>` from `c.cell_ref`.
+fn load_sheet_comments(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     sheet_path: &str,
-) -> Vec<String> {
+) -> Vec<XlsxComment> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
     let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
@@ -2373,15 +2440,86 @@ fn load_sheet_comment_refs(
     let Ok(comments_xml) = read_zip_entry(archive, &comments_path) else { return Vec::new(); };
     let Ok(comments_doc) = roxmltree::Document::parse(&comments_xml) else { return Vec::new(); };
 
-    let mut refs: Vec<String> = Vec::new();
+    // Resolve <authors><author>…</author></authors> — `authorId` indexes here.
+    let authors: Vec<String> = comments_doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "authors")
+        .map(|n| {
+            n.children()
+                .filter(|c| c.is_element() && c.tag_name().name() == "author")
+                .map(|c| c.text().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut comments: Vec<XlsxComment> = Vec::new();
     for node in comments_doc.descendants() {
-        if node.tag_name().name() == "comment" && node.is_element() {
-            if let Some(r) = node.attribute("ref") {
-                refs.push(r.to_string());
+        if node.tag_name().name() != "comment" || !node.is_element() { continue }
+        let Some(cell_ref) = node.attribute("ref") else { continue };
+        let author = node
+            .attribute("authorId")
+            .and_then(|s| s.parse::<usize>().ok())
+            .and_then(|i| authors.get(i).cloned())
+            .filter(|s| !s.is_empty());
+        let mut text = String::new();
+        if let Some(t_node) = node.children().find(|c| c.is_element() && c.tag_name().name() == "text") {
+            for r in t_node.descendants() {
+                if r.is_element() && r.tag_name().name() == "t" {
+                    if let Some(s) = r.text() { text.push_str(s); }
+                }
             }
         }
+        comments.push(XlsxComment {
+            cell_ref: cell_ref.to_string(),
+            author,
+            text,
+        });
     }
-    refs
+    comments
+}
+
+/// ECMA-376 §18.3.1.32 — extracts `<dataValidations>` rules from the sheet
+/// XML root. Returns an empty vec when the element is absent.
+fn parse_data_validations(ws_root: roxmltree::Node<'_, '_>) -> Vec<DataValidation> {
+    let mut out: Vec<DataValidation> = Vec::new();
+    let Some(dvs) = ws_root.children().find(|n| n.is_element() && n.tag_name().name() == "dataValidations") else {
+        return out;
+    };
+    for dv in dvs.children().filter(|n| n.is_element() && n.tag_name().name() == "dataValidation") {
+        let sqref = dv.attribute("sqref").unwrap_or("").to_string();
+        if sqref.is_empty() { continue }
+        let validation_type = dv.attribute("type").map(String::from);
+        let operator = dv.attribute("operator").map(String::from);
+        let allow_blank = dv.attribute("allowBlank").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let prompt_title = dv.attribute("promptTitle").map(String::from).filter(|s| !s.is_empty());
+        let prompt = dv.attribute("prompt").map(String::from).filter(|s| !s.is_empty());
+        let error_title = dv.attribute("errorTitle").map(String::from).filter(|s| !s.is_empty());
+        let error_message = dv.attribute("error").map(String::from).filter(|s| !s.is_empty());
+
+        let mut formula1: Option<String> = None;
+        let mut formula2: Option<String> = None;
+        for child in dv.children().filter(|n| n.is_element()) {
+            match child.tag_name().name() {
+                "formula1" => formula1 = child.text().map(String::from).filter(|s| !s.is_empty()),
+                "formula2" => formula2 = child.text().map(String::from).filter(|s| !s.is_empty()),
+                _ => {}
+            }
+        }
+
+        out.push(DataValidation {
+            sqref,
+            validation_type,
+            operator,
+            formula1,
+            formula2,
+            allow_blank,
+            prompt_title,
+            prompt,
+            error_title,
+            error_message,
+        });
+    }
+    out
 }
 
 /// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
@@ -5479,7 +5617,8 @@ pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<S
     ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
     ws.shape_groups = load_sheet_shape_groups(&mut archive, &sheet_path, &theme_colors);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
-    ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
+    ws.comments = load_sheet_comments(&mut archive, &sheet_path);
+    ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
     ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);

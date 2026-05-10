@@ -27,6 +27,63 @@ pub struct Document {
     /// is absent or malformed.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub font_family_classes: HashMap<String, String>,
+    /// ECMA-376 §17.13.5 — track-changes events found in the body. Each entry
+    /// is one `<w:ins>` or `<w:del>` block, with the change author / date /
+    /// text content. Empty when the document has no tracked changes.
+    /// Renderer ignores this; surfaced for tools (MCP, agents).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub revisions: Vec<DocxRevision>,
+    /// ECMA-376 §17.13.4 — `word/comments.xml` flat list. Each comment carries
+    /// its id (matches `<w:commentReference w:id>` in the body), author, date,
+    /// and plain-text body. Empty when the document has no comments part.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub comments: Vec<DocxComment>,
+    /// ECMA-376 §17.11.10 — `word/footnotes.xml` flat list (id + text).
+    /// Excludes the spec-defined separator and continuation-separator entries
+    /// (id="-1" / "0"). Empty when the document has no footnotes part.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub footnotes: Vec<DocxNote>,
+    /// ECMA-376 §17.11.4 — `word/endnotes.xml` flat list. Same shape as
+    /// `footnotes`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub endnotes: Vec<DocxNote>,
+}
+
+/// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxRevision {
+    /// "insertion" | "deletion"
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// `<w:ins w:date>` / `<w:del w:date>` — ISO-8601 timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// Concatenated plain text. For deletions, this is the deleted text
+    /// captured from `<w:delText>` runs.
+    pub text: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxComment {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// `<w:initials>` from `word/comments.xml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initials: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    pub text: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxNote {
+    pub id: String,
+    pub text: String,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
@@ -137,6 +194,13 @@ pub struct DocParagraph {
     /// sizing empty paragraphs (lines with no runs) correctly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_size: Option<f64>,
+    /// ECMA-376 §17.3.1.20 `<w:outlineLvl w:val="N">` (0–8). Resolved through
+    /// the style chain: explicit pPr → linked paragraph style → docDefaults.
+    /// `None` for body paragraphs that don't appear in the document outline.
+    /// Surfaced so MCP / agents can build a heading hierarchy without relying
+    /// on the styleId string ("Heading1", "見出し1", etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline_level: Option<u32>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

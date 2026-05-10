@@ -79,6 +79,30 @@ struct Slide {
     slide_number: usize,
     background: Option<Fill>,
     elements: Vec<SlideElement>,
+    /// `ppt/notesSlides/notesSlideN.xml` plain text — the speaker-notes pane
+    /// content as a single string (paragraphs joined with '\n'). `None` when
+    /// the slide has no notes part. Renderer ignores this; surfaced for tools.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    notes: Option<String>,
+    /// Legacy slide comments (`ppt/comments/commentN.xml`). Modern Office365
+    /// "threaded comments" are not yet parsed.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    comments: Vec<PptxComment>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct PptxComment {
+    /// Resolved author name from `ppt/commentAuthors.xml` (`<cmAuthor @id>`
+    /// matches `<cm @authorId>`). `None` when authors file is missing or
+    /// authorId is out of range.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// `<cm @dt>` — ISO-8601 date string when the comment was authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date: Option<String>,
+    /// Plain-text body from `<p:text>`.
+    text: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -299,6 +323,25 @@ struct ShapeElement {
     /// ECMA-376 §20.1.8.27 (CT_ReflectionEffect).
     #[serde(skip_serializing_if = "Option::is_none")]
     reflection: Option<Reflection>,
+    /// `<p:nvSpPr><p:cNvPr @id>` — DrawingML cNvPr `id` attribute. Stable
+    /// per-slide identifier surfaced for tools that need to reference a shape
+    /// (MCP, scripted edits). Renderer ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    /// `<p:nvSpPr><p:cNvPr @name>` — author-visible name (e.g. "Title 1",
+    /// "Rectangle 5"). Useful for tools that want a human-readable handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// `<p:nvSpPr><p:nvPr><p:ph @type>` — placeholder semantic type
+    /// ("title" / "ctrTitle" / "body" / "subTitle" / "ftr" / "sldNum" /
+    /// "dt" / "obj" / "pic" / etc., ECMA-376 §19.7.10). `None` for
+    /// non-placeholder shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placeholder_type: Option<String>,
+    /// `<p:ph @idx>` — placeholder index used by the slide-layout chain to
+    /// disambiguate multiple body / picture placeholders on a layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placeholder_idx: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -3171,6 +3214,22 @@ fn is_placeholder(node: roxmltree::Node<'_, '_>) -> bool {
 //  Shape parsing  (p:sp)
 // ===========================
 
+/// Pull `(id, name)` from a sibling `<p:nvSpPr><p:cNvPr>` (or `<p:nvCxnSpPr>`).
+/// Returns `(None, None)` when the wrapper is missing — both fields are
+/// optional in the JSON output.
+fn read_cnv_pr(sp_node: roxmltree::Node<'_, '_>) -> (Option<String>, Option<String>) {
+    for wrapper_name in &["nvSpPr", "nvCxnSpPr", "nvPicPr", "nvGraphicFramePr"] {
+        if let Some(nv) = child(sp_node, wrapper_name) {
+            if let Some(cnv) = child(nv, "cNvPr") {
+                let id = attr(&cnv, "id");
+                let name = attr(&cnv, "name").filter(|s| !s.is_empty());
+                return (id, name);
+            }
+        }
+    }
+    (None, None)
+}
+
 fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
@@ -3190,6 +3249,14 @@ fn parse_shape(
         .as_ref()
         .and_then(|n| attr(n, "idx"))
         .and_then(|v| v.parse().ok());
+    // Surface the explicit ph @type / @idx (when present) on the ShapeElement
+    // JSON. We keep `ph_type` defaulted to "body" for the internal lookup
+    // path, but only emit the `placeholder_type` field when a real `<p:ph>`
+    // node was found.
+    let placeholder_type_out: Option<String> = ph_node
+        .as_ref()
+        .map(|n| attr(n, "type").unwrap_or_else(|| "body".into()));
+    let (cnv_id, cnv_name) = read_cnv_pr(sp_node);
 
     // --- Transform: slide xfrm OR layout fallback ---
     let sp_pr = child(sp_node, "spPr");
@@ -3431,6 +3498,10 @@ fn parse_shape(
         geometry, fill, stroke, text_body, default_text_color, cust_geom,
         adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8,
         shadow, inner_shadow, glow, soft_edge, reflection,
+        id: cnv_id,
+        name: cnv_name,
+        placeholder_type: placeholder_type_out,
+        placeholder_idx: ph_idx,
     })
 }
 
@@ -4026,7 +4097,91 @@ fn parse_slide(
         parse_sp_tree_node(node, &lph, slide_dir, rels, smartart_drawings, zip, theme, &mut elements, false, None);
     }
 
-    Ok(Slide { index, slide_number: index + 1, background, elements })
+    // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
+    let notes = load_notes_slide(zip, rels);
+    let comments = load_pptx_comments(zip, rels);
+
+    Ok(Slide { index, slide_number: index + 1, background, elements, notes, comments })
+}
+
+/// Resolve the slide's `notesSlide` relationship, read the notes part, and
+/// return its plain text (paragraphs joined by '\n'). Returns `None` when
+/// the slide has no notes part or the part can't be read.
+fn load_notes_slide(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Option<String> {
+    // rels here is the slide's _rels map (rId → Target) parsed by the caller.
+    // The relationship Type ends with "/notesSlide". The cleanest way to find
+    // the right entry is to look at every value in the map and pick the one
+    // pointing at "../notesSlides/...".
+    let target = rels.values().find(|t| t.contains("notesSlides/"))?;
+    let path = if target.starts_with('/') {
+        target.trim_start_matches('/').to_string()
+    } else {
+        // Relative to ppt/slides/ — resolve "../notesSlides/notesSlide1.xml".
+        resolve_path("ppt/slides", target)
+    };
+    let xml = read_zip_str(zip, &path).ok()?;
+    let doc = roxmltree::Document::parse(&xml).ok()?;
+    let mut buf = String::new();
+    let mut prev_was_text = false;
+    for n in doc.descendants() {
+        if !n.is_element() { continue }
+        let name = n.tag_name().name();
+        if name == "p" && prev_was_text {
+            buf.push('\n');
+            prev_was_text = false;
+        }
+        if name == "t" {
+            if let Some(s) = n.text() {
+                buf.push_str(s);
+                prev_was_text = true;
+            }
+        }
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// Resolve and parse the slide's `comments` relationship (legacy
+/// `<p:cmLst>` format). Modern threaded comments live in a different
+/// namespace and are not yet supported.
+fn load_pptx_comments(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Vec<PptxComment> {
+    let Some(target) = rels.values().find(|t| t.contains("comments/")) else { return Vec::new(); };
+    let path = if target.starts_with('/') {
+        target.trim_start_matches('/').to_string()
+    } else {
+        resolve_path("ppt/slides", target)
+    };
+    let Ok(xml) = read_zip_str(zip, &path) else { return Vec::new(); };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else { return Vec::new(); };
+
+    // commentAuthors.xml is a top-level part — look it up directly.
+    let author_xml = read_zip_str(zip, "ppt/commentAuthors.xml").ok();
+    let mut authors: HashMap<String, String> = HashMap::new();
+    if let Some(ax) = author_xml {
+        if let Ok(adoc) = roxmltree::Document::parse(&ax) {
+            for a in adoc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor") {
+                let id = a.attribute("id").unwrap_or("").to_string();
+                let name = a.attribute("name").unwrap_or("").to_string();
+                if !id.is_empty() && !name.is_empty() {
+                    authors.insert(id, name);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for cm in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "cm") {
+        let author_id = cm.attribute("authorId").unwrap_or("");
+        let author = authors.get(author_id).cloned();
+        let date = cm.attribute("dt").map(String::from).filter(|s| !s.is_empty());
+        let text = cm
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "text")
+            .and_then(|n| n.text().map(String::from))
+            .unwrap_or_default();
+        out.push(PptxComment { author, date, text });
+    }
+    out
 }
 
 fn parse_sp_tree_node(
@@ -4451,6 +4606,7 @@ fn parse_connector(
     if t.cx == 0 && t.cy == 0 {
         return None;
     }
+    let (cnv_id, cnv_name) = read_cnv_pr(node);
 
     // Style-based stroke fallback. `p:style > a:lnRef idx="N"` references the
     // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
@@ -4579,6 +4735,10 @@ fn parse_connector(
         glow: None,
         soft_edge: None,
         reflection: None,
+        id: cnv_id,
+        name: cnv_name,
+        placeholder_type: None,
+        placeholder_idx: None,
     })
 }
 

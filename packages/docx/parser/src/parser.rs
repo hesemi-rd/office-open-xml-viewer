@@ -90,7 +90,112 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .map(|s| parse_font_table(&s))
         .unwrap_or_default();
 
-    Ok(Document { section, body, headers, footers, major_font, minor_font, font_family_classes })
+    // Track-changes events live inline in the body XML; do a second pass to
+    // surface them as a flat list with author/date metadata. The body parse
+    // above already merged the run text transparently — this gives consumers
+    // (MCP / agents) the revision metadata without disturbing rendering.
+    let revisions = collect_revisions(body_node);
+
+    let comments = find_rel_target(&rels_xml, "comments")
+        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .and_then(|p| read_zip_entry(&mut zip, &p).ok())
+        .map(|xml| parse_comments(&xml))
+        .unwrap_or_default();
+    let footnotes = find_rel_target(&rels_xml, "footnotes")
+        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .and_then(|p| read_zip_entry(&mut zip, &p).ok())
+        .map(|xml| parse_notes(&xml, "footnote"))
+        .unwrap_or_default();
+    let endnotes = find_rel_target(&rels_xml, "endnotes")
+        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .and_then(|p| read_zip_entry(&mut zip, &p).ok())
+        .map(|xml| parse_notes(&xml, "endnote"))
+        .unwrap_or_default();
+
+    Ok(Document {
+        section, body, headers, footers, major_font, minor_font, font_family_classes,
+        revisions, comments, footnotes, endnotes,
+    })
+}
+
+/// Walks the body looking for `<w:ins>` / `<w:del>` ancestors and returns one
+/// `DocxRevision` per element. Text is collected from descendant `<w:t>` (for
+/// insertions) and `<w:delText>` (for deletions).
+fn collect_revisions(body: roxmltree::Node) -> Vec<crate::types::DocxRevision> {
+    let mut out = Vec::new();
+    for node in body.descendants().filter(|n| n.is_element()) {
+        let kind = match node.tag_name().name() {
+            "ins" => "insertion",
+            "del" => "deletion",
+            _ => continue,
+        };
+        let author = node
+            .attributes()
+            .find(|a| a.name() == "author")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty());
+        let date = node
+            .attributes()
+            .find(|a| a.name() == "date")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty());
+        let mut text = String::new();
+        for t in node.descendants().filter(|n| n.is_element()) {
+            // For insertions, w:t carries the new text. For deletions, the
+            // original text lives in w:delText (ECMA-376 §17.13.5.13).
+            let is_text = (kind == "insertion" && t.tag_name().name() == "t")
+                || (kind == "deletion" && t.tag_name().name() == "delText");
+            if is_text {
+                if let Some(s) = t.text() {
+                    text.push_str(s);
+                }
+            }
+        }
+        out.push(crate::types::DocxRevision {
+            kind: kind.to_string(),
+            author,
+            date,
+            text,
+        });
+    }
+    out
+}
+
+/// Parse word/comments.xml into a flat list of `<w:comment>` entries.
+fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else { return Vec::new(); };
+    let mut out = Vec::new();
+    for c in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "comment") {
+        let id = c.attributes().find(|a| a.name() == "id").map(|a| a.value().to_string()).unwrap_or_default();
+        if id.is_empty() { continue }
+        let author = c.attributes().find(|a| a.name() == "author").map(|a| a.value().to_string()).filter(|s| !s.is_empty());
+        let initials = c.attributes().find(|a| a.name() == "initials").map(|a| a.value().to_string()).filter(|s| !s.is_empty());
+        let date = c.attributes().find(|a| a.name() == "date").map(|a| a.value().to_string()).filter(|s| !s.is_empty());
+        let mut text = String::new();
+        for t in c.descendants().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+            if let Some(s) = t.text() { text.push_str(s); }
+        }
+        out.push(crate::types::DocxComment { id, author, initials, date, text });
+    }
+    out
+}
+
+/// Parse word/footnotes.xml or word/endnotes.xml. Excludes the two
+/// reserved entries (id="-1" separator, id="0" continuation separator)
+/// per ECMA-376 §17.11.10.
+fn parse_notes(xml: &str, element_name: &str) -> Vec<crate::types::DocxNote> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else { return Vec::new(); };
+    let mut out = Vec::new();
+    for n in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == element_name) {
+        let id = n.attributes().find(|a| a.name() == "id").map(|a| a.value().to_string()).unwrap_or_default();
+        if id.is_empty() || id == "-1" || id == "0" { continue }
+        let mut text = String::new();
+        for t in n.descendants().filter(|t| t.is_element() && t.tag_name().name() == "t") {
+            if let Some(s) = t.text() { text.push_str(s); }
+        }
+        out.push(crate::types::DocxNote { id, text });
+    }
+    out
 }
 
 /// Resolve scheme color names (accent1..6, dk1, dk2, lt1, lt2, hlink, folHlink)
@@ -682,6 +787,7 @@ fn parse_paragraph(
             .or_else(|| style_map.default_para_style_id().map(str::to_string))
             .or_else(|| Some("Normal".to_string())),
         default_font_size: base_run.font_size,
+        outline_level: base_para.outline_level,
     }
 }
 
