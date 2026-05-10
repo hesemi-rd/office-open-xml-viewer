@@ -1598,13 +1598,13 @@ impl LayoutPlaceholders {
     }
 
     /// Look up the inherited default font size for a placeholder (layout then master fallback).
+    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
     fn lookup_font_size(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
-        ph_idx
-            .and_then(|i| self.by_idx_font_size.get(&i).copied())
-            .or_else(|| self.by_type_font_size.get(ph_type).copied())
-            .or_else(|| {
-                if ph_type == "body" { self.by_type_font_size.get("").copied() } else { None }
-            })
+        if let Some(i) = ph_idx {
+            return self.by_idx_font_size.get(&i).copied();
+        }
+        self.by_type_font_size.get(ph_type).copied()
+            .or_else(|| if ph_type == "body" { self.by_type_font_size.get("").copied() } else { None })
     }
 
     /// Look up inherited bold for this placeholder type.
@@ -1650,33 +1650,34 @@ impl LayoutPlaceholders {
     /// Look up inherited blipFill from the layout placeholder spPr. Used when a slide
     /// references a picture placeholder (e.g. ph type="pic") without its own blipFill —
     /// the image defined on the layout's matching placeholder should render through.
-    ///
-    /// NOTE: this lookup currently falls back to the by_type map even when the
-    /// slide explicitly carried an idx — same pattern that broke `lookup_fill`
-    /// in sample-2 (a sibling placeholder of the same type but a different idx
-    /// would bleed its blipFill onto the wrong slot). It hasn't manifested in
-    /// real samples yet because layouts rarely have two picture placeholders
-    /// with distinct blipFills, but the fix should mirror `lookup_fill`'s
-    /// idx-strict semantics when that case appears.
+    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
     fn lookup_blip_fill(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<InheritedBlipFill> {
-        ph_idx
-            .and_then(|i| self.by_idx_blip_fill.get(&i).cloned())
-            .or_else(|| self.by_type_blip_fill.get(ph_type).cloned())
+        if let Some(i) = ph_idx {
+            return self.by_idx_blip_fill.get(&i).cloned();
+        }
+        self.by_type_blip_fill.get(ph_type).cloned()
     }
 
     /// Look up inherited stroke from the layout placeholder spPr > ln.
+    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
     fn lookup_stroke(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<Stroke> {
-        ph_idx
-            .and_then(|i| self.by_idx_stroke.get(&i).cloned())
-            .or_else(|| self.by_type_stroke.get(ph_type).cloned())
+        if let Some(i) = ph_idx {
+            return self.by_idx_stroke.get(&i).cloned();
+        }
+        self.by_type_stroke.get(ph_type).cloned()
             .or_else(|| if ph_type == "body" { self.by_type_stroke.get("").cloned() } else { None })
     }
 
     /// Look up inherited default text color for this placeholder (layout then master fallback).
+    /// Idx-strict per ECMA-376 §19.7.16 — when the slide-level placeholder carried an
+    /// explicit `idx`, do NOT fall through to a sibling-by-type. The master_color tier
+    /// is only consulted under the type-fallback branch (no-idx slides) because master
+    /// txStyles are keyed by type only and sit *below* the layout's idx-keyed map.
     fn lookup_color(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
-        ph_idx
-            .and_then(|i| self.by_idx_color.get(&i).cloned())
-            .or_else(|| self.by_type_color.get(ph_type).cloned())
+        if let Some(i) = ph_idx {
+            return self.by_idx_color.get(&i).cloned();
+        }
+        self.by_type_color.get(ph_type).cloned()
             .or_else(|| if ph_type == "body" { self.by_type_color.get("").cloned() } else { None })
             .or_else(|| self.by_type_master_color.get(ph_type).cloned())
             .or_else(|| if ph_type == "body" { self.by_type_master_color.get("").cloned() } else { None })
@@ -1709,10 +1710,12 @@ impl LayoutPlaceholders {
     }
 
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
+    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
     fn lookup_line_spacing(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
-        ph_idx
-            .and_then(|i| self.by_idx_line_spacing.get(&i).copied())
-            .or_else(|| self.by_type_line_spacing.get(ph_type).copied())
+        if let Some(i) = ph_idx {
+            return self.by_idx_line_spacing.get(&i).copied();
+        }
+        self.by_type_line_spacing.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_line_spacing.get("").copied() } else { None })
             .or_else(|| self.by_type_master_line_spacing.get(ph_type).copied())
             .or_else(|| if ph_type == "body" { self.by_type_master_line_spacing.get("").copied() } else { None })
