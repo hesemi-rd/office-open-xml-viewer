@@ -4,6 +4,31 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.30.0 — 2026-05-10
+
+### Features
+
+- **pptx**: `<a:bodyPr numCol>` and `<a:bodyPr spcCol>` (§20.1.10.34) — multi-column text body. Paragraphs flow across N columns with a balanced `⌈N/numCol⌉` split so the right column lines up with the left at row level. Sample-2 slide-13's "ターゲット条件" / "新機能" textbox uses this to align 利用履歴 / 価値観 / 属性詳細 with 年齢 / 性別 / 居住地.
+- **pptx**: `<a:bodyPr><a:spAutoFit/>` (§20.1.10.5) now disables horizontal wrap. spAutoFit means the *shape* grows to fit the text, so the bbox stops being a wrap boundary — mixed-size sequences like "20代" or "YoY+11.9%" stay on one line.
+- **pptx**: theme `<a:objectDefaults>` inheritance (§20.1.6.7). `<a:txDef>` / `<a:spDef>` bodyPr defaults now flow through to slide-level shapes that leave attributes blank. `parse_shape` reads `<p:cNvSpPr txBox="1"/>` to choose the right defaults slot — txDef for true text boxes, spDef for placeholders / shape-with-text — so theme `<a:spAutoFit/>` doesn't bleed onto wrapping shapes.
+- **pptx**: `<p:pic>` `<a:custGeom>` clipping (§20.1.9.8). Pictures with a custom-geometry path are clipped to that silhouette before drawing — fixes sample-2 slide-12 where the website inset image was overlaying the laptop bezel instead of being trimmed inside it.
+- **pptx**: `<c:legend><c:legendPos>`, `<c:barChart><c:gapWidth>`, `<c:overlap>`, `<c:dLblPos>`, `<c:dLbls><c:txPr>` font color, `<c:dLbls><c:numFmt>`, `<c:valAx><c:numFmt>`, and ChartEx `<cx:axis hidden>` now flow from the parser through to the renderer (sample-2 slides 7 + 8). xlsx already exposed these; pptx had been quietly dropping them.
+- **pptx**: callout1 family preset (`callout1` / `bordercallout1` / `accentcallout1` / `accentbordercallout1`) attach/tip pairing fixed to the ECMA-376 (Y, X) convention from `presets.json`. Sample-2 slide-8's connector callouts now point at the correct bars.
+- **core/chart**: waterfall chart honors `valAxisHidden` (skips gridlines, tick labels, and the L-frame's left segment). `dataMin = 0` when all bars are non-negative so bar bases sit on the x-axis instead of floating above it (sample-2 slide-8).
+- **core/chart**: bar data labels now read `chart.dataLabelFontSizeHpt` to match the file's specified size; the previous `barW * 0.6` heuristic stayed clamped at 11px regardless of XML.
+- **rust**: `ooxml_common::chart` module extracted with shared chart-XML probes (`extract_legend`, `extract_axis_min_max`, `axis_is_deleted`, `extract_chartex_axis_hidden`, `extract_data_label_font_color`, …). pptx and xlsx parsers now call into one place so future field additions stay in lockstep. New `ColorResolver` trait keeps theme-aware colour resolution per-crate while sharing the DOM walks.
+
+### Fixes
+
+- **pptx**: data label horizontal centering on column-style bar charts. `drawBarDataLabel` was being called with `(barW, barH)` swapped where it expected `(barL=length, barW=thickness)`, so `cx = bx + barW/2` ended up using the bar's HEIGHT and pushed every label far to the right. Vertical (column) charts now centre labels on the bar centre as PowerPoint does.
+- **pptx**: `LayoutPlaceholders` lookups (`fill`, `font_size`, `blip_fill`, `stroke`, `color`, `line_spacing`) are now idx-strict per ECMA-376 §19.7.16. When the slide-level shape carries `<p:ph idx="N">` the only valid layout source is the placeholder with the matching idx; the previous fall-through-to-`by_type` was leaking sibling-placeholder values onto unrelated slots (sample-2 slide-4's header strip rendered grey because layout10 idx=13's gray fill was bleeding onto idx=12).
+- **pptx**: bullet color inheritance follows ECMA-376 §21.1.2.4.4 / §21.1.2.4.10: `<a:buClr>` → first run's color → paraDefault → bodyDefault. Previously the chain skipped the first-run step and bullets without explicit `buClr` rendered in whatever `<p:style><a:fontRef>` resolved to (white on slide-13's bullet boxes — invisible).
+- **pptx**: `parse_text_body` no longer breaks a non-whitespace token away from preceding non-whitespace content on the same line, matching PowerPoint's `ST_TextWrappingType` "square" behavior for sequences like "YoY+11.9%".
+
+### Refactors
+
+- **rust**: `pptx-parser` and `xlsx-parser` chart-XML extractors deduplicated via the new `ooxml_common::chart` module. ~150 lines of overlapping bodies removed; the same parser now feeds both pptx and xlsx ChartElement variants.
+
 ## 0.29.1 — 2026-05-10
 
 ### Fixes
