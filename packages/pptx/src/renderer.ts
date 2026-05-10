@@ -639,6 +639,12 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
   ]);
 
+  // callout1 family — `<a:ln><a:headEnd|tailEnd>` decorate the line path
+  // (path 1 in presets.json), not the surrounding text rectangle (path 0).
+  const CALLOUT1_GEOMS = new Set([
+    'callout1', 'bordercallout1', 'accentcallout1', 'accentbordercallout1',
+  ]);
+
   const applyAndStroke = el.stroke
     ? () => {
         applyStroke(ctx, el.stroke!, scale);
@@ -700,6 +706,29 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       if (el.stroke.headEnd) {
         drawArrowHead(ctx, anchors.start.x, anchors.start.y, anchors.start.angle, el.stroke.headEnd, el.stroke, scale);
       }
+    }
+  } else if (el.stroke && CALLOUT1_GEOMS.has(geom)) {
+    // Callout1 family carries an `<a:ln>` whose head/tail decorations belong
+    // on the *line* (path 1: m,x1,y1 → l,x2,y2), not on the rectangle (path 0).
+    // ECMA-376 callout1 gd: y1=h·adj1/100000, x1=w·adj2/100000 (attach point);
+    // y2=h·adj3/100000, x2=w·adj4/100000 (tip). Tip and attach may sit
+    // outside the bbox. Compute both, then orient the head/tail along the
+    // attach→tip direction.
+    const attXf = ((el.adj2 ?? -8333) as number) / 100000;
+    const attYf = ((el.adj  ?? 18750) as number) / 100000;
+    const tipXf = ((el.adj4 ?? -38333) as number) / 100000;
+    const tipYf = ((el.adj3 ?? 112500) as number) / 100000;
+    const attX = x + attXf * w;
+    const attY = y + attYf * h;
+    const tipX = x + tipXf * w;
+    const tipY = y + tipYf * h;
+    const tailAngle = Math.atan2(tipY - attY, tipX - attX);
+    const headAngle = tailAngle + Math.PI;
+    if (el.stroke.tailEnd) {
+      drawArrowHead(ctx, tipX, tipY, tailAngle, el.stroke.tailEnd, el.stroke, scale);
+    }
+    if (el.stroke.headEnd) {
+      drawArrowHead(ctx, attX, attY, headAngle, el.stroke.headEnd, el.stroke, scale);
     }
   }
 
@@ -1128,13 +1157,21 @@ function renderTextBody(
   // `body.wrap === "none"` means horizontal non-wrap; it doesn't affect
   // clipping per spec either, so we just don't clip.
 
-  // Multi-column flow state. We use a *balanced* split rather than a greedy
-  // height-fill: PowerPoint distributes paragraphs so each column gets
-  // roughly ⌈N/numCol⌉ entries, which keeps parallel rows across columns
-  // aligned (e.g. on sample-2 slide-13 the right column starts with a blank
-  // paragraph so the blue 利用履歴/価値観/属性詳細 sit at the same y as
-  // the left column's 年齢/性別/居住地). A pure overflow-driven advance
-  // would pack the left column maximally and shift the right column up.
+  // Multi-column flow state. PowerPoint's actual behaviour with `numCol`:
+  //
+  // - If the total content height fits within a single column, ALL paragraphs
+  //   stay in column 0 even when `numCol > 1`. (Sample-2 slide-13's "従来"
+  //   box has 4 paragraphs in a `numCol="2"` body; PowerPoint stacks them
+  //   vertically because they fit, not 2+2.)
+  // - Otherwise, paragraphs are distributed *balanced* (each column gets
+  //   roughly ⌈N/numCol⌉ entries) so parallel rows across columns line up.
+  //   (Sample-2 slide-13's "新機能" box has 9 paragraphs that overflow a
+  //   single column; the right column starts with a blank paragraph so the
+  //   blue 利用履歴/価値観/属性詳細 sit at the same y as 年齢/性別/居住地.)
+  //
+  // A pure overflow-driven advance would either pack column 0 maximally and
+  // shift the right column up (breaking row alignment) or never collapse
+  // multi-col to single when content fits.
   //
   // We pre-compute, for each entry, which column it belongs to. Column 0
   // starts at the initial cursorY; each subsequent column resets the cursor
@@ -1143,7 +1180,12 @@ function renderTextBody(
   const colWidthShift = numCol > 1
     ? (bw - lPad - rPad - (numCol - 1) * spcColPx) / numCol + spcColPx
     : 0;
-  const linesPerCol = numCol > 1 ? Math.ceil(allLines.length / numCol) : allLines.length;
+  const colHeightCapacity = Math.max(0, effectiveBh - tPad - bPad);
+  // When `bh === 0` (caller relies on auto-height) the capacity is unbounded
+  // and content always fits, so a multi-col directive collapses to single col.
+  const fitsInOneCol = bh === 0 || totalHeight <= colHeightCapacity + 0.5;
+  const useMultiCol = numCol > 1 && !fitsInOneCol;
+  const linesPerCol = useMultiCol ? Math.ceil(allLines.length / numCol) : allLines.length;
   let colIdx = 0;
   let entriesInCol = 0;
 
@@ -1786,6 +1828,7 @@ export async function renderSlide(
           dataLabelFontColor: el.dataLabelFontColor ?? null,
           dataLabelFormatCode: el.dataLabelFormatCode ?? null,
           valAxisFormatCode: el.valAxisFormatCode ?? null,
+          plotAreaManualLayout: el.plotAreaManualLayout ?? null,
         },
         {
           x: emuToPx(el.x, scale),

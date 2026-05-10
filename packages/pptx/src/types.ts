@@ -210,6 +210,10 @@ export interface ChartElement {
   dataLabelFormatCode?: string | null;
   /** `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format. */
   valAxisFormatCode?: string | null;
+  /** `<c:plotArea><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.32) — explicit
+   * plot-area placement so bars don't extend past the chart-frame's intended
+   * inner region (sample-2 slide-16 horizontal bar chart). */
+  plotAreaManualLayout?: import('@silurus/ooxml-core').ChartManualLayout | null;
 }
 
 export interface PictureElement {

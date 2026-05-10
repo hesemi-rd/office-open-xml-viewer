@@ -100,6 +100,11 @@ struct ChartSeriesData {
     /// Per-data-point colors (used for pie/doughnut charts). None if all points use series color.
     #[serde(skip_serializing_if = "Option::is_none")]
     data_point_colors: Option<Vec<Option<String>>>,
+    /// Per-data-point data-label text colors. ChartEx (`<cx:dataLabel idx>`) uses this
+    /// to switch label colour per bar — sample-2's waterfall paints the negative
+    /// △ values in red (accent1) while positive values stay in tx1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_label_colors: Option<Vec<Option<String>>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -168,6 +173,32 @@ struct ChartElement {
     /// `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     #[serde(skip_serializing_if = "Option::is_none")]
     val_axis_format_code: Option<String>,
+    /// `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area placement
+    /// (ECMA-376 §21.2.2.32). Templates use this to keep the chart's bars from
+    /// occupying the full chart-frame width when callout text sits beside the
+    /// frame; without honouring it the bars overflow into the side annotations
+    /// (sample-2 slide-16's horizontal bar chart).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plot_area_manual_layout: Option<ChartManualLayout>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ChartManualLayout {
+    /// "edge" = x/y are absolute fractions from top-left of chart space;
+    /// "factor" = fractions offset from the renderer's default placement.
+    x_mode: String,
+    y_mode: String,
+    /// "inner" (excludes axes / tick labels) | "outer" (includes them).
+    /// Only meaningful for plotArea — title/legend ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout_target: Option<String>,
+    x: f64,
+    y: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    w: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    h: Option<f64>,
 }
 
 // ===== Table data model =====
@@ -2815,6 +2846,10 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         ChartSeriesData {
             name, values, color,
             data_point_colors: if has_dpt_colors { Some(data_point_colors) } else { None },
+            // Legacy `<c:chart>` per-point label colors are extracted via
+            // `<c:dLbls><c:dLbl idx>` — not yet wired here; chartEx is the only
+            // path that needs it for sample-2's waterfall.
+            data_label_colors: None,
         }
     }).collect();
 
@@ -2877,6 +2912,38 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);
 
+    // `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area rectangle
+    // (fractions of chart space). ECMA-376 §21.2.2.32. Sample-2 slide-16 uses
+    // this to keep its horizontal bar chart from spilling into the side
+    // annotation column. We parse the same shape xlsx already exposes
+    // (xMode, yMode, layoutTarget, x, y, w?, h?).
+    let plot_area_manual_layout = plot_area.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "layout")
+        .and_then(|layout| layout.children().find(|n| n.is_element() && n.tag_name().name() == "manualLayout"))
+        .map(|ml| {
+            let mut x_mode = "edge".to_string();
+            let mut y_mode = "edge".to_string();
+            let mut layout_target: Option<String> = None;
+            let mut x = 0.0_f64;
+            let mut y = 0.0_f64;
+            let mut w: Option<f64> = None;
+            let mut h: Option<f64> = None;
+            for ch in ml.children().filter(|n| n.is_element()) {
+                let val_str = attr(&ch, "val");
+                match ch.tag_name().name() {
+                    "xMode" => { if let Some(v) = val_str { x_mode = v; } }
+                    "yMode" => { if let Some(v) = val_str { y_mode = v; } }
+                    "layoutTarget" => { layout_target = val_str; }
+                    "x" => { if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) { x = v; } }
+                    "y" => { if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) { y = v; } }
+                    "w" => { w = val_str.and_then(|s| s.parse::<f64>().ok()); }
+                    "h" => { h = val_str.and_then(|s| s.parse::<f64>().ok()); }
+                    _ => {}
+                }
+            }
+            ChartManualLayout { x_mode, y_mode, layout_target, x, y, w, h }
+        });
+
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
         chart_type,
@@ -2906,6 +2973,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         data_label_font_color,
         data_label_format_code,
         val_axis_format_code,
+        plot_area_manual_layout,
     })
 }
 
@@ -2974,11 +3042,39 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
         .and_then(|fill| parse_color_node(fill, theme));
 
+    // Per-idx data-label colors. ChartEx writes `<cx:dataLabels>` with
+    // `<cx:dataLabel idx="N">` overrides; each carries its own `<cx:txPr>`
+    // whose first `<a:solidFill>` is the label colour for that bar. Sample-2
+    // waterfall uses this to paint negative-bar labels in accent1 (red) while
+    // positive-bar labels stay tx1 (black).
+    let mut data_label_colors_vec: Vec<Option<String>> = vec![None; raw_values.len().max(1)];
+    let mut has_per_label_color = false;
+    for dl in series_node.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dataLabel")
+    {
+        let Some(idx) = attr(&dl, "idx").and_then(|v| v.parse::<usize>().ok()) else { continue; };
+        if idx >= data_label_colors_vec.len() { continue; }
+        // First `<a:solidFill>` inside the per-idx <cx:txPr>.
+        let txpr = match dl.children().find(|n| n.is_element() && n.tag_name().name() == "txPr") {
+            Some(n) => n,
+            None => continue,
+        };
+        for desc in txpr.descendants().filter(|n| n.is_element()) {
+            if desc.tag_name().name() != "solidFill" { continue; }
+            if let Some(c) = parse_color_node(desc, theme) {
+                data_label_colors_vec[idx] = Some(c);
+                has_per_label_color = true;
+                break;
+            }
+        }
+    }
+
     let series = vec![ChartSeriesData {
         name: String::new(),
         values: raw_values,
         color,
         data_point_colors: None,
+        data_label_colors: if has_per_label_color { Some(data_label_colors_vec) } else { None },
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
@@ -3015,6 +3111,7 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         data_label_font_color: None,
         data_label_format_code: None,
         val_axis_format_code: None,
+        plot_area_manual_layout: None,
     })
 }
 

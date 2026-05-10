@@ -18,6 +18,13 @@ export interface ChartSeries {
    */
   dataPointColors?: (string | null)[] | null;
   /**
+   * Per-data-point data-label text colors. Used by chartEx (`<cx:dataLabel idx>`)
+   * to override label colour per bar — sample-2's waterfall paints negative
+   * △ values in red while positive values stay black. Null inside the array =
+   * fall back to the chart-level `dataLabelFontColor`.
+   */
+  dataLabelColors?: (string | null)[] | null;
+  /**
    * Mixed chart: per-series chart type override. Currently only "line" (XLSX)
    * is honoured; other values are treated as the chart's primary type.
    */

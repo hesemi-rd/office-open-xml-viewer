@@ -641,8 +641,25 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const px0 = x + pad.l; const py0 = y + pad.t;
-  const pw  = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  // Plot-area placement: honor `<c:plotArea><c:layout><c:manualLayout>` when
+  // present (ECMA-376 §21.2.2.32). Templates use this to keep bars from
+  // overflowing into side annotations — sample-2 slide-16's horizontal bar
+  // chart has the chart frame extending into the right-hand text column,
+  // and the explicit `x=0.184, w=0.797` keeps the actual bars on the left.
+  // `layoutTarget="inner"` (default) means the rectangle covers the inner
+  // data region; "outer" includes axes/labels. We treat both identically
+  // because the inner padding stays the same either way.
+  const pml = chart.plotAreaManualLayout;
+  let px0: number, py0: number, pw: number, ph: number;
+  if (pml && pml.w != null && pml.h != null) {
+    px0 = x + pml.x * w;
+    py0 = y + pml.y * h;
+    pw  = pml.w * w;
+    ph  = pml.h * h;
+  } else {
+    px0 = x + pad.l; py0 = y + pad.t;
+    pw  = w - pad.l - pad.r; ph = h - pad.t - pad.b;
+  }
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -1979,11 +1996,28 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     const labelText = rawVal < 0
       ? `△ ${Math.abs(rawVal).toLocaleString()}`
       : rawVal.toLocaleString();
-    ctx.fillStyle = '#595959';
+    // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
+    // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
+    // then to neutral grey. PowerPoint paints negative-bar labels in
+    // accent1 (red) for sample-2's waterfall.
+    const perPointColor = chart.series[0]?.dataLabelColors?.[i] ?? null;
+    const labelColor = perPointColor
+      ? `#${perPointColor}`
+      : chart.dataLabelFontColor
+        ? `#${chart.dataLabelFontColor}`
+        : '#595959';
+    ctx.fillStyle = labelColor;
     ctx.font = `bold ${Math.round(h * 0.044)}px sans-serif`;
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(labelText, bx + barW / 2, yTop - 3);
+    // Negative bars: label sits BELOW the bar (`outEnd` for a negative value
+    // points downward in chartEx). Positive bars and subtotals: label ABOVE.
+    if (rawVal < 0) {
+      ctx.textBaseline = 'top';
+      ctx.fillText(labelText, bx + barW / 2, yBot + 3);
+    } else {
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(labelText, bx + barW / 2, yTop - 3);
+    }
   });
 
   ctx.textAlign = 'center';
