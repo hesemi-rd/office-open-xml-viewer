@@ -944,9 +944,26 @@ function renderTextBody(
       ? firstRunSizePt * PT_TO_EMU * scale * fontScale
       : paraDefaultFontSizePx;
 
+    // ECMA-376 §21.1.2.4.4 (CT_TextCharBullet) / §21.1.2.4.10 (buClrTx): when
+    // no explicit `<a:buClr>` is present, the bullet inherits the *first run*'s
+    // color, NOT the shape-level default text color. The two diverge on
+    // templates where `<p:style><a:fontRef>` resolves to white (lt1) — runs
+    // override that with their own `<a:rPr><a:solidFill>`, but bullets without
+    // a buClr would otherwise pick up the white default and become invisible
+    // (the slide-13 sample-2 regression).
+    const firstRunColorHex = (() => {
+      for (const r of para.runs) {
+        if (r.type === 'text' && r.color) return r.color;
+      }
+      return null;
+    })();
+    const bulletInheritedColor = firstRunColorHex
+      ? hexToRgba(firstRunColorHex)
+      : paraDefaultColor;
+
     let bulletLabel  = '';
     let bulletFont   = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
-    let bulletColor  = paraDefaultColor;
+    let bulletColor  = bulletInheritedColor;
 
     if (para.bullet.type === 'char') {
       const b = para.bullet;
@@ -958,7 +975,7 @@ function renderTextBody(
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
       const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
       bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
-      bulletColor = b.color ? hexToRgba(b.color) : paraDefaultColor;
+      bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
       // Reset counters when switching to char bullets
       autoNumCounters.clear();
     } else if (para.bullet.type === 'autoNum') {
@@ -971,7 +988,7 @@ function renderTextBody(
       }
       bulletLabel = formatAutoNum(autoNumCounters.get(lvl)!, b.numType);
       bulletFont  = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
-      bulletColor = paraDefaultColor;
+      bulletColor = bulletInheritedColor;
     } else {
       // Not a list paragraph — reset autoNum counters
       autoNumCounters.clear();
@@ -1111,34 +1128,38 @@ function renderTextBody(
   // `body.wrap === "none"` means horizontal non-wrap; it doesn't affect
   // clipping per spec either, so we just don't clip.
 
-  // Multi-column flow state. When numCol > 1 we walk the lines top-to-bottom
-  // and advance to the next column whenever the current column's content
-  // height would be exceeded. Column 0 starts at the initial cursorY; each
-  // subsequent column resets the cursor and shifts X by colWidth + spcCol.
-  // When numCol === 1 these stay at 0 / `cursorY` / and never advance.
-  let colIdx = 0;
+  // Multi-column flow state. We use a *balanced* split rather than a greedy
+  // height-fill: PowerPoint distributes paragraphs so each column gets
+  // roughly ⌈N/numCol⌉ entries, which keeps parallel rows across columns
+  // aligned (e.g. on sample-2 slide-13 the right column starts with a blank
+  // paragraph so the blue 利用履歴/価値観/属性詳細 sit at the same y as
+  // the left column's 年齢/性別/居住地). A pure overflow-driven advance
+  // would pack the left column maximally and shift the right column up.
+  //
+  // We pre-compute, for each entry, which column it belongs to. Column 0
+  // starts at the initial cursorY; each subsequent column resets the cursor
+  // and shifts X by colWidth + spcCol.
   const colTopY = cursorY;
   const colWidthShift = numCol > 1
     ? (bw - lPad - rPad - (numCol - 1) * spcColPx) / numCol + spcColPx
     : 0;
-  const colHeight = Math.max(0, effectiveBh - tPad - bPad);
+  const linesPerCol = numCol > 1 ? Math.ceil(allLines.length / numCol) : allLines.length;
+  let colIdx = 0;
+  let entriesInCol = 0;
 
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, alignment } = entry;
-    cursorY += topGapPx;
-    // Advance to the next column when the current line would not fit. We only
-    // advance once per line (PowerPoint never breaks a single line across
-    // columns) and never past the last column — anything that overflows the
-    // last column simply runs past the bbox, matching PPT's spill behavior.
-    if (
-      numCol > 1 &&
-      colIdx < numCol - 1 &&
-      cursorY - colTopY + linePx > colHeight + 0.5 &&
-      cursorY > colTopY
-    ) {
+    // Balanced column advance: when the current column has reached its share
+    // of paragraphs, jump to the next one. PowerPoint never breaks a single
+    // line across columns and never spills past the last column — anything
+    // beyond the last column simply runs past the bbox, matching PPT.
+    if (numCol > 1 && colIdx < numCol - 1 && entriesInCol >= linesPerCol) {
       colIdx++;
-      cursorY = colTopY + topGapPx;
+      entriesInCol = 0;
+      cursorY = colTopY;
     }
+    cursorY += topGapPx;
+    entriesInCol++;
     const xShift = colIdx * colWidthShift;
     const textX = entry.textX + xShift;
     const bulletX = entry.bulletX + xShift;
