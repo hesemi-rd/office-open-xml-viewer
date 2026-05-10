@@ -750,7 +750,13 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barW, barH);
         if (chart.showDataLabels && val > 0) {
-          const lsz = Math.max(7, Math.min(11, barW * 0.6));
+          // ECMA-376 §21.2.2.30 / §21.1.2.3.10 — data label font size comes from
+          // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
+          // the file specifies one we honor it; otherwise the proportional
+          // heuristic keeps small bars readable.
+          const lsz = chart.dataLabelFontSizeHpt
+            ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
+            : Math.max(7, Math.min(11, barW * 0.6));
           ctx.font = `bold ${lsz}px sans-serif`;
           const text = pct
             ? `${Math.round(val)}%`
@@ -758,9 +764,16 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
                 val,
                 chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
               );
+          // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
+          // a vertical column bar, "length" is the bar's height and
+          // "thickness" is its horizontal width — pass them in that order.
+          // Previously the args were (barW, barH) which silently swapped the
+          // two and made `cx = bx + barW/2` (the horizontal-center formula
+          // inside the helper) use the bar's HEIGHT instead of its width,
+          // pushing data labels far to the right of the bar.
           drawBarDataLabel(
             ctx, text,
-            bx, by, barW, barH,
+            bx, by, barH, barW,
             'vertical',
             chart.dataLabelPosition ?? null,
             chart.dataLabelFontColor ?? null,
@@ -780,7 +793,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barL, barW);
         if (chart.showDataLabels && val > 0) {
-          const lsz = Math.max(7, Math.min(11, barW * 0.6));
+          const lsz = chart.dataLabelFontSizeHpt
+            ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
+            : Math.max(7, Math.min(11, barW * 0.6));
           ctx.font = `bold ${lsz}px sans-serif`;
           const text = pct
             ? `${Math.round(val)}%`

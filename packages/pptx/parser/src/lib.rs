@@ -960,6 +960,51 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         }
     }
 
+    // Parse <a:objectDefaults> per ECMA-376 §20.1.6.7. PowerPoint stores
+    // `<a:txDef>` (text-box default), `<a:spDef>` (shape default) and
+    // `<a:lnDef>` (line default) here; their `<a:bodyPr>` settings are the
+    // last-resort fallback below master/layout/slide for any text body that
+    // doesn't override the attribute. Sample-2 hides a `<a:spAutoFit/>`
+    // inside its txDef — without inheriting it, every text box in the
+    // template defaults to "noAutofit + wrap=square" (the spec literal),
+    // which makes mixed-size runs like "20代" wrap unnecessarily and
+    // reproduces the slide-13 regression on every similar deck. We parse
+    // the bodyPr attributes (and the autoFit child element) into namespaced
+    // theme keys so `parse_text_body` can fall back through them without
+    // changing function signatures.
+    if let Some(obj_defaults) = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "objectDefaults")
+    {
+        let read_def = |def_name: &str, key_prefix: &str, map: &mut HashMap<String, String>| {
+            let Some(def) = child(obj_defaults, def_name) else { return; };
+            let Some(body_pr) = child(def, "bodyPr") else { return; };
+            // Plain attributes — copy verbatim; consumers parse the strings.
+            for attr_name in ["wrap", "anchor", "anchorCtr", "vert", "rtlCol",
+                              "lIns", "rIns", "tIns", "bIns",
+                              "numCol", "spcCol",
+                              "vertOverflow", "horzOverflow", "spcFirstLastPara",
+                              "rot", "upright", "fromWordArt", "forceAA",
+                              "compatLnSpc"] {
+                if let Some(v) = attr(&body_pr, attr_name) {
+                    map.insert(format!("{key_prefix}-bodyPr-{attr_name}"), v);
+                }
+            }
+            // Auto-fit is a child element, not an attribute. Encode as
+            // `{prefix}-autoFit` → "sp" | "norm" | "none".
+            let auto_fit = if child(body_pr, "spAutoFit").is_some() { "sp" }
+                else if child(body_pr, "normAutofit").is_some() { "norm" }
+                else { "none" };
+            // Only record when explicit; "none" is the spec default and
+            // recording it would make every consumer see `Some("none")` even
+            // for themes that didn't say anything.
+            if auto_fit != "none" {
+                map.insert(format!("{key_prefix}-autoFit"), auto_fit.to_owned());
+            }
+        };
+        read_def("txDef", "+txDef", &mut map);
+        read_def("spDef", "+spDef", &mut map);
+    }
+
     map
 }
 
@@ -2125,6 +2170,21 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
 //  Text body parsing
 // ===========================
 
+/// Which `<a:objectDefaults>` slot to consult when the shape's own bodyPr
+/// leaves an attribute unset. `Tx` ⇔ "text box" (slide-level
+/// `<p:cNvSpPr txBox="1"/>`), which inherits from `<a:txDef>`. `Sp` ⇔
+/// "regular shape with text" — table cell, placeholder, or a
+/// preset-geometry shape carrying a `<p:txBody>` — which inherits from
+/// `<a:spDef>`. Falling back to txDef for non-text-boxes is wrong because
+/// txDef commonly carries `<a:spAutoFit/>` (PowerPoint's default for
+/// freshly-inserted text boxes); applying that to e.g. a placeholder body
+/// makes the whole paragraph spill horizontally instead of wrapping.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShapeKind {
+    Tx,
+    Sp,
+}
+
 fn parse_text_body(
     tx_body: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -2137,36 +2197,84 @@ fn parse_text_body(
     inherited_space_before: Option<i64>,
     inherited_space_after: Option<i64>,
     inherited_line_spacing: Option<f64>,
+    shape_kind: ShapeKind,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
+    // ECMA-376 §20.1.6.7 objectDefaults. The theme-level `<a:txDef>` (and
+    // `<a:spDef>` as a secondary fallback) provides defaults for every
+    // bodyPr attribute the slide-level shape leaves unset. Without this
+    // fallback chain, sample-2's "20代" (txDef carries `<a:spAutoFit/>`)
+    // and similar templates would silently use the spec's literal defaults
+    // instead of what the theme author intended.
+    // Shape-kind-aware lookup: text boxes consult txDef, regular shapes spDef.
+    // Cross-fall is intentionally NOT done — see ShapeKind doc.
+    let def_prefix = match shape_kind { ShapeKind::Tx => "+txDef", ShapeKind::Sp => "+spDef" };
+    let theme_default_str = |key: &str| -> Option<String> {
+        theme.get(&format!("{def_prefix}-bodyPr-{key}")).cloned()
+    };
+    let theme_default_i64 = |key: &str| -> Option<i64> {
+        theme_default_str(key).and_then(|v| v.parse::<i64>().ok())
+    };
+    let theme_default_u32 = |key: &str| -> Option<u32> {
+        theme_default_str(key).and_then(|v| v.parse::<u32>().ok())
+    };
+    let theme_auto_fit = || -> Option<String> {
+        theme.get(&format!("{def_prefix}-autoFit")).cloned()
+    };
+
     let vertical_anchor = body_pr
         .and_then(|n| attr(&n, "anchor"))
         .map(|a| a.to_string())
         .or(inherited_anchor)
+        .or_else(|| theme_default_str("anchor"))
         .unwrap_or_else(|| "t".into());
-    // Text insets (EMU). OOXML defaults: lIns=rIns=91440, tIns=bIns=45720
-    let l_ins = body_pr.and_then(|n| attr_i64(&n, "lIns")).unwrap_or(91_440);
-    let r_ins = body_pr.and_then(|n| attr_i64(&n, "rIns")).unwrap_or(91_440);
-    let t_ins = body_pr.and_then(|n| attr_i64(&n, "tIns")).unwrap_or(45_720);
-    let b_ins = body_pr.and_then(|n| attr_i64(&n, "bIns")).unwrap_or(45_720);
-    let wrap = body_pr.and_then(|n| attr(&n, "wrap")).unwrap_or_else(|| "square".into());
-    let vert = body_pr.and_then(|n| attr(&n, "vert")).unwrap_or_else(|| "horz".into());
-    let auto_fit = body_pr.map(|n| {
+    // Text insets (EMU). OOXML defaults: lIns=rIns=91440, tIns=bIns=45720.
+    // Shape attribute → theme objectDefaults → spec default.
+    let l_ins = body_pr.and_then(|n| attr_i64(&n, "lIns"))
+        .or_else(|| theme_default_i64("lIns"))
+        .unwrap_or(91_440);
+    let r_ins = body_pr.and_then(|n| attr_i64(&n, "rIns"))
+        .or_else(|| theme_default_i64("rIns"))
+        .unwrap_or(91_440);
+    let t_ins = body_pr.and_then(|n| attr_i64(&n, "tIns"))
+        .or_else(|| theme_default_i64("tIns"))
+        .unwrap_or(45_720);
+    let b_ins = body_pr.and_then(|n| attr_i64(&n, "bIns"))
+        .or_else(|| theme_default_i64("bIns"))
+        .unwrap_or(45_720);
+    let wrap = body_pr.and_then(|n| attr(&n, "wrap"))
+        .or_else(|| theme_default_str("wrap"))
+        .unwrap_or_else(|| "square".into());
+    let vert = body_pr.and_then(|n| attr(&n, "vert"))
+        .or_else(|| theme_default_str("vert"))
+        .unwrap_or_else(|| "horz".into());
+    // Auto-fit child element (spAutoFit / normAutofit). When the shape's own
+    // bodyPr is absent or contains no autofit child, defer to theme txDef.
+    let auto_fit = if let Some(n) = body_pr {
         if child(n, "spAutoFit").is_some() { "sp".to_owned() }
-        // OOXML uses lowercase 'f': normAutofit (not normAutoFit)
+        // OOXML uses lowercase 'f': normAutofit (not normAutoFit).
         else if child(n, "normAutofit").is_some() { "norm".to_owned() }
-        else { "none".to_owned() }
-    }).unwrap_or_else(|| "none".to_owned());
+        else if child(n, "noAutofit").is_some() { "none".to_owned() }
+        else {
+            // bodyPr present but no autofit child — fall back to theme.
+            theme_auto_fit().unwrap_or_else(|| "none".to_owned())
+        }
+    } else {
+        theme_auto_fit().unwrap_or_else(|| "none".to_owned())
+    };
     // ECMA-376 §20.1.10.34: numCol on <a:bodyPr> tells the renderer to
     // distribute paragraphs across N columns within the shape. Default 1.
-    // spcCol is the inter-column gutter in EMU (default 0).
+    // spcCol is the inter-column gutter in EMU (default 0). Both fall back
+    // through theme objectDefaults.
     let num_col = body_pr
         .and_then(|n| attr(&n, "numCol"))
         .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| theme_default_u32("numCol"))
         .filter(|&n| n >= 1)
         .unwrap_or(1);
     let spc_col = body_pr
         .and_then(|n| attr_i64(&n, "spcCol"))
+        .or_else(|| theme_default_i64("spcCol"))
         .unwrap_or(0);
 
     // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
@@ -3184,8 +3292,17 @@ fn parse_shape(
         (None, None, None, None, None, None, None, None)
     };
 
+    // ECMA-376 §19.3.1.21 / §20.1.4.2: a slide-level `<p:cNvSpPr txBox="1"/>`
+    // marks the shape as a true text box, which means the theme's
+    // `<a:txDef>` (rather than `<a:spDef>`) provides the fallback bodyPr.
+    let is_text_box = child(sp_node, "nvSpPr")
+        .and_then(|n| child(n, "cNvSpPr"))
+        .and_then(|n| attr(&n, "txBox"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let shape_kind = if is_text_box { ShapeKind::Tx } else { ShapeKind::Sp };
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing));
+        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
@@ -3680,7 +3797,7 @@ fn parse_table_cell(
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
     let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, None, None, anchor, None, None, None, None));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
