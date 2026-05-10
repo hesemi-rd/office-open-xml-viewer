@@ -366,12 +366,13 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | **Document** | Page rendering | ✅ |
 | | Page size and margins | ✅ |
 | | Headers / footers (default / first / even) | ✅ |
-| | Section breaks | ❌ |
+| | Section breaks (continuous / nextPage / oddPage / evenPage) | ✅ |
 | **Text** | Paragraphs | ✅ |
 | | Bold, italic, underline, strikethrough | ✅ |
 | | Font family, size, color | ✅ |
 | | Hyperlinks | ✅ |
 | | Superscript / subscript (`w:vertAlign`) | ✅ |
+| | Ruby annotations / furigana (`w:ruby`) | ✅ |
 | **Formatting** | Paragraph alignment (left/center/right/justify) | ✅ |
 | | Line spacing (auto / atLeast / exact) | ✅ |
 | | Line grid (`w:docGrid`, §17.6.5) | ✅ |

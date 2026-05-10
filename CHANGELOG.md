@@ -4,6 +4,33 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.29.0 — 2026-05-10
+
+### Features
+
+- **docx**: section breaks — `continuous` (no page break), `oddPage`, `evenPage` (§17.18.79 `ST_SectionMark`). Parity breaks pad a blank page when the new section would otherwise start on the wrong side.
+- **docx**: `<w:ruby>` furigana annotations (§17.3.4) rendered above base text at `<w:hps>` font size. Line height expands uniformly across lines that carry ruby so annotations never overlap.
+- **docx**: text inside drawing shapes (`<wps:txbx>`) with `lIns/tIns/rIns/bIns` insets (§21.1.2.1.1) and `wps:bodyPr @anchor` vertical alignment (`t / ctr / b`).
+- **docx**: anchor shape positioning — `<wp:positionH/V relativeFrom="…">` full container set (page / margin / leftMargin / rightMargin / topMargin / bottomMargin / paragraph / line — §20.4.3.4); `<wp:align>` horizontal/vertical alignment (§20.4.3.1); `<wp14:pctPosH/VOffset>` percentage positioning (§20.4.2.7); `<wp14:sizeRelH/V>` percentage size overriding `<wp:extent>` (§20.4.2.18–19). `<mc:AlternateContent>/<mc:Choice Requires="wp14">` wrappers are resolved correctly.
+- **docx**: wgp group shape transform — `grpSpPr/xfrm chOff/chExt → off/ext` scale applied to child shapes (§20.1.7). Each child's offset and size are converted from child-coord-space to page EMU using the group's sx/sy factors.
+- **docx**: font family classification from `word/fontTable.xml` (§17.8.3.10). Parser reads `<w:font><w:family w:val="roman|swiss|modern|…"/>` and exposes it as `fontFamilyClasses` in the document JSON. The renderer uses this as the authoritative serif/sans-serif/monospace source, falling back to name-pattern matching only for fonts absent from the table.
+- **docx**: preset geometry shapes via `core.buildShapePath` — shares the full catalog (ellipse / roundRect / triangles / arrows / callouts / ribbons / flowchart / …) with the pptx renderer.
+- **docx**: `<a:theme>` fill references (`fillRef idx`) resolve through the theme's `fillStyleLst` / `bgFillStyleLst` with scheme-colour recolouring.
+
+### Fixes
+
+- **docx**: `bodyPr` inset defaults corrected to ECMA-376 §21.1.2.1.1 values — lIns=rIns=91440 EMU (7.2pt), tIns=bIns=45720 EMU (3.6pt). Previous `unwrap_or(0.0)` caused text frames to overlap their shape borders when attributes were absent.
+- **docx**: ruby paragraph line height snaps to integer docGrid pitches (§17.6.5) to prevent cumulative drift across multi-line ruby paragraphs.
+- **docx**: ruby paragraphs split across pages correctly when the paragraph doesn't fit on a single page.
+- **docx**: `<w:lastRenderedPageBreak/>` honored in ruby paragraphs where self-paginator line-height drift is largest.
+- **docx**: requested font family is preserved verbatim as the first CSS font-stack entry; fallback chain adds appropriate Japanese serif/sans-serif fonts.
+- **docx**: `DocRun::Break.break_type` serialised as camelCase (`lineBreak` / `pageBreak` / `columnBreak`) to match TS consumer expectations.
+
+### Refactors
+
+- **core**: `buildShapePath` and shape-path helpers moved from `@silurus/ooxml-pptx` into `@silurus/ooxml-core` so DOCX and PPTX share one preset-geometry catalog.
+- **rust**: `ooxml-common` crate extracted for colour transform helpers shared between the pptx and docx parsers.
+
 ## 0.28.0 — 2026-05-10
 
 ### Features
