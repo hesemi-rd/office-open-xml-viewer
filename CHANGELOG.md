@@ -4,6 +4,18 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.33.1 — 2026-05-12
+
+### Fixes
+
+- **vscode-extension**: unlink the cached `ooxml-mcp-server` binary before overwriting it. The version-pin fix introduced in 0.32.1 first triggered an in-place rewrite on the 0.32.x → 0.33.0 upgrade, and macOS `amfid` caches the kernel's code-signing decision for an executable by path. Writing a new ad-hoc-signed binary (different content hash) over the existing file leaves the stale decision attached; the next exec is silently refused, dyld blocks before reaching `main()`, and VS Code logs `Waiting for server to respond to "initialize" request...` forever. `fs.promises.rm(dest, { force: true })` immediately before the writeFile severs the cache association so amfid evaluates the new file from scratch.
+
+**Affected users on 0.33.0**: until you upgrade to 0.33.1, manually delete the cached binary and reload VS Code so the extension can prompt to (re)install:
+
+```
+rm ~/Library/Application\ Support/Code/User/globalStorage/silurus.office-open-xml-viewer/bin/ooxml-mcp-server*
+```
+
 ## 0.33.0 — 2026-05-11
 
 MCP-server-focused release introducing a **text-focused projection** tier alongside the rich structured tools. Renderer is unchanged from 0.32.1 (demo VRT 20/20 at 100% match).
