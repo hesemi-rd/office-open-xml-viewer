@@ -161,11 +161,15 @@ fn range_to_a1(range: &Value) -> Option<String> {
 }
 
 /// Returns the display string for a cell value from a `cell` JSON object.
+/// CellValue uses `rename_all = "camelCase"` on its enum tag, so the JSON
+/// type field is lower-case ("text"/"number"/"bool"/"error"/"empty") — *not*
+/// PascalCase. An earlier revision matched "Text"/"Number", which never fired
+/// and silently dropped every non-empty cell value through `xlsx_get_*`.
 fn cell_display(cell: &Value) -> String {
     let val = &cell["value"];
-    match val["type"].as_str().unwrap_or("Empty") {
-        "Text" => val["text"].as_str().unwrap_or("").to_string(),
-        "Number" => val["number"]
+    match val["type"].as_str().unwrap_or("empty") {
+        "text" => val["text"].as_str().unwrap_or("").to_string(),
+        "number" => val["number"]
             .as_f64()
             .map(|n| {
                 if n.fract() == 0.0 && n.abs() < 1e15 {
@@ -175,8 +179,13 @@ fn cell_display(cell: &Value) -> String {
                 }
             })
             .unwrap_or_default(),
-        "Bool" => val["value"].as_bool().map(|b| b.to_string()).unwrap_or_default(),
-        "Error" => val["error"].as_str().unwrap_or("#ERR").to_string(),
+        // Bool variant carries the value under the `bool` field (renamed by
+        // serde from the variant's inner field name).
+        "bool" => val["bool"]
+            .as_bool()
+            .map(|b| if b { "TRUE".to_string() } else { "FALSE".to_string() })
+            .unwrap_or_default(),
+        "error" => val["error"].as_str().unwrap_or("#ERR").to_string(),
         _ => String::new(),
     }
 }
@@ -186,6 +195,18 @@ fn cell_display(cell: &Value) -> String {
 pub struct XlsxTools;
 
 impl XlsxTools {
+    #[tool(description = "Convert an XLSX file to GitHub-flavoured markdown — one `## SheetName` per sheet, followed by a pipe table of the cells' cached display values. Merged-cell continuation cells render empty. Formula cells show the cached result, not the formula text (use `xlsx_get_formulas` if you need the formulas). Designed for agents that need to *read* spreadsheet content efficiently. Lossy by design: drops styling, conditional formatting, charts, sparklines, drawings. For precise structure use the structured tools (`xlsx_get_cell_range`, `xlsx_get_sheet_layout`, etc.)")]
+    pub fn xlsx_to_markdown(Parameters(p): Parameters<XlsxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match xlsx_parser::to_markdown_native(&data) {
+            Ok(md) => md,
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
     #[tool(description = "Parse an XLSX file and return workbook overview including sheet names and IDs")]
     pub fn xlsx_parse(Parameters(p): Parameters<XlsxPathParam>) -> String {
         let data = match read_file(&p.path) {
@@ -937,6 +958,18 @@ mod sample_tests {
 
     fn pp(path: &str) -> Parameters<XlsxPathParam> {
         Parameters(XlsxPathParam { path: path.into() })
+    }
+
+    #[test]
+    fn xlsx_to_markdown_sample() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = XlsxTools::xlsx_to_markdown(pp(&path));
+        assert!(!out.starts_with("Error:"), "errored: {out}");
+        assert!(out.contains("## "), "missing sheet heading: {}", &out[..200.min(out.len())]);
+        assert!(out.contains("|"), "no pipe table emitted");
     }
 
     #[test]

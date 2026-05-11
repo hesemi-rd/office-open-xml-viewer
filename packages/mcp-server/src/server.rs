@@ -39,6 +39,11 @@ impl OoxmlServer {
 
     // ── xlsx tools ────────────────────────────────────────────────────────────
 
+    #[tool(description = "Convert an XLSX file to GitHub-flavoured markdown — text-focused projection. One `## SheetName` per sheet followed by a pipe table of cached cell values. Use when an agent needs to *read* spreadsheet content efficiently")]
+    fn xlsx_to_markdown(&self, Parameters(p): Parameters<XlsxPathParam>) -> String {
+        XlsxTools::xlsx_to_markdown(Parameters(p))
+    }
+
     #[tool(description = "Parse an XLSX file and return workbook overview including sheet names and IDs")]
     fn xlsx_parse(&self, Parameters(p): Parameters<XlsxPathParam>) -> String {
         XlsxTools::xlsx_parse(Parameters(p))
@@ -115,6 +120,11 @@ impl OoxmlServer {
     }
 
     // ── docx tools ────────────────────────────────────────────────────────────
+
+    #[tool(description = "Convert a DOCX file to GitHub-flavoured markdown — text-focused projection. Headings, paragraphs, bullet/numbered lists, tables, footnotes, comments, with bold/italic/strikethrough/hyperlinks preserved. Use when an agent needs to *read* the document content efficiently")]
+    fn docx_to_markdown(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
+        DocxTools::docx_to_markdown(Parameters(p))
+    }
 
     #[tool(description = "Extract all plain text from a DOCX file")]
     fn docx_extract_text(&self, Parameters(p): Parameters<DocxPathParam>) -> String {

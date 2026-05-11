@@ -142,6 +142,18 @@ fn body_structure(body: &[Value]) -> Vec<Value> {
 pub struct DocxTools;
 
 impl DocxTools {
+    #[tool(description = "Convert a DOCX file to GitHub-flavoured markdown. Preserves textual structure (headings from outlineLevel, paragraphs, bullet/numbered lists, tables, footnotes, comments) and rich-text formatting (bold/italic/strikethrough/hyperlinks). Discards positioning, section properties, font metrics, drawing shapes, and headers/footers. Designed for agents that need to *read* the document content efficiently — typical 10×+ token reduction vs. the structured JSON tools. Lossy by design: when you need precise layout or styling, fall back to `docx_get_structure` / `docx_get_paragraph`")]
+    pub fn docx_to_markdown(Parameters(p): Parameters<DocxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match docx_parser::to_markdown_native(&data) {
+            Ok(md) => md,
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
     #[tool(description = "Extract all plain text from a DOCX file")]
     pub fn docx_extract_text(Parameters(p): Parameters<DocxPathParam>) -> String {
         let data = match read_file(&p.path) {
@@ -597,6 +609,27 @@ mod sample_tests {
 
     fn pp(path: &str) -> Parameters<DocxPathParam> {
         Parameters(DocxPathParam { path: path.into() })
+    }
+
+    #[test]
+    fn docx_to_markdown_sample() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = DocxTools::docx_to_markdown(pp(&path));
+        assert!(!out.starts_with("Error:"), "errored: {out}");
+        assert!(!out.trim().is_empty(), "markdown should be non-empty");
+        let plain = DocxTools::docx_extract_text(pp(&path));
+        // Allow markdown to be larger than plain (markup overhead) but not
+        // more than 3× — guards against accidentally serializing the rich
+        // structure tree.
+        assert!(
+            out.len() < plain.len() * 3 + 1024,
+            "markdown should stay within bounds — got {} vs plain {}",
+            out.len(),
+            plain.len()
+        );
     }
 
     #[test]

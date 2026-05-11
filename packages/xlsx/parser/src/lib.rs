@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod markdown;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Workbook {
@@ -5584,6 +5587,33 @@ fn parse_cell_ref(r: &str) -> (u32, u32) {
 pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
     parse_xlsx_inner(data)
         .and_then(|wb| serde_json::to_string(&wb.workbook).map_err(|e| e.to_string()))
+}
+
+/// Parse the workbook and project every sheet to GitHub-flavoured markdown:
+/// `## SheetName` headings followed by a pipe table per sheet. Merged-cell
+/// continuation cells are rendered as empty; the display value comes from the
+/// cached `<v>` so formula formulas show their results, not the formula text.
+/// Designed for AI agents that need to read the spreadsheet content
+/// efficiently — drops styling, formatting, charts, sparklines, drawings.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
+    let cursor = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+    let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
+    let sheets = parse_workbook_sheets(&wb_doc);
+
+    let mut out = String::new();
+    for (idx, sheet_meta) in sheets.iter().enumerate() {
+        let sheet_json =
+            parse_sheet_native(data, idx as u32, &sheet_meta.name).map_err(|e| {
+                format!("sheet '{}' (#{}) parse failed: {}", sheet_meta.name, idx, e)
+            })?;
+        let sheet: serde_json::Value =
+            serde_json::from_str(&sheet_json).map_err(|e| e.to_string())?;
+        markdown::render_sheet(&sheet, &mut out);
+    }
+    Ok(out)
 }
 
 /// Parses a single worksheet by 0-based index and returns it as JSON.
