@@ -233,6 +233,11 @@ impl OoxmlServer {
         PptxTools::pptx_get_presentation_meta(Parameters(p))
     }
 
+    #[tool(description = "Convert a PPTX file to GitHub-flavoured markdown — text-focused projection. Discards geometry/fills/strokes/effects, keeps titles, bullets, tables, chart summaries, notes, and comments. Use when an agent needs to *read* a deck efficiently (10-30× token reduction vs. structured tools)")]
+    fn pptx_to_markdown(&self, Parameters(p): Parameters<PptxPathParam>) -> String {
+        PptxTools::pptx_to_markdown(Parameters(p))
+    }
+
     #[tool(description = "Return speaker-notes text for one or all slides")]
     fn pptx_get_notes(&self, Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         PptxTools::pptx_get_notes(Parameters(p))

@@ -884,6 +884,18 @@ impl PptxTools {
         .to_string()
     }
 
+    #[tool(description = "Convert a PPTX file to GitHub-flavoured markdown. Preserves textual structure (titles, bullets at correct nesting, tables, chart summaries, speaker notes, comments) and discards presentation details (geometry, fills, strokes, theme inheritance, positions). Designed for agents that need to *read* a deck efficiently — typical 10-30× token reduction vs. `pptx_get_slides` / `pptx_extract_text`. Lossy by design: when you need precise layout or styling, fall back to the structured tools (`pptx_get_shape`, `pptx_get_slide_structure`, etc.)")]
+    pub fn pptx_to_markdown(Parameters(p): Parameters<PptxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match pptx_parser::to_markdown_native(&data) {
+            Ok(md) => md,
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
     #[tool(description = "Return speaker-notes text for one or all slides. Each entry: { slideIndex, slideNumber, notes }. Slides without a notesSlide part are omitted")]
     pub fn pptx_get_notes(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
@@ -1335,6 +1347,40 @@ mod sample_tests {
         }));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
         assert!(v["notes"].as_array().is_some(), "missing 'notes' array");
+    }
+
+    #[test]
+    fn pptx_to_markdown_sample() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = PptxTools::pptx_to_markdown(pp(&path));
+        assert!(!out.starts_with("Error:"), "errored: {out}");
+        // Slide titles should appear as level-1 headings.
+        assert!(out.contains("# STATE OF THE FOREST"), "missing slide-1 heading: {}", &out[..200.min(out.len())]);
+        // Slide separator between slides.
+        assert!(out.contains("\n---\n"), "missing slide separator");
+        // Bold/italic markers from rich-text runs should be preserved.
+        assert!(out.contains("**3.4%**") || out.contains("**+3.4%**"), "missing bold marker");
+        // Tables → pipe rows.
+        assert!(out.contains("| Taxon |"), "biodiversity table missing");
+        // Chart → markdown summary.
+        assert!(out.contains("**Chart (line):"), "chart summary missing");
+        // Compared with pptx_extract_text, markdown adds structure but keeps
+        // size in the same order of magnitude. Sanity-check the bound so a
+        // future bug that explodes the output (e.g. accidentally serializing
+        // the full presentation) trips the test.
+        let plain = PptxTools::pptx_extract_text(Parameters(PptxTextParam {
+            path: path.clone(),
+            slide_index: None,
+        }));
+        assert!(
+            out.len() < plain.len() * 3,
+            "markdown should be within 3× of plain text — got {} vs {}",
+            out.len(),
+            plain.len()
+        );
     }
 
     #[test]
