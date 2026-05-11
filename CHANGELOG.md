@@ -4,6 +4,12 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.33.2 — 2026-05-12
+
+### Features
+
+- **mcp-server**: every tool now declares MCP `ToolAnnotations` hints (`readOnlyHint=true`, `idempotentHint=true`, `openWorldHint=false`). Clients that honour these hints (VS Code Copilot, Claude Desktop, …) can auto-approve calls without showing the per-call "このセッションで許可する / スキップ" confirmation that has been firing on every read since 0.32.0. Every tool we expose is a pure read of a local OOXML file — no filesystem mutation, no network, no external state — so the hints are unconditional.
+
 ## 0.33.1 — 2026-05-12
 
 ### Fixes
