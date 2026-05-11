@@ -171,6 +171,14 @@ export async function downloadBinary(context: vscode.ExtensionContext): Promise<
         );
       }
 
+      // macOS caches the kernel's code-signing decision for an executable
+      // keyed by path. If we overwrite an existing ad-hoc-signed binary in
+      // place (same path, different content hash), amfid keeps the old
+      // decision, refuses the new binary on launch, and `execve` hangs at
+      // dyld bootstrap with no log output — exactly the symptom seen when the
+      // version-pin fix from v0.32.1 first kicks in and replaces the cached
+      // 0.32.0 binary. Unlinking first severs the cache association.
+      await fs.promises.rm(dest, { force: true });
       await fs.promises.writeFile(dest, buf);
       if (process.platform !== 'win32') {
         await fs.promises.chmod(dest, 0o755);
