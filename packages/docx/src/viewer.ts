@@ -107,16 +107,4 @@ export class DocxViewer {
       layer.appendChild(span);
     }
   }
-
-  /** Export the currently displayed page as a PNG blob. */
-  exportCurrentPageToPng(opts?: { width?: number; dpr?: number }): Promise<Blob> {
-    if (!this._doc) throw new Error('Document not loaded');
-    return this._doc.exportPageToPng(this._currentPage, opts);
-  }
-
-  /** Export every page as PNG blobs (in page order). */
-  exportAllPagesToPng(opts?: { width?: number; dpr?: number }): Promise<Blob[]> {
-    if (!this._doc) throw new Error('Document not loaded');
-    return this._doc.exportAllPagesToPng(opts);
-  }
 }

@@ -190,18 +190,6 @@ export class PptxViewer {
     }
   }
 
-  /** Export the currently displayed slide as a PNG blob. */
-  exportCurrentSlideToPng(opts?: { width?: number; dpr?: number }): Promise<Blob> {
-    if (!this.engine) throw new Error('Presentation not loaded');
-    return this.engine.exportSlideToPng(this.currentSlide, opts);
-  }
-
-  /** Export every slide as PNG blobs (in slide order). */
-  exportAllSlidesToPng(opts?: { width?: number; dpr?: number }): Promise<Blob[]> {
-    if (!this.engine) throw new Error('Presentation not loaded');
-    return this.engine.exportAllSlidesToPng(opts);
-  }
-
   /** Clean up the viewer and terminate the background worker. */
   destroy(): void {
     this.handle?.dispose();

@@ -522,30 +522,6 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ---
 
-## Exporting to PNG
-
-PPTX and DOCX viewers can export the rendered output to PNG (per page or all
-pages). Zero runtime dependencies — pages are rendered to an off-screen
-canvas and encoded via `canvas.toBlob('image/png')`.
-
-```typescript
-const viewer = new PptxViewer(canvas);
-await viewer.load('/deck.pptx');
-
-// Current slide as PNG
-const png = await viewer.exportCurrentSlideToPng({ width: 1920, dpr: 2 });
-
-// Every slide as PNG (in slide order)
-const pngs = await viewer.exportAllSlidesToPng();
-```
-
-PDF stitching is intentionally left to the caller — the library stays
-zero-dependency, but every PNG returned here carries `pixelWidth` /
-`pixelHeight` / `pointWidth` / `pointHeight` (in PDF points), so you can
-feed them straight into `pdf-lib` or jsPDF in your own code.
-
----
-
 ## Companion packages
 
 - **[`packages/markdown/`](packages/markdown/)** — `@silurus/ooxml-markdown` and the `ooxml-md` CLI convert `.pptx` / `.docx` / `.xlsx` to GitHub-flavoured markdown via the workspace WASM parsers. Same projection used by the MCP server (~21× smaller than the raw XML on the demo deck, ~8% bigger than a flat-text extractor). Includes a node20-based GitHub Action for bulk repo-wide conversion.
