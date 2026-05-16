@@ -4,6 +4,14 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.34.0 — 2026-05-16
+
+Single xlsx-focused change. pptx / docx renderers are byte-identical to 0.33.2, and the xlsx grid render with no active selection is unchanged — header colors only diverge once the viewer holds a selection. No README screenshot updates because of this.
+
+### Features
+
+- **xlsx**: `XlsxViewer` now highlights the row / column headers that the current selection belongs to, matching Excel's two-tier indicator. Cell selection (`cells` mode) paints the row & column headers of the selected range in a slightly darker grey (`#e8eaed`). Whole-row / whole-column selection (`rows` / `cols` mode) paints the selection-axis headers in light blue (`#caddf6`) with a blue border (`#5b9bd5`) and the other axis in the grey accent. Select-all paints every header in light blue. Two new `RenderViewportOptions` fields (`selectedRowRange` / `selectedColRange`, each carrying `start` / `end` / `strong`) flow from the viewer through `XlsxWorkbook.renderViewport` into `renderer.renderHeaders`, where `drawColHeader` / `drawRowHeader` pick fill and stroke colors per index. Canvas re-render is now triggered alongside every `updateSelectionOverlay()` call so headers repaint in lock-step with the overlay border.
+
 ## 0.33.2 — 2026-05-12
 
 ### Features

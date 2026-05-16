@@ -428,6 +428,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Pivot tables | ❌ Not planned |
 | | Data validation / comments | ❌ Not planned |
 | **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
+| | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
 | | Text selection inside cells (transparent overlay) | ✅ |
 | | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
