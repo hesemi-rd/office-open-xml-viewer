@@ -5,8 +5,8 @@ import type {
   ShapeElement,
   PictureElement,
 } from '@silurus/ooxml-pptx';
-import type { Change, DiffResult, BBox } from './types';
-import { deepEqual } from './util/equal';
+import type { Change, DiffResult, BBox } from './types.ts';
+import { deepEqual } from './util/equal.ts';
 
 /** Parser-emitted fields that aren't yet in the public TS surface. The Rust
  *  parser (CHANGELOG 0.32.0) serializes `id` / `name` / `placeholderType` /
@@ -97,40 +97,49 @@ function diffElements(left: SlideElement[], right: SlideElement[], slideIndex: n
   const rightMatched = new Set<number>();
   const pairs: Array<[number, number]> = [];
 
-  // Pass 1 — by id
-  const rightById = new Map<string, number>();
+  // Pass 1 — by id (PowerPoint reuses cNvPr ids on the same slide, so we
+  // keep ALL indices per id and consume them in order rather than taking only
+  // the last one. This way, two shapes with id="3" on each side pair up 1:1
+  // instead of fighting over the same slot.)
+  const rightById = new Map<string, number[]>();
   right.forEach((el, i) => {
     const id = (el as IdentifiedShape).id;
-    if (id) rightById.set(id, i);
+    if (!id) return;
+    const list = rightById.get(id) ?? [];
+    list.push(i);
+    rightById.set(id, list);
   });
   left.forEach((el, i) => {
     const id = (el as IdentifiedShape).id;
     if (!id) return;
-    const j = rightById.get(id);
-    if (j != null && !rightMatched.has(j)) {
-      pairs.push([i, j]);
-      leftMatched.add(i);
-      rightMatched.add(j);
-    }
+    const list = rightById.get(id);
+    if (!list || list.length === 0) return;
+    const j = list.shift()!;
+    pairs.push([i, j]);
+    leftMatched.add(i);
+    rightMatched.add(j);
   });
 
-  // Pass 2 — by name
-  const rightByName = new Map<string, number>();
+  // Pass 2 — by name (same multi-index handling as pass 1)
+  const rightByName = new Map<string, number[]>();
   right.forEach((el, i) => {
     if (rightMatched.has(i)) return;
     const name = (el as IdentifiedShape).name;
-    if (name) rightByName.set(name, i);
+    if (!name) return;
+    const list = rightByName.get(name) ?? [];
+    list.push(i);
+    rightByName.set(name, list);
   });
   left.forEach((el, i) => {
     if (leftMatched.has(i)) return;
     const name = (el as IdentifiedShape).name;
     if (!name) return;
-    const j = rightByName.get(name);
-    if (j != null && !rightMatched.has(j)) {
-      pairs.push([i, j]);
-      leftMatched.add(i);
-      rightMatched.add(j);
-    }
+    const list = rightByName.get(name);
+    if (!list || list.length === 0) return;
+    const j = list.shift()!;
+    pairs.push([i, j]);
+    leftMatched.add(i);
+    rightMatched.add(j);
   });
 
   // Pass 3 — greedy nearest neighbour by type + centre distance

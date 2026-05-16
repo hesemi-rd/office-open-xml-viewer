@@ -4,6 +4,8 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "declarationDir": "./dist/types",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "paths": {
       "@silurus/ooxml-core": ["../core/src/index.ts"],
       "@silurus/ooxml-pptx": ["../pptx/src/types.ts"],

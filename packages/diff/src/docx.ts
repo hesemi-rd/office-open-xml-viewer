@@ -5,9 +5,9 @@ import type {
   DocRun,
   TextRun,
 } from '@silurus/ooxml-docx';
-import type { Change, DiffResult } from './types';
-import { deepEqual, stableText } from './util/equal';
-import { alignSequences } from './util/sequence';
+import type { Change, DiffResult } from './types.ts';
+import { deepEqual, stableText } from './util/equal.ts';
+import { alignSequences } from './util/sequence.ts';
 
 /** Top-level entry. Produce a structural diff between two parsed DOCX documents. */
 export function diffDocx(before: Document, after: Document): DiffResult {

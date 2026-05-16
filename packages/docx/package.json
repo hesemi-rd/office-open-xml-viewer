@@ -18,6 +18,15 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
   "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/types/index.d.ts"
+    },
+    "./wasm": "./src/wasm/docx_parser.js",
+    "./wasm-binary": "./src/wasm/docx_parser_bg.wasm"
+  },
   "files": ["dist", "src"],
   "scripts": {
     "dev": "vite",

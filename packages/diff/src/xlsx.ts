@@ -5,8 +5,8 @@ import type {
   CellValue,
   Row,
 } from '@silurus/ooxml-xlsx';
-import type { Change, DiffResult } from './types';
-import { deepEqual } from './util/equal';
+import type { Change, DiffResult } from './types.ts';
+import { deepEqual } from './util/equal.ts';
 
 /** Input to {@link diffXlsx}: the workbook plus a map of sheet name → parsed Worksheet.
  *  This mirrors how `XlsxWorkbook` exposes worksheets (one parse per sheet on demand). */
