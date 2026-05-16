@@ -1,0 +1,22 @@
+name: 'OOXML → Markdown'
+description: 'Convert .pptx / .docx / .xlsx files in a repository to GitHub-flavoured markdown.'
+author: 'silurus'
+branding:
+  icon: 'file-text'
+  color: 'green'
+
+inputs:
+  files:
+    description: 'Glob pattern for OOXML files to convert (e.g. "docs/**/*.docx").'
+    required: true
+  out-dir:
+    description: 'Directory to write the markdown output. Defaults to alongside each source file.'
+    required: false
+  commit:
+    description: 'When "true", commit the generated markdown back to the branch.'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'node20'
+  main: 'index.js'

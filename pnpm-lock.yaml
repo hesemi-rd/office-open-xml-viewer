@@ -99,6 +99,15 @@ importers:
         specifier: ^3.6.0
         version: 3.6.0(vite@6.4.2(@types/node@25.6.0)(lightningcss@1.32.0))
 
+  packages/markdown:
+    devDependencies:
+      '@types/node':
+        specifier: ^25.6.0
+        version: 25.6.0
+      typescript:
+        specifier: ^6.0.2
+        version: 6.0.3
+
   packages/node:
     dependencies:
       '@silurus/ooxml-docx':
