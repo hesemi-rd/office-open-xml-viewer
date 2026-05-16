@@ -68,6 +68,12 @@ export class XlsxWorkbook {
     return this.parsedWorkbook?.workbook.sheets.length ?? 0;
   }
 
+  /** The parsed workbook (sheet list + styles + shared strings).
+   *  `null` until `load()` resolves. Read-only view intended for consumers
+   *  that need to inspect or diff the workbook structure
+   *  (`@silurus/ooxml-diff`). */
+  get parsed(): ParsedWorkbook | null { return this.parsedWorkbook; }
+
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
     if (this.sheetCache.has(sheetIndex)) {
       return this.sheetCache.get(sheetIndex)!;

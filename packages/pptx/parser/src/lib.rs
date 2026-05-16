@@ -19,8 +19,26 @@ pub fn parse_pptx(data: &[u8]) -> Result<String, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// WASM-callable markdown projection. Shares the body of `to_markdown_native`
+/// so the browser / Node WASM path and the native mcp-server path stay in
+/// lock-step. See `to_markdown_native` for the design rationale.
+#[wasm_bindgen]
+pub fn pptx_to_markdown(data: &[u8]) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    let pres = parse_presentation(data)
+        .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+    let mut out = String::new();
+    for (i, slide) in pres.slides.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n---\n\n");
+        }
+        render_slide_md(slide, &mut out);
+    }
+    Ok(out)
+}
+
 /// Native equivalent of `parse_pptx` for use from the MCP server.
-#[cfg(not(target_arch = "wasm32"))]
+
 pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
     let presentation = parse_presentation(data).map_err(|e| e.to_string())?;
     serde_json::to_string(&presentation).map_err(|e| e.to_string())
@@ -32,7 +50,7 @@ pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
 /// strokes, effects, theme inheritance details). Designed for AI agents that
 /// need to read content efficiently — typical 10-30× token reduction vs. the
 /// raw JSON of `parse_pptx_native`.
-#[cfg(not(target_arch = "wasm32"))]
+
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     let pres = parse_presentation(data).map_err(|e| e.to_string())?;
     let mut out = String::new();
@@ -50,7 +68,7 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 //  serialization used by the viewer. Lossy by design.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_slide_md(slide: &Slide, out: &mut String) {
     use std::fmt::Write as _;
     let title = slide_title_md(slide);
@@ -78,7 +96,7 @@ fn render_slide_md(slide: &Slide, out: &mut String) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn slide_title_md(slide: &Slide) -> Option<String> {
     for el in &slide.elements {
         if let SlideElement::Shape(s) = el {
@@ -96,7 +114,7 @@ fn slide_title_md(slide: &Slide) -> Option<String> {
     None
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn shape_text_plain(s: &ShapeElement) -> Option<String> {
     let tb = s.text_body.as_ref()?;
     let mut buf = String::new();
@@ -112,7 +130,7 @@ fn shape_text_plain(s: &ShapeElement) -> Option<String> {
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_element_md(el: &SlideElement, out: &mut String) {
     match el {
         SlideElement::Shape(s) => {
@@ -139,7 +157,7 @@ fn render_element_md(el: &SlideElement, out: &mut String) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_shape_md(s: &ShapeElement, out: &mut String) {
     let Some(tb) = &s.text_body else { return };
     if tb.paragraphs.is_empty() {
@@ -158,14 +176,14 @@ fn render_shape_md(s: &ShapeElement, out: &mut String) {
     out.push('\n');
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 enum ParaKind {
     Plain,
     Bullet,
     Number,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn paragraph_kind(b: &Bullet, inherit_means_bullet: bool) -> ParaKind {
     match b {
         Bullet::None => ParaKind::Plain,
@@ -181,7 +199,7 @@ fn paragraph_kind(b: &Bullet, inherit_means_bullet: bool) -> ParaKind {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_paragraph_md(para: &Paragraph, inherit_means_bullet: bool, out: &mut String) {
     use std::fmt::Write as _;
     let text = render_runs_md(&para.runs);
@@ -207,7 +225,7 @@ fn render_paragraph_md(para: &Paragraph, inherit_means_bullet: bool, out: &mut S
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_runs_md(runs: &[TextRun]) -> String {
     let mut out = String::new();
     for run in runs {
@@ -257,7 +275,7 @@ fn render_runs_md(runs: &[TextRun]) -> String {
 /// body text contains so much punctuation that aggressive escaping makes the
 /// output noisier than the structure it's trying to expose. Pipe is handled
 /// separately in `render_table_cell_md` since it only matters inside tables.
-#[cfg(not(target_arch = "wasm32"))]
+
 fn escape_inline_md(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('*', "\\*")
@@ -265,7 +283,7 @@ fn escape_inline_md(s: &str) -> String {
         .replace('`', "\\`")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_table_md(t: &TableElement, out: &mut String) {
     use std::fmt::Write as _;
     if t.rows.is_empty() {
@@ -286,7 +304,7 @@ fn render_table_md(t: &TableElement, out: &mut String) {
     out.push('\n');
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_table_cell_md(cell: &TableCell) -> String {
     // Continuation cells of a merge carry no content — leave empty so the row
     // alignment stays intact.
@@ -310,7 +328,7 @@ fn render_table_cell_md(cell: &TableCell) -> String {
     buf.trim().replace('|', "\\|")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+
 fn render_chart_md(c: &ChartElement, out: &mut String) {
     use std::fmt::Write as _;
     let title = c.title.as_deref().unwrap_or("(untitled)");

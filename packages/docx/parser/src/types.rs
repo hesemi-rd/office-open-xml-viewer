@@ -510,6 +510,26 @@ pub struct TextRun {
     /// (half-points) inside the rubyPr.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ruby: Option<RubyAnnotation>,
+    /// ECMA-376 §17.13.5 — set when this run sits inside a `<w:ins>` or
+    /// `<w:del>` block. The renderer paints insertions with a per-author
+    /// underline and deletions with a per-author strikethrough so reviewers
+    /// can see tracked edits inline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RunRevision>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRevision {
+    /// "insertion" or "deletion".
+    pub kind: String,
+    /// `<w:ins w:author>` / `<w:del w:author>`. Used by the renderer to pick
+    /// a stable per-author colour (modulo a fixed palette).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// `<w:ins w:date>` / `<w:del w:date>` ISO-8601 timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

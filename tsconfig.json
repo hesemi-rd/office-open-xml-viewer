@@ -4,6 +4,7 @@
     { "path": "./packages/core" },
     { "path": "./packages/pptx" },
     { "path": "./packages/xlsx" },
-    { "path": "./packages/docx" }
+    { "path": "./packages/docx" },
+    { "path": "./packages/diff" }
   ]
 }

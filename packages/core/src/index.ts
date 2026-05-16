@@ -13,3 +13,10 @@ export {
   type SparklineModel,
   type SparklineRect,
 } from './sparkline/renderer';
+export {
+  renderPageToPng,
+  renderAllPagesToPng,
+  type PageBitmap,
+  type RenderPageToCanvasContext,
+  type ExportPngOptions,
+} from './export/index';

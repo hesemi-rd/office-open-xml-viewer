@@ -53,6 +53,11 @@
       "import": "./dist/pptx.mjs",
       "require": "./dist/pptx.cjs",
       "types": "./dist/types/pptx.d.ts"
+    },
+    "./diff": {
+      "import": "./dist/diff.mjs",
+      "require": "./dist/diff.cjs",
+      "types": "./dist/types/diff.d.ts"
     }
   },
   "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
@@ -67,6 +72,7 @@
   },
   "devDependencies": {
     "@chromatic-com/storybook": "^5.1.2",
+    "@silurus/ooxml-diff": "workspace:*",
     "@storybook/addon-a11y": "^10.3.5",
     "@storybook/addon-docs": "^10.3.5",
     "@storybook/html-vite": "^10.3.5",

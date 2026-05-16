@@ -1,6 +1,16 @@
 # 残課題一覧
 
-最終更新: 2026-04-18 (session 4)
+最終更新: 2026-05-16 (session 5 — item 4 を deferred と明記)
+
+---
+
+## ライブラリ拡張ロードマップでスキップした項目
+
+- **session 5 (本ブランチ)** の roadmap (`/root/.claude/plans/...`) で
+  diff / Node 基盤 / export / track changes / markdown CLI を順に実装したが、
+  **item 4 (baseline 精度 + 未実装プリセット図形) は VRT が回せない CI 環境では
+  net regression を検知できないため deferred** とした。後述の課題と合わせ、
+  ローカル `pnpm vrt` 環境で再着手すること。
 
 ---
 

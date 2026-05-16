@@ -114,4 +114,35 @@ export class DocxDocument {
       prebuiltPages: pages,
     });
   }
+
+  /** Export a single page as a PNG blob. */
+  async exportPageToPng(pageIndex: number, opts: { width?: number; dpr?: number } = {}): Promise<Blob> {
+    const { renderPageToPng } = await import('@silurus/ooxml-core');
+    const bitmap = await renderPageToPng(this._exportContext(), pageIndex, opts);
+    return bitmap.blob;
+  }
+
+  /** Export every page as PNG blobs (in page order). */
+  async exportAllPagesToPng(opts: { width?: number; dpr?: number } = {}): Promise<Blob[]> {
+    const { renderAllPagesToPng } = await import('@silurus/ooxml-core');
+    const bitmaps = await renderAllPagesToPng(this._exportContext(), opts);
+    return bitmaps.map((b) => b.blob);
+  }
+
+  /** @internal Build the shared `RenderPageToCanvasContext`. */
+  private _exportContext() {
+    const doc = this._document;
+    if (!doc) throw new Error('Document not loaded');
+    const totalPages = this._getPages().length;
+    return {
+      pageCount: totalPages,
+      renderPage: async (canvas: HTMLCanvasElement, pageIndex: number, opts: { width: number; dpr: number }) =>
+        this.renderPage(canvas, pageIndex, opts),
+      pageSizeInPoints: () => ({
+        // SectionProps.pageWidth / pageHeight are already in points.
+        widthPt: doc.section.pageWidth,
+        heightPt: doc.section.pageHeight,
+      }),
+    };
+  }
 }

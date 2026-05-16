@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
-#[cfg(not(target_arch = "wasm32"))]
+
 mod markdown;
 
 #[derive(Debug, Serialize)]
@@ -5583,7 +5583,7 @@ fn parse_cell_ref(r: &str) -> (u32, u32) {
 
 /// Returns workbook overview (sheet names and metadata) as JSON.
 /// Native equivalent of `parse_xlsx` for use from the MCP server.
-#[cfg(not(target_arch = "wasm32"))]
+
 pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
     parse_xlsx_inner(data)
         .and_then(|wb| serde_json::to_string(&wb.workbook).map_err(|e| e.to_string()))
@@ -5592,11 +5592,24 @@ pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
 /// Parse the workbook and project every sheet to GitHub-flavoured markdown:
 /// `## SheetName` headings followed by a pipe table per sheet. Merged-cell
 /// continuation cells are rendered as empty; the display value comes from the
+/// WASM-callable markdown projection (mirrors `to_markdown_native`).
+#[wasm_bindgen]
+pub fn xlsx_to_markdown(data: &[u8]) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    to_markdown_impl(data).map_err(|e| JsValue::from_str(&e))
+}
+
 /// cached `<v>` so formula formulas show their results, not the formula text.
 /// Designed for AI agents that need to read the spreadsheet content
 /// efficiently — drops styling, formatting, charts, sparklines, drawings.
-#[cfg(not(target_arch = "wasm32"))]
+
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
+    to_markdown_impl(data)
+}
+
+/// Shared implementation between `to_markdown_native` (mcp-server) and
+/// `xlsx_to_markdown` (browser / Node WASM).
+fn to_markdown_impl(data: &[u8]) -> Result<String, String> {
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
     let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
@@ -5618,7 +5631,7 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 
 /// Parses a single worksheet by 0-based index and returns it as JSON.
 /// Native equivalent of `parse_sheet` for use from the MCP server.
-#[cfg(not(target_arch = "wasm32"))]
+
 pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;

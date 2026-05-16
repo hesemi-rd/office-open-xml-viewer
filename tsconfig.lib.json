@@ -5,7 +5,8 @@
     "packages/core/src/**/*",
     "packages/pptx/src/**/*",
     "packages/xlsx/src/**/*",
-    "packages/docx/src/**/*"
+    "packages/docx/src/**/*",
+    "packages/diff/src/**/*"
   ],
   "compilerOptions": {
     "outDir": "./dist",
@@ -13,7 +14,11 @@
     "emitDeclarationOnly": true,
     "paths": {
       "@silurus/ooxml-core": ["./packages/core/src/index.ts"],
-      "@silurus/ooxml-core/*": ["./packages/core/src/*"]
+      "@silurus/ooxml-core/*": ["./packages/core/src/*"],
+      "@silurus/ooxml-pptx": ["./packages/pptx/src/index.ts"],
+      "@silurus/ooxml-docx": ["./packages/docx/src/index.ts"],
+      "@silurus/ooxml-xlsx": ["./packages/xlsx/src/index.ts"],
+      "@silurus/ooxml-diff": ["./packages/diff/src/index.ts"]
     }
   }
 }

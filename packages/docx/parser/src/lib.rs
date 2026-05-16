@@ -5,8 +5,6 @@ mod xml_util;
 mod styles;
 mod numbering;
 mod parser;
-
-#[cfg(not(target_arch = "wasm32"))]
 mod markdown;
 
 #[wasm_bindgen]
@@ -18,6 +16,16 @@ pub fn parse_docx(data: &[u8]) -> String {
         }),
         Err(e) => format!("{{\"error\":\"{}\"}}", e),
     }
+}
+
+/// WASM-callable markdown projection (mirrors `to_markdown_native`). Returns
+/// GitHub-flavoured markdown of headings / paragraphs / tables / footnotes,
+/// discarding positioning, section properties, fonts, and drawing shapes.
+#[wasm_bindgen]
+pub fn docx_to_markdown(data: &[u8]) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    let doc = parser::parse(data).map_err(|e| JsValue::from_str(&e))?;
+    Ok(markdown::render_document(&doc))
 }
 
 /// Native equivalent of `parse_docx` for use from the MCP server.

@@ -18,6 +18,42 @@ export interface Document {
    * entry is absent or classified as "auto".
    */
   fontFamilyClasses?: Record<string, string>;
+  /** ECMA-376 §17.13.5 — flat list of `<w:ins>` / `<w:del>` events in the
+   *  body. Each entry carries author / date / text. The renderer marks
+   *  runs inline via {@link TextRun.revision}; this array is primarily for
+   *  tooling (MCP, agents, change-summary panels). */
+  revisions?: DocRevision[];
+  /** ECMA-376 §17.13.4 — `word/comments.xml`. Each comment carries id,
+   *  author, initials, date, and plain-text body. */
+  comments?: DocComment[];
+  /** ECMA-376 §17.11.10 — `word/footnotes.xml` (id + text). Excludes the
+   *  spec-defined separator / continuation-separator entries. */
+  footnotes?: DocNote[];
+  /** ECMA-376 §17.11.4 — `word/endnotes.xml` (id + text). Same shape as
+   *  `footnotes`. */
+  endnotes?: DocNote[];
+}
+
+export interface DocRevision {
+  /** "insertion" | "deletion" */
+  kind: 'insertion' | 'deletion' | string;
+  author?: string;
+  /** ISO-8601 timestamp */
+  date?: string;
+  text: string;
+}
+
+export interface DocComment {
+  id: string;
+  author?: string;
+  initials?: string;
+  date?: string;
+  text: string;
+}
+
+export interface DocNote {
+  id: string;
+  text: string;
 }
 
 export interface HeadersFooters {
@@ -291,6 +327,20 @@ export interface TextRun {
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana). Renders above the
    *  base text in a smaller font; line height is expanded to fit it. */
   ruby?: RubyAnnotation;
+  /** ECMA-376 §17.13.5 — set when this run sits inside `<w:ins>` or
+   *  `<w:del>`. The renderer paints insertions with an author-coloured
+   *  underline and deletions with an author-coloured strikethrough so
+   *  tracked changes appear inline. */
+  revision?: RunRevision;
+}
+
+export interface RunRevision {
+  /** "insertion" or "deletion" */
+  kind: 'insertion' | 'deletion' | string;
+  /** `<w:ins w:author>` / `<w:del w:author>`. Used to colour the markup. */
+  author?: string;
+  /** ISO-8601 timestamp. */
+  date?: string;
 }
 
 export interface RubyAnnotation {
@@ -420,4 +470,8 @@ export interface RenderPageOptions {
   defaultTextColor?: string;
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
   onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string }) => void;
+  /** Default `true`. When false, ECMA-376 §17.13.5 track-changes runs render
+   *  in their normal style (no author colour, no underline / strikethrough)
+   *  — equivalent to Word's "Final / No Markup" view. */
+  showTrackChanges?: boolean;
 }

@@ -749,7 +749,7 @@ fn parse_paragraph(
 
     // Parse runs
     let mut runs = vec![];
-    parse_para_content(node, &base_run, style_map, media_map, rel_map, theme, &mut runs);
+    parse_para_content(node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None);
 
     let tab_stops = base_para.tab_stops.clone().unwrap_or_default().into_iter()
         .map(|(pos, alignment, leader)| TabStop { pos, alignment, leader })
@@ -813,13 +813,14 @@ fn parse_para_content(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
+    revision: Option<&RunRevision>,
 ) {
     let mut field = FieldState::default();
 
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
-                handle_run_in_para(child, base_run, style_map, media_map, theme, runs, &mut field, None);
+                handle_run_in_para(child, base_run, style_map, media_map, theme, runs, &mut field, None, revision);
             }
             "hyperlink" => {
                 // Resolve URL from r:id via relationships
@@ -827,11 +828,24 @@ fn parse_para_content(
                     .or_else(|| child.attribute("id"))
                     .and_then(|rid| rel_map.get(rid).cloned());
                 for r in child.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
-                    handle_run_in_para(r, base_run, style_map, media_map, theme, runs, &mut field, Some(href.clone()));
+                    handle_run_in_para(r, base_run, style_map, media_map, theme, runs, &mut field, Some(href.clone()), revision);
                 }
             }
-            "ins" | "del" | "smartTag" => {
-                parse_para_content(child, base_run, style_map, media_map, rel_map, theme, runs);
+            "ins" | "del" => {
+                // ECMA-376 §17.13.5 — build a RunRevision context covering
+                // every descendant run so the renderer can paint tracked
+                // changes inline. Nested ins/del isn't legal per spec; the
+                // inner block wins if it occurs anyway.
+                let kind = if child.tag_name().name() == "ins" { "insertion" } else { "deletion" };
+                let inner = RunRevision {
+                    kind: kind.to_string(),
+                    author: attr_w(child, "author"),
+                    date: attr_w(child, "date"),
+                };
+                parse_para_content(child, base_run, style_map, media_map, rel_map, theme, runs, Some(&inner));
+            }
+            "smartTag" => {
+                parse_para_content(child, base_run, style_map, media_map, rel_map, theme, runs, revision);
             }
             "fldSimple" => {
                 let instr = attr_w(child, "instr").unwrap_or_default();
@@ -860,6 +874,7 @@ fn handle_run_in_para(
     field: &mut FieldState,
     // Outer None = not inside a hyperlink. Some(None) = hyperlink without URL. Some(Some(url)) = hyperlink with URL.
     link_href: Option<Option<String>>,
+    revision: Option<&RunRevision>,
 ) {
     // Inspect this run for field control characters or instruction text first.
     let mut fld_char_type: Option<String> = None;
@@ -929,7 +944,7 @@ fn handle_run_in_para(
     }
 
     // Normal run
-    parse_run_inner(r_node, base_run, style_map, media_map, theme, runs, link_href);
+    parse_run_inner(r_node, base_run, style_map, media_map, theme, runs, link_href, revision);
 }
 
 fn extract_text_from_runs(node: roxmltree::Node) -> String {
@@ -985,6 +1000,7 @@ fn parse_run_inner(
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     link_href: Option<Option<String>>,
+    revision: Option<&RunRevision>,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -1029,7 +1045,10 @@ fn parse_run_inner(
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
-            "t" => {
+            "t" | "delText" => {
+                // ECMA-376 §17.13.5: text inside <w:del> is wrapped in
+                // <w:delText> instead of <w:t>, but otherwise carries the
+                // same content. Accept both and attach the revision below.
                 let text = child.text().unwrap_or("").to_string();
                 if !text.is_empty() {
                     runs.push(DocRun::Text(TextRun {
@@ -1050,6 +1069,7 @@ fn parse_run_inner(
                         double_strikethrough,
                         highlight: highlight.clone(),
                         ruby: None,
+                        revision: revision.cloned(),
                     }));
                 }
             }
@@ -1073,6 +1093,7 @@ fn parse_run_inner(
                     double_strikethrough,
                     highlight: highlight.clone(),
                     ruby: None,
+                    revision: revision.cloned(),
                 }));
             }
             "br" => {
@@ -1119,7 +1140,7 @@ fn parse_run_inner(
                 if let Some(rb) = child_w(child, "rubyBase") {
                     let before = runs.len();
                     for inner in rb.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
-                        parse_run_inner(inner, &fmt, style_map, media_map, theme, runs, link_href.clone());
+                        parse_run_inner(inner, &fmt, style_map, media_map, theme, runs, link_href.clone(), revision);
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
                     // (typical case is a single base run carrying one or two
@@ -1165,6 +1186,7 @@ fn parse_run_inner(
                     double_strikethrough,
                     highlight: highlight.clone(),
                     ruby: None,
+                    revision: revision.cloned(),
                 }));
             }
             "AlternateContent" => {

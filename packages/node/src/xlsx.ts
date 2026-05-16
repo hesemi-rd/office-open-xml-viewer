@@ -1,0 +1,58 @@
+import type { ParsedWorkbook, Worksheet } from '@silurus/ooxml-xlsx';
+// @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
+import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
+import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
+
+let initialized = false;
+
+function ensureInit(): void {
+  if (initialized) return;
+  const wasmPath = resolveWasm(import.meta.url, '../../xlsx/src/wasm/xlsx_parser_bg.wasm');
+  loadWasmModule(xlsxWasm as unknown as { initSync: (m: WebAssembly.Module) => unknown }, wasmPath);
+  initialized = true;
+}
+
+/** Parse the workbook index (sheet list + styles + shared strings) from a
+ *  `.xlsx` archive. Individual sheet cell data is parsed lazily via
+ *  {@link parseSheet}. */
+export function parseXlsx(buffer: ArrayBuffer | Uint8Array | Buffer): ParsedWorkbook {
+  ensureInit();
+  const bytes = toUint8(buffer);
+  const json = (xlsxWasm as unknown as { parse_xlsx: (b: Uint8Array) => string }).parse_xlsx(bytes);
+  return JSON.parse(json) as ParsedWorkbook;
+}
+
+/** Parse a single sheet's cell data and layout. The browser path does this
+ *  on demand from a Web Worker; in Node we just call the WASM export
+ *  synchronously. */
+export function parseSheet(
+  buffer: ArrayBuffer | Uint8Array | Buffer,
+  sheetIndex: number,
+  sheetName: string,
+): Worksheet {
+  ensureInit();
+  const bytes = toUint8(buffer);
+  const json = (xlsxWasm as unknown as {
+    parse_sheet: (b: Uint8Array, idx: number, name: string) => string;
+  }).parse_sheet(bytes, sheetIndex, sheetName);
+  return JSON.parse(json) as Worksheet;
+}
+
+/** Eagerly parse every sheet referenced by the workbook. Useful for batch
+ *  jobs (diffing two workbooks, dumping to markdown) where you want the
+ *  whole model in one go. */
+export function parseXlsxAllSheets(
+  buffer: ArrayBuffer | Uint8Array | Buffer,
+): { workbook: ParsedWorkbook['workbook']; worksheets: Record<string, Worksheet> } {
+  const parsed = parseXlsx(buffer);
+  const worksheets: Record<string, Worksheet> = {};
+  for (let i = 0; i < parsed.workbook.sheets.length; i++) {
+    const meta = parsed.workbook.sheets[i];
+    worksheets[meta.name] = parseSheet(buffer, i, meta.name);
+  }
+  return { workbook: parsed.workbook, worksheets };
+}
+
+function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
+}

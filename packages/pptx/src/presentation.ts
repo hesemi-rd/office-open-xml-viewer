@@ -169,6 +169,11 @@ export class PptxPresentation {
   /** Slide height in EMU. */
   get slideHeight(): number { return this._presentation?.slideHeight ?? 0; }
 
+  /** The parsed presentation model. `null` until `load()` resolves. Read-only
+   *  view intended for consumers that need to inspect or diff the structure
+   *  (`@silurus/ooxml-diff`). */
+  get presentation(): Presentation | null { return this._presentation; }
+
   /** Render a slide onto the given canvas. */
   async renderSlide(
     canvas: HTMLCanvasElement,
@@ -261,6 +266,37 @@ export class PptxPresentation {
         onTextRun: opts.onTextRun,
       }),
     });
+  }
+
+  /** Export a single slide as a PNG blob. */
+  async exportSlideToPng(slideIndex: number, opts: { width?: number; dpr?: number } = {}): Promise<Blob> {
+    const { renderPageToPng } = await import('@silurus/ooxml-core');
+    const bitmap = await renderPageToPng(this._exportContext(), slideIndex, opts);
+    return bitmap.blob;
+  }
+
+  /** Export every slide as PNG blobs (in slide order). */
+  async exportAllSlidesToPng(opts: { width?: number; dpr?: number } = {}): Promise<Blob[]> {
+    const { renderAllPagesToPng } = await import('@silurus/ooxml-core');
+    const bitmaps = await renderAllPagesToPng(this._exportContext(), opts);
+    return bitmaps.map((b) => b.blob);
+  }
+
+  /** @internal Build the {@link RenderPageToCanvasContext} adapter used by
+   *  the export helpers in `@silurus/ooxml-core`. */
+  private _exportContext() {
+    const pres = this._presentation;
+    if (!pres) throw new Error('Presentation not loaded');
+    return {
+      pageCount: pres.slides.length,
+      renderPage: async (canvas: HTMLCanvasElement, slideIndex: number, opts: { width: number; dpr: number }) =>
+        this.renderSlide(canvas, slideIndex, opts),
+      // EMU → pt: 1 pt = 12700 EMU
+      pageSizeInPoints: () => ({
+        widthPt: pres.slideWidth / 12700,
+        heightPt: pres.slideHeight / 12700,
+      }),
+    };
   }
 
   /** Terminate the worker and release all resources. */

@@ -386,7 +386,8 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | Text boxes / drawing shapes | ✅ |
 | **Advanced** | Footnote / endnote reference markers | ✅ |
-| | Track changes / comments | ❌ |
+| | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
+| | Comments / footnote bodies (parsed, not yet rendered inline) | ⚠️ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 
@@ -521,8 +522,70 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ---
 
+## Exporting to PNG
+
+PPTX and DOCX viewers can export the rendered output to PNG (per page or all
+pages). Zero runtime dependencies — pages are rendered to an off-screen
+canvas and encoded via `canvas.toBlob('image/png')`.
+
+```typescript
+const viewer = new PptxViewer(canvas);
+await viewer.load('/deck.pptx');
+
+// Current slide as PNG
+const png = await viewer.exportCurrentSlideToPng({ width: 1920, dpr: 2 });
+
+// Every slide as PNG (in slide order)
+const pngs = await viewer.exportAllSlidesToPng();
+```
+
+PDF stitching is intentionally left to the caller — the library stays
+zero-dependency, but every PNG returned here carries `pixelWidth` /
+`pixelHeight` / `pointWidth` / `pointHeight` (in PDF points), so you can
+feed them straight into `pdf-lib` or jsPDF in your own code.
+
+---
+
+## Document diff
+
+In addition to viewing, `@silurus/ooxml` exposes a structural diff for any of
+the three formats — useful for review workflows, CI checks, or change
+visualisation.
+
+```typescript
+import { diffPptx } from '@silurus/ooxml/diff';
+import { PptxPresentation } from '@silurus/ooxml/pptx';
+
+const before = await PptxPresentation.load('/v1.pptx');
+const after  = await PptxPresentation.load('/v2.pptx');
+
+const result = diffPptx(before.presentation!, after.presentation!);
+// result.changes: [{ op: 'modify', kind: 'text', location: { kind: 'slide', slideIndex: 2, bbox: { x, y, width, height } }, before, after }, ...]
+```
+
+There's also a turnkey side-by-side viewer that overlays the diff:
+
+```typescript
+import { PptxDiffViewer } from '@silurus/ooxml/pptx';
+import { diffPptx } from '@silurus/ooxml/diff';
+
+const left  = document.getElementById('before-canvas') as HTMLCanvasElement;
+const right = document.getElementById('after-canvas')  as HTMLCanvasElement;
+const viewer = new PptxDiffViewer(left, right, { width: 480 });
+viewer.setDiffFn(diffPptx);
+await viewer.load('/v1.pptx', '/v2.pptx');
+```
+
+The DOCX (`DocxDiffViewer`) and XLSX (`XlsxDiffViewer`) counterparts have the
+same shape. See the `Diff` stories under each viewer in the
+[Storybook demo](https://ooxml.silurus.dev) for live examples.
+
+---
+
 ## Companion packages
 
+- **[`packages/markdown/`](packages/markdown/)** — `@silurus/ooxml-markdown` and the `ooxml-md` CLI convert `.pptx` / `.docx` / `.xlsx` to GitHub-flavoured markdown via the workspace WASM parsers. Same projection used by the MCP server (~21× smaller than the raw XML on the demo deck, ~8% bigger than a flat-text extractor). Includes a node20-based GitHub Action for bulk repo-wide conversion.
+- **[`packages/node/`](packages/node/)** — Node-side parsers (`@silurus/ooxml-node`) exposing `parsePptx` / `parseDocx` / `parseXlsx` / `parseXlsxAllSheets` against the workspace WASM artifacts, with no DOM or Web Worker dependency. Useful for CI checks, headless rendering pipelines, and CLI tools. Pairs with `@silurus/ooxml-diff` for server-side diffing. Includes an `ooxml-thumbnail` CLI (pptx-only first pass; requires `skia-canvas`).
 - **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` so AI coding agents in the same window (Copilot Agent mode, Claude, …) can read those files via dedicated tools.
 - **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`. Prebuilt binaries are attached to each [GitHub Release](https://github.com/yukiyokotani/office-open-xml-viewer/releases) for macOS / Linux / Windows; the VS Code extension downloads them on demand.
 

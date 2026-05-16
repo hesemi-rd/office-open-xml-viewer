@@ -72,6 +72,9 @@ interface RenderState {
   fontFamilyClasses: Record<string, string>;
   /** Callback for building a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
+  /** When false, runs tagged with a `revision` render without the
+   *  track-changes overlay (no author colour, no underline/strikethrough). */
+  showTrackChanges: boolean;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -101,6 +104,11 @@ export interface RenderDocumentOptions {
   prebuiltPages?: PaginatedBodyElement[][];
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
+  /** Default `true`. When false, runs tagged with a `revision` (insertion or
+   *  deletion from `<w:ins>` / `<w:del>`) render in their normal colour with
+   *  no underline / strikethrough overlay — useful for a "final / no markup"
+   *  view of a tracked document. */
+  showTrackChanges?: boolean;
 }
 
 // ===== Image preloading =====
@@ -113,6 +121,30 @@ interface ImagePair {
 /** Returns a stable map key for a (url, colorReplaceFrom) pair. */
 function imageKey(url: string, colorReplaceFrom?: string): string {
   return colorReplaceFrom ? `${url}|clr:${colorReplaceFrom}` : url;
+}
+
+/** Picks a stable colour for a track-changes author. Mirrors Word's behaviour
+ *  of cycling through a fixed palette (Word uses 8 hues then alternates).
+ *  An empty / missing author maps to the first colour. */
+const TRACK_CHANGE_AUTHOR_PALETTE = [
+  '#C00000', // red
+  '#0070C0', // blue
+  '#00B050', // green
+  '#7030A0', // purple
+  '#E97132', // orange
+  '#196B24', // dark green
+  '#9E480E', // brown
+  '#525252', // grey
+];
+function authorColor(author?: string): string {
+  if (!author) return TRACK_CHANGE_AUTHOR_PALETTE[0];
+  // Simple FNV-1a style hash so the same author always gets the same colour.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < author.length; i++) {
+    h ^= author.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
 }
 
 function collectImagePairs(doc: Document): ImagePair[] {
@@ -252,6 +284,7 @@ export async function renderDocumentToCanvas(
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     onTextRun: opts.onTextRun,
+    showTrackChanges: opts.showTrackChanges ?? true,
   };
 
   // Header: top of page, starting at headerDistance
@@ -450,6 +483,7 @@ function buildMeasureState(
     floats: [],
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
     fontFamilyClasses,
+    showTrackChanges: false,
   };
 }
 
@@ -998,7 +1032,14 @@ function renderParagraph(
           ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, s.measuredWidth, effSizePx * 1.1);
         }
 
-        ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
+        // Track-changes overlay: paint insertions / deletions in the author's
+        // colour with the canonical Word markup (underline for insertions,
+        // strikethrough for deletions). The author hash gives stable colours
+        // for the same reviewer across pages. Disabled when
+        // `showTrackChanges: false` (the "Final / No Markup" view).
+        const revActive = state.showTrackChanges && !!s.revision;
+        const revColor = revActive ? authorColor(s.revision!.author) : null;
+        ctx.fillStyle = revColor ?? (s.color ? `#${s.color}` : defaultColor);
         ctx.fillText(s.text, x, baseline + yOffset);
 
         // Ruby annotation: small text centered above the base glyphs.
@@ -1031,18 +1072,21 @@ function renderParagraph(
           });
         }
 
-        const lineColor = s.color ? `#${s.color}` : defaultColor;
+        const lineColor = revColor ?? (s.color ? `#${s.color}` : defaultColor);
         const lineW = Math.max(0.5, effSizePx * 0.05);
         const textW = ctx.measureText(s.text).width;
 
-        if (s.underline) {
+        const isInsertion = revActive && s.revision?.kind === 'insertion';
+        const isDeletion = revActive && s.revision?.kind === 'deletion';
+
+        if (s.underline || isInsertion) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
           const uy = baseline + yOffset + effSizePx * 0.12;
           ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + textW, uy); ctx.stroke();
         }
 
-        if (s.strikethrough) {
+        if (s.strikethrough || isDeletion) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
           const sy = baseline + yOffset - effSizePx * 0.3;
@@ -1108,6 +1152,8 @@ interface LayoutTextSeg {
   highlight?: string | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
   ruby?: { text: string; fontSizePt: number };
+  /** Track-changes revision attached to this run (insertion / deletion). */
+  revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
 }
 
 /**
@@ -1185,6 +1231,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     const ruby = (base as TextRun).ruby
       ? { text: (base as TextRun).ruby!.text, fontSizePt: (base as TextRun).ruby!.fontSizePt }
       : undefined;
+    const revision = (base as TextRun).revision;
     let firstSeg = true;
     for (const word of splitTextForLayout(displayText)) {
       segs.push({
@@ -1202,6 +1249,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
         ruby: firstSeg ? ruby : undefined,
+        revision,
       });
       firstSeg = false;
     }
