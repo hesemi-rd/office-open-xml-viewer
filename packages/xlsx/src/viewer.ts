@@ -569,6 +569,7 @@ export class XlsxViewer {
         }
       }
       this.updateSelectionOverlay();
+      void this.renderCurrentSheet();
       this.opts.onSelectionChange?.(this.selection);
       return;
     }
@@ -588,6 +589,7 @@ export class XlsxViewer {
       this.scrollHost.setPointerCapture(pointerId);
     }
     this.updateSelectionOverlay();
+    void this.renderCurrentSheet();
     this.opts.onSelectionChange?.(this.selection);
   }
 
@@ -637,6 +639,7 @@ export class XlsxViewer {
       }
 
       this.updateSelectionOverlay();
+      void this.renderCurrentSheet();
       this.opts.onSelectionChange?.(this.selection);
     });
 
@@ -819,6 +822,8 @@ export class XlsxViewer {
 
     const viewport: ViewportRange = { row: startRow, col: startCol, rows, cols };
 
+    const { selectedRowRange, selectedColRange } = this.computeHeaderHighlight();
+
     await this.wb.renderViewport(this.canvas, this.currentSheet, viewport, {
       width: w,
       height: h,
@@ -828,7 +833,45 @@ export class XlsxViewer {
       scrollOffsetY: offsetY,
       freezeRows,
       freezeCols,
+      selectedRowRange,
+      selectedColRange,
     });
+  }
+
+  private computeHeaderHighlight(): {
+    selectedRowRange: { start: number; end: number; strong: boolean } | null;
+    selectedColRange: { start: number; end: number; strong: boolean } | null;
+  } {
+    if (!this.anchorCell || !this.activeCell) {
+      return { selectedRowRange: null, selectedColRange: null };
+    }
+    const ALL = Number.MAX_SAFE_INTEGER;
+    const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+    const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
+    const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+    const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+    switch (this.selectionMode) {
+      case 'cells':
+        return {
+          selectedRowRange: { start: r1, end: r2, strong: false },
+          selectedColRange: { start: c1, end: c2, strong: false },
+        };
+      case 'rows':
+        return {
+          selectedRowRange: { start: r1, end: r2, strong: true },
+          selectedColRange: { start: 1, end: ALL, strong: false },
+        };
+      case 'cols':
+        return {
+          selectedRowRange: { start: 1, end: ALL, strong: false },
+          selectedColRange: { start: c1, end: c2, strong: true },
+        };
+      case 'all':
+        return {
+          selectedRowRange: { start: 1, end: ALL, strong: true },
+          selectedColRange: { start: 1, end: ALL, strong: true },
+        };
+    }
   }
 
   get sheetNames(): string[] {

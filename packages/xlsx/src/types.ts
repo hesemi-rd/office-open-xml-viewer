@@ -730,6 +730,12 @@ export interface RenderViewportOptions {
   loadedImages?: Map<string, HTMLImageElement>;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
   onTextRun?: (info: TextRunInfo) => void;
+  /** Highlighted row range for selected row headers (1-indexed inclusive).
+   *  `strong: true` → light blue + blue border (rows / cols / all selection modes).
+   *  `strong: false` → slightly darker grey (cells selection mode). */
+  selectedRowRange?: { start: number; end: number; strong: boolean } | null;
+  /** Same shape as selectedRowRange, for column headers. */
+  selectedColRange?: { start: number; end: number; strong: boolean } | null;
 }
 
 export type WorkerRequest =

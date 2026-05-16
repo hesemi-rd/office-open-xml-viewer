@@ -3507,6 +3507,8 @@ export function renderViewport(
     frozenColWidths, frozenRowHeights,
     frozenW, frozenH,
     hw, hh, cs, dpr,
+    opts.selectedRowRange ?? null,
+    opts.selectedColRange ?? null,
   );
 
   // ── Freeze pane separator lines ──────────────────────────────
@@ -3545,10 +3547,32 @@ function renderHeaders(
   frozenColWidths: number[], frozenRowHeights: number[],
   frozenW: number, frozenH: number,
   hw: number, hh: number, cs: number, dpr: number,
+  selectedRowRange: { start: number; end: number; strong: boolean } | null,
+  selectedColRange: { start: number; end: number; strong: boolean } | null,
 ): void {
   const HEADER_BG = '#f8f9fa';
+  const HEADER_BG_SUBTLE = '#e8eaed';
+  const HEADER_BG_STRONG = '#caddf6';
   const HEADER_BORDER = '#c8ccd0';
+  const HEADER_BORDER_STRONG = '#5b9bd5';
   const HEADER_TEXT = '#444';
+
+  const colBg = (col: number): string => {
+    if (!selectedColRange || col < selectedColRange.start || col > selectedColRange.end) return HEADER_BG;
+    return selectedColRange.strong ? HEADER_BG_STRONG : HEADER_BG_SUBTLE;
+  };
+  const colBorder = (col: number): string => {
+    if (!selectedColRange || col < selectedColRange.start || col > selectedColRange.end) return HEADER_BORDER;
+    return selectedColRange.strong ? HEADER_BORDER_STRONG : HEADER_BORDER;
+  };
+  const rowBg = (row: number): string => {
+    if (!selectedRowRange || row < selectedRowRange.start || row > selectedRowRange.end) return HEADER_BG;
+    return selectedRowRange.strong ? HEADER_BG_STRONG : HEADER_BG_SUBTLE;
+  };
+  const rowBorder = (row: number): string => {
+    if (!selectedRowRange || row < selectedRowRange.start || row > selectedRowRange.end) return HEADER_BORDER;
+    return selectedRowRange.strong ? HEADER_BORDER_STRONG : HEADER_BORDER;
+  };
   const headerFontSize = Math.max(1, Math.round(11 * cs));
   const HEADER_FONT = `${headerFontSize}px ${DEFAULT_FONT_FAMILY}`;
   const scrollAreaX = hw + frozenW;
@@ -3574,9 +3598,9 @@ function renderHeaders(
   // Borders are drawn INSET (-hp) so that the next cell's fillRect (which starts at cx+cw)
   // never overwrites the current cell's right/bottom border line.
   const drawColHeader = (col: number, cx: number, cw: number) => {
-    ctx.fillStyle = HEADER_BG;
+    ctx.fillStyle = colBg(col);
     ctx.fillRect(cx, 0, cw, hh);
-    ctx.strokeStyle = HEADER_BORDER;
+    ctx.strokeStyle = colBorder(col);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     ctx.moveTo(cx + cw - hp, 0);     ctx.lineTo(cx + cw - hp, hh);  // right (inset)
@@ -3592,9 +3616,9 @@ function renderHeaders(
   // Helper: draw one row header cell.
   // Borders drawn inset so adjacent cell's fill never overwrites them.
   const drawRowHeader = (row: number, cy: number, ch: number) => {
-    ctx.fillStyle = HEADER_BG;
+    ctx.fillStyle = rowBg(row);
     ctx.fillRect(0, cy, hw, ch);
-    ctx.strokeStyle = HEADER_BORDER;
+    ctx.strokeStyle = rowBorder(row);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     ctx.moveTo(hw - hp, cy);  ctx.lineTo(hw - hp, cy + ch);   // right (inset)
