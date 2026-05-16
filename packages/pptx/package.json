@@ -37,6 +37,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@silurus/ooxml-diff": "workspace:*",
     "@types/pngjs": "^6.0.5",
     "@vitest/coverage-v8": "^4.1.4",
     "pixelmatch": "^7.1.0",
