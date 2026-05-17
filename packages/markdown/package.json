@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-markdown",
   "private": true,
-  "version": "0.34.0",
+  "version": "0.35.0",
   "description": "Convert .pptx / .docx / .xlsx to GitHub-flavoured markdown using the workspace WASM parsers — browser / Node / CLI",
   "license": "MIT",
   "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
