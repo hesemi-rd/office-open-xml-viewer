@@ -4,7 +4,9 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
-## Unreleased
+## 0.35.0 — 2026-05-17
+
+Two new companion packages (`@silurus/ooxml-node`, `@silurus/ooxml-markdown`) and an inline render of DOCX track-changes. Browser viewer renderers are unchanged for pptx / xlsx; for docx, the markup overlay only fires on runs that sit inside `<w:ins>` / `<w:del>` blocks, so `demo/sample-1.docx` (no tracked changes) renders byte-identically. README screenshots not updated for this reason. Zero runtime dependencies preserved.
 
 ### Features
 
@@ -12,6 +14,7 @@ changes that remain compatible with existing API surfaces.
 - **pptx / docx / xlsx**: each format package now declares `./wasm` and `./wasm-binary` subpath exports so Node-side consumers (and bundlers) can locate the wasm-pack JS shim and the underlying `.wasm` file without reaching into `src/wasm/` paths.
 - **docx**: ECMA-376 §17.13.5 track-changes (`<w:ins>` / `<w:del>`) now render inline. The Rust parser tags each `TextRun` produced inside a tracked block with `{ kind: 'insertion' | 'deletion', author, date }`; the renderer overlays the author-derived colour (8-hue stable palette hashed by author name), an underline for insertions, and a strikethrough for deletions. The new `RenderPageOptions.showTrackChanges` flag (default `true`) toggles the markup off for a "Final / No Markup" view. Deletion text inside `<w:delText>` is now surfaced (was silently dropped) alongside insertion text inside `<w:t>`. Public TS surface now also exposes the previously parser-only `Document.revisions` / `comments` / `footnotes` / `endnotes` fields (CHANGELOG 0.32.0) with proper TS types (`DocRevision`, `DocComment`, `DocNote`, `RunRevision`).
 - **markdown**: new `@silurus/ooxml-markdown` workspace package exposing `pptxToMarkdown` / `docxToMarkdown` / `xlsxToMarkdown` as pure WASM calls (no JSON round-trip). The Rust `*_to_markdown` functions used to be native-only (mcp-server); they're now also `#[wasm_bindgen]`-exported so the same projection runs in browser, Node, or via the new `ooxml-md` CLI. Markdown output matches the v0.33.0 MCP projections byte-for-byte (titles via `placeholderType`, bullets via `<w:outlineLvl>`, pipe-table XLSX per sheet). Includes a node20-based GitHub Action under `packages/markdown/action/` for bulk-converting an entire repository's OOXML files in CI.
+- **storybook**: new `PptxViewer/Markdown`, `DocxViewer/Markdown`, `XlsxViewer/Markdown` stories that load demo/sample-1 (or a user file), invoke the WASM-backed conversion, and display the markdown output alongside size / compression ratio / latency.
 
 ## 0.34.0 — 2026-05-16
 
