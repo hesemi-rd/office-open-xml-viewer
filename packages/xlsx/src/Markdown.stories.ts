@@ -1,5 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/html';
-import { xlsxToMarkdown, initXlsxFromBytes } from '@silurus/ooxml-markdown';
+// Direct workspace-relative import (instead of `@silurus/ooxml-markdown`)
+// so this story works without depending on whether pnpm has been re-run
+// after the workspace dep was added. Vite resolves the path directly.
+import { xlsxToMarkdown, initXlsxFromBytes } from '../../markdown/src/index';
 import xlsxWasmUrl from './wasm/xlsx_parser_bg.wasm?url';
 
 type Args = Record<string, never>;

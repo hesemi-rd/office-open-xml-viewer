@@ -1,5 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/html';
-import { pptxToMarkdown, initPptxFromBytes } from '@silurus/ooxml-markdown';
+// Direct workspace-relative import (instead of `@silurus/ooxml-markdown`)
+// so this story works without depending on whether pnpm has been re-run
+// after the workspace dep was added. Vite resolves the path directly.
+import { pptxToMarkdown, initPptxFromBytes } from '../../markdown/src/index';
 import pptxWasmUrl from './wasm/pptx_parser_bg.wasm?url';
 
 type Args = Record<string, never>;
