@@ -4,6 +4,18 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.36.0 — 2026-05-19
+
+Single security-surface change: the 512 MiB per-entry ZIP decompression cap that
+backed the "zip-bomb safe" guarantee is now caller-configurable. Default is
+unchanged, so renderers / VRT references / `demo/sample-*` outputs are
+byte-identical to 0.35.0 — README screenshots were not refreshed for that
+reason.
+
+### Features
+
+- **core / pptx / docx / xlsx**: viewer constructor option `maxZipEntryBytes` now overrides the per-entry ZIP decompression cap that backs the "zip-bomb safe" guarantee. Default stays at 512 MiB; raise it for legitimate decks with large embedded media, or lower it to tighten the budget for untrusted input. Plumbed through `PptxViewer` / `DocxViewer` / `XlsxViewer` constructors → worker `parse_*` messages → new `Option<u64>` argument on the `#[wasm_bindgen]` entry points (`parse_pptx`, `parse_docx`, `parse_xlsx`, `parse_sheet`, `extract_media`, plus the `*_to_markdown` variants). The Rust parsers consult the cap via a new shared `ooxml-common::zip` thread-local, replacing the three near-identical `const MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;` duplicates. Zero / negative values fall back to the default. Existing callers that omit the option see no behavior change.
+
 ## 0.35.0 — 2026-05-17
 
 Two new companion packages (`@silurus/ooxml-node`, `@silurus/ooxml-markdown`) and an inline render of DOCX track-changes. Browser viewer renderers are unchanged for pptx / xlsx; for docx, the markup overlay only fires on runs that sit inside `<w:ins>` / `<w:del>` blocks, so `demo/sample-1.docx` (no tracked changes) renders byte-identically. README screenshots not updated for this reason. Zero runtime dependencies preserved.

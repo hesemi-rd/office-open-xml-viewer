@@ -24,12 +24,20 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     await initPromise;
     if (req.type === 'parse') {
-      const json = parse_xlsx(new Uint8Array(req.data));
+      const maxBytes =
+        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
+          ? BigInt(req.maxZipEntryBytes)
+          : undefined;
+      const json = parse_xlsx(new Uint8Array(req.data), maxBytes);
       const workbook = JSON.parse(json);
       const res: WorkerResponse = { type: 'parsed', workbook };
       self.postMessage(res);
     } else if (req.type === 'parseSheet') {
-      const json = parse_sheet(new Uint8Array(req.data), req.sheetIndex, req.sheetName);
+      const maxBytes =
+        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
+          ? BigInt(req.maxZipEntryBytes)
+          : undefined;
+      const json = parse_sheet(new Uint8Array(req.data), req.sheetIndex, req.sheetName, maxBytes);
       const worksheet = JSON.parse(json);
       const res: WorkerResponse = { type: 'parsedSheet', worksheet };
       self.postMessage(res);

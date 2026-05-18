@@ -24,7 +24,11 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     await initPromise;
     if (req.type === 'parse') {
-      const json = parse_docx(new Uint8Array(req.data));
+      const maxBytes =
+        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
+          ? BigInt(req.maxZipEntryBytes)
+          : undefined;
+      const json = parse_docx(new Uint8Array(req.data), maxBytes);
       const document = JSON.parse(json);
       if (document.error) throw new Error(`Parse error: ${document.error}`);
       const res: WorkerResponse = { type: 'parsed', document };

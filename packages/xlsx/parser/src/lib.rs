@@ -1207,16 +1207,18 @@ const INDEXED_COLORS: &[&str] = &[
 ];
 
 #[wasm_bindgen]
-pub fn parse_xlsx(data: &[u8]) -> Result<String, JsValue> {
+pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     parse_xlsx_inner(data)
         .map(|wb| serde_json::to_string(&wb).unwrap())
         .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]
-pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, JsValue> {
+pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str, max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
@@ -1277,19 +1279,16 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     })
 }
 
-/// Refuse to decompress individual ZIP entries larger than 512 MiB to prevent
-/// zip-bomb DoS.
-const MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
-
 fn read_zip_entry(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<String, String> {
+    let max = ooxml_common::zip::current_max();
     let mut file = archive
         .by_name(name)
         .map_err(|e| format!("entry '{}' not found: {}", name, e))?;
-    if file.size() > MAX_ZIP_ENTRY_BYTES {
+    if file.size() > max {
         return Err(format!("entry '{}' exceeds size limit", name));
     }
     let mut buf = String::new();
-    file.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_string(&mut buf).map_err(|e| e.to_string())?;
+    file.by_ref().take(max).read_to_string(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
 }
 
@@ -2706,12 +2705,13 @@ fn load_hyperlinks(
 
 /// Read a binary file from the zip.
 fn read_zip_bytes(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &str) -> Option<Vec<u8>> {
+    let max = ooxml_common::zip::current_max();
     let mut file = archive.by_name(path).ok()?;
-    if file.size() > MAX_ZIP_ENTRY_BYTES {
+    if file.size() > max {
         return None;
     }
     let mut buf = Vec::new();
-    file.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_end(&mut buf).ok()?;
+    file.by_ref().take(max).read_to_end(&mut buf).ok()?;
     Some(buf)
 }
 
@@ -5594,8 +5594,9 @@ pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
 /// continuation cells are rendered as empty; the display value comes from the
 /// WASM-callable markdown projection (mirrors `to_markdown_native`).
 #[wasm_bindgen]
-pub fn xlsx_to_markdown(data: &[u8]) -> Result<String, JsValue> {
+pub fn xlsx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     to_markdown_impl(data).map_err(|e| JsValue::from_str(&e))
 }
 

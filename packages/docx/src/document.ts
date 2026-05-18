@@ -23,9 +23,16 @@ const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-/** Options for {@link DocxDocument.load}. Re-exports the shared
+/** Options for {@link DocxDocument.load}. Extends the shared
  *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export type LoadOptions = CoreLoadOptions;
+export interface LoadOptions extends CoreLoadOptions {
+  /**
+   * Override the per-entry ZIP decompression cap (bytes) used by the
+   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Zero / negative
+   * values fall back to the default.
+   */
+  maxZipEntryBytes?: number;
+}
 
 export class DocxDocument {
   private _document: Document | null = null;
@@ -48,7 +55,7 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
-    await doc._parse(buffer);
+    await doc._parse(buffer, opts.maxZipEntryBytes);
     if (opts.useGoogleFonts) {
       await preloadGoogleFonts(
         [doc._document?.majorFont, doc._document?.minorFont],
@@ -58,7 +65,7 @@ export class DocxDocument {
     return doc;
   }
 
-  private _parse(buffer: ArrayBuffer): Promise<void> {
+  private _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const handler = (e: MessageEvent<WorkerResponse>) => {
         this._worker.removeEventListener('message', handler);
@@ -70,7 +77,7 @@ export class DocxDocument {
         }
       };
       this._worker.addEventListener('message', handler);
-      this._worker.postMessage({ type: 'parse', data: buffer }, [buffer]);
+      this._worker.postMessage({ type: 'parse', data: buffer, maxZipEntryBytes }, [buffer]);
     });
   }
 

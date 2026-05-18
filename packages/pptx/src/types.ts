@@ -253,7 +253,7 @@ export interface PictureElement {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer }
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number }
   | { kind: 'extractMedia'; id: number; path: string };
 
 export type WorkerResponse =

@@ -13,6 +13,13 @@ export interface PptxViewerOptions extends RenderOptions {
    */
   useGoogleFonts?: boolean;
   /**
+   * Override the per-entry ZIP decompression cap (bytes) used by the zip-bomb
+   * guard in the Rust parser. Defaults to 512 MiB. Raise this to load decks
+   * with very large embedded media, or lower it to tighten the budget for
+   * untrusted input. Zero / negative values fall back to the default.
+   */
+  maxZipEntryBytes?: number;
+  /**
    * Enable interactive audio/video playback. When true, slides are rendered
    * via {@link PptxPresentation.presentSlide} so media elements become
    * clickable and the viewer draws its own play/pause chrome. When false
@@ -78,6 +85,7 @@ export class PptxViewer {
     try {
       this.engine = await PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
+        maxZipEntryBytes: this.opts.maxZipEntryBytes,
       });
       this.currentSlide = 0;
       await this.renderCurrentSlide();

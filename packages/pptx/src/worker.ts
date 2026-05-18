@@ -3,6 +3,7 @@ import init, { parse_pptx, extract_media } from './wasm/pptx_parser.js';
 
 let ready = false;
 let currentBuffer: Uint8Array | null = null;
+let currentMaxZipEntryBytes: bigint | undefined;
 
 function decodeDataUrl(url: string): ArrayBuffer | null {
   if (!url.startsWith('data:')) return null;
@@ -40,7 +41,11 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     try {
       const bytes = new Uint8Array(req.buffer);
       currentBuffer = bytes;
-      const jsonStr = parse_pptx(bytes);
+      currentMaxZipEntryBytes =
+        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
+          ? BigInt(req.maxZipEntryBytes)
+          : undefined;
+      const jsonStr = parse_pptx(bytes, currentMaxZipEntryBytes);
       const presentation: Presentation = JSON.parse(jsonStr);
       const msg: WorkerResponse = { kind: 'parsed', id: req.id, presentation };
       self.postMessage(msg);
@@ -62,7 +67,7 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
       return;
     }
     try {
-      const bytes = extract_media(currentBuffer, req.path);
+      const bytes = extract_media(currentBuffer, req.path, currentMaxZipEntryBytes);
       const copy = new Uint8Array(bytes).slice().buffer;
       const msg: WorkerResponse = { kind: 'mediaExtracted', id: req.id, bytes: copy };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [copy]);

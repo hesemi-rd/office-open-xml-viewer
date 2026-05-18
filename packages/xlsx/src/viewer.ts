@@ -20,6 +20,12 @@ export interface XlsxViewerOptions {
    * privacy implications.
    */
   useGoogleFonts?: boolean;
+  /**
+   * Override the per-entry ZIP decompression cap (bytes) used by the
+   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Zero / negative
+   * values fall back to the default.
+   */
+  maxZipEntryBytes?: number;
 }
 
 export interface CellAddress {
@@ -122,7 +128,10 @@ export class XlsxViewer {
 
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
-      await this.wb.load(source, { useGoogleFonts: this.opts.useGoogleFonts });
+      await this.wb.load(source, {
+        useGoogleFonts: this.opts.useGoogleFonts,
+        maxZipEntryBytes: this.opts.maxZipEntryBytes,
+      });
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(0);

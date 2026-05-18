@@ -455,7 +455,7 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; data: ArrayBuffer };
+  | { type: 'parse'; data: ArrayBuffer; maxZipEntryBytes?: number };
 
 export type WorkerResponse =
   | { type: 'parsed'; document: Document }

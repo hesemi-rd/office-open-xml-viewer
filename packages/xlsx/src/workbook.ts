@@ -22,9 +22,17 @@ const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   },
 };
 
-/** Options for {@link XlsxWorkbook.load}. Re-exports the shared
+/** Options for {@link XlsxWorkbook.load}. Extends the shared
  *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export type LoadOptions = CoreLoadOptions;
+export interface LoadOptions extends CoreLoadOptions {
+  /**
+   * Override the per-entry ZIP decompression cap (bytes) used by the
+   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Applies to both
+   * the initial workbook parse and per-sheet parse. Zero / negative values
+   * fall back to the default.
+   */
+  maxZipEntryBytes?: number;
+}
 
 export class XlsxWorkbook {
   private worker: Worker;
@@ -33,6 +41,7 @@ export class XlsxWorkbook {
   /** Cache of loaded images keyed by their data URL. Shared across sheets. */
   private imageCache = new Map<string, HTMLImageElement>();
   private rawData: ArrayBuffer | null = null;
+  private maxZipEntryBytes: number | undefined;
 
   constructor() {
     this.worker = new InlineWorker();
@@ -46,7 +55,12 @@ export class XlsxWorkbook {
         ? await fetch(source).then((r) => r.arrayBuffer())
         : source;
     this.rawData = data;
-    this.parsedWorkbook = await this.sendMessage({ type: 'parse', data: data.slice(0) }) as ParsedWorkbook;
+    this.maxZipEntryBytes = opts.maxZipEntryBytes;
+    this.parsedWorkbook = await this.sendMessage({
+      type: 'parse',
+      data: data.slice(0),
+      maxZipEntryBytes: this.maxZipEntryBytes,
+    }) as ParsedWorkbook;
     if (opts.useGoogleFonts) {
       // Walk every styled font in the workbook and queue Google Fonts
       // substitutes for any Office faces (Calibri → Carlito, Cambria →
@@ -83,6 +97,7 @@ export class XlsxWorkbook {
       data: this.rawData.slice(0),
       sheetIndex,
       sheetName: sheetMeta.name,
+      maxZipEntryBytes: this.maxZipEntryBytes,
     }) as Worksheet;
     this.sheetCache.set(sheetIndex, ws);
     return ws;

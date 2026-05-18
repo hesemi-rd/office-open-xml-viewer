@@ -11,8 +11,9 @@ mod table_style_presets;
 // ===========================
 
 #[wasm_bindgen]
-pub fn parse_pptx(data: &[u8]) -> Result<String, JsValue> {
+pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let presentation = parse_presentation(data)
         .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
     serde_json::to_string(&presentation)
@@ -23,8 +24,9 @@ pub fn parse_pptx(data: &[u8]) -> Result<String, JsValue> {
 /// so the browser / Node WASM path and the native mcp-server path stay in
 /// lock-step. See `to_markdown_native` for the design rationale.
 #[wasm_bindgen]
-pub fn pptx_to_markdown(data: &[u8]) -> Result<String, JsValue> {
+pub fn pptx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let pres = parse_presentation(data)
         .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
     let mut out = String::new();
@@ -354,15 +356,24 @@ fn render_chart_md(c: &ChartElement, out: &mut String) {
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
 #[wasm_bindgen]
-pub fn extract_media(data: &[u8], path: &str) -> Result<Vec<u8>, JsValue> {
+pub fn extract_media(data: &[u8], path: &str, max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
+    let max = ooxml_common::zip::current_max();
     let cursor = Cursor::new(data);
     let mut zip = zip::ZipArchive::new(cursor)
         .map_err(|e| JsValue::from_str(&format!("zip open error: {e}")))?;
     let mut entry = zip
         .by_name(path)
         .map_err(|e| JsValue::from_str(&format!("entry not found: {path}: {e}")))?;
+    if entry.size() > max {
+        return Err(JsValue::from_str(&format!(
+            "ZIP entry exceeds size limit: {path}"
+        )));
+    }
     let mut buf = Vec::with_capacity(entry.size() as usize);
     entry
+        .by_ref()
+        .take(max)
         .read_to_end(&mut buf)
         .map_err(|e| JsValue::from_str(&format!("read error: {e}")))?;
     Ok(buf)
@@ -1141,30 +1152,27 @@ struct TextOutline {
 
 type PptxZip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
 
-/// Refuse to decompress individual ZIP entries larger than 512 MiB.
-/// OOXML legitimately reaches tens of MB (embedded video, 4K images) but not
-/// hundreds, so this cap blocks zip-bomb DoS without rejecting real files.
-const MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
-
 fn read_zip_str(zip: &mut PptxZip<'_>, path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let max = ooxml_common::zip::current_max();
     let mut file = zip
         .by_name(path)
         .map_err(|_| format!("missing ZIP entry: {path}"))?;
-    if file.size() > MAX_ZIP_ENTRY_BYTES {
+    if file.size() > max {
         return Err(format!("ZIP entry exceeds size limit: {path}").into());
     }
     let mut buf = String::new();
-    file.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_string(&mut buf)?;
+    file.by_ref().take(max).read_to_string(&mut buf)?;
     Ok(buf)
 }
 
 fn read_zip_bytes(zip: &mut PptxZip<'_>, path: &str) -> Option<Vec<u8>> {
+    let max = ooxml_common::zip::current_max();
     let mut file = zip.by_name(path).ok()?;
-    if file.size() > MAX_ZIP_ENTRY_BYTES {
+    if file.size() > max {
         return None;
     }
     let mut buf = Vec::new();
-    file.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_end(&mut buf).ok()?;
+    file.by_ref().take(max).read_to_end(&mut buf).ok()?;
     Some(buf)
 }
 

@@ -8,8 +8,9 @@ mod parser;
 mod markdown;
 
 #[wasm_bindgen]
-pub fn parse_docx(data: &[u8]) -> String {
+pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> String {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     match parser::parse(data) {
         Ok(doc) => serde_json::to_string(&doc).unwrap_or_else(|e| {
             format!("{{\"error\":\"{}\"}}", e)
@@ -22,8 +23,9 @@ pub fn parse_docx(data: &[u8]) -> String {
 /// GitHub-flavoured markdown of headings / paragraphs / tables / footnotes,
 /// discarding positioning, section properties, fonts, and drawing shapes.
 #[wasm_bindgen]
-pub fn docx_to_markdown(data: &[u8]) -> Result<String, JsValue> {
+pub fn docx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let doc = parser::parse(data).map_err(|e| JsValue::from_str(&e))?;
     Ok(markdown::render_document(&doc))
 }

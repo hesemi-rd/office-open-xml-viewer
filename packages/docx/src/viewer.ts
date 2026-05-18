@@ -51,7 +51,10 @@ export class DocxViewer {
   }
 
   async load(source: string | ArrayBuffer): Promise<void> {
-    this._doc = await DocxDocument.load(source, { useGoogleFonts: this._opts.useGoogleFonts });
+    this._doc = await DocxDocument.load(source, {
+      useGoogleFonts: this._opts.useGoogleFonts,
+      maxZipEntryBytes: this._opts.maxZipEntryBytes,
+    });
     this._currentPage = 0;
     await this._render();
   }

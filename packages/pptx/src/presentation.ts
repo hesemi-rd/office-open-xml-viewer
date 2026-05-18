@@ -20,9 +20,18 @@ const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-/** Options for {@link PptxPresentation.load}. Re-exports the shared
+/** Options for {@link PptxPresentation.load}. Extends the shared
  *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export type LoadOptions = CoreLoadOptions;
+export interface LoadOptions extends CoreLoadOptions {
+  /**
+   * Override the per-entry ZIP decompression cap (bytes). Defaults to
+   * 512 MiB — matches `MAX_ZIP_ENTRY_BYTES` in the Rust parser. Raising
+   * this past 4 GiB requires a 64-bit WASM build; lowering it makes the
+   * loader reject otherwise-legitimate large media decks. Zero or
+   * negative values fall back to the default.
+   */
+  maxZipEntryBytes?: number;
+}
 
 /** Options for rendering a single slide onto a canvas. */
 export interface RenderSlideOptions {
@@ -135,7 +144,7 @@ export class PptxPresentation {
     } else {
       buffer = source;
     }
-    await pres._parse(buffer);
+    await pres._parse(buffer, opts.maxZipEntryBytes);
     if (opts.useGoogleFonts) {
       await preloadGoogleFonts(
         [pres._presentation!.majorFont, pres._presentation!.minorFont],
@@ -150,12 +159,12 @@ export class PptxPresentation {
     return new Promise((resolve) => this._workerReadyCallbacks.push(resolve));
   }
 
-  private async _parse(buffer: ArrayBuffer): Promise<void> {
+  private async _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
     await this._waitForWorker();
     const id = this._nextId++;
     const presentation = await new Promise<Presentation>((resolve, reject) => {
       this._pendingParseCallbacks.set(id, { resolve, reject });
-      this._worker.postMessage({ kind: 'parse', id, buffer } satisfies WorkerRequest, [buffer]);
+      this._worker.postMessage({ kind: 'parse', id, buffer, maxZipEntryBytes } satisfies WorkerRequest, [buffer]);
     });
     this._presentation = presentation;
   }

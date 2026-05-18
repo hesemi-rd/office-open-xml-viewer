@@ -2325,26 +2325,24 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
     map
 }
 
-/// Refuse to decompress individual ZIP entries larger than 512 MiB to prevent
-/// zip-bomb DoS.
-const MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
-
 fn read_zip_entry(zip: &mut Zip, path: &str) -> Result<String, String> {
+    let max = ooxml_common::zip::current_max();
     let mut entry = zip.by_name(path).map_err(|e| format!("{}: {}", path, e))?;
-    if entry.size() > MAX_ZIP_ENTRY_BYTES {
+    if entry.size() > max {
         return Err(format!("{}: exceeds size limit", path));
     }
     let mut s = String::new();
-    entry.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_string(&mut s).map_err(|e| e.to_string())?;
+    entry.by_ref().take(max).read_to_string(&mut s).map_err(|e| e.to_string())?;
     Ok(s)
 }
 
 fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
+    let max = ooxml_common::zip::current_max();
     let mut entry = zip.by_name(path).map_err(|e| format!("{}: {}", path, e))?;
-    if entry.size() > MAX_ZIP_ENTRY_BYTES {
+    if entry.size() > max {
         return Err(format!("{}: exceeds size limit", path));
     }
     let mut buf = vec![];
-    entry.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    entry.by_ref().take(max).read_to_end(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
 }
