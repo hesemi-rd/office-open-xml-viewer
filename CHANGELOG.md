@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.37.0 — 2026-05-23
+
+xlsx-focused fidelity release. Four small spec-correctness fixes that together
+align the picture-bearing samples (calendars, dashboards with embedded clip art)
+with what Excel actually renders — positions, proportions, italic flags — using
+ECMA-376 §20.5.2.33 / §18.3.1.73 / §22.9.2 as the source of truth instead of
+the empirical observations the renderer was previously holding onto. Demo VRT
+references for `private/sample-10` (H7 sun emoji, G13 parasol+waves group) and
+the right-side L–N emoji column now line up with their Excel exports; the
+`demo/sample-1` Evergreen dashboard re-screenshot in the README reflects the
+new row-height interpretation (rows render ~33% taller, so fewer fit per
+1200×720 viewport — same as Excel). pptx / docx renderers untouched, but their
+README images were re-captured at the same time so all three views come from
+the same release.
+
+### Fixes
+
+- **xlsx**: `<xdr:twoCellAnchor editAs="oneCell">` pictures and shape groups now honour the saved EMU extent (`<xdr:spPr><a:xfrm><a:ext>` or `<xdr:grpSpPr><a:xfrm><a:ext>`) from the parser instead of deriving the rect from the from/to cell anchors. ECMA-376 §20.5.2.33 + Excel's "Move but don't size with cells" behaviour: with `editAs="oneCell"` Excel preserves the picture's saved size regardless of cell resizing, and the to anchor is only updated to track that fixed size. The previous from/to-derived rect would amplify any column-width / row-height discrepancy into a visible aspect-ratio drift (`private/sample-10` H7 sun rendered at 0.877 aspect vs Excel's 0.888; G13 parasol+waves at 2.06 vs 1.75). Parser now captures `editAs` + `nativeExtCx/Cy` on `ImageAnchor` / `ShapeAnchor`; renderer falls back to from/to for the default `twoCell` mode and any anchor missing the native ext.
+- **xlsx**: column-width MDW lookup table for Meiryo UI 10/11 pt. When the host doesn't ship Meiryo UI (macOS), Canvas2D's `measureText` falls back to a narrower sans-serif and returns MDW≈7 for Japanese faces where Excel uses 8. The miscalculation cascaded: every column rendered ~12 % narrow, shifting every drawing anchor inside the sheet roughly one cell to the right of where Excel renders it. The new `MDW_TABLE` in `renderer.ts` overrides the measurement for the families where the fallback systematically under-measures (Meiryo UI / Meiryo) and lets other fonts (Yu Gothic 12 pt, where Canvas happens to land on 8) keep using the measurement.
+- **xlsx**: row height `pt → px` conversion. ECMA-376 §18.3.1.73 specifies `<row ht>` in points; the renderer had been treating the value as already-resolved pixels because of an empirical observation on `private/sample-27`. That observation conflated two things — sample-27's rows lacked `customHeight="1"`, so Excel was ignoring the `ht` attribute entirely and falling back to the workbook default, not that `ht` was stored in pixels. The parser now honours `customHeight` (only records `ht` when the attribute is set), and the renderer applies the spec-correct `×4/3` conversion. The intrinsic default in the parser moves from 20 px to 15 pt (same display result) so both code paths share the same units.
+- **xlsx**: ST_OnOff `val` attribute respected when parsing `<b>` / `<i>` / `<strike>` in font definitions. ECMA-376 §22.9.2: `<i val="0"/>` is an explicit *clear* override, not implicit "on". The parser previously treated the mere presence of the element as turn-on, which inverted the meaning of a differential format like `<dxf><font><b/><i val="0"/></font></dxf>` (which Excel reads as set-bold + clear-italic). `private/sample-10`'s calendar month-transition CF carries exactly that shape, and `C5` "6月7日" / `F11` "7月1日" were rendering as bold italic when Excel shows them as plain bold. The fix is a new `parse_st_on_off` helper applied across the three font-parsing sites in `styles.xml` (`<fonts>`, `<dxfs>`, rich-string `<rPr>`). DrawingML's attribute-form `<a:rPr b="1" i="1">` path is unaffected.
+
 ## 0.36.0 — 2026-05-19
 
 Single security-surface change: the 512 MiB per-entry ZIP decompression cap that

@@ -4,7 +4,7 @@
   "version": "0.36.0",
   "description": "Convert .pptx / .docx / .xlsx to GitHub-flavoured markdown using the workspace WASM parsers — browser / Node / CLI",
   "license": "MIT",
-  "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
+  "author": "Yuki Yokotani <26348105+yukiyokotani@users.noreply.github.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
