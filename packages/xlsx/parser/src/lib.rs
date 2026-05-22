@@ -1586,8 +1586,8 @@ fn parse_si_node(
                             let mut f = RunFont::default();
                             for rp in rc.children() {
                                 match rp.tag_name().name() {
-                                    "b" => f.bold = true,
-                                    "i" => f.italic = true,
+                                    "b" => f.bold = parse_st_on_off(&rp),
+                                    "i" => f.italic = parse_st_on_off(&rp),
                                     "u" => {
                                         // ECMA-376 §18.4.13 ST_UnderlineValues:
                                         // single (default) | double | singleAccounting |
@@ -1600,7 +1600,7 @@ fn parse_si_node(
                                             }
                                         }
                                     }
-                                    "strike" => f.strike = true,
+                                    "strike" => f.strike = parse_st_on_off(&rp),
                                     "vertAlign" => {
                                         // ECMA-376 §18.4.6 ST_VerticalAlignRun.
                                         if let Some(v) = rp.attribute("val") {
@@ -1708,8 +1708,8 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                         let mut f = Font { size: 11.0, ..Default::default() };
                         for fc in child.children() {
                             match fc.tag_name().name() {
-                                "b" => f.bold = true,
-                                "i" => f.italic = true,
+                                "b" => f.bold = parse_st_on_off(&fc),
+                                "i" => f.italic = parse_st_on_off(&fc),
                                 "u" => {
                                     let v = fc.attribute("val").unwrap_or("single");
                                     if v != "none" {
@@ -1719,7 +1719,7 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                                         }
                                     }
                                 }
-                                "strike" => f.strike = true,
+                                "strike" => f.strike = parse_st_on_off(&fc),
                                 "vertAlign" => {
                                     if let Some(v) = fc.attribute("val") {
                                         if v != "baseline" {
@@ -1816,6 +1816,18 @@ fn parse_num_fmts(doc: &roxmltree::Document, ns: &str) -> Vec<NumFmt> {
     fmts
 }
 
+/// ECMA-376 §22.9.2 ST_OnOff. Toggle elements like `<b/>`, `<i/>`, `<strike/>`
+/// accept an optional `val` attribute whose value is "1" / "true" (on) or
+/// "0" / "false" (off). When omitted, the presence of the element itself
+/// implies "on". A dxf with `<i val="0"/>` therefore means "differential
+/// format that *clears* italic", not "set italic to true".
+fn parse_st_on_off(node: &roxmltree::Node) -> bool {
+    match node.attribute("val") {
+        None => true,
+        Some(v) => !matches!(v, "0" | "false" | "False" | "FALSE" | "off" | "Off"),
+    }
+}
+
 fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Font> {
     let mut fonts = Vec::new();
     for fonts_node in doc.descendants() {
@@ -1825,8 +1837,8 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                 let mut f = Font { size: 11.0, ..Default::default() };
                 for child in font_node.children() {
                     match child.tag_name().name() {
-                        "b" => f.bold = true,
-                        "i" => f.italic = true,
+                        "b" => f.bold = parse_st_on_off(&child),
+                        "i" => f.italic = parse_st_on_off(&child),
                         "u" => {
                             let v = child.attribute("val").unwrap_or("single");
                             if v != "none" {
@@ -1836,7 +1848,7 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                                 }
                             }
                         }
-                        "strike" => f.strike = true,
+                        "strike" => f.strike = parse_st_on_off(&child),
                         "vertAlign" => {
                             if let Some(v) = child.attribute("val") {
                                 if v != "baseline" {
