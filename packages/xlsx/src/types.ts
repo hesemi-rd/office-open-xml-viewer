@@ -402,6 +402,15 @@ export interface ShapeAnchor {
   fromRow: number; fromRowOff: number;
   toCol: number;   toColOff: number;
   toRow: number;   toRowOff: number;
+  /** `twoCellAnchor@editAs` (ECMA-376 §20.5.2.33). With `"oneCell"` the
+   *  renderer uses `nativeExtCx`/`nativeExtCy` as the on-sheet size, since
+   *  Excel preserves the group's saved EMU extent regardless of cell
+   *  resizing ("Move but don't size with cells"). Absent ⇒ default `"twoCell"`. */
+  editAs?: string;
+  /** Saved EMU extent of the top-level grpSp (or the stand-alone sp/pic).
+   *  Authoritative when `editAs === "oneCell"`. 0 = unavailable. */
+  nativeExtCx: number;
+  nativeExtCy: number;
   shapes: ShapeInfo[];
 }
 
@@ -483,6 +492,15 @@ export interface ImageAnchor {
   toColOff: number;
   toRow: number;
   toRowOff: number;
+  /** `twoCellAnchor@editAs` (ECMA-376 §20.5.2.33). `"oneCell"` instructs the
+   *  renderer to use `nativeExtCx`/`nativeExtCy` as the size and ignore the
+   *  `to` anchor (Excel's "Move but don't size with cells"). Absent ⇒ default
+   *  `"twoCell"`. */
+  editAs?: string;
+  /** `<xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>` in EMU — the picture's saved
+   *  size. Authoritative when `editAs === "oneCell"`. 0 = unavailable. */
+  nativeExtCx: number;
+  nativeExtCy: number;
   /** Data URL (data:image/png;base64,...) */
   dataUrl: string;
 }

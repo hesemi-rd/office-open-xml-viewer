@@ -3755,17 +3755,29 @@ function renderImages(
     // xdr col/row are 0-indexed; our widths map is 1-indexed.
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
-    const toCol1   = anchor.toCol   + 1;
-    const toRow1   = anchor.toRow   + 1;
 
-    // Image sheet-space rect (in scaled px)
+    // Image sheet-space top-left (always from the `from` anchor)
     const imgSheetX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
     const imgSheetY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
-    const imgSheetX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
-    const imgSheetY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
 
-    const imgW = imgSheetX2 - imgSheetX1;
-    const imgH = imgSheetY2 - imgSheetY1;
+    // ECMA-376 §20.5.2.33: with editAs="oneCell" Excel preserves the
+    // picture's saved EMU size (spPr/xfrm/ext) regardless of cell resizing
+    // ("Move but don't size with cells"). Use the from anchor for position
+    // and the native ext for size; ignore the `to` anchor in that case.
+    // Otherwise (twoCell/absolute or missing native ext) the from/to rect
+    // is authoritative.
+    let imgW: number, imgH: number;
+    if (anchor.editAs === 'oneCell' && anchor.nativeExtCx > 0 && anchor.nativeExtCy > 0) {
+      imgW = (anchor.nativeExtCx * cs) / EMU_PER_PX;
+      imgH = (anchor.nativeExtCy * cs) / EMU_PER_PX;
+    } else {
+      const toCol1 = anchor.toCol + 1;
+      const toRow1 = anchor.toRow + 1;
+      const imgSheetX2 = sheetXForCol(ws, toCol1, cs) + (anchor.toColOff * cs) / EMU_PER_PX;
+      const imgSheetY2 = sheetYForRow(ws, toRow1, cs) + (anchor.toRowOff * cs) / EMU_PER_PX;
+      imgW = imgSheetX2 - imgSheetX1;
+      imgH = imgSheetY2 - imgSheetY1;
+    }
     if (imgW <= 0 || imgH <= 0) continue;
 
     // Translate to canvas coordinates of the scrollable viewport
@@ -3811,15 +3823,25 @@ function renderShapeGroups(
   for (const anchor of anchors) {
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
-    const toCol1   = anchor.toCol   + 1;
-    const toRow1   = anchor.toRow   + 1;
 
     const x1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
     const y1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
-    const x2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
-    const y2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
-    const w = x2 - x1;
-    const h = y2 - y1;
+
+    // editAs="oneCell" preserves the group's saved EMU extent (grpSpPr/xfrm/ext)
+    // regardless of cell resizing — ECMA-376 §20.5.2.33. See renderImages
+    // for the same handling on stand-alone <xdr:pic> anchors.
+    let w: number, h: number;
+    if (anchor.editAs === 'oneCell' && anchor.nativeExtCx > 0 && anchor.nativeExtCy > 0) {
+      w = (anchor.nativeExtCx * cs) / EMU_PER_PX;
+      h = (anchor.nativeExtCy * cs) / EMU_PER_PX;
+    } else {
+      const toCol1 = anchor.toCol + 1;
+      const toRow1 = anchor.toRow + 1;
+      const x2 = sheetXForCol(ws, toCol1, cs) + (anchor.toColOff * cs) / EMU_PER_PX;
+      const y2 = sheetYForRow(ws, toRow1, cs) + (anchor.toRowOff * cs) / EMU_PER_PX;
+      w = x2 - x1;
+      h = y2 - y1;
+    }
     if (w <= 0 || h <= 0) continue;
 
     const canvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;

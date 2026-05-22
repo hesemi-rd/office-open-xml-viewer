@@ -731,6 +731,16 @@ pub struct ShapeAnchor {
     pub to_col_off: i64,
     pub to_row: u32,
     pub to_row_off: i64,
+    /// `twoCellAnchor@editAs` (ECMA-376 §20.5.2.33). With `"oneCell"` the
+    /// renderer uses `native_ext_cx/cy` for the on-sheet size instead of the
+    /// from/to-derived rect (Excel's "Move but don't size with cells").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_as: Option<String>,
+    /// Group's `<xdr:grpSpPr><a:xfrm><a:ext cx cy>` (or `<xdr:spPr><a:xfrm>`
+    /// for stand-alone sp/pic) in EMU. The saved on-sheet size, used as the
+    /// authoritative extent when `editAs == "oneCell"`. 0 = unavailable.
+    pub native_ext_cx: i64,
+    pub native_ext_cy: i64,
     pub shapes: Vec<ShapeInfo>,
 }
 
@@ -887,6 +897,17 @@ pub struct ImageAnchor {
     pub to_col_off: i64,
     pub to_row: u32,
     pub to_row_off: i64,
+    /// `twoCellAnchor@editAs` (ECMA-376 §20.5.2.33). Possible values: `"twoCell"`
+    /// (default), `"oneCell"`, `"absolute"`. With `"oneCell"`, Excel preserves
+    /// the picture's native EMU size (below) when cells are resized; with
+    /// `"twoCell"`, the from/to anchor rect IS the rendered size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_as: Option<String>,
+    /// `<xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>` in EMU. The picture's saved
+    /// size at insert/edit time. Used as the authoritative size when
+    /// `editAs == "oneCell"`. 0 = absent / use from/to rect.
+    pub native_ext_cx: i64,
+    pub native_ext_cy: i64,
     /// Data URL: "data:image/png;base64,..."
     pub data_url: String,
 }
@@ -2765,6 +2786,13 @@ fn parse_drawing_anchors(
         let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
         let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
         let mut pic_rid: Option<String> = None;
+        let mut native_ext_cx: i64 = 0;
+        let mut native_ext_cy: i64 = 0;
+        // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs`. Possible values:
+        // "twoCell" (default), "oneCell", "absolute". With "oneCell" Excel
+        // preserves the picture's saved size from <xdr:spPr><a:xfrm><a:ext>
+        // regardless of cell resizing.
+        let edit_as = anchor.attribute("editAs").map(|s| s.to_string());
 
         for child in anchor.children() {
             if !child.is_element() { continue; }
@@ -2804,6 +2832,20 @@ fn parse_drawing_anchors(
                                 .map(|a| a.value().to_string());
                         }
                     }
+                    // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
+                    // own saved EMU extent. Authoritative when editAs="oneCell".
+                    if let Some(sp_pr) = child.children()
+                        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(xdr_ns))
+                    {
+                        if let Some(xfrm_n) = sp_pr.children()
+                            .find(|n| n.tag_name().name() == "xfrm" && n.tag_name().namespace() == Some(a_ns))
+                        {
+                            if let Some(xfrm) = parse_xfrm(&xfrm_n) {
+                                native_ext_cx = xfrm.ext_x as i64;
+                                native_ext_cy = xfrm.ext_y as i64;
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2819,6 +2861,9 @@ fn parse_drawing_anchors(
         anchors.push(ImageAnchor {
             from_col, from_col_off, from_row, from_row_off,
             to_col, to_col_off, to_row, to_row_off,
+            edit_as,
+            native_ext_cx,
+            native_ext_cy,
             data_url,
         });
     }
@@ -3294,6 +3339,12 @@ fn parse_shape_anchors(
         // Parse from/to anchor rect (shared between grpSp and stand-alone sp paths)
         let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
         let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs` — see ImageAnchor parsing
+        // path for semantics. `"oneCell"` instructs the renderer to preserve
+        // the group's saved EMU size instead of resizing with the cell rect.
+        let edit_as = anchor.attribute("editAs").map(|s| s.to_string());
+        let native_ext_cx: i64;
+        let native_ext_cy: i64;
         for c in anchor.children() {
             if !c.is_element() { continue; }
             if c.tag_name().name() == "from" || c.tag_name().name() == "to" {
@@ -3333,6 +3384,11 @@ fn parse_shape_anchors(
             let Some(root) = xfrm else { continue; };
             if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 { continue; }
 
+            // Top-level grpSp ext is the group's saved on-sheet EMU size —
+            // authoritative when editAs="oneCell".
+            native_ext_cx = root.ext_x as i64;
+            native_ext_cy = root.ext_y as i64;
+
             // Map child coords → root coords with the grpSp's own chOff/chExt.
             let csx = root.ext_x / root.ch_ext_x;
             let csy = root.ext_y / root.ch_ext_y;
@@ -3354,6 +3410,8 @@ fn parse_shape_anchors(
             let Some(xfrm_n) = xfrm_node else { continue; };
             let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
             if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 { continue; }
+            native_ext_cx = xfrm.ext_x as i64;
+            native_ext_cy = xfrm.ext_y as i64;
             collect_shapes(&anchor, xfrm.off_x, xfrm.off_y, xfrm.ext_x, xfrm.ext_y,
                            1.0, 1.0, 0.0, 0.0, theme_colors, rid_urls, &mut shapes);
         } else {
@@ -3365,6 +3423,9 @@ fn parse_shape_anchors(
         anchors.push(ShapeAnchor {
             from_col, from_col_off, from_row, from_row_off,
             to_col, to_col_off, to_row, to_row_off,
+            edit_as,
+            native_ext_cx,
+            native_ext_cy,
             shapes,
         });
     }
