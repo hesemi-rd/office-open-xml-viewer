@@ -1177,8 +1177,13 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  // Category-axis baseline. `<c:catAx><c:spPr><a:ln><a:noFill>` suppresses
+  // the rule (labels stay). Same line-only hide semantics as the line/bar
+  // renderers — see those for the spec reference.
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
 
   const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
   for (let si = chart.series.length - 1; si >= 0; si--) {
@@ -1599,19 +1604,23 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
   }
 
-  // X-axis line (always drawn — the timeline ruler in Gantt-style scatter
-  // charts depends on this line's stroke). Tick labels are skipped when the
-  // category axis is hidden via `<c:delete val="1"/>`. Color and weight come
-  // from `<c:catAx><c:spPr><a:ln>` when present; default otherwise.
-  ctx.save();
-  ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
-  ctx.lineWidth = chart.catAxisLineWidthEmu
-    ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700)
-    : 1;
-  ctx.lineCap = 'butt';
-  ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
-  ctx.restore();
-  if (!chart.valAxisHidden) {
+  // X-axis line (the timeline ruler in Gantt-style scatter charts depends
+  // on this line's stroke). Tick labels are skipped when the category axis
+  // is hidden via `<c:delete val="1"/>`; the rule itself is also gated on
+  // `<c:catAx><c:spPr><a:ln><a:noFill>` (line-only hide). Color and
+  // weight come from `<c:catAx><c:spPr><a:ln>` when present; default
+  // otherwise.
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.save();
+    ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
+    ctx.lineWidth = chart.catAxisLineWidthEmu
+      ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700)
+      : 1;
+    ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
+    ctx.restore();
+  }
+  if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     ctx.save();
     ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
     ctx.lineWidth = chart.valAxisLineWidthEmu
@@ -2133,19 +2142,25 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     }
   }
 
-  ctx.strokeStyle = '#bbb';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  if (!chart.valAxisHidden) {
-    ctx.moveTo(px0, py0);
-    ctx.lineTo(px0, py0 + ph);
-    ctx.lineTo(px0 + pw, py0 + ph);
-  } else if (!chart.catAxisHidden) {
-    // Just the baseline under the categories.
-    ctx.moveTo(px0, py0 + ph);
-    ctx.lineTo(px0 + pw, py0 + ph);
+  // L-frame: vertical (value-axis) rule + horizontal (category-axis) baseline.
+  // Each segment is independently gated on its axis's `<c:delete>` *and*
+  // `<c:spPr><a:ln><a:noFill>` (line-only hide).
+  const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden;
+  const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
+  if (drawValLine || drawCatLine) {
+    ctx.strokeStyle = '#bbb';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (drawValLine) {
+      ctx.moveTo(px0, py0);
+      ctx.lineTo(px0, py0 + ph);
+      if (drawCatLine) ctx.lineTo(px0 + pw, py0 + ph);
+    } else if (drawCatLine) {
+      ctx.moveTo(px0, py0 + ph);
+      ctx.lineTo(px0 + pw, py0 + ph);
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
 
   const colorSub = '#196ECA';
   const colorPos = '#5BA4E6';
