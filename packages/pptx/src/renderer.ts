@@ -1034,7 +1034,8 @@ function renderTextBody(
   // AutoNum counters per list level
   const autoNumCounters = new Map<number, number>();
 
-  for (const para of body.paragraphs) {
+  for (let paraIdx = 0; paraIdx < body.paragraphs.length; paraIdx++) {
+    const para = body.paragraphs[paraIdx];
     const marLPx   = emuToPx(para.marL,   scale);
     const marRPx   = emuToPx(para.marR,   scale);
     const indentPx = emuToPx(para.indent, scale);
@@ -1170,7 +1171,13 @@ function renderTextBody(
         lineHeight = maxSizePx * 1.2;
       }
       const linePx  = lineHeight + (isLast ? spaceAfterPx : 0);
-      const topGap  = isFirst ? spaceBeforePx : 0;
+      // ECMA-376 §21.1.2.2.6 (a:spcBef): paragraph "space before" is the gap
+      // *between* paragraphs. PowerPoint suppresses it on the first paragraph
+      // of a text body — otherwise placeholders whose layout-default `spcBef`
+      // is 10 pt (sample-1 slide-5 "Figure 1." caption inherits this from the
+      // layout body lstStyle) get pushed ~10 px below the placeholder top and
+      // collide with the chart title sitting just below in the slide.
+      const topGap  = isFirst && paraIdx > 0 ? spaceBeforePx : 0;
       // Non-bullet first-line indent
       const textXOffset = (!hasBullet && isFirst) ? indentPx : 0;
 
