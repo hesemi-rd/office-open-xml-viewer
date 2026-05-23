@@ -546,6 +546,16 @@ pub struct ChartData {
     /// axis (labels, ticks, and axis line).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub val_axis_hidden: bool,
+    /// `<c:catAx><c:spPr><a:ln><a:noFill>` — hides just the category axis
+    /// LINE while keeping labels/ticks visible. Distinct from `cat_axis_hidden`
+    /// (full `<c:delete val="1"/>` removes labels too).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cat_axis_line_hidden: bool,
+    /// `<c:valAx><c:spPr><a:ln><a:noFill>` — hides just the value axis LINE
+    /// while keeping labels/ticks visible. Sample-1's "Carbon & Growth" line
+    /// chart uses this to suppress the leftmost vertical rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub val_axis_line_hidden: bool,
     /// Outer `<c:chartSpace><c:spPr>` fill resolution (ECMA-376 §21.2.2.5).
     /// `Some(hex)` for `<a:solidFill>`, `None` for `<a:noFill>` or when spPr is
     /// absent *and* no explicit fill is declared. An absent `chart_bg` on the
@@ -661,6 +671,11 @@ pub struct ChartData {
     /// (axes + labels included).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plot_area_manual_layout: Option<ManualLayout>,
+    /// `<c:radarChart><c:radarStyle val>` — "standard" (line only),
+    /// "marker" (line + markers), "filled" (closed polygon with area fill).
+    /// Default per ECMA-376 §21.2.3.10 is "standard" — no area fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radar_style: Option<String>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
@@ -2115,27 +2130,17 @@ fn parse_worksheet(
                 if let Some(v) = node.attribute("defaultColWidth").and_then(|s| s.parse().ok()) {
                     default_col_width = v;
                 }
-                // ECMA-376 §18.3.1.81 customHeight: "'True' if
-                // defaultRowHeight value has been manually set, or is
-                // different from the default value." When customHeight is
-                // false/absent, the written defaultRowHeight is purely
-                // informational — applications use their intrinsic default
-                // (15 pt for the Calibri 11 baseline → 20 px at 96 DPI).
-                // Honoring the file value unconditionally caused sample-27
-                // (defaultRowHeight=20pt, no customHeight) to render rows
-                // at 27 px instead of Excel's actual 20 px.
-                let custom_height = node
-                    .attribute("customHeight")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
+                // ECMA-376 §18.3.1.81 `defaultRowHeight` is the workbook
+                // default row height in points. Always honor it when present
+                // — `demo/sample-1` stores `defaultRowHeight="20.1"` (no
+                // customHeight) and Excel uses that 20.1 pt as the default
+                // for non-customized rows. `customHeight` is metadata about
+                // how the height was set, not a gate on whether to honor it.
                 if let Some(v) = node
                     .attribute("defaultRowHeight")
                     .and_then(|s| s.parse::<f64>().ok())
                 {
-                    if custom_height {
-                        default_row_height = v;
-                    }
-                    // else: leave intrinsic 20 (px) in place
+                    default_row_height = v;
                 }
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
@@ -2217,22 +2222,18 @@ fn parse_worksheet(
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
                 let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
-                // ECMA-376 §18.3.1.73 `<row>@ht` is only authoritative when
-                // `@customHeight="1"`. When customHeight is absent / 0 the
-                // ht attribute is informational and Excel falls back to the
-                // workbook default (sample-27 stores ht="21" on rows 4-10
-                // without customHeight; Excel still displays them at the
-                // 20-px default rather than 21 pt × 4/3).
-                let custom_height = node
-                    .attribute("customHeight")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
+                // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
+                // Gating the value on `@customHeight="1"` (0.37.0) was too
+                // strict — `demo/sample-1` sheets 2-5 store `ht="36.95"` on
+                // row 2 without `customHeight`, and Excel renders that row at
+                // ~49 px (36.95 pt × 4/3), not the workbook default. Always
+                // honor `ht` when present; `customHeight` is metadata about
+                // *how* the height was set (user-edited vs auto-fit) and
+                // doesn't gate the value itself.
                 let height: Option<f64> = if hidden {
                     Some(0.0)
-                } else if custom_height {
-                    node.attribute("ht").and_then(|s| s.parse().ok())
                 } else {
-                    None
+                    node.attribute("ht").and_then(|s| s.parse().ok())
                 };
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
@@ -4073,6 +4074,9 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     // hides the axis (labels, ticks, and lines). Default is "0" (visible).
     let mut cat_axis_hidden = false;
     let mut val_axis_hidden = false;
+    // `<c:catAx|valAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay.
+    let mut cat_axis_line_hidden = false;
+    let mut val_axis_line_hidden = false;
     let mut cat_axis_format_code: Option<String> = None;
     let mut cat_axis_min: Option<f64> = None;
     let mut cat_axis_max: Option<f64> = None;
@@ -4094,6 +4098,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut val_axis_crosses_at: Option<f64> = None;
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
+    let mut radar_style: Option<String> = None;
     let mut data_label_position: Option<String> = None;
     let mut data_label_format_code: Option<String> = None;
     // Data-label text color is theme-aware, so we hoist the extraction to a
@@ -4156,6 +4161,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 if cat_axis_crosses.is_none() { cat_axis_crosses = cr; }
                 if cat_axis_crosses_at.is_none() { cat_axis_crosses_at = cra; }
                 if axis_is_deleted(&child, c_ns) { cat_axis_hidden = true; }
+                if axis_line_is_hidden(&child, c_ns) { cat_axis_line_hidden = true; }
                 continue;
             }
             "valAx" => {
@@ -4197,6 +4203,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     if cat_axis_crosses.is_none() { cat_axis_crosses = cr; }
                     if cat_axis_crosses_at.is_none() { cat_axis_crosses_at = cra; }
                     if axis_is_deleted(&child, c_ns) { cat_axis_hidden = true; }
+                    if axis_line_is_hidden(&child, c_ns) { cat_axis_line_hidden = true; }
                 } else {
                     if val_axis_title.is_none() {
                         val_axis_title = extract_chart_title(&child, c_ns, a_ns);
@@ -4229,6 +4236,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                         val_axis_minor_tick_mark = extract_axis_tick_mark(&child, c_ns, "minorTickMark");
                     }
                     if axis_is_deleted(&child, c_ns) { val_axis_hidden = true; }
+                    if axis_line_is_hidden(&child, c_ns) { val_axis_line_hidden = true; }
                 }
                 continue;
             }
@@ -4273,6 +4281,15 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     // overlap within a cluster (negative = gap).
                     if bar_overlap.is_none() {
                         bar_overlap = attr_node.attribute("val").and_then(|v| v.parse().ok());
+                    }
+                }
+                "radarStyle" => {
+                    // ECMA-376 §21.2.3.10 — "standard" (line only, default),
+                    // "marker" (line + markers), "filled" (closed polygon
+                    // with area fill). Only the "filled" variant should
+                    // produce a translucent area in the renderer.
+                    if radar_style.is_none() {
+                        radar_style = attr_node.attribute("val").map(|s| s.to_string());
                     }
                 }
                 "dLbls"    => {
@@ -4409,6 +4426,8 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         legend_manual_layout,
         cat_axis_hidden,
         val_axis_hidden,
+        cat_axis_line_hidden,
+        val_axis_line_hidden,
         bar_gap_width,
         bar_overlap,
         data_label_position,
@@ -4421,6 +4440,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         val_axis_max,
         title_manual_layout,
         plot_area_manual_layout,
+        radar_style,
     })
 }
 
@@ -4451,6 +4471,19 @@ fn extract_axis_line_style(
     let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
     let color = extract_solid_fill_in_drawingml(&ln, theme_colors);
     (color, width)
+}
+
+/// `<c:catAx|valAx><c:spPr><a:ln><a:noFill>` — true when the axis line is
+/// explicitly hidden (labels and tick marks still render). Distinct from
+/// `<c:delete val="1"/>` which hides the entire axis. Sample-1 "Carbon &
+/// Growth" uses this on `<c:valAx>` to keep the Y-axis numbers visible
+/// while suppressing the vertical rule.
+fn axis_line_is_hidden(axis_node: &roxmltree::Node, c_ns: &str) -> bool {
+    let Some(sp_pr) = axis_node.children()
+        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns))
+    else { return false; };
+    let Some(ln) = sp_pr.children().find(|n| n.tag_name().name() == "ln") else { return false; };
+    ln.children().any(|n| n.is_element() && n.tag_name().name() == "noFill")
 }
 
 /// `<c:catAx|valAx><c:txPr>...defRPr@b>` — bold flag for axis tick labels.
@@ -4684,7 +4717,20 @@ fn resolve_fill_color(fill_node: &roxmltree::Node, theme_colors: &[String]) -> O
 fn resolve_series_color(ser_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
     let sp_pr = ser_node.children()
         .find(|n| n.is_element() && n.tag_name().name() == "spPr")?;
-    resolve_fill_color(&sp_pr, theme_colors)
+    // Line / scatter / radar series carry their color on `<a:ln><a:solidFill>`
+    // (the series IS the stroke), not on `<a:solidFill>` directly under spPr.
+    // Bar / area / pie series carry it on the direct `<a:solidFill>` (fill).
+    // Try fill first (handles bar/area/pie/marker fill); if absent, fall back
+    // to the line color (handles line/scatter/radar). Without this fallback
+    // the renderer would lose the explicit `<a:ln><a:solidFill><a:srgbClr>`
+    // overrides on line-chart series and rotate through the theme accents
+    // instead (`demo/sample-1` "Carbon & Growth" "Year" series should be
+    // #2D6A4F but rendered as accent1 = #156082 blue).
+    if let Some(c) = resolve_fill_color(&sp_pr, theme_colors) {
+        return Some(c);
+    }
+    let ln = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "ln")?;
+    resolve_fill_color(&ln, theme_colors)
 }
 
 fn parse_chart_series(

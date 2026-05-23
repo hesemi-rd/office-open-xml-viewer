@@ -173,6 +173,10 @@ export interface ChartElement {
   showDataLabels: boolean;
   catAxisHidden: boolean;
   valAxisHidden: boolean;
+  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay. */
+  catAxisLineHidden?: boolean;
+  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay. */
+  valAxisLineHidden?: boolean;
   plotAreaBg: string | null;
   /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
   chartBg: string | null;
@@ -217,6 +221,8 @@ export interface ChartElement {
   /** `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42) — drives
    * whether scatter charts connect points with straight or smooth lines. */
   scatterStyle?: string | null;
+  /** `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). */
+  radarStyle?: string | null;
 }
 
 export interface PictureElement {

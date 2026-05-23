@@ -1948,6 +1948,8 @@ export async function renderSlide(
           valAxisTitle: null,
           catAxisHidden: el.catAxisHidden,
           valAxisHidden: el.valAxisHidden,
+          catAxisLineHidden: el.catAxisLineHidden ?? false,
+          valAxisLineHidden: el.valAxisLineHidden ?? false,
           plotAreaBg: el.plotAreaBg,
           chartBg: el.chartBg,
           showLegend: el.showLegend,
@@ -1970,6 +1972,7 @@ export async function renderSlide(
           valAxisFormatCode: el.valAxisFormatCode ?? null,
           plotAreaManualLayout: el.plotAreaManualLayout ?? null,
           scatterStyle: el.scatterStyle ?? null,
+          radarStyle: el.radarStyle ?? null,
         },
         {
           x: emuToPx(el.x, scale),

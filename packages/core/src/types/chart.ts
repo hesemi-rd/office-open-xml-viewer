@@ -181,6 +181,13 @@ export interface ChartModel {
   catAxisHidden: boolean;
   /** `<c:valAx><c:delete val="1"/>`. */
   valAxisHidden: boolean;
+  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
+   *  and tick marks still render. Distinct from `catAxisHidden` (which
+   *  removes everything via `<c:delete val="1"/>`). */
+  catAxisLineHidden: boolean;
+  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
+   *  and tick marks still render. */
+  valAxisLineHidden: boolean;
   /** Hex without '#'. From `<c:plotArea><c:spPr><a:solidFill>`. */
   plotAreaBg: string | null;
   /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
@@ -306,6 +313,13 @@ export interface ChartModel {
    * for `chartType === "scatter"`; bubble ignores it.
    */
   scatterStyle?: string | null;
+  /**
+   * `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). Controls
+   * whether radar series render as line + markers ("standard" / "marker")
+   * or as a closed polygon with area fill ("filled"). null = default
+   * ("standard" — line, no fill). Only consulted for `chartType === "radar"`.
+   */
+  radarStyle?: string | null;
 }
 
 /**

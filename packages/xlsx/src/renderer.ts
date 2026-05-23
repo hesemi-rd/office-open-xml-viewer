@@ -4457,6 +4457,8 @@ function adaptChartData(chart: ChartData): ChartModel {
     valAxisTitle: chart.valAxisTitle ?? null,
     catAxisHidden: chart.catAxisHidden ?? false,
     valAxisHidden: chart.valAxisHidden ?? false,
+    catAxisLineHidden: chart.catAxisLineHidden ?? false,
+    valAxisLineHidden: chart.valAxisLineHidden ?? false,
     plotAreaBg: null,
     // `<c:chartSpace><c:spPr>` resolution: when the spPr element was present
     // we honor whatever it said (solid hex or `<a:noFill/>` → null =
@@ -4494,6 +4496,7 @@ function adaptChartData(chart: ChartData): ChartModel {
     dataLabelFormatCode: chart.dataLabelFormatCode ?? null,
     titleManualLayout: chart.titleManualLayout ?? null,
     plotAreaManualLayout: chart.plotAreaManualLayout ?? null,
+    radarStyle: chart.radarStyle ?? null,
   };
 }
 

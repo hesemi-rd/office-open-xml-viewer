@@ -349,13 +349,58 @@ function drawAxisTitle(
   ctx.restore();
 }
 
+/** Line-shaped legend swatch styles match Excel's actual chart-type
+ *  conventions: bar/column/area/pie use a filled rectangle ("swatch");
+ *  line/radar/scatter use a horizontal line segment (the same stroke
+ *  weight the series uses). Without this, line-chart legends rendered as
+ *  filled squares, which read as a different chart-type marker.
+ */
+type LegendSwatchStyle = 'fill' | 'line';
+
+function legendSwatchStyle(chartType: string | undefined): LegendSwatchStyle {
+  if (!chartType) return 'fill';
+  if (
+    chartType === 'line' || chartType === 'stackedLine' || chartType === 'stackedLinePct' ||
+    chartType === 'radar' || chartType === 'scatter'
+  ) {
+    return 'line';
+  }
+  return 'fill';
+}
+
+function drawLegendSwatch(
+  ctx: CanvasRenderingContext2D,
+  style: LegendSwatchStyle,
+  color: string,
+  x: number, y: number, w: number, h: number,
+): void {
+  ctx.fillStyle = color;
+  if (style === 'line') {
+    // Horizontal stroke centered vertically inside the swatch slot. 2 px
+    // weight matches Excel's default 2.25 pt line at typical legend sizes.
+    ctx.strokeStyle = color;
+    const prevW = ctx.lineWidth;
+    ctx.lineWidth = Math.max(1.5, h * 0.15);
+    ctx.beginPath();
+    const ly = y + h / 2;
+    ctx.moveTo(x, ly);
+    ctx.lineTo(x + w, ly);
+    ctx.stroke();
+    ctx.lineWidth = prevW;
+  } else {
+    ctx.fillRect(x, y, w, h);
+  }
+}
+
 function drawLegend(
   ctx: CanvasRenderingContext2D,
   series: ChartSeries[],
   lx: number, ly: number, lw: number, lh: number,
   orient: 'vertical' | 'horizontal' = 'vertical',
+  chartType?: string,
 ): void {
   const sw = 10; const gap = 4;
+  const swatchStyle = legendSwatchStyle(chartType);
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
     const fontSize = Math.max(9, Math.min(12, lh * 0.7));
@@ -368,8 +413,7 @@ function drawLegend(
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < series.length; i++) {
-      ctx.fillStyle = chartColor(i, series[i]);
-      ctx.fillRect(rx, ry - fontSize / 2, sw, fontSize);
+      drawLegendSwatch(ctx, swatchStyle, chartColor(i, series[i]), rx, ry - fontSize / 2, sw, fontSize);
       ctx.fillStyle = '#333'; ctx.textAlign = 'left';
       ctx.fillText(labels[i].slice(0, 30), rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
@@ -382,8 +426,7 @@ function drawLegend(
   const rowH = fontSize + 4;
   let ry = ly + (lh - rowH * series.length) / 2;
   for (let i = 0; i < series.length; i++) {
-    ctx.fillStyle = chartColor(i, series[i]);
-    ctx.fillRect(lx, ry, sw, fontSize);
+    drawLegendSwatch(ctx, swatchStyle, chartColor(i, series[i]), lx, ry, sw, fontSize);
     ctx.fillStyle = '#333'; ctx.textAlign = 'left';
     const label = series[i].name || `Series ${i + 1}`;
     ctx.fillText(label.slice(0, 20), lx + sw + gap, ry + fontSize / 2);
@@ -438,21 +481,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal');
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal');
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType);
       break;
   }
 }
@@ -725,10 +768,17 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   }
 
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  // `<c:spPr><a:ln><a:noFill>` on the corresponding axis suppresses just
+  // the rule (labels stay). For a vertical bar chart the bottom rule is
+  // the category axis; for a horizontal bar chart it's the value axis.
   if (!isH) {
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+      ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    }
   } else {
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
+      ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    }
   }
 
   // Bar cluster geometry — ECMA-376 §21.2.2.13 (gapWidth = % of bar width
@@ -989,10 +1039,14 @@ function renderLineChart(
   }
 
   // Axis lines: bottom (category) + left (value). Both default to visible
-  // unless hidden explicitly.
+  // unless hidden explicitly. `<c:spPr><a:ln><a:noFill>` (line-only hide)
+  // suppresses the rule while keeping labels and tick marks — sample-1
+  // "Carbon & Growth" uses this on the value axis.
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
-  if (!chart.valAxisHidden) {
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
+  if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
   }
 
@@ -1123,8 +1177,13 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  // Category-axis baseline. `<c:catAx><c:spPr><a:ln><a:noFill>` suppresses
+  // the rule (labels stay). Same line-only hide semantics as the line/bar
+  // renderers — see those for the spec reference.
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
 
   const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
   for (let si = chart.series.length - 1; si >= 0; si--) {
@@ -1341,21 +1400,61 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.fillText((cats[i] ?? '').toString().slice(0, 12), lx, ly);
   }
 
+  // ECMA-376 §21.2.3.10 c:radarStyle — "filled" closes the polygon with a
+  // translucent area fill; "standard" / "marker" (and default) draw the
+  // line only. Markers come from per-series `<c:marker>` (which can
+  // override the chart-type style by setting `<c:symbol val="none"/>`);
+  // sample-1 "Biodiversity Index" sets radarStyle="marker" but every
+  // series carries `<c:marker><c:symbol val="none"/>`, so Excel draws
+  // lines only — no dots.
+  const filled = chart.radarStyle === 'filled';
+  const markerRadius = Math.max(2, rd * 0.025);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const color = chartColor(si, s);
-    ctx.beginPath();
+    // Build the per-spoke point list, leaving holes where the series has
+    // no value (`<c:val>` ptCount > pts implies missing indices — sample-1
+    // "Biodiversity Index" omits idx 0, so Excel draws an open polyline
+    // from idx 1 to idx 10 without bridging back through the top spoke).
+    const pts: Array<[number, number] | null> = [];
     for (let i = 0; i < n; i++) {
-      const v = s.values[i] ?? 0;
+      const v = s.values[i];
+      if (v == null) { pts.push(null); continue; }
       const frac = v / axMax;
       const a = spoke(i);
-      const px = cx2 + Math.cos(a) * rd * frac;
-      const py = cy2 + Math.sin(a) * rd * frac;
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      pts.push([cx2 + Math.cos(a) * rd * frac, cy2 + Math.sin(a) * rd * frac]);
     }
-    ctx.closePath();
-    ctx.fillStyle = hexToRgba(color, 0.25); ctx.fill();
+
+    // Stroke the polyline, breaking on holes (no synthetic 0-fill).
+    ctx.beginPath();
+    let pen = false;
+    for (const pt of pts) {
+      if (pt == null) { pen = false; continue; }
+      if (!pen) { ctx.moveTo(pt[0], pt[1]); pen = true; }
+      else { ctx.lineTo(pt[0], pt[1]); }
+    }
+    // Only close the polygon when there are no gaps. With a hole anywhere
+    // the radar is an open path (matches Excel's "skip missing point").
+    const allPresent = pts.every(p => p != null);
+    if (filled && allPresent) {
+      ctx.closePath();
+      ctx.fillStyle = hexToRgba(color, 0.25); ctx.fill();
+    } else if (allPresent) {
+      ctx.closePath();
+    }
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+
+    // Markers: honor the per-series marker_symbol. When the series
+    // explicitly carries `<c:marker><c:symbol val="none"/>`, the parser
+    // sets showMarker=false — respect that even for radarStyle="marker"
+    // charts (the chart-level style is the default; series overrides win).
+    if (!filled && s.showMarker !== false) {
+      ctx.fillStyle = color;
+      for (const pt of pts) {
+        if (pt == null) continue;
+        ctx.beginPath(); ctx.arc(pt[0], pt[1], markerRadius, 0, Math.PI * 2); ctx.fill();
+      }
+    }
   }
 
   drawLegendForLayout(
@@ -1505,19 +1604,23 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
   }
 
-  // X-axis line (always drawn — the timeline ruler in Gantt-style scatter
-  // charts depends on this line's stroke). Tick labels are skipped when the
-  // category axis is hidden via `<c:delete val="1"/>`. Color and weight come
-  // from `<c:catAx><c:spPr><a:ln>` when present; default otherwise.
-  ctx.save();
-  ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
-  ctx.lineWidth = chart.catAxisLineWidthEmu
-    ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700)
-    : 1;
-  ctx.lineCap = 'butt';
-  ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
-  ctx.restore();
-  if (!chart.valAxisHidden) {
+  // X-axis line (the timeline ruler in Gantt-style scatter charts depends
+  // on this line's stroke). Tick labels are skipped when the category axis
+  // is hidden via `<c:delete val="1"/>`; the rule itself is also gated on
+  // `<c:catAx><c:spPr><a:ln><a:noFill>` (line-only hide). Color and
+  // weight come from `<c:catAx><c:spPr><a:ln>` when present; default
+  // otherwise.
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.save();
+    ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
+    ctx.lineWidth = chart.catAxisLineWidthEmu
+      ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700)
+      : 1;
+    ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
+    ctx.restore();
+  }
+  if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     ctx.save();
     ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
     ctx.lineWidth = chart.valAxisLineWidthEmu
@@ -2039,19 +2142,25 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     }
   }
 
-  ctx.strokeStyle = '#bbb';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  if (!chart.valAxisHidden) {
-    ctx.moveTo(px0, py0);
-    ctx.lineTo(px0, py0 + ph);
-    ctx.lineTo(px0 + pw, py0 + ph);
-  } else if (!chart.catAxisHidden) {
-    // Just the baseline under the categories.
-    ctx.moveTo(px0, py0 + ph);
-    ctx.lineTo(px0 + pw, py0 + ph);
+  // L-frame: vertical (value-axis) rule + horizontal (category-axis) baseline.
+  // Each segment is independently gated on its axis's `<c:delete>` *and*
+  // `<c:spPr><a:ln><a:noFill>` (line-only hide).
+  const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden;
+  const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
+  if (drawValLine || drawCatLine) {
+    ctx.strokeStyle = '#bbb';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (drawValLine) {
+      ctx.moveTo(px0, py0);
+      ctx.lineTo(px0, py0 + ph);
+      if (drawCatLine) ctx.lineTo(px0 + pw, py0 + ph);
+    } else if (drawCatLine) {
+      ctx.moveTo(px0, py0 + ph);
+      ctx.lineTo(px0 + pw, py0 + ph);
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
 
   const colorSub = '#196ECA';
   const colorPos = '#5BA4E6';
