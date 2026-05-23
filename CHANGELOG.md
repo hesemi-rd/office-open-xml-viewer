@@ -4,6 +4,27 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.39.0 — 2026-05-24
+
+xlsx fidelity release. Six correctness fixes for chart and row-height
+rendering surfaced by `demo/sample-1`'s Forest Inventory / Carbon & Growth
+/ Biodiversity Index sheets. The chart-related fixes also extend the
+shared `@silurus/ooxml-core` chart renderer, so pptx / docx consumers see
+the same improvements (pptx demo VRT 9/9 still passes byte-identically).
+
+### Fixes
+
+- **xlsx**: the `customHeight="1"` gate on `<row ht>` added in 0.37.0 was too strict — `demo/sample-1` sheets 2-5 store `ht="36.95"` on row 2 without `customHeight`, and Excel renders that row at ~49 px (36.95 pt × 4/3), not the workbook default. Always honor `ht` and `defaultRowHeight` when present; `customHeight` is metadata about *how* the height was set, not a gate on whether to honor it. The same gate is removed from `sheetFormatPr@defaultRowHeight`.
+- **chart**: `<c:catAx|valAx><c:spPr><a:ln><a:noFill>` (line-only hide, distinct from `<c:delete val="1"/>` which removes the entire axis) is now honored across line / bar / area / scatter / waterfall renderers. New `catAxisLineHidden` / `valAxisLineHidden` fields on `ChartData` / `ChartModel`; parser detects `<a:noFill>` under `<a:ln>` and each renderer gates its axis rule on it. `demo/sample-1` "Carbon & Growth" uses this to suppress the value-axis vertical line on the embedded line chart.
+- **chart (line)**: series color resolution now falls back to `<a:ln><a:solidFill>` when `<c:ser><c:spPr>` has no direct `<a:solidFill>`. Line / scatter / radar series carry their color on the stroke fill; the previous lookup only checked the area fill, so explicit `<a:srgbClr val="2D6A4F">` overrides fell through to the theme accent rotation (the "Carbon & Growth" "Year" series rendered as accent1 #156082 blue).
+- **chart**: legend swatch is now a horizontal line segment (instead of a filled rectangle) for line / stackedLine / stackedLinePct / radar / scatter chart types. Bar / area / pie keep the rectangle. Matches Excel's per-chart-type legend convention.
+- **chart (radar)**: `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10) is parsed and threaded onto `ChartModel.radarStyle`. The renderer now only fills the polygon when `radarStyle === "filled"`; "standard" / "marker" / absent draw the line only. Without this every radar series was washed with a 25 % alpha fill.
+- **chart (radar)**: per-series `<c:marker><c:symbol val="none"/>` is honored even when the chart-type style is `radarStyle="marker"` (series-level override wins, ECMA-376 §21.2.2.33). Missing data points (sparse `<c:val>` cache where ptCount > the supplied pts) are now skipped instead of synthesized as 0 — the polyline breaks on holes and only closes when every point is present. `demo/sample-1` "Biodiversity Index" omits idx 0 on every series; Excel draws an open polyline from Northridge to Hollowvale without bridging back through the top spoke.
+
+### Notes
+
+VRT references for `demo/sample-1` sheets 1 and 2 are now visibly stale relative to the corrected layouts (cumulative effect of the 0.37.0 pt→px row-height change and this release's `<row ht>` gate fix). The new renders match Excel; references need `UPDATE_REFS=1` once confirmed.
+
 ## 0.38.0 — 2026-05-23
 
 Single pptx text-layout fix that affects any text body whose layout inherits a
