@@ -4,6 +4,21 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.38.0 — 2026-05-23
+
+Single pptx text-layout fix that affects any text body whose layout inherits a
+non-zero `<a:spcBef>`. Demo VRT is unchanged (9/9 demo/sample-1 slides still
+match), but the slide-5 chart in that deck now lines up the way PowerPoint
+exports it instead of stacking the caption on top of the chart title.
+
+### Fixes
+
+- **pptx**: `<a:spcBef>` is the gap *between* paragraphs (ECMA-376 §21.1.2.2.6); PowerPoint suppresses it on the first paragraph of any text body because there is no preceding paragraph to space against. The renderer was applying it unconditionally for the first line of every paragraph including paragraph 0, pushing the text down by the inherited spcBef. `public/demo/sample-1.pptx` slide-5 surfaces this: the "Figure 1. Canopy cover index …" caption placeholder inherits a layout-level `spcBef=1000` (10 pt) from the slide layout's body lstStyle. With the unconditional spcBef the caption rendered ~10 px below the placeholder top and collided with the chart title "Canopy Cover Index" sitting just below (chart `graphicFrame@y` is only 93026 EMU = ~10 px below the placeholder). The fix gates `topGap` on `paraIdx > 0` in `buildLayout`.
+
+### Author metadata
+
+- npm package `author` switched from the GitHub `noreply` placeholder introduced in 0.37.0 to a dedicated `silurus.dev@gmail.com` address so consumers have a real reply path that isn't the maintainer's personal inbox. Applied across all 7 publishable packages (`root`, `core`, `pptx`, `xlsx`, `docx`, `node`, `markdown`); `vscode-extension` keeps using `publisher: silurus` with no author email.
+
 ## 0.37.0 — 2026-05-23
 
 xlsx-focused fidelity release. Four small spec-correctness fixes that together
