@@ -1397,36 +1397,57 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 
   // ECMA-376 §21.2.3.10 c:radarStyle — "filled" closes the polygon with a
   // translucent area fill; "standard" / "marker" (and default) draw the
-  // line only. Sample-1 "Biodiversity Index" uses "marker" and Excel
-  // renders no area fill, so the previous unconditional 25 %-alpha fill
-  // washed every series across the radar.
+  // line only. Markers come from per-series `<c:marker>` (which can
+  // override the chart-type style by setting `<c:symbol val="none"/>`);
+  // sample-1 "Biodiversity Index" sets radarStyle="marker" but every
+  // series carries `<c:marker><c:symbol val="none"/>`, so Excel draws
+  // lines only — no dots.
   const filled = chart.radarStyle === 'filled';
-  const showMarkers = chart.radarStyle === 'marker' || chart.radarStyle === 'standard'
-    || chart.series.some(s => s.showMarker !== false && s.markerSymbol && s.markerSymbol !== 'none');
   const markerRadius = Math.max(2, rd * 0.025);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const color = chartColor(si, s);
-    ctx.beginPath();
-    const pts: Array<[number, number]> = [];
+    // Build the per-spoke point list, leaving holes where the series has
+    // no value (`<c:val>` ptCount > pts implies missing indices — sample-1
+    // "Biodiversity Index" omits idx 0, so Excel draws an open polyline
+    // from idx 1 to idx 10 without bridging back through the top spoke).
+    const pts: Array<[number, number] | null> = [];
     for (let i = 0; i < n; i++) {
-      const v = s.values[i] ?? 0;
+      const v = s.values[i];
+      if (v == null) { pts.push(null); continue; }
       const frac = v / axMax;
       const a = spoke(i);
-      const px = cx2 + Math.cos(a) * rd * frac;
-      const py = cy2 + Math.sin(a) * rd * frac;
-      pts.push([px, py]);
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      pts.push([cx2 + Math.cos(a) * rd * frac, cy2 + Math.sin(a) * rd * frac]);
     }
-    ctx.closePath();
-    if (filled) {
+
+    // Stroke the polyline, breaking on holes (no synthetic 0-fill).
+    ctx.beginPath();
+    let pen = false;
+    for (const pt of pts) {
+      if (pt == null) { pen = false; continue; }
+      if (!pen) { ctx.moveTo(pt[0], pt[1]); pen = true; }
+      else { ctx.lineTo(pt[0], pt[1]); }
+    }
+    // Only close the polygon when there are no gaps. With a hole anywhere
+    // the radar is an open path (matches Excel's "skip missing point").
+    const allPresent = pts.every(p => p != null);
+    if (filled && allPresent) {
+      ctx.closePath();
       ctx.fillStyle = hexToRgba(color, 0.25); ctx.fill();
+    } else if (allPresent) {
+      ctx.closePath();
     }
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-    if (showMarkers && !filled) {
+
+    // Markers: honor the per-series marker_symbol. When the series
+    // explicitly carries `<c:marker><c:symbol val="none"/>`, the parser
+    // sets showMarker=false — respect that even for radarStyle="marker"
+    // charts (the chart-level style is the default; series overrides win).
+    if (!filled && s.showMarker !== false) {
       ctx.fillStyle = color;
-      for (const [px, py] of pts) {
-        ctx.beginPath(); ctx.arc(px, py, markerRadius, 0, Math.PI * 2); ctx.fill();
+      for (const pt of pts) {
+        if (pt == null) continue;
+        ctx.beginPath(); ctx.arc(pt[0], pt[1], markerRadius, 0, Math.PI * 2); ctx.fill();
       }
     }
   }
