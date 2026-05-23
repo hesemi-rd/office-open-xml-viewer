@@ -3,7 +3,7 @@
   "version": "0.37.0",
   "description": "Browser-based OOXML viewer (docx/xlsx/pptx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
-  "author": "Yuki Yokotani <26348105+yukiyokotani@users.noreply.github.com>",
+  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "keywords": [
     "ooxml",
     "docx",

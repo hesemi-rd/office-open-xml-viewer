@@ -4,7 +4,7 @@
   "version": "0.36.0",
   "description": "Node-side parsers for OOXML (docx/xlsx/pptx) using the workspace WASM artifacts — no browser DOM needed",
   "license": "MIT",
-  "author": "Yuki Yokotani <26348105+yukiyokotani@users.noreply.github.com>",
+  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",

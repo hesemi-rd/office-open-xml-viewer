@@ -4,7 +4,7 @@
   "version": "0.37.0",
   "description": "PPTX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
-  "author": "Yuki Yokotani <26348105+yukiyokotani@users.noreply.github.com>",
+  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
