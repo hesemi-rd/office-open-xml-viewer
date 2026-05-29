@@ -100,10 +100,12 @@ export class XlsxViewer {
     this.canvasArea.appendChild(this.selectionOverlay);
     this.canvasArea.appendChild(this.scrollHost);
 
+    const headerW = Math.round(HEADER_W * (this.opts.cellScale ?? 1));
+
     this.tabBar = document.createElement('div');
     this.tabBar.style.cssText =
       `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;flex-shrink:0;` +
-      `background:#f0f0f0;border-top:1px solid #c8ccd0;padding:0 4px;gap:2px;`;
+      `background:#f0f0f0;border-top:1px solid #c8ccd0;`;
 
     // Excel-style scroll buttons. They scroll the tab strip; they do NOT change
     // the active sheet. Disabled (greyed) at the ends / when there is no overflow.
@@ -111,7 +113,14 @@ export class XlsxViewer {
     this.navNext = this.makeNavButton('▶', 'Scroll tabs right', () => this.scrollTabs(1));
     this.navPrev.dataset.xlsxTabNav = 'prev';
     this.navNext.dataset.xlsxTabNav = 'next';
-    this.navNext.style.marginRight = '4px';
+
+    // The two buttons together span the row-header width so the tab strip starts
+    // at the same x as the data columns (which begin after the HEADER_W header).
+    const navGroup = document.createElement('div');
+    navGroup.style.cssText =
+      `display:flex;flex-shrink:0;width:${headerW}px;height:100%;`;
+    navGroup.appendChild(this.navPrev);
+    navGroup.appendChild(this.navNext);
 
     // The scrollable strip that actually holds the sheet tabs. position:relative
     // so each tab's offsetLeft is measured against the strip's scroll content.
@@ -128,8 +137,7 @@ export class XlsxViewer {
     document.head.appendChild(style);
     this.tabStrip.addEventListener('scroll', () => this.updateNavButtons());
 
-    this.tabBar.appendChild(this.navPrev);
-    this.tabBar.appendChild(this.navNext);
+    this.tabBar.appendChild(navGroup);
     this.tabBar.appendChild(this.tabStrip);
 
     wrapper.appendChild(this.canvasArea);
@@ -736,9 +744,9 @@ export class XlsxViewer {
     // hover tint) lives in the injected `.xlsx-tab-nav` stylesheet so the inline
     // style does not shadow the `:hover` rule.
     const base =
-      `flex-shrink:0;align-self:center;width:18px;height:18px;padding:0;` +
+      `flex:1;height:100%;padding:0;` +
       `display:flex;align-items:center;justify-content:center;` +
-      `border:none;border-radius:3px;color:#666;font-size:8px;line-height:1;` +
+      `border:none;color:#666;font-size:9px;line-height:1;` +
       `box-sizing:border-box;outline:none;`;
     return disabled
       ? base + `opacity:0.3;cursor:default;pointer-events:none;`
