@@ -4,6 +4,20 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.40.0 — 2026-05-30
+
+xlsx viewer UX release. Adds Excel-style sheet-tab navigation so workbooks with
+more sheet tabs than fit the container width stay reachable. No parser or
+rendering changes; docx / pptx are untouched.
+
+### Features
+
+- **xlsx (viewer)**: the sheet-tab bar hides its scrollbar, which left plain-mouse users (no trackpad / Shift+wheel) unable to reach tabs that overflow the container width. Added fixed Excel-style prev / next triangle buttons at the left of the tab bar. They scroll the tab strip one clipped tab per click — they do **not** change the active sheet — and grey out (disabled) at each end and when there is no overflow. Tabs now keep their natural width (`flex:none`) so the strip genuinely overflows, while `overflow-x:auto` is retained so trackpad / Shift+wheel scrolling still works. The two buttons span the row-header width so the tab strip starts in line with the data columns (offset by one inter-tab gap). Covered by a new Playwright interaction test (`packages/xlsx/tests/visual/tab-nav.spec.ts`).
+
+### Notes
+
+VS Code extension is bumped to 0.40.0 to stay in lockstep with the npm packages (no extension-specific changes this release).
+
 ## 0.39.0 — 2026-05-24
 
 xlsx fidelity release. Six correctness fixes for chart and row-height
