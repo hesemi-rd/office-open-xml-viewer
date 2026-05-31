@@ -1849,6 +1849,76 @@ function renderQuadrant(
 // ────────────────────────────────────────────────────────────────
 // Main render function
 // ────────────────────────────────────────────────────────────────
+/** Viewport-independent lookups derived purely from a Worksheet. The workbook
+ *  caches one Worksheet object per sheet, so this WeakMap hits on every scroll
+ *  frame and only misses on a sheet switch / re-parse — avoiding a full-sheet
+ *  cell-Map rebuild and a conditional-formatting recompile per frame. */
+interface SheetRenderCache {
+  cellMap: Map<string, Cell>;
+  cfContext: CfContext;
+  mergeSkipSet: Set<string>;
+  autoFilterCells: Set<string>;
+  hyperlinkMap: Map<string, string>;
+  commentCells: Set<string>;
+  tableStyleMap: Map<string, TableCellStyle>;
+  sparklineMap: Map<string, SparklineModel>;
+}
+const sheetRenderCache = new WeakMap<Worksheet, SheetRenderCache>();
+
+function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
+  const cached = sheetRenderCache.get(worksheet);
+  if (cached) return cached;
+
+  const cellMap = new Map<string, Cell>();
+  for (const row of worksheet.rows) {
+    for (const cell of row.cells) {
+      cellMap.set(`${cell.row}:${cell.col}`, cell);
+    }
+  }
+
+  // Merge skip-set is pure topology (no scaled sizes) so it is cacheable; the
+  // anchor map's pixel sizes depend on cellScale and stay per-frame.
+  const mergeSkipSet = new Set<string>();
+  for (const mc of worksheet.mergeCells ?? []) {
+    for (let r = mc.top; r <= mc.bottom; r++) {
+      for (let c = mc.left; c <= mc.right; c++) {
+        if (r === mc.top && c === mc.left) continue;
+        mergeSkipSet.add(`${r}:${c}`);
+      }
+    }
+  }
+
+  const autoFilterCells = new Set<string>();
+  if (worksheet.autoFilter) {
+    const af = worksheet.autoFilter;
+    for (let c = af.left; c <= af.right; c++) autoFilterCells.add(`${af.top}:${c}`);
+  }
+
+  const hyperlinkMap = new Map<string, string>();
+  for (const hl of worksheet.hyperlinks ?? []) {
+    if (hl.url) hyperlinkMap.set(`${hl.row}:${hl.col}`, hl.url);
+  }
+
+  const commentCells = new Set<string>();
+  for (const ref of worksheet.commentRefs ?? []) {
+    const parsed = parseA1Ref(ref);
+    if (parsed) commentCells.add(`${parsed.row}:${parsed.col}`);
+  }
+
+  const entry: SheetRenderCache = {
+    cellMap,
+    cfContext: compileCf(worksheet),
+    mergeSkipSet,
+    autoFilterCells,
+    hyperlinkMap,
+    commentCells,
+    tableStyleMap: buildTableStyleMap(worksheet),
+    sparklineMap: buildSparklineMap(worksheet),
+  };
+  sheetRenderCache.set(worksheet, entry);
+  return entry;
+}
+
 export function renderViewport(
   ctx: CanvasRenderingContext2D,
   worksheet: Worksheet,
@@ -1902,16 +1972,14 @@ export function renderViewport(
     scrollRowHeights.push(sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight)));
   }
 
-  // ── Build cell & merge lookup ────────────────────────────────
-  const cellMap = new Map<string, Cell>();
-  for (const row of worksheet.rows) {
-    for (const cell of row.cells) {
-      cellMap.set(`${cell.row}:${cell.col}`, cell);
-    }
-  }
+  // ── Viewport-independent lookups (memoized per Worksheet) ────
+  const {
+    cellMap, cfContext, mergeSkipSet, autoFilterCells,
+    hyperlinkMap, commentCells, tableStyleMap, sparklineMap,
+  } = getSheetRenderCache(worksheet);
 
+  // Merge anchor sizes are cellScale-scaled, so they stay per-frame.
   const mergeAnchorMap = new Map<string, { totalW: number; totalH: number; right: number; bottom: number }>();
-  const mergeSkipSet = new Set<string>();
   for (const mc of worksheet.mergeCells ?? []) {
     let totalW = 0;
     for (let c = mc.left; c <= mc.right; c++) {
@@ -1922,42 +1990,7 @@ export function renderViewport(
       totalH += sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
     }
     mergeAnchorMap.set(`${mc.top}:${mc.left}`, { totalW, totalH, right: mc.right, bottom: mc.bottom });
-    for (let r = mc.top; r <= mc.bottom; r++) {
-      for (let c = mc.left; c <= mc.right; c++) {
-        if (r === mc.top && c === mc.left) continue;
-        mergeSkipSet.add(`${r}:${c}`);
-      }
-    }
   }
-
-  const cfContext = compileCf(worksheet);
-
-  // Build autoFilter indicator cell set
-  const autoFilterCells = new Set<string>();
-  if (worksheet.autoFilter) {
-    const af = worksheet.autoFilter;
-    for (let c = af.left; c <= af.right; c++) {
-      autoFilterCells.add(`${af.top}:${c}`);
-    }
-  }
-
-  // Build hyperlink lookup map
-  const hyperlinkMap = new Map<string, string>();
-  for (const hl of worksheet.hyperlinks ?? []) {
-    if (hl.url) hyperlinkMap.set(`${hl.row}:${hl.col}`, hl.url);
-  }
-
-  // Build commented-cell lookup. worksheet.commentRefs are A1-style refs
-  // ("A1", "B12", "AA3") so we convert each to "row:col" and stash in a Set
-  // for O(1) membership checks in the cell loop.
-  const commentCells = new Set<string>();
-  for (const ref of worksheet.commentRefs ?? []) {
-    const parsed = parseA1Ref(ref);
-    if (parsed) commentCells.add(`${parsed.row}:${parsed.col}`);
-  }
-
-  const tableStyleMap = buildTableStyleMap(worksheet);
-  const sparklineMap = buildSparklineMap(worksheet);
 
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
