@@ -4,6 +4,51 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.41.0 — 2026-06-01
+
+Rendering-fidelity and performance release. Replaces several sample-fit
+heuristics with spec-faithful behavior (verified against the Word / PowerPoint
+PDF exports of the test decks), and removes per-frame work from the hot render
+paths. Also lands the engineering foundation for a stable release: VRT
+regression detection, a modular xlsx parser/renderer, and PR-gating CI.
+
+### Rendering fidelity
+
+- **pptx**: titles and captions now honor `cap="all"` / `cap="small"` inherited
+  from the slide master/layout placeholder style (ECMA-376 §21.1.2.3.13), not
+  just from the run — e.g. a template `titleStyle` with `cap="all"` upper-cases
+  mixed-case text exactly as PowerPoint does.
+- **pptx**: normAutofit now applies PowerPoint's stored `fontScale` /
+  `lnSpcReduction` (§21.1.2.1.3) instead of re-deriving the shrink with a search,
+  reproducing PowerPoint's exact text layout.
+- **xlsx**: cell indentation is `indent × 3 × MDW` of the normal-style font
+  (§18.8.1), replacing an ungrounded font-size factor.
+- **charts**: the automatic value-axis maximum is the smallest major-unit
+  multiple ≥ the data max — no extra "headroom" step — matching Excel; overlap
+  is handled by honoring `<c:plotArea><c:manualLayout>` (§21.2.2.32), which the
+  waterfall renderer now respects too.
+- **docx**: `<w:lastRenderedPageBreak/>` (Word's layout cache, §17.3.1.20) is
+  ignored uniformly — pagination is computed from our own layout — removing a
+  ruby-only special case (verified byte-identical on the ruby sample).
+
+### Performance
+
+- **xlsx**: per-sheet render lookups (the full-sheet cell map, conditional-format
+  compile, table/sparkline maps) are memoized per worksheet instead of rebuilt
+  every scroll frame.
+- **xlsx**: scroll/click cell lookup is O(log n) via cumulative-offset axes with
+  binary search, replacing a linear scan that could walk ~1M rows.
+- **pptx**: decoded image bitmaps are cached instead of re-decoding the inlined
+  base64 on every render.
+
+### Internals
+
+- VRT regression mode + snapshot capture for local pixel-diff gating.
+- The xlsx Rust parser (`lib.rs`, −75%) and TypeScript renderer (−31%) are split
+  into focused modules.
+- CI now validates every PR (WASM build, typecheck across all packages,
+  build, ast-grep lint) and gates the npm publish on a clean typecheck.
+
 ## 0.40.0 — 2026-05-30
 
 xlsx viewer UX release. Adds Excel-style sheet-tab navigation so workbooks with
