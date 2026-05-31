@@ -37,6 +37,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # ast-grep lint runs on source only (no WASM needed) — fail fast.
+      - name: ast-grep rule tests
+        run: pnpm lint:test
+
+      - name: Lint
+        run: pnpm lint
+
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
       - name: Build WASM
