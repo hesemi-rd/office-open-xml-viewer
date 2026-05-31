@@ -1170,6 +1170,12 @@ function renderTextBody(
       } else {
         lineHeight = maxSizePx * 1.2;
       }
+      // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
+      // each paragraph's line spacing by this fraction alongside the font
+      // shrink. Apply it only when normAutofit actually stored a value.
+      if (body.autoFit === 'norm' && body.lnSpcReduction != null) {
+        lineHeight *= 1 - body.lnSpcReduction;
+      }
       const linePx  = lineHeight + (isLast ? spaceAfterPx : 0);
       // ECMA-376 §21.1.2.2.6 (a:spcBef): paragraph "space before" is the gap
       // *between* paragraphs. PowerPoint suppresses it on the first paragraph
@@ -1199,16 +1205,25 @@ function renderTextBody(
 
   let { allLines, totalHeight } = buildLayout(1.0);
 
-  // ── normAutoFit: shrink font until text fits ─────────────────────────────
+  // ── normAutoFit ──────────────────────────────────────────────────────────
+  // PowerPoint stores the font-shrink ratio it computed at edit time in
+  // <a:normAutofit fontScale> (ECMA-376 §21.1.2.1.3). When present, apply it
+  // directly — this reproduces PowerPoint's exact layout instead of guessing a
+  // scale from our own (slightly different) text metrics. Only when no scale
+  // was stored do we fall back to fitting the text by search.
   if (body.autoFit === 'norm') {
-    const maxContentH = bh - tPad - bPad;
-    if (totalHeight > maxContentH && maxContentH > 0) {
-      let lo = 0.1, hi = 1.0;
-      for (let i = 0; i < 6; i++) {
-        const mid = (lo + hi) / 2;
-        if (buildLayout(mid).totalHeight <= maxContentH) lo = mid; else hi = mid;
+    if (body.fontScale != null && body.fontScale > 0) {
+      if (body.fontScale < 1.0) ({ allLines, totalHeight } = buildLayout(body.fontScale));
+    } else {
+      const maxContentH = bh - tPad - bPad;
+      if (totalHeight > maxContentH && maxContentH > 0) {
+        let lo = 0.1, hi = 1.0;
+        for (let i = 0; i < 6; i++) {
+          const mid = (lo + hi) / 2;
+          if (buildLayout(mid).totalHeight <= maxContentH) lo = mid; else hi = mid;
+        }
+        ({ allLines, totalHeight } = buildLayout(lo));
       }
-      ({ allLines, totalHeight } = buildLayout(lo));
     }
   }
 

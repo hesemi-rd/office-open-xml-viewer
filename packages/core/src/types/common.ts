@@ -139,6 +139,17 @@ export interface TextBody {
   /** Auto-fit: "sp" = shape grows to fit text, "norm" = font shrinks, "none" = no fit */
   autoFit: string;
   /**
+   * `<a:normAutofit fontScale>` (ECMA-376 §21.1.2.1.3) — PowerPoint's stored,
+   * pre-computed font-shrink ratio for `autoFit === "norm"`, as a fraction
+   * (e.g. 0.625 for `fontScale="62500"`). Null/absent when PowerPoint stored no
+   * scale; the renderer then re-derives one. Applying the stored value matches
+   * PowerPoint exactly instead of guessing from our own text metrics.
+   */
+  fontScale?: number | null;
+  /** `<a:normAutofit lnSpcReduction>` — stored line-spacing reduction fraction
+   *  (e.g. 0.20 for `lnSpcReduction="20000"`). Null/absent when not stored. */
+  lnSpcReduction?: number | null;
+  /**
    * `<a:bodyPr numCol>` (ECMA-376 §20.1.10.34) — number of text columns inside
    * the shape. Defaults to 1; values > 1 cause the renderer to flow paragraphs
    * across N columns left-to-right, top-to-bottom.

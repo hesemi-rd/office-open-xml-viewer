@@ -969,6 +969,15 @@ struct TextBody {
     vert: String,
     /// Auto-fit mode from bodyPr: "sp" = spAutoFit (shape grows), "norm" = normAutoFit (font shrinks), "none" = noAutofit
     auto_fit: String,
+    /// `<a:normAutofit fontScale>` (ECMA-376 §21.1.2.1.3) — PowerPoint's stored
+    /// pre-computed font-shrink ratio as a fraction (62500 → 0.625). None when
+    /// absent; the renderer then re-derives the scale itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_scale: Option<f64>,
+    /// `<a:normAutofit lnSpcReduction>` — stored line-spacing reduction fraction
+    /// (20000 → 0.20). None when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ln_spc_reduction: Option<f64>,
     /// `<a:bodyPr numCol>` (ECMA-376 §20.1.10.34 / §21.1.2.1.1) — number of
     /// text columns inside the shape. Default 1. PowerPoint distributes
     /// paragraphs across columns left-to-right, top-to-bottom.
@@ -2705,10 +2714,19 @@ fn parse_text_body(
         .unwrap_or_else(|| "horz".into());
     // Auto-fit child element (spAutoFit / normAutofit). When the shape's own
     // bodyPr is absent or contains no autofit child, defer to theme txDef.
+    // For normAutofit, also capture PowerPoint's stored fontScale /
+    // lnSpcReduction (ECMA-376 §21.1.2.1.3) — ST_Percentage in 1000ths of a
+    // percent, so 62500 → 0.625. The renderer applies these directly.
+    let mut font_scale: Option<f64> = None;
+    let mut ln_spc_reduction: Option<f64> = None;
     let auto_fit = if let Some(n) = body_pr {
         if child(n, "spAutoFit").is_some() { "sp".to_owned() }
         // OOXML uses lowercase 'f': normAutofit (not normAutoFit).
-        else if child(n, "normAutofit").is_some() { "norm".to_owned() }
+        else if let Some(na) = child(n, "normAutofit") {
+            font_scale = attr_f64(&na, "fontScale").map(|v| v / 100000.0);
+            ln_spc_reduction = attr_f64(&na, "lnSpcReduction").map(|v| v / 100000.0);
+            "norm".to_owned()
+        }
         else if child(n, "noAutofit").is_some() { "none".to_owned() }
         else {
             // bodyPr present but no autofit child — fall back to theme.
@@ -2775,7 +2793,7 @@ fn parse_text_body(
         .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
         .collect();
 
-    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, num_col, spc_col }
+    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, font_scale, ln_spc_reduction, num_col, spc_col }
 }
 
 fn parse_paragraph(
