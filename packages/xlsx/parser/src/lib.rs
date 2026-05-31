@@ -15,6 +15,8 @@ mod drawing;
 use drawing::*;
 mod slicer;
 use slicer::*;
+mod table;
+use table::*;
 
 
 // Excel built-in indexed color palette (indices 0-63)
@@ -988,166 +990,6 @@ fn parse_data_validations(ws_root: roxmltree::Node<'_, '_>) -> Vec<DataValidatio
     out
 }
 
-/// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
-/// collect them for the renderer. Each table carries a ref range, style name
-/// (e.g. "TableStyleLight18"), and the banded-rows / banded-cols flags from
-/// `<tableStyleInfo>` (ECMA-376 §18.5).
-/// Resolve a built-in table style's accent color from the theme.
-///
-/// Built-in style names follow the pattern `TableStyle{Light|Medium|Dark}{N}`
-/// (ECMA-376 §18.5.1.4). Excel's UI lays the 21/28/11 built-ins out in a grid
-/// of rows × 7 columns: column 0 is a "none" style (no accent), columns 1–6
-/// map to accent1–accent6. So the accent index is `(N - 1) mod 7` where 0
-/// means "no accent" and 1..=6 map to the theme's accent slots.
-///
-/// `theme_colors` is in OOXML natural order — accent1 lives at index 4, so
-/// accent_n is at `theme_colors[3 + n]`. Falls back to a neutral gray when
-/// the style name is unrecognised or the theme is missing accents.
-/// dxf indices for the ECMA-376 §18.8.40 `<tableStyleElement>` roles we care
-/// about. Built-in styles (`TableStyleLight18`, etc.) have no entry in the
-/// file's `<tableStyles>` block and fall through to accent-based rendering;
-/// custom styles (`"Gift Budget"`) reference dxfs from `<dxfs>`.
-#[derive(Debug, Clone, Default)]
-struct TableStyleElements {
-    whole_table: Option<u32>,
-    header_row: Option<u32>,
-}
-
-/// Parse `<tableStyles><tableStyle name="…"><tableStyleElement type="…" dxfId="…"/>`
-/// into a lookup keyed by table-style name.
-fn parse_table_styles_map(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> std::collections::HashMap<String, TableStyleElements> {
-    use std::collections::HashMap;
-    let mut map: HashMap<String, TableStyleElements> = HashMap::new();
-    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else { return map; };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else { return map; };
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-    for n in doc.descendants() {
-        if n.tag_name().name() != "tableStyles" || n.tag_name().namespace() != Some(ns) { continue; }
-        for ts in n.children().filter(|c| c.is_element() && c.tag_name().name() == "tableStyle") {
-            let Some(name) = ts.attribute("name") else { continue; };
-            let mut elems = TableStyleElements::default();
-            for el in ts.children().filter(|c| c.is_element() && c.tag_name().name() == "tableStyleElement") {
-                let t = el.attribute("type").unwrap_or("");
-                let dxf: Option<u32> = el.attribute("dxfId").and_then(|s| s.parse().ok());
-                match t {
-                    "wholeTable" => elems.whole_table = dxf,
-                    "headerRow"  => elems.header_row = dxf,
-                    _ => {}
-                }
-            }
-            map.insert(name.to_string(), elems);
-        }
-    }
-    map
-}
-
-fn resolve_table_style_accent(style_name: &str, theme_colors: &[String]) -> String {
-    let fallback = "#808080".to_string();
-    let Some(rest) = style_name.strip_prefix("TableStyle") else { return fallback; };
-    let digits_start = rest.find(|c: char| c.is_ascii_digit());
-    let Some(start) = digits_start else { return fallback; };
-    let Ok(n) = rest[start..].parse::<u32>() else { return fallback; };
-    if n == 0 { return fallback; }
-    let slot = ((n - 1) % 7) as usize;
-    if slot == 0 { return fallback; }
-    theme_colors.get(3 + slot).cloned().unwrap_or(fallback)
-}
-
-fn load_sheet_tables(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    sheet_path: &str,
-    theme_colors: &[String],
-) -> Vec<TableInfo> {
-    let custom_styles = parse_table_styles_map(archive);
-    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
-    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
-    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else { return Vec::new(); };
-
-    let mut table_targets: Vec<String> = Vec::new();
-    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
-        if rel.attribute("Type").unwrap_or("").ends_with("/table") {
-            if let Some(t) = rel.attribute("Target") {
-                table_targets.push(t.to_string());
-            }
-        }
-    }
-
-    let mut tables: Vec<TableInfo> = Vec::new();
-    for target in table_targets {
-        let table_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(xml) = read_zip_entry(archive, &table_path) else { continue; };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue; };
-        let root = doc.root_element();
-        let Some(ref_attr) = root.attribute("ref") else { continue };
-        let parts: Vec<&str> = ref_attr.split(':').collect();
-        let range = if parts.len() == 2 {
-            let (left, top) = parse_cell_ref(parts[0]);
-            let (right, bottom) = parse_cell_ref(parts[1]);
-            CellRange { top, left, bottom, right }
-        } else {
-            let (col, row) = parse_cell_ref(parts[0]);
-            CellRange { top: row, left: col, bottom: row, right: col }
-        };
-        let header_row_count: u32 = root.attribute("headerRowCount")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
-        let totals_row_count: u32 = root.attribute("totalsRowCount")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let style_info = root.children().find(|n| n.tag_name().name() == "tableStyleInfo");
-        // ECMA-376 §18.5.1.4: when `name` is absent the table has "None" style —
-        // no visual table formatting. Default to "" rather than a named style so
-        // the renderer can skip table-style overlay for these cells.
-        let style_name = style_info
-            .and_then(|n| n.attribute("name"))
-            .unwrap_or("")
-            .to_string();
-        let bool_attr = |n: &roxmltree::Node, key: &str| n.attribute(key).map(|v| v == "1" || v == "true").unwrap_or(false);
-        let (show_row_stripes, show_column_stripes, show_first_column, show_last_column) = match style_info {
-            Some(n) => (
-                bool_attr(&n, "showRowStripes"),
-                bool_attr(&n, "showColumnStripes"),
-                bool_attr(&n, "showFirstColumn"),
-                bool_attr(&n, "showLastColumn"),
-            ),
-            None => (false, false, false, false),
-        };
-        let accent_color = resolve_table_style_accent(&style_name, theme_colors);
-        let (whole_table_dxf, header_row_dxf) = match custom_styles.get(&style_name) {
-            Some(e) => (e.whole_table, e.header_row),
-            None => (None, None),
-        };
-        // ECMA-376 §18.5.1.3: each `<tableColumn>` may carry its own
-        // `dataDxfId`, `headerRowDxfId`, `totalsRowDxfId`. We collect them in
-        // document order so the renderer can index them via
-        // `columns[cellCol - range.left]`.
-        let columns: Vec<TableColumnInfo> = root
-            .descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == "tableColumn")
-            .map(|tc| TableColumnInfo {
-                data_dxf_id:       tc.attribute("dataDxfId").and_then(|s| s.parse().ok()),
-                header_row_dxf_id: tc.attribute("headerRowDxfId").and_then(|s| s.parse().ok()),
-                totals_row_dxf_id: tc.attribute("totalsRowDxfId").and_then(|s| s.parse().ok()),
-            })
-            .collect();
-        tables.push(TableInfo {
-            range,
-            style_name,
-            header_row_count,
-            totals_row_count,
-            show_row_stripes,
-            show_column_stripes,
-            show_first_column,
-            show_last_column,
-            accent_color,
-            whole_table_dxf,
-            header_row_dxf,
-            columns,
-        });
-    }
-    tables
-}
 
 /// Resolve hyperlink rIds to URLs from the sheet rels file.
 fn load_hyperlinks(
@@ -1504,7 +1346,7 @@ fn parse_row_cells(
     cells
 }
 
-fn parse_cell_ref(r: &str) -> (u32, u32) {
+pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
     let col_str: String = r.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
     let row_str: String = r.chars().skip_while(|c| c.is_ascii_alphabetic()).collect();
     let col = col_str.chars().fold(0u32, |acc, c| acc * 26 + (c as u32 - 'A' as u32 + 1));
