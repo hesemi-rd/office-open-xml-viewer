@@ -61,7 +61,7 @@ function buildPptxTextLayer(layer: HTMLDivElement, runs: TextRunInfo[], cssWidth
       shapeMap.set(key, div);
       layer.appendChild(div);
     }
-    const shape = shapeMap.get(key)!;
+    const shape = shapeMap.get(key) as HTMLDivElement;
     const span = document.createElement('span');
     span.textContent = run.text;
     span.style.cssText =
