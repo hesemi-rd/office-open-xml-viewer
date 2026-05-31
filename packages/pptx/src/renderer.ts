@@ -1527,15 +1527,42 @@ function renderTextBody(
   ctx.restore();
 }
 
+// Decoded-image cache keyed by data URL. Decoding an inlined base64 image to an
+// ImageBitmap is expensive, and the same picture is re-decoded on every render
+// (each scroll / resize / interaction). Cache the decode — the Promise, so
+// concurrent first-renders dedupe — and reuse it. Bounded FIFO so a long
+// session or many decks can't grow without limit.
+const IMAGE_BITMAP_CACHE_MAX = 256;
+const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
+
+function getCachedBitmap(dataUrl: string): Promise<ImageBitmap> {
+  const existing = imageBitmapCache.get(dataUrl);
+  if (existing) {
+    // Refresh LRU position.
+    imageBitmapCache.delete(dataUrl);
+    imageBitmapCache.set(dataUrl, existing);
+    return existing;
+  }
+  const p = fetch(dataUrl).then((r) => r.blob()).then((b) => createImageBitmap(b));
+  // Don't poison the cache on a transient decode failure.
+  p.catch(() => imageBitmapCache.delete(dataUrl));
+  imageBitmapCache.set(dataUrl, p);
+  if (imageBitmapCache.size > IMAGE_BITMAP_CACHE_MAX) {
+    const oldestKey = imageBitmapCache.keys().next().value as string;
+    const oldest = imageBitmapCache.get(oldestKey);
+    imageBitmapCache.delete(oldestKey);
+    oldest?.then((b) => b.close()).catch(() => {});
+  }
+  return p;
+}
+
 async function renderPicture(
   ctx: CanvasRenderingContext2D,
   el: PictureElement,
   scale: number
 ) {
   try {
-    const resp = await fetch(el.dataUrl);
-    const blob = await resp.blob();
-    const bitmap = await createImageBitmap(blob);
+    const bitmap = await getCachedBitmap(el.dataUrl);
     ctx.save();
     if (el.alpha != null) ctx.globalAlpha *= el.alpha;
     const x = emuToPx(el.x, scale);
@@ -1583,7 +1610,7 @@ async function renderPicture(
       ctx.drawImage(bitmap, x, y, w, h);
     }
     ctx.restore();
-    bitmap.close();
+    // bitmap is owned by getCachedBitmap's cache — do not close it here.
   } catch {
     // silently skip broken images
   }
