@@ -1,5 +1,5 @@
 import { test } from '@playwright/test';
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 
@@ -39,10 +39,13 @@ const XLSX_FILES: { name: string; sheetCount: number }[] = [
 ];
 
 const PIXEL_THRESHOLD = 0.20;
-const FAIL_ABOVE_PCT: number | null = 20;
+const FAIL_ABOVE_PCT = 20;
+const REGRESSION_PCT = 0.5;
 
 // UPDATE_REFS=1 pnpm vrt → adopt the current canvas output as the new reference.
 const UPDATE_REFS = process.env.UPDATE_REFS === '1';
+const SNAPSHOT = process.env.VRT_SNAPSHOT === '1';
+const RUN_MODE = process.env.VRT_MODE === 'regression' ? 'regression' : 'fidelity';
 
 test.describe('xlsx visual regression', () => {
   for (const { name, sheetCount } of XLSX_FILES) {
@@ -81,8 +84,18 @@ test.describe('xlsx visual regression', () => {
           console.log(`  ${name} sheet ${sheetNum}: reference updated`);
           return;
         }
+        if (SNAPSHOT) {
+          mkdirSync(`tests/visual/baseline/${name}`, { recursive: true });
+          writeFileSync(`tests/visual/baseline/${name}/sheet-${sheetNum}.png`, actualBuf);
+          console.log(`  ${name} sheet ${sheetNum}: baseline captured`);
+          return;
+        }
 
-        const refPath = `tests/visual/references/${name}/sheet-${sheetNum}.png`;
+        const targetRoot = RUN_MODE === 'regression' ? 'baseline' : 'references';
+        const refPath = `tests/visual/${targetRoot}/${name}/sheet-${sheetNum}.png`;
+        if (!existsSync(refPath)) {
+          test.skip(true, `no ${targetRoot} image for ${name} sheet ${sheetNum}`);
+        }
         const refBuf = readFileSync(refPath);
         const refPng = PNG.sync.read(refBuf);
         const actualPng = PNG.sync.read(actualBuf);
@@ -136,9 +149,10 @@ test.describe('xlsx visual regression', () => {
           `(${diffPixels.toLocaleString()} / ${totalPx.toLocaleString()} px)`
         );
 
-        if (FAIL_ABOVE_PCT !== null && diffPct > FAIL_ABOVE_PCT) {
+        const limit = RUN_MODE === 'regression' ? REGRESSION_PCT : FAIL_ABOVE_PCT;
+        if (diffPct > limit) {
           throw new Error(
-            `${name} sheet ${sheetNum} pixel diff ${diffPct.toFixed(1)}% exceeds ${FAIL_ABOVE_PCT}%`
+            `${name} sheet ${sheetNum} pixel diff ${diffPct.toFixed(1)}% exceeds ${limit}% in ${RUN_MODE} mode`
           );
         }
       });

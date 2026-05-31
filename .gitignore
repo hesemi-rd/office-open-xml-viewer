@@ -33,6 +33,7 @@ storybook-static/
 packages/pptx/tests/visual/screenshots/
 packages/pptx/tests/visual/diffs/
 packages/pptx/tests/visual/report/
+packages/pptx/tests/visual/baseline/
 # Playwright
 playwright-report/
 test-results/

@@ -13,5 +13,6 @@ tests/visual/references/sample-*/
 tests/visual/screenshots/
 tests/visual/diffs/
 tests/visual/report/
+tests/visual/baseline/
 # Local-only Storybook stories that load sample DOCX files
 src/*.privateDemo.stories.ts

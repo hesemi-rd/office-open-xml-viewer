@@ -1,5 +1,5 @@
 import { test } from '@playwright/test';
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 
@@ -24,11 +24,14 @@ const PIXEL_THRESHOLD = 0.20;
 
 // Set to a number (e.g. 20) to fail the test when diff exceeds that percentage.
 // Set to null to always pass (report-only mode).
-const FAIL_ABOVE_PCT: number | null = 20;
+const FAIL_ABOVE_PCT = 20;
+const REGRESSION_PCT = 0.5;
 
 // UPDATE_REFS=1 pnpm vrt → adopt the current canvas output as the new reference.
 // Skips diff comparison and writes the screenshot straight into references/.
 const UPDATE_REFS = process.env.UPDATE_REFS === '1';
+const SNAPSHOT = process.env.VRT_SNAPSHOT === '1';
+const RUN_MODE = process.env.VRT_MODE === 'regression' ? 'regression' : 'fidelity';
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 test.describe('visual regression', () => {
@@ -74,9 +77,19 @@ test.describe('visual regression', () => {
           console.log(`  ${name} slide ${slideNum}: reference updated`);
           return;
         }
+        if (SNAPSHOT) {
+          mkdirSync(`tests/visual/baseline/${name}`, { recursive: true });
+          writeFileSync(`tests/visual/baseline/${name}/slide-${slideNum}.png`, actualBuf);
+          console.log(`  ${name} slide ${slideNum}: baseline captured`);
+          return;
+        }
 
-        // ── Load reference ─────────────────────────────────────────────────
-        const refBuf = readFileSync(`tests/visual/references/${name}/slide-${slideNum}.png`);
+        const targetRoot = RUN_MODE === 'regression' ? 'baseline' : 'references';
+        const refPath = `tests/visual/${targetRoot}/${name}/slide-${slideNum}.png`;
+        if (!existsSync(refPath)) {
+          test.skip(true, `no ${targetRoot} image for ${name} slide ${slideNum}`);
+        }
+        const refBuf = readFileSync(refPath);
         const refPng    = PNG.sync.read(refBuf);
         const actualPng = PNG.sync.read(actualBuf);
 
@@ -118,10 +131,11 @@ test.describe('visual regression', () => {
         );
 
         // ── Optional hard failure ──────────────────────────────────────────
-        if (FAIL_ABOVE_PCT !== null && diffPct > FAIL_ABOVE_PCT) {
+        const limit = RUN_MODE === 'regression' ? REGRESSION_PCT : FAIL_ABOVE_PCT;
+        if (diffPct > limit) {
           throw new Error(
             `${name} slide ${slideNum} pixel diff ${diffPct.toFixed(1)}% exceeds ` +
-            `threshold ${FAIL_ABOVE_PCT}%`
+            `${limit}% in ${RUN_MODE} mode`
           );
         }
       });
