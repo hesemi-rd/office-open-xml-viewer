@@ -618,10 +618,10 @@ pub enum BreakType {
     Page,
     Column,
     /// ECMA-376 §17.3.1.20 — Word's saved hint about where the previous
-    /// render placed a page break. Distinguished from `Page` so the
-    /// renderer can honor it conditionally (currently: only inside
-    /// paragraphs that carry ruby, where our own line-height calc tends
-    /// to drift from Word's). Serialized as `renderedPage` for the TS side.
+    /// render placed a page break. A layout cache, not authoritative: we
+    /// paginate ourselves and ignore it uniformly (the parser strips these
+    /// runs). Kept distinct from `Page` only so the stripping stays explicit.
+    /// Serialized as `renderedPage` for the TS side.
     RenderedPage,
 }
 

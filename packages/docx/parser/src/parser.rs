@@ -440,20 +440,10 @@ enum ParaPiece {
 /// Two break flavors are recognized:
 ///   - `BreakType::Page`         — hard `<w:br w:type="page"/>`, always honored.
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
-///     (ECMA-376 §17.3.1.20).
-///
-/// HEURISTIC — ruby-only gate: `lastRenderedPageBreak` is currently honored
-/// only in paragraphs that carry ruby annotations, because our ruby
-/// line-height calculation tends to drift from Word's measurement and
-/// causes page-break positions to differ. Gating to ruby paragraphs limits
-/// the blast radius while the underlying issue exists.
-///
-/// This gate is a spec violation: §17.3.1.20 makes no distinction between
-/// ruby and non-ruby paragraphs. The correct fix is to implement §17.3.4.x
-/// (rubyPr/rubyAlign) line-height calculation accurately, after which this
-/// gate should be removed and `lastRenderedPageBreak` honored uniformly
-/// (or ignored uniformly if the self-paginator becomes authoritative).
-/// TODO: remove gate after fixing ruby line-height per §17.3.4.6 / §17.3.4.20.
+///     (ECMA-376 §17.3.1.20), a layout cache that is NOT authoritative. We
+///     paginate ourselves, so it is ignored uniformly and stripped (never
+///     mixed with self-pagination per the package CLAUDE.md). Verified
+///     behavior-invariant on the ruby sample that used to need it.
 ///
 /// `<w:lastRenderedPageBreak/>` is often emitted by Word at the very
 /// start of a paragraph too (echoing the page break that produced the
@@ -463,29 +453,31 @@ enum ParaPiece {
 /// Pure-page-break paragraphs are handled upstream as
 /// BodyElement::PageBreak before this function ever sees them.
 fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
-    let para_has_ruby = para.runs.iter().any(|r| matches!(r, DocRun::Text(t) if t.ruby.is_some()));
-    let is_break_run = |r: &DocRun| match r {
-        DocRun::Break { break_type: BreakType::Page } => true,
-        DocRun::Break { break_type: BreakType::RenderedPage } => para_has_ruby,
-        _ => false,
-    };
+    // `<w:lastRenderedPageBreak/>` (BreakType::RenderedPage) is Word's layout
+    // cache, not an authoritative break (ECMA-376 §17.3.1.20). We paginate the
+    // body ourselves (computePages, TS side), so these hints are ignored
+    // uniformly and stripped here — only a hard `<w:br w:type="page"/>` splits a
+    // paragraph. Per the package CLAUDE.md, honoring vs ignoring the hint must
+    // not be mixed. (It was previously honored only inside ruby paragraphs as a
+    // stopgap for a ruby line-height drift that the docGrid-aware line metrics
+    // have since absorbed: with this gate gone, private/sample-5 — 66 ruby runs,
+    // 5 lastRenderedPageBreak hints, 7 pages — is byte-identical and still
+    // matches its Word export.)
+    let is_break_run = |r: &DocRun| matches!(r, DocRun::Break { break_type: BreakType::Page });
     let has_break = para.runs.iter().any(is_break_run);
     if !has_break {
-        // Strip RenderedPage runs we're not honoring so they don't pollute
-        // downstream layout (treated as no-op).
+        // Strip the (ignored) RenderedPage runs so they don't pollute layout.
         let mut p = para;
         p.runs.retain(|r| !matches!(r, DocRun::Break { break_type: BreakType::RenderedPage }));
         return vec![ParaPiece::Para(p)];
     }
 
-    // Collect run chunks split on page breaks. RenderedPage runs we don't
-    // honor get filtered out instead of triggering a split.
+    // Split run chunks on hard page breaks; RenderedPage runs are dropped.
     let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
     for run in para.runs.iter().cloned() {
-        match (&run, para_has_ruby) {
-            (DocRun::Break { break_type: BreakType::Page }, _) => chunks.push(Vec::new()),
-            (DocRun::Break { break_type: BreakType::RenderedPage }, true) => chunks.push(Vec::new()),
-            (DocRun::Break { break_type: BreakType::RenderedPage }, false) => { /* skip */ }
+        match &run {
+            DocRun::Break { break_type: BreakType::Page } => chunks.push(Vec::new()),
+            DocRun::Break { break_type: BreakType::RenderedPage } => { /* ignored hint */ }
             _ => chunks.last_mut().unwrap().push(run),
         }
     }
