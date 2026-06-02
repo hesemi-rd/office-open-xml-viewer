@@ -68,3 +68,16 @@ describe('non-numeric cells', () => {
     expect(formatCellValue(cell, styles('0.00'))).toBe('hello');
   });
 });
+
+describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
+  it('ISO and slash dates', () => {
+    expect(fmt(45306, 'yyyy-mm-dd')).toBe('2024-01-15');
+    expect(fmt(45306, 'm/d/yy')).toBe('1/15/24');
+    expect(fmt(45306, 'mm/dd/yyyy')).toBe('01/15/2024');
+  });
+  it('day and month parts', () => {
+    expect(fmt(45292, 'yyyy')).toBe('2024');
+    expect(fmt(45292, 'd')).toBe('1');
+    expect(fmt(45292, 'dd')).toBe('01');
+  });
+});

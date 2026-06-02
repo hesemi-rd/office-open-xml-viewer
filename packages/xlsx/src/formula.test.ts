@@ -73,3 +73,44 @@ describe('evalFormulaToBool — cell references', () => {
     expect(evalFormulaToBool('A1>90', c)).toBe(false);
   });
 });
+
+describe('evalFormulaToBool — numeric functions', () => {
+  it('ABS / INT / MOD', () => {
+    expect(ev('ABS(-5)=5')).toBe(true);
+    expect(ev('INT(5.9)=5')).toBe(true);
+    expect(ev('INT(-5.1)=-6')).toBe(true); // Excel INT rounds toward -infinity
+    expect(ev('MOD(7,3)=1')).toBe(true);
+  });
+  it('CEILING / FLOOR', () => {
+    expect(ev('CEILING(4.2,1)=5')).toBe(true);
+    expect(ev('FLOOR(4.8,1)=4')).toBe(true);
+  });
+});
+
+describe('evalFormulaToBool — IS / text functions', () => {
+  it('ISBLANK', () => {
+    const c = ctx({ cells: [numCell(1, 1, 0)], row: 1, col: 1 });
+    expect(evalFormulaToBool('ISBLANK(B1)', c)).toBe(true);  // B1 absent → blank
+    expect(evalFormulaToBool('ISBLANK(A1)', c)).toBe(false); // A1 present
+  });
+  it('EXACT', () => {
+    expect(ev('EXACT("abc","abc")')).toBe(true);
+    expect(ev('EXACT("abc","abC")')).toBe(false);
+  });
+});
+
+describe('evalFormulaToBool — conditional aggregates', () => {
+  it('COUNTIF over a range', () => {
+    // A1:A3 = 90, 50, 95 ; count of >=90 is 2
+    const cells = [numCell(1, 1, 90), numCell(2, 1, 50), numCell(3, 1, 95)];
+    const c = ctx({ cells, row: 1, col: 1 });
+    expect(evalFormulaToBool('COUNTIF(A1:A3,">=90")=2', c)).toBe(true);
+  });
+});
+
+describe('evalFormulaToBool — DATE', () => {
+  it('builds an Excel serial', () => {
+    expect(ev('DATE(2024,1,1)=45292')).toBe(true);
+    expect(ev('DATE(2024,1,15)=45306')).toBe(true);
+  });
+});
