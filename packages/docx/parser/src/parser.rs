@@ -779,6 +779,11 @@ fn parse_paragraph(
             .or_else(|| style_map.default_para_style_id().map(str::to_string))
             .or_else(|| Some("Normal".to_string())),
         default_font_size: base_run.font_size,
+        // Resolve the paragraph's default font the same way runs do (ascii
+        // first, then eastAsia, through theme refs) so empty paragraphs can be
+        // sized with the intended font's line metrics.
+        default_font_family: theme.resolve_font_ref(base_run.font_family_ascii.clone())
+            .or_else(|| theme.resolve_font_ref(base_run.font_family_east_asia.clone())),
         outline_level: base_para.outline_level,
     }
 }
@@ -2212,6 +2217,19 @@ fn parse_table_cell(
             }
         });
 
+    // Per-cell margins (ECMA-376 §17.4.42 `<w:tcPr><w:tcMar>`). Each edge,
+    // when present, overrides the table-level `<w:tblCellMar>` default; absent
+    // edges stay None so the renderer falls back to the table default.
+    let tc_mar = tc_pr.and_then(|p| child_w(p, "tcMar"));
+    let edge_mar = |name: &str| tc_mar
+        .and_then(|m| child_w(m, name))
+        .and_then(|n| attr_w(n, "w"))
+        .map(|v| twips_to_pt(&v));
+    let margin_top = edge_mar("top");
+    let margin_bottom = edge_mar("bottom");
+    let margin_left = edge_mar("left");
+    let margin_right = edge_mar("right");
+
     // ECMA-376 §17.4.7: a cell may contain paragraphs AND nested tables in
     // any order. element_children_flat unwraps sdt wrappers like elsewhere.
     let mut content: Vec<CellElement> = vec![];
@@ -2227,7 +2245,10 @@ fn parse_table_cell(
         }
     }
 
-    DocTableCell { content, col_span, v_merge, borders, background, v_align, width_pt }
+    DocTableCell {
+        content, col_span, v_merge, borders, background, v_align, width_pt,
+        margin_top, margin_bottom, margin_left, margin_right,
+    }
 }
 
 fn parse_table_borders(node: roxmltree::Node) -> TableBorders {

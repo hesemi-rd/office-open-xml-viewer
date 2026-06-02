@@ -675,8 +675,9 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
     for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
-      const innerW = Math.max(1, cellW - table.cellMarginLeft - table.cellMarginRight);
-      let ch = table.cellMarginTop + table.cellMarginBottom;
+      const cm = effCellMargins(cell, table);
+      const innerW = Math.max(1, cellW - cm.left - cm.right);
+      let ch = cm.top + cm.bottom;
       for (const ce of cell.content) {
         if (ce.type === 'paragraph') {
           ch += estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
@@ -2195,7 +2196,8 @@ function calculateRowHeight(
   for (const cell of row.cells) {
     const span = Math.min(cell.colSpan, colWidths.length - ci);
     const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
-    const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
+    const cm = effCellMargins(cell, table);
+    const contentW = cellW - (cm.left + cm.right) * scale;
 
     // ECMA-376 §17.4.85 (w:vMerge): a vMerge=restart cell's content occupies
     // the entire merged span (this row + following rows whose same column
@@ -2215,7 +2217,7 @@ function calculateRowHeight(
       continue;
     }
 
-    let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
+    let h = (cm.top + cm.bottom) * scale;
     for (const ce of cell.content) {
       h += measureCellElementHeight(state, ce, contentW, scale);
     }
@@ -2234,8 +2236,9 @@ function measureRestartCellContentHeight(
   scale: number,
   state: RenderState,
 ): number {
-  const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
-  let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
+  const cm = effCellMargins(cell, table);
+  const contentW = cellW - (cm.left + cm.right) * scale;
+  let h = (cm.top + cm.bottom) * scale;
   for (const ce of cell.content) {
     h += measureCellElementHeight(state, ce, contentW, scale);
   }
@@ -2259,6 +2262,22 @@ function measureParaHeight(
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby, l.intendedSingle), 0);
 }
 
+/** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376
+ *  §17.4.42) take precedence per edge over the table-level `<w:tblCellMar>`
+ *  default (§17.4.41). A résumé template, for example, gives one cell a larger
+ *  top margin to add space above its content. */
+function effCellMargins(
+  cell: DocTableCell,
+  table: DocTable,
+): { top: number; bottom: number; left: number; right: number } {
+  return {
+    top: cell.marginTop ?? table.cellMarginTop,
+    bottom: cell.marginBottom ?? table.cellMarginBottom,
+    left: cell.marginLeft ?? table.cellMarginLeft,
+    right: cell.marginRight ?? table.cellMarginRight,
+  };
+}
+
 function measureCellContent(
   cell: DocTableCell,
   table: DocTable,
@@ -2266,8 +2285,9 @@ function measureCellContent(
   scale: number,
   state: RenderState,
 ): void {
-  const ml = table.cellMarginLeft * scale;
-  const mr = table.cellMarginRight * scale;
+  const cm = effCellMargins(cell, table);
+  const ml = cm.left * scale;
+  const mr = cm.right * scale;
   const innerW = cellW - ml - mr;
   for (const ce of cell.content) {
     measureCellElementHeight(state, ce, innerW, scale);
@@ -2310,10 +2330,11 @@ function renderCell(
 
   drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale);
 
-  const mt = table.cellMarginTop * scale;
-  const mb = table.cellMarginBottom * scale;
-  const ml = table.cellMarginLeft * scale;
-  const mr = table.cellMarginRight * scale;
+  const cm = effCellMargins(cell, table);
+  const mt = cm.top * scale;
+  const mb = cm.bottom * scale;
+  const ml = cm.left * scale;
+  const mr = cm.right * scale;
 
   // ECMA-376 §17.6.5 defines w:docGrid as a section-level constraint on
   // Cell paragraphs inherit the section's docGrid, but their line-spacing
@@ -2555,13 +2576,16 @@ function getDefaultFontSize(para: DocParagraph): number {
 }
 
 /** First text/field run's font family — used to size empty paragraphs whose
- *  intended font (e.g. Meiryo) has a larger win line height than the fallback. */
+ *  intended font (e.g. Meiryo) has a larger win line height than the fallback.
+ *  Empty paragraphs (no runs) fall back to the paragraph's style-resolved
+ *  default font so e.g. an empty Meiryo cell that forms a résumé "bar" reserves
+ *  Meiryo's tall line box rather than the generic fallback's. */
 function getDefaultFontFamily(para: DocParagraph): string | null {
   for (const run of para.runs) {
     if (run.type === 'text') return (run as unknown as TextRun).fontFamily;
     if (run.type === 'field') return (run as unknown as FieldRun).fontFamily;
   }
-  return null;
+  return para.defaultFontFamily ?? null;
 }
 
 /** Intended single-line height (px) for an empty paragraph, from its default

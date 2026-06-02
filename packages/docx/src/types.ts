@@ -139,6 +139,9 @@ export interface DocParagraph {
   styleId?: string | null;
   /** Default font size (pt) inherited from style + direct pPr/rPr. Falls back to 10pt. */
   defaultFontSize?: number;
+  /** Default font family resolved from the style chain. Used to size empty
+   *  paragraphs (no runs) with the intended font's line metrics. */
+  defaultFontFamily?: string | null;
 }
 
 export interface ParagraphBorders {
@@ -442,6 +445,13 @@ export interface DocTableCell {
   background: string | null;
   vAlign: 'top' | 'center' | 'bottom';
   widthPt: number | null;
+  /** Per-cell margins (pt) from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42). Each
+   *  edge overrides the table-level `cellMargin*` default when set; null/absent
+   *  = inherit the table default. */
+  marginTop?: number | null;
+  marginBottom?: number | null;
+  marginLeft?: number | null;
+  marginRight?: number | null;
 }
 
 export interface CellBorders {

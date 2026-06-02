@@ -194,6 +194,12 @@ pub struct DocParagraph {
     /// sizing empty paragraphs (lines with no runs) correctly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_size: Option<f64>,
+    /// Default font family resolved from the style chain + direct pPr/rPr.
+    /// Used to size empty paragraphs (no runs) when the intended font's line
+    /// height differs from the fallback (e.g. an empty Meiryo cell that forms a
+    /// résumé "bar" must reserve Meiryo's tall line box). None when unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_family: Option<String>,
     /// ECMA-376 §17.3.1.20 `<w:outlineLvl w:val="N">` (0–8). Resolved through
     /// the style chain: explicit pPr → linked paragraph style → docDefaults.
     /// `None` for body paragraphs that don't appear in the document outline.
@@ -700,6 +706,18 @@ pub struct DocTableCell {
     pub v_align: String,
     /// pt
     pub width_pt: Option<f64>,
+    /// Per-cell margins from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42), in pt.
+    /// Each edge overrides the table-level `<w:tblCellMar>` default (§17.4.41)
+    /// when present; None = inherit the table default. Used e.g. by résumé
+    /// templates that add a top margin to a single cell to space its content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_top: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_bottom: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_right: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
