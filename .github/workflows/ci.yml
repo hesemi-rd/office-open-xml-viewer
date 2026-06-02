@@ -44,6 +44,11 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # Unit tests for pure-logic modules (formula engine, number formats).
+      # No WASM needed.
+      - name: Unit tests
+        run: pnpm test
+
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
       - name: Build WASM
