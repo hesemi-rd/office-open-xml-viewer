@@ -483,14 +483,21 @@ function applyFormatCode(num: number, formatCode: string): string {
   // (§18.8.30). Pick the section matching `num`, falling back to the positive
   // section when the target one is absent.
   let section: string;
+  // When a dedicated negative section is present, Excel formats the negative
+  // value's *magnitude* in it — the minus is conveyed by the section's own
+  // literals (e.g. parentheses). `0;(0)` renders -5 as "(5)", not "(-5)".
+  let useMagnitude = false;
   if (num > 0) section = sections[0];
-  else if (num < 0) section = sections.length > 1 ? sections[1] : sections[0];
+  else if (num < 0) {
+    if (sections.length > 1) { section = sections[1]; useMagnitude = true; }
+    else section = sections[0];
+  }
   else section = sections.length > 2 ? sections[2] : sections[0];
   const { tokens, numSpec } = tokenizeNumberFormat(section);
   const hasPercent = tokens.some(t => t.kind === 'percent');
   const sciTok = tokens.find(t => t.kind === 'sci') as Extract<FmtToken, { kind: 'sci' }> | undefined;
 
-  let value = num;
+  let value = useMagnitude ? Math.abs(num) : num;
   if (hasPercent) value = value * 100;
 
   let numberText: string;
