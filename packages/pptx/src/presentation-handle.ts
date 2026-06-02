@@ -1,5 +1,6 @@
 import type { MediaElement, Slide } from './types';
 import { drawPlayBadge } from './media-chrome';
+import { tabularDigitWidth, tabularTextWidth, drawTabularText } from './tabular-text';
 
 const EMU_PER_PX = 9525;
 const emuToPx = (v: number, scale: number) => (v / EMU_PER_PX) * scale;
@@ -365,10 +366,10 @@ function drawAudioPill(
 }
 
 /**
- * Render "m:ss / m:ss" such that the separator stays at a fixed x even as the
- * current-time digits tick, by right-aligning the current side into a fixed
- * slot and left-aligning the duration side. Side slot width is sized once per
- * call from the duration string so the layout fits longer clips too.
+ * Render "m:ss / m:ss" with tabular (fixed-advance) digits so neither the
+ * separator nor the individual current-time digits shift as playback ticks.
+ * The current side is right-aligned into a fixed slot (sized from the wider of
+ * the two sides) and the duration side is left-aligned after the separator.
  */
 function drawFixedSlotTime(
   ctx: CanvasRenderingContext2D,
@@ -376,23 +377,25 @@ function drawFixedSlotTime(
   duration: number,
   x: number,
   anchorY: number,
-  anchor: 'middle' | 'bottom',
+  _anchor: 'middle' | 'bottom',
 ): void {
   const curText = formatTime(current);
   const durText = formatTime(duration);
   const sep = ' / ';
-  // Widest representation of either side: use the longer of the two formatted
-  // strings. In practice duration dominates since current ≤ duration.
-  const slotW = Math.max(ctx.measureText(curText).width, ctx.measureText(durText).width);
+  const digitW = tabularDigitWidth(ctx);
+  const curW = tabularTextWidth(ctx, curText, digitW);
+  const durW = tabularTextWidth(ctx, durText, digitW);
   const sepW = ctx.measureText(sep).width;
-  const y = anchor === 'bottom' ? anchorY : anchorY;
+  // Slot wide enough for the longer side (duration dominates since current ≤
+  // duration), so the separator sits at a fixed x regardless of current time.
+  const slotW = Math.max(curW, durW);
+  // Current time right-aligned within the slot (its right edge fixed at x+slotW).
+  drawTabularText(ctx, curText, x + slotW - curW, anchorY, digitW);
   const prevAlign = ctx.textAlign;
-  ctx.textAlign = 'right';
-  ctx.fillText(curText, x + slotW, y);
   ctx.textAlign = 'left';
-  ctx.fillText(sep, x + slotW, y);
-  ctx.fillText(durText, x + slotW + sepW, y);
+  ctx.fillText(sep, x + slotW, anchorY);
   ctx.textAlign = prevAlign;
+  drawTabularText(ctx, durText, x + slotW + sepW, anchorY, digitW);
 }
 
 function drawBar(
