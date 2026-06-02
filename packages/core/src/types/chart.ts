@@ -25,6 +25,14 @@ export interface ChartSeries {
    */
   dataLabelColors?: (string | null)[] | null;
   /**
+   * Series-level data-label text colour (`<c:ser><c:dLbls><c:txPr>…solidFill`,
+   * ECMA-376 §21.2.2.216). Hex without '#'. Stacked-bar charts colour each
+   * segment's label independently (e.g. white on the dark segment, black on
+   * the light one), which a single chart-level `dataLabelFontColor` can't
+   * express. Takes precedence over `dataLabelFontColor`; null = no override.
+   */
+  labelColor?: string | null;
+  /**
    * Mixed chart: per-series chart type override. Currently only "line" (XLSX)
    * is honoured; other values are treated as the chart's primary type.
    */

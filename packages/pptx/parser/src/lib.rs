@@ -475,6 +475,18 @@ struct ChartSeriesData {
     /// non-bubble series.
     #[serde(skip_serializing_if = "Option::is_none")]
     bubble_sizes: Option<Vec<Option<f64>>>,
+    /// `<c:val><c:numRef><c:numCache><c:formatCode>` — the series value number
+    /// format (ECMA-376 §21.2.2.121). Drives data-label formatting (thousands
+    /// separators, decimals, etc.) when the `<c:dLbls>` block has no explicit
+    /// `<c:numFmt>` of its own. `None` for "General" / unformatted series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_format_code: Option<String>,
+    /// `<c:ser><c:dLbls><c:txPr>…<a:solidFill>` — series-level data-label text
+    /// colour (ECMA-376 §21.2.2.216). Stacked bars colour each segment's label
+    /// independently (e.g. white on the dark segment, black on the light one),
+    /// so a single chart-level colour cannot represent both series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label_color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -3398,6 +3410,26 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         }).collect();
 
         let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
+
+        // Series value number format from `<c:val>…<c:numCache><c:formatCode>`.
+        // Used for data labels when `<c:dLbls>` carries no explicit `<c:numFmt>`
+        // (ECMA-376 §21.2.2.121). "General" means "no format" → drop it so the
+        // renderer's default integer/decimal formatter takes over.
+        let val_format_code = val_cache
+            .and_then(|cache| cache.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "formatCode")
+                .and_then(|fc| fc.text().map(|t| t.to_string())))
+            .filter(|s| !s.is_empty() && s != "General");
+
+        // Series-level data-label text colour from `<c:dLbls><c:txPr>…solidFill`.
+        // Scoped to this `<c:ser>` (not chart-root) so stacked-bar segments keep
+        // their independent label colours (white on dark fill, black on light).
+        let label_color = ser.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "dLbls")
+            .and_then(|dlbls| dlbls.children().find(|n| n.is_element() && n.tag_name().name() == "txPr"))
+            .and_then(|txpr| txpr.descendants().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+            .and_then(|fill| parse_color_node(fill, theme));
+
         ChartSeriesData {
             name, values, color,
             data_point_colors: if has_dpt_colors { Some(data_point_colors) } else { None },
@@ -3407,6 +3439,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             data_label_colors: None,
             categories: series_categories,
             bubble_sizes,
+            val_format_code,
+            label_color,
         }
     }).collect();
 
@@ -3643,6 +3677,8 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         data_label_colors: if has_per_label_color { Some(data_label_colors_vec) } else { None },
         categories: None,
         bubble_sizes: None,
+        val_format_code: None,
+        label_color: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
