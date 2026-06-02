@@ -195,6 +195,10 @@ export interface XlsxChartSeries {
   /** `<c:val>/<c:numRef>/<c:formatCode>` — Excel number format for series
    *  values (ECMA-376 §21.2.2.37). */
   valFormatCode?: string | null;
+  /** `<c:ser><c:dLbls><c:txPr>…solidFill` — per-series data-label text color
+   *  (ECMA-376 §21.2.2.216). Takes precedence over the chart-level color so
+   *  each series can color its labels independently. */
+  labelColor?: string | null;
   /** `<c:ser><c:order>` — stacking/legend display order (§21.2.2.28). */
   order?: number;
   /** `<c:marker><c:symbol val>` — point marker shape (ECMA-376 §21.2.2.32). */

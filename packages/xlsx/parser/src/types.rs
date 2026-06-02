@@ -330,6 +330,14 @@ pub struct ChartSeries {
     /// labels are formatted per ECMA-376 §21.2.2.37.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_format_code: Option<String>,
+    /// `<c:ser><c:dLbls><c:txPr>…<a:solidFill>` — series-level data-label text
+    /// color (ECMA-376 §21.2.2.216). Resolved against the workbook theme.
+    /// Stacked/clustered charts can color each series's labels independently
+    /// (e.g. white on a dark bar, black on a light one), which a single
+    /// chart-level color can't express. None = fall back to the chart-level
+    /// `data_label_font_color` in the renderer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<String>,
     /// `<c:ser><c:order val>` — display order of this series (stacking
     /// ordering + legend ordering) per ECMA-376 §21.2.2.28. Lower `order`
     /// renders first/below; Excel's legend for horizontal bar charts reverses

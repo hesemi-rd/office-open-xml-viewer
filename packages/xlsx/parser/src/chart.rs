@@ -914,6 +914,16 @@ pub(crate) fn parse_chart_series(
         _                 => chart_marker_default,
     };
 
+    // Per-series data-label text color from `<c:ser><c:dLbls><c:txPr>…solidFill`.
+    // Scoped to THIS series (not chart-root) so stacked/clustered charts keep
+    // their independent label colors instead of all collapsing to the single
+    // chart-level color. Reuses the shared dLbls-txPr walker + xlsx theme
+    // resolver. None when the series has no own dLbls text color.
+    let label_color = ooxml_common::chart::extract_data_label_font_color(
+        *node,
+        &XlsxColorResolver { theme_colors },
+    );
+
     let data_point_overrides = parse_data_point_overrides(node, c_ns, theme_colors);
     // `<c15:datalabelsRange>` lookup table for `<a:fld type="CELLRANGE">`
     // labels. Excel saves the actual cached label strings here; we resolve
@@ -931,6 +941,7 @@ pub(crate) fn parse_chart_series(
         color,
         show_marker,
         val_format_code,
+        label_color,
         order,
         marker_symbol,
         marker_size,
@@ -1550,3 +1561,69 @@ pub(crate) fn collect_num_cache(ser_node: &roxmltree::Node, c_ns: &str, child_ta
     result
 }
 
+
+#[cfg(test)]
+mod label_color_tests {
+    use super::*;
+    use roxmltree::Document;
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+
+    fn ser_xml(scheme: &str) -> String {
+        format!(
+            r#"<c:ser xmlns:c="{c}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <c:idx val="0"/><c:order val="0"/>
+                 <c:dLbls>
+                   <c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr>
+                     <a:solidFill><a:schemeClr val="{s}"/></a:solidFill>
+                   </a:defRPr></a:pPr></a:p></c:txPr>
+                   <c:showVal val="1"/>
+                 </c:dLbls>
+                 <c:val><c:numRef><c:numCache>
+                   <c:pt idx="0"><c:v>1</c:v></c:pt>
+                 </c:numCache></c:numRef></c:val>
+               </c:ser>"#,
+            c = C_NS, s = scheme
+        )
+    }
+
+    // Theme order: dk1@0, lt1@1, dk2@2, lt2@3, accent1@4 …
+    fn theme() -> Vec<String> {
+        vec![
+            "111111".into(), "fefefe".into(), "222222".into(), "eeeeee".into(),
+            "aa0000".into(), "00aa00".into(), "0000aa".into(),
+            "aaaa00".into(), "00aaaa".into(), "aa00aa".into(),
+        ]
+    }
+
+    #[test]
+    fn per_series_label_color_resolves_tx1_to_dk1() {
+        let xml = ser_xml("tx1");
+        let doc = Document::parse(&xml).unwrap();
+        let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
+        // tx1 maps to dk1 → theme[0]
+        assert_eq!(s.label_color.as_deref(), Some("111111"));
+    }
+
+    #[test]
+    fn per_series_label_color_resolves_bg1_to_lt1() {
+        let xml = ser_xml("bg1");
+        let doc = Document::parse(&xml).unwrap();
+        let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
+        // bg1 maps to lt1 → theme[1]
+        assert_eq!(s.label_color.as_deref(), Some("fefefe"));
+    }
+
+    #[test]
+    fn no_series_dlbls_color_is_none() {
+        let xml = format!(
+            r#"<c:ser xmlns:c="{c}"><c:idx val="0"/><c:order val="0"/>
+                 <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+               </c:ser>"#,
+            c = C_NS
+        );
+        let doc = Document::parse(&xml).unwrap();
+        let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
+        assert_eq!(s.label_color, None);
+    }
+}

@@ -3016,6 +3016,7 @@ function adaptChartData(chart: ChartData): ChartModel {
       categories: s.categories.length > 0 ? s.categories : null,
       showMarker: s.showMarker ?? null,
       valFormatCode: s.valFormatCode ?? null,
+      labelColor: s.labelColor ?? null,
       markerSymbol: s.markerSymbol ?? null,
       markerSize: s.markerSize ?? null,
       markerFill: s.markerFill ?? null,
