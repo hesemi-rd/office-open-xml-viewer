@@ -4,6 +4,7 @@
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
+import { niceStep, niceAxisMax, niceAxisMin } from './axis-scale.js';
 
 // ─── Palette + helpers ──────────────────────────────────────────────────────
 
@@ -29,33 +30,6 @@ function hexToRgba(hex: string, alpha: number): string {
   const g = parseInt(h.slice(2, 4), 16);
   const b = parseInt(h.slice(4, 6), 16);
   return `rgba(${r},${g},${b},${alpha})`;
-}
-
-function niceStep(range: number, targetSteps = 5): number {
-  if (range === 0) return 1;
-  const raw = range / targetSteps;
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const normed = raw / mag;
-  const nice = normed < 1.5 ? 1 : normed < 3.5 ? 2 : normed < 7.5 ? 5 : 10;
-  return nice * mag;
-}
-
-function niceAxisMax(dataMax: number, step: number): number {
-  if (dataMax <= 0) return step;
-  // Excel's automatic value-axis maximum is the smallest major-unit multiple
-  // that is >= dataMax — no extra headroom step. A bar filling 97% of the axis
-  // stays at 97%, exactly as Excel renders it. (Earlier code added one step
-  // when data exceeded 90% of the axis to stop stacked bars spilling into
-  // adjacent shapes, but that distorted the scale of every chart. Overlap is
-  // handled correctly by honoring <c:plotArea><c:manualLayout> — ECMA-376
-  // §21.2.2.32 — which constrains the plot rect, not by inflating the axis.)
-  return Math.ceil(dataMax / step) * step;
-}
-
-function niceAxisMin(dataMin: number, step: number): number {
-  if (dataMin >= 0) return 0;
-  const ax = Math.floor(dataMin / step) * step;
-  return Math.abs(ax - dataMin) < step * 1e-9 ? ax - step : ax;
 }
 
 function formatChartVal(v: number): string {
