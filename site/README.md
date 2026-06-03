@@ -30,10 +30,20 @@ SITE_BASE=/office-open-xml-viewer/ pnpm --filter @silurus/ooxml-site build  # pr
 
 ## Deploy (GitHub Pages)
 
-`.github/workflows/deploy-site.yml` builds and deploys to Pages, but is
-**manual-only** (`workflow_dispatch`).
+GitHub Pages serves one site per repo, so `.github/workflows/deploy-pages.yml`
+builds **both** projects and merges them into a single artifact:
 
-> ⚠️ GitHub Pages serves one site per repo. `deploy-storybook.yml` currently
-> publishes Storybook to the custom domain `ooxml.silurus.dev`. Deploying this
-> site **replaces** that. Decide which site owns Pages (and the custom domain)
-> before enabling a push trigger.
+```
+site/dist/            → https://ooxml.silurus.dev/
+site/dist/storybook/  → https://ooxml.silurus.dev/storybook/
+```
+
+Steps: build WASM → build the site (base `/`) → build Storybook with
+`STORYBOOK_BASE=/storybook/` → copy `storybook-static/` into
+`site/dist/storybook/` → write `CNAME` → deploy. Storybook's Vite `base` reads
+`STORYBOOK_BASE` (default `/`, so local `pnpm storybook` and standalone builds
+are unaffected).
+
+Triggers on `v*` tags and `workflow_dispatch`. This replaces the old
+`deploy-site.yml` + `deploy-storybook.yml`. Running it makes the showcase site
+the front door at the custom domain, with Storybook nested under `/storybook/`.

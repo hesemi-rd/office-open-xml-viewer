@@ -1,4 +1,12 @@
-name: Deploy Storybook to GitHub Pages
+# Unified GitHub Pages deploy: showcase site at /, Storybook at /storybook/.
+#
+# GitHub Pages serves one site per repo, so both projects are built and merged
+# into a single artifact:
+#   site/dist/            → served at  https://ooxml.silurus.dev/
+#   site/dist/storybook/  → served at  https://ooxml.silurus.dev/storybook/
+#
+# Replaces the former deploy-storybook.yml + deploy-site.yml.
+name: Deploy site + Storybook to GitHub Pages
 
 on:
   push:
@@ -20,9 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -42,16 +48,27 @@ jobs:
       - name: Build WASM
         run: pnpm build:wasm
 
+      # 1) Showcase site → site/dist  (base '/')
+      - name: Build showcase site
+        run: pnpm --filter @silurus/ooxml-site build
+
+      # 2) Storybook → storybook-static  (base '/storybook/')
       - name: Build Storybook
+        env:
+          STORYBOOK_BASE: /storybook/
         run: pnpm build-storybook
 
-      - name: Write CNAME for custom domain
-        run: echo "ooxml.silurus.dev" > storybook-static/CNAME
+      # 3) Merge Storybook under the site, add the custom-domain CNAME
+      - name: Merge into one artifact
+        run: |
+          mkdir -p site/dist/storybook
+          cp -r storybook-static/* site/dist/storybook/
+          echo "ooxml.silurus.dev" > site/dist/CNAME
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: storybook-static
+          path: site/dist
 
   deploy:
     needs: build

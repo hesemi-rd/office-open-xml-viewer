@@ -3,6 +3,7 @@ interface Props {
   active?: 'pptx' | 'docx' | 'xlsx';
 }
 const { active } = Astro.props;
+const storybook = `${import.meta.env.BASE_URL}storybook/`.replace(/([^:])\/\/+/g, '$1/');
 ---
 <nav class="nav">
   <div class="wrap nav-inner">
@@ -15,7 +16,7 @@ const { active } = Astro.props;
       <a href="/xlsx" class:list={[{ 'nav-on': active === 'xlsx' }]}>XLSX</a>
       <a href="/pptx" class:list={[{ 'nav-on': active === 'pptx' }]}>PPTX</a>
       <a href="/try">Try yours</a>
-      <a class="nav-ext" href="https://ooxml.silurus.dev">Storybook ↗</a>
+      <a class="nav-ext" href={storybook}>Storybook</a>
       <a class="nav-gh" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
     </div>
   </div>

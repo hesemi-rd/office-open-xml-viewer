@@ -21,7 +21,9 @@ const config: StorybookConfig = {
     const { default: wasm } = await import('vite-plugin-wasm');
     return {
       ...config,
-      base: '/',
+      // Default '/' for local dev and standalone deploys; the unified Pages
+      // workflow sets STORYBOOK_BASE=/storybook/ to nest it under the site.
+      base: process.env.STORYBOOK_BASE ?? '/',
       plugins: [...(config.plugins ?? []), wasm()],
       worker: { format: 'es' as const, plugins: () => [wasm()] },
     };
