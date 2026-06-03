@@ -69,7 +69,13 @@ export async function loadMathResources(url: string = defaultMathFontUrl): Promi
   if (!mathResourcesPromise) {
     mathResourcesPromise = (async () => {
       const buf = await (await fetch(url)).arrayBuffer();
-      const fonts = (globalThis as { fonts?: FontFaceSet }).fonts;
+      // FontFaceSet lives on `document.fonts` (window) or `self.fonts` (worker) —
+      // NOT on `globalThis.fonts`. Resolve the right one so fillText actually uses
+      // the math font instead of silently falling back to a system serif.
+      const fonts: FontFaceSet | undefined =
+        typeof document !== 'undefined' && document.fonts
+          ? document.fonts
+          : (self as unknown as { fonts?: FontFaceSet }).fonts;
       if (typeof FontFace !== 'undefined' && fonts) {
         try {
           const face = new FontFace(DEFAULT_MATH_FONT_FAMILY, buf);
