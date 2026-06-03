@@ -2,6 +2,7 @@
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
 import FrameworkSection from '../components/FrameworkSection.astro';
+import ApiReference from '../components/ApiReference.astro';
 import { pptxSnippets } from '../lib/demo-snippets';
 ---
 <FormatPage format="pptx" name="PPTX" ext=".pptx" color="var(--pptx)"
@@ -31,4 +32,5 @@ import { pptxSnippets } from '../lib/demo-snippets';
     code={pptxSnippets.masterdetail}
   />
   <FrameworkSection format="pptx" />
+  <ApiReference format="pptx" />
 </FormatPage>

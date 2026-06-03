@@ -2,6 +2,7 @@
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
 import FrameworkSection from '../components/FrameworkSection.astro';
+import ApiReference from '../components/ApiReference.astro';
 import { xlsxSheetSnippet } from '../lib/demo-snippets';
 ---
 <FormatPage format="xlsx" name="XLSX" ext=".xlsx" color="var(--xlsx)"
@@ -13,4 +14,5 @@ import { xlsxSheetSnippet } from '../lib/demo-snippets';
     code={xlsxSheetSnippet}
   />
   <FrameworkSection format="xlsx" />
+  <ApiReference format="xlsx" />
 </FormatPage>

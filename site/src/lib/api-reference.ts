@@ -1,0 +1,128 @@
+// API reference data for the per-format pages. Hand-extracted from the real
+// source (viewer.ts / presentation.ts / document.ts + the shared RenderOptions
+// / LoadOptions). Keep in sync when the public types change.
+
+export interface ApiOption {
+  name: string;
+  type: string;
+  def?: string;
+  desc: string;
+}
+export interface ApiMethod {
+  sig: string;
+  desc: string;
+}
+export interface ApiClass {
+  name: string;
+  ctor: string;
+  note?: string;
+  options?: ApiOption[];
+  methods: ApiMethod[];
+}
+
+const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: '512 MiB', desc: 'Per-entry ZIP decompression cap (zip-bomb guard). Lower it for untrusted input.' };
+const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts from Google Fonts so layout matches Office without the fonts installed. Off by default for privacy.' };
+const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
+
+export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
+  pptx: [
+    {
+      name: 'PptxViewer',
+      ctor: 'new PptxViewer(canvas: HTMLCanvasElement, options?: PptxViewerOptions)',
+      note: 'Opinionated single-canvas viewer. Hand it a <canvas>; it owns parsing, rendering and the current slide.',
+      options: [
+        { name: 'width', type: 'number', def: '960', desc: 'Canvas CSS width in px; height is derived from the slide aspect ratio.' },
+        DPR,
+        GFONTS,
+        { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer so users can select & copy slide text.' },
+        { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive (the viewer draws its own play chrome).' },
+        ZIP,
+        { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
+        { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
+      ],
+      methods: [
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first slide.' },
+        { sig: 'goToSlide(index: number): Promise<void>', desc: 'Render a specific slide (0-indexed, clamped).' },
+        { sig: 'nextSlide(): Promise<void>', desc: 'Advance one slide.' },
+        { sig: 'prevSlide(): Promise<void>', desc: 'Go back one slide.' },
+        { sig: 'get slideIndex(): number', desc: 'Current slide index.' },
+        { sig: 'get slideCount(): number', desc: 'Total slides (0 until loaded).' },
+        { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
+        { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
+      ],
+    },
+    {
+      name: 'PptxPresentation',
+      ctor: 'await PptxPresentation.load(source, options?)',
+      note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
+      options: [GFONTS, ZIP],
+      methods: [
+        { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
+        { sig: 'get slideCount(): number', desc: 'Total slides.' },
+        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width.' },
+        { sig: 'destroy(): void', desc: 'Release the worker.' },
+      ],
+    },
+  ],
+
+  docx: [
+    {
+      name: 'DocxViewer',
+      ctor: 'new DocxViewer(canvas: HTMLCanvasElement, options?: DocxViewerOptions)',
+      note: 'Single-canvas viewer that paginates the document and tracks the current page.',
+      options: [
+        { name: 'width', type: 'number', desc: 'Canvas CSS width in px; height is auto-computed from the page aspect ratio.' },
+        DPR,
+        GFONTS,
+        { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer for native selection & copy.' },
+        { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours.' },
+        ZIP,
+      ],
+      methods: [
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first page.' },
+        { sig: 'goToPage(index: number): Promise<void>', desc: 'Render a specific page (0-indexed, clamped).' },
+        { sig: 'nextPage(): Promise<void>', desc: 'Advance one page.' },
+        { sig: 'prevPage(): Promise<void>', desc: 'Go back one page.' },
+        { sig: 'get pageCount(): number', desc: 'Total pages (0 until loaded).' },
+        { sig: 'get currentPage(): number', desc: 'Current page index.' },
+      ],
+    },
+    {
+      name: 'DocxDocument',
+      ctor: 'await DocxDocument.load(source, options?)',
+      note: 'Headless engine — render any page into any canvas you supply.',
+      options: [GFONTS, ZIP],
+      methods: [
+        { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
+        { sig: 'get pageCount(): number', desc: 'Total pages.' },
+        { sig: 'renderPage(canvas, index, opts?: { width?, dpr?, showTrackChanges? }): Promise<void>', desc: 'Render one page into the given canvas.' },
+      ],
+    },
+  ],
+
+  xlsx: [
+    {
+      name: 'XlsxViewer',
+      ctor: 'new XlsxViewer(container: HTMLElement, options?: XlsxViewerOptions)',
+      note: 'Full workbook viewer. Takes a container <div> (not a canvas) — it manages its own canvas, sheet-tab bar and zoom slider.',
+      options: [
+        { name: 'cellScale', type: 'number', def: '1', desc: 'Scale factor for cell/header dimensions (0.5 = half size).' },
+        { name: 'showZoomSlider', type: 'boolean', def: 'true', desc: 'Show the Excel-style zoom slider at the end of the tab bar.' },
+        { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom slider bounds as scale factors (10%–400%).' },
+        GFONTS,
+        ZIP,
+        { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
+        { name: 'onSheetChange', type: '(index: number, name: string) => void', desc: 'Called when the active sheet changes.' },
+        { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
+        { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
+      ],
+      methods: [
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a workbook from a URL or ArrayBuffer and render the first sheet.' },
+        { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
+        { sig: 'get selection(): CellRange | null', desc: 'The current selected range.' },
+        { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
+        { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
+      ],
+    },
+  ],
+};
