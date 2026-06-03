@@ -1,0 +1,25 @@
+{
+  "name": "@silurus/ooxml-site",
+  "version": "0.43.0",
+  "private": true,
+  "type": "module",
+  "description": "Showcase / marketing site for @silurus/ooxml",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@silurus/ooxml-core": "workspace:*",
+    "@silurus/ooxml-docx": "workspace:*",
+    "@silurus/ooxml-pptx": "workspace:*",
+    "@silurus/ooxml-xlsx": "workspace:*"
+  },
+  "devDependencies": {
+    "astro": "^5.14.1",
+    "three": "^0.180.0",
+    "@types/three": "^0.180.0",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
+  }
+}

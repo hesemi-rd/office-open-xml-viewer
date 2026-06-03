@@ -1,0 +1,158 @@
+/* ── Design tokens — dark technical ──────────────────────────────── */
+:root {
+  --bg: #07090e;
+  --bg-elev: #0c0f17;
+  --bg-elev-2: #11151f;
+  --panel: #0e1219;
+  --border: #1c2230;
+  --border-bright: #2a3445;
+  --text: #e6e9f0;
+  --text-dim: #9aa4b8;
+  --text-faint: #5b6577;
+  --accent: #5eead4;        /* teal neon */
+  --accent-2: #818cf8;      /* indigo */
+  --accent-3: #f472b6;      /* pink */
+  --docx: #2b7cff;
+  --xlsx: #22c55e;
+  --pptx: #f97316;
+  --glow: 0 0 0 1px var(--border), 0 0 40px -8px rgba(94, 234, 212, 0.18);
+  --mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --maxw: 1180px;
+}
+
+* { box-sizing: border-box; }
+
+html { overflow-x: hidden; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.6;
+}
+
+/* ambient grid + radial glow backdrop */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(900px 600px at 70% -5%, rgba(129, 140, 248, 0.12), transparent 60%),
+    radial-gradient(700px 500px at 10% 0%, rgba(94, 234, 212, 0.10), transparent 55%);
+  pointer-events: none;
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(180deg, #000 0%, transparent 90%);
+  pointer-events: none;
+}
+
+a { color: inherit; text-decoration: none; }
+
+h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.section { padding: 96px 0; position: relative; }
+.section-title {
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 700;
+  margin: 14px 0 12px;
+}
+.section-lead {
+  color: var(--text-dim);
+  font-size: 17px;
+  max-width: 64ch;
+}
+
+/* buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 15px;
+  padding: 12px 20px;
+  border-radius: 10px;
+  border: 1px solid var(--border-bright);
+  transition: transform 0.12s ease, border-color 0.2s, background 0.2s;
+  cursor: pointer;
+}
+.btn:hover { transform: translateY(-1px); }
+.btn-primary {
+  background: linear-gradient(180deg, #5eead4, #2dd4bf);
+  color: #06231f;
+  border-color: transparent;
+  box-shadow: 0 8px 30px -10px rgba(45, 212, 191, 0.6);
+}
+.btn-ghost { background: rgba(255, 255, 255, 0.02); color: var(--text); }
+.btn-ghost:hover { border-color: var(--accent); }
+
+/* reveal on scroll */
+[data-reveal] {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.7s ease, transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+}
+[data-reveal].in { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; }
+  [data-reveal] { opacity: 1; transform: none; transition: none; }
+}
+
+/* ── Live viewer controls ────────────────────────────────────────── */
+.lv-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.lv-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: 1px solid var(--border-bright);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+.lv-btn:hover:not(:disabled) { border-color: var(--accent); background: var(--bg-elev); }
+.lv-btn:disabled { opacity: 0.35; cursor: default; }
+.lv-info {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-dim);
+  min-width: 64px;
+}
+.lv-stage {
+  position: relative;
+  border-radius: 10px;
+  overflow: auto;
+  background: #fff;
+  max-width: 100%;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+.lv-stage canvas { display: block; max-width: 100%; }

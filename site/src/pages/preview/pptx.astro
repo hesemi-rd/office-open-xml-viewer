@@ -1,0 +1,17 @@
+---
+// Dev-only isolated preview of the live PPTX viewer (scroll-0 screenshotable).
+const base = import.meta.env.BASE_URL;
+---
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>preview: pptx</title></head>
+  <body style="margin:0;background:#0b0e14;padding:16px;">
+    <div id="pptx-live" style="background:#0e1219;border:1px solid #1c2230;border-radius:12px;padding:14px;"></div>
+    <script>
+      import { mountPptx } from '../../lib/live-pptx';
+      const el = document.getElementById('pptx-live');
+      const url = `${import.meta.env.BASE_URL}samples/sample-1.pptx`.replace(/([^:])\/\/+/g, '$1/');
+      if (el) mountPptx(el as HTMLElement, url, 760);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,86 @@
+---
+import Base from '../layouts/Base.astro';
+const base = import.meta.env.BASE_URL;
+const sample = (f: string) => `${base}samples/${f}`.replace(/\/\/+/g, '/');
+---
+<Base>
+  <!-- ── Hero (placeholder; 3D comes later) ────────────────────── -->
+  <header class="hero">
+    <div class="wrap hero-inner">
+      <p class="eyebrow">Rust · WebAssembly · Canvas 2D</p>
+      <h1 class="hero-title">
+        Pixel-faithful <span class="grad">Office</span> documents,<br />
+        rendered in the browser.
+      </h1>
+      <p class="hero-lead">
+        <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
+        <strong>.pptx</strong> with a Rust/WASM engine and paints them to a Canvas — no server,
+        no MS Office, no iframe. The closest thing to PowerPoint/Word/Excel rendering on the web.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
+        <a class="btn btn-ghost" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Live showcase (validation: real PPTX viewer) ──────────── -->
+  <section class="section" id="showcase">
+    <div class="wrap" data-reveal>
+      <p class="eyebrow">Live in this page</p>
+      <h2 class="section-title">Not a screenshot — the real renderer.</h2>
+      <p class="section-lead">
+        The viewer below is the actual library running a real <code>.pptx</code> in your browser
+        right now. Use the arrows to step through slides.
+      </p>
+      <div class="live-card" id="pptx-live" data-format="pptx"></div>
+    </div>
+  </section>
+
+  <script>
+    import { mountPptx } from '../lib/live-pptx';
+    const el = document.getElementById('pptx-live');
+    const base = import.meta.env.BASE_URL;
+    const url = `${base}samples/sample-1.pptx`.replace(/([^:])\/\/+/g, '$1/');
+    if (el) mountPptx(el as HTMLElement, url);
+  </script>
+</Base>
+
+<style>
+  .hero {
+    position: relative;
+    padding: 120px 0 80px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-inner { position: relative; z-index: 1; }
+  .hero-title {
+    font-size: clamp(34px, 6vw, 68px);
+    font-weight: 800;
+    margin: 18px 0 0;
+    letter-spacing: -0.03em;
+  }
+  .grad {
+    background: linear-gradient(120deg, var(--accent), var(--accent-2) 60%, var(--accent-3));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero-lead {
+    margin: 22px 0 0;
+    max-width: 62ch;
+    font-size: 18px;
+    color: var(--text-dim);
+  }
+  .hero-lead code, .hero-lead strong { color: var(--text); }
+  .hero-lead code { font-family: var(--mono); font-size: 0.92em; }
+  .hero-cta { display: flex; gap: 14px; margin-top: 32px; flex-wrap: wrap; }
+
+  .live-card {
+    margin-top: 28px;
+    padding: 18px;
+    border-radius: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--glow);
+  }
+</style>
