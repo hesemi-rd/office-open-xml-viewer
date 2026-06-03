@@ -1,43 +1,60 @@
-// MathJax (DOM-free, via liteAdaptor) turns MathML into an SVG string. The SVG is
-// rasterized to the canvas by the consumer. MathJax is loaded lazily so it only ships
-// to pages that actually render equations.
+// MathJax turns MathML into an SVG string that the consumer rasterizes onto the canvas.
+//
+// MathJax is loaded lazily AT RUNTIME from a CDN (no npm dependency) so that:
+//   1. bundlers in consuming apps have no bare `mathjax-*` import to resolve, and
+//   2. we use maintained MathJax v4 rather than the frozen/superseded `mathjax-full` v3.
+// Browser-only (it needs a DOM); the load is triggered only when a document actually
+// contains equations. The URL is overridable for self-hosting / offline.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-interface MathJaxInstance {
-  adaptor: any;
-  doc: any;
+
+let mathJaxUrl = 'https://cdn.jsdelivr.net/npm/mathjax@4/mml-svg.js';
+let mjPromise: Promise<any> | null = null;
+
+/** Override the MathJax script URL (e.g. a self-hosted / pinned copy). Call before load. */
+export function setMathJaxUrl(url: string): void {
+  mathJaxUrl = url;
 }
 
-let mjPromise: Promise<MathJaxInstance> | null = null;
+function loadScript(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Failed to load MathJax from ${src}`));
+    document.head.appendChild(s);
+  });
+}
 
-async function getMathJax(): Promise<MathJaxInstance> {
-  if (!mjPromise) {
-    mjPromise = (async () => {
-      const [{ mathjax }, { MathML }, { SVG }, { liteAdaptor }, { RegisterHTMLHandler }] =
-        await Promise.all([
-          import('mathjax-full/js/mathjax.js'),
-          import('mathjax-full/js/input/mathml.js'),
-          import('mathjax-full/js/output/svg.js'),
-          import('mathjax-full/js/adaptors/liteAdaptor.js'),
-          import('mathjax-full/js/handlers/html.js'),
-        ]);
-      const adaptor = liteAdaptor();
-      RegisterHTMLHandler(adaptor);
-      // fontCache: 'none' inlines glyph outlines as <path> (no <use>/<defs>), which
-      // keeps each SVG self-contained and rasterizable as a standalone image.
-      const doc = mathjax.document('', {
-        InputJax: new MathML(),
-        OutputJax: new SVG({ fontCache: 'none' }),
-      });
-      return { adaptor, doc };
-    })();
-  }
+async function ensureMathJax(): Promise<any> {
+  if (mjPromise) return mjPromise;
+  mjPromise = (async () => {
+    const w = globalThis as any;
+    if (w.MathJax?.startup?.promise) {
+      await w.MathJax.startup.promise;
+      return w.MathJax;
+    }
+    if (typeof document === 'undefined') {
+      throw new Error('MathJax rendering requires a DOM (browser environment)');
+    }
+    // Configure before the component script runs: don't auto-typeset the page, and
+    // inline glyph outlines (fontCache:'none') so each SVG is self-contained.
+    w.MathJax = {
+      ...(w.MathJax || {}),
+      startup: { ...(w.MathJax?.startup || {}), typeset: false },
+      svg: { ...(w.MathJax?.svg || {}), fontCache: 'none' },
+    };
+    await loadScript(mathJaxUrl);
+    await w.MathJax.startup.promise;
+    return w.MathJax;
+  })();
   return mjPromise;
 }
 
 /** Preload MathJax. Call once before rendering equations. */
 export async function loadMathJax(): Promise<void> {
-  await getMathJax();
+  await ensureMathJax();
 }
 
 export interface MathSvg {
@@ -69,10 +86,11 @@ export function svgExtents(svg: string): { widthEm: number; ascentEm: number; de
 
 /** Convert a MathML string to an SVG + its baseline-relative extents. */
 export async function mathMLToSvg(mathml: string): Promise<MathSvg> {
-  const { adaptor, doc } = await getMathJax();
-  const container = doc.convert(mathml, { display: true });
-  const svgNode = adaptor.firstChild(container);
-  const svg: string = adaptor.outerHTML(svgNode);
+  const MathJax = await ensureMathJax();
+  const container = MathJax.mathml2svg(mathml, { display: true });
+  const svgEl: Element | null =
+    typeof container.querySelector === 'function' ? container.querySelector('svg') : null;
+  const svg: string = svgEl ? svgEl.outerHTML : MathJax.startup.adaptor.outerHTML(container);
   return { svg, ...svgExtents(svg) };
 }
 
