@@ -74,9 +74,10 @@ describe('layoutMath', () => {
       ctx,
     );
     expect(box.width).toBeGreaterThan(0);
-    // surd glyph drawn + at least one vinculum rule
-    expect(box.ops.some((o) => o.type === 'glyph' && o.text === '√')).toBe(true);
-    expect(box.ops.some((o) => o.type === 'rule')).toBe(true);
+    // surd is a synthesized polyline stroke (vinculum is the last 2 points)
+    const stroke = box.ops.find((o) => o.type === 'stroke');
+    expect(stroke).toBeDefined();
+    expect(stroke && stroke.type === 'stroke' && stroke.points.length >= 4).toBe(true);
     // radical reserves ascent above the bare radicand for the rule + gap
     const bare = layoutMath([{ kind: 'run', text: 'x', style: 'italic' }], ctx);
     expect(box.ascent).toBeGreaterThan(bare.ascent);

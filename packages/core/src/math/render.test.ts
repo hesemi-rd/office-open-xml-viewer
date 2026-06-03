@@ -37,6 +37,18 @@ function mockCtx(): CanvasRenderingContext2D & RecordingCtx {
     fillRect(_x: number, _y: number, w: number, h: number) {
       calls.push(`rect:${w.toFixed(1)}x${h.toFixed(1)}`);
     },
+    beginPath() {
+      calls.push('beginPath');
+    },
+    moveTo() {},
+    lineTo() {},
+    stroke() {
+      calls.push('stroke');
+    },
+    set lineWidth(_v: number) {},
+    set lineJoin(_v: string) {},
+    set lineCap(_v: string) {},
+    set strokeStyle(_v: string) {},
     set font(_v: string) {},
     get font() {
       return '';

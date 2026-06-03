@@ -14,7 +14,10 @@ export interface MathLayoutCtx {
 
 export type DrawOp =
   | { type: 'glyph'; text: string; style: MathStyle; x: number; y: number; sizePx: number }
-  | { type: 'rule'; x: number; y: number; w: number; h: number };
+  | { type: 'rule'; x: number; y: number; w: number; h: number }
+  /** Polyline stroke (e.g. a synthesized radical sign). Points are relative to the
+   *  box origin; y grows down with the baseline at 0. */
+  | { type: 'stroke'; points: { x: number; y: number }[]; lineWidth: number };
 
 export interface MathBox {
   width: number;
@@ -53,6 +56,9 @@ function scriptCtx(ctx: MathLayoutCtx): MathLayoutCtx {
 }
 
 function shiftOp(op: DrawOp, dx: number, dy: number): DrawOp {
+  if (op.type === 'stroke') {
+    return { ...op, points: op.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+  }
   return { ...op, x: op.x + dx, y: op.y + dy };
 }
 
@@ -208,28 +214,40 @@ function naryBox(node: Extract<MathNode, { kind: 'nary' }>, ctx: MathLayoutCtx):
 function radicalBox(node: Extract<MathNode, { kind: 'radical' }>, ctx: MathLayoutCtx): MathBox {
   const c = ctx.consts;
   const radicand = layoutMath(node.radicand, ctx);
-  // Phase 1: fixed-size surd glyph (U+221A). Stretchy variants are Phase 2.
-  const surd = runBox({ text: '√', style: 'roman' }, ctx);
   const rule = fu(ctx, c.radicalRuleThickness);
   const gap = fu(ctx, c.radicalVerticalGap);
   const extra = fu(ctx, c.radicalExtraAscender);
-  const kern = fu(ctx, c.fractionRuleThickness); // small horizontal breathing room after surd
 
-  const radX = surd.width + kern;
-  // Vinculum (overline) sits gap above the radicand top; its top adds the rule thickness.
-  const vinculumTopY = -(radicand.ascent + gap + rule);
-  const ops: DrawOp[] = [
-    ...surd.ops, // surd at baseline origin
-    ...shiftBox(radicand, radX, 0).ops,
-    { type: 'rule', x: radX, y: vinculumTopY, w: radicand.width, h: rule },
-    // extend the vinculum left to meet the top of the surd
-    { type: 'rule', x: surd.width - kern * 0.5, y: vinculumTopY, w: radX - (surd.width - kern * 0.5), h: rule },
-  ];
+  // Phase 1: synthesize the surd as a stroked polyline sized to the radicand. This
+  // avoids depending on the font's U+221A glyph (which descends below the baseline
+  // and needs per-glyph extents we don't parse until Phase 2) and always fits.
+  const top = -(radicand.ascent + gap + rule); // canvas y of the vinculum top (up = negative)
+  const bottom = radicand.descent; // canvas y of the surd's lowest point
+  const h = bottom - top; // total surd height
+  const surdW = Math.max(fu(ctx, ctx.font.unitsPerEm) * 0.06, h * 0.5); // ~0.5× height, min ~0.06em
+  const kern = rule * 1.5; // gap between surd and radicand
+  const radX = surdW + kern;
+  const vinculumLen = radX + radicand.width - surdW * 0.85;
+
+  // Surd shape: short entry tick → deep V vertex → up to the vinculum left → across.
+  const surd: DrawOp = {
+    type: 'stroke',
+    lineWidth: rule,
+    points: [
+      { x: 0, y: top + h * 0.55 },
+      { x: surdW * 0.3, y: top + h * 0.45 },
+      { x: surdW * 0.5, y: bottom },
+      { x: surdW * 0.85, y: top + rule / 2 },
+      { x: surdW * 0.85 + vinculumLen, y: top + rule / 2 },
+    ],
+  };
+
+  const ops: DrawOp[] = [surd, ...shiftBox(radicand, radX, 0).ops];
 
   return {
     width: radX + radicand.width,
-    ascent: Math.max(surd.ascent, radicand.ascent + gap + rule + extra),
-    descent: Math.max(surd.descent, radicand.descent),
+    ascent: radicand.ascent + gap + rule + extra,
+    descent: radicand.descent,
     ops,
   };
 }

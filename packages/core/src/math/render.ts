@@ -23,6 +23,7 @@ export function renderMathBox(
 ): void {
   ctx.save();
   ctx.fillStyle = color;
+  ctx.strokeStyle = color;
   for (const op of box.ops) drawOp(ctx, op, x, baseline, family);
   ctx.restore();
 }
@@ -31,8 +32,23 @@ function drawOp(ctx: Ctx2D, op: DrawOp, x: number, baseline: number, family: str
   if (op.type === 'glyph') {
     ctx.font = styleToFont(op.style, op.sizePx, family);
     ctx.fillText(op.text, x + op.x, baseline + op.y);
-  } else {
+  } else if (op.type === 'rule') {
     ctx.fillRect(x + op.x, baseline + op.y, op.w, op.h);
+  } else {
+    // Polyline stroke (synthesized radical sign).
+    ctx.save();
+    ctx.lineWidth = op.lineWidth;
+    ctx.lineJoin = 'miter';
+    ctx.lineCap = 'butt';
+    ctx.beginPath();
+    op.points.forEach((p, i) => {
+      const px = x + p.x;
+      const py = baseline + p.y;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.restore();
   }
 }
 
