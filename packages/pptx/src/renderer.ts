@@ -659,6 +659,49 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
+/**
+ * Preset-geometry text rectangle (ECMA-376 §20.1.9.21 `<a:rect>` /
+ * presetTextRectangle), as an absolute sub-rect of the shape bbox. PowerPoint
+ * lays text out inside this rect (then applies the `lIns/tIns/rIns/bIns`
+ * insets), NOT in the full bounding box. For arrows the text rect is the shaft
+ * (left of the arrowhead), so centered text sits in the body — without this a
+ * `rightArrow`'s label drifts right into the arrowhead. Returns null when the
+ * geometry's text rect is the whole bbox (the common case).
+ *
+ * Arrowhead length uses `ss = min(w, h)` per the spec's `dx1 = ss * adj2`.
+ */
+function presetTextRect(
+  geom: string,
+  x: number, y: number, w: number, h: number,
+  adj1?: number | null, adj2?: number | null,
+): { tx: number; ty: number; tw: number; th: number } | null {
+  const ss = Math.min(w, h);
+  switch (geom) {
+    case 'rightarrow':
+    case 'leftarrow': {
+      const a1 = Math.min(Math.max(adj1 ?? 50000, 0), 100000); // shaft height fraction
+      const a2 = Math.min(Math.max(adj2 ?? 50000, 0), 100000); // arrowhead length fraction
+      const dx = (ss * a2) / 100000;        // arrowhead length (ss-based, ECMA dx1)
+      const dy = (h * a1) / 200000;          // shaft half-height about the center
+      const ty = y + h / 2 - dy;
+      const th = 2 * dy;
+      const tw = Math.max(0, w - dx);
+      return geom === 'rightarrow'
+        ? { tx: x, ty, tw, th }              // shaft on the left, arrowhead on the right
+        : { tx: x + dx, ty, tw, th };        // leftarrow: arrowhead on the left
+    }
+    case 'roundrect': {
+      // Text rect inset from the rounded corners: il = radius * (1 - 1/√2),
+      // radius = ss * adj / 100000 (ECMA roundRect adj default 16667).
+      const a = Math.min(Math.max(adj1 ?? 16667, 0), 100000) as number;
+      const il = (ss * a) / 100000 * (1 - 1 / Math.SQRT2);
+      return { tx: x + il, ty: y + il, tw: Math.max(0, w - 2 * il), th: Math.max(0, h - 2 * il) };
+    }
+    default:
+      return null;
+  }
+}
+
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }, onTextRun?: TextRunCallback) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -821,11 +864,25 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     // (the maximum-area rectangle that fits inside the ellipse: sides = a/√2, b/√2).
     // This only affects non-ctr anchors; ctr anchor is invariant to this inset.
     let tx = x, ty = y, tw = w, th = h;
-    if (geom === 'ellipse') {
+    if (el.textRect) {
+      // SmartArt drawings carry an explicit text frame (<dsp:txXfrm>) that
+      // PowerPoint pre-computed against the actual layout — e.g. an arrow's
+      // label sits past an overlapping circle node, a roundRect's label avoids
+      // an overlapping bottom badge. Honour it verbatim (insets apply within).
+      tx = emuToPx(el.textRect.x, scale);
+      ty = emuToPx(el.textRect.y, scale);
+      tw = emuToPx(el.textRect.width, scale);
+      th = emuToPx(el.textRect.height, scale);
+    } else if (geom === 'ellipse') {
       const insetX = w * (1 - 1 / Math.SQRT2) / 2;
       const insetY = h * (1 - 1 / Math.SQRT2) / 2;
       tx = x + insetX; ty = y + insetY;
       tw = w / Math.SQRT2; th = h / Math.SQRT2;
+    } else {
+      // Preset text rectangle (ECMA-376 §20.1.9.21): e.g. an arrow's label sits
+      // in the shaft, not the full bbox. Insets (lIns/…) apply within this rect.
+      const tr = presetTextRect(geom, x, y, w, h, el.adj, el.adj2);
+      if (tr) { tx = tr.tx; ty = tr.ty; tw = tr.tw; th = tr.th; }
     }
     // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
     renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, onTextRun);

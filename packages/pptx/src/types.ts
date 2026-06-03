@@ -112,6 +112,18 @@ export interface ShapeElement {
   softEdge?: SoftEdge;
   /** Mirrored reflection — ECMA-376 §20.1.8.27. */
   reflection?: Reflection;
+  /** Explicit text frame from a SmartArt drawing's `<dsp:txXfrm>` (absolute EMU,
+   *  same space as x/y/width/height). When present the renderer lays text out in
+   *  this rectangle instead of the preset/ellipse-derived text rectangle. */
+  textRect?: TextRect;
+}
+
+/** Absolute text-frame rectangle in EMU (from SmartArt `<dsp:txXfrm>`). */
+export interface TextRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface TableElement {

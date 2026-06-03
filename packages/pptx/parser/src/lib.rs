@@ -633,6 +633,23 @@ struct TableCell {
     v_merge: bool,
 }
 
+/// Explicit text frame for a shape, sourced from a SmartArt drawing's
+/// `<dsp:txXfrm>` (Microsoft diagram drawing extension). Coordinates are
+/// absolute EMU in the same space as the shape's `x/y/width/height`, so the
+/// group-transform / graphicFrame-offset passes adjust them in lock-step.
+/// When present the renderer lays text out in this rectangle instead of the
+/// preset/ellipse-derived text rectangle — PowerPoint stores the actual text
+/// region here (e.g. an arrow's label sits past an overlapping circle node,
+/// a roundRect's label avoids an overlapping bottom badge).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TextRect {
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ShapeElement {
@@ -706,6 +723,10 @@ struct ShapeElement {
     /// disambiguate multiple body / picture placeholders on a layout.
     #[serde(skip_serializing_if = "Option::is_none")]
     placeholder_idx: Option<u32>,
+    /// Explicit text rectangle from a SmartArt `<dsp:txXfrm>`. `None` for
+    /// ordinary shapes (renderer falls back to the preset text rectangle).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_rect: Option<TextRect>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1953,6 +1974,14 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             let nt = gt.apply_to_transform(t);
             s.x = nt.x; s.y = nt.y; s.width = nt.cx; s.height = nt.cy;
             s.rotation = nt.rot; s.flip_h = nt.flip_h; s.flip_v = nt.flip_v;
+            // Transform the explicit text frame in lock-step. It is axis-aligned
+            // in local coords; pass rot=0/flip=false so it only translates+scales
+            // (SmartArt drawings that carry txXfrm are not nested in rotated groups).
+            if let Some(tr) = &mut s.text_rect {
+                let tt = Transform { x: tr.x, y: tr.y, cx: tr.width, cy: tr.height, rot: 0.0, flip_h: false, flip_v: false };
+                let ntt = gt.apply_to_transform(tt);
+                tr.x = ntt.x; tr.y = ntt.y; tr.width = ntt.cx; tr.height = ntt.cy;
+            }
         }
         SlideElement::Picture(p) => {
             let t = Transform { x: p.x, y: p.y, cx: p.width, cy: p.height, rot: p.rotation, flip_h: p.flip_h, flip_v: p.flip_v };
@@ -4204,6 +4233,7 @@ fn parse_shape(
         name: cnv_name,
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
+        text_rect: None,
     })
 }
 
@@ -5197,6 +5227,24 @@ fn parse_sp_tree_node(
 /// element shape as a regular p:sp / p:cxnSp / p:grpSp (children use the `a:`
 /// namespace). Coordinates inside the drawing are local to the enclosing
 /// graphicFrame, so we translate every emitted element by the graphicFrame's xfrm.
+/// Read a SmartArt shape's explicit text frame from `<dsp:txXfrm>`
+/// (`<a:off>` / `<a:ext>`), in the drawing's local EMU coordinates. Returns
+/// `None` when the shape has no txXfrm (most ordinary shapes). The optional
+/// `rot` attribute is intentionally not consumed here — none of the supported
+/// SmartArt layouts rotate the text frame independently of the shape, and the
+/// renderer already rotates text by the shape's own rotation.
+fn parse_tx_xfrm(sp_node: roxmltree::Node<'_, '_>) -> Option<TextRect> {
+    let txx = child(sp_node, "txXfrm")?;
+    let off = child(txx, "off")?;
+    let ext = child(txx, "ext")?;
+    Some(TextRect {
+        x: attr_i64(&off, "x")?,
+        y: attr_i64(&off, "y")?,
+        width: attr_i64(&ext, "cx")?,
+        height: attr_i64(&ext, "cy")?,
+    })
+}
+
 fn parse_smartart_drawing(
     drawing_xml: &str,
     gf_xfrm: &Transform,
@@ -5225,7 +5273,8 @@ fn parse_smartart_drawing(
         // branches (sp/cxnSp/grpSp) directly.
         match node.tag_name().name() {
             "sp" => {
-                if let Some(shape) = parse_shape(node, &empty_lph, theme, &empty_rels, None) {
+                if let Some(mut shape) = parse_shape(node, &empty_lph, theme, &empty_rels, None) {
+                    shape.text_rect = parse_tx_xfrm(node);
                     out.push(SlideElement::Shape(shape));
                 }
             }
@@ -5264,7 +5313,8 @@ fn parse_smartart_drawing(
                 for child_node in node.children().filter(|n| n.is_element()) {
                     match child_node.tag_name().name() {
                         "sp" => {
-                            if let Some(shape) = parse_shape(child_node, &empty_lph, theme, &empty_rels, None) {
+                            if let Some(mut shape) = parse_shape(child_node, &empty_lph, theme, &empty_rels, None) {
+                                shape.text_rect = parse_tx_xfrm(child_node);
                                 out.push(SlideElement::Shape(shape));
                             }
                         }
@@ -5294,7 +5344,7 @@ fn parse_smartart_drawing(
 
 fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
     match el {
-        SlideElement::Shape(s)   => { s.x += dx; s.y += dy; }
+        SlideElement::Shape(s)   => { s.x += dx; s.y += dy; if let Some(tr) = &mut s.text_rect { tr.x += dx; tr.y += dy; } }
         SlideElement::Picture(p) => { p.x += dx; p.y += dy; }
         SlideElement::Table(t)   => { t.x += dx; t.y += dy; }
         SlideElement::Chart(c)   => { c.x += dx; c.y += dy; }
@@ -5446,6 +5496,7 @@ fn parse_connector(
         name: cnv_name,
         placeholder_type: None,
         placeholder_idx: None,
+        text_rect: None,
     })
 }
 
