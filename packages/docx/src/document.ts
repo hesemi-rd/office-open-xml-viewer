@@ -6,7 +6,7 @@ import {
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
 } from '@silurus/ooxml-core';
-import type { PaginatedBodyElement, Document, RenderPageOptions, WorkerResponse } from './types';
+import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerResponse } from './types';
 import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns } from './renderer';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
@@ -33,7 +33,7 @@ const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
 export type LoadOptions = CoreLoadOptions;
 
 export class DocxDocument {
-  private _document: Document | null = null;
+  private _document: DocxDocumentModel | null = null;
   private _pages: PaginatedBodyElement[][] | null = null;
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse>;
@@ -90,7 +90,7 @@ export class DocxDocument {
     return this._getPages().length;
   }
 
-  get document(): Document {
+  get document(): DocxDocumentModel {
     if (!this._document) throw new Error('Document not loaded');
     return this._document;
   }

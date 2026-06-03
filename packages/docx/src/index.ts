@@ -2,7 +2,7 @@ export { DocxDocument, type LoadOptions } from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
-  Document,
+  DocxDocumentModel,
   SectionProps,
   BodyElement,
   DocParagraph,

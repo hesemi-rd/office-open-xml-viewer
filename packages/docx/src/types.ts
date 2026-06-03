@@ -2,7 +2,7 @@
 
 import type { MathNode } from '@silurus/ooxml-core';
 
-export interface Document {
+export interface DocxDocumentModel {
   section: SectionProps;
   body: BodyElement[];
   headers: HeadersFooters;
@@ -473,7 +473,7 @@ export type WorkerRequest =
   | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number };
 
 export type WorkerResponse =
-  | { type: 'parsed'; id: number; document: Document }
+  | { type: 'parsed'; id: number; document: DocxDocumentModel }
   | { type: 'error'; id: number; message: string };
 
 // ===== Public API types =====

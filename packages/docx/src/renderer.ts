@@ -1,5 +1,5 @@
 import type {
-  Document, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
+  DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
@@ -232,7 +232,7 @@ function authorColor(author?: string): string {
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
 }
 
-function collectImagePairs(doc: Document): ImagePair[] {
+function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   const seen = new Map<string, ImagePair>();
   const walk = (runs: DocRun[]) => {
     for (const run of runs) {
@@ -293,7 +293,7 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
   return createImageBitmap(offscreen);
 }
 
-async function preloadImages(doc: Document): Promise<Map<string, ImageBitmap>> {
+async function preloadImages(doc: DocxDocumentModel): Promise<Map<string, ImageBitmap>> {
   const pairs = collectImagePairs(doc);
   const entries = await Promise.all(
     pairs.map(async (pair): Promise<[string, ImageBitmap] | null> => {
@@ -316,7 +316,7 @@ async function preloadImages(doc: Document): Promise<Map<string, ImageBitmap>> {
 // ===== Main entry =====
 
 export async function renderDocumentToCanvas(
-  doc: Document,
+  doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
   opts: RenderDocumentOptions = {},
@@ -818,7 +818,7 @@ function findMergeEndRow(table: DocTable, startRi: number, startCi: number): num
 }
 
 function pickHeaderFooter(
-  set: Document['headers'],
+  set: DocxDocumentModel['headers'],
   pageIndex: number,
   _totalPages: number,
   titlePage: boolean,

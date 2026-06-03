@@ -1,4 +1,4 @@
-import type { Document } from '@silurus/ooxml-docx';
+import type { DocxDocumentModel } from '@silurus/ooxml-docx';
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
 import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
@@ -12,14 +12,14 @@ function ensureInit(): void {
   initialized = true;
 }
 
-/** Parse a `.docx` archive in Node and return the same `Document` model the
+/** Parse a `.docx` archive in Node and return the same `DocxDocumentModel` the
  *  browser path produces. */
-export function parseDocx(buffer: ArrayBuffer | Uint8Array | Buffer): Document {
+export function parseDocx(buffer: ArrayBuffer | Uint8Array | Buffer): DocxDocumentModel {
   ensureInit();
   const bytes =
     buffer instanceof Uint8Array
       ? buffer
       : new Uint8Array(buffer as ArrayBuffer);
   const json = (docxWasm as unknown as { parse_docx: (b: Uint8Array) => string }).parse_docx(bytes);
-  return JSON.parse(json) as Document;
+  return JSON.parse(json) as DocxDocumentModel;
 }
