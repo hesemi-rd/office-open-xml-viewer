@@ -92,9 +92,49 @@ function nodeToMathML(node: MathNode): string {
       return node.index && node.index.length
         ? `<mroot>${row(node.radicand)}${row(node.index)}</mroot>`
         : `<msqrt>${seq(node.radicand)}</msqrt>`;
+    case 'limit':
+      return limitToMathML(node);
+    case 'array':
+      return arrayToMathML(node);
+    case 'groupChr': {
+      const b = row(node.base);
+      const mo = `<mo stretchy="true">${esc(node.char)}</mo>`;
+      return node.pos === 'top' ? `<mover>${b}${mo}</mover>` : `<munder>${b}${mo}</munder>`;
+    }
+    case 'bar':
+      return `<menclose notation="${node.pos === 'bot' ? 'bottom' : 'top'}">${row(node.base)}</menclose>`;
+    case 'accent':
+      return `<mover accent="true">${row(node.base)}<mo stretchy="false">${esc(node.char)}</mo></mover>`;
     case 'func':
       return `<mrow>${row(node.name)}<mo>&#x2061;</mo>${row(node.arg)}</mrow>`;
   }
+}
+
+function limitToMathML(node: Extract<MathNode, { kind: 'limit' }>): string {
+  const base = row(node.base);
+  const lower = node.lower && node.lower.length ? row(node.lower) : null;
+  const upper = node.upper && node.upper.length ? row(node.upper) : null;
+  if (lower && upper) return `<munderover>${base}${lower}${upper}</munderover>`;
+  if (lower) return `<munder>${base}${lower}</munder>`;
+  if (upper) return `<mover>${base}${upper}</mover>`;
+  return base;
+}
+
+function arrayToMathML(node: Extract<MathNode, { kind: 'array' }>): string {
+  const cols = Math.max(1, ...node.rows.map((r) => r.length));
+  let colalign: string;
+  if (node.align === 'eq') {
+    // alternating right/left so cells align at the relation (& marker)
+    colalign = Array.from({ length: cols }, (_, i) => (i % 2 === 0 ? 'right' : 'left')).join(' ');
+  } else if (node.align === 'left') {
+    colalign = 'left';
+  } else {
+    colalign = 'center';
+  }
+  const rows = node.rows
+    .map((cells) => `<mtr>${cells.map((c) => `<mtd>${seq(c)}</mtd>`).join('')}</mtr>`)
+    .join('');
+  return `<mtable columnalign="${colalign}" rowspacing="0.2em" columnspacing="0.3em">${rows}</mtable>`;
 }
 
 function naryToMathML(node: Extract<MathNode, { kind: 'nary' }>): string {

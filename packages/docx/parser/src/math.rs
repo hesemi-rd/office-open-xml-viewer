@@ -52,6 +52,34 @@ pub enum MathNode {
         index: Vec<MathNode>,
         radicand: Vec<MathNode>,
     },
+    Limit {
+        base: Vec<MathNode>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        lower: Vec<MathNode>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        upper: Vec<MathNode>,
+    },
+    Array {
+        rows: Vec<Vec<Vec<MathNode>>>,
+        /// "eq" (alternating right/left) | "center" (matrix) | "left"
+        align: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    GroupChr {
+        #[serde(rename = "char")]
+        chr: String,
+        pos: String,
+        base: Vec<MathNode>,
+    },
+    Bar {
+        pos: String,
+        base: Vec<MathNode>,
+    },
+    Accent {
+        #[serde(rename = "char")]
+        chr: String,
+        base: Vec<MathNode>,
+    },
     Func {
         name: Vec<MathNode>,
         arg: Vec<MathNode>,
@@ -149,6 +177,42 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 index: nodes_in(child, "deg"),
                 radicand: nodes_in(child, "e"),
             }),
+            "limLow" => out.push(MathNode::Limit {
+                base: nodes_in(child, "e"),
+                lower: nodes_in(child, "lim"),
+                upper: Vec::new(),
+            }),
+            "limUpp" => out.push(MathNode::Limit {
+                base: nodes_in(child, "e"),
+                lower: Vec::new(),
+                upper: nodes_in(child, "lim"),
+            }),
+            "m" => out.push(parse_matrix(child)),
+            "eqArr" => out.push(parse_eqarr(child)),
+            "groupChr" => {
+                let pr = mchild(child, "groupChrPr");
+                let pos = pr
+                    .and_then(|p| mval(p, "pos"))
+                    .unwrap_or_else(|| "bot".to_string());
+                let chr = pr.and_then(|p| mval(p, "chr")).unwrap_or_else(|| {
+                    if pos == "top" { "\u{23DE}".to_string() } else { "\u{23DF}".to_string() }
+                });
+                out.push(MathNode::GroupChr { chr, pos, base: nodes_in(child, "e") });
+            }
+            "bar" => {
+                let pr = mchild(child, "barPr");
+                let pos = pr
+                    .and_then(|p| mval(p, "pos"))
+                    .unwrap_or_else(|| "top".to_string());
+                out.push(MathNode::Bar { pos, base: nodes_in(child, "e") });
+            }
+            "acc" => {
+                let pr = mchild(child, "accPr");
+                let chr = pr
+                    .and_then(|p| mval(p, "chr"))
+                    .unwrap_or_else(|| "\u{0302}".to_string());
+                out.push(MathNode::Accent { chr, base: nodes_in(child, "e") });
+            }
             "func" => out.push(MathNode::Func {
                 name: nodes_in(child, "fName"),
                 arg: nodes_in(child, "e"),
@@ -221,9 +285,90 @@ pub fn nodes_to_text(nodes: &[MathNode]) -> String {
                 s.push_str(&nodes_to_text(arg));
             }
             MathNode::Group { items } => s.push_str(&nodes_to_text(items)),
+            MathNode::Limit { base, lower, upper } => {
+                s.push_str(&nodes_to_text(base));
+                if !lower.is_empty() {
+                    s.push('_');
+                    s.push_str(&nodes_to_text(lower));
+                }
+                if !upper.is_empty() {
+                    s.push('^');
+                    s.push_str(&nodes_to_text(upper));
+                }
+            }
+            MathNode::Array { rows, .. } => {
+                for (ri, row) in rows.iter().enumerate() {
+                    if ri > 0 {
+                        s.push_str("; ");
+                    }
+                    for (ci, cell) in row.iter().enumerate() {
+                        if ci > 0 {
+                            s.push(' ');
+                        }
+                        s.push_str(&nodes_to_text(cell));
+                    }
+                }
+            }
+            MathNode::GroupChr { base, .. } => s.push_str(&nodes_to_text(base)),
+            MathNode::Bar { base, .. } => s.push_str(&nodes_to_text(base)),
+            MathNode::Accent { base, .. } => s.push_str(&nodes_to_text(base)),
         }
     }
     s
+}
+
+/// `m:m` matrix -> array of rows (m:mr) of cells (m:e), centered.
+fn parse_matrix(el: Node) -> MathNode {
+    let mut rows = Vec::new();
+    for mr in el
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "mr")
+    {
+        let cells: Vec<Vec<MathNode>> = mr
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "e")
+            .map(parse_omath_nodes)
+            .collect();
+        rows.push(cells);
+    }
+    MathNode::Array { rows, align: "center".to_string() }
+}
+
+/// `m:eqArr` -> array where each `m:e` is a row, split into cells at `&` alignment marks.
+fn parse_eqarr(el: Node) -> MathNode {
+    let mut rows = Vec::new();
+    for e in el
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "e")
+    {
+        rows.push(split_align_cells(parse_omath_nodes(e)));
+    }
+    MathNode::Array { rows, align: "eq".to_string() }
+}
+
+/// Split a row's nodes into alignment cells at run-text `&` markers.
+fn split_align_cells(nodes: Vec<MathNode>) -> Vec<Vec<MathNode>> {
+    let mut cells: Vec<Vec<MathNode>> = vec![Vec::new()];
+    for node in nodes {
+        if let MathNode::Run { text, style } = &node {
+            if text.contains('&') {
+                for (i, part) in text.split('&').enumerate() {
+                    if i > 0 {
+                        cells.push(Vec::new());
+                    }
+                    if !part.is_empty() {
+                        cells.last_mut().unwrap().push(MathNode::Run {
+                            text: part.to_string(),
+                            style: style.clone(),
+                        });
+                    }
+                }
+                continue;
+            }
+        }
+        cells.last_mut().unwrap().push(node);
+    }
+    cells
 }
 
 /// Parse the math content of the named child element (`m:<name>`).
@@ -307,6 +452,48 @@ mod tests {
         let json = serde_json::to_string(&nodes).unwrap();
         assert!(json.contains(r#""kind":"nary""#), "json: {json}");
         assert!(json.contains(r#""op":"∑""#) || json.contains("∑"), "json: {json}");
+    }
+
+    #[test]
+    fn eqarr_splits_rows_into_aligned_cells() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:eqArr>
+              <m:e><m:r><m:t>x&amp;=1+2+3</m:t></m:r></m:e>
+              <m:e><m:r><m:t>&amp;=6</m:t></m:r></m:e>
+            </m:eqArr></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::Array { rows, align } => {
+                assert_eq!(align, "eq");
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].len(), 2); // "x" | "=1+2+3"
+                assert_eq!(rows[1].len(), 2); // ""  | "=6"
+                assert!(rows[1][0].is_empty());
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+        // no stray '&' leaks into text
+        let json = serde_json::to_string(&nodes).unwrap();
+        assert!(!json.contains('&') || json.contains("\\u0026") == false);
+    }
+
+    #[test]
+    fn parses_limlow() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:limLow>
+              <m:e><m:r><m:t>lim</m:t></m:r></m:e>
+              <m:lim><m:r><m:t>n</m:t></m:r></m:lim>
+            </m:limLow></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::Limit { lower, upper, .. } => {
+                assert!(!lower.is_empty());
+                assert!(upper.is_empty());
+            }
+            other => panic!("expected limit, got {other:?}"),
+        }
     }
 
     #[test]

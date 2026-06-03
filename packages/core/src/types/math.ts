@@ -43,6 +43,39 @@ export interface MathRadical {
   index?: MathNode[];
   radicand: MathNode[];
 }
+/** Lower/upper limit (`m:limLow` / `m:limUpp`), e.g. lim under n→∞. */
+export interface MathLimit {
+  kind: 'limit';
+  base: MathNode[];
+  lower?: MathNode[];
+  upper?: MathNode[];
+}
+/** Matrix (`m:m`) or aligned equation array (`m:eqArr`). rows → cells → nodes. */
+export interface MathArray {
+  kind: 'array';
+  rows: MathNode[][][];
+  /** 'eq' = alternating right/left (eqArr); 'center' = matrix; 'left'. */
+  align: 'eq' | 'center' | 'left';
+}
+/** Group character (`m:groupChr`), e.g. under/over brace. */
+export interface MathGroupChr {
+  kind: 'groupChr';
+  char: string;
+  pos: 'top' | 'bot';
+  base: MathNode[];
+}
+/** Over/under bar (`m:bar`). */
+export interface MathBar {
+  kind: 'bar';
+  pos: 'top' | 'bot';
+  base: MathNode[];
+}
+/** Accent (`m:acc`), e.g. hat, bar, vector arrow over the base. */
+export interface MathAccent {
+  kind: 'accent';
+  char: string;
+  base: MathNode[];
+}
 export interface MathFunc {
   kind: 'func';
   name: MathNode[];
@@ -60,6 +93,11 @@ export type MathNode =
   | MathNary
   | MathDelimiter
   | MathRadical
+  | MathLimit
+  | MathArray
+  | MathGroupChr
+  | MathBar
+  | MathAccent
   | MathFunc
   | MathGroup;
 
@@ -72,6 +110,11 @@ const KINDS = new Set([
   'nary',
   'delimiter',
   'radical',
+  'limit',
+  'array',
+  'groupChr',
+  'bar',
+  'accent',
   'func',
   'group',
 ]);

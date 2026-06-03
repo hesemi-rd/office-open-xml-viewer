@@ -62,6 +62,47 @@ describe('mathToMathML', () => {
     expect(ml).toContain('∑');
   });
 
+  it('emits munder for a lower limit (lim)', () => {
+    const ml = mathToMathML(
+      [
+        {
+          kind: 'limit',
+          base: [{ kind: 'run', text: 'lim', style: 'roman' }],
+          lower: [{ kind: 'run', text: 'n→∞', style: 'italic' }],
+        },
+      ],
+      true,
+    );
+    expect(ml).toContain('<munder>');
+  });
+
+  it('emits an mtable for an eqArr with alternating alignment', () => {
+    const ml = mathToMathML(
+      [
+        {
+          kind: 'array',
+          align: 'eq',
+          rows: [
+            [[{ kind: 'run', text: 'x', style: 'italic' }], [{ kind: 'run', text: '=1+2+3', style: 'italic' }]],
+            [[], [{ kind: 'run', text: '=6', style: 'italic' }]],
+          ],
+        },
+      ],
+      true,
+    );
+    expect(ml).toContain('<mtable');
+    expect(ml).toContain('columnalign="right left"');
+    expect(ml).toContain('<mtr>');
+  });
+
+  it('emits mover accent for an accented base', () => {
+    const ml = mathToMathML(
+      [{ kind: 'accent', char: '^', base: [{ kind: 'run', text: 'x', style: 'italic' }] }],
+      false,
+    );
+    expect(ml).toContain('accent="true"');
+  });
+
   it('escapes XML metacharacters', () => {
     const ml = mathToMathML([{ kind: 'run', text: 'a<b', style: 'italic' }], false);
     expect(ml).toContain('&lt;');
