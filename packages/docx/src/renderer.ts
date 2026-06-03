@@ -605,7 +605,7 @@ function estimateParagraphHeight(
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft);
     if (paraHasRuby) {
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
@@ -683,7 +683,7 @@ function splitParagraphAcrossPages(
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft);
   const paraHasRuby = paragraphHasRuby(para);
 
   const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle);
@@ -974,7 +974,7 @@ function renderParagraph(
     pageH: state.pageH,
   } : undefined;
 
-  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses);
+  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft * scale);
 
   // For paragraphs that carry any ruby annotation, Word renders every line
   // at the SAME height. Per the user's note: when the section's docGrid is
@@ -1511,6 +1511,9 @@ function layoutLines(
   tabStops: TabStop[] = [],
   wrapCtx?: WrapLayoutCtx,
   fontFamilyClasses: Record<string, string> = {},
+  // Paragraph left-indent in px. Tab-stop positions are measured from the text
+  // margin (ECMA-376 §17.3.1.37), but layout is paraX-relative, so subtract this.
+  tabOriginPx: number = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -1688,14 +1691,17 @@ function layoutLines(
     if ('isTab' in seg) {
       // Absolute position on the line measured from paraX (line origin for continuation lines)
       const absFromParaX = currentWidth + (isFirst ? firstIndent : 0);
+      // Tab-stop X relative to paraX: stops are measured from the text margin, so
+      // subtract the paragraph's own left indent.
+      const stopXof = (t: TabStop) => t.pos * scale - tabOriginPx;
       // Find the next tab stop strictly greater than the current position
-      const stop = tabStops.find((t) => t.pos * scale > absFromParaX);
+      const stop = tabStops.find((t) => stopXof(t) > absFromParaX);
       // Right/center/decimal tab: place the tab + its trailing content (up to the next
       // tab / line end) so the content ends at / centers on the stop, and commit that
       // content directly so the normal wrap check doesn't push it past the stop
       // (ECMA-376 §17.3.1.37). This is what makes TOC "heading …… page" lines work.
       if (stop && stop.alignment !== 'left' && stop.alignment !== 'bar' && stop.alignment !== 'clear') {
-        const stopX = stop.pos * scale;
+        const stopX = stopXof(stop);
         seg.leader = stop.leader;
         let followW = 0;
         for (const q of queue) {
@@ -1731,7 +1737,7 @@ function layoutLines(
 
       let tabWidth: number;
       if (stop) {
-        tabWidth = stop.pos * scale - absFromParaX;
+        tabWidth = stopXof(stop) - absFromParaX;
         seg.leader = stop.leader;
       } else {
         // Round up to the next DEFAULT_TAB_PT boundary
