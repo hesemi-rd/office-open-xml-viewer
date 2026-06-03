@@ -3,6 +3,8 @@ export {
   type MathBox,
   type MathLayoutCtx,
   type MathLevel,
+  type MeasureGlyph,
+  type AtomClass,
   type DrawOp,
 } from './layout';
 export { renderMathBox, measureMathBox, type MathMetrics } from './render';

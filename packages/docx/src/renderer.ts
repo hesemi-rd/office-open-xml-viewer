@@ -16,6 +16,7 @@ import {
   DEFAULT_MATH_FONT_FAMILY,
   type MathFont,
   type MathConstants,
+  type MeasureGlyph,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
 
@@ -40,6 +41,25 @@ interface MathResources {
 }
 let mathResources: MathResources | null = null;
 let mathResourcesPromise: Promise<MathResources> | null = null;
+
+/** Real per-glyph ink metrics from a canvas context, for the math layout engine. */
+function mathMeasureGlyph(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+): MeasureGlyph {
+  return (text, sizePx, style) => {
+    const bold = style === 'bold' || style === 'boldItalic';
+    const italic = style === 'italic' || style === 'boldItalic';
+    ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${sizePx}px "${DEFAULT_MATH_FONT_FAMILY}"`;
+    const m = ctx.measureText(text);
+    const ascent = m.actualBoundingBoxAscent;
+    const descent = m.actualBoundingBoxDescent;
+    return {
+      width: m.width,
+      ascent: Number.isFinite(ascent) ? ascent : sizePx * 0.7,
+      descent: Number.isFinite(descent) ? descent : 0,
+    };
+  };
+}
 
 /** True if any run in the body (incl. tables) is an OMML equation. */
 export function documentHasMath(body: BodyElement[]): boolean {
@@ -1103,6 +1123,7 @@ function renderParagraph(
             consts: mathResources.consts,
             fontSizePx: seg.fontSize * scale,
             level: seg.display ? 'display' : 'text',
+            measureGlyph: mathMeasureGlyph(ctx),
           });
           renderMathBox(
             ctx,
@@ -1717,6 +1738,7 @@ function layoutLines(
         consts: mathResources.consts,
         fontSizePx: seg.fontSize * scale,
         level: seg.display ? 'display' : 'text',
+        measureGlyph: mathMeasureGlyph(ctx),
       });
       seg.measuredWidth = box.width;
       seg.mathAscent = box.ascent;
