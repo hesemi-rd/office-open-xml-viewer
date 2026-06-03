@@ -859,7 +859,11 @@ fn parse_para_content(
             "oMath" => {
                 let nodes = crate::math::parse_omath_nodes(child);
                 if !nodes.is_empty() {
-                    runs.push(DocRun::Math { nodes, display: false });
+                    runs.push(DocRun::Math {
+                        nodes,
+                        display: false,
+                        font_size: base_run.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+                    });
                 }
             }
             "oMathPara" => {
@@ -870,7 +874,11 @@ fn parse_para_content(
                 {
                     let nodes = crate::math::parse_omath_nodes(om);
                     if !nodes.is_empty() {
-                        runs.push(DocRun::Math { nodes, display: true });
+                        runs.push(DocRun::Math {
+                            nodes,
+                            display: true,
+                            font_size: base_run.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+                        });
                     }
                 }
             }

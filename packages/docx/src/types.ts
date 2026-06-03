@@ -195,7 +195,7 @@ export type DocRun =
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
   | { type: 'shape' } & ShapeRun
-  | { type: 'math'; nodes: MathNode[]; display: boolean };
+  | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number };
 
 export type PathCmd =
   | { cmd: 'moveTo'; x: number; y: number }

@@ -291,9 +291,12 @@ pub enum DocRun {
     Field(FieldRun),
     Shape(ShapeRun),
     /// An OMML equation (`m:oMath`). `display` = block (`m:oMathPara`).
+    #[serde(rename_all = "camelCase")]
     Math {
         nodes: Vec<crate::math::MathNode>,
         display: bool,
+        /// Resolved paragraph font size (pt) so the equation matches surrounding text.
+        font_size: f64,
     },
 }
 

@@ -1408,7 +1408,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       const text = resolveFieldText(f, state);
       if (text) pushTextPiece(text, f, f.vertAlign);
     } else if (run.type === 'math') {
-      const fontSize = findNearbyFontSize(runs, runs.indexOf(run));
+      // The parser resolves the paragraph font size; fall back to a nearby run only
+      // if it is somehow absent.
+      const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
       segs.push({
         mathNodes: run.nodes,
         display: run.display,
