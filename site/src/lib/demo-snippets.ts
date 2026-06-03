@@ -94,3 +94,103 @@ const container = document.getElementById('sheet') as HTMLElement;
 const viewer = new XlsxViewer(container, { showZoomSlider: true });
 
 await viewer.load('/sample.xlsx');`;
+
+// ── Framework integration (per format) ─────────────────────────────
+// docx/pptx take a <canvas>; xlsx takes a container <div>. pptx & xlsx expose
+// destroy(); docx renders into the canvas you own and needs no teardown.
+interface FwCfg {
+  Viewer: string;
+  sub: 'docx' | 'xlsx' | 'pptx';
+  el: 'canvas' | 'container';
+  tag: 'canvas' | 'div';
+  RefType: 'HTMLCanvasElement' | 'HTMLDivElement';
+  opts: string;
+  destroy: boolean;
+}
+
+const fwPptx: FwCfg = { Viewer: 'PptxViewer', sub: 'pptx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 960 }', destroy: true };
+const fwDocx: FwCfg = { Viewer: 'DocxViewer', sub: 'docx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 820 }', destroy: false };
+const fwXlsx: FwCfg = { Viewer: 'XlsxViewer', sub: 'xlsx', el: 'container', tag: 'div', RefType: 'HTMLDivElement', opts: '{ showZoomSlider: true }', destroy: true };
+
+export interface FrameworkSnippets {
+  react: string;
+  vue: string;
+  svelte: string;
+  vanilla: string;
+}
+
+function buildFw(c: FwCfg): FrameworkSnippets {
+  const reactCleanup = c.destroy
+    ? '    return () => viewer.destroy();'
+    : `    // ${c.Viewer} renders into the ${c.el} you own — nothing to tear down.`;
+  const svelteCleanup = c.destroy ? '\n    return () => viewer.destroy();' : '';
+  const vueUnmount = c.destroy
+    ? `onBeforeUnmount(() => viewer?.destroy());`
+    : `// ${c.Viewer} needs no explicit teardown.`;
+
+  return {
+    react: `import { useEffect, useRef } from 'react';
+import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
+
+export function Viewer({ src }: { src: string }) {
+  const ref = useRef<${c.RefType}>(null);
+
+  useEffect(() => {
+    const ${c.el} = ref.current;
+    if (!${c.el}) return;
+    const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
+    void viewer.load(src);
+${reactCleanup}
+  }, [src]);
+
+  return <${c.tag} ref={ref} />;
+}`,
+
+    vue: `<script setup lang="ts">
+import { onMounted${c.destroy ? ', onBeforeUnmount' : ''}, ref } from 'vue';
+import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
+
+const props = defineProps<{ src: string }>();
+const ${c.el} = ref<${c.RefType}>();
+let viewer: ${c.Viewer} | undefined;
+
+onMounted(() => {
+  viewer = new ${c.Viewer}(${c.el}.value as ${c.RefType}, ${c.opts});
+  void viewer.load(props.src);
+});
+${vueUnmount}
+<\/script>
+
+<template>
+  <${c.tag} ref="${c.el}" />
+</template>`,
+
+    svelte: `<script lang="ts">
+  import { onMount } from 'svelte';
+  import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
+
+  export let src: string;
+  let ${c.el}: ${c.RefType};
+
+  onMount(() => {
+    const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
+    void viewer.load(src);${svelteCleanup}
+  });
+<\/script>
+
+<${c.tag} bind:this={${c.el}}></${c.tag}>`,
+
+    vanilla: `import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
+
+const ${c.el} = document.getElementById('viewer') as ${c.RefType};
+const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
+
+await viewer.load('/sample.${c.sub}');`,
+  };
+}
+
+export const frameworkSnippets = {
+  docx: buildFw(fwDocx),
+  xlsx: buildFw(fwXlsx),
+  pptx: buildFw(fwPptx),
+};

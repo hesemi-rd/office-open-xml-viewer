@@ -2,36 +2,8 @@
 import Base from '../layouts/Base.astro';
 import Nav from '../components/Nav.astro';
 import LiveShowcase from '../components/LiveShowcase.astro';
-import CodeTabs from '../components/CodeTabs.astro';
 import Pitch from '../components/Pitch.astro';
 import Capabilities from '../components/Capabilities.astro';
-import {
-  embedSnippet,
-  scrollSnippet,
-  thumbnailSnippet,
-  navSnippet,
-  fileSnippet,
-  selectionSnippet,
-  vanillaSnippet,
-  reactSnippet,
-  vueSnippet,
-  svelteSnippet,
-} from '../lib/snippets';
-
-const recipeTabs = [
-  { id: 'embed', label: 'Embed a viewer', lang: 'ts', code: embedSnippet },
-  { id: 'scroll', label: 'Scroll every page', lang: 'ts', code: scrollSnippet },
-  { id: 'thumbs', label: 'Thumbnail grid', lang: 'ts', code: thumbnailSnippet },
-  { id: 'nav', label: 'Page controls', lang: 'ts', code: navSnippet },
-  { id: 'file', label: 'Open a local file', lang: 'ts', code: fileSnippet },
-  { id: 'select', label: 'Select & copy', lang: 'ts', code: selectionSnippet },
-];
-const frameworkTabs = [
-  { id: 'react', label: 'React', lang: 'tsx', code: reactSnippet },
-  { id: 'vue', label: 'Vue', lang: 'vue', code: vueSnippet },
-  { id: 'svelte', label: 'Svelte', lang: 'svelte', code: svelteSnippet },
-  { id: 'vanilla', label: 'Vanilla', lang: 'ts', code: vanillaSnippet },
-];
 const base = import.meta.env.BASE_URL;
 ---
 <Base>
@@ -85,34 +57,6 @@ const base = import.meta.env.BASE_URL;
         Go deeper — live demos and the code behind them, per format:
         <a href="/docx">DOCX</a> · <a href="/xlsx">XLSX</a> · <a href="/pptx">PPTX</a>
       </p>
-    </div>
-  </section>
-
-  <!-- ── Code / recipes ────────────────────────────────────────── -->
-  <section class="section section-alt" id="code">
-    <div class="wrap" data-reveal>
-      <p class="eyebrow">Copy-paste recipes</p>
-      <h2 class="section-title">One viewer, every use case.</h2>
-      <p class="section-lead">
-        From a one-line embed to a fully custom UI. The built-in viewers handle the common cases;
-        the headless engines (<code>PptxPresentation</code> / <code>DocxDocument</code> /
-        <code>XlsxWorkbook</code>) render into any canvas you supply for the rest.
-      </p>
-      <div class="code-wrap">
-        <CodeTabs tabs={recipeTabs} />
-      </div>
-
-      <div class="fw-block">
-        <h3 class="fw-title">…and in your framework.</h3>
-        <p class="fw-lead">
-          The viewers are plain TypeScript classes — no framework runtime, no peer deps. Mount one
-          in a <code>ref</code> effect and tear it down on unmount. The same shape works for Word,
-          Excel and PowerPoint.
-        </p>
-        <div class="code-wrap">
-          <CodeTabs tabs={frameworkTabs} />
-        </div>
-      </div>
     </div>
   </section>
 
