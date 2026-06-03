@@ -33,5 +33,8 @@ describe('parseMathConstants', () => {
     expect(mc.upperLimitGapMin).toBe(200);
     expect(mc.lowerLimitGapMin).toBe(167);
     expect(mc.mathLeading).toBe(154);
+    expect(mc.radicalVerticalGap).toBe(50);
+    expect(mc.radicalRuleThickness).toBe(40);
+    expect(mc.radicalExtraAscender).toBe(40);
   });
 });

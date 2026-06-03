@@ -29,6 +29,9 @@ export interface MathConstants {
   fractionNumeratorGapMin: number;
   fractionRuleThickness: number;
   fractionDenominatorGapMin: number;
+  radicalVerticalGap: number;
+  radicalRuleThickness: number;
+  radicalExtraAscender: number;
 }
 
 // Byte offsets within the MathConstants table (verified against Latin Modern Math).
@@ -63,6 +66,11 @@ const OFF = {
   // 140 fractionNumDisplayStyleGapMin
   fractionRuleThickness: 144,
   fractionDenominatorGapMin: 148,
+  // 152..184: skewed-fraction / overbar / underbar records
+  radicalVerticalGap: 188,
+  // 192 radicalDisplayStyleVerticalGap
+  radicalRuleThickness: 196,
+  radicalExtraAscender: 200,
 } as const;
 
 export function parseMathConstants(font: MathFont): MathConstants {
@@ -90,5 +98,8 @@ export function parseMathConstants(font: MathFont): MathConstants {
     fractionNumeratorGapMin: v(OFF.fractionNumeratorGapMin),
     fractionRuleThickness: v(OFF.fractionRuleThickness),
     fractionDenominatorGapMin: v(OFF.fractionDenominatorGapMin),
+    radicalVerticalGap: v(OFF.radicalVerticalGap),
+    radicalRuleThickness: v(OFF.radicalRuleThickness),
+    radicalExtraAscender: v(OFF.radicalExtraAscender),
   };
 }

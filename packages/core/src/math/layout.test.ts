@@ -68,6 +68,20 @@ describe('layoutMath', () => {
     expect(sub.descent).toBeGreaterThan(plain.descent);
   });
 
+  it('lays out a radical with a surd glyph and a vinculum rule', () => {
+    const box = layoutMath(
+      [{ kind: 'radical', radicand: [{ kind: 'run', text: 'x', style: 'italic' }] }],
+      ctx,
+    );
+    expect(box.width).toBeGreaterThan(0);
+    // surd glyph drawn + at least one vinculum rule
+    expect(box.ops.some((o) => o.type === 'glyph' && o.text === '√')).toBe(true);
+    expect(box.ops.some((o) => o.type === 'rule')).toBe(true);
+    // radical reserves ascent above the bare radicand for the rule + gap
+    const bare = layoutMath([{ kind: 'run', text: 'x', style: 'italic' }], ctx);
+    expect(box.ascent).toBeGreaterThan(bare.ascent);
+  });
+
   it('lays out an n-ary sum with a body', () => {
     const box = layoutMath(
       [

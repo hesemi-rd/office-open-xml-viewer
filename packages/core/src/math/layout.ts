@@ -109,6 +109,8 @@ function layoutNode(node: MathNode, ctx: MathLayoutCtx): MathBox {
       return naryBox(node, ctx);
     case 'delimiter':
       return delimiterBox(node, ctx);
+    case 'radical':
+      return radicalBox(node, ctx);
     case 'func':
       return hlist([
         layoutMath(node.name, ctx),
@@ -201,6 +203,35 @@ function naryBox(node: Extract<MathNode, { kind: 'nary' }>, ctx: MathLayoutCtx):
     runBox({ text: ' ', style: 'roman' }, ctx),
     layoutMath(node.body, ctx),
   ]);
+}
+
+function radicalBox(node: Extract<MathNode, { kind: 'radical' }>, ctx: MathLayoutCtx): MathBox {
+  const c = ctx.consts;
+  const radicand = layoutMath(node.radicand, ctx);
+  // Phase 1: fixed-size surd glyph (U+221A). Stretchy variants are Phase 2.
+  const surd = runBox({ text: '√', style: 'roman' }, ctx);
+  const rule = fu(ctx, c.radicalRuleThickness);
+  const gap = fu(ctx, c.radicalVerticalGap);
+  const extra = fu(ctx, c.radicalExtraAscender);
+  const kern = fu(ctx, c.fractionRuleThickness); // small horizontal breathing room after surd
+
+  const radX = surd.width + kern;
+  // Vinculum (overline) sits gap above the radicand top; its top adds the rule thickness.
+  const vinculumTopY = -(radicand.ascent + gap + rule);
+  const ops: DrawOp[] = [
+    ...surd.ops, // surd at baseline origin
+    ...shiftBox(radicand, radX, 0).ops,
+    { type: 'rule', x: radX, y: vinculumTopY, w: radicand.width, h: rule },
+    // extend the vinculum left to meet the top of the surd
+    { type: 'rule', x: surd.width - kern * 0.5, y: vinculumTopY, w: radX - (surd.width - kern * 0.5), h: rule },
+  ];
+
+  return {
+    width: radX + radicand.width,
+    ascent: Math.max(surd.ascent, radicand.ascent + gap + rule + extra),
+    descent: Math.max(surd.descent, radicand.descent),
+    ops,
+  };
 }
 
 function delimiterBox(node: Extract<MathNode, { kind: 'delimiter' }>, ctx: MathLayoutCtx): MathBox {

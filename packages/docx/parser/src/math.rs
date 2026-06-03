@@ -47,6 +47,11 @@ pub enum MathNode {
         end_char: String,
         items: Vec<Vec<MathNode>>,
     },
+    Radical {
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        index: Vec<MathNode>,
+        radicand: Vec<MathNode>,
+    },
     Func {
         name: Vec<MathNode>,
         arg: Vec<MathNode>,
@@ -140,6 +145,10 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                     items,
                 });
             }
+            "rad" => out.push(MathNode::Radical {
+                index: nodes_in(child, "deg"),
+                radicand: nodes_in(child, "e"),
+            }),
             "func" => out.push(MathNode::Func {
                 name: nodes_in(child, "fName"),
                 arg: nodes_in(child, "e"),
@@ -194,6 +203,17 @@ pub fn nodes_to_text(nodes: &[MathNode]) -> String {
                     s.push_str(&nodes_to_text(it));
                 }
                 s.push_str(end_char);
+            }
+            MathNode::Radical { index, radicand } => {
+                s.push('√');
+                if !index.is_empty() {
+                    s.push('[');
+                    s.push_str(&nodes_to_text(index));
+                    s.push(']');
+                }
+                s.push('(');
+                s.push_str(&nodes_to_text(radicand));
+                s.push(')');
             }
             MathNode::Func { name, arg } => {
                 s.push_str(&nodes_to_text(name));

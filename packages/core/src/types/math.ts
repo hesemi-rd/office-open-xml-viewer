@@ -37,6 +37,12 @@ export interface MathDelimiter {
   /** separated groups (e.g. for cases / multiple args). */
   items: MathNode[][];
 }
+export interface MathRadical {
+  kind: 'radical';
+  /** optional index (e.g. cube root); empty/omitted = square root. */
+  index?: MathNode[];
+  radicand: MathNode[];
+}
 export interface MathFunc {
   kind: 'func';
   name: MathNode[];
@@ -53,6 +59,7 @@ export type MathNode =
   | MathScript
   | MathNary
   | MathDelimiter
+  | MathRadical
   | MathFunc
   | MathGroup;
 
@@ -64,6 +71,7 @@ const KINDS = new Set([
   'subSup',
   'nary',
   'delimiter',
+  'radical',
   'func',
   'group',
 ]);
