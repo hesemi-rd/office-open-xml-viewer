@@ -708,7 +708,8 @@ fn parse_paragraph(
         }
     }
 
-    let alignment = base_para.alignment.as_deref().map(normalize_align).unwrap_or("left").to_string();
+    let mut alignment = base_para.alignment.as_deref().map(normalize_align).unwrap_or("left").to_string();
+    let alignment_explicit = base_para.alignment.is_some();
     let indent_right = base_para.indent_right.unwrap_or(0.0);
     let space_before = base_para.space_before.unwrap_or(0.0);
     let space_after = base_para.space_after.unwrap_or(0.0);
@@ -742,6 +743,15 @@ fn parse_paragraph(
     // Parse runs
     let mut runs = vec![];
     parse_para_content(node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None);
+
+    // OMML display equations (m:oMathPara) are center-justified by default (§22.1.2.88
+    // m:jc). When the paragraph has no explicit alignment, centering the block math
+    // matches Word.
+    if !alignment_explicit
+        && runs.iter().any(|r| matches!(r, DocRun::Math { display: true, .. }))
+    {
+        alignment = "center".to_string();
+    }
 
     let tab_stops = base_para.tab_stops.clone().unwrap_or_default().into_iter()
         .map(|(pos, alignment, leader)| TabStop { pos, alignment, leader })
@@ -2160,26 +2170,42 @@ fn parse_table(
         .unwrap_or((0.0, 0.0, 3.6, 3.6));
 
     let mut rows = vec![];
+    let mut row_cnf: Vec<Option<String>> = vec![];
     for tr_node in children_w_flat(node, "tr") {
+        // §17.4.7 conditional-format bitmask on the row (firstRow/band1Horz/…).
+        row_cnf.push(
+            child_w(tr_node, "trPr")
+                .and_then(|p| child_w(p, "cnfStyle"))
+                .and_then(|c| attr_w(c, "val")),
+        );
         let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map, theme, table_style_id.as_deref());
         rows.push(row);
     }
 
     // Apply table-style cell shading + vAlign where the cell didn't set them inline.
-    let mut body_idx: i64 = 0;
+    // Only treat row 0 as a non-banded "first row" when firstRow is enabled AND the
+    // style's firstRow conditional actually carries formatting; an empty firstRow
+    // (like EHC) must NOT shift the banding (Word bands from row 0 → 1st row = band1).
+    let first_row_styled = first_row
+        && tstyle
+            .cond
+            .get("firstRow")
+            .map(|c| c.shd.is_some())
+            .unwrap_or(false);
     for (r, row) in rows.iter_mut().enumerate() {
-        // Which horizontal conditional format applies to this row?
-        let cond: Option<&CondFmt> = if r == 0 && first_row {
-            tstyle.cond.get("firstRow")
+        // Pick the conditional format: the row's explicit cnfStyle wins (§17.4.7);
+        // otherwise fall back to tblLook firstRow + horizontal banding by row parity.
+        let cond_name: Option<String> = if let Some(cnf) = &row_cnf[r] {
+            cnf_to_cond(cnf)
+        } else if r == 0 && first_row_styled {
+            Some("firstRow".to_string())
+        } else if h_band {
+            let bi = if first_row_styled { r as i64 - 1 } else { r as i64 };
+            Some(if bi % 2 == 0 { "band1Horz" } else { "band2Horz" }.to_string())
         } else {
-            let band = if h_band {
-                if body_idx % 2 == 0 { "band1Horz" } else { "band2Horz" }
-            } else {
-                ""
-            };
-            body_idx += 1;
-            if band.is_empty() { None } else { tstyle.cond.get(band) }
+            None
         };
+        let cond: Option<&CondFmt> = cond_name.as_deref().and_then(|n| tstyle.cond.get(n));
         let row_shd = cond.and_then(|c| c.shd.clone()).or_else(|| tstyle.cell_shd.clone());
         for cell in row.cells.iter_mut() {
             if cell.background.is_none() {
@@ -2194,6 +2220,11 @@ fn parse_table(
         }
     }
 
+    let jc = tbl_pr
+        .and_then(|p| child_w(p, "jc"))
+        .and_then(|j| attr_w(j, "val"))
+        .unwrap_or_else(|| "left".to_string());
+
     DocTable {
         col_widths,
         rows,
@@ -2202,6 +2233,7 @@ fn parse_table(
         cell_margin_bottom: cm_bot,
         cell_margin_left: cm_left,
         cell_margin_right: cm_right,
+        jc,
     }
 }
 
@@ -2338,6 +2370,24 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
         bottom: child_w(node, "bottom").map(parse_border_spec),
         left: child_w(node, "left").map(parse_border_spec),
         right: child_w(node, "right").map(parse_border_spec),
+    }
+}
+
+/// Decode a `w:cnfStyle` bitmask (12 chars) to the conditional-format key it selects.
+/// Bit order (§17.4.7): firstRow,lastRow,firstCol,lastCol,band1Vert,band2Vert,
+/// band1Horz,band2Horz,neCell,nwCell,seCell,swCell.
+fn cnf_to_cond(cnf: &str) -> Option<String> {
+    let bit = |i: usize| cnf.as_bytes().get(i).copied() == Some(b'1');
+    if bit(0) {
+        Some("firstRow".to_string())
+    } else if bit(1) {
+        Some("lastRow".to_string())
+    } else if bit(6) {
+        Some("band1Horz".to_string())
+    } else if bit(7) {
+        Some("band2Horz".to_string())
+    } else {
+        None
     }
 }
 

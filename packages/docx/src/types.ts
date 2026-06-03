@@ -409,6 +409,8 @@ export interface DocTable {
   cellMarginBottom: number;
   cellMarginLeft: number;
   cellMarginRight: number;
+  /** table horizontal alignment on the page: 'left' | 'center' | 'right'. */
+  jc: string;
 }
 
 export interface TableBorders {

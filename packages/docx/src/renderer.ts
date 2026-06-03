@@ -2331,7 +2331,14 @@ function renderTable(table: DocTable, state: RenderState): void {
   const colScale = totalColW > contentW ? contentW / totalColW : 1;
   const colWidths = table.colWidths.map(w => w * scale * colScale);
 
-  const tableX = contentX;
+  // Horizontal table alignment on the page (w:tblPr/w:jc).
+  const tableW = colWidths.reduce((s, w) => s + w, 0);
+  const tableX =
+    table.jc === 'center'
+      ? contentX + Math.max(0, (contentW - tableW) / 2)
+      : table.jc === 'right'
+        ? contentX + Math.max(0, contentW - tableW)
+        : contentX;
 
   const rowHeights: number[] = [];
   for (const row of table.rows) {

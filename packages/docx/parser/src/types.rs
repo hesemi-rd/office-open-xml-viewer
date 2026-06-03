@@ -654,6 +654,8 @@ pub struct DocTable {
     pub cell_margin_bottom: f64,
     pub cell_margin_left: f64,
     pub cell_margin_right: f64,
+    /// table horizontal alignment on the page: "left" | "center" | "right" (w:tblPr/w:jc).
+    pub jc: String,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
