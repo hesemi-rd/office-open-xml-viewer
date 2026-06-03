@@ -864,7 +864,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     // (the maximum-area rectangle that fits inside the ellipse: sides = a/√2, b/√2).
     // This only affects non-ctr anchors; ctr anchor is invariant to this inset.
     let tx = x, ty = y, tw = w, th = h;
-    if (geom === 'ellipse') {
+    if (el.textRect) {
+      // SmartArt drawings carry an explicit text frame (<dsp:txXfrm>) that
+      // PowerPoint pre-computed against the actual layout — e.g. an arrow's
+      // label sits past an overlapping circle node, a roundRect's label avoids
+      // an overlapping bottom badge. Honour it verbatim (insets apply within).
+      tx = emuToPx(el.textRect.x, scale);
+      ty = emuToPx(el.textRect.y, scale);
+      tw = emuToPx(el.textRect.width, scale);
+      th = emuToPx(el.textRect.height, scale);
+    } else if (geom === 'ellipse') {
       const insetX = w * (1 - 1 / Math.SQRT2) / 2;
       const insetY = h * (1 - 1 / Math.SQRT2) / 2;
       tx = x + insetX; ty = y + insetY;
