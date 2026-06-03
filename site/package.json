@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Showcase / marketing site for @silurus/ooxml",
   "scripts": {
+    "copy-samples": "node scripts/copy-samples.mjs",
+    "predev": "node scripts/copy-samples.mjs",
+    "prebuild": "node scripts/copy-samples.mjs",
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview"

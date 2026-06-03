@@ -1,0 +1,75 @@
+# Showcase site → GitHub Pages.
+#
+# ⚠️  Manual trigger only (workflow_dispatch). GitHub Pages serves ONE site per
+#     repo, and `deploy-storybook.yml` currently publishes Storybook to the
+#     custom domain ooxml.silurus.dev. Running this workflow REPLACES that
+#     deployment. Decide which site owns Pages before enabling a push trigger,
+#     and add a CNAME step here (and remove it from deploy-storybook.yml) if the
+#     showcase site should take the custom domain.
+#
+# By default this builds with base `/` (custom-domain style). For project-pages
+# (https://<user>.github.io/office-open-xml-viewer/) set SITE_BASE accordingly.
+name: Deploy Showcase Site to GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Base path (/ for custom domain, /office-open-xml-viewer/ for project pages)'
+        type: string
+        default: '/'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM
+        run: pnpm build:wasm
+
+      - name: Build site
+        env:
+          SITE_BASE: ${{ inputs.base }}
+        run: pnpm --filter @silurus/ooxml-site build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
