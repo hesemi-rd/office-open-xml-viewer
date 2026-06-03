@@ -398,6 +398,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | Category | Feature | Status |
 |----------|---------|--------|
 | **Workbook** | Multiple sheets, sheet names | ✅ |
+| | Sheet tab colors (`<sheetPr><tabColor>` — theme / tint / indexed / rgb) | ✅ |
 | **Cells** | Text, number, boolean, error values | ✅ |
 | | Formula results (from cached `<v>`) | ✅ |
 | | Dates (ECMA-376 date format codes) | ✅ |
@@ -433,6 +434,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
 | | Text selection inside cells (transparent overlay) | ✅ |
 | | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
+| | Zoom slider (Excel-style, right of the tab bar, 10–400% with 100% centered; `showZoomSlider` option) | ✅ |
 
 ---
 
