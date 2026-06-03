@@ -528,6 +528,33 @@ struct ChartElement {
     cat_axis_font_size_hpt: Option<i32>,
     /// <c:valAx><c:txPr>…defRPr@sz — value-axis label font size (hpt).
     val_axis_font_size_hpt: Option<i32>,
+    /// `<c:catAx><c:txPr>…<a:solidFill>` resolved to hex (no #) — category-axis
+    /// tick-label text color. None falls back to the renderer's default gray.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_font_color: Option<String>,
+    /// `<c:valAx><c:txPr>…<a:solidFill>` resolved to hex (no #) — value-axis
+    /// tick-label text color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_font_color: Option<String>,
+    /// `<c:catAx><c:spPr><a:ln><a:solidFill>` resolved to hex (no #) — the
+    /// category-axis line color (ECMA-376 §21.2.2.*). None → renderer default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_line_color: Option<String>,
+    /// `<c:catAx><c:spPr><a:ln w>` width in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_line_width_emu: Option<u32>,
+    /// `<c:catAx><c:spPr><a:ln><a:noFill>` — suppress just the category-axis rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    cat_axis_line_hidden: bool,
+    /// `<c:valAx><c:spPr><a:ln><a:solidFill>` resolved to hex (no #).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_line_color: Option<String>,
+    /// `<c:valAx><c:spPr><a:ln w>` width in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_line_width_emu: Option<u32>,
+    /// `<c:valAx><c:spPr><a:ln><a:noFill>` — suppress just the value-axis rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    val_axis_line_hidden: bool,
     /// <c:dLbls><c:txPr>…defRPr@sz — data-label font size (hpt).
     data_label_font_size_hpt: Option<i32>,
     /// `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr".
@@ -3663,6 +3690,18 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let data_label_font_color =
         ooxml_common::chart::extract_data_label_font_color(root, &resolver);
 
+    // Axis tick-label text color + axis-line style (color / width / noFill).
+    // ECMA-376 §21.2.2.* — `<c:catAx|valAx><c:txPr>…<a:solidFill>` colors the
+    // tick labels and `<c:spPr><a:ln>` styles the axis rule. Shared helpers so
+    // the gray "2025年3月期" category labels and the light-gray category-axis
+    // line in sample-2 slide-16's horizontal bar chart resolve the same way.
+    let cat_axis_font_color = cat_ax.and_then(|n| ooxml_common::chart::extract_axis_tick_label_color(n, &resolver));
+    let val_axis_font_color = val_ax.and_then(|n| ooxml_common::chart::extract_axis_tick_label_color(n, &resolver));
+    let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) =
+        cat_ax.map(|n| ooxml_common::chart::extract_axis_line_style(n, &resolver)).unwrap_or((None, None, false));
+    let (val_axis_line_color, val_axis_line_width_emu, val_axis_line_hidden) =
+        val_ax.map(|n| ooxml_common::chart::extract_axis_line_style(n, &resolver)).unwrap_or((None, None, false));
+
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);
 
@@ -3727,6 +3766,14 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         title_font_size_hpt,
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
+        cat_axis_font_color,
+        val_axis_font_color,
+        cat_axis_line_color,
+        cat_axis_line_width_emu,
+        cat_axis_line_hidden,
+        val_axis_line_color,
+        val_axis_line_width_emu,
+        val_axis_line_hidden,
         data_label_font_size_hpt,
         legend_pos,
         bar_gap_width,
@@ -3882,6 +3929,14 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         title_font_size_hpt: None,
         cat_axis_font_size_hpt: None,
         val_axis_font_size_hpt: None,
+        cat_axis_font_color: None,
+        val_axis_font_color: None,
+        cat_axis_line_color: None,
+        cat_axis_line_width_emu: None,
+        cat_axis_line_hidden: false,
+        val_axis_line_color: None,
+        val_axis_line_width_emu: None,
+        val_axis_line_hidden: false,
         data_label_font_size_hpt: None,
         legend_pos: None,
         bar_gap_width,

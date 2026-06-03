@@ -224,6 +224,11 @@ export interface ChartModel {
   catAxisFontSizeHpt: number | null;
   /** `<c:valAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
   valAxisFontSizeHpt: number | null;
+  /** `<c:catAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#').
+   *  null = renderer default. Lets templates color category labels gray. */
+  catAxisFontColor?: string | null;
+  /** `<c:valAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
+  valAxisFontColor?: string | null;
   /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
   dataLabelFontSizeHpt: number | null;
   /** Waterfall subtotal category indices. */
