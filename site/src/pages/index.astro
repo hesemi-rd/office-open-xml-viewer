@@ -5,13 +5,26 @@ import CodeTabs from '../components/CodeTabs.astro';
 import Pitch from '../components/Pitch.astro';
 import Capabilities from '../components/Capabilities.astro';
 import {
+  embedSnippet,
+  scrollSnippet,
+  thumbnailSnippet,
+  navSnippet,
+  fileSnippet,
+  selectionSnippet,
   vanillaSnippet,
   reactSnippet,
   vueSnippet,
   svelteSnippet,
-  headlessSnippet,
 } from '../lib/snippets';
 
+const recipeTabs = [
+  { id: 'embed', label: 'Embed a viewer', lang: 'ts', code: embedSnippet },
+  { id: 'scroll', label: 'Scroll every page', lang: 'ts', code: scrollSnippet },
+  { id: 'thumbs', label: 'Thumbnail grid', lang: 'ts', code: thumbnailSnippet },
+  { id: 'nav', label: 'Page controls', lang: 'ts', code: navSnippet },
+  { id: 'file', label: 'Open a local file', lang: 'ts', code: fileSnippet },
+  { id: 'select', label: 'Select & copy', lang: 'ts', code: selectionSnippet },
+];
 const frameworkTabs = [
   { id: 'react', label: 'React', lang: 'tsx', code: reactSnippet },
   { id: 'vue', label: 'Vue', lang: 'vue', code: vueSnippet },
@@ -84,32 +97,29 @@ const base = import.meta.env.BASE_URL;
     </div>
   </section>
 
-  <!-- ── Code / framework integration ──────────────────────────── -->
+  <!-- ── Code / recipes ────────────────────────────────────────── -->
   <section class="section section-alt" id="code">
     <div class="wrap" data-reveal>
-      <p class="eyebrow">Framework-agnostic</p>
-      <h2 class="section-title">Drop it into your stack.</h2>
+      <p class="eyebrow">Copy-paste recipes</p>
+      <h2 class="section-title">One viewer, every use case.</h2>
       <p class="section-lead">
-        The viewers are plain TypeScript classes — no framework runtime, no peer deps. Hand one a
-        <code>&lt;canvas&gt;</code> (or a container, for Excel) and call <code>load()</code>. Here's the
-        same PowerPoint viewer in four flavours; Word and Excel follow the identical shape.
+        From a one-line embed to a fully custom UI. The built-in viewers handle the common cases;
+        the headless engines (<code>PptxPresentation</code> / <code>DocxDocument</code> /
+        <code>XlsxWorkbook</code>) render into any canvas you supply for the rest.
       </p>
       <div class="code-wrap">
-        <CodeTabs tabs={frameworkTabs} filename="Deck.tsx" />
+        <CodeTabs tabs={recipeTabs} filename="example.ts" />
       </div>
 
-      <div class="headless">
-        <div class="headless-copy">
-          <h3 class="headless-title">Or compose your own UI.</h3>
-          <p class="headless-lead">
-            Each format also ships a <strong>headless engine</strong>
-            (<code>PptxPresentation</code> / <code>DocxDocument</code> / <code>XlsxWorkbook</code>)
-            that renders into any canvas you supply. Build thumbnail grids, scroll views, or
-            master–detail panes — you own the chrome, the library owns the pixels.
-          </p>
-        </div>
+      <div class="fw-block">
+        <h3 class="fw-title">…and in your framework.</h3>
+        <p class="fw-lead">
+          The viewers are plain TypeScript classes — no framework runtime, no peer deps. Mount one
+          in a <code>ref</code> effect and tear it down on unmount. The same shape works for Word,
+          Excel and PowerPoint.
+        </p>
         <div class="code-wrap">
-          <CodeTabs tabs={[{ id: 'headless', label: 'thumbnails.ts', lang: 'ts', code: headlessSnippet }]} />
+          <CodeTabs tabs={frameworkTabs} filename="Deck.tsx" />
         </div>
       </div>
     </div>
@@ -223,24 +233,15 @@ const base = import.meta.env.BASE_URL;
   }
   .code-wrap { margin-top: 28px; }
 
-  .headless {
-    margin-top: 56px;
-    display: grid;
-    grid-template-columns: 0.85fr 1.15fr;
-    gap: 28px;
-    align-items: center;
-  }
-  .headless-title { font-size: 24px; font-weight: 700; }
-  .headless-lead {
+  .fw-block { margin-top: 56px; }
+  .fw-title { font-size: 24px; font-weight: 700; }
+  .fw-lead {
     margin-top: 12px;
+    max-width: 70ch;
     color: var(--text-dim);
     font-size: 16px;
   }
-  .headless-lead code, .headless-lead strong { color: var(--text); }
-  .headless-lead code { font-family: var(--mono); font-size: 0.9em; }
-  @media (max-width: 860px) {
-    .headless { grid-template-columns: 1fr; }
-  }
+  .fw-lead code { color: var(--text); font-family: var(--mono); font-size: 0.9em; }
 
   /* nav */
   .nav {

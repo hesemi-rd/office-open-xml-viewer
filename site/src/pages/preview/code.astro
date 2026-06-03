@@ -1,7 +1,18 @@
 ---
 import CodeTabs from '../../components/CodeTabs.astro';
-import { vanillaSnippet, reactSnippet, vueSnippet, svelteSnippet, headlessSnippet } from '../../lib/snippets';
+import {
+  embedSnippet, scrollSnippet, thumbnailSnippet, navSnippet, fileSnippet, selectionSnippet,
+  vanillaSnippet, reactSnippet, vueSnippet, svelteSnippet,
+} from '../../lib/snippets';
 import '../../styles/global.css';
+const recipeTabs = [
+  { id: 'embed', label: 'Embed a viewer', lang: 'ts', code: embedSnippet },
+  { id: 'scroll', label: 'Scroll every page', lang: 'ts', code: scrollSnippet },
+  { id: 'thumbs', label: 'Thumbnail grid', lang: 'ts', code: thumbnailSnippet },
+  { id: 'nav', label: 'Page controls', lang: 'ts', code: navSnippet },
+  { id: 'file', label: 'Open a local file', lang: 'ts', code: fileSnippet },
+  { id: 'select', label: 'Select & copy', lang: 'ts', code: selectionSnippet },
+];
 const frameworkTabs = [
   { id: 'react', label: 'React', lang: 'tsx', code: reactSnippet },
   { id: 'vue', label: 'Vue', lang: 'vue', code: vueSnippet },
@@ -17,8 +28,8 @@ const frameworkTabs = [
   </head>
   <body style="padding:24px;">
     <div style="max-width:900px;margin:0 auto;display:grid;gap:28px;">
+      <CodeTabs tabs={recipeTabs} filename="example.ts" />
       <CodeTabs tabs={frameworkTabs} filename="Deck.tsx" />
-      <CodeTabs tabs={[{ id: 'headless', label: 'thumbnails.ts', lang: 'ts', code: headlessSnippet }]} />
     </div>
   </body>
 </html>
