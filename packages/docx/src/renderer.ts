@@ -3,7 +3,20 @@ import type {
   DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
-import { buildCustomPath, buildShapePath, hexToRgba, resolveFill } from '@silurus/ooxml-core';
+import {
+  buildCustomPath,
+  buildShapePath,
+  hexToRgba,
+  resolveFill,
+  parseMathFont,
+  parseMathConstants,
+  layoutMath,
+  renderMathBox,
+  defaultMathFontUrl,
+  DEFAULT_MATH_FONT_FAMILY,
+  type MathFont,
+  type MathConstants,
+} from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -16,6 +29,64 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
 
 // 1pt = 96/72 CSS px at screen
 const PT_TO_PX = 96 / 72;
+
+// ── Math (OMML) resources ──────────────────────────────────────────────────
+// The math font is parsed once and shared. Layout reads it synchronously, so it
+// must be loaded (via loadMathResources) before computePages / renderPage run.
+// Loading is skipped entirely for documents without equations.
+interface MathResources {
+  font: MathFont;
+  consts: MathConstants;
+}
+let mathResources: MathResources | null = null;
+let mathResourcesPromise: Promise<MathResources> | null = null;
+
+/** True if any run in the body (incl. tables) is an OMML equation. */
+export function documentHasMath(body: BodyElement[]): boolean {
+  const runsHaveMath = (runs: DocRun[]) => runs.some((r) => r.type === 'math');
+  const walk = (el: BodyElement): boolean => {
+    if ('runs' in el && runsHaveMath((el as DocParagraph).runs)) return true;
+    if ('rows' in el) {
+      for (const row of (el as DocTable).rows) {
+        for (const cell of row.cells) {
+          for (const child of cell.content) {
+            if (walk(child as BodyElement)) return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+  return body.some(walk);
+}
+
+/**
+ * Fetch + parse the default math font and register it for `fillText`. Idempotent
+ * and safe to call repeatedly. Call once after parsing when the document has math.
+ */
+export async function loadMathResources(url: string = defaultMathFontUrl): Promise<MathResources> {
+  if (mathResources) return mathResources;
+  if (!mathResourcesPromise) {
+    mathResourcesPromise = (async () => {
+      const buf = await (await fetch(url)).arrayBuffer();
+      const fonts = (globalThis as { fonts?: FontFaceSet }).fonts;
+      if (typeof FontFace !== 'undefined' && fonts) {
+        try {
+          const face = new FontFace(DEFAULT_MATH_FONT_FAMILY, buf);
+          await face.load();
+          fonts.add(face);
+        } catch {
+          // Registration failure (e.g. no FontFaceSet): glyphs fall back to a
+          // system font; layout (which uses parsed metrics) is unaffected.
+        }
+      }
+      const font = parseMathFont(buf);
+      mathResources = { font, consts: parseMathConstants(font) };
+      return mathResources;
+    })();
+  }
+  return mathResourcesPromise;
+}
 
 /** Anchor image float that affects text wrap on the current page. */
 interface FloatRect {
@@ -1019,6 +1090,26 @@ function renderParagraph(
         x += seg.measuredWidth;
         continue;
       }
+      if ('mathNodes' in seg) {
+        if (!dryRun && mathResources) {
+          const box = layoutMath(seg.mathNodes, {
+            font: mathResources.font,
+            consts: mathResources.consts,
+            fontSizePx: seg.fontSize * scale,
+            level: seg.display ? 'display' : 'text',
+          });
+          renderMathBox(
+            ctx,
+            box,
+            x,
+            baseline,
+            seg.color ? `#${seg.color}` : defaultColor,
+            DEFAULT_MATH_FONT_FAMILY,
+          );
+        }
+        x += seg.measuredWidth;
+        continue;
+      }
       const s = seg as LayoutTextSeg;
       if (!dryRun) {
         const effSizePx = calcEffectiveFontPx(s, scale);
@@ -1183,6 +1274,18 @@ interface LayoutImageSeg {
   measuredWidth: number;
 }
 
+/** An inline OMML equation. Measured + drawn via the core math engine. */
+interface LayoutMathSeg {
+  mathNodes: import('@silurus/ooxml-core').MathNode[];
+  display: boolean;
+  fontSize: number;  // pt
+  color: string | null;
+  measuredWidth: number;
+  /** px ascent/descent of the laid-out box at scale, cached during measurement. */
+  mathAscent: number;
+  mathDescent: number;
+}
+
 /** Sentinel that forces a new line when encountered in layoutLines. */
 interface LayoutLineBreak {
   lineBreak: true;
@@ -1190,10 +1293,10 @@ interface LayoutLineBreak {
   measuredWidth: 0;
 }
 
-type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutLineBreak | LayoutTabSeg;
+type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutLineBreak | LayoutTabSeg;
 
 interface LayoutLine {
-  segments: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[];
+  segments: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[];
   height: number;  // pt — max fontSize on line (for empty-line sizing fallback)
   ascent: number;  // px — fontBoundingBoxAscent (font-metric, stable per font+size)
   descent: number; // px — fontBoundingBoxDescent
@@ -1297,6 +1400,17 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       const f = run as unknown as FieldRun & { type: 'field' };
       const text = resolveFieldText(f, state);
       if (text) pushTextPiece(text, f, f.vertAlign);
+    } else if (run.type === 'math') {
+      const fontSize = findNearbyFontSize(runs, runs.indexOf(run));
+      segs.push({
+        mathNodes: run.nodes,
+        display: run.display,
+        fontSize,
+        color: null,
+        measuredWidth: 0,
+        mathAscent: 0,
+        mathDescent: 0,
+      });
     }
   }
   return segs;
@@ -1385,7 +1499,7 @@ function layoutLines(
   fontFamilyClasses: Record<string, string> = {},
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
-  let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
+  let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
   // Sum of trailing-space widths of every text token on the current line.
   // Used for two things:
@@ -1505,7 +1619,7 @@ function layoutLines(
   };
 
   const addToLine = (
-    s: LayoutTextSeg | LayoutImageSeg | LayoutTabSeg,
+    s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
     w: number,
     h: number,
     asc: number,
@@ -1518,7 +1632,7 @@ function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
-    if (!('isTab' in s) && !('dataUrl' in s)) {
+    if (!('isTab' in s) && !('dataUrl' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
@@ -1586,6 +1700,24 @@ function layoutLines(
       seg.measuredWidth = w;
       if (currentLine.length > 0 && currentWidth + w > availW()) flush();
       addToLine(seg, w, h, asc, 0);
+      continue;
+    }
+
+    // ── Math segment ─────────────────────────────────────
+    if ('mathNodes' in seg) {
+      if (!mathResources) { seg.measuredWidth = 0; continue; }
+      const box = layoutMath(seg.mathNodes, {
+        font: mathResources.font,
+        consts: mathResources.consts,
+        fontSizePx: seg.fontSize * scale,
+        level: seg.display ? 'display' : 'text',
+      });
+      seg.measuredWidth = box.width;
+      seg.mathAscent = box.ascent;
+      seg.mathDescent = box.descent;
+      if (currentLine.length > 0 && currentWidth + box.width > availW()) flush();
+      // line-height tracks the un-scaled pt size; ascent/descent come from the box.
+      addToLine(seg, box.width, seg.fontSize, box.ascent, box.descent);
       continue;
     }
 

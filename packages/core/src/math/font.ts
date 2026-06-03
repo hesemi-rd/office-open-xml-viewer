@@ -93,6 +93,19 @@ function parseCmap(dv: DataView, base: number): Map<number, number> {
   return best >= 0 ? readSubtable(dv, best) : new Map();
 }
 
+/**
+ * URL of the bundled default math font (Latin Modern Math, OFL). Resolved relative
+ * to this module so bundlers (Vite/Rollup) fingerprint and serve the asset, and Node
+ * gets a `file://` URL. Callers fetch this and pass the bytes to {@link parseMathFont}.
+ */
+export const defaultMathFontUrl: string = new URL(
+  '../../assets/LatinModernMath.otf',
+  import.meta.url,
+).href;
+
+/** Family name under which the default math font is registered for `ctx.fillText`. */
+export const DEFAULT_MATH_FONT_FAMILY = 'LatinModernMath';
+
 export function parseMathFont(buffer: ArrayBuffer): MathFont {
   const dv = new DataView(buffer);
   const dir = tableDirectory(dv);
