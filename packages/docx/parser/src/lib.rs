@@ -6,6 +6,7 @@ mod styles;
 mod numbering;
 mod parser;
 mod markdown;
+mod math;
 
 #[wasm_bindgen]
 pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> String {

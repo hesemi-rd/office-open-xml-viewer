@@ -1,5 +1,7 @@
 // ===== Output JSON model (mirrors Rust types) =====
 
+import type { MathNode } from '@silurus/ooxml-core';
+
 export interface Document {
   section: SectionProps;
   body: BodyElement[];
@@ -192,7 +194,8 @@ export type DocRun =
   | { type: 'image' } & ImageRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
-  | { type: 'shape' } & ShapeRun;
+  | { type: 'shape' } & ShapeRun
+  | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number };
 
 export type PathCmd =
   | { cmd: 'moveTo'; x: number; y: number }

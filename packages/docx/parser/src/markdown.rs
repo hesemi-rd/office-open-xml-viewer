@@ -110,6 +110,13 @@ fn render_runs(runs: &[DocRun]) -> String {
                 // No readable text; intentionally dropped. Use docx_get_images
                 // / docx_get_shapes when you need metadata.
             }
+            DocRun::Math { nodes, .. } => {
+                // Surface the equation's literal characters as inline text.
+                let text = crate::math::nodes_to_text(nodes);
+                if !text.is_empty() {
+                    out.push_str(&escape_inline_md(&text));
+                }
+            }
         }
     }
     out

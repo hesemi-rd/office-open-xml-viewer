@@ -290,6 +290,14 @@ pub enum DocRun {
     Break { break_type: BreakType },
     Field(FieldRun),
     Shape(ShapeRun),
+    /// An OMML equation (`m:oMath`). `display` = block (`m:oMathPara`).
+    #[serde(rename_all = "camelCase")]
+    Math {
+        nodes: Vec<crate::math::MathNode>,
+        display: bool,
+        /// Resolved paragraph font size (pt) so the equation matches surrounding text.
+        font_size: f64,
+    },
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image

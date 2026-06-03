@@ -3,7 +3,17 @@ import type {
   DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
-import { buildCustomPath, buildShapePath, hexToRgba, resolveFill } from '@silurus/ooxml-core';
+import {
+  buildCustomPath,
+  buildShapePath,
+  hexToRgba,
+  resolveFill,
+  mathToMathML,
+  loadMathJax,
+  mathMLToSvg,
+  recolorSvg,
+} from '@silurus/ooxml-core';
+import type { MathNode } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -16,6 +26,82 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
 
 // 1pt = 96/72 CSS px at screen
 const PT_TO_PX = 96 / 72;
+
+// ── Math (OMML) rendering via MathJax ───────────────────────────────────────
+// Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to
+// an <img> once (async, before pagination). Layout reads cached em-extents
+// synchronously; drawing blits the image. Skipped entirely for math-free documents.
+interface MathRender {
+  img: CanvasImageSource;
+  /** baseline-relative extents in em (1em = the equation's font size). */
+  widthEm: number;
+  ascentEm: number;
+  descentEm: number;
+}
+// Keyed by the run's MathNode[] reference, which is stable from parse through render.
+const mathRenders = new WeakMap<MathNode[], MathRender>();
+
+/** True if any run in the body (incl. tables) is an OMML equation. */
+export function documentHasMath(body: BodyElement[]): boolean {
+  return collectMathRuns(body).length > 0;
+}
+
+function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boolean }[] {
+  const found: { nodes: MathNode[]; display: boolean }[] = [];
+  const fromRuns = (runs: DocRun[]) => {
+    for (const r of runs) {
+      if (r.type === 'math') found.push({ nodes: r.nodes, display: r.display });
+    }
+  };
+  const walk = (el: BodyElement) => {
+    if ('runs' in el) fromRuns((el as DocParagraph).runs);
+    if ('rows' in el) {
+      for (const row of (el as DocTable).rows) {
+        for (const cell of row.cells) {
+          for (const child of cell.content) walk(child as BodyElement);
+        }
+      }
+    }
+  };
+  body.forEach(walk);
+  return found;
+}
+
+/** Rasterize an SVG string to an <img> (browser). Resolves once decoded. */
+function svgToImage(svg: string): Promise<HTMLImageElement> {
+  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const img = new Image();
+  return new Promise((resolve, reject) => {
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+/**
+ * Convert + rasterize every equation in the document. Must complete before
+ * pagination/render (which read extents synchronously). Idempotent per equation.
+ */
+export async function prepareMathRuns(body: BodyElement[]): Promise<void> {
+  const runs = collectMathRuns(body);
+  if (runs.length === 0) return;
+  await loadMathJax();
+  for (const r of runs) {
+    if (mathRenders.has(r.nodes)) continue;
+    try {
+      const out = await mathMLToSvg(mathToMathML(r.nodes, r.display));
+      const img = await svgToImage(recolorSvg(out.svg, '#000000'));
+      mathRenders.set(r.nodes, {
+        img,
+        widthEm: out.widthEm,
+        ascentEm: out.ascentEm,
+        descentEm: out.descentEm,
+      });
+    } catch {
+      // Conversion failure: leave the equation unrendered (zero-size) rather than throw.
+    }
+  }
+}
 
 /** Anchor image float that affects text wrap on the current page. */
 interface FloatRect {
@@ -1019,6 +1105,18 @@ function renderParagraph(
         x += seg.measuredWidth;
         continue;
       }
+      if ('mathNodes' in seg) {
+        const render = mathRenders.get(seg.mathNodes);
+        if (!dryRun && render) {
+          const emPx = seg.fontSize * scale;
+          const w = render.widthEm * emPx;
+          const h = (render.ascentEm + render.descentEm) * emPx;
+          const top = baseline - render.ascentEm * emPx;
+          ctx.drawImage(render.img, x, top, w, h);
+        }
+        x += seg.measuredWidth;
+        continue;
+      }
       const s = seg as LayoutTextSeg;
       if (!dryRun) {
         const effSizePx = calcEffectiveFontPx(s, scale);
@@ -1183,6 +1281,18 @@ interface LayoutImageSeg {
   measuredWidth: number;
 }
 
+/** An inline OMML equation. Measured + drawn via the core math engine. */
+interface LayoutMathSeg {
+  mathNodes: import('@silurus/ooxml-core').MathNode[];
+  display: boolean;
+  fontSize: number;  // pt
+  color: string | null;
+  measuredWidth: number;
+  /** px ascent/descent of the laid-out box at scale, cached during measurement. */
+  mathAscent: number;
+  mathDescent: number;
+}
+
 /** Sentinel that forces a new line when encountered in layoutLines. */
 interface LayoutLineBreak {
   lineBreak: true;
@@ -1190,10 +1300,10 @@ interface LayoutLineBreak {
   measuredWidth: 0;
 }
 
-type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutLineBreak | LayoutTabSeg;
+type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutLineBreak | LayoutTabSeg;
 
 interface LayoutLine {
-  segments: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[];
+  segments: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[];
   height: number;  // pt — max fontSize on line (for empty-line sizing fallback)
   ascent: number;  // px — fontBoundingBoxAscent (font-metric, stable per font+size)
   descent: number; // px — fontBoundingBoxDescent
@@ -1297,6 +1407,19 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       const f = run as unknown as FieldRun & { type: 'field' };
       const text = resolveFieldText(f, state);
       if (text) pushTextPiece(text, f, f.vertAlign);
+    } else if (run.type === 'math') {
+      // The parser resolves the paragraph font size; fall back to a nearby run only
+      // if it is somehow absent.
+      const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
+      segs.push({
+        mathNodes: run.nodes,
+        display: run.display,
+        fontSize,
+        color: null,
+        measuredWidth: 0,
+        mathAscent: 0,
+        mathDescent: 0,
+      });
     }
   }
   return segs;
@@ -1385,7 +1508,7 @@ function layoutLines(
   fontFamilyClasses: Record<string, string> = {},
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
-  let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
+  let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
   // Sum of trailing-space widths of every text token on the current line.
   // Used for two things:
@@ -1505,7 +1628,7 @@ function layoutLines(
   };
 
   const addToLine = (
-    s: LayoutTextSeg | LayoutImageSeg | LayoutTabSeg,
+    s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
     w: number,
     h: number,
     asc: number,
@@ -1518,7 +1641,7 @@ function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
-    if (!('isTab' in s) && !('dataUrl' in s)) {
+    if (!('isTab' in s) && !('dataUrl' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
@@ -1586,6 +1709,22 @@ function layoutLines(
       seg.measuredWidth = w;
       if (currentLine.length > 0 && currentWidth + w > availW()) flush();
       addToLine(seg, w, h, asc, 0);
+      continue;
+    }
+
+    // ── Math segment ─────────────────────────────────────
+    if ('mathNodes' in seg) {
+      const render = mathRenders.get(seg.mathNodes);
+      if (!render) { seg.measuredWidth = 0; continue; }
+      const emPx = seg.fontSize * scale;
+      const w = render.widthEm * emPx;
+      const asc = render.ascentEm * emPx;
+      const desc = render.descentEm * emPx;
+      seg.measuredWidth = w;
+      seg.mathAscent = asc;
+      seg.mathDescent = desc;
+      if (currentLine.length > 0 && currentWidth + w > availW()) flush();
+      addToLine(seg, w, seg.fontSize, asc, desc);
       continue;
     }
 

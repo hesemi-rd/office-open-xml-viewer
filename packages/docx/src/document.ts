@@ -2,7 +2,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, Document, RenderPageOptions, WorkerResponse } from './types';
-import { computePages, renderDocumentToCanvas } from './renderer';
+import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns } from './renderer';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
  *  PPTX map — these are the well-known free webfont alternatives Microsoft
@@ -61,6 +61,11 @@ export class DocxDocument {
         [doc._document?.majorFont, doc._document?.minorFont],
         DOCX_GOOGLE_FONTS,
       );
+    }
+    // Equations are converted + rasterized before pagination (which reads their
+    // extents synchronously).
+    if (doc._document && documentHasMath(doc._document.body)) {
+      await prepareMathRuns(doc._document.body);
     }
     return doc;
   }
