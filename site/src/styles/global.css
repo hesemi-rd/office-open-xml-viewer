@@ -231,7 +231,10 @@ h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
 .demo-status { font-family: var(--mono); font-size: 13px; color: var(--text-dim); padding: 36px; text-align: center; }
 
 /* single-viewer demo */
-.demo-stage { padding: 22px; display: flex; justify-content: center; max-height: 560px; overflow: auto; }
+/* Block (not flex) scroll container + text-align centres the viewer's
+ * inline-block wrapper, and keeps the top/bottom padding symmetric — a flex
+ * scroll container drops the padding-bottom from the scroll area. */
+.demo-stage { padding: 22px; max-height: 560px; overflow: auto; text-align: center; }
 .demo-stage .demo-page { width: 100%; max-width: 760px; height: auto; }
 
 /* scroll demo */
