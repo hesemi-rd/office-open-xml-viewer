@@ -1096,7 +1096,10 @@ function renderParagraph(
       const seg = line.segments[si];
       const isLastSeg = si === line.segments.length - 1;
       if ('isTab' in seg) {
-        // Tabs render as blank space; width was resolved during layout.
+        // Tabs render as blank space, optionally filled with a leader (TOC dots etc.).
+        if (!dryRun && seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
+          drawTabLeader(ctx, seg.leader, x, baseline, seg.measuredWidth, seg.fontSize * scale, defaultColor);
+        }
         x += seg.measuredWidth;
         continue;
       }
@@ -1264,6 +1267,8 @@ interface LayoutTabSeg {
   isTab: true;
   fontSize: number;  // pt — for line-height purposes
   measuredWidth: number;
+  /** tab leader to fill the gap (e.g. TOC dot leaders); set during layout. */
+  leader?: TabStop['leader'];
 }
 
 interface LayoutImageSeg {
@@ -1658,6 +1663,15 @@ function layoutLines(
     return ctx.measureText(s.text);
   };
 
+  // Width of a queued segment, for right/center tab look-ahead.
+  const tabFollowWidth = (q: LayoutSeg): number => {
+    if ('isTab' in q) return q.measuredWidth || 0;
+    if ('dataUrl' in q) return q.widthPt * scale;
+    if ('mathNodes' in q) return q.measuredWidth || 0;
+    if ('lineBreak' in q) return 0;
+    return measureText(q).width;
+  };
+
   // Use an explicit queue so CJK split-tails can be re-queued
   const queue: LayoutSeg[] = [...segs];
 
@@ -1676,9 +1690,49 @@ function layoutLines(
       const absFromParaX = currentWidth + (isFirst ? firstIndent : 0);
       // Find the next tab stop strictly greater than the current position
       const stop = tabStops.find((t) => t.pos * scale > absFromParaX);
+      // Right/center/decimal tab: place the tab + its trailing content (up to the next
+      // tab / line end) so the content ends at / centers on the stop, and commit that
+      // content directly so the normal wrap check doesn't push it past the stop
+      // (ECMA-376 §17.3.1.37). This is what makes TOC "heading …… page" lines work.
+      if (stop && stop.alignment !== 'left' && stop.alignment !== 'bar' && stop.alignment !== 'clear') {
+        const stopX = stop.pos * scale;
+        seg.leader = stop.leader;
+        let followW = 0;
+        for (const q of queue) {
+          if ('isTab' in q || 'lineBreak' in q) break;
+          followW += tabFollowWidth(q);
+        }
+        const frac = stop.alignment === 'center' ? 0.5 : 1;
+        let tabW = stopX - absFromParaX - followW * frac;
+        if (tabW <= 0) tabW = seg.fontSize * scale * 0.25;
+        seg.measuredWidth = tabW;
+        addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * 0.8, seg.fontSize * scale * 0.2);
+        // Commit the trailing content onto this line without a wrap re-check.
+        while (queue.length > 0) {
+          const q = queue[0];
+          if ('isTab' in q || 'lineBreak' in q) break;
+          queue.shift();
+          if ('dataUrl' in q) {
+            const w = q.widthPt * scale;
+            q.measuredWidth = w;
+            addToLine(q, w, q.heightPt, q.heightPt * scale, 0);
+          } else if ('mathNodes' in q) {
+            addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
+          } else {
+            const m = measureText(q);
+            q.measuredWidth = m.width;
+            const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
+            const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
+            addToLine(q, m.width, q.fontSize, asc, desc);
+          }
+        }
+        continue;
+      }
+
       let tabWidth: number;
       if (stop) {
         tabWidth = stop.pos * scale - absFromParaX;
+        seg.leader = stop.leader;
       } else {
         // Round up to the next DEFAULT_TAB_PT boundary
         const nextDefault = Math.ceil((absFromParaX + 0.01) / (DEFAULT_TAB_PT * scale)) * (DEFAULT_TAB_PT * scale);
@@ -1815,6 +1869,40 @@ function layoutLines(
   if (currentLine.length > 0) flush();
 
   return lines;
+}
+
+/** Fill a tab gap with its leader characters (e.g. TOC dot leaders, ECMA-376 §17.3.1.37). */
+function drawTabLeader(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  leader: NonNullable<LayoutTabSeg['leader']>,
+  x: number,
+  baseline: number,
+  width: number,
+  fontPx: number,
+  color: string,
+): void {
+  const ch =
+    leader === 'hyphen'
+      ? '-'
+      : leader === 'underscore' || leader === 'heavy'
+        ? '_'
+        : leader === 'middleDot'
+          ? '·'
+          : '.';
+  ctx.save();
+  ctx.font = `${fontPx}px serif`;
+  ctx.fillStyle = color;
+  const chW = ctx.measureText(ch).width;
+  if (chW > 0) {
+    // Dots sit on a loose grid; other leaders are drawn solid.
+    const step = leader === 'dot' || leader === 'middleDot' ? chW * 1.5 : chW;
+    const margin = chW * 0.5;
+    const end = x + width - margin;
+    for (let cx = x + margin; cx <= end; cx += step) {
+      ctx.fillText(ch, cx, baseline);
+    }
+  }
+  ctx.restore();
 }
 
 function renderInlineImage(
