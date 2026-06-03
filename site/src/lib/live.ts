@@ -1,86 +1,76 @@
 // Client-side mounts for the three real viewers, used by the Live Showcase.
-// Each mount returns a `destroy()` so the showcase can swap formats cleanly.
-import { PptxViewer } from '@silurus/ooxml-pptx';
-import { DocxViewer } from '@silurus/ooxml-docx';
+// PPTX/DOCX render every page/slide stacked on a backdrop (Storybook-style),
+// scrolled vertically. XLSX uses its own full viewer. Each mount returns a
+// destroy() so the showcase can swap formats cleanly.
+import { PptxPresentation } from '@silurus/ooxml-pptx';
+import { DocxDocument } from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
 
 export type LiveController = { destroy: () => void };
 
-function controlBar(): { bar: HTMLDivElement; prev: HTMLButtonElement; next: HTMLButtonElement; info: HTMLSpanElement } {
-  const bar = document.createElement('div');
-  bar.className = 'lv-bar';
-  const prev = document.createElement('button');
-  prev.className = 'lv-btn';
-  prev.textContent = '‹';
-  prev.disabled = true;
-  const next = document.createElement('button');
-  next.className = 'lv-btn';
-  next.textContent = '›';
-  next.disabled = true;
-  const info = document.createElement('span');
-  info.className = 'lv-info';
-  info.textContent = 'Loading…';
-  bar.append(prev, info, next);
-  return { bar, prev, next, info };
-}
+const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
 
-function stage(fill = false): HTMLDivElement {
+function scroller(): HTMLDivElement {
   const s = document.createElement('div');
-  s.className = fill ? 'lv-stage lv-stage--fill' : 'lv-stage';
+  s.className = 'lv-scroll';
   return s;
 }
 
-export function mountPptx(root: HTMLElement, url: string, width = 1280): LiveController {
-  root.innerHTML = '';
-  const { bar, prev, next, info } = controlBar();
-  const st = stage(true);
-  const canvas = document.createElement('canvas');
-  st.appendChild(canvas);
-  root.append(bar, st);
-
-  const viewer = new PptxViewer(canvas, {
-    width,
-    useGoogleFonts: true,
-    enableTextSelection: true,
-    onSlideChange: (idx, total) => {
-      info.textContent = `Slide ${idx + 1} / ${total}`;
-      prev.disabled = idx === 0;
-      next.disabled = idx === total - 1;
-    },
-    onError: (err) => { info.textContent = `Error: ${err.message}`; },
-  });
-  prev.addEventListener('click', () => void viewer.prevSlide());
-  next.addEventListener('click', () => void viewer.nextSlide());
-  viewer.load(url).catch((e: unknown) => { info.textContent = msg(e); });
-
-  return { destroy: () => { root.innerHTML = ''; } };
+function statusLine(text: string): HTMLDivElement {
+  const d = document.createElement('div');
+  d.className = 'lv-status';
+  d.textContent = text;
+  return d;
 }
 
-export function mountDocx(root: HTMLElement, url: string, width = 760): LiveController {
+export function mountPptx(root: HTMLElement, url: string): LiveController {
   root.innerHTML = '';
-  const { bar, prev, next, info } = controlBar();
-  const st = stage();
-  const canvas = document.createElement('canvas');
-  st.appendChild(canvas);
-  root.append(bar, st);
+  const sc = scroller();
+  const status = statusLine('Parsing…');
+  sc.appendChild(status);
+  root.append(sc);
+  let destroyed = false;
 
-  const viewer = new DocxViewer(canvas, {
-    width,
-    dpr: window.devicePixelRatio,
-    useGoogleFonts: true,
-    enableTextSelection: true,
-  });
-  const sync = () => {
-    const total = viewer.pageCount;
-    info.textContent = total ? `Page ${viewer.currentPage + 1} / ${total}` : 'Loading…';
-    prev.disabled = viewer.currentPage <= 0;
-    next.disabled = viewer.currentPage >= total - 1;
-  };
-  prev.addEventListener('click', () => { void viewer.prevPage().then(sync); });
-  next.addEventListener('click', () => { void viewer.nextPage().then(sync); });
-  viewer.load(url).then(sync).catch((e: unknown) => { info.textContent = msg(e); });
+  PptxPresentation.load(url, { useGoogleFonts: true })
+    .then(async (deck) => {
+      if (destroyed) return;
+      status.remove();
+      for (let i = 0; i < deck.slideCount; i++) {
+        if (destroyed) return;
+        const canvas = document.createElement('canvas');
+        canvas.className = 'lv-page';
+        sc.appendChild(canvas);
+        await deck.renderSlide(canvas, i, { width: 1280, dpr: DPR() });
+      }
+    })
+    .catch((e: unknown) => { status.textContent = msg(e); });
 
-  return { destroy: () => { root.innerHTML = ''; } };
+  return { destroy: () => { destroyed = true; root.innerHTML = ''; } };
+}
+
+export function mountDocx(root: HTMLElement, url: string): LiveController {
+  root.innerHTML = '';
+  const sc = scroller();
+  const status = statusLine('Parsing…');
+  sc.appendChild(status);
+  root.append(sc);
+  let destroyed = false;
+
+  DocxDocument.load(url, { useGoogleFonts: true })
+    .then(async (doc) => {
+      if (destroyed) return;
+      status.remove();
+      for (let i = 0; i < doc.pageCount; i++) {
+        if (destroyed) return;
+        const canvas = document.createElement('canvas');
+        canvas.className = 'lv-page';
+        sc.appendChild(canvas);
+        await doc.renderPage(canvas, i, { width: 1000, dpr: DPR() });
+      }
+    })
+    .catch((e: unknown) => { status.textContent = msg(e); });
+
+  return { destroy: () => { destroyed = true; root.innerHTML = ''; } };
 }
 
 export function mountXlsx(root: HTMLElement, url: string): LiveController {

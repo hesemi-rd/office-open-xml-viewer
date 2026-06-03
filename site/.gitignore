@@ -2,5 +2,6 @@
 .astro/
 dist/
 
-# copied at predev/prebuild from packages/*/public/demo
+# copied at predev/prebuild (samples from packages/*/public/demo, icon from docs/images)
 public/samples/
+public/icon.png

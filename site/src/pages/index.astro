@@ -18,6 +18,7 @@ const frameworkTabs = [
   { id: 'svelte', label: 'Svelte', lang: 'svelte', code: svelteSnippet },
   { id: 'vanilla', label: 'Vanilla', lang: 'ts', code: vanillaSnippet },
 ];
+const base = import.meta.env.BASE_URL;
 ---
 <Base>
   <!-- ── Nav ───────────────────────────────────────────────────── -->
@@ -58,19 +59,10 @@ const frameworkTabs = [
       </div>
       <div class="hero-art">
         <div class="hero-art-glow"></div>
-        <canvas id="hero3d" aria-hidden="true"></canvas>
+        <img class="hero-icon" src={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} alt="@silurus/ooxml" width="2048" height="2048" />
       </div>
     </div>
   </header>
-
-  <script>
-    import { mountHero3D } from '../lib/hero3d';
-    const c = document.getElementById('hero3d');
-    if (c) {
-      const url = `${import.meta.env.BASE_URL}cube3.glb`.replace(/([^:])\/\/+/g, '$1/');
-      mountHero3D(c as HTMLCanvasElement, url);
-    }
-  </script>
 
   <!-- ── Pitch ─────────────────────────────────────────────────── -->
   <section class="section pitch-section">
@@ -173,29 +165,30 @@ const frameworkTabs = [
   }
   .hero-art {
     position: relative;
-    aspect-ratio: 1 / 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     min-height: 0;
   }
-  .hero-art canvas {
+  .hero-icon {
     position: relative;
     z-index: 1;
-    width: 100%;
-    height: 100%;
+    width: 78%;
+    max-width: 360px;
+    height: auto;
     display: block;
-    opacity: 0;
-    transition: opacity 0.8s ease;
-    cursor: grab;
+    filter: drop-shadow(0 24px 60px rgba(0, 0, 0, 0.55));
   }
-  .hero-art canvas.ready { opacity: 1; }
   .hero-art-glow {
     position: absolute;
-    inset: 8% 8% 8% 8%;
-    background: radial-gradient(closest-side, rgba(94, 234, 212, 0.16), rgba(129, 140, 248, 0.1) 55%, transparent 75%);
-    filter: blur(8px);
+    inset: 12%;
+    background: radial-gradient(closest-side, rgba(94, 234, 212, 0.18), rgba(129, 140, 248, 0.12) 55%, transparent 75%);
+    filter: blur(20px);
   }
   @media (max-width: 860px) {
     .hero-grid { grid-template-columns: 1fr; }
-    .hero-art { max-width: 420px; margin: 8px auto 0; width: 100%; }
+    .hero-art { margin: 8px auto 0; }
+    .hero-icon { width: 56%; max-width: 280px; }
   }
   .hero-title {
     font-size: clamp(34px, 6vw, 68px);
