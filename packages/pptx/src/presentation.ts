@@ -25,18 +25,9 @@ const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-/** Options for {@link PptxPresentation.load}. Extends the shared
- *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export interface LoadOptions extends CoreLoadOptions {
-  /**
-   * Override the per-entry ZIP decompression cap (bytes). Defaults to
-   * 512 MiB — matches `MAX_ZIP_ENTRY_BYTES` in the Rust parser. Raising
-   * this past 4 GiB requires a 64-bit WASM build; lowering it makes the
-   * loader reject otherwise-legitimate large media decks. Zero or
-   * negative values fall back to the default.
-   */
-  maxZipEntryBytes?: number;
-}
+/** Options for {@link PptxPresentation.load}. The shared load-options type
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
+export type LoadOptions = CoreLoadOptions;
 
 /** Options for rendering a single slide onto a canvas. */
 export interface RenderSlideOptions {

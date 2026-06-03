@@ -42,7 +42,7 @@ export interface RenderContext {
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
-export interface TextRunInfo {
+export interface PptxTextRunInfo {
   text: string;
   /** X position in CSS px, relative to the shape's top-left corner. */
   inShapeX: number;
@@ -73,7 +73,7 @@ export interface TextRunInfo {
   textBodyRotation?: number;
 }
 
-export type TextRunCallback = (run: TextRunInfo) => void;
+export type TextRunCallback = (run: PptxTextRunInfo) => void;
 
 /**
  * Convert EMU to canvas pixels.

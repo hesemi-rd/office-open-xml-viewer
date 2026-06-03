@@ -1,6 +1,6 @@
 import type {
   Document, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
 import {
@@ -641,7 +641,7 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
  *  ruby-bearing and ruby-free lines line up on the same baseline grid. */
 function paragraphHasRuby(para: DocParagraph): boolean {
   for (const run of para.runs) {
-    if (run.type === 'text' && (run as unknown as TextRun).ruby) return true;
+    if (run.type === 'text' && (run as unknown as DocxTextRun).ruby) return true;
   }
   return false;
 }
@@ -1342,17 +1342,17 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const pushTextPiece = (
     text: string,
-    base: TextRun | FieldRun,
+    base: DocxTextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
   ) => {
     const displayText = (base.allCaps || base.smallCaps) ? text.toUpperCase() : text;
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
     // the annotation only to the first emitted segment.
-    const ruby = (base as TextRun).ruby
-      ? { text: (base as TextRun).ruby!.text, fontSizePt: (base as TextRun).ruby!.fontSizePt }
+    const ruby = (base as DocxTextRun).ruby
+      ? { text: (base as DocxTextRun).ruby!.text, fontSizePt: (base as DocxTextRun).ruby!.fontSizePt }
       : undefined;
-    const revision = (base as TextRun).revision;
+    const revision = (base as DocxTextRun).revision;
     let firstSeg = true;
     for (const word of splitTextForLayout(displayText)) {
       segs.push({
@@ -1378,7 +1378,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
 
   for (const run of runs) {
     if (run.type === 'text') {
-      const t = run as unknown as TextRun & { type: 'text' };
+      const t = run as unknown as DocxTextRun & { type: 'text' };
       // Split on tab chars so tab alignment can be resolved during layout.
       const parts = t.text.split('\t');
       for (let i = 0; i < parts.length; i++) {
@@ -1434,12 +1434,12 @@ function findNearbyFontSize(runs: DocRun[], idx: number): number {
   // Look backwards then forwards for a text or field run to get font size
   for (let i = idx - 1; i >= 0; i--) {
     const r = runs[i];
-    if (r.type === 'text') return (r as unknown as TextRun).fontSize;
+    if (r.type === 'text') return (r as unknown as DocxTextRun).fontSize;
     if (r.type === 'field') return (r as unknown as FieldRun).fontSize;
   }
   for (let i = idx + 1; i < runs.length; i++) {
     const r = runs[i];
-    if (r.type === 'text') return (r as unknown as TextRun).fontSize;
+    if (r.type === 'text') return (r as unknown as DocxTextRun).fontSize;
     if (r.type === 'field') return (r as unknown as FieldRun).fontSize;
   }
   return 10; // pt fallback
@@ -2807,7 +2807,7 @@ function normalizeFontFamily(
 function getDefaultFontSize(para: DocParagraph): number {
   for (const run of para.runs) {
     if (run.type === 'text') {
-      return (run as unknown as TextRun).fontSize;
+      return (run as unknown as DocxTextRun).fontSize;
     }
     if (run.type === 'field') {
       return (run as unknown as FieldRun).fontSize;
@@ -2824,7 +2824,7 @@ function getDefaultFontSize(para: DocParagraph): number {
  *  Meiryo's tall line box rather than the generic fallback's. */
 function getDefaultFontFamily(para: DocParagraph): string | null {
   for (const run of para.runs) {
-    if (run.type === 'text') return (run as unknown as TextRun).fontFamily;
+    if (run.type === 'text') return (run as unknown as DocxTextRun).fontFamily;
     if (run.type === 'field') return (run as unknown as FieldRun).fontFamily;
   }
   return para.defaultFontFamily ?? null;

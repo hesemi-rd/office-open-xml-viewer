@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { buildViewerUI } from './PptxViewer.stories';
 import { PptxPresentation } from './presentation';
 import { PptxViewer } from './viewer';
-import type { TextRunInfo } from './renderer';
+import type { PptxTextRunInfo } from './renderer';
 
 type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
@@ -40,7 +40,7 @@ function makeStatus(root: HTMLElement): HTMLDivElement {
   return s;
 }
 
-function buildPptxTextLayer(layer: HTMLDivElement, runs: TextRunInfo[], cssWidth: number, cssHeight: number): void {
+function buildPptxTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
   layer.innerHTML = '';
   layer.style.width = `${cssWidth}px`;
   layer.style.height = `${cssHeight}px`;
@@ -111,7 +111,7 @@ export const ScrollView: LayoutStory = {
           slideWrapper.appendChild(textLayer);
           scroller.appendChild(slideWrapper);
 
-          const runs: TextRunInfo[] = [];
+          const runs: PptxTextRunInfo[] = [];
           await pres.renderSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
           buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
         }

@@ -629,8 +629,8 @@ export interface NumFmt {
 }
 
 export interface Styles {
-  fonts: Font[];
-  fills: Fill[];
+  fonts: CellFont[];
+  fills: CellFill[];
   borders: Border[];
   cellXfs: CellXf[];
   numFmts: NumFmt[];
@@ -638,8 +638,8 @@ export interface Styles {
 }
 
 export interface Dxf {
-  font: Font | null;
-  fill: Fill | null;
+  font: CellFont | null;
+  fill: CellFill | null;
   border: Border | null;
   /** Number format override from the dxf (ECMA-376 §18.8.17). When a
    *  conditional-formatting rule matches, this numFmt replaces the cell's own
@@ -648,7 +648,7 @@ export interface Dxf {
   numFmt?: NumFmt | null;
 }
 
-export interface Font {
+export interface CellFont {
   bold: boolean;
   italic: boolean;
   underline: boolean;
@@ -662,7 +662,7 @@ export interface Font {
   vertAlign?: 'superscript' | 'subscript';
 }
 
-export interface Fill {
+export interface CellFill {
   patternType: string;
   fgColor: string | null;
   bgColor: string | null;
@@ -735,7 +735,7 @@ export interface ViewportRange {
 }
 
 /** Emitted once per cell that has text, with the cell's canvas-pixel bounds. */
-export interface TextRunInfo {
+export interface XlsxTextRunInfo {
   text: string;
   /** Canvas CSS-pixel x of the cell's top-left corner. */
   x: number;
@@ -764,7 +764,7 @@ export interface RenderViewportOptions {
   /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
   loadedImages?: Map<string, HTMLImageElement>;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
-  onTextRun?: (info: TextRunInfo) => void;
+  onTextRun?: (info: XlsxTextRunInfo) => void;
   /** Highlighted row range for selected row headers (1-indexed inclusive).
    *  `strong: true` → light blue + blue border (rows / cols / all selection modes).
    *  `strong: false` → slightly darker grey (cells selection mode). */

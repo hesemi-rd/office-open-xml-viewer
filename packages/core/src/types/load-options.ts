@@ -1,10 +1,11 @@
 /**
- * Common load-time options shared by the docx / pptx / xlsx viewer
- * `load(source, opts)` methods.
+ * Common load-time options shared by the docx / pptx / xlsx
+ * `Document.load` / `Presentation.load` / `Workbook.load` factories and their
+ * viewer wrappers.
  *
- * Each viewer narrows or extends this in its package-local `LoadOptions` if
- * needed, but the names that overlap (currently `useGoogleFonts`) keep the
- * same shape so application code can pass the same options object.
+ * This is the single source of truth — each package re-exports this exact type
+ * as its `LoadOptions` so application code can pass one options object to any
+ * of the three.
  */
 export interface LoadOptions {
   /**
@@ -18,4 +19,11 @@ export interface LoadOptions {
    * via `@font-face` in your application CSS.
    */
   useGoogleFonts?: boolean;
+  /**
+   * Override the per-entry ZIP decompression cap (bytes) used by the zip-bomb
+   * guard in the Rust parser. Defaults to 512 MiB. Raise it to load documents
+   * with very large embedded media, or lower it to tighten the budget for
+   * untrusted input. Zero / negative values fall back to the default.
+   */
+  maxZipEntryBytes?: number;
 }

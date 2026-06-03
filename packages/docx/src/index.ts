@@ -7,7 +7,7 @@ export type {
   BodyElement,
   DocParagraph,
   DocRun,
-  TextRun,
+  DocxTextRun,
   ImageRun,
   RenderPageOptions,
   RunRevision,

@@ -1,4 +1,4 @@
-import type { RenderOptions, TextRunInfo } from './renderer';
+import type { RenderOptions, PptxTextRunInfo } from './renderer';
 import { PptxPresentation } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 
@@ -139,8 +139,8 @@ export class PptxViewer {
     this.handle?.dispose();
     this.handle = null;
 
-    const runs: TextRunInfo[] = [];
-    const onTextRun = this.textLayer ? (r: TextRunInfo) => runs.push(r) : undefined;
+    const runs: PptxTextRunInfo[] = [];
+    const onTextRun = this.textLayer ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     try {
       if (this.opts.enableMediaPlayback) {
@@ -161,7 +161,7 @@ export class PptxViewer {
     }
   }
 
-  private _buildTextLayer(runs: TextRunInfo[], cssWidth: number, cssHeight: number): void {
+  private _buildTextLayer(runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
     const layer = this.textLayer!;
     layer.innerHTML = '';
     layer.style.width = `${cssWidth}px`;

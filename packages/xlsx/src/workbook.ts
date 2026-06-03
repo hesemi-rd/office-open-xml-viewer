@@ -27,17 +27,9 @@ const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   },
 };
 
-/** Options for {@link XlsxWorkbook.load}. Extends the shared
- *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export interface LoadOptions extends CoreLoadOptions {
-  /**
-   * Override the per-entry ZIP decompression cap (bytes) used by the
-   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Applies to both
-   * the initial workbook parse and per-sheet parse. Zero / negative values
-   * fall back to the default.
-   */
-  maxZipEntryBytes?: number;
-}
+/** Options for {@link XlsxWorkbook.load}. The shared load-options type from
+ *  `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
+export type LoadOptions = CoreLoadOptions;
 
 export class XlsxWorkbook {
   private worker: Worker;

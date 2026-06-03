@@ -22,7 +22,7 @@ export interface Document {
   fontFamilyClasses?: Record<string, string>;
   /** ECMA-376 §17.13.5 — flat list of `<w:ins>` / `<w:del>` events in the
    *  body. Each entry carries author / date / text. The renderer marks
-   *  runs inline via {@link TextRun.revision}; this array is primarily for
+   *  runs inline via {@link DocxTextRun.revision}; this array is primarily for
    *  tooling (MCP, agents, change-summary panels). */
   revisions?: DocRevision[];
   /** ECMA-376 §17.13.4 — `word/comments.xml`. Each comment carries id,
@@ -190,7 +190,7 @@ export interface NumberingInfo {
 }
 
 export type DocRun =
-  | { type: 'text' } & TextRun
+  | { type: 'text' } & DocxTextRun
   | { type: 'image' } & ImageRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
@@ -312,7 +312,7 @@ export interface FieldRun {
   highlight?: string | null;
 }
 
-export interface TextRun {
+export interface DocxTextRun {
   text: string;
   bold: boolean;
   italic: boolean;

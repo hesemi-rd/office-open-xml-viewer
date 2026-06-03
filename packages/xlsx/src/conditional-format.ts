@@ -1,4 +1,4 @@
-import type { Worksheet, Cell, CellRange, CfStop, CfValue, Dxf, CfRule, Fill, Border, DefinedName } from './types.js';
+import type { Worksheet, Cell, CellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
 import { evalFormulaToBool } from './formula.js';
 
 // ────────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ export interface CfContext {
 }
 
 export interface CfResult {
-  fill?: Fill;
+  fill?: CellFill;
   fontColor?: string;
   fontBold?: boolean;
   fontItalic?: boolean;

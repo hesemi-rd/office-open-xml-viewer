@@ -28,16 +28,9 @@ const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-/** Options for {@link DocxDocument.load}. Extends the shared
- *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export interface LoadOptions extends CoreLoadOptions {
-  /**
-   * Override the per-entry ZIP decompression cap (bytes) used by the
-   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Zero / negative
-   * values fall back to the default.
-   */
-  maxZipEntryBytes?: number;
-}
+/** Options for {@link DocxDocument.load}. The shared load-options type from
+ *  `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
+export type LoadOptions = CoreLoadOptions;
 
 export class DocxDocument {
   private _document: Document | null = null;

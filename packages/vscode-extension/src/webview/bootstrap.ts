@@ -18,7 +18,7 @@ declare function acquireVsCodeApi(): {
 
 import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
 import { DocxDocument, type DocxTextRunInfo } from '@silurus/ooxml-docx';
-import { PptxPresentation, type TextRunInfo } from '@silurus/ooxml-pptx';
+import { PptxPresentation, type PptxTextRunInfo } from '@silurus/ooxml-pptx';
 
 const vscodeApi = acquireVsCodeApi();
 const fileType = __OOXML_FILE_TYPE__;
@@ -149,7 +149,7 @@ async function initDocx(buffer: ArrayBuffer): Promise<void> {
 
 function buildPptxTextLayer(
   layer: HTMLDivElement,
-  runs: TextRunInfo[],
+  runs: PptxTextRunInfo[],
   cssWidth: number,
   cssHeight: number,
 ): void {
@@ -211,7 +211,7 @@ async function initPptx(buffer: ArrayBuffer): Promise<void> {
     wrapper.append(canvas, textLayer);
     stack.appendChild(wrapper);
 
-    const runs: TextRunInfo[] = [];
+    const runs: PptxTextRunInfo[] = [];
     await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
     buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
   }

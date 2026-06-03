@@ -1,6 +1,6 @@
 import type {
-  Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
-  ViewportRange, RenderViewportOptions, TextRunInfo,
+  Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
+  ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
@@ -379,7 +379,7 @@ function hatchPattern(
  */
 function paintCellPatternFill(
   ctx: CanvasRenderingContext2D,
-  fill: Fill,
+  fill: CellFill,
   x: number, y: number, w: number, h: number,
 ): boolean {
   if (fill.gradient && fill.gradient.stops.length > 0) {
@@ -501,7 +501,7 @@ function blendHex(fgHex: string, bgHex: string, fgCoverage: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
-function buildFont(font: Font, cs = 1): string {
+function buildFont(font: CellFont, cs = 1): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
   const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
@@ -541,7 +541,7 @@ function drawTextDecoLine(
  * size/color/name fall back to the base when omitted. A run with no
  * <rPr> (run.font undefined) inherits the base entirely.
  */
-function applyRunFont(base: Font, run: Run): Font {
+function applyRunFont(base: CellFont, run: Run): CellFont {
   const rf = run.font;
   if (!rf) return base;
   return {
@@ -557,12 +557,12 @@ function applyRunFont(base: Font, run: Run): Font {
   };
 }
 
-function resolveXf(styles: Styles, styleIndex: number): { font: Font; fill: Fill; border: Border; xf: CellXf } {
+function resolveXf(styles: Styles, styleIndex: number): { font: CellFont; fill: CellFill; border: Border; xf: CellXf } {
   const xf: CellXf = styles.cellXfs[styleIndex] ?? styles.cellXfs[0] ?? {
     fontId: 0, fillId: 0, borderId: 0, numFmtId: 0, alignH: null, alignV: null, wrapText: false,
   };
-  const font: Font = styles.fonts[xf.fontId] ?? { bold: false, italic: false, underline: false, strike: false, size: DEFAULT_FONT_SIZE, color: null, name: null };
-  const fill: Fill = styles.fills[xf.fillId] ?? { patternType: 'none', fgColor: null, bgColor: null };
+  const font: CellFont = styles.fonts[xf.fontId] ?? { bold: false, italic: false, underline: false, strike: false, size: DEFAULT_FONT_SIZE, color: null, name: null };
+  const fill: CellFill = styles.fills[xf.fillId] ?? { patternType: 'none', fgColor: null, bgColor: null };
   const border: Border = styles.borders[xf.borderId] ?? { left: null, right: null, top: null, bottom: null };
   return { font, fill, border, xf };
 }
@@ -641,7 +641,7 @@ function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: string, ma
 
 interface RichSeg {
   text: string;
-  font: Font;
+  font: CellFont;
   width: number; // px
 }
 
@@ -662,7 +662,7 @@ interface RichLine {
 function layoutRichTextLines(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
-  baseFont: Font,
+  baseFont: CellFont,
   cs: number,
   maxWidth: number,
 ): RichLine[] {
@@ -677,7 +677,7 @@ function layoutRichTextLines(
     cur = []; curW = 0; curMaxSize = 0;
   };
 
-  const push = (text: string, font: Font) => {
+  const push = (text: string, font: CellFont) => {
     if (!text) return;
     ctx.font = buildFont(font, cs);
     const w = ctx.measureText(text).width;
@@ -775,7 +775,7 @@ interface RenderContext {
    *  (ECMA-376 §18.3.1.13). Used by `colWidthToPx` to convert character-
    *  unit column widths into pixels. */
   mdw: number;
-  onTextRun?: (info: TextRunInfo) => void;
+  onTextRun?: (info: XlsxTextRunInfo) => void;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1083,7 +1083,7 @@ function renderQuadrant(
     const effectiveItalic = font.italic || !!cf.fontItalic;
     const effectiveUnderline = font.underline || !!cf.fontUnderline;
     const effectiveStrike = font.strike || !!cf.fontStrike;
-    const fontForDraw: Font = (
+    const fontForDraw: CellFont = (
       effectiveBold !== font.bold || effectiveItalic !== font.italic ||
       effectiveUnderline !== font.underline || effectiveStrike !== font.strike
     ) ? { ...font, bold: effectiveBold, italic: effectiveItalic, underline: effectiveUnderline, strike: effectiveStrike }
@@ -1384,7 +1384,7 @@ function renderQuadrant(
       const effectiveItalic = font.italic || !!cf.fontItalic;
       const effectiveUnderline = font.underline || !!cf.fontUnderline;
       const effectiveStrike = font.strike || !!cf.fontStrike;
-      const fontForDraw: Font = (
+      const fontForDraw: CellFont = (
         effectiveBold !== font.bold || effectiveItalic !== font.italic ||
         effectiveUnderline !== font.underline || effectiveStrike !== font.strike
       )
@@ -1764,7 +1764,7 @@ function renderQuadrant(
         let vaYShift = 0;
         if (cellVertAlign === 'superscript') vaYShift = -Math.round(baseSizePxOrig * 0.35);
         else if (cellVertAlign === 'subscript') vaYShift = Math.round(baseSizePxOrig * 0.10);
-        const drawFont: Font = cellVertAlign
+        const drawFont: CellFont = cellVertAlign
           ? { ...fontForDraw, size: fontForDraw.size * 0.65 }
           : fontForDraw;
         if (cellVertAlign) {
