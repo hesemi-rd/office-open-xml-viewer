@@ -8,10 +8,14 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-let mathJaxUrl = 'https://cdn.jsdelivr.net/npm/mathjax@4/mml-svg.js';
+// Default to the MathJax v4 component bundled with this package (Apache-2.0), resolved
+// to a same-origin asset URL by the consumer's bundler (Vite/webpack/rollup all handle
+// `new URL(asset, import.meta.url)`). This makes math a built-in feature with no
+// cross-origin request. `setMathJaxUrl` overrides it (e.g. a CDN or pinned copy).
+let mathJaxUrl: string = new URL('../../assets/mathjax/mml-svg.js', import.meta.url).href;
 let mjPromise: Promise<any> | null = null;
 
-/** Override the MathJax script URL (e.g. a self-hosted / pinned copy). Call before load. */
+/** Override the MathJax script URL (e.g. a CDN or self-hosted copy). Call before load. */
 export function setMathJaxUrl(url: string): void {
   mathJaxUrl = url;
 }
@@ -44,6 +48,8 @@ async function ensureMathJax(): Promise<any> {
       ...(w.MathJax || {}),
       startup: { ...(w.MathJax?.startup || {}), typeset: false },
       svg: { ...(w.MathJax?.svg || {}), fontCache: 'none' },
+      // No a11y menu / speech-rule worker — keeps it fully offline (no extra fetches).
+      options: { ...(w.MathJax?.options || {}), enableMenu: false },
     };
     await loadScript(mathJaxUrl);
     await w.MathJax.startup.promise;
