@@ -4,6 +4,60 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.42.0 — 2026-06-03
+
+Rendering-fidelity release, verified against the Word / PowerPoint / Excel PDF
+exports of the test decks. Continues replacing sample-fit heuristics with
+spec-faithful behavior and expands the canvas-free unit-test coverage.
+
+### Rendering fidelity
+
+- **pptx**: SmartArt shapes now honor the explicit text frame PowerPoint stores
+  per shape in the fallback drawing (`<dsp:txXfrm>`), so labels land where
+  PowerPoint puts them — e.g. a process arrow's bullet list starts past the
+  overlapping circle node instead of behind it, and a roundRect label clears the
+  badge rect overlapping its bottom (#312). Preset-geometry text also lays out
+  inside the geometry's text rectangle before insets apply (ECMA-376 §20.1.9.21),
+  fixing centered arrow text drifting into the arrowhead and roundRect corner
+  insets.
+- **pptx**: per-list-level default font sizes (`lvl1pPr`..`lvl9pPr` `defRPr sz`,
+  §21.1.2.4) are inherited from the slide master / layout, so a 2nd-level bullet
+  shrinks (28→20pt) as in PowerPoint instead of staying at the level-1 size (#311).
+- **pptx**: media playback time renders with tabular figures (each digit in a
+  fixed slot), removing the layout jitter as the clock ticks (#310).
+- **docx**: `auto` / single line spacing is sized from the intended font's
+  Windows metrics (§17.3.1.33), fixing vertical drift where overlapping title
+  lines accumulated down the page (#306).
+- **docx**: an explicit `<w:color w:val="auto"/>` is honored as the automatic
+  (black) color and overrides an inherited style color (§17.3.2.6), so
+  `auto`-colored runs under a gray character style render black, not gray (#307).
+- **docx**: per-cell `<w:tcMar>` margins override the table-level `<w:tblCellMar>`
+  default (§17.4.42 over §17.4.41), and empty paragraphs contribute their font
+  metrics — restoring missing space before cell content (#309).
+- **xlsx**: per-series chart data-label colors (`<c:ser><c:dLbls><c:txPr>`,
+  §21.2.2.216) are resolved individually instead of collapsing every series to
+  the first series' color — parity with the pptx chart fix (#308).
+- **xlsx**: a number format with a dedicated negative section formats the value's
+  magnitude in it (§18.8.30), so `0;(0)` renders -5 as `(5)`, not `(-5)` (#301).
+
+### Charts
+
+- The automatic value-axis maximum restores Excel's documented headroom — the
+  first major unit above `Ymax + (Ymax - Ymin)/20` — so the tallest series sits
+  below the top gridline rather than flush, fixing auto-scaled bars that had
+  become ~10% too tall (#304).
+- Stacked bar-chart data labels render with the correct per-series color, comma
+  grouping, and visibility vs PowerPoint (§21.2.2.216) (#305).
+
+### Internals
+
+- Axis-scaling math (`niceStep` / `niceAxisMax` / `niceAxisMin`) is extracted to
+  a canvas-free `axis-scale.ts` module with unit tests locking the Excel-faithful
+  auto-max behavior (#302).
+- Added vitest unit tests for the xlsx formula engine and number formats
+  (ABS/INT/MOD/CEILING/FLOOR, ISBLANK/EXACT, COUNTIF, DATE, date format codes)
+  (#301, #302).
+
 ## 0.41.0 — 2026-06-01
 
 Rendering-fidelity and performance release. Replaces several sample-fit
