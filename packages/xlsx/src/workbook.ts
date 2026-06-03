@@ -82,6 +82,12 @@ export class XlsxWorkbook {
     return this.parsedWorkbook?.workbook.sheets.length ?? 0;
   }
 
+  /** Per-sheet tab colors (`#RRGGBB`) parallel to {@link sheetNames}.
+   *  `null` for sheets that declare no tab color. */
+  get tabColors(): (string | null)[] {
+    return this.parsedWorkbook?.workbook.sheets.map((s) => s.tabColor ?? null) ?? [];
+  }
+
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
     if (this.sheetCache.has(sheetIndex)) {
       return this.sheetCache.get(sheetIndex)!;

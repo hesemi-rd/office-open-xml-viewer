@@ -11,6 +11,14 @@ const TAB_GAP = 1;
 export interface XlsxViewerOptions {
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
   cellScale?: number;
+  /** Show the Excel-style zoom slider at the right end of the sheet-tab bar.
+   *  Default `true`. Set `false` to hide it (e.g. when the host supplies its
+   *  own zoom control). */
+  showZoomSlider?: boolean;
+  /** Lower/upper bounds for the zoom slider as scale factors. Default 0.1–4
+   *  (10%–400%, matching Excel's zoom range). */
+  zoomMin?: number;
+  zoomMax?: number;
   onReady?: (sheetNames: string[]) => void;
   onSheetChange?: (index: number, name: string) => void;
   onError?: (err: Error) => void;
@@ -128,7 +136,12 @@ export class XlsxViewer {
   private tabStrip: HTMLDivElement;
   private navPrev: HTMLButtonElement;
   private navNext: HTMLButtonElement;
+  private navGroup!: HTMLDivElement;
   private tabs: HTMLButtonElement[] = [];
+  /** Per-tab colors parallel to `tabs`, from `<sheetPr><tabColor>`. */
+  private tabColors: (string | null)[] = [];
+  private zoomSlider: HTMLInputElement | null = null;
+  private zoomLabel: HTMLSpanElement | null = null;
   private currentSheet = 0;
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
@@ -198,6 +211,7 @@ export class XlsxViewer {
       `display:flex;flex-shrink:0;width:${headerW}px;height:100%;`;
     navGroup.appendChild(this.navPrev);
     navGroup.appendChild(this.navNext);
+    this.navGroup = navGroup;
 
     // The scrollable strip that actually holds the sheet tabs. position:relative
     // so each tab's offsetLeft is measured against the strip's scroll content.
@@ -213,12 +227,23 @@ export class XlsxViewer {
     style.textContent =
       `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
       `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
-      `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}`;
+      `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}` +
+      // Excel-status-bar zoom slider: a thin uniform gray track (no colored
+      // fill on either side of the thumb) with a small round gray handle.
+      `.xlsx-zoom-slider{-webkit-appearance:none;appearance:none;background:transparent;height:15px;margin:0;}` +
+      `.xlsx-zoom-slider::-webkit-slider-runnable-track{height:4px;background:#c4c4c4;border-radius:2px;}` +
+      `.xlsx-zoom-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;margin-top:-4px;border-radius:50%;background:#808080;cursor:pointer;}` +
+      `.xlsx-zoom-slider:hover::-webkit-slider-thumb{background:#5f5f5f;}` +
+      `.xlsx-zoom-slider::-moz-range-track{height:4px;background:#c4c4c4;border-radius:2px;}` +
+      `.xlsx-zoom-slider::-moz-range-thumb{width:12px;height:12px;border:none;border-radius:50%;background:#808080;cursor:pointer;}`;
     document.head.appendChild(style);
     this.tabStrip.addEventListener('scroll', () => this.updateNavButtons());
 
     this.tabBar.appendChild(navGroup);
     this.tabBar.appendChild(this.tabStrip);
+    if (this.opts.showZoomSlider !== false) {
+      this.tabBar.appendChild(this.buildZoomControl());
+    }
 
     wrapper.appendChild(this.canvasArea);
     wrapper.appendChild(this.tabBar);
@@ -784,11 +809,12 @@ export class XlsxViewer {
   private buildTabs(): void {
     this.tabStrip.innerHTML = '';
     this.tabs = [];
+    this.tabColors = this.wb.tabColors;
     this.wb.sheetNames.forEach((name, i) => {
       const btn = document.createElement('button');
       btn.textContent = name;
       btn.title = name;
-      btn.style.cssText = this.tabStyle(false);
+      btn.style.cssText = this.tabStyle(false, this.tabColors[i]);
       btn.addEventListener('click', () => this.showSheet(i));
       this.tabStrip.appendChild(btn);
       this.tabs.push(btn);
@@ -864,29 +890,136 @@ export class XlsxViewer {
 
   private updateTabActive(index: number): void {
     this.tabs.forEach((btn, i) => {
-      btn.style.cssText = this.tabStyle(i === index);
+      btn.style.cssText = this.tabStyle(i === index, this.tabColors[i]);
     });
     this.tabs[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  private tabStyle(active: boolean): string {
+  private tabStyle(active: boolean, tabColor?: string | null): string {
     // Active tab renders taller than inactive so the selected sheet draws the
     // eye. Tabs align to flex-end, so shorter inactive tabs sit lower and the
     // active tab sticks up. Font size also bumps a hair on active.
     const activeH = TAB_BAR_H - 2;
     const inactiveH = TAB_BAR_H - 5;
     const base =
-      `display:inline-block;flex:none;padding:0 14px;` +
+      `display:inline-block;flex:none;padding:0 14px;position:relative;` +
       `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
       `cursor:pointer;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;` +
       `outline:none;box-sizing:border-box;`;
+    // `<sheetPr><tabColor>` renders as a color bar along the tab's bottom edge
+    // (Excel's "sheet tab color" treatment), drawn as an inset bottom shadow so
+    // it doesn't fight the tab's own border/background. The active tab keeps a
+    // thinner bar since its bottom merges into the white sheet body.
+    const bar = tabColor
+      ? `box-shadow:inset 0 -${active ? 2 : 3}px 0 0 ${tabColor};`
+      : '';
     return active
       ? base +
         `height:${activeH}px;font-size:13px;` +
-        `background:#fff;color:#000;border-bottom:1px solid #fff;font-weight:600;position:relative;top:1px;`
+        `background:#fff;color:#000;border-bottom:1px solid #fff;font-weight:600;top:1px;` +
+        bar
       : base +
         `height:${inactiveH}px;font-size:11px;` +
-        `background:#e0e0e0;color:#555;`;
+        `background:#e0e0e0;color:#555;` +
+        bar;
+  }
+
+  /** Excel-style zoom control pinned to the right end of the tab bar:
+   *  `−  [────slider────]  +  100%`. Live-updates the cell scale on input. */
+  private buildZoomControl(): HTMLDivElement {
+    const zoomMin = this.opts.zoomMin ?? 0.1;
+    const zoomMax = this.opts.zoomMax ?? 4;
+    const cur = this.opts.cellScale ?? 1;
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText =
+      `display:flex;align-items:center;flex-shrink:0;gap:2px;` +
+      `padding:0 10px;height:100%;color:#555;font-size:12px;user-select:none;`;
+
+    const mkBtn = (glyph: string, label: string, delta: number): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.textContent = glyph;
+      b.setAttribute('aria-label', label);
+      b.title = label;
+      b.style.cssText =
+        `width:18px;height:18px;padding:0;border:none;background:transparent;` +
+        `color:#555;font-size:14px;line-height:1;cursor:pointer;border-radius:3px;`;
+      b.addEventListener('click', () => this.setScale((this.opts.cellScale ?? 1) + delta));
+      return b;
+    };
+
+    // The slider works in "position" units [0,100]; 50 is dead-center and maps
+    // to 100% so each half is its own linear segment (zoomMin→1 on the left,
+    // 1→zoomMax on the right), mirroring Excel's status-bar zoom where 100% sits
+    // in the middle even though the range (10%–400%) is asymmetric.
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '100';
+    slider.step = 'any';
+    slider.value = String(this.zoomScaleToPos(cur, zoomMin, zoomMax));
+    slider.setAttribute('aria-label', 'Zoom');
+    slider.title = 'Zoom';
+    slider.classList.add('xlsx-zoom-slider');
+    slider.style.cssText = `width:90px;cursor:pointer;`;
+    slider.addEventListener('input', () =>
+      this.setScale(this.zoomPosToScale(Number(slider.value), zoomMin, zoomMax)),
+    );
+
+    const label = document.createElement('span');
+    label.textContent = `${Math.round(cur * 100)}%`;
+    label.style.cssText = `min-width:42px;margin-left:6px;text-align:right;font-variant-numeric:tabular-nums;`;
+
+    wrap.appendChild(mkBtn('−', 'Zoom out', -0.1));
+    wrap.appendChild(slider);
+    wrap.appendChild(mkBtn('+', 'Zoom in', 0.1));
+    wrap.appendChild(label);
+
+    this.zoomSlider = slider;
+    this.zoomLabel = label;
+    return wrap;
+  }
+
+  /** Map a slider position [0,100] to a scale factor. 50 → 1.0 (100%), with a
+   *  separate linear segment on each side so the center is always 100%. */
+  private zoomPosToScale(pos: number, min: number, max: number): number {
+    return pos <= 50
+      ? min + (pos / 50) * (1 - min)
+      : 1 + ((pos - 50) / 50) * (max - 1);
+  }
+
+  /** Inverse of {@link zoomPosToScale}: scale factor → slider position [0,100]. */
+  private zoomScaleToPos(scale: number, min: number, max: number): number {
+    const clamped = Math.min(max, Math.max(min, scale));
+    return clamped <= 1
+      ? ((clamped - min) / (1 - min)) * 50
+      : 50 + ((clamped - 1) / (max - 1)) * 50;
+  }
+
+  /** Set the cell/header scale and re-lay-out the current sheet. Clamped to the
+   *  zoom bounds; keeps the slider thumb, percentage label and the row-header-
+   *  aligned tab-nav width in sync. */
+  setScale(scale: number): void {
+    const zoomMin = this.opts.zoomMin ?? 0.1;
+    const zoomMax = this.opts.zoomMax ?? 4;
+    // Snap to whole percent so the label and cellScale stay tidy.
+    const pct = Math.min(
+      Math.round(zoomMax * 100),
+      Math.max(Math.round(zoomMin * 100), Math.round(scale * 100)),
+    );
+    const next = pct / 100;
+    if (next === (this.opts.cellScale ?? 1)) return;
+    this.opts.cellScale = next;
+
+    if (this.zoomSlider) this.zoomSlider.value = String(this.zoomScaleToPos(next, zoomMin, zoomMax));
+    if (this.zoomLabel) this.zoomLabel.textContent = `${pct}%`;
+    // The tab-nav block spans the row-header width, which scales with the cells.
+    this.navGroup.style.width = `${Math.round(HEADER_W * next)}px`;
+
+    if (this.currentWorksheet) this.updateSpacerSize(this.currentWorksheet);
+    void this.renderCurrentSheet();
+    this.updateSelectionOverlay();
+    this.updateNavButtons();
   }
 
   private updateSpacerSize(ws: Worksheet): void {

@@ -6,6 +6,10 @@ export interface SheetMeta {
   name: string;
   sheetId: number;
   rId: string;
+  /** Sheet tab color (`<sheetPr><tabColor>`, ECMA-376 §18.3.1.93) resolved to
+   *  `#RRGGBB`. Surfaced at workbook-list time so tabs can be painted up front.
+   *  Absent when the sheet declares no tab color. */
+  tabColor?: string | null;
 }
 
 export interface MergeCell {

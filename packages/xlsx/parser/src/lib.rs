@@ -98,11 +98,74 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let styles = parse_styles(&mut archive, &theme_colors)?;
 
+    // Surface each sheet's tab color (`<sheetPr><tabColor>`) on the workbook
+    // sheet list so the viewer can paint every tab up front. `<sheetPr>` is the
+    // first child of `<worksheet>` (ECMA-376 §18.3.1.99 element order), so a
+    // small head read of each sheet entry is enough — we never decompress the
+    // (potentially huge) `<sheetData>` body just to read the tab color.
+    let mut sheets = sheets;
+    if let Ok(rels_xml) = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels") {
+        if let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) {
+            for sheet in sheets.iter_mut() {
+                let Some(path) = resolve_sheet_path(&rels_doc, &sheet.r_id) else { continue; };
+                let Ok(head) = read_zip_entry_head(&mut archive, &format!("xl/{}", path), 16_384)
+                else { continue; };
+                sheet.tab_color = extract_tab_color_from_head(&head, &theme_colors);
+            }
+        }
+    }
+
     Ok(ParsedWorkbook {
         workbook: Workbook { sheets },
         styles,
         shared_strings,
     })
+}
+
+/// Read only the first `max_bytes` of a ZIP entry as text. Used to probe the
+/// top of a worksheet (its `<sheetPr>`) without inflating the whole sheet.
+/// Lossy UTF-8 keeps a multibyte character split at the cut from erroring; the
+/// region we care about (`<sheetPr><tabColor>`) is pure ASCII near the start.
+fn read_zip_entry_head(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+    max_bytes: u64,
+) -> Result<String, String> {
+    let mut file = archive
+        .by_name(name)
+        .map_err(|e| format!("entry '{}' not found: {}", name, e))?;
+    let mut buf = Vec::new();
+    file.by_ref().take(max_bytes).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Extract the resolved tab color from the head of a worksheet XML. Locates the
+/// single `<tabColor .../>` element (it lives in `<sheetPr>`, before
+/// `<sheetData>`) and resolves its `rgb` / `theme`+`tint` / `indexed` attributes
+/// through the same rules as cell colors. Returns `None` when no tab color is
+/// declared or the tag is truncated by the head limit. A lightweight attribute
+/// scan avoids any namespace-prefix assumptions in the partial document.
+fn extract_tab_color_from_head(head: &str, theme_colors: &[String]) -> Option<String> {
+    // Don't look past the data body — `tabColor` only appears in `<sheetPr>`.
+    let scope = head.split("<sheetData").next().unwrap_or(head);
+    let start = scope.find("tabColor")?;
+    let rest = &scope[start..];
+    // The element is self-closing (`<tabColor ... />`); read up to its `>`.
+    let end = rest.find('>')?;
+    let tag = &rest[..end];
+    let attr = |name: &str| -> Option<&str> {
+        let key = format!("{}=\"", name);
+        let i = tag.find(&key)? + key.len();
+        let j = tag[i..].find('"')? + i;
+        Some(&tag[i..j])
+    };
+    resolve_color_attrs(
+        attr("rgb"),
+        attr("theme"),
+        attr("tint"),
+        attr("indexed"),
+        theme_colors,
+    )
 }
 
 pub(crate) fn read_zip_entry(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<String, String> {
@@ -223,8 +286,28 @@ fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
 }
 
 pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    resolve_color_attrs(
+        node.attribute("rgb"),
+        node.attribute("theme"),
+        node.attribute("tint"),
+        node.attribute("indexed"),
+        theme_colors,
+    )
+}
+
+/// Resolve a DrawingML/SpreadsheetML color from its raw attribute values
+/// (`rgb` / `theme` + `tint` / `indexed`). Split out from [`parse_color`] so
+/// callers that scan attributes without a roxmltree node (e.g. the bounded
+/// tab-color head probe) share the exact same resolution rules.
+pub(crate) fn resolve_color_attrs(
+    rgb: Option<&str>,
+    theme: Option<&str>,
+    tint: Option<&str>,
+    indexed: Option<&str>,
+    theme_colors: &[String],
+) -> Option<String> {
     // rgb attribute (ARGB: 8 chars, drop alpha; or 6-char RGB)
-    if let Some(rgb) = node.attribute("rgb") {
+    if let Some(rgb) = rgb {
         if rgb.len() == 8 {
             return Some(format!("#{}", &rgb[2..].to_uppercase()));
         }
@@ -240,7 +323,7 @@ pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Op
     //   0=lt1, 1=dk1, 2=lt2, 3=dk2, 4..11 unchanged.
     // This is a well-known interoperability quirk (see Open-XML-SDK issue #46
     // and ECMA-376 §22.1.2.7 where "index values of 0 and 1 are swapped").
-    if let Some(theme_str) = node.attribute("theme") {
+    if let Some(theme_str) = theme {
         if let Ok(idx) = theme_str.parse::<usize>() {
             let mapped = match idx {
                 0 => 1,
@@ -250,7 +333,7 @@ pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Op
                 n => n,
             };
             if let Some(base) = theme_colors.get(mapped) {
-                let tint = node.attribute("tint").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let tint = tint.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 if tint == 0.0 {
                     return Some(base.clone());
                 }
@@ -260,7 +343,7 @@ pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Op
     }
 
     // indexed attribute → Excel built-in palette
-    if let Some(indexed_str) = node.attribute("indexed") {
+    if let Some(indexed_str) = indexed {
         if let Ok(idx) = indexed_str.parse::<usize>() {
             // indices 64 (foreground) and 65 (background) are special: use black/white
             let color = match idx {
@@ -290,7 +373,7 @@ fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
                 .attribute((r_ns, "id"))
                 .unwrap_or("")
                 .to_string();
-            sheets.push(SheetMeta { name, sheet_id, r_id });
+            sheets.push(SheetMeta { name, sheet_id, r_id, tab_color: None });
         }
     }
     sheets
@@ -1449,4 +1532,47 @@ pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<S
     ws.default_font_size = df_size;
 
     serde_json::to_string(&ws).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tab_color_tests {
+    use super::extract_tab_color_from_head;
+
+    const THEME: &[&str] = &[
+        "#000000", "#FFFFFF", "#44546A", "#E7E6E6", "#4472C4", "#ED7D31",
+        "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#0563C1", "#954F72",
+    ];
+
+    fn theme() -> Vec<String> {
+        THEME.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tab_color_rgb() {
+        let head = r#"<?xml version="1.0"?><worksheet><sheetPr><tabColor rgb="FFFF0000"/></sheetPr><dimension ref="A1"/><sheetData>"#;
+        assert_eq!(extract_tab_color_from_head(head, &theme()).as_deref(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn tab_color_theme_with_tint() {
+        // theme="4" (Excel-internal accent1) resolves to #4472C4; a tint just
+        // needs to produce *something* different — exact value covered by apply_tint.
+        let head = r#"<worksheet><sheetPr codeName="S1"><tabColor theme="4" tint="-0.249977111117893"/></sheetPr><sheetData/></worksheet>"#;
+        let got = extract_tab_color_from_head(head, &theme());
+        assert!(got.is_some(), "theme tab color should resolve");
+        assert_ne!(got.as_deref(), Some("#4472C4"), "tint should darken the base");
+    }
+
+    #[test]
+    fn tab_color_absent() {
+        let head = r#"<worksheet><sheetPr/><dimension ref="A1"/><sheetData><row/></sheetData></worksheet>"#;
+        assert_eq!(extract_tab_color_from_head(head, &theme()), None);
+    }
+
+    #[test]
+    fn tab_color_not_searched_past_sheetdata() {
+        // A stray "tabColor" token inside the body must not be misread.
+        let head = r#"<worksheet><sheetPr/><sheetData><c><is><t>tabColor rgb="00FF00"</t></is></c>"#;
+        assert_eq!(extract_tab_color_from_head(head, &theme()), None);
+    }
 }

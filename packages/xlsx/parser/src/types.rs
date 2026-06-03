@@ -13,6 +13,12 @@ pub struct SheetMeta {
     pub name: String,
     pub sheet_id: u32,
     pub r_id: String,
+    /// Sheet tab color (`<sheetPr><tabColor>`, ECMA-376 §18.3.1.93) resolved
+    /// to `#RRGGBB`. Surfaced at workbook-list time so the viewer can paint
+    /// every tab without eagerly parsing each worksheet. `None` when the
+    /// sheet declares no tab color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_color: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
