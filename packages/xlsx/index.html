@@ -66,13 +66,13 @@
     const sheetSelect = document.getElementById('sheetSelect');
     const status = document.getElementById('status');
 
-    const wb = new XlsxWorkbook();
+    let wb = null;
     let loaded = false;
 
     async function loadFile(source) {
       status.textContent = 'Loading…';
       try {
-        await wb.load(source);
+        wb = await XlsxWorkbook.load(source);
         loaded = true;
         sheetSelect.innerHTML = '';
         wb.sheetNames.forEach((name, i) => {
