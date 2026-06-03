@@ -381,10 +381,14 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Lists (bullet and numbered) | ✅ |
 | | Paragraph styles (Heading 1–9, Normal, custom) | ✅ |
 | | Table style `w:pPr` cascade (§17.7.6) | ✅ |
+| | Table style borders / shading / banding (`tblStylePr`, `cnfStyle`, §17.4.7) | ✅ |
+| | Table of contents (TOC field) — dot leaders, right-aligned page numbers | ✅ |
 | | keepNext / keepLines / widowControl | ✅ |
-| **Elements** | Tables (with borders, fills, merges) | ✅ |
+| **Elements** | Tables (with borders, fills, merges, banding, alignment) | ✅ |
+| | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | Text boxes / drawing shapes | ✅ |
+| | WMF / EMF metafile images (legacy vector) | ❌ Not planned |
 | **Advanced** | Footnote / endnote reference markers | ✅ |
 | | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
 | | Comments / footnote bodies (parsed, not yet rendered inline) | ⚠️ |

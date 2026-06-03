@@ -4,6 +4,35 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.44.0 — 2026-06-04
+
+Adds OOXML math (OMML) rendering to the docx viewer via bundled MathJax, plus
+table-style fidelity (shading / banding / borders / alignment) and table-of-
+contents rendering (dot leaders, right-aligned page numbers). Verified against
+the Word PDF export of the test document.
+
+### docx
+
+- **Math equations (OMML)**: `m:oMath` / `m:oMathPara` are extracted in the Rust
+  parser into a shared AST (fractions, sub/superscripts, n-ary with correct
+  limit placement, radicals, delimiters, matrices / `eqArr`, `limLow` / `limUpp`,
+  group chars, bars, accents) and rendered via **MathJax** — converted to MathML,
+  then SVG, then rasterized onto the canvas. MathJax (Apache-2.0) is **bundled and
+  loaded same-origin** (no cross-origin request); `setMathJaxUrl` overrides the
+  source. Equations size to the surrounding text and center as display math.
+- **Table styles**: resolve `w:style type="table"` cell shading, borders, and
+  conditional formatting (`tblStylePr` firstRow / band1Horz / band2Horz),
+  honoring each row's `w:cnfStyle` bitmask (§17.4.7) — so banded tables paint
+  correctly. Table `w:jc` centering and display-equation cell centering added.
+- **Table of contents**: tab **leaders** (dot / hyphen / underscore, §17.3.1.37)
+  and **right / center / decimal tab stops** (measured from the text margin), so
+  TOC entries render `heading … page` on one line with flush right-aligned page
+  numbers. Complex multi-paragraph fields (TOC) now render their result content
+  (only PAGE / NUMPAGES are recomputed), fixing a dropped first entry.
+- Internal-document links (TOC entries, cross-references) render as plain body
+  text instead of the Hyperlink style's blue / underline, matching Word; external
+  URL links stay blue + underlined.
+
 ## 0.43.0 — 2026-06-03
 
 Adds Excel-style sheet-tab colors and a zoom slider to the xlsx viewer, plus a

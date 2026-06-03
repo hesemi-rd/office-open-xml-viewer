@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-docx",
   "private": true,
-  "version": "0.43.0",
+  "version": "0.44.0",
   "description": "DOCX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -27,7 +27,10 @@
     "./wasm": "./src/wasm/docx_parser.js",
     "./wasm-binary": "./src/wasm/docx_parser_bg.wasm"
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc --build && vite build",
