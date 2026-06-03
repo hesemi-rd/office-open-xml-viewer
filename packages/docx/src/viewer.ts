@@ -10,6 +10,10 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
    * browser's native text selection works on document content.
    */
   enableTextSelection?: boolean;
+  /** Called when a page finishes rendering. */
+  onPageChange?: (index: number, total: number) => void;
+  /** Called on parse or render errors. */
+  onError?: (err: Error) => void;
 }
 
 export class DocxViewer {
@@ -50,13 +54,29 @@ export class DocxViewer {
     }
   }
 
+  /**
+   * Load a DOCX from URL or ArrayBuffer and render the first page.
+   *
+   * Error contract (shared by all three viewers): on failure, if an `onError`
+   * callback was provided it is invoked and `load` resolves normally; if not,
+   * the error is rethrown so it is never silently swallowed.
+   */
   async load(source: string | ArrayBuffer): Promise<void> {
-    this._doc = await DocxDocument.load(source, {
-      useGoogleFonts: this._opts.useGoogleFonts,
-      maxZipEntryBytes: this._opts.maxZipEntryBytes,
-    });
-    this._currentPage = 0;
-    await this._render();
+    try {
+      this._doc = await DocxDocument.load(source, {
+        useGoogleFonts: this._opts.useGoogleFonts,
+        maxZipEntryBytes: this._opts.maxZipEntryBytes,
+      });
+      this._currentPage = 0;
+      await this._render();
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (this._opts.onError) {
+        this._opts.onError(e);
+        return;
+      }
+      throw e;
+    }
   }
 
   get pageCount(): number {
@@ -65,6 +85,11 @@ export class DocxViewer {
 
   get currentPage(): number {
     return this._currentPage;
+  }
+
+  /** The underlying <canvas> element. */
+  get canvasElement(): HTMLCanvasElement {
+    return this._canvas;
   }
 
   async goToPage(index: number): Promise<void> {
@@ -77,18 +102,25 @@ export class DocxViewer {
   async nextPage(): Promise<void> { await this.goToPage(this._currentPage + 1); }
   async prevPage(): Promise<void> { await this.goToPage(this._currentPage - 1); }
 
+  /** Terminate the parser worker and release resources. */
+  destroy(): void {
+    this._doc?.destroy();
+    this._doc = null;
+    this._wrapper.remove();
+  }
+
   private async _render(): Promise<void> {
     if (!this._doc) return;
     const runs: DocxTextRunInfo[] = [];
     const onTextRun = this._textLayer ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
     await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, onTextRun });
     if (this._textLayer) {
-      this._buildTextLayer(runs);
+      this._buildTextLayer(this._textLayer, runs);
     }
+    this._opts.onPageChange?.(this._currentPage, this.pageCount);
   }
 
-  private _buildTextLayer(runs: DocxTextRunInfo[]): void {
-    const layer = this._textLayer!;
+  private _buildTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
     layer.innerHTML = '';
     layer.style.width = `${this._canvas.style.width || this._canvas.width + 'px'}`;
     layer.style.height = `${this._canvas.style.height || this._canvas.height + 'px'}`;

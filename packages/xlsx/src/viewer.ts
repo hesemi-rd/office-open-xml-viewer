@@ -264,6 +264,13 @@ export class XlsxViewer {
     this.setupSelectionEvents();
   }
 
+  /**
+   * Load an XLSX from URL or ArrayBuffer and render the first sheet.
+   *
+   * Error contract (shared by all three viewers): on failure, if an `onError`
+   * callback was provided it is invoked and `load` resolves normally; if not,
+   * the error is rethrown so it is never silently swallowed.
+   */
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
       this.wb = await XlsxWorkbook.load(source, {
@@ -274,7 +281,12 @@ export class XlsxViewer {
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(0);
     } catch (err) {
-      this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (this.opts.onError) {
+        this.opts.onError(e);
+        return;
+      }
+      throw e;
     }
   }
 
@@ -1176,6 +1188,11 @@ export class XlsxViewer {
 
   get sheetNames(): string[] {
     return this.wb?.sheetNames ?? [];
+  }
+
+  /** The underlying <canvas> element the grid is drawn on. */
+  get canvasElement(): HTMLCanvasElement {
+    return this.canvas;
   }
 
   destroy(): void {

@@ -80,7 +80,13 @@ export class PptxViewer {
     }
   }
 
-  /** Load a PPTX from URL or ArrayBuffer and render the first slide. */
+  /**
+   * Load a PPTX from URL or ArrayBuffer and render the first slide.
+   *
+   * Error contract (shared by all three viewers): on failure, if an `onError`
+   * callback was provided it is invoked and `load` resolves normally; if not,
+   * the error is rethrown so it is never silently swallowed.
+   */
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
       this.engine = await PptxPresentation.load(source, {
@@ -91,7 +97,10 @@ export class PptxViewer {
       await this.renderCurrentSlide();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
-      this.opts.onError?.(e);
+      if (this.opts.onError) {
+        this.opts.onError(e);
+        return;
+      }
       throw e;
     }
   }
