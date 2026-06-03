@@ -81,8 +81,45 @@ pub struct StyleDef {
     pub based_on: Option<String>,
 }
 
+/// One border edge from a table style (val/sz/color), pt-converted.
+#[derive(Debug, Default, Clone)]
+pub struct EdgeBorder {
+    pub width: f64,
+    pub color: Option<String>,
+    pub style: String,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RawTblBorders {
+    pub top: Option<EdgeBorder>,
+    pub bottom: Option<EdgeBorder>,
+    pub left: Option<EdgeBorder>,
+    pub right: Option<EdgeBorder>,
+    pub inside_h: Option<EdgeBorder>,
+    pub inside_v: Option<EdgeBorder>,
+}
+
+/// Conditional formatting block (`w:tblStylePr`) — the subset we resolve.
+#[derive(Debug, Default, Clone)]
+pub struct CondFmt {
+    pub shd: Option<String>,
+    pub borders: RawTblBorders,
+}
+
+/// Table style (`w:style w:type="table"`) cell/border formatting.
+#[derive(Debug, Default, Clone)]
+pub struct TableStyleDef {
+    pub based_on: Option<String>,
+    pub borders: RawTblBorders,
+    pub cell_shd: Option<String>,
+    pub cell_valign: Option<String>,
+    /// keyed by w:tblStylePr w:type (firstRow, band1Horz, band2Horz, …).
+    pub cond: HashMap<String, CondFmt>,
+}
+
 pub struct StyleMap {
     styles: HashMap<String, StyleDef>,
+    table_styles: HashMap<String, TableStyleDef>,
     defaults_para: ParaFmt,
     defaults_run: RunFmt,
     /// styleId of the style with w:default="1" and w:type="paragraph".
@@ -131,6 +168,7 @@ impl StyleMap {
         // index them in the same StyleMap so cell resolution can look
         // them up by ID.
         let mut default_para_style_id: Option<String> = None;
+        let mut table_styles: HashMap<String, TableStyleDef> = HashMap::new();
         for style_node in children_w(root, "style") {
             let Some(style_id) = attr_w(style_node, "styleId") else { continue };
             let style_type = attr_w(style_node, "type").unwrap_or_default();
@@ -145,6 +183,10 @@ impl StyleMap {
             }
 
             let based_on = child_w(style_node, "basedOn").and_then(|n| attr_w(n, "val"));
+
+            if style_type == "table" {
+                table_styles.insert(style_id.clone(), parse_tbl_style_def(style_node, based_on.clone()));
+            }
 
             let para = if let Some(ppr) = child_w(style_node, "pPr") {
                 parse_para_fmt(ppr)
@@ -161,16 +203,44 @@ impl StyleMap {
             styles.insert(style_id, StyleDef { para, run, based_on });
         }
 
-        StyleMap { styles, defaults_para, defaults_run, default_para_style_id }
+        StyleMap { styles, table_styles, defaults_para, defaults_run, default_para_style_id }
     }
 
     fn empty() -> Self {
         StyleMap {
             styles: HashMap::new(),
+            table_styles: HashMap::new(),
             defaults_para: ParaFmt::default(),
             defaults_run: RunFmt::default(),
             default_para_style_id: None,
         }
+    }
+
+    /// Resolve a table style by ID, flattening its basedOn chain (base first, then
+    /// the derived style overrides). Returns defaults if the ID is unknown.
+    pub fn resolve_table_style(&self, style_id: &str) -> TableStyleDef {
+        let mut chain: Vec<&TableStyleDef> = Vec::new();
+        let mut cur = self.table_styles.get(style_id);
+        let mut guard = 0;
+        while let Some(def) = cur {
+            chain.push(def);
+            guard += 1;
+            if guard > 16 { break; }
+            cur = def.based_on.as_deref().and_then(|b| self.table_styles.get(b));
+        }
+        // Merge from base (end of chain) to derived (front).
+        let mut out = TableStyleDef::default();
+        for def in chain.into_iter().rev() {
+            merge_raw_borders(&mut out.borders, &def.borders);
+            if def.cell_shd.is_some() { out.cell_shd = def.cell_shd.clone(); }
+            if def.cell_valign.is_some() { out.cell_valign = def.cell_valign.clone(); }
+            for (k, v) in &def.cond {
+                let slot = out.cond.entry(k.clone()).or_default();
+                if v.shd.is_some() { slot.shd = v.shd.clone(); }
+                merge_raw_borders(&mut slot.borders, &v.borders);
+            }
+        }
+        out
     }
 
     /// Resolve all formatting for a paragraph style ID, merging inherited chain.
@@ -525,6 +595,81 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     }
 
     fmt
+}
+
+// ===== Table style parsing =====
+
+fn shd_fill(node: roxmltree::Node) -> Option<String> {
+    child_w(node, "shd")
+        .and_then(|s| attr_w(s, "fill"))
+        .filter(|f| f != "auto" && f.len() == 6)
+        .map(|f| f.to_lowercase())
+}
+
+fn parse_edge_border(node: roxmltree::Node) -> EdgeBorder {
+    let style = attr_w(node, "val").unwrap_or_else(|| "none".to_string());
+    let width = attr_w(node, "sz")
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|v| v / 8.0)
+        .unwrap_or(0.5);
+    let color = attr_w(node, "color").filter(|c| c != "auto").map(|c| c.to_lowercase());
+    EdgeBorder { width, color, style }
+}
+
+fn parse_raw_tbl_borders(node: roxmltree::Node) -> RawTblBorders {
+    let mut b = RawTblBorders::default();
+    for edge in node.children().filter(|n| n.is_element()) {
+        let e = parse_edge_border(edge);
+        match edge.tag_name().name() {
+            "top" => b.top = Some(e),
+            "bottom" => b.bottom = Some(e),
+            "left" | "start" => b.left = Some(e),
+            "right" | "end" => b.right = Some(e),
+            "insideH" => b.inside_h = Some(e),
+            "insideV" => b.inside_v = Some(e),
+            _ => {}
+        }
+    }
+    b
+}
+
+fn merge_raw_borders(dst: &mut RawTblBorders, src: &RawTblBorders) {
+    if src.top.is_some() { dst.top = src.top.clone(); }
+    if src.bottom.is_some() { dst.bottom = src.bottom.clone(); }
+    if src.left.is_some() { dst.left = src.left.clone(); }
+    if src.right.is_some() { dst.right = src.right.clone(); }
+    if src.inside_h.is_some() { dst.inside_h = src.inside_h.clone(); }
+    if src.inside_v.is_some() { dst.inside_v = src.inside_v.clone(); }
+}
+
+fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) -> TableStyleDef {
+    let mut def = TableStyleDef { based_on, ..Default::default() };
+    if let Some(tbl_pr) = child_w(style_node, "tblPr") {
+        if let Some(borders) = child_w(tbl_pr, "tblBorders") {
+            def.borders = parse_raw_tbl_borders(borders);
+        }
+    }
+    if let Some(tc_pr) = child_w(style_node, "tcPr") {
+        def.cell_shd = shd_fill(tc_pr);
+        def.cell_valign = child_w(tc_pr, "vAlign").and_then(|v| attr_w(v, "val"));
+    }
+    for sp in children_w(style_node, "tblStylePr") {
+        let Some(typ) = attr_w(sp, "type") else { continue };
+        let mut cf = CondFmt::default();
+        if let Some(tc_pr) = child_w(sp, "tcPr") {
+            cf.shd = shd_fill(tc_pr);
+            if let Some(borders) = child_w(tc_pr, "tcBorders") {
+                cf.borders = parse_raw_tbl_borders(borders);
+            }
+        }
+        if let Some(tbl_pr) = child_w(sp, "tblPr") {
+            if let Some(borders) = child_w(tbl_pr, "tblBorders") {
+                merge_raw_borders(&mut cf.borders, &parse_raw_tbl_borders(borders));
+            }
+        }
+        def.cond.insert(typ, cf);
+    }
+    def
 }
 
 #[cfg(test)]

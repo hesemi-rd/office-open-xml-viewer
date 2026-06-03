@@ -7,7 +7,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::xml_util::*;
 use crate::types::*;
-use crate::styles::{StyleMap, parse_para_fmt, parse_run_fmt, ParaFmt, RunFmt};
+use crate::styles::{StyleMap, parse_para_fmt, parse_run_fmt, ParaFmt, RunFmt, CondFmt, RawTblBorders, EdgeBorder};
 use crate::numbering::NumberingMap;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
@@ -2129,10 +2129,24 @@ fn parse_table(
             .collect()
     }).unwrap_or_default();
 
-    // Table borders
-    let borders = tbl_pr.and_then(|p| child_w(p, "tblBorders"))
+    // Resolve the table style's cell/border formatting (shading, banding, borders,
+    // vAlign) — these live in styles.xml, not inline (§17.7.6). tblLook selects which
+    // conditional formats are active.
+    let tstyle = table_style_id
+        .as_deref()
+        .map(|id| style_map.resolve_table_style(id))
+        .unwrap_or_default();
+    let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
+    let look_flag = |name: &str| look.and_then(|l| attr_w(l, name)).as_deref() == Some("1");
+    let first_row = look_flag("firstRow");
+    let h_band = look.and_then(|l| attr_w(l, "noHBand")).as_deref() != Some("1");
+
+    // Table borders: inline tblBorders win; otherwise the table style's borders
+    // (so styles like "Table Grid" show their gridlines).
+    let mut borders = tbl_pr.and_then(|p| child_w(p, "tblBorders"))
         .map(|b| parse_table_borders(b))
         .unwrap_or_default();
+    apply_style_borders(&mut borders, &tstyle.borders);
 
     // Cell margins
     let (cm_top, cm_bot, cm_left, cm_right) = tbl_pr
@@ -2149,6 +2163,35 @@ fn parse_table(
     for tr_node in children_w_flat(node, "tr") {
         let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map, theme, table_style_id.as_deref());
         rows.push(row);
+    }
+
+    // Apply table-style cell shading + vAlign where the cell didn't set them inline.
+    let mut body_idx: i64 = 0;
+    for (r, row) in rows.iter_mut().enumerate() {
+        // Which horizontal conditional format applies to this row?
+        let cond: Option<&CondFmt> = if r == 0 && first_row {
+            tstyle.cond.get("firstRow")
+        } else {
+            let band = if h_band {
+                if body_idx % 2 == 0 { "band1Horz" } else { "band2Horz" }
+            } else {
+                ""
+            };
+            body_idx += 1;
+            if band.is_empty() { None } else { tstyle.cond.get(band) }
+        };
+        let row_shd = cond.and_then(|c| c.shd.clone()).or_else(|| tstyle.cell_shd.clone());
+        for cell in row.cells.iter_mut() {
+            if cell.background.is_none() {
+                cell.background = row_shd.clone();
+            }
+            if cell.v_align.is_empty() {
+                cell.v_align = tstyle
+                    .cell_valign
+                    .clone()
+                    .unwrap_or_else(|| "top".to_string());
+            }
+        }
     }
 
     DocTable {
@@ -2224,9 +2267,10 @@ fn parse_table_cell(
         .filter(|f| f != "auto" && f.len() == 6)
         .map(|f| f.to_lowercase());
 
+    // Empty = not set inline; parse_table fills it from the table style (else "top").
     let v_align = tc_pr.and_then(|p| child_w(p, "vAlign"))
         .and_then(|v| attr_w(v, "val"))
-        .unwrap_or_else(|| "top".to_string());
+        .unwrap_or_default();
 
     // ECMA-376 §17.18.87 ST_TblWidth:
     //   dxa  — twentieths of a point (1/20pt)
@@ -2295,6 +2339,22 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
         left: child_w(node, "left").map(parse_border_spec),
         right: child_w(node, "right").map(parse_border_spec),
     }
+}
+
+/// Fill table-border edges from a table style where the inline table didn't set them.
+fn apply_style_borders(dst: &mut TableBorders, src: &RawTblBorders) {
+    let usable = |e: &EdgeBorder| e.style != "none" && e.style != "nil";
+    let conv = |e: &EdgeBorder| BorderSpec {
+        width: e.width,
+        color: e.color.clone(),
+        style: e.style.clone(),
+    };
+    if dst.top.is_none() { if let Some(e) = &src.top { if usable(e) { dst.top = Some(conv(e)); } } }
+    if dst.bottom.is_none() { if let Some(e) = &src.bottom { if usable(e) { dst.bottom = Some(conv(e)); } } }
+    if dst.left.is_none() { if let Some(e) = &src.left { if usable(e) { dst.left = Some(conv(e)); } } }
+    if dst.right.is_none() { if let Some(e) = &src.right { if usable(e) { dst.right = Some(conv(e)); } } }
+    if dst.inside_h.is_none() { if let Some(e) = &src.inside_h { if usable(e) { dst.inside_h = Some(conv(e)); } } }
+    if dst.inside_v.is_none() { if let Some(e) = &src.inside_v { if usable(e) { dst.inside_v = Some(conv(e)); } } }
 }
 
 fn parse_border_spec(node: roxmltree::Node) -> BorderSpec {
