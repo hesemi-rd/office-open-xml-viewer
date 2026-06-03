@@ -4,6 +4,36 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.43.0 — 2026-06-03
+
+Adds Excel-style sheet-tab colors and a zoom slider to the xlsx viewer, plus a
+PowerPoint chart-axis fidelity fix verified against the PDF exports of the test
+decks.
+
+### xlsx
+
+- **Sheet tab colors**: `<sheetPr><tabColor>` (ECMA-376 §18.3.1.93; theme +
+  tint / indexed / rgb) now renders as a color bar along each sheet tab's bottom
+  edge. The color is surfaced on the workbook sheet list via a bounded
+  worksheet-head read (`<sheetPr>` is the first child, so `<sheetData>` is never
+  inflated), so every tab paints up front without eagerly parsing each sheet
+  (#315).
+- **Zoom slider**: an Excel-style zoom control pinned to the right end of the
+  sheet-tab bar (10%–400%, with 100% at the slider's center via a
+  piecewise-linear position→scale map). Gated by the new `showZoomSlider`
+  viewer option (default on); `zoomMin` / `zoomMax` are configurable (#315).
+
+### pptx
+
+- **Chart axes**: horizontal bar charts now draw the category-axis line
+  PowerPoint renders. The left rule was previously misattributed to the value
+  axis — in a bar chart the category axis is the vertical/left one — so a chart
+  whose value axis is `<c:delete val="1">` (sample-2 slide-16) drew no axis line
+  at all. Axis tick labels now honor the file's `<c:txPr>` text color and
+  `<c:spPr><a:ln>` line color (ECMA-376 §21.2.2.*) instead of a hardcoded gray,
+  resolved through the lumMod/lumOff path (tx1 15%/85% → ~#D9D9D9, bg1 75% →
+  #BFBFBF); this also fixes slide-7's column charts (#314).
+
 ## 0.42.0 — 2026-06-03
 
 Rendering-fidelity release, verified against the Word / PowerPoint / Excel PDF
