@@ -209,6 +209,45 @@ pub fn extract_data_label_font_color(root: Node, resolver: &dyn ColorResolver) -
     None
 }
 
+/// `<c:catAx|valAx><c:txPr>` tick-label text color, resolved to a hex string
+/// (no leading `#`). Walks the axis's `<c:txPr>` for the first descendant
+/// `<a:solidFill>` the resolver can map — this is the `<a:defRPr><a:solidFill>`
+/// that ECMA-376 §21.2.2.* / §21.1.2.2.* uses to color the axis tick labels
+/// (e.g. PowerPoint's "category labels in gray"). Scoped to `<c:txPr>` so the
+/// sibling `<c:spPr>` axis-line fill can't shadow the answer.
+pub fn extract_axis_tick_label_color(axis_node: Node, resolver: &dyn ColorResolver) -> Option<String> {
+    let txpr = child(axis_node, "txPr")?;
+    for desc in txpr.descendants().filter(|n| n.is_element()) {
+        if desc.tag_name().name() != "solidFill" { continue; }
+        if let Some(c) = resolver.resolve_solid_fill(desc) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// `<c:catAx|valAx><c:spPr><a:ln>` axis-line style (ECMA-376 §21.2.2.* line
+/// properties via DrawingML §20.1.2.2.24). Returns `(color, width_emu, no_fill)`:
+///
+///  - `color`: resolved hex (no `#`) when the line carries a `<a:solidFill>`.
+///  - `width_emu`: the `<a:ln w>` width in EMU when present.
+///  - `no_fill`: true when the line is explicitly `<a:noFill>` — the axis still
+///    shows its labels/ticks but the rule itself is suppressed.
+///
+/// When the axis has no `<c:spPr><a:ln>` at all the tuple is
+/// `(None, None, false)` and the caller falls back to its default rule.
+pub fn extract_axis_line_style(
+    axis_node: Node,
+    resolver: &dyn ColorResolver,
+) -> (Option<String>, Option<u32>, bool) {
+    let Some(sp_pr) = child(axis_node, "spPr") else { return (None, None, false); };
+    let Some(ln) = child(sp_pr, "ln") else { return (None, None, false); };
+    let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
+    let no_fill = child(ln, "noFill").is_some();
+    let color = child(ln, "solidFill").and_then(|sf| resolver.resolve_solid_fill(sf));
+    (color, width, no_fill)
+}
+
 /// chartEx (`<cx:chartSpace>`) axis visibility. ChartEx encodes the
 /// scale type via a `<cx:catScaling>` / `<cx:valScaling>` child rather
 /// than separate `<c:catAx>` / `<c:valAx>` elements, so callers can't just
@@ -396,6 +435,56 @@ mod tests {
         let d = root_of(xml);
         let got = extract_data_label_font_color(d.root_element(), &StubResolver);
         assert_eq!(got.as_deref(), Some("FFFFFF"));
+    }
+
+    #[test]
+    fn axis_tick_label_color_from_txpr() {
+        let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:spPr><a:ln><a:solidFill><a:srgbClr val="d9d9d9"/></a:solidFill></a:ln></c:spPr>
+            <c:txPr><a:p><a:pPr><a:defRPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:defRPr></a:pPr></a:p></c:txPr>
+        </c:catAx>"#;
+        let d = root_of(xml);
+        // The txPr text fill (bg1) is returned — the spPr line fill must not leak.
+        let got = extract_axis_tick_label_color(d.root_element(), &StubResolver);
+        assert_eq!(got.as_deref(), Some("bg1"));
+    }
+
+    #[test]
+    fn axis_tick_label_color_absent() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert!(extract_axis_tick_label_color(d.root_element(), &StubResolver).is_none());
+    }
+
+    #[test]
+    fn axis_line_style_solid_with_width() {
+        let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:spPr><a:noFill/><a:ln w="9525"><a:solidFill><a:srgbClr val="d9d9d9"/></a:solidFill></a:ln></c:spPr>
+        </c:catAx>"#;
+        let d = root_of(xml);
+        let (color, width, no_fill) = extract_axis_line_style(d.root_element(), &StubResolver);
+        assert_eq!(color.as_deref(), Some("D9D9D9"));
+        assert_eq!(width, Some(9525));
+        assert!(!no_fill);
+    }
+
+    #[test]
+    fn axis_line_style_nofill_line() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:spPr><a:ln w="9525"><a:noFill/></a:ln></c:spPr>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        let (color, width, no_fill) = extract_axis_line_style(d.root_element(), &StubResolver);
+        assert!(color.is_none());
+        assert_eq!(width, Some(9525));
+        assert!(no_fill);
+    }
+
+    #[test]
+    fn axis_line_style_absent() {
+        let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_axis_line_style(d.root_element(), &StubResolver), (None, None, false));
     }
 
     #[test]

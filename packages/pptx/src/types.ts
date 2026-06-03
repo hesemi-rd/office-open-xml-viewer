@@ -210,6 +210,18 @@ export interface ChartElement {
   catAxisFontSizeHpt: number | null;
   /** `<c:valAx><c:txPr>` font size (hpt). null = proportional default. */
   valAxisFontSizeHpt: number | null;
+  /** `<c:catAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
+  catAxisFontColor?: string | null;
+  /** `<c:valAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
+  valAxisFontColor?: string | null;
+  /** `<c:catAx><c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
+  catAxisLineColor?: string | null;
+  /** `<c:catAx><c:spPr><a:ln w>` axis-line width in EMU. */
+  catAxisLineWidthEmu?: number | null;
+  /** `<c:valAx><c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
+  valAxisLineColor?: string | null;
+  /** `<c:valAx><c:spPr><a:ln w>` axis-line width in EMU. */
+  valAxisLineWidthEmu?: number | null;
   /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
   dataLabelFontSizeHpt: number | null;
   /** `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr". */

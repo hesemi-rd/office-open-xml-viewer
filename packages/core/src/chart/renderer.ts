@@ -447,7 +447,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const steps = Math.round(axMax / step);
   ctx.textBaseline = 'middle';
   ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
-  ctx.fillStyle = '#555';
+  // Honor `<c:valAx><c:txPr>…<a:solidFill>` when present (ECMA-376 §21.2.2.*);
+  // otherwise keep the neutral gray default.
+  const valLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+  ctx.fillStyle = valLabelColor;
 
   if (!chart.valAxisHidden) {
     for (let si = 0; si <= steps; si++) {
@@ -473,18 +476,32 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-  // `<c:spPr><a:ln><a:noFill>` on the corresponding axis suppresses just
-  // the rule (labels stay). For a vertical bar chart the bottom rule is
-  // the category axis; for a horizontal bar chart it's the value axis.
+  // Axis rules. The CATEGORY axis runs along the bars' baseline — bottom
+  // (horizontal) for a column chart, left (vertical) for a horizontal bar
+  // chart — and the VALUE axis is perpendicular to it. The previous code
+  // assumed the left rule was always the value axis, so a horizontal bar
+  // chart whose value axis is `<c:delete val="1">` (sample-2 slide-16) drew
+  // no axis line at all even though its category axis carries an explicit
+  // `<c:spPr><a:ln>`. `<a:noFill>` on a line suppresses just the rule (labels
+  // stay) → `*AxisLineHidden`; an `<a:solidFill>` gives `*AxisLineColor`/Width
+  // (ECMA-376 §21.2.2.* line props). Office leaves the value-axis rule off by
+  // default (gridlines stand in), so only draw it when the file specifies one.
+  const catLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#aaa';
+  const valLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#aaa';
+  const catLineW = chart.catAxisLineWidthEmu ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700) : 1;
+  const valLineW = chart.valAxisLineWidthEmu ? Math.max(0.5, chart.valAxisLineWidthEmu / 12700) : 1;
+  const strokeAxis = (x1: number, y1: number, x2: number, y2: number, color: string, lw: number): void => {
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  };
+  const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
+  const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden && chart.valAxisLineColor != null;
   if (!isH) {
-    if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-      ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
-    }
+    if (drawCatLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, catLineColor, catLineW); // bottom
+    if (drawValLine) strokeAxis(px0, py0, px0, py0 + ph, valLineColor, valLineW);           // left
   } else {
-    if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
-      ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
-    }
+    if (drawCatLine) strokeAxis(px0, py0, px0, py0 + ph, catLineColor, catLineW);           // left
+    if (drawValLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW); // bottom
   }
 
   // Bar cluster geometry — ECMA-376 §21.2.2.13 (gapWidth = % of bar width
@@ -600,7 +617,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   }
 
   if (!chart.catAxisHidden) {
-    ctx.fillStyle = '#555';
+    // `<c:catAx><c:txPr>…<a:solidFill>` colors the category tick labels (e.g.
+    // sample-2 slide-16's "2025年3月期" labels are `bg1 lumMod 75%` gray).
+    ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.font = `${Math.max(8, Math.min(11, catGap * 0.5))}px sans-serif`;
     for (let ci = 0; ci < n; ci++) {
       const label = (cats[ci] ?? '').toString().slice(0, 12);
@@ -739,7 +758,8 @@ function renderLineChart(
       ctx.lineWidth = v === 0 ? 1 : 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
-      ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+      ctx.textAlign = 'right';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 6, gy);
     }
   }
@@ -797,12 +817,13 @@ function renderLineChart(
 
   if (!chart.catAxisHidden) {
     const labelInterval = Math.max(1, Math.ceil(n / 8));
-    ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
+    ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${catAxFontPx}px sans-serif`;
     for (let ci = 0; ci < n; ci += labelInterval) {
       const tx = toX(ci);
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
-      ctx.fillStyle = '#555';
+      ctx.fillStyle = catLabelColor;
       ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), tx, py0 + ph + 5);
     }
   }
@@ -879,7 +900,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.strokeStyle = si === 0 ? '#aaa' : '#e0e0e0';
       ctx.lineWidth = si === 0 ? 1 : 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
-      ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+      ctx.textAlign = 'right';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
@@ -922,7 +944,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 
   if (!chart.catAxisHidden) {
     const labelInterval = Math.max(1, Math.ceil(n / 8));
-    ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
     for (let ci = 0; ci < n; ci += labelInterval) {
       ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), toX(ci), py0 + ph + 3);
