@@ -13,3 +13,5 @@ export {
   type SparklineModel,
   type SparklineRect,
 } from './sparkline/renderer';
+export * from './math';
+export type { MathNode, MathFormula, MathStyle } from './types/math';
