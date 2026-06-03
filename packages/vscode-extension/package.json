@@ -2,7 +2,7 @@
   "name": "office-open-xml-viewer",
   "displayName": "Office Viewer — DOCX, XLSX, PPTX",
   "description": "High-fidelity viewer for Office files (.docx / .xlsx / .pptx). Local-only — files never leave your machine. Powered by a Rust/WASM parser and Canvas renderer.",
-  "version": "0.43.0",
+  "version": "0.44.0",
   "publisher": "silurus",
   "license": "MIT",
   "icon": "icon.png",
@@ -36,7 +36,9 @@
         "viewType": "ooxmlViewer.docxEditor",
         "displayName": "OOXML Viewer (DOCX)",
         "selector": [
-          { "filenamePattern": "*.docx" }
+          {
+            "filenamePattern": "*.docx"
+          }
         ],
         "priority": "default"
       },
@@ -44,7 +46,9 @@
         "viewType": "ooxmlViewer.xlsxEditor",
         "displayName": "OOXML Viewer (XLSX)",
         "selector": [
-          { "filenamePattern": "*.xlsx" }
+          {
+            "filenamePattern": "*.xlsx"
+          }
         ],
         "priority": "default"
       },
@@ -52,7 +56,9 @@
         "viewType": "ooxmlViewer.pptxEditor",
         "displayName": "OOXML Viewer (PPTX)",
         "selector": [
-          { "filenamePattern": "*.pptx" }
+          {
+            "filenamePattern": "*.pptx"
+          }
         ],
         "priority": "default"
       }
@@ -85,7 +91,11 @@
       "properties": {
         "ooxmlViewer.mcpServer.enabled": {
           "type": "string",
-          "enum": ["auto", "always", "never"],
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
           "enumDescriptions": [
             "Offer to enable when the workspace contains .xlsx / .docx / .pptx files.",
             "Always register the MCP server (downloading the binary on first use).",

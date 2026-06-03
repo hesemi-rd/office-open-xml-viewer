@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-xlsx",
   "private": true,
-  "version": "0.43.0",
+  "version": "0.44.0",
   "description": "XLSX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -27,7 +27,10 @@
     "./wasm": "./src/wasm/xlsx_parser.js",
     "./wasm-binary": "./src/wasm/xlsx_parser_bg.wasm"
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
