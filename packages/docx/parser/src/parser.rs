@@ -810,6 +810,9 @@ struct FieldState {
     fmt: Option<RunFmt>,
     /// Fallback text captured between `separate` and `end`.
     fallback: String,
+    /// True when we recompute this field (PAGE/NUMPAGES) and swallow its cached result.
+    /// False for complex fields (TOC, PAGEREF, REF, …) whose result is rendered as-is.
+    substitute: bool,
 }
 
 fn parse_para_content(
@@ -936,12 +939,18 @@ fn handle_run_in_para(
                 field.instruction.clear();
                 field.fallback.clear();
                 field.fmt = None;
+                field.substitute = false;
             }
             "separate" => {
                 field.past_separate = true;
+                // Only PAGE / NUMPAGES are recomputed (their cached result is swallowed).
+                // Complex fields (TOC, PAGEREF, REF, HYPERLINK, …) render their result
+                // content as normal runs — so multi-paragraph / nested fields like a TOC
+                // keep their headings, tabs and page numbers.
+                field.substitute = classify_field(&field.instruction) != "other";
             }
             "end" => {
-                if field.active {
+                if field.active && field.substitute {
                     let fmt = field.fmt.clone().unwrap_or_else(|| base_run.clone());
                     runs.push(make_field_run(&field.instruction, &fmt, &field.fallback, theme));
                 }
@@ -952,29 +961,32 @@ fn handle_run_in_para(
         return;
     }
 
-    if field.active {
-        if !field.past_separate {
-            // Capture instruction text and remember the formatting of the first instruction run
-            if !instr_text.is_empty() {
-                field.instruction.push_str(&instr_text);
-                if field.fmt.is_none() {
-                    let mut fmt = base_run.clone();
-                    if let Some(rpr) = child_w(r_node, "rPr") {
-                        apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
-                    }
-                    field.fmt = Some(fmt);
+    if field.active && !field.past_separate {
+        // Inside the instruction (before `separate`). Accumulate it and remember the
+        // first instruction run's formatting; the (hidden) instruction never renders.
+        if !instr_text.is_empty() {
+            field.instruction.push_str(&instr_text);
+            if field.fmt.is_none() {
+                let mut fmt = base_run.clone();
+                if let Some(rpr) = child_w(r_node, "rPr") {
+                    apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
                 }
-            }
-        } else {
-            // Fallback/result text between separate and end — accumulate for "other" fields
-            for c in r_node.children().filter(|n| n.is_element() && n.tag_name().name() == "t") {
-                if let Some(t) = c.text() {
-                    field.fallback.push_str(t);
-                }
+                field.fmt = Some(fmt);
             }
         }
         return;
     }
+
+    if field.active && field.substitute {
+        // Cached result of a recomputed field (PAGE/NUMPAGES) — swallow it.
+        for c in r_node.children().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+            if let Some(t) = c.text() {
+                field.fallback.push_str(t);
+            }
+        }
+        return;
+    }
+    // field.active && past_separate && !substitute → fall through and render the result.
 
     // Normal run
     parse_run_inner(r_node, base_run, style_map, media_map, theme, runs, link_href, revision);
@@ -1054,15 +1066,24 @@ fn parse_run_inner(
     // Skip hidden runs entirely
     if fmt.vanish.unwrap_or(false) { return; }
 
+    // External links (URL) vs internal-document links (anchor: TOC entries,
+    // cross-references). Word renders internal links as plain body text — NOT with
+    // the Hyperlink style's blue/underline — so strip that styling here.
     let is_link = link_href.is_some();
+    let is_external = matches!(link_href, Some(Some(_)));
+    let is_internal = matches!(link_href, Some(None));
     let hyperlink = link_href.clone().flatten();
+    if is_internal {
+        fmt.color = base_run.color.clone();
+        fmt.underline = base_run.underline;
+    }
 
     let bold = fmt.bold.unwrap_or(false);
     let italic = fmt.italic.unwrap_or(false);
-    let underline = fmt.underline.unwrap_or(false) || is_link;
+    let underline = fmt.underline.unwrap_or(false) || is_external;
     let strikethrough = fmt.strikethrough.unwrap_or(false);
     let font_size = fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let color = if is_link && fmt.color.is_none() {
+    let color = if is_external && fmt.color.is_none() {
         Some("0563c1".to_string())
     } else {
         fmt.color.clone()
