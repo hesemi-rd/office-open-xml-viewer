@@ -101,8 +101,14 @@ function nodeToMathML(node: MathNode): string {
       const mo = `<mo stretchy="true">${esc(node.char)}</mo>`;
       return node.pos === 'top' ? `<mover>${b}${mo}</mover>` : `<munder>${b}${mo}</munder>`;
     }
-    case 'bar':
-      return `<menclose notation="${node.pos === 'bot' ? 'bottom' : 'top'}">${row(node.base)}</menclose>`;
+    case 'bar': {
+      // A tight stretchy bar hugging the base (overline / underline), not a padded box.
+      const b = row(node.base);
+      const barOp = '<mo stretchy="true">&#x00AF;</mo>';
+      return node.pos === 'bot'
+        ? `<munder accent="true">${b}${barOp}</munder>`
+        : `<mover accent="true">${b}${barOp}</mover>`;
+    }
     case 'accent':
       return `<mover accent="true">${row(node.base)}<mo stretchy="false">${esc(node.char)}</mo></mover>`;
     case 'func':
