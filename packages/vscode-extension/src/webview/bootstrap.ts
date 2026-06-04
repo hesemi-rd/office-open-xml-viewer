@@ -19,6 +19,24 @@ declare function acquireVsCodeApi(): {
 import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
 import { DocxDocument, type DocxTextRunInfo } from '@silurus/ooxml-docx';
 import { PptxPresentation, type PptxTextRunInfo } from '@silurus/ooxml-pptx';
+import { svgExtents } from '@silurus/ooxml-core';
+// Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
+// into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
+// equations only when handed a `math` engine; its built-in engine loads lazily
+// by injecting a <script>, which this webview's nonce CSP blocks — so we bundle
+// the engine inline instead and pass the adapter below to the viewers.
+import '@silurus/ooxml-core/mathjax-stix2';
+
+const math = {
+  loadMathJax: async (): Promise<void> => {
+    /* engine bundled by the import above; globalThis.__ooxmlStix2 is set */
+  },
+  mathMLToSvg: async (mathml: string) => {
+    if (!__ooxmlStix2) throw new Error('Math engine failed to initialize');
+    const svg = __ooxmlStix2.mathml2svg(mathml);
+    return { svg, ...svgExtents(svg) };
+  },
+};
 
 const vscodeApi = acquireVsCodeApi();
 const fileType = __OOXML_FILE_TYPE__;
@@ -115,7 +133,7 @@ function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): voi
 }
 
 async function initDocx(buffer: ArrayBuffer): Promise<void> {
-  const doc = await DocxDocument.load(buffer);
+  const doc = await DocxDocument.load(buffer, { math });
 
   const stack = document.createElement('div');
   stack.className = 'page-stack';
@@ -212,7 +230,7 @@ async function initPptx(buffer: ArrayBuffer): Promise<void> {
     stack.appendChild(wrapper);
 
     const runs: PptxTextRunInfo[] = [];
-    await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
+    await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r), math });
     buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
   }
 

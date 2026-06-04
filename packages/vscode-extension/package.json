@@ -127,6 +127,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@silurus/ooxml-core": "workspace:*",
     "@silurus/ooxml-docx": "workspace:*",
     "@silurus/ooxml-xlsx": "workspace:*",
     "@silurus/ooxml-pptx": "workspace:*"

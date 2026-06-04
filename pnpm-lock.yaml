@@ -170,6 +170,9 @@ importers:
 
   packages/vscode-extension:
     dependencies:
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
       '@silurus/ooxml-docx':
         specifier: workspace:*
         version: link:../docx
