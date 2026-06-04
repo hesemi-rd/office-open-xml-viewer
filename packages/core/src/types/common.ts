@@ -1,6 +1,8 @@
 // Format-agnostic OOXML types shared across pptx/docx/xlsx packages.
 // All positions and sizes are in EMUs (English Metric Units).
 
+import type { MathNode } from './math';
+
 export type PathCmd =
   | { cmd: 'moveTo';     x: number; y: number }
   | { cmd: 'lineTo';     x: number; y: number }
@@ -207,7 +209,24 @@ export interface Paragraph {
   runs: TextRun[];
 }
 
-export type TextRun = TextRunData | LineBreak;
+export type TextRun = TextRunData | LineBreak | EquationRun;
+
+/**
+ * An OMML equation embedded in a paragraph (ECMA-376 §22.1). Parsed into the
+ * shared math AST and rendered by `@silurus/ooxml-core`'s math engine.
+ * PowerPoint stores these as `a14:m` inside `mc:AlternateContent`.
+ */
+export interface EquationRun {
+  type: 'math';
+  /** Parsed OMML node list. */
+  nodes: MathNode[];
+  /** True for block (`m:oMathPara`) math, false for inline (`m:oMath`). */
+  display: boolean;
+  /** Paragraph default run size in pt, if declared; absent → renderer inherits. */
+  fontSize?: number | null;
+  /** Equation colour (hex, no '#') from the math run's rPr; absent → inherit. */
+  color?: string | null;
+}
 
 export interface TextRunData {
   type: 'text';

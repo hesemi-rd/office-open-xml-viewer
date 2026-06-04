@@ -23,6 +23,35 @@ export function hasPreset(geom: string): boolean {
   return geom.toLowerCase() in PRESETS;
 }
 
+// A wedge callout's tail only protrudes when its tip is OUTSIDE the body. When
+// the author drags the tip into the body (e.g. to hide the tail), PowerPoint
+// renders just the base shape — no inward dent. The literal ECMA-376 preset
+// path always draws the tail vertices, which on a thin near-horizontal edge
+// shows as a visible notch. So when the tip is inside the body bounds, fall
+// back to the base geometry. With the preset DEFAULT adjusts the tip is
+// outside, so ordinary callouts keep their tails.
+const WEDGE_CALLOUT_BASE: Record<string, string | null> = {
+  wedgeroundrectcallout: 'roundrect', // corner radius = adj3
+  wedgeellipsecallout: 'ellipse',
+  wedgerectcallout: null, // → inline RECT_DEF
+};
+const RECT_DEF: PresetDef = {
+  adj: [],
+  gd: [],
+  paths: [{
+    w: null, h: null, fill: null, stroke: true, extrusionOk: false,
+    cmds: [['m', 'l', 't'], ['l', 'r', 't'], ['l', 'r', 'b'], ['l', 'l', 'b'], ['c']],
+  }],
+};
+
+/** Effective adjust value i, falling back to the preset's declared default. */
+function effAdj(adj: (number | null | undefined)[], def: PresetDef, i: number): number {
+  const s = adj[i];
+  if (typeof s === 'number') return s;
+  const d = def.adj[i];
+  return d ? Number(d[1].replace(/^val\s+/, '')) || 0 : 0;
+}
+
 /**
  * Render a preset shape onto the canvas. Handles all paths (including
  * secondary outline-only / highlight paths) with per-path fill/stroke
@@ -45,8 +74,30 @@ export function renderPresetShape(
   clearShadow: () => void,
 ): boolean {
   const key = geom.toLowerCase();
-  const def = PRESETS[key];
+  let def = PRESETS[key];
   if (!def) return false;
+
+  // Suppress a wedge-callout tail whose tip sits inside the body (see note above).
+  if (key in WEDGE_CALLOUT_BASE) {
+    const a1 = effAdj(adj, def, 0); // dxPos fraction (×1e5) of width from centre
+    const a2 = effAdj(adj, def, 1); // dyPos fraction (×1e5) of height from centre
+    const xPos = w / 2 + (w * a1) / 100000;
+    const yPos = h / 2 + (h * a2) / 100000;
+    const tipInside = xPos >= 0 && xPos <= w && yPos >= 0 && yPos <= h;
+    if (tipInside) {
+      const baseKey = WEDGE_CALLOUT_BASE[key];
+      if (baseKey === 'roundrect') {
+        def = PRESETS.roundrect;
+        adj = [effAdj(adj, PRESETS[key], 2)]; // adj3 → corner radius
+      } else if (baseKey && PRESETS[baseKey]) {
+        def = PRESETS[baseKey];
+        adj = [];
+      } else {
+        def = RECT_DEF;
+        adj = [];
+      }
+    }
+  }
 
   const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
 

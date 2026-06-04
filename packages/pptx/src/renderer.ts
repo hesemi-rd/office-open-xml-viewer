@@ -27,7 +27,12 @@ import {
   drawPolygon,
   ooxmlArcTo,
   EMU_PER_PT as PT_TO_EMU,
+  loadMathJax,
+  mathToMathML,
+  mathMLToSvg,
+  recolorSvg,
 } from '@silurus/ooxml-core';
+import type { MathNode } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
 
@@ -196,6 +201,122 @@ function drawUnderline(
   ctx.setLineDash([]);
 }
 
+// ── Math (OMML) rendering ──────────────────────────────────────────────────
+// Equations are converted to SVG by MathJax once, cached by their MathNode[]
+// reference (stable from parse through render), then drawn as images inline.
+// Mirrors the docx renderer's pipeline so the typesetting is identical.
+interface MathRender {
+  /** The equation rasterized as opaque black glyphs on transparent. */
+  img: HTMLImageElement;
+  /** baseline-relative extents in em (1em = the equation's font size in px). */
+  widthEm: number;
+  ascentEm: number;
+  descentEm: number;
+  /** Per-colour tinted copies (the black `img` recoloured via source-in). */
+  tinted: Map<string, CanvasImageSource>;
+}
+const mathRenders = new WeakMap<MathNode[], MathRender>();
+
+/**
+ * Tint the cached black equation image to `color`. PowerPoint equations follow
+ * the run/paragraph text colour, which varies per slide (white on dark, theme
+ * accents, …), so we recolour the glyphs at draw time via `source-in` instead
+ * of baking a single colour. Cached per colour on the render.
+ */
+function tintedMathImage(render: MathRender, color: string): CanvasImageSource {
+  const cached = render.tinted.get(color);
+  if (cached) return cached;
+  const iw = render.img.naturalWidth || 1;
+  const ih = render.img.naturalHeight || 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = iw;
+  canvas.height = ih;
+  const cx = canvas.getContext('2d');
+  if (!cx) return render.img;
+  cx.drawImage(render.img, 0, 0, iw, ih);
+  cx.globalCompositeOperation = 'source-in';
+  cx.fillStyle = color;
+  cx.fillRect(0, 0, iw, ih);
+  render.tinted.set(color, canvas);
+  return canvas;
+}
+
+function svgToImage(svg: string): Promise<HTMLImageElement> {
+  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const img = new Image();
+  return new Promise((resolve, reject) => {
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+// Rasterization resolution for equation SVGs, in px per em. A MathJax SVG
+// carries its size in `ex` units, so an `<img>` rasterizes it at a small
+// intrinsic size and `drawImage` then upscales it — blurry on HiDPI canvases.
+// Forcing an explicit px width/height makes the browser rasterize at this
+// resolution instead; 256 px/em stays crisp for equations well past 40pt even
+// at devicePixelRatio 3 (40pt → ~53px/em × 3 ≈ 160 px/em needed).
+const MATH_RASTER_PX_PER_EM = 256;
+
+/** Pin the SVG root to an explicit high-resolution px size before rasterizing. */
+function sizeSvgForRaster(svg: string, widthEm: number, heightEm: number): string {
+  const w = Math.max(1, Math.round(widthEm * MATH_RASTER_PX_PER_EM));
+  const h = Math.max(1, Math.round(heightEm * MATH_RASTER_PX_PER_EM));
+  return svg.replace(/<svg([^>]*?)>/, (_m, attrs: string) => {
+    const cleaned = attrs.replace(/\s(?:width|height)="[^"]*"/g, '');
+    return `<svg${cleaned} width="${w}" height="${h}">`;
+  });
+}
+
+/** Gather every math run reachable from a slide's shapes and table cells. */
+function collectSlideMathRuns(slide: Slide): { nodes: MathNode[]; display: boolean }[] {
+  const found: { nodes: MathNode[]; display: boolean }[] = [];
+  const fromBody = (body: TextBody | null) => {
+    if (!body) return;
+    for (const para of body.paragraphs) {
+      for (const run of para.runs) {
+        if (run.type === 'math') found.push({ nodes: run.nodes, display: run.display });
+      }
+    }
+  };
+  for (const el of slide.elements) {
+    if (el.type === 'shape') fromBody(el.textBody);
+    else if (el.type === 'table') {
+      for (const row of el.rows) for (const cell of row.cells) fromBody(cell.textBody);
+    }
+  }
+  return found;
+}
+
+/**
+ * Pre-render every equation on the slide to an image (async), so the
+ * synchronous layout/draw passes can place them by reading cached extents.
+ * A conversion failure leaves the equation unrendered rather than throwing.
+ */
+export async function prepareSlideMath(slide: Slide): Promise<void> {
+  const runs = collectSlideMathRuns(slide);
+  if (runs.length === 0) return;
+  await loadMathJax();
+  for (const r of runs) {
+    if (mathRenders.has(r.nodes)) continue;
+    try {
+      const out = await mathMLToSvg(mathToMathML(r.nodes, r.display));
+      const sized = sizeSvgForRaster(recolorSvg(out.svg, '#000000'), out.widthEm, out.ascentEm + out.descentEm);
+      const img = await svgToImage(sized);
+      mathRenders.set(r.nodes, {
+        img,
+        widthEm: out.widthEm,
+        ascentEm: out.ascentEm,
+        descentEm: out.descentEm,
+        tinted: new Map(),
+      });
+    } catch {
+      // leave unrendered
+    }
+  }
+}
+
 type LayoutSegment = {
   text: string;
   font: string;
@@ -216,6 +337,17 @@ type LayoutSegment = {
   shadow?: import('@silurus/ooxml-core').Shadow;
   /** Run-level glyph outline (rPr > a:ln). Width in EMU; renderer scales. */
   outline?: import('@silurus/ooxml-core').TextOutline;
+  /**
+   * Present when this segment is an OMML equation drawn as an image instead of
+   * text (`text` is then ""). Box metrics are in px at the current scale.
+   */
+  math?: {
+    nodes: MathNode[];
+    display: boolean;
+    width: number;
+    ascent: number;
+    descent: number;
+  };
 };
 
 interface LayoutLine {
@@ -283,6 +415,21 @@ function genericFallback(family: string): string {
   return 'sans-serif';
 }
 
+/**
+ * Office fonts → metric-compatible, freely-distributable substitutes
+ * (`presentation.ts` preloads these webfonts). Putting the substitute in the
+ * canvas font stack means a viewer that lacks Calibri/Cambria (macOS, Linux)
+ * renders at the SAME advance widths as PowerPoint instead of a wider system
+ * serif/sans — without which `wrap="none"` lines overflow the slide. Keys are
+ * lower-cased; both the Office face and its substitute share glyph metrics.
+ */
+const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
+  'calibri': 'Carlito',
+  'calibri light': 'Carlito',
+  'cambria': 'Caladea',
+  'cambria math': 'Caladea',
+};
+
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
   const weight = bold   ? 'bold '   : '';
@@ -290,9 +437,12 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  // Named font + inferred generic fallback so browsers degrade consistently
-  // when the exact typeface is not installed.
-  return `${style}${weight}${sizePx}px "${normalized}", ${genericFallback(normalized)}`;
+  // Named font + (metric-compatible substitute, if an Office face) + inferred
+  // generic fallback, so browsers degrade consistently when the exact typeface
+  // is not installed.
+  const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
+  const subPart = sub ? `"${sub}", ` : '';
+  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${genericFallback(normalized)}`;
 }
 
 /**
@@ -429,6 +579,7 @@ function layoutParagraph(
     // the same object since the run is parsed once. Different objects (or
     // one set / one missing) force a new segment.
     const sameMeta = (a: LayoutSegment) =>
+      !a.math &&
       a.font === font &&
       a.color === color &&
       a.underline === underline &&
@@ -462,6 +613,36 @@ function layoutParagraph(
   for (const run of para.runs) {
     if (run.type === 'break') {
       newLine();
+      continue;
+    }
+
+    // ── OMML equation ─────────────────────────────────────────────────────
+    if (run.type === 'math') {
+      const render = mathRenders.get(run.nodes);
+      // Equation font size: explicit run size (pt→px) else paragraph default.
+      const emPx = run.fontSize != null
+        ? run.fontSize * PT_TO_EMU * scale * fontScale
+        : defaultFontSizePx;
+      const width = render ? render.widthEm * emPx : 0;
+      const ascent = render ? render.ascentEm * emPx : 0;
+      const descent = render ? render.descentEm * emPx : 0;
+      // Block (display) math gets its own line; the draw pass centres it.
+      if (run.display && lineW > 0) newLine();
+      else if (lineW + width > maxWidthPx && lineW > 0) newLine();
+      currentLine.segments.push({
+        text: '',
+        font: `${emPx}px sans-serif`,
+        sizePx: emPx,
+        // Equations follow their own run colour (e.g. a purple title); the
+        // draw pass tints the glyph image to this colour. Fall back to the
+        // paragraph/body default when the run carries no explicit colour.
+        color: run.color ? hexToRgba(run.color) : defaultColor,
+        underline: false,
+        strikethrough: false,
+        math: { nodes: run.nodes, display: run.display, width, ascent, descent },
+      });
+      lineW += width;
+      if (run.display) newLine();
       continue;
     }
 
@@ -1203,7 +1384,10 @@ function renderTextBody(
       // inflate lineHeight and push real 24pt runs far below the anchor.
       let maxSizePx = 0;
       for (const seg of line.segments) {
-        if (seg.sizePx > maxSizePx) maxSizePx = seg.sizePx;
+        // For an equation, the visual box (ascent+descent) must fit inside the
+        // line's 1.2× leading, so contribute an equivalent font size.
+        const effSize = seg.math ? (seg.math.ascent + seg.math.descent) / 1.2 : seg.sizePx;
+        if (effSize > maxSizePx) maxSizePx = effSize;
       }
       if (maxSizePx === 0) maxSizePx = paraDefaultFontSizePx;
       // Bullet font size also counts
@@ -1381,6 +1565,11 @@ function renderTextBody(
     let lineWidth = 0;
     let maxAscent = lineHeight * 0.8; // fallback when no segments
     for (const seg of line.segments) {
+      if (seg.math) {
+        lineWidth += seg.math.width;
+        maxAscent = Math.max(maxAscent, seg.math.ascent);
+        continue;
+      }
       ctx.font = seg.font;
       const m = ctx.measureText(seg.text || 'M');
       const ls = seg.letterSpacingPx ?? 0;
@@ -1409,6 +1598,19 @@ function renderTextBody(
     }
 
     for (const seg of line.segments) {
+      // ── Equation segment: draw the cached image instead of text ──────────
+      if (seg.math) {
+        const render = mathRenders.get(seg.math.nodes);
+        const w = seg.math.width;
+        const h = seg.math.ascent + seg.math.descent;
+        if (render && w > 0 && h > 0) {
+          const top = baseline - seg.math.ascent;
+          const img = tintedMathImage(render, seg.color);
+          ctx.drawImage(img, penX, top, w, h);
+        }
+        penX += w;
+        continue;
+      }
       ctx.font = seg.font;
       ctx.fillStyle = seg.color;
       // baseline shift: OOXML baseline in thousandths of a point; positive = superscript (up)
@@ -2012,6 +2214,9 @@ export async function renderSlide(
   };
 
   renderBackground(ctx, slide.background, canvasW, canvasH);
+
+  // Pre-rasterize any equations so the synchronous text layout can place them.
+  await prepareSlideMath(slide);
 
   const themeDefaultColor = opts.defaultTextColor
     ? `#${opts.defaultTextColor}`

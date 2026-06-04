@@ -9,3 +9,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 roxmltree = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

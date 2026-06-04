@@ -11,9 +11,17 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
 /** Theme-referenced typefaces commonly used by PPTX templates. Keys are
- *  lower-cased family names; loadFamily is omitted because Google Fonts
- *  ships the same family name in those entries. */
+ *  lower-cased family names. Entries that substitute a metric-compatible
+ *  family (Calibri → Carlito, Cambria → Caladea) include `loadFamily` so the
+ *  FontFaceSet load is driven against the substitute; the renderer puts the
+ *  substitute into the canvas font stack so missing Office fonts degrade to a
+ *  same-width webfont instead of a wider system serif/sans. The remaining
+ *  entries omit `loadFamily` because Google Fonts ships the same family name. */
 const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
+  'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
+  'calibri light':     { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
+  'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
+  'cambria math':      { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
   'nunito sans':       { url: 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   'nunito':            { url: 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   'open sans':         { url: 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
