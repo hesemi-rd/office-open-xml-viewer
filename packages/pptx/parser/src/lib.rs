@@ -1152,6 +1152,10 @@ enum TextRun {
         /// Paragraph default run size (pt) if declared; None → renderer inherits.
         #[serde(skip_serializing_if = "Option::is_none")]
         font_size: Option<f64>,
+        /// Equation run colour (hex, no '#') from the math run's rPr solidFill;
+        /// None → renderer uses the paragraph/body default colour.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
     },
 }
 
@@ -3059,7 +3063,21 @@ fn math_run_size(om: roxmltree::Node<'_, '_>) -> Option<f64> {
         .map(|v| v / 100.0)
 }
 
-fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &mut Vec<TextRun>) {
+/// Equation colour: the first run-property solidFill within the equation
+/// (PowerPoint puts the colour on the math run's `a:rPr`, like the size), so
+/// inline math follows the surrounding text colour (e.g. a purple title).
+fn math_run_color(om: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) -> Option<String> {
+    om.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
+        .find_map(|rpr| child(rpr, "solidFill").and_then(|sf| parse_color_node(sf, theme)))
+}
+
+fn push_math_runs(
+    node: roxmltree::Node<'_, '_>,
+    font_size: Option<f64>,
+    theme: &HashMap<String, String>,
+    runs: &mut Vec<TextRun>,
+) {
     match node.tag_name().name() {
         "oMath" => {
             let nodes = parse_omath_nodes(node);
@@ -3068,6 +3086,7 @@ fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &
                     nodes,
                     display: false,
                     font_size: math_run_size(node).or(font_size),
+                    color: math_run_color(node, theme),
                 });
             }
         }
@@ -3082,6 +3101,7 @@ fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &
                         nodes,
                         display: true,
                         font_size: math_run_size(om).or(font_size),
+                        color: math_run_color(om, theme),
                     });
                 }
             }
@@ -3094,14 +3114,14 @@ fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &
                 .find(|n| n.is_element() && n.tag_name().name() == "Choice")
             {
                 for c in choice.children().filter(|n| n.is_element()) {
-                    push_math_runs(c, font_size, runs);
+                    push_math_runs(c, font_size, theme, runs);
                 }
             }
         }
         // a14:m wrapper (local name "m") holds an m:oMathPara.
         "m" => {
             for c in node.children().filter(|n| n.is_element()) {
-                push_math_runs(c, font_size, runs);
+                push_math_runs(c, font_size, theme, runs);
             }
         }
         _ => {}
@@ -3216,7 +3236,7 @@ fn parse_paragraph(
             // math as a bare `a14:m` (local name "m") directly under `a:p`, and
             // also inside `mc:AlternateContent`; both reach push_math_runs.
             "oMath" | "oMathPara" | "AlternateContent" | "m" => {
-                push_math_runs(node, def_font_size, &mut runs);
+                push_math_runs(node, def_font_size, theme, &mut runs);
             }
             // Field elements (e.g. slide number, date): parse like a run but tag the field type
             "fld" => {
@@ -6288,11 +6308,12 @@ mod tests {
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "AlternateContent")
             .unwrap();
+        let theme = HashMap::new();
         let mut runs = Vec::new();
-        push_math_runs(ac, Some(18.0), &mut runs);
+        push_math_runs(ac, Some(18.0), &theme, &mut runs);
         assert_eq!(runs.len(), 1, "exactly one math run, fallback ignored");
         match &runs[0] {
-            TextRun::Math { display, nodes, font_size } => {
+            TextRun::Math { display, nodes, font_size, .. } => {
                 assert!(*display, "oMathPara → display math");
                 assert_eq!(*font_size, Some(18.0));
                 assert_eq!(nodes_to_text(nodes), "x");
@@ -6312,18 +6333,20 @@ mod tests {
             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
             xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
           <m:oMath><m:r>
-            <a:rPr sz="2800" i="1"/>
+            <a:rPr sz="2800" i="1"><a:solidFill><a:srgbClr val="7030A0"/></a:solidFill></a:rPr>
             <m:t>n</m:t>
           </m:r></m:oMath>
         </m>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
         let mut runs = Vec::new();
-        push_math_runs(doc.root_element(), None, &mut runs);
+        push_math_runs(doc.root_element(), None, &theme, &mut runs);
         assert_eq!(runs.len(), 1);
         match &runs[0] {
-            TextRun::Math { display, font_size, nodes } => {
+            TextRun::Math { display, font_size, nodes, color } => {
                 assert!(!*display, "bare a14:m with m:oMath → inline");
                 assert_eq!(*font_size, Some(28.0), "size read from math run rPr sz");
+                assert_eq!(color.as_deref(), Some("7030A0"), "colour read from math run rPr solidFill");
                 assert_eq!(nodes_to_text(nodes), "n");
             }
             other => panic!("expected math run, got {other:?}"),

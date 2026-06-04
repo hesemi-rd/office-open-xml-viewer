@@ -633,7 +633,10 @@ function layoutParagraph(
         text: '',
         font: `${emPx}px sans-serif`,
         sizePx: emPx,
-        color: defaultColor,
+        // Equations follow their own run colour (e.g. a purple title); the
+        // draw pass tints the glyph image to this colour. Fall back to the
+        // paragraph/body default when the run carries no explicit colour.
+        color: run.color ? hexToRgba(run.color) : defaultColor,
         underline: false,
         strikethrough: false,
         math: { nodes: run.nodes, display: run.display, width, ascent, descent },

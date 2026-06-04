@@ -224,6 +224,8 @@ export interface EquationRun {
   display: boolean;
   /** Paragraph default run size in pt, if declared; absent → renderer inherits. */
   fontSize?: number | null;
+  /** Equation colour (hex, no '#') from the math run's rPr; absent → inherit. */
+  color?: string | null;
 }
 
 export interface TextRunData {
