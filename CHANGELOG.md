@@ -4,6 +4,59 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.45.0 — 2026-06-04
+
+A consistency pass over the public API ahead of a future 1.0, plus a
+concurrency bug fix in the parser workers. **This release contains breaking
+API changes** (renamed types and a changed `XlsxWorkbook` construction path);
+see "Breaking changes" below.
+
+### Fixed
+
+- **Worker response correlation (pptx / docx / xlsx)**: the docx and xlsx
+  parse clients matched worker responses by message `type` only, so with two
+  requests in flight (a thumbnail grid, concurrent `parseSheet` calls) the
+  first response of a matching type could resolve the wrong promise, and an
+  unrelated message left a promise pending forever. All three packages now
+  correlate by a per-request id via a shared `WorkerBridge` in
+  `@silurus/ooxml-core` (covered by unit tests). pptx was already correct.
+- **`DocxViewer` worker leak**: `DocxViewer` had no teardown path, leaking its
+  parser worker and injected DOM wrapper. It now exposes `destroy()`.
+
+### Breaking changes
+
+- **`XlsxWorkbook` construction** now matches `PptxPresentation` /
+  `DocxDocument`: use `await XlsxWorkbook.load(source, opts)` instead of
+  `new XlsxWorkbook()` followed by `wb.load(source)`.
+- **Public type renames** to remove cross-package name collisions and a DOM
+  global shadow:
+  - docx data model `Document` → `DocxDocumentModel`
+  - docx `TextRun` → `DocxTextRun`
+  - xlsx `Fill` → `CellFill`, `Font` → `CellFont`
+  - the text-overlay callback payload `TextRunInfo` → `PptxTextRunInfo` /
+    `XlsxTextRunInfo` (docx was already `DocxTextRunInfo`)
+  - the four per-package `LoadOptions` are now a single shared type re-exported
+    from each package (`maxZipEntryBytes` moved into the core `LoadOptions`).
+
+### Added
+
+- `DocxViewer`: `onError` / `onPageChange` callbacks and a `canvasElement`
+  accessor. `XlsxViewer`: `goToSheet` / `nextSheet` / `prevSheet`,
+  `sheetIndex` / `sheetCount`, and a `canvasElement` accessor — navigation and
+  accessors now parallel `PptxViewer`.
+- Unified `load()` error contract across all three viewers: if an `onError`
+  callback is set it is invoked and `load` resolves; otherwise the error is
+  rethrown (no more silent swallowing).
+
+### Internal
+
+- New `@silurus/ooxml-core` building blocks: `WorkerBridge` (+ `decodeDataUrl`)
+  for worker request/response correlation, and `units.ts` centralizing the
+  pt→px and EMU constants (`PT_TO_PX`, `EMU_PER_PT`, `EMU_PER_PX`,
+  `EMU_PER_INCH`) that were previously re-spelled four different ways.
+- xlsx VRT references regenerated from the current render (xlsx has no
+  Excel-export ground truth, so the renderer is its own baseline).
+
 ## 0.44.0 — 2026-06-04
 
 Adds OOXML math (OMML) rendering to the docx viewer via bundled MathJax, plus
