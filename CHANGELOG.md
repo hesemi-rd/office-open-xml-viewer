@@ -4,6 +4,20 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.50.1 — 2026-06-04
+
+VS Code extension:
+
+- **Equations now render in the webview.** Two causes: since 0.49.0 the math
+  engine is opt-in (the webview wasn't passing a `math` engine), and the
+  engine's lazy `<script>` injection is blocked by the webview's nonce CSP. The
+  extension now bundles the self-contained MathJax + STIX Two Math engine into
+  the webview (sets `globalThis.__ooxmlStix2` on load — no script injection,
+  CSP-safe) and passes a `MathRenderer` adapter to the docx/pptx viewers.
+
+(No functional change to the npm library; version bumped to keep the single
+release series.)
+
 ## 0.50.0 — 2026-06-04
 
 docx:
