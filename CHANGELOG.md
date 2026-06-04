@@ -4,6 +4,32 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.49.0 — 2026-06-04
+
+Packaging: **the math engine is now opt-in.** ⚠️ Breaking change.
+
+- The MathJax + STIX Two Math engine (~3 MB) was statically imported by the
+  docx/pptx renderers, so every consumer shipped it in their initial bundle even
+  with no equations. It now lives behind a separate entry point,
+  `@silurus/ooxml/math`, exposing a named `math` engine. Pass it to a viewer to
+  render equations; omit it and a bundler tree-shakes the ~3 MB away entirely.
+
+  ```ts
+  import { DocxViewer } from '@silurus/ooxml/docx';
+  import { math } from '@silurus/ooxml/math';
+  new DocxViewer(canvas, { math });
+  ```
+
+  Works for `PptxViewer` and the headless `DocxDocument` / `PptxPresentation`
+  APIs (all take `math` in their options). xlsx never references the engine.
+- **Migration**: equations in docx/pptx no longer render automatically — add the
+  `@silurus/ooxml/math` import and pass `math`. No change needed if you don't use
+  equations (and you no longer pay the ~3 MB for them).
+- Docs site: the "Try yours" page enables equation rendering; the pptx
+  master-detail demo's large preview now fills its pane.
+- Repo hygiene: internal design/plan/dev-note docs (`docs/superpowers/`,
+  `docs/dev-notes/`) are no longer tracked.
+
 ## 0.48.1 — 2026-06-04
 
 Docs: correct the README "Bundle size note" — the package became ESM-only in
