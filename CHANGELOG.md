@@ -4,6 +4,13 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.48.1 — 2026-06-04
+
+Docs: correct the README "Bundle size note" — the package became ESM-only in
+0.47.0, so the note no longer describes a CJS output or "single module format"
+tree-shaking; it now reflects the ESM-only bundle and the shared, lazily-loaded
+math engine.
+
 ## 0.48.0 — 2026-06-04
 
 Packaging: **smaller math engine.**
