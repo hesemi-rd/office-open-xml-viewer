@@ -937,7 +937,22 @@ export class XlsxViewer {
     this.tabs.forEach((btn, i) => {
       btn.style.cssText = this.tabStyle(i === index, this.tabColors[i]);
     });
-    this.tabs[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    // Keep the active tab visible by scrolling the tab strip HORIZONTALLY only.
+    // `scrollIntoView` walks every scrollable ancestor, so it also scrolls the
+    // page vertically — on first load that jumped the whole page down to the
+    // tab bar (the active sheet is set during load). Adjust the strip's
+    // scrollLeft directly so the page never moves.
+    const tab = this.tabs[index];
+    if (tab) {
+      const strip = this.tabStrip;
+      const tabRect = tab.getBoundingClientRect();
+      const stripRect = strip.getBoundingClientRect();
+      if (tabRect.left < stripRect.left) {
+        strip.scrollLeft -= stripRect.left - tabRect.left;
+      } else if (tabRect.right > stripRect.right) {
+        strip.scrollLeft += tabRect.right - stripRect.right;
+      }
+    }
   }
 
   private tabStyle(active: boolean, tabColor?: string | null): string {
