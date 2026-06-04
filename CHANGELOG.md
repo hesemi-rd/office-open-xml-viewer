@@ -4,6 +4,20 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.48.0 — 2026-06-04
+
+Packaging: **smaller math engine.**
+
+- The bundled STIX Two Math font now ships only the math-relevant glyph ranges;
+  non-math ranges (Cyrillic, phonetics, dingbats, accented-Latin variants) are
+  omitted. Math italic variables, Greek, blackboard-bold, script, fraktur,
+  sans-serif/monospace variants, operators, arrows, accents and stretchy
+  delimiters are all retained. Engine asset 4.2 MB → 3.0 MB; package unpacked
+  11.3 MB → 9.6 MB, tarball 4.3 MB → 3.7 MB.
+- Edge case: an equation using a non-Latin/non-math alphabet (e.g. a Cyrillic
+  variable) would now show a missing glyph; such usage is vanishingly rare in
+  OOXML math.
+
 ## 0.47.0 — 2026-06-04
 
 Packaging: **ESM-only distribution.**

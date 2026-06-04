@@ -1,11 +1,13 @@
 // Entry for the pre-bundled MathJax v4 + STIX Two Math converter.
 //
 // esbuild bundles this (and only this) into `assets/mathjax-stix2.js`, an
-// opaque, tree-shaken, minified IIFE (~1.7 MB). The renderer loads that asset
+// opaque, tree-shaken, minified IIFE (~3 MB). The renderer loads that asset
 // lazily, so it never bloats non-math viewers and is never re-bundled by the
-// consuming app's bundler. The STIX2 font is baked in statically: every glyph
-// range is imported up-front so `dynamicSetup` marks it loaded → DOM-free,
-// zero network, zero cross-origin (no on-demand range fetches).
+// consuming app's bundler. The STIX2 font is baked in statically: the
+// math-relevant glyph ranges below are imported up-front so `dynamicSetup`
+// marks them loaded → DOM-free, zero network, zero cross-origin (no on-demand
+// range fetches). Non-math ranges (cyrillic, phonetics, dingbats, accented
+// Latin variants) are intentionally omitted to keep the bundle small.
 import { mathjax } from '@mathjax/src/mjs/mathjax.js';
 import { MathML } from '@mathjax/src/mjs/input/mathml.js';
 import { SVG } from '@mathjax/src/mjs/output/svg.js';
@@ -16,19 +18,12 @@ import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/accents-other.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/accents.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/arrows.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/calligraphic.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/cyrillic.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/dingbats.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/double-struck.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/enclosed.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/fraktur.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/greek.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-b.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-bi.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-i.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/math.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/monospace.js';
-import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/phonetics.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/sans-serif.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/script.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/shapes.js';
