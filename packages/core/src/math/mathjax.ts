@@ -1,23 +1,31 @@
 // MathJax turns MathML into an SVG string that the consumer rasterizes onto the canvas.
 //
-// MathJax is loaded lazily AT RUNTIME from a CDN (no npm dependency) so that:
-//   1. bundlers in consuming apps have no bare `mathjax-*` import to resolve, and
-//   2. we use maintained MathJax v4 rather than the frozen/superseded `mathjax-full` v3.
-// Browser-only (it needs a DOM); the load is triggered only when a document actually
-// contains equations. The URL is overridable for self-hosting / offline.
+// The MathJax v3 `mml-svg` component is vendored in this package (../../assets/mathjax),
+// is self-contained (glyph outlines inlined, ZERO runtime network), and is loaded lazily
+// only when a document actually contains equations. Browser-only (it needs a DOM). The
+// URL is overridable via `setMathJaxUrl` for self-hosting / a pinned CDN copy.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-// Default to the MathJax v4 component bundled with this package (Apache-2.0), resolved
-// to a same-origin asset URL by the consumer's bundler (Vite/webpack/rollup all handle
+// The MathJax v3 component bundled with this package (Apache-2.0) is resolved to a
+// same-origin asset URL by the consumer's bundler (Vite/webpack/rollup all handle
 // `new URL(asset, import.meta.url)`). This makes math a built-in feature with no
 // cross-origin request. `setMathJaxUrl` overrides it (e.g. a CDN or pinned copy).
-let mathJaxUrl: string = new URL('../../assets/mathjax/mml-svg.js', import.meta.url).href;
+//
+// IMPORTANT: the `new URL(...)` lives inside `resolveMathJaxUrl()` rather than at module
+// scope so that bundles which never call into the math pipeline (the pptx/xlsx viewers)
+// tree-shake the whole module out and don't inline the ~2.5MB MathJax asset.
+let mathJaxUrlOverride: string | null = null;
 let mjPromise: Promise<any> | null = null;
+
+function resolveMathJaxUrl(): string {
+  if (mathJaxUrlOverride) return mathJaxUrlOverride;
+  return new URL('../../assets/mathjax/mml-svg.js', import.meta.url).href;
+}
 
 /** Override the MathJax script URL (e.g. a CDN or self-hosted copy). Call before load. */
 export function setMathJaxUrl(url: string): void {
-  mathJaxUrl = url;
+  mathJaxUrlOverride = url;
 }
 
 function loadScript(src: string): Promise<void> {
@@ -51,7 +59,7 @@ async function ensureMathJax(): Promise<any> {
       // No a11y menu / speech-rule worker — keeps it fully offline (no extra fetches).
       options: { ...(w.MathJax?.options || {}), enableMenu: false },
     };
-    await loadScript(mathJaxUrl);
+    await loadScript(resolveMathJaxUrl());
     await w.MathJax.startup.promise;
     return w.MathJax;
   })();
