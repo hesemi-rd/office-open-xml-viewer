@@ -122,11 +122,16 @@ pnpm --filter @silurus/ooxml-pptx vrt   # 単一パッケージ
    - 前リリース以降にマージされた PR を `git log --oneline` で拾い、機能追加があれば `## Feature Support` の該当行を ❌ → ✅ に反転、または新しい行を追加する。
    - bug fix / 精度向上だけなら対応表は動かさず、根拠は CHANGELOG に書く。
    - **紹介サイトの API リファレンス同期**（メインタスク）: 公開 API（各 `*Viewer` のオプション／メソッド、`*Presentation`・`*Document` の headless API）が前リリースから変わっていたら `site/src/lib/api-reference.ts` を実装に合わせて更新する。型は手動抽出なので放置すると陳腐化する。併せて新フォーマット機能があれば `site/src/components/Capabilities.astro` の該当列にも追記する。サイト自体のデプロイは `v*` タグで `deploy-pages.yml` が自動実行する（site を `/`、Storybook を `/storybook/` に統合配信）。
-3. **CHANGELOG 追記**: `CHANGELOG.md` の先頭に `## 0.x.0 — YYYY-MM-DD` セクションを追加し、docx/pptx/xlsx/charts ごとに 1〜3 行の bullet で要点を書く。ECMA-376 節番号や PR 番号を適宜併記。
-4. **バージョン bump**: ルート `package.json` と `packages/{core,pptx,xlsx,docx,markdown,node,vscode-extension}/package.json` の計 8 ファイルを同じバージョンへ揃える。markdown / node は private パッケージだが、バージョンは全パッケージで統一する（リリース番号は単一系列で進める）。VS Code 拡張も npm ライブラリと同じ番号で進めるため、機能変更がない月でも minor を上げる。
-5. **PR 作成**: ブランチ名は `release/0.x.0`。PR タイトルは `chore(release): 0.x.0`。マージは必ず `--merge` か `--rebase`（squash 禁止）。
-6. **タグ作成**: PR マージ後、main を pull して `git tag -a v0.x.0 -m "v0.x.0"` → `git push origin v0.x.0`。
-7. **GitHub Release 作成**: `gh release create v0.x.0 --title v0.x.0 --notes "..."` でリリースノート公開。本文は CHANGELOG の該当セクションを要約し、末尾に `**Full Changelog**: https://github.com/yukiyokotani/office-open-xml-viewer/compare/v0.(x-1).0...v0.x.0` を追記する。既存 v0.12.0 のフォーマットを踏襲すること (`gh release view v0.12.0` で確認可能)。
+3. **README 整合性検証**（メインタスク・必須）: タグ公開前に README 全体を実装の現状と突き合わせて検証する。npm の README はバージョン公開時にしか更新されないため、誤記が残ると次リリースまで直せない。最低限、以下を毎回確認する:
+   - **Bundle size note / パッケージ形式の記述**: 現在 `@silurus/ooxml` は **ESM 専用（`.mjs`）**。「ES + CJS 合算」「CJS を tree-shaking で落とす」等の古い記述が残っていないか。サイズ数値（数式エンジン ≈3 MB 等）が実態と合っているか。
+   - **install / import 例**: `require(...)` ではなく `import`（ESM）になっているか。公開単位が `@silurus/ooxml` 本体＋サブパス（`./docx` `./pptx` `./xlsx`）であることと矛盾しないか（サブパッケージは `private:true`）。
+   - **Feature Support 表**: 新機能の行が追加・反転されているか（このリリースの変更と一致するか）。
+   - **バージョン依存の記述**: 廃止 API・旧バージョン番号への言及が残っていないか。
+4. **CHANGELOG 追記**: `CHANGELOG.md` の先頭に `## 0.x.0 — YYYY-MM-DD` セクションを追加し、docx/pptx/xlsx/charts ごとに 1〜3 行の bullet で要点を書く。ECMA-376 節番号や PR 番号を適宜併記。
+5. **バージョン bump**: ルート `package.json` と `packages/{core,pptx,xlsx,docx,markdown,node,vscode-extension}/package.json` の計 8 ファイルを同じバージョンへ揃える。markdown / node は private パッケージだが、バージョンは全パッケージで統一する（リリース番号は単一系列で進める）。VS Code 拡張も npm ライブラリと同じ番号で進めるため、機能変更がない月でも minor を上げる。
+6. **PR 作成**: ブランチ名は `release/0.x.0`。PR タイトルは `chore(release): 0.x.0`。マージは必ず `--merge` か `--rebase`（squash 禁止）。
+7. **タグ作成**: PR マージ後、main を pull して `git tag -a v0.x.0 -m "v0.x.0"` → `git push origin v0.x.0`。
+8. **GitHub Release 作成**: `gh release create v0.x.0 --title v0.x.0 --notes "..."` でリリースノート公開。本文は CHANGELOG の該当セクションを要約し、末尾に `**Full Changelog**: https://github.com/yukiyokotani/office-open-xml-viewer/compare/v0.(x-1).0...v0.x.0` を追記する。既存 v0.12.0 のフォーマットを踏襲すること (`gh release view v0.12.0` で確認可能)。
 
 参照画像（`tests/visual/references/`）はこの手順の対象外。README のスクリーンショットは `docs/images/` 配下のみ。
 
