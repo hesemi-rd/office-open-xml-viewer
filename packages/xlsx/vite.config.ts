@@ -12,6 +12,8 @@ const dirname =
 export default defineConfig({
   plugins: [wasm()],
   root: dirname,
+  // Don't copy public/ (sample .xlsx fixtures) into the published dist/.
+  publicDir: false,
   server: { port: 5175, strictPort: true },
   build: {
     lib: {

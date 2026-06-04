@@ -11,6 +11,8 @@ const dirname =
 
 export default defineConfig({
   plugins: [wasm()],
+  // Don't copy public/ (sample .pptx fixtures) into the published dist/.
+  publicDir: false,
   server: {
     fs: {
       // Include monorepo root so node_modules/.pnpm/ fontsource files can be served

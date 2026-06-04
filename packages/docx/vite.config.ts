@@ -9,6 +9,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   root: __dirname,
   plugins: [wasm(), topLevelAwait()],
+  // Don't copy public/ (sample .docx fixtures) into the published dist/.
+  publicDir: false,
   build: {
     lib: {
       entry: resolve(__dirname, 'src/index.ts'),
