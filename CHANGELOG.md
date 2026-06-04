@@ -4,6 +4,36 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.46.0 — 2026-06-04
+
+PowerPoint equation rendering, and a new shared math font.
+
+### pptx
+
+- **OMML equations** (ECMA-376 §22.1) now render in PptxViewer — inline and
+  display math, including PowerPoint's `a14:m` / `mc:AlternateContent`
+  wrappers and bare `a14:m`. Fractions, n-ary operators, radicals, matrices,
+  accents/overbars, norms, sub/superscripts, scripts, blackboard-bold, etc.
+- Equations inherit their run colour (e.g. a purple title) and font size.
+- **Font fidelity**: pptx now loads the metric-compatible Office substitutes
+  (Calibri → Carlito, Cambria → Caladea) like docx/xlsx, so text matches
+  PowerPoint's advance widths and no longer overflows `wrap="none"` boxes.
+- **Shapes**: a wedge callout whose tail tip is dragged inside the body now
+  renders as the plain (rounded) base shape — no spurious inward notch.
+
+### core
+
+- **Math engine** moved to MathJax v4 with the **STIX Two Math** font baked in
+  statically — a Times-like face close to PowerPoint's Cambria Math. Fully
+  offline (DOM-free, zero network, zero cross-origin); works out of the box on
+  `npm install`. The OMML parser is hoisted into the shared `ooxml-common`
+  crate and reused by docx and pptx.
+
+### build
+
+- Viewer packages no longer copy sample fixtures into `dist/`, and the math
+  engine is tree-shaken out of viewers that don't render equations (xlsx).
+
 ## 0.45.1 — 2026-06-04
 
 Patch fixes for docx math (OMML) rendering.
