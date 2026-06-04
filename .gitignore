@@ -52,3 +52,8 @@ package-lock.json
 # Per-session scratch notes (keep local, do not commit)
 **/SESSION_LOG_*.md
 **/PLAN_*.md
+# Internal working docs — design specs, implementation plans (incl. superpowers
+# skill output) and dev notes. Keep local; not for the public repo.
+# (docs/images/ stays tracked — it holds the README / extension screenshots.)
+docs/superpowers/
+docs/dev-notes/
