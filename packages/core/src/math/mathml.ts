@@ -115,7 +115,7 @@ function nodeToMathML(node: MathNode): string {
       // Tight stretchy overline/underline (like \overline). NOTE: accent="true" adds a
       // gap above the base in MathJax, so we omit it — the stretchy bar hugs the base.
       const b = row(node.base);
-      const barOp = '<mo stretchy="true">&#x00AF;</mo>';
+      const barOp = '<mo stretchy="true">&#x2015;</mo>';
       return node.pos === 'bot' ? `<munder>${b}${barOp}</munder>` : `<mover>${b}${barOp}</mover>`;
     }
     case 'accent':
@@ -145,7 +145,7 @@ const OVERLINE_CHARS = new Set(['̅', '̄', '¯', '‾', '̲', '̳']);
 function accentToMathML(node: Extract<MathNode, { kind: 'accent' }>): string {
   const b = row(node.base);
   if (OVERLINE_CHARS.has(node.char)) {
-    return `<mover>${b}<mo stretchy="true">&#x00AF;</mo></mover>`;
+    return `<mover>${b}<mo stretchy="true">&#x2015;</mo></mover>`;
   }
   const ch = ACCENT_MAP[node.char] ?? node.char;
   const stretchy = ch === '→' || ch === '←' ? 'true' : 'false';

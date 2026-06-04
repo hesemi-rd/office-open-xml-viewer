@@ -23,10 +23,14 @@
   },
   "scripts": {
     "build": "tsc --build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:mathjax": "node build/build-mathjax.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "esbuild": "^0.25.0",
+    "@mathjax/src": "^4.0.0",
+    "@mathjax/mathjax-stix2-font": "^4.1.0"
   }
 }

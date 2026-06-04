@@ -4,6 +4,5 @@ export {
   mathMLToSvg,
   svgExtents,
   recolorSvg,
-  setMathJaxUrl,
   type MathSvg,
 } from './mathjax';

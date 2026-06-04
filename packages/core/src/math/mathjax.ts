@@ -1,31 +1,25 @@
-// MathJax turns MathML into an SVG string that the consumer rasterizes onto the canvas.
+// MathML → SVG via a pre-bundled MathJax v4 + STIX Two Math converter.
 //
-// The MathJax v3 `mml-svg` component is vendored in this package (../../assets/mathjax),
-// is self-contained (glyph outlines inlined, ZERO runtime network), and is loaded lazily
-// only when a document actually contains equations. Browser-only (it needs a DOM). The
-// URL is overridable via `setMathJaxUrl` for self-hosting / a pinned CDN copy.
+// The converter (engine + statically-baked STIX2 font, all glyph ranges) is
+// built by `build/build-mathjax.mjs` into the opaque asset
+// `assets/mathjax-stix2.js`. We load that asset *lazily* (only when a document
+// actually contains equations): the `new URL(...)` lives inside a function so
+// non-math viewers (xlsx) tree-shake it out, and keeping it pre-bundled stops
+// the consuming app's bundler from re-bundling — and over-including — the
+// MathJax source. The asset is self-contained: DOM-free internally, zero
+// network, zero cross-origin requests. It exposes `globalThis.__ooxmlStix2`.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-// The MathJax v3 component bundled with this package (Apache-2.0) is resolved to a
-// same-origin asset URL by the consumer's bundler (Vite/webpack/rollup all handle
-// `new URL(asset, import.meta.url)`). This makes math a built-in feature with no
-// cross-origin request. `setMathJaxUrl` overrides it (e.g. a CDN or pinned copy).
-//
-// IMPORTANT: the `new URL(...)` lives inside `resolveMathJaxUrl()` rather than at module
-// scope so that bundles which never call into the math pipeline (the pptx/xlsx viewers)
-// tree-shake the whole module out and don't inline the ~2.5MB MathJax asset.
-let mathJaxUrlOverride: string | null = null;
-let mjPromise: Promise<any> | null = null;
-
-function resolveMathJaxUrl(): string {
-  if (mathJaxUrlOverride) return mathJaxUrlOverride;
-  return new URL('../../assets/mathjax/mml-svg.js', import.meta.url).href;
+interface Stix2Engine {
+  /** MathML string → standalone `<svg>…</svg>` (currentColor fill, viewBox in 1000-units/em). */
+  mathml2svg(mathml: string): string;
 }
 
-/** Override the MathJax script URL (e.g. a CDN or self-hosted copy). Call before load. */
-export function setMathJaxUrl(url: string): void {
-  mathJaxUrlOverride = url;
+let enginePromise: Promise<Stix2Engine> | null = null;
+
+function resolveAssetUrl(): string {
+  return new URL('../../assets/mathjax-stix2.js', import.meta.url).href;
 }
 
 function loadScript(src: string): Promise<void> {
@@ -34,47 +28,36 @@ function loadScript(src: string): Promise<void> {
     s.src = src;
     s.async = true;
     s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`Failed to load MathJax from ${src}`));
+    s.onerror = () => reject(new Error(`Failed to load math engine from ${src}`));
     document.head.appendChild(s);
   });
 }
 
-async function ensureMathJax(): Promise<any> {
-  if (mjPromise) return mjPromise;
-  mjPromise = (async () => {
-    const w = globalThis as any;
-    if (w.MathJax?.startup?.promise) {
-      await w.MathJax.startup.promise;
-      return w.MathJax;
-    }
+function ensureEngine(): Promise<Stix2Engine> {
+  if (enginePromise) return enginePromise;
+  enginePromise = (async () => {
+    const existing = (globalThis as any).__ooxmlStix2 as Stix2Engine | undefined;
+    if (existing) return existing;
     if (typeof document === 'undefined') {
-      throw new Error('MathJax rendering requires a DOM (browser environment)');
+      throw new Error('Math rendering requires a DOM (browser environment)');
     }
-    // Configure before the component script runs: don't auto-typeset the page, and
-    // inline glyph outlines (fontCache:'none') so each SVG is self-contained.
-    w.MathJax = {
-      ...(w.MathJax || {}),
-      startup: { ...(w.MathJax?.startup || {}), typeset: false },
-      svg: { ...(w.MathJax?.svg || {}), fontCache: 'none' },
-      // No a11y menu / speech-rule worker — keeps it fully offline (no extra fetches).
-      options: { ...(w.MathJax?.options || {}), enableMenu: false },
-    };
-    await loadScript(resolveMathJaxUrl());
-    await w.MathJax.startup.promise;
-    return w.MathJax;
+    await loadScript(resolveAssetUrl());
+    const engine = (globalThis as any).__ooxmlStix2 as Stix2Engine | undefined;
+    if (!engine) throw new Error('Math engine failed to initialize');
+    return engine;
   })();
-  return mjPromise;
+  return enginePromise;
 }
 
-/** Preload MathJax. Call once before rendering equations. */
+/** Preload the math engine. Call once before rendering equations. */
 export async function loadMathJax(): Promise<void> {
-  await ensureMathJax();
+  await ensureEngine();
 }
 
 export interface MathSvg {
   /** standalone `<svg>…</svg>` markup. */
   svg: string;
-  /** extents in em (MathJax SVG uses 1em = 1000 viewBox units). */
+  /** extents in em (the SVG viewBox uses 1em = 1000 units). */
   widthEm: number;
   ascentEm: number;
   descentEm: number;
@@ -98,13 +81,10 @@ export function svgExtents(svg: string): { widthEm: number; ascentEm: number; de
   };
 }
 
-/** Convert a MathML string to an SVG + its baseline-relative extents. */
+/** Convert a MathML string to a standalone SVG + its baseline-relative extents. */
 export async function mathMLToSvg(mathml: string): Promise<MathSvg> {
-  const MathJax = await ensureMathJax();
-  const container = MathJax.mathml2svg(mathml, { display: true });
-  const svgEl: Element | null =
-    typeof container.querySelector === 'function' ? container.querySelector('svg') : null;
-  const svg: string = svgEl ? svgEl.outerHTML : MathJax.startup.adaptor.outerHTML(container);
+  const engine = await ensureEngine();
+  const svg = engine.mathml2svg(mathml);
   return { svg, ...svgExtents(svg) };
 }
 

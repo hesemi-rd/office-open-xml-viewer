@@ -1384,9 +1384,14 @@ function renderTextBody(
       // inflate lineHeight and push real 24pt runs far below the anchor.
       let maxSizePx = 0;
       for (const seg of line.segments) {
-        // For an equation, the visual box (ascent+descent) must fit inside the
-        // line's 1.2× leading, so contribute an equivalent font size.
-        const effSize = seg.math ? (seg.math.ascent + seg.math.descent) / 1.2 : seg.sizePx;
+        // For an equation, the line must be at least as tall as its own font
+        // size (so a short label like "y"/"p"/"z" gets the normal font-ascent
+        // baseline and sits where PowerPoint puts it — not floated up by its
+        // tight ink box), AND tall enough for its visual box (fractions, norms,
+        // big operators) to fit inside the 1.2× leading.
+        const effSize = seg.math
+          ? Math.max(seg.sizePx, (seg.math.ascent + seg.math.descent) / 1.2)
+          : seg.sizePx;
         if (effSize > maxSizePx) maxSizePx = effSize;
       }
       if (maxSizePx === 0) maxSizePx = paraDefaultFontSizePx;

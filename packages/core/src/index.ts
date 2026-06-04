@@ -54,7 +54,6 @@ export {
   mathMLToSvg,
   svgExtents,
   recolorSvg,
-  setMathJaxUrl,
   type MathSvg,
 } from './math';
 export type { MathNode, MathFormula, MathStyle } from './types/math';
