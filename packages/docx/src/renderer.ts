@@ -530,11 +530,22 @@ export function computePages(
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
-      const h = estimateTableHeight(measureState, tbl, contentW);
-      if (y + h > contentH) newPage();
-      pages[pages.length - 1].push(el);
-      y += h;
-      measureState.y += h;
+      const rowHs = computeTableRowHeights(measureState, tbl, contentW);
+      const h = rowHs.reduce((s, x) => s + x, 0);
+      if (h > contentH) {
+        // Taller than a full page: split row-by-row so the overflow continues
+        // onto the next page instead of being clipped (ECMA-376 table
+        // pagination). Tables that fit on a page keep the simple place-whole
+        // path below.
+        const endY = splitTableAcrossPages(tbl, rowHs, y, contentH, pages, () => newPage());
+        y = endY;
+        measureState.y = section.marginTop + endY;
+      } else {
+        if (y + h > contentH) newPage();
+        pages[pages.length - 1].push(el);
+        y += h;
+        measureState.y += h;
+      }
       prevPara = null;
     }
   }
@@ -738,7 +749,10 @@ function splitParagraphAcrossPages(
   return { endY: cursorY };
 }
 
-function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
+/** Per-row heights used by both pagination and the height estimate. Mirrors the
+ *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
+ *  ECMA-376 §17.4.80, §17.4.85). */
+function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
   const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
   const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
   const colWidths = table.colWidths.map((w) => w * colScale);
@@ -789,7 +803,74 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
     }
   }
 
-  return rowHs.reduce((s, x) => s + x, 0);
+  return rowHs;
+}
+
+function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
+  return computeTableRowHeights(state, table, contentWPt).reduce((s, x) => s + x, 0);
+}
+
+/** A page break before row `ri` is unsafe when `ri` continues a vertical merge
+ *  started above (ECMA-376 §17.4.85): splitting there would orphan the merged
+ *  cell's continuation. Such a row carries at least one `vMerge=false` cell. */
+function tableBreakAllowedBefore(table: DocTable, ri: number): boolean {
+  if (ri <= 0) return true;
+  return !table.rows[ri].cells.some((c) => c.vMerge === false);
+}
+
+/**
+ * Split a table that is taller than one page across page boundaries, row by
+ * row (ECMA-376 table pagination). Each page receives a {@link DocTable} slice
+ * holding the rows that fit; `w:tblHeader` rows (§17.4.78) repeat at the top of
+ * every continuation. Breaks land only on vMerge-safe boundaries
+ * ({@link tableBreakAllowedBefore}). Returns the Y offset after the final slice
+ * on the last page.
+ */
+export function splitTableAcrossPages(
+  table: DocTable,
+  rowHs: number[],
+  startY: number,
+  contentH: number,
+  pages: PaginatedBodyElement[][],
+  newPage: () => void,
+): number {
+  const n = table.rows.length;
+  // Leading tblHeader rows repeat on each continuation page.
+  let headerCount = 0;
+  while (headerCount < n && table.rows[headerCount].isHeader) headerCount++;
+  const headerRows = table.rows.slice(0, headerCount);
+  const headerH = rowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
+
+  let y = startY;
+  let start = 0;
+  let firstSlice = true;
+
+  while (start < n) {
+    const isContinuation = !firstSlice && headerCount > 0 && start >= headerCount;
+    const avail = contentH - y;
+    let used = isContinuation ? headerH : 0;
+    let end = start;
+    // Always place at least one row to guarantee forward progress.
+    while (end < n) {
+      const h = rowHs[end];
+      if (end > start && used + h > avail && tableBreakAllowedBefore(table, end)) break;
+      used += h;
+      end++;
+    }
+
+    const bodyRows = table.rows.slice(start, end);
+    const sliceRows = isContinuation ? [...headerRows, ...bodyRows] : bodyRows;
+    pages[pages.length - 1].push({ ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement);
+
+    y += used;
+    start = end;
+    firstSlice = false;
+    if (start < n) {
+      newPage();
+      y = 0;
+    }
+  }
+  return y;
 }
 
 /** Find the last row index in a vMerge span starting at (startRi, startCi) —
