@@ -4,6 +4,34 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.50.0 — 2026-06-04
+
+docx:
+
+- **Tables split across pages.** A table taller than the page was paginated as
+  one atomic block and clipped at the bottom margin; it now splits row by row
+  (ECMA-376 table pagination). Breaks land only on vMerge-safe boundaries
+  (§17.4.85) and leading `w:tblHeader` rows (§17.4.78) repeat at the top of each
+  continuation page.
+- **Inline math reserves a full line box.** A math run's line height was taken
+  from the MathJax SVG ink extents, so a short equation (a lone "−", a single
+  operator) collapsed its line — and its table row — to near-zero and pinned the
+  glyph to the top of the cell. The line box is now floored to the run font's
+  natural ascent/descent (tall math keeps its larger ink box).
+
+xlsx:
+
+- Activating a sheet tab no longer scrolls the page. `XlsxViewer` kept the
+  active tab visible with `scrollIntoView`, which also scrolled every ancestor
+  (including the document); it now scrolls the tab strip horizontally only.
+
+Docs site:
+
+- "Try yours" renders pptx with interactive audio/video playback (only on-screen
+  slides hold a live handle). Its slides render at display width so the media
+  controls aren't shrunk. The per-format hero copy no longer references the
+  cryptic "sample-1.xlsx".
+
 ## 0.49.0 — 2026-06-04
 
 Packaging: **the math engine is now opt-in.** ⚠️ Breaking change.
