@@ -12,6 +12,13 @@ const math = { loadMathJax, mathMLToSvg };
 
 const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
 
+type SlideHandle = Awaited<ReturnType<PptxPresentation['presentSlide']>>;
+
+// Disposes the previous render's live resources (interactive slide handles +
+// their IntersectionObserver) so audio/video stops and RAF loops are released
+// when a new file is loaded.
+let activeCleanup: (() => void) | null = null;
+
 export interface RenderResult {
   format: 'docx' | 'xlsx' | 'pptx';
   units: number; // pages / slides; 0 for xlsx (sheet-based)
@@ -23,6 +30,10 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
   if (ext !== 'docx' && ext !== 'xlsx' && ext !== 'pptx') {
     throw new Error('Unsupported file — choose a .docx, .xlsx or .pptx file.');
   }
+  // Tear down any live handles from a previous file before replacing the stage.
+  activeCleanup?.();
+  activeCleanup = null;
+
   const buffer = await file.arrayBuffer();
   stage.innerHTML = '';
 
@@ -41,12 +52,61 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
 
   if (ext === 'pptx') {
     const deck = await PptxPresentation.load(buffer, { useGoogleFonts: true });
+    const canvases: HTMLCanvasElement[] = [];
     for (let i = 0; i < deck.slideCount; i++) {
       const c = document.createElement('canvas');
       c.className = 'lv-page';
+      c.dataset.slide = String(i);
       sc.appendChild(c);
       await deck.renderSlide(c, i, { width: 1280, dpr: DPR(), math });
+      canvases.push(c);
     }
+
+    // Audio/video playback: upgrade slides to an interactive PresentationHandle
+    // (click-to-play media + scrubber) — but only while they are on-screen, so
+    // the per-handle RAF loop and decoded media stay bounded no matter how many
+    // slides the deck has. Off-screen slides keep their static base render.
+    const handles = new Map<number, SlideHandle>();
+    const pending = new Set<number>();
+    const visible = new Set<number>();
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const c = e.target as HTMLCanvasElement;
+          const idx = Number(c.dataset.slide);
+          if (e.isIntersecting) {
+            visible.add(idx);
+            if (handles.has(idx) || pending.has(idx)) continue;
+            pending.add(idx);
+            deck
+              .presentSlide(c, idx, { width: 1280, dpr: DPR(), math })
+              .then((h) => {
+                pending.delete(idx);
+                if (visible.has(idx)) handles.set(idx, h);
+                else h.dispose(); // scrolled away before it resolved
+              })
+              .catch(() => pending.delete(idx));
+          } else {
+            visible.delete(idx);
+            const h = handles.get(idx);
+            if (h) {
+              h.dispose(); // stops media + RAF; the static base frame remains
+              handles.delete(idx);
+            }
+          }
+        }
+      },
+      { root: sc, rootMargin: '150px 0px' },
+    );
+    canvases.forEach((c) => io.observe(c));
+    activeCleanup = () => {
+      io.disconnect();
+      handles.forEach((h) => h.dispose());
+      handles.clear();
+      pending.clear();
+      visible.clear();
+    };
+
     return { format: 'pptx', units: deck.slideCount, unitLabel: 'slide' };
   }
 
