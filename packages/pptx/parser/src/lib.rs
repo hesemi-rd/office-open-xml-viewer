@@ -1073,7 +1073,7 @@ enum SpaceLine {
 }
 
 /// Bullet / list-item marker for a paragraph
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Bullet {
     /// Explicitly no bullet (buNone)
@@ -2118,6 +2118,11 @@ struct LayoutPlaceholders {
     by_idx_level_sizes:  HashMap<u32, LevelFontSizes>,
     /// Per-list-level default font sizes (pt) per placeholder type.
     by_type_level_sizes: HashMap<String, LevelFontSizes>,
+    /// Per-list-level inherited bullet (buChar/buAutoNum/buNone) per placeholder
+    /// idx — what a paragraph with no explicit bullet inherits (ECMA-376 §19.7.10).
+    by_idx_level_bullets:  HashMap<u32, LevelBullets>,
+    /// Per-list-level inherited bullet per placeholder type.
+    by_type_level_bullets: HashMap<String, LevelBullets>,
     /// Default bold per placeholder type, from layout lstStyle defRPr b attribute
     by_type_bold: HashMap<String, bool>,
     /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
@@ -2206,6 +2211,17 @@ impl LayoutPlaceholders {
         self.by_type_level_sizes.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_level_sizes.get("").copied() } else { None })
             .unwrap_or([None; 9])
+    }
+
+    /// Per-list-level inherited bullets (lvl1..lvl9). Same idx-strict resolution as
+    /// `lookup_level_font_sizes`. All-None when the placeholder inherits no bullet.
+    fn lookup_level_bullets(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelBullets {
+        if let Some(i) = ph_idx {
+            return self.by_idx_level_bullets.get(&i).cloned().unwrap_or_else(empty_level_bullets);
+        }
+        self.by_type_level_bullets.get(ph_type).cloned()
+            .or_else(|| if ph_type == "body" { self.by_type_level_bullets.get("").cloned() } else { None })
+            .unwrap_or_else(empty_level_bullets)
     }
 
     /// Look up inherited bold for this placeholder type.
@@ -2387,6 +2403,42 @@ fn merge_level_sizes(primary: &LevelFontSizes, fallback: &LevelFontSizes) -> Lev
     out
 }
 
+/// Per-list-level bullet definitions (index 0..=8 → lvl1pPr..lvl9pPr).
+/// `None` where the level's `<a:lvlNpPr>` declares no `buChar`/`buAutoNum`/`buNone`
+/// (so the value is still inherited from a lower-priority style tier).
+type LevelBullets = [Option<Bullet>; 9];
+
+fn empty_level_bullets() -> LevelBullets { std::array::from_fn(|_| None) }
+
+/// True when any level carries an explicit bullet (avoids storing all-None arrays).
+fn has_any_level_bullet(s: &LevelBullets) -> bool { s.iter().any(|v| v.is_some()) }
+
+/// Read `<a:lvlNpPr>` bullets for levels 1..9 from a node holding `<a:lvlNpPr>`
+/// children (a txBody `<a:lstStyle>` or a master `<p:txStyles>` style node).
+/// A level resolves to `Some` only when it explicitly sets `buChar`/`buAutoNum`/
+/// `buNone`; an absent bullet element stays `None` so lower tiers can supply it.
+fn read_level_bullets(list_style: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) -> LevelBullets {
+    std::array::from_fn(|lvl| {
+        let tag = format!("lvl{}pPr", lvl + 1);
+        list_style.children()
+            .find(|n| n.is_element() && n.tag_name().name() == tag)
+            .and_then(|lp| match parse_bullet(Some(lp), theme) {
+                Bullet::Inherit => None,
+                b => Some(b),
+            })
+    })
+}
+
+/// Per-level bullets from a txBody's own `<a:lstStyle>`.
+fn extract_level_bullets(tx_body: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) -> LevelBullets {
+    child(tx_body, "lstStyle").map(|ls| read_level_bullets(ls, theme)).unwrap_or_else(empty_level_bullets)
+}
+
+/// Per-edge merge: `primary[lvl]` wins, else `fallback[lvl]`.
+fn merge_level_bullets(primary: &LevelBullets, fallback: &LevelBullets) -> LevelBullets {
+    std::array::from_fn(|lvl| primary[lvl].clone().or_else(|| fallback[lvl].clone()))
+}
+
 /// Parse bodyPr anchor ("t"/"ctr"/"b") from master placeholder shapes.
 fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -2529,6 +2581,54 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
                 if has_any_level_size(&sizes) {
                     for ph_type in *ph_types {
                         map.entry(ph_type.to_string()).or_insert(sizes);
+                    }
+                }
+            }
+        }
+    }
+
+    map
+}
+
+/// Per-list-level bullets from the master, keyed by ph_type. Mirrors
+/// `parse_master_level_font_sizes`: a master body placeholder's `<a:buChar>` (or
+/// the `bodyStyle` `<a:lvlNpPr>` bullets) is what a slide body paragraph with no
+/// explicit bullet inherits (ECMA-376 §19.7.10 / §21.1.2.4). Per-shape lstStyle
+/// wins over the generic txStyles.
+fn parse_master_level_bullets(master_xml: &str, theme: &HashMap<String, String>) -> HashMap<String, LevelBullets> {
+    let mut map: HashMap<String, LevelBullets> = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+
+    // Per-shape lstStyle first (more specific).
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            if let Some(ph) = sp.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph") {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    let bullets = extract_level_bullets(tx_body, theme);
+                    if has_any_level_bullet(&bullets) { map.entry(ph_type).or_insert(bullets); }
+                }
+            }
+        }
+    }
+
+    // txStyles fallback.
+    if let Some(tx_styles) = child(root, "txStyles") {
+        let style_ph_map: &[(&str, &[&str])] = &[
+            ("titleStyle",  &["title", "ctrTitle"]),
+            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
+            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+        ];
+        for (style_name, ph_types) in style_ph_map {
+            if let Some(style_node) = child(tx_styles, style_name) {
+                let bullets = read_level_bullets(style_node, theme);
+                if has_any_level_bullet(&bullets) {
+                    for ph_type in *ph_types {
+                        map.entry(ph_type.to_string()).or_insert_with(|| bullets.clone());
                     }
                 }
             }
@@ -2702,7 +2802,7 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_level_font_sizes: &HashMap<String, LevelFontSizes>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>, layout_dir: &str, layout_rels: &HashMap<String, String>, zip: &mut PptxZip<'_>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_level_font_sizes: &HashMap<String, LevelFontSizes>, master_level_bullets: &HashMap<String, LevelBullets>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>, layout_dir: &str, layout_rels: &HashMap<String, String>, zip: &mut PptxZip<'_>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     lph.master_by_type = master_transforms.clone();
     lph.by_type_master_alignment = master_alignments.clone();
@@ -2749,6 +2849,10 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
             .map(extract_level_font_sizes)
             .unwrap_or([None; 9]);
+        // Per-level bullets from the layout placeholder's own lstStyle.
+        let layout_level_bullets: LevelBullets = child(sp, "txBody")
+            .map(|tb| extract_level_bullets(tb, theme))
+            .unwrap_or_else(empty_level_bullets);
         let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
         let layout_caps   = layout_def_rpr.and_then(|rp| attr(&rp, "cap")).filter(|v| v == "all" || v == "small");
@@ -2828,6 +2932,15 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 if has_any_level_size(&level_sizes) {
                     lph.by_idx_level_sizes.entry(idx).or_insert(level_sizes);
                 }
+                // Per-level bullets: layout lstStyle wins per level, else master.
+                let empty_bul = empty_level_bullets();
+                let level_bullets = merge_level_bullets(
+                    &layout_level_bullets,
+                    master_level_bullets.get(&ph_type).unwrap_or(&empty_bul),
+                );
+                if has_any_level_bullet(&level_bullets) {
+                    lph.by_idx_level_bullets.entry(idx).or_insert(level_bullets);
+                }
                 if let Some(ref s) = layout_stroke {
                     lph.by_idx_stroke.entry(idx).or_insert(s.clone());
                 }
@@ -2855,6 +2968,14 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             );
             if has_any_level_size(&type_level_sizes) {
                 lph.by_type_level_sizes.entry(ph_type.clone()).or_insert(type_level_sizes);
+            }
+            let empty_bul_t = empty_level_bullets();
+            let type_level_bullets = merge_level_bullets(
+                &layout_level_bullets,
+                master_level_bullets.get(&ph_type).unwrap_or(&empty_bul_t),
+            );
+            if has_any_level_bullet(&type_level_bullets) {
+                lph.by_type_level_bullets.entry(ph_type.clone()).or_insert(type_level_bullets);
             }
             if let Some(b) = layout_bold {
                 lph.by_type_bold.entry(ph_type.clone()).or_insert(b);
@@ -2928,6 +3049,7 @@ fn parse_text_body(
     rels: &HashMap<String, String>,
     inherited_font_size: Option<f64>,
     inherited_level_font_sizes: LevelFontSizes,
+    inherited_level_bullets: &LevelBullets,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
     inherited_caps: Option<String>,
@@ -3037,6 +3159,11 @@ fn parse_text_body(
     // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
     let own_level_sizes = extract_level_font_sizes(tx_body);
     let effective_level_sizes = merge_level_sizes(&own_level_sizes, &inherited_level_font_sizes);
+    // Effective per-level bullets: own lstStyle wins per level, else inherited
+    // layout/master. A paragraph with no explicit bullet resolves its marker (and
+    // its hanging-indent defaults) from this by `lvl` (ECMA-376 §19.7.10).
+    let own_level_bullets = extract_level_bullets(tx_body, theme);
+    let effective_level_bullets = merge_level_bullets(&own_level_bullets, inherited_level_bullets);
     let default_bold = own_def_rpr
         .and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true")
         .or(inherited_bold);
@@ -3070,7 +3197,7 @@ fn parse_text_body(
 
     let mut paragraphs: Vec<Paragraph> = children_vec(tx_body, "p")
         .into_iter()
-        .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing, &effective_level_sizes))
+        .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing, &effective_level_sizes, &effective_level_bullets))
         .collect();
 
     // ECMA-376 §21.1.2.3.13 cap: a run inherits cap="all"/"small" from the
@@ -3183,6 +3310,7 @@ fn parse_paragraph(
     body_default_space_after: Option<i64>,
     body_default_line_spacing: Option<f64>,
     level_font_sizes: &LevelFontSizes,
+    level_bullets: &LevelBullets,
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
@@ -3201,17 +3329,23 @@ fn parse_paragraph(
         .unwrap_or_else(|| if rtl { "r".into() } else { "l".into() });
     let lvl: u32   = p_pr.and_then(|n| attr(&n, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    // Detect whether the paragraph has an explicit bullet character (buChar/buAutoNum).
-    // Used to choose between bullet-list defaults and plain-text defaults.
-    let has_explicit_bullet = p_pr.map(|n| {
-        child(n, "buChar").is_some() || child(n, "buAutoNum").is_some()
-    }).unwrap_or(false);
+    // Effective bullet: the paragraph's own `<a:buChar>`/`<a:buAutoNum>`/`<a:buNone>`,
+    // else the inherited per-level bullet for this placeholder (ECMA-376 §19.7.10).
+    let bullet = match parse_bullet(p_pr, theme) {
+        Bullet::Inherit => level_bullets.get(lvl as usize).and_then(|o| o.clone()).unwrap_or(Bullet::Inherit),
+        b => b,
+    };
+    // A paragraph is a list item (and gets a hanging indent) when its effective
+    // bullet is a char/number — whether declared explicitly or inherited. An
+    // inherited bullet without an inherited marL/indent reuses PowerPoint's
+    // implicit list metrics, the same defaults explicit bullets already use.
+    let has_bullet = matches!(bullet, Bullet::Char { .. } | Bullet::AutoNum { .. });
 
     // marL / indent defaults follow PowerPoint's implicit list style:
     //   Bullet paragraphs:  marL = (lvl+1)*342900, indent = -342900 (hanging)
     //   Plain paragraphs:   marL = lvl*457200 (matches presentation.xml defaultTextStyle)
     let mar_l = p_pr.and_then(|n| attr_i64(&n, "marL")).unwrap_or_else(|| {
-        if has_explicit_bullet {
+        if has_bullet {
             (lvl as i64 + 1) * 342900
         } else {
             lvl as i64 * 457200
@@ -3219,7 +3353,7 @@ fn parse_paragraph(
     });
     let mar_r  = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
     let indent = p_pr.and_then(|n| attr_i64(&n, "indent")).unwrap_or_else(|| {
-        if has_explicit_bullet { -342900 } else { 0 }
+        if has_bullet { -342900 } else { 0 }
     });
 
     let space_before = p_pr.and_then(|n| {
@@ -3239,8 +3373,6 @@ fn parse_paragraph(
                 .map(|v| SpaceLine::Pts { val: v / 100.0 }) // hundredths of pt → pt
         }
     }).or_else(|| body_default_line_spacing.map(|v| SpaceLine::Pct { val: v }));
-
-    let bullet = parse_bullet(p_pr, theme);
 
     // Tab stops from pPr > tabLst
     let tab_stops: Vec<TabStop> = p_pr
@@ -4417,8 +4549,15 @@ fn parse_shape(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let shape_kind = if is_text_box { ShapeKind::Tx } else { ShapeKind::Sp };
+    // Per-level bullets a paragraph inherits when it declares no explicit one
+    // (ECMA-376 §19.7.10): the layout/master placeholder cascade for this slot.
+    let inherited_level_bullets: LevelBullets = if ph_node.is_some() {
+        lph.lookup_level_bullets(&ph_type, ph_idx)
+    } else {
+        empty_level_bullets()
+    };
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_level_font_sizes, inherited_bold, inherited_italic, inherited_caps.clone(), inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
+        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_level_font_sizes, &inherited_level_bullets, inherited_bold, inherited_italic, inherited_caps.clone(), inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
@@ -5000,7 +5139,7 @@ fn parse_table_cell(
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
     let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, [None; 9], None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, [None; 9], &empty_level_bullets(), None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
@@ -5039,6 +5178,7 @@ fn parse_slide(
     master_bg: Option<Fill>,
     master_font_sizes: &HashMap<String, f64>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_bullets: &HashMap<String, LevelBullets>,
     master_anchors: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
@@ -5056,7 +5196,7 @@ fn parse_slide(
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let mut lph = match layout_xml {
-        Some(x) => parse_layout_placeholders(x, master_font_sizes, master_level_font_sizes, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme, layout_dir, layout_rels, zip),
+        Some(x) => parse_layout_placeholders(x, master_font_sizes, master_level_font_sizes, master_level_bullets, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme, layout_dir, layout_rels, zip),
         None => LayoutPlaceholders::default(),
     };
     // Fall back to master txStyles defRPr @b/@i when the layout did not specify
@@ -5848,6 +5988,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_level_font_sizes(xml))
         .unwrap_or_default();
 
+    let master_level_bullets: HashMap<String, LevelBullets> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_level_bullets(xml, &theme))
+        .unwrap_or_default();
+
     let master_anchors: HashMap<String, String> = master_xml_opt
         .as_deref()
         .map(|xml| parse_master_anchors(xml))
@@ -5943,6 +6088,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             master_bg.clone(),
             &master_font_sizes,
             &master_level_font_sizes,
+            &master_level_bullets,
             &master_anchors,
             &master_transforms,
             &master_alignments,
@@ -6393,6 +6539,41 @@ mod tests {
         assert_eq!(m.get("").unwrap()[2], Some(20.0));
         // title style is captured separately.
         assert_eq!(m.get("title").unwrap()[0], Some(44.0));
+    }
+
+    /// ECMA-376 §19.7.10 / §21.1.2.4 — a slide body paragraph with no explicit
+    /// `<a:buChar>` inherits the master `bodyStyle` bullet. `parse_master_level_bullets`
+    /// must surface that `•` (keyed by body/""/obj), so the renderer can draw it.
+    /// Regression: sample-9 slides 4/7/12 bullet lists rendered with no markers.
+    #[test]
+    fn master_body_style_bullets_inherited_by_level() {
+        let master = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:bodyStyle>
+              <a:lvl1pPr><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2000"/></a:lvl1pPr>
+              <a:lvl2pPr><a:buFont typeface="Arial"/><a:buChar char="–"/><a:defRPr sz="1800"/></a:lvl2pPr>
+            </p:bodyStyle>
+            <p:titleStyle><a:lvl1pPr><a:buNone/><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let theme = HashMap::new();
+        let m = parse_master_level_bullets(master, &theme);
+        let body = m.get("body").expect("body bullets");
+        match &body[0] {
+            Some(Bullet::Char { ch, .. }) => assert_eq!(ch, "•", "lvl1 bullet char"),
+            other => panic!("expected lvl1 char bullet, got {other:?}"),
+        }
+        match &body[1] {
+            Some(Bullet::Char { ch, .. }) => assert_eq!(ch, "–", "lvl2 bullet char"),
+            other => panic!("expected lvl2 char bullet, got {other:?}"),
+        }
+        assert!(body[2].is_none(), "lvl3 unspecified");
+        // body style also keys the empty placeholder type and "obj".
+        assert!(matches!(m.get("").and_then(|b| b[0].clone()), Some(Bullet::Char { .. })));
+        assert!(matches!(m.get("obj").and_then(|b| b[0].clone()), Some(Bullet::Char { .. })));
+        // titleStyle's explicit buNone is captured (so titles don't inherit a bullet).
+        assert!(matches!(m.get("title").and_then(|b| b[0].clone()), Some(Bullet::None)));
     }
 
     #[test]
