@@ -27,7 +27,7 @@ Each release ships prebuilt binaries on the [Releases page](https://github.com/y
 Each asset has an accompanying `.sha256` file. Download, verify, mark executable, and place anywhere on your `PATH`:
 
 ```bash
-TAG=v0.50.1   # replace with the latest tag from the Releases page
+TAG=v0.51.0   # replace with the latest tag from the Releases page
 ASSET=ooxml-mcp-server-aarch64-apple-darwin   # pick your platform
 curl -L -o ooxml-mcp-server  "https://github.com/yukiyokotani/office-open-xml-viewer/releases/download/${TAG}/${ASSET}"
 curl -L -o sums.txt         "https://github.com/yukiyokotani/office-open-xml-viewer/releases/download/${TAG}/${ASSET}.sha256"

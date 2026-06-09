@@ -30,7 +30,7 @@ pnpm add @silurus/ooxml
 
 > **Bundler note**: this package embeds `.wasm` files. With Vite add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm); with webpack use [`experiments.asyncWebAssembly`](https://webpack.js.org/configuration/experiments/).
 
-> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~3 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine — and all xlsx usage — tree-shake the ~3 MB away entirely.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~3 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine tree-shake the ~3 MB away entirely.
 
 ---
 
@@ -78,9 +78,12 @@ const docx = new DocxViewer(canvas, { math }); // ← equations now render
 await docx.load('/paper-with-equations.docx');
 ```
 
-The same `math` engine works for `PptxViewer` and the headless `DocxDocument` /
-`PptxPresentation` APIs (which take `math` in their options). xlsx has no equation
-support and never references the engine.
+The same `math` engine works for `PptxViewer`, `XlsxViewer`, and the headless
+`DocxDocument` / `PptxPresentation` APIs (which take `math` in their options).
+Excel stores "Insert > Equation" as OMML inside the shared DrawingML `<xdr:txBody>`
+grammar, so `XlsxViewer` renders equations embedded in shapes / text boxes the same
+way — pass `math` and they render; omit it and those equations are skipped and the
+engine is tree-shaken away.
 
 ---
 
@@ -446,6 +449,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Hidden rows / columns | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody`) | ✅ |
+| | Math equations in shapes (OMML `m:oMath` / `m:oMathPara` in `xdr:txBody`, incl. `a14:m` / `mc:AlternateContent`; rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Charts (bar, line, area, radar, scatter / bubble) | ✅ |
 | | Chart markers (circle / square / diamond / triangle / x / plus / star / dot / dash, per-point `<c:dPt>` overrides) | ✅ |
 | | Chart data labels (`<c:dLbl>` per-point with CELLRANGE / VALUE / SERIESNAME / CATEGORYNAME field references, position `l`/`r`/`t`/`b`/`ctr`/`outEnd`) | ✅ |
