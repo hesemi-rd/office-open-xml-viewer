@@ -2457,7 +2457,7 @@ function renderShapeGroups(
       const sw = shape.w * w;
       const sh = shape.h * h;
       if (sw <= 0 || sh <= 0) continue;
-      drawShape(ctx, shape, sx, sy, sw, sh, loadedImages);
+      drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages);
     }
   }
 
@@ -2468,6 +2468,7 @@ function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
   sx: number, sy: number, sw: number, sh: number,
+  cs: number,
   loadedImages?: Map<string, HTMLImageElement>,
 ): void {
   ctx.save();
@@ -2569,7 +2570,7 @@ function drawShape(
   // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after
   // fill/stroke so it sits on top of the shape's background.
   if (shape.text) {
-    drawShapeText(ctx, shape.text, sw, sh);
+    drawShapeText(ctx, shape.text, sw, sh, cs);
   }
   ctx.restore();
 }
@@ -2708,10 +2709,16 @@ function drawShapeText(
   ctx: CanvasRenderingContext2D,
   txt: import('./types.js').ShapeText,
   sw: number, sh: number,
+  cs: number,
 ): void {
   if (sw <= 0 || sh <= 0 || txt.paragraphs.length === 0) return;
-  const padX = 7;
-  const padY = 4;
+  // The shape box (sw,sh) is already cellScale-scaled by the caller, but font
+  // sizes are authored in points. Multiply every px size (padding, text, math)
+  // by `cs` so the contents grow/shrink with the box on Excel's zoom slider —
+  // matching how cell text scales via buildFont(font, cs). Without this the box
+  // would zoom while the glyphs stayed fixed, drifting out of alignment.
+  const padX = 7 * cs;
+  const padY = 4 * cs;
   const innerW = Math.max(0, sw - padX * 2);
   const innerH = Math.max(0, sh - padY * 2);
   if (innerW <= 0 || innerH <= 0) return;
@@ -2726,7 +2733,7 @@ function drawShapeText(
   // Font string + px size for a text run (math runs have no run-level font).
   const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
-    const px = size * PT_TO_PX;
+    const px = size * PT_TO_PX * cs;
     const family = run.fontFace ? `"${run.fontFace}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
@@ -2755,7 +2762,7 @@ function drawShapeText(
       if (run.type === 'math') {
         const render = mathRenders.get(run.nodes);
         if (!render) continue; // engine not supplied / conversion failed → skip
-        const px = (run.fontSize ?? (lastTextPt || DEFAULT_FONT_SIZE)) * PT_TO_PX;
+        const px = (run.fontSize ?? (lastTextPt || DEFAULT_FONT_SIZE)) * PT_TO_PX * cs;
         const w = render.widthEm * px;
         const ascent = render.ascentEm * px;
         const descent = render.descentEm * px;
