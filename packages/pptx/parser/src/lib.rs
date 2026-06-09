@@ -2244,13 +2244,27 @@ impl LayoutPlaceholders {
     }
 
     /// Look up inherited default text color for this placeholder (layout then master fallback).
-    /// Idx-strict per ECMA-376 §19.7.16 — when the slide-level placeholder carried an
-    /// explicit `idx`, do NOT fall through to a sibling-by-type. The master_color tier
-    /// is only consulted under the type-fallback branch (no-idx slides) because master
-    /// txStyles are keyed by type only and sit *below* the layout's idx-keyed map.
+    ///
+    /// The *layout* tier is idx-strict per ECMA-376 §19.7.16: when the slide-level
+    /// placeholder carries an explicit `idx`, a layout colour is inherited only from the
+    /// layout shape with the SAME idx — never a sibling body placeholder at a different
+    /// idx (which would leak an unrelated region's colour).
+    ///
+    /// The *master* `txStyles` tier (titleStyle/bodyStyle/otherStyle), however, is a
+    /// document-wide default keyed by placeholder *type* (§21.1.2.4 / §19.3.1) and is
+    /// inherited regardless of idx. So when the idx-matched layout shape defines no
+    /// colour, resolution must still fall through to `by_type_master_color`. Without
+    /// this, a body placeholder whose layout shape sets size-but-not-colour resolves to
+    /// no colour at all and the renderer defaults to black — instead of the master
+    /// bodyStyle colour (e.g. `schemeClr bg1` = white on a dark theme). (sample-9 slide 2+)
     fn lookup_color(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
         if let Some(i) = ph_idx {
-            return self.by_idx_color.get(&i).cloned();
+            if let Some(c) = self.by_idx_color.get(&i) {
+                return Some(c.clone());
+            }
+            // Layout idx had no colour → fall through to the master type-keyed default.
+            return self.by_type_master_color.get(ph_type).cloned()
+                .or_else(|| if ph_type == "body" { self.by_type_master_color.get("").cloned() } else { None });
         }
         self.by_type_color.get(ph_type).cloned()
             .or_else(|| if ph_type == "body" { self.by_type_color.get("").cloned() } else { None })
@@ -6351,5 +6365,37 @@ mod tests {
             }
             other => panic!("expected math run, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 §21.1.2.4 / §19.3.1 — a slide body placeholder bound by `idx`
+    /// whose layout shape sets size-but-not-colour must still inherit the master
+    /// `txStyles` bodyStyle colour (keyed by placeholder *type*). The idx-strict
+    /// rule only blocks a sibling *layout* placeholder from leaking its colour; it
+    /// must NOT block the master's type-keyed document default.
+    ///
+    /// Regression: sample-9 slide 2+ body text rendered black instead of the
+    /// master bodyStyle's `schemeClr val="bg1"` (→ lt1 → white on a dark theme),
+    /// because `lookup_color` returned early on a missing `by_idx_color` entry.
+    #[test]
+    fn idx_placeholder_inherits_master_txstyle_color() {
+        let mut lph = LayoutPlaceholders::default();
+        // Master bodyStyle resolves to white and is keyed by type (incl. "" and "body").
+        lph.by_type_master_color.insert("body".to_string(), "FFFFFF".to_string());
+        lph.by_type_master_color.insert("".to_string(), "FFFFFF".to_string());
+
+        // Layout idx=35 placeholder declared size only → no by_idx_color entry.
+        assert_eq!(
+            lph.lookup_color("body", Some(35)),
+            Some("FFFFFF".to_string()),
+            "idx-bound body placeholder must fall through to the master bodyStyle colour"
+        );
+
+        // The layout idx colour still wins when present (idx-strict for the layout tier).
+        lph.by_idx_color.insert(35, "112233".to_string());
+        assert_eq!(
+            lph.lookup_color("body", Some(35)),
+            Some("112233".to_string()),
+            "an explicit layout idx colour takes priority over the master default"
+        );
     }
 }
