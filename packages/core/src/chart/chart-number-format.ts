@@ -25,7 +25,11 @@ export function formatChartVal(v: number): string {
  * or an empty section tells the caller to hide the value.
  */
 export function formatChartValWithCode(v: number, code: string | null | undefined): string {
-  if (!code) return formatChartVal(v);
+  // Absent `code`, or the reserved "General" keyword (ECMA-376 §18.8.30), both
+  // mean the General number format. LibreOffice charts emit
+  // `<c:numFmt formatCode="General">`; tokenizing it as a literal pattern would
+  // render the word "General" instead of the value (issue #358).
+  if (!code || code.trim().toLowerCase() === 'general') return formatChartVal(v);
   // Detect Excel date format codes (m/d/y/h/s tokens outside quotes) and
   // route to the date formatter. Charts use this on the X axis of scatter
   // / time-series charts where the value is a serial date.

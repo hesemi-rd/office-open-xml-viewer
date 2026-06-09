@@ -45,5 +45,11 @@ describe('formatChartValWithCode — percent & null', () => {
   });
   it('falls back to General when code is null/General', () => {
     expect(formatChartValWithCode(7507, null)).toBe('7507');
+    // "General" is the reserved General-format keyword (ECMA-376 §18.8.30), not a
+    // literal pattern. LibreOffice charts emit <c:numFmt formatCode="General">,
+    // which must render the value — not the literal text "General" (issue #358).
+    expect(formatChartValWithCode(7507, 'General')).toBe('7507');
+    expect(formatChartValWithCode(7507, 'general')).toBe('7507');
+    expect(formatChartValWithCode(0.5, ' General ')).toBe('0.5');
   });
 });
