@@ -2194,6 +2194,16 @@ export async function renderSlide(
   opts: RenderOptions = {},
   onTextRun?: TextRunCallback,
 ): Promise<HTMLCanvasElement | OffscreenCanvas> {
+  // Cancellation guard. renderSlide is async (it awaits image / equation decode),
+  // so rapid navigation can start a newer render of the SAME canvas before this
+  // one finishes. Both would `canvas.width = …` (clear) and then draw, and their
+  // draws interleave at the await points — ghosting multiple slides together.
+  // Stamp a per-canvas token; once a newer render supersedes us, stop drawing at
+  // the next await so only the latest render's output survives.
+  const tokenHost = canvas as unknown as { __pptxRenderToken?: number };
+  const myToken = (tokenHost.__pptxRenderToken = (tokenHost.__pptxRenderToken ?? 0) + 1);
+  const superseded = () => tokenHost.__pptxRenderToken !== myToken;
+
   const targetWidth = opts.width ?? ((canvas instanceof HTMLCanvasElement ? canvas.offsetWidth : 0) || 960);
   const scale = targetWidth / slideWidth;
   const canvasW = Math.round(targetWidth);
@@ -2228,6 +2238,7 @@ export async function renderSlide(
   // Requires the opt-in `math` engine (RenderOptions.math); without it,
   // equations are skipped and the engine asset never enters the bundle.
   if (opts.math) await prepareSlideMath(slide, opts.math);
+  if (superseded()) return canvas;
 
   const themeDefaultColor = opts.defaultTextColor
     ? `#${opts.defaultTextColor}`
@@ -2235,6 +2246,9 @@ export async function renderSlide(
 
   const slideNumber = slide.slideNumber;
   for (const el of slide.elements) {
+    // A newer render of this canvas started while we awaited an image/equation —
+    // stop so we don't paint this (now stale) slide over the newer one.
+    if (superseded()) return canvas;
     if (el.type === 'shape') {
       renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun);
     } else if (el.type === 'picture') {
