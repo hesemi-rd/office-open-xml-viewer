@@ -665,7 +665,12 @@ pub(crate) fn parse_shape_anchors(
     let mut anchors: Vec<ShapeAnchor> = Vec::new();
 
     for anchor in doc.descendants() {
-        if anchor.tag_name().name() != "twoCellAnchor"
+        let anchor_tag = anchor.tag_name().name();
+        // ECMA-376 §20.5.2: a drawing shape is anchored with either
+        // `twoCellAnchor` (from+to) or `oneCellAnchor` (from + a saved `<ext>`
+        // size). Excel authors equation text boxes as oneCellAnchor, so we must
+        // accept both or those shapes (and their math) are silently dropped.
+        if (anchor_tag != "twoCellAnchor" && anchor_tag != "oneCellAnchor")
             || anchor.tag_name().namespace() != Some(xdr_ns) { continue; }
 
         // Parse from/to anchor rect (shared between grpSp and stand-alone sp paths)
@@ -674,7 +679,16 @@ pub(crate) fn parse_shape_anchors(
         // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs` — see ImageAnchor parsing
         // path for semantics. `"oneCell"` instructs the renderer to preserve
         // the group's saved EMU size instead of resizing with the cell rect.
-        let edit_as = anchor.attribute("editAs").map(|s| s.to_string());
+        // oneCellAnchor has no `<to>`; its size is the saved EMU `<ext>` (which
+        // equals the shape's own xfrm ext), positioned at `<from>` — i.e. the
+        // "oneCell" (move-but-don't-size) semantics the renderer already
+        // implements via nativeExtCx/Cy. Force editAs accordingly so the
+        // renderer sizes from the saved ext rather than a (missing) `to` rect.
+        let edit_as = if anchor_tag == "oneCellAnchor" {
+            Some("oneCell".to_string())
+        } else {
+            anchor.attribute("editAs").map(|s| s.to_string())
+        };
         let native_ext_cx: i64;
         let native_ext_cy: i64;
         for c in anchor.children() {
@@ -700,6 +714,22 @@ pub(crate) fn parse_shape_anchors(
             }
         }
 
+        // Excel wraps a modern shape in an anchor-level `<mc:AlternateContent>`
+        // (`<mc:Choice Requires="…">` = the live shape, `<mc:Fallback>` = a
+        // legacy fallback). Unwrap to the Choice's content so the grpSp/sp/pic
+        // lookups below see the real shape; otherwise the whole drawing — and
+        // any equation in it — is silently dropped. (Equations inside the shape
+        // text body are handled separately by `push_math_runs_shape`; this is
+        // the distinct, shape-level wrapper.)
+        let content = anchor
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "AlternateContent")
+            .and_then(|ac| {
+                ac.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "Choice")
+            })
+            .unwrap_or(anchor);
+
         // Two top-level layouts ECMA-376 allows under <xdr:twoCellAnchor>:
         //   (a) <xdr:grpSp> wrapping a tree of nested groups + leaves; and
         //   (b) a single <xdr:sp> / <xdr:pic> directly under the anchor
@@ -707,7 +737,7 @@ pub(crate) fn parse_shape_anchors(
         //       to define the anchor's drawing-coord system; the stand-alone
         //       path treats the shape as filling 100 % of the anchor rect.
         let mut shapes: Vec<ShapeInfo> = Vec::new();
-        if let Some(grp) = anchor.children().find(|n| n.is_element() && n.tag_name().name() == "grpSp") {
+        if let Some(grp) = content.children().find(|n| n.is_element() && n.tag_name().name() == "grpSp") {
             let grp_sp_pr = grp.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
             let xfrm = grp_sp_pr
                 .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
@@ -729,7 +759,7 @@ pub(crate) fn parse_shape_anchors(
 
             collect_shapes(&grp, root.off_x, root.off_y, root.ext_x, root.ext_y,
                            csx, csy, tx, ty, theme_colors, rid_urls, &mut shapes);
-        } else if let Some(sp) = anchor.children().find(|n| n.is_element() && (n.tag_name().name() == "sp" || n.tag_name().name() == "pic")) {
+        } else if let Some(sp) = content.children().find(|n| n.is_element() && (n.tag_name().name() == "sp" || n.tag_name().name() == "pic")) {
             // Stand-alone sp/pic: the shape's own xfrm gives its absolute EMU
             // rect, but for our rendering pipeline the anchor's from/to
             // already defines the on-sheet rect, and the leaf occupies it
@@ -744,7 +774,7 @@ pub(crate) fn parse_shape_anchors(
             if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 { continue; }
             native_ext_cx = xfrm.ext_x as i64;
             native_ext_cy = xfrm.ext_y as i64;
-            collect_shapes(&anchor, xfrm.off_x, xfrm.off_y, xfrm.ext_x, xfrm.ext_y,
+            collect_shapes(&content, xfrm.off_x, xfrm.off_y, xfrm.ext_x, xfrm.ext_y,
                            1.0, 1.0, 0.0, 0.0, theme_colors, rid_urls, &mut shapes);
         } else {
             continue;
