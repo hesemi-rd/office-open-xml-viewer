@@ -4,6 +4,33 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.54.0 — 2026-06-09
+
+xlsx:
+
+- **A custom `numFmt` with `formatCode="General"` now renders the cell value
+  instead of the literal text "General".** LibreOffice Calc writes a custom
+  numFmt (id ≥ 164) with `formatCode="General"` for every workbook it saves; the
+  formatter only reached the General path via the builtin `numFmtId=0`, so these
+  cells tokenised "General" as a literal pattern and every numeric cell showed the
+  word "General". ECMA-376 §18.8.30 reserves "General" as the General number
+  format regardless of `numFmtId`, so a trimmed, case-insensitive
+  `formatCode === "general"` is now normalised to it (#358).
+
+charts:
+
+- **Chart axis ticks and data labels with an explicit `formatCode="General"` now
+  render the value.** `formatChartValWithCode` only fell back to the General
+  formatter for null/empty codes, so the `<c:numFmt formatCode="General">` that
+  LibreOffice emits on axes and data labels was tokenised as a literal pattern.
+  Shared by pptx/docx/xlsx charts via `@silurus/ooxml-core` (#358).
+
+docs:
+
+- The README "Demo (Storybook)" link is relabelled "Live demo" — it points to the
+  project site (`ooxml.silurus.dev`), not Storybook — and the headless-engine
+  `Examples` reference now links to `/storybook/`, where those stories live.
+
 ## 0.53.0 — 2026-06-09
 
 pptx:

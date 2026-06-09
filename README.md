@@ -12,11 +12,11 @@
 [![VS Code installs](https://img.shields.io/visual-studio-marketplace/i/silurus.office-open-xml-viewer?label=installs)](https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer)
 [![license](https://img.shields.io/npm/l/@silurus/ooxml.svg)](./LICENSE)
 
-**[Demo (Storybook)](https://ooxml.silurus.dev)**
+**[Live demo](https://ooxml.silurus.dev)**
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
-Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev).
+Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev/storybook/).
 
 | DOCX | XLSX | PPTX |
 |:---:|:---:|:---:|
