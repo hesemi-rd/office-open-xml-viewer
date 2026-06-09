@@ -4,6 +4,34 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.51.0 — 2026-06-09
+
+xlsx:
+
+- **OMML equations now render in shapes / text boxes (opt-in).** Excel stores
+  "Insert > Equation" as OMML inside the shared DrawingML `<xdr:txBody>` grammar
+  (ECMA-376 §22.1), exactly like PowerPoint. The xlsx renderer now parses those
+  `m:oMath` / `m:oMathPara` runs and renders them through the same `MathRenderer`
+  DI used by docx/pptx — pass `math` (from `@silurus/ooxml/math`) to `XlsxViewer`
+  (or via `XlsxWorkbook.renderViewport` opts); omit it and the ~3 MB engine is
+  tree-shaken away and equations are skipped. `ShapeTextRun` became a tagged union
+  (`text` / `break` / `math`) mirroring the pptx text-run model.
+- Equations are parsed in `oneCellAnchor` shapes and in shapes wrapped in
+  `mc:AlternateContent` / `a14:m`, not just `twoCellAnchor` (parser `drawing.rs`).
+- Fixed shape colour resolution for equation boxes: `<a:solidFill>` now applies
+  DrawingML transforms (`lumMod` / `lumOff` / `shade` / `tint` / `satMod`) and
+  resolves `<a:sysClr lastClr>`; an `<a:ln>` with a fill but no `w` defaults to
+  0.75 pt; equation glyph colour reads the math run (`m:r`) and ignores the
+  structural `<m:ctrlPr>` fill.
+- Shape text and equations now scale with `cellScale` (the Excel zoom slider),
+  matching how cell text scales — previously the shape box grew with zoom while
+  its contents stayed a fixed pixel size and drifted out of alignment.
+
+VS Code extension / docs:
+
+- Fixed the VS Code Marketplace homepage link (now points to the project homepage)
+  and ran a documentation-staleness audit (PR #352).
+
 ## 0.50.1 — 2026-06-04
 
 VS Code extension:
