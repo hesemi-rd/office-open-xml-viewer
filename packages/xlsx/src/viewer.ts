@@ -1,5 +1,6 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet } from './types.js';
+import type { MathRenderer } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet } from './renderer.js';
 
 const TAB_BAR_H = 30;
@@ -38,6 +39,14 @@ export interface XlsxViewerOptions {
    * values fall back to the default.
    */
   maxZipEntryBytes?: number;
+  /**
+   * Opt-in OMML equation engine for rendering math in shapes/text boxes.
+   * Import it from the separate `@silurus/ooxml/math` entry and pass it in
+   * (`import { math } from '@silurus/ooxml/math'`). When omitted, equations are
+   * skipped and the ~3 MB engine never enters the bundle (tree-shaken). Same
+   * dependency-injection contract as the docx/pptx viewers.
+   */
+  math?: MathRenderer;
 }
 
 export interface CellAddress {
@@ -1190,6 +1199,7 @@ export class XlsxViewer {
       freezeCols,
       selectedRowRange,
       selectedColRange,
+      math: this.opts.math,
     });
   }
 

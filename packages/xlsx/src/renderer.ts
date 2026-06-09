@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, type ChartModel, type SparklineModel } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -2457,7 +2457,7 @@ function renderShapeGroups(
       const sw = shape.w * w;
       const sh = shape.h * h;
       if (sw <= 0 || sh <= 0) continue;
-      drawShape(ctx, shape, sx, sy, sw, sh, loadedImages);
+      drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages);
     }
   }
 
@@ -2468,6 +2468,7 @@ function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
   sx: number, sy: number, sw: number, sh: number,
+  cs: number,
   loadedImages?: Map<string, HTMLImageElement>,
 ): void {
   ctx.save();
@@ -2569,7 +2570,7 @@ function drawShape(
   // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after
   // fill/stroke so it sits on top of the shape's background.
   if (shape.text) {
-    drawShapeText(ctx, shape.text, sw, sh);
+    drawShapeText(ctx, shape.text, sw, sh, cs);
   }
   ctx.restore();
 }
@@ -2586,73 +2587,231 @@ function drawShape(
  * `tIns=45720 EMU` ≈ 3.6 pt top/bottom). We approximate inset as a fixed
  * 7 px / 4 px since `bodyPr@*Ins` is rarely overridden in practice.
  */
+// ── Math (OMML) rendering in shapes ─────────────────────────────────────────
+// Equations are converted to SVG by MathJax once, cached by their MathNode[]
+// reference (stable from parse through render), then drawn as images inside
+// shape text. Mirrors the pptx/docx pipeline so typesetting is identical; the
+// engine is opt-in (RenderViewportOptions.math) and tree-shakes out otherwise.
+interface MathRender {
+  /** The equation rasterized as opaque black glyphs on transparent. */
+  img: HTMLImageElement;
+  /** baseline-relative extents in em (1em = the equation's font size in px). */
+  widthEm: number;
+  ascentEm: number;
+  descentEm: number;
+  /** Per-colour tinted copies (the black `img` recoloured via source-in). */
+  tinted: Map<string, CanvasImageSource>;
+}
+const mathRenders = new WeakMap<MathNode[], MathRender>();
+
+/** Tint the cached black equation image to `color` via source-in (cached). */
+function tintedMathImage(render: MathRender, color: string): CanvasImageSource {
+  const cached = render.tinted.get(color);
+  if (cached) return cached;
+  const iw = render.img.naturalWidth || 1;
+  const ih = render.img.naturalHeight || 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = iw;
+  canvas.height = ih;
+  const cx = canvas.getContext('2d');
+  if (!cx) return render.img;
+  cx.drawImage(render.img, 0, 0, iw, ih);
+  cx.globalCompositeOperation = 'source-in';
+  cx.fillStyle = color;
+  cx.fillRect(0, 0, iw, ih);
+  render.tinted.set(color, canvas);
+  return canvas;
+}
+
+function svgToImage(svg: string): Promise<HTMLImageElement> {
+  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const img = new Image();
+  return new Promise((resolve, reject) => {
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+// px-per-em rasterization resolution for equation SVGs — keeps glyphs crisp on
+// HiDPI canvases (a MathJax SVG otherwise rasterizes at a small intrinsic size
+// and drawImage upscales it). 256 stays crisp past 40pt at devicePixelRatio 3.
+const MATH_RASTER_PX_PER_EM = 256;
+function sizeSvgForRaster(svg: string, widthEm: number, heightEm: number): string {
+  const w = Math.max(1, Math.round(widthEm * MATH_RASTER_PX_PER_EM));
+  const h = Math.max(1, Math.round(heightEm * MATH_RASTER_PX_PER_EM));
+  return svg.replace(/<svg([^>]*?)>/, (_m, attrs: string) => {
+    const cleaned = attrs.replace(/\s(?:width|height)="[^"]*"/g, '');
+    return `<svg${cleaned} width="${w}" height="${h}">`;
+  });
+}
+
+/** Gather every math run reachable from a worksheet's shapes. Equations live
+ *  only in shape text bodies (ECMA-376 §22.1) — never in cell values. */
+function collectWorksheetMath(ws: Worksheet): { nodes: MathNode[]; display: boolean }[] {
+  const found: { nodes: MathNode[]; display: boolean }[] = [];
+  for (const anchor of ws.shapeGroups ?? []) {
+    for (const shape of anchor.shapes) {
+      for (const p of shape.text?.paragraphs ?? []) {
+        for (const run of p.runs) {
+          if (run.type === 'math') found.push({ nodes: run.nodes, display: run.display });
+        }
+      }
+    }
+  }
+  return found;
+}
+
+/** True iff the worksheet has at least one equation not yet rasterized. Lets
+ *  the caller keep steady-state scroll/zoom frames fully synchronous (no await)
+ *  — only the first frame that reveals new equations pays the async cost. */
+export function worksheetHasUncachedMath(ws: Worksheet): boolean {
+  for (const anchor of ws.shapeGroups ?? []) {
+    for (const shape of anchor.shapes) {
+      for (const p of shape.text?.paragraphs ?? []) {
+        for (const run of p.runs) {
+          if (run.type === 'math' && !mathRenders.has(run.nodes)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** Pre-rasterize every equation in the worksheet (async). Idempotent: skips
+ *  already-rasterized equations and only loads MathJax when math is present.
+ *  MUST be awaited BEFORE the canvas resize (off the synchronous draw path), so
+ *  the old frame stays visible until the new one is ready (no white flash). */
+export async function prepareWorksheetMath(ws: Worksheet, math: MathRenderer): Promise<void> {
+  const uncached = collectWorksheetMath(ws).filter((r) => !mathRenders.has(r.nodes));
+  if (uncached.length === 0) return;
+  await math.loadMathJax();
+  for (const r of uncached) {
+    if (mathRenders.has(r.nodes)) continue;
+    try {
+      const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
+      const sized = sizeSvgForRaster(recolorSvg(out.svg, '#000000'), out.widthEm, out.ascentEm + out.descentEm);
+      const img = await svgToImage(sized);
+      mathRenders.set(r.nodes, {
+        img,
+        widthEm: out.widthEm,
+        ascentEm: out.ascentEm,
+        descentEm: out.descentEm,
+        tinted: new Map(),
+      });
+    } catch {
+      // Conversion failure: leave the equation unrendered rather than throw.
+    }
+  }
+}
+
 function drawShapeText(
   ctx: CanvasRenderingContext2D,
   txt: import('./types.js').ShapeText,
   sw: number, sh: number,
+  cs: number,
 ): void {
   if (sw <= 0 || sh <= 0 || txt.paragraphs.length === 0) return;
-  const padX = 7;
-  const padY = 4;
+  // The shape box (sw,sh) is already cellScale-scaled by the caller, but font
+  // sizes are authored in points. Multiply every px size (padding, text, math)
+  // by `cs` so the contents grow/shrink with the box on Excel's zoom slider —
+  // matching how cell text scales via buildFont(font, cs). Without this the box
+  // would zoom while the glyphs stayed fixed, drifting out of alignment.
+  const padX = 7 * cs;
+  const padY = 4 * cs;
   const innerW = Math.max(0, sw - padX * 2);
   const innerH = Math.max(0, sh - padY * 2);
   if (innerW <= 0 || innerH <= 0) return;
 
-  type Line = { runs: { text: string; run: import('./types.js').ShapeTextRun }[]; align: string; height: number; ascent: number };
+  // A laid-out segment: measured text or a rasterized equation. `w` is the
+  // advance width (px); math also carries baseline-relative ascent/descent.
+  type Seg =
+    | { kind: 'text'; text: string; font: string; color: string; w: number }
+    | { kind: 'math'; render: MathRender; color: string; w: number; ascent: number; descent: number };
+  type Line = { segs: Seg[]; align: string; height: number; ascent: number; hasMath: boolean };
 
-  const runFont = (run: import('./types.js').ShapeTextRun): { font: string; size: number } => {
+  // Font string + px size for a text run (math runs have no run-level font).
+  const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
-    const px = size * PT_TO_PX;
+    const px = size * PT_TO_PX * cs;
     const family = run.fontFace ? `"${run.fontFace}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
-    const weight = run.bold ? 'bold ' : '';
-    const italic = run.italic ? 'italic ' : '';
-    return { font: `${italic}${weight}${px}px ${family}`, size: px };
+    return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
 
-  // Wrap each paragraph into lines.
+  // Wrap each paragraph into lines (segments preserve run order).
   const wrap = txt.wrap !== 'none';
   const lines: Line[] = [];
   for (const p of txt.paragraphs) {
     const align = p.align || 'l';
-    let lineRuns: Line['runs'] = [];
+    let segs: Seg[] = [];
     let lineW = 0;
     let lineHeight = 0;
     let lineAscent = 0;
+    let hasMath = false;
     const flushLine = () => {
-      lines.push({ runs: lineRuns, align, height: lineHeight, ascent: lineAscent });
-      lineRuns = [];
-      lineW = 0;
-      lineHeight = 0;
-      lineAscent = 0;
+      lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath });
+      segs = []; lineW = 0; lineHeight = 0; lineAscent = 0; hasMath = false;
     };
+    // Nearest preceding text size (pt) in this paragraph — inline math with no
+    // explicit rPr@sz inherits it (then falls back to the default).
+    let lastTextPt = 0;
+
     for (const run of p.runs) {
-      const { font, size: pxSize } = runFont(run);
+      if (run.type === 'break') { flushLine(); continue; }
+
+      if (run.type === 'math') {
+        const render = mathRenders.get(run.nodes);
+        if (!render) continue; // engine not supplied / conversion failed → skip
+        const px = (run.fontSize ?? (lastTextPt || DEFAULT_FONT_SIZE)) * PT_TO_PX * cs;
+        const w = render.widthEm * px;
+        const ascent = render.ascentEm * px;
+        const descent = render.descentEm * px;
+        const color = run.color ?? '#000000';
+        if (run.display) {
+          // Block equation occupies its own line (centered per paragraph align).
+          flushLine();
+          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: ascent + descent, ascent, hasMath: true });
+          continue;
+        }
+        // Inline equation: treat as an atomic, non-breaking "word".
+        if (wrap && lineW + w > innerW && segs.length > 0) flushLine();
+        segs.push({ kind: 'math', render, color, w, ascent, descent });
+        lineW += w;
+        lineHeight = Math.max(lineHeight, ascent + descent);
+        lineAscent = Math.max(lineAscent, ascent);
+        hasMath = true;
+        continue;
+      }
+
+      // Text run.
+      lastTextPt = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
+      const { font, px: pxSize } = textFont(run);
+      const color = run.color ?? '#000000';
       lineHeight = Math.max(lineHeight, pxSize * 1.2);
       lineAscent = Math.max(lineAscent, pxSize * 0.85);
       ctx.font = font;
-      // Split on explicit newlines (from <a:br/>) first.
-      const segments = run.text.split('\n');
-      for (let s = 0; s < segments.length; s++) {
+      // Defensive: a run's text may still contain a literal "\n".
+      const pieces = run.text.split('\n');
+      for (let s = 0; s < pieces.length; s++) {
         if (s > 0) flushLine();
-        const seg = segments[s];
-        if (!seg) continue;
+        const piece = pieces[s];
+        if (!piece) continue;
         if (!wrap) {
-          lineRuns.push({ text: seg, run });
-          lineW += ctx.measureText(seg).width;
+          const w = ctx.measureText(piece).width;
+          segs.push({ kind: 'text', text: piece, font, color, w });
+          lineW += w;
           continue;
         }
-        // Greedy word-wrap. Treat each character as a possible break point
-        // for CJK; for spaces, prefer breaking on space boundaries. We do a
-        // simple character-level greedy wrap which works adequately for
-        // both Latin and CJK.
+        // Greedy character-level wrap (adequate for Latin + CJK).
         let buf = '';
-        for (const ch of seg) {
+        for (const ch of piece) {
           const candidate = buf + ch;
           const cw = ctx.measureText(candidate).width;
-          if (lineW + cw > innerW && (buf.length > 0 || lineRuns.length > 0)) {
+          if (lineW + cw > innerW && (buf.length > 0 || segs.length > 0)) {
             if (buf) {
-              lineRuns.push({ text: buf, run });
-              lineW += ctx.measureText(buf).width;
+              const w = ctx.measureText(buf).width;
+              segs.push({ kind: 'text', text: buf, font, color, w });
+              lineW += w;
             }
             flushLine();
             buf = ch;
@@ -2664,8 +2823,9 @@ function drawShapeText(
           }
         }
         if (buf) {
-          lineRuns.push({ text: buf, run });
-          lineW += ctx.measureText(buf).width;
+          const w = ctx.measureText(buf).width;
+          segs.push({ kind: 'text', text: buf, font, color, w });
+          lineW += w;
         }
       }
     }
@@ -2682,28 +2842,42 @@ function drawShapeText(
   if (txt.anchor === 'ctr') y0 = padY + (innerH - blockH) / 2;
   else if (txt.anchor === 'b') y0 = padY + Math.max(0, innerH - blockH);
 
-  // Use 'middle' baseline: fillText(x, y) draws with the em-box midpoint at y.
-  // This gives clean per-line centering without manual ascent bookkeeping.
-  ctx.textBaseline = 'middle';
   let lineTop = y0;
   for (const line of lines) {
-    const drawY = lineTop + line.height / 2;
-    // Compute total line width to align horizontally
-    let totalW = 0;
-    for (const r of line.runs) {
-      const { font } = runFont(r.run);
-      ctx.font = font;
-      totalW += ctx.measureText(r.text).width;
-    }
+    const totalW = line.segs.reduce((s, seg) => s + seg.w, 0);
     let x = padX;
     if (line.align === 'ctr') x = padX + Math.max(0, (innerW - totalW) / 2);
     else if (line.align === 'r') x = padX + Math.max(0, innerW - totalW);
-    for (const r of line.runs) {
-      const { font } = runFont(r.run);
-      ctx.font = font;
-      ctx.fillStyle = r.run.color ?? '#000000';
-      ctx.fillText(r.text, x, drawY);
-      x += ctx.measureText(r.text).width;
+
+    if (line.hasMath) {
+      // A line containing an equation aligns text AND the math raster to a
+      // shared alphabetic baseline (= lineTop + ascent), so the equation sits
+      // on the same baseline as adjacent text. (Pure-text lines keep the
+      // simpler 'middle' baseline below.)
+      ctx.textBaseline = 'alphabetic';
+      const baseline = lineTop + line.ascent;
+      for (const seg of line.segs) {
+        if (seg.kind === 'text') {
+          ctx.font = seg.font;
+          ctx.fillStyle = seg.color;
+          ctx.fillText(seg.text, x, baseline);
+        } else {
+          const img = tintedMathImage(seg.render, seg.color);
+          ctx.drawImage(img, x, baseline - seg.ascent, seg.w, seg.ascent + seg.descent);
+        }
+        x += seg.w;
+      }
+    } else {
+      ctx.textBaseline = 'middle';
+      const drawY = lineTop + line.height / 2;
+      for (const seg of line.segs) {
+        if (seg.kind === 'text') {
+          ctx.font = seg.font;
+          ctx.fillStyle = seg.color;
+          ctx.fillText(seg.text, x, drawY);
+        }
+        x += seg.w;
+      }
     }
     lineTop += line.height;
   }

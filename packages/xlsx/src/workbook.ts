@@ -7,7 +7,7 @@ import {
   type LoadOptions as CoreLoadOptions,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
-import { renderViewport } from './renderer.js';
+import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
 
 /** Office font name → metric-compatible Google Fonts substitute. These are
  *  the well-known pairings Microsoft and Google both publish and ship on
@@ -179,6 +179,16 @@ export class XlsxWorkbook {
           this.imageCache.set(url, el);
         }),
       ).catch(() => { /* swallow image failures so the grid still renders */ });
+    }
+
+    // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,
+    // for the same no-white-flash reason as the image preload. Gated on
+    // `worksheetHasUncachedMath` so steady-state scroll/zoom frames take NO
+    // await and stay fully synchronous — only the first frame that reveals new
+    // equations pays the (idempotently cached) MathJax cost. Opt-in: skipped
+    // entirely unless the caller supplies a `math` engine.
+    if (opts.math && worksheetHasUncachedMath(ws)) {
+      await prepareWorksheetMath(ws, opts.math);
     }
 
     // ── Step 2: Resize + draw, all synchronous from here.
