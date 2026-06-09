@@ -818,20 +818,39 @@ pub struct ShapeParagraph {
     pub runs: Vec<ShapeTextRun>,
 }
 
+/// A run within a shape paragraph. Tagged union (mirrors the pptx `TextRun`
+/// shape) so a run is either styled text, a soft line break, or an OMML
+/// equation. Excel stores "Insert > Equation" as OMML inside the shared
+/// DrawingML `<xdr:txBody>` grammar (ECMA-376 §22.1), exactly like PowerPoint.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShapeTextRun {
-    pub text: String,
-    pub bold: bool,
-    pub italic: bool,
-    /// Font size in points (`<a:rPr@sz>` is in 100ths of a point; this field
-    /// is already converted). 0 means "inherit from default" → renderer falls
-    /// back to its own default.
-    pub size: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub font_face: Option<String>,
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ShapeTextRun {
+    Text {
+        text: String,
+        bold: bool,
+        italic: bool,
+        /// Font size in points (`<a:rPr@sz>` is in 100ths of a point; this
+        /// field is already converted). 0 means "inherit from default" →
+        /// renderer falls back to its own default.
+        size: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_face: Option<String>,
+    },
+    /// Soft line break (`<a:br>`).
+    Break,
+    /// Inline (`display:false`) or block (`display:true`) OMML equation.
+    Math {
+        nodes: Vec<ooxml_common::math::MathNode>,
+        display: bool,
+        /// Point size for the equation, when the run carries an explicit
+        /// `rPr@sz`; otherwise the renderer inherits the surrounding size.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_size: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize)]

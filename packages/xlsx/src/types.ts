@@ -1,3 +1,5 @@
+import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
+
 export interface Workbook {
   sheets: SheetMeta[];
 }
@@ -461,16 +463,33 @@ export interface ShapeParagraph {
   runs: ShapeTextRun[];
 }
 
-export interface ShapeTextRun {
-  text: string;
-  bold: boolean;
-  italic: boolean;
-  /** Font size in points (already converted from `<a:rPr@sz>` 100ths-of-a-pt).
-   *  0 = inherit (renderer falls back to its default). */
-  size: number;
-  color?: string;
-  fontFace?: string;
-}
+/** A run within a shape paragraph — tagged union mirroring the Rust enum
+ *  (matches the pptx `TextRun` shape): styled text, a soft line break, or an
+ *  OMML equation. Excel stores "Insert > Equation" as OMML inside the shared
+ *  DrawingML `<xdr:txBody>` grammar (ECMA-376 §22.1), like PowerPoint. */
+export type ShapeTextRun =
+  | {
+      type: 'text';
+      text: string;
+      bold: boolean;
+      italic: boolean;
+      /** Font size in points (already converted from `<a:rPr@sz>` 100ths-of-a-pt).
+       *  0 = inherit (renderer falls back to its default). */
+      size: number;
+      color?: string;
+      fontFace?: string;
+    }
+  | { type: 'break' }
+  | {
+      type: 'math';
+      /** OMML AST (shared `MathNode` model) for the equation. */
+      nodes: MathNode[];
+      /** true = block (`m:oMathPara`), false = inline (`m:oMath`). */
+      display: boolean;
+      /** Point size when the run carries an explicit `rPr@sz`; else inherit. */
+      fontSize?: number;
+      color?: string;
+    };
 
 export type ShapeGeom =
   | { type: 'preset'; name: string }
@@ -763,6 +782,11 @@ export interface RenderViewportOptions {
   cellScale?: number;
   /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
   loadedImages?: Map<string, HTMLImageElement>;
+  /** Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
+   *  entry and pass it in (`import { math } from '@silurus/ooxml/math'`). When
+   *  omitted, equations in shapes are skipped and the ~3 MB engine never enters
+   *  the bundle. Same DI contract as docx/pptx. */
+  math?: MathRenderer;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
   onTextRun?: (info: XlsxTextRunInfo) => void;
   /** Highlighted row range for selected row headers (1-indexed inclusive).

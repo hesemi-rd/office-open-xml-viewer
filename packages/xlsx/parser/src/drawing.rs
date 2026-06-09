@@ -270,6 +270,89 @@ pub(crate) fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
 /// `<a:latin@typeface>` selects the Latin font face (we don't yet
 /// distinguish East-Asian / complex-script fonts — `<a:ea>` and `<a:cs>`
 /// are ignored for typeface).
+/// Point size for an equation: the first `rPr@sz` within the equation
+/// (Excel/PowerPoint put the size on the math run's `a:rPr`), in pt.
+fn math_run_size_shape(om: roxmltree::Node) -> Option<f64> {
+    om.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
+        .find_map(|rpr| rpr.attribute("sz").and_then(|s| s.parse::<f64>().ok()))
+        .map(|v| v / 100.0)
+}
+
+/// Equation colour: the first run-property `solidFill` within the equation, so
+/// inline math follows the surrounding text colour (mirrors pptx). Resolved
+/// through the same `parse_solid_fill` used for shape text runs.
+fn math_run_color_shape(om: roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    om.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
+        .find_map(|rpr| {
+            rpr.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                .and_then(|sf| parse_solid_fill(&sf, theme_colors))
+        })
+}
+
+/// Emit `ShapeTextRun::Math` runs from an OMML wrapper inside a `<a:p>`. Handles
+/// the four shapes Excel/PowerPoint produce — bare `m:oMath`, `m:oMathPara`
+/// (block), the `a14:m` wrapper (local name `m`), and `mc:AlternateContent`
+/// (take the `a14` `Choice`, ignore the rasterized `Fallback`). Direct port of
+/// the pptx parser's `push_math_runs` (ECMA-376 §22.1); reuses the shared
+/// `ooxml_common::math` OMML→AST parser unchanged.
+fn push_math_runs_shape(
+    node: roxmltree::Node,
+    theme_colors: &[String],
+    runs: &mut Vec<ShapeTextRun>,
+) {
+    match node.tag_name().name() {
+        "oMath" => {
+            let nodes = ooxml_common::math::parse_omath_nodes(node);
+            if !nodes.is_empty() {
+                runs.push(ShapeTextRun::Math {
+                    nodes,
+                    display: false,
+                    font_size: math_run_size_shape(node),
+                    color: math_run_color_shape(node, theme_colors),
+                });
+            }
+        }
+        "oMathPara" => {
+            for om in node
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "oMath")
+            {
+                let nodes = ooxml_common::math::parse_omath_nodes(om);
+                if !nodes.is_empty() {
+                    runs.push(ShapeTextRun::Math {
+                        nodes,
+                        display: true,
+                        font_size: math_run_size_shape(om),
+                        color: math_run_color_shape(om, theme_colors),
+                    });
+                }
+            }
+        }
+        // mc:AlternateContent → the a14 `Choice` holds the live equation; the
+        // `Fallback` holds a rasterized picture we must NOT also draw.
+        "AlternateContent" => {
+            if let Some(choice) = node
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "Choice")
+            {
+                for c in choice.children().filter(|n| n.is_element()) {
+                    push_math_runs_shape(c, theme_colors, runs);
+                }
+            }
+        }
+        // a14:m wrapper (local name "m") holds an m:oMathPara / m:oMath.
+        "m" => {
+            for c in node.children().filter(|n| n.is_element()) {
+                push_math_runs_shape(c, theme_colors, runs);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) -> Option<ShapeText> {
     let mut anchor = String::from("t");
     let mut wrap = String::from("square");
@@ -324,18 +407,18 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
                                 }
                             }
                             if !text.is_empty() {
-                                runs.push(ShapeTextRun { text, bold, italic, size, color, font_face });
+                                runs.push(ShapeTextRun::Text { text, bold, italic, size, color, font_face });
                             }
                         }
                         "br" => {
-                            // Soft line break: emit an empty run with a newline marker.
-                            // We collapse to a literal newline since the renderer paints
-                            // each \n as a wrapped line.
-                            runs.push(ShapeTextRun {
-                                text: "\n".into(),
-                                bold: false, italic: false, size: 0.0,
-                                color: None, font_face: None,
-                            });
+                            // Soft line break (`<a:br>`).
+                            runs.push(ShapeTextRun::Break);
+                        }
+                        // OMML equations (ECMA-376 §22.1) embedded in shape text:
+                        // bare `m:oMath` / `m:oMathPara`, the `a14:m` wrapper
+                        // (local name "m"), or `mc:AlternateContent`.
+                        "oMath" | "oMathPara" | "AlternateContent" | "m" => {
+                            push_math_runs_shape(pc, theme_colors, &mut runs);
                         }
                         _ => {}
                     }
@@ -501,8 +584,13 @@ pub(crate) fn collect_shapes(
             if let (Some(t), Some(default_color)) = (text.as_mut(), style_text_color) {
                 for p in t.paragraphs.iter_mut() {
                     for r in p.runs.iter_mut() {
-                        if r.color.is_none() {
-                            r.color = Some(default_color.clone());
+                        match r {
+                            ShapeTextRun::Text { color, .. } | ShapeTextRun::Math { color, .. } => {
+                                if color.is_none() {
+                                    *color = Some(default_color.clone());
+                                }
+                            }
+                            ShapeTextRun::Break => {}
                         }
                     }
                 }
@@ -785,5 +873,105 @@ pub(crate) fn load_sheet_images(
         all_anchors.append(&mut anchors);
     }
     all_anchors
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+    use ooxml_common::math::nodes_to_text;
+
+    const NS: &str = r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"
+        xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math""#;
+
+    /// Excel stores "Insert > Equation" as OMML inside the shared DrawingML
+    /// `<xdr:txBody>` grammar — a block equation as `mc:AlternateContent` →
+    /// `a14:m` → `m:oMathPara` (ECMA-376 §22.1). The Fallback (a rasterized
+    /// picture) must be ignored so the equation isn't double-rendered.
+    #[test]
+    fn parses_block_math_from_alternatecontent() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:bodyPr/>
+              <a:p>
+                <mc:AlternateContent>
+                  <mc:Choice Requires="a14"><a14:m>
+                    <m:oMathPara><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>
+                  </a14:m></mc:Choice>
+                  <mc:Fallback><a:r><a:t>fallback</a:t></a:r></mc:Fallback>
+                </mc:AlternateContent>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        assert_eq!(text.paragraphs.len(), 1);
+        let runs = &text.paragraphs[0].runs;
+        assert_eq!(runs.len(), 1, "one math run, fallback ignored");
+        match &runs[0] {
+            ShapeTextRun::Math { display, nodes, .. } => {
+                assert!(*display, "oMathPara → display (block) math");
+                assert_eq!(nodes_to_text(nodes), "x");
+            }
+            other => panic!("expected Math run, got {other:?}"),
+        }
+    }
+
+    /// Inline math is a bare `a14:m` (local name "m") directly under `a:p`,
+    /// holding `m:oMath` (not oMathPara). It extracts as inline (display:false)
+    /// and inherits size + colour from the math run's `a:rPr`.
+    #[test]
+    fn parses_inline_bare_a14m_with_size_and_color() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:bodyPr/>
+              <a:p>
+                <a14:m><m:oMath><m:r>
+                  <a:rPr sz="2800" i="1"><a:solidFill><a:srgbClr val="7030A0"/></a:solidFill></a:rPr>
+                  <m:t>n</m:t>
+                </m:r></m:oMath></a14:m>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let runs = &text.paragraphs[0].runs;
+        assert_eq!(runs.len(), 1);
+        match &runs[0] {
+            ShapeTextRun::Math { display, font_size, color, nodes } => {
+                assert!(!*display, "bare a14:m + m:oMath → inline");
+                assert_eq!(*font_size, Some(28.0), "size from math run rPr sz/100");
+                assert_eq!(color.as_deref(), Some("#7030A0"), "colour from math run rPr solidFill (xlsx #-prefixed convention)");
+                assert_eq!(nodes_to_text(nodes), "n");
+            }
+            other => panic!("expected Math run, got {other:?}"),
+        }
+    }
+
+    /// Text + break + math coexist in one paragraph; the run order is preserved
+    /// and `<a:br>` becomes a `Break` variant.
+    #[test]
+    fn mixes_text_break_and_math_runs() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r><a:rPr sz="1100"/><a:t>E=</a:t></a:r>
+                <a14:m><m:oMath><m:r><m:t>mc</m:t></m:r></m:oMath></a14:m>
+                <a:br/>
+                <a:r><a:t>done</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let runs = &text.paragraphs[0].runs;
+        assert_eq!(runs.len(), 4, "text, math, break, text");
+        assert!(matches!(runs[0], ShapeTextRun::Text { .. }));
+        assert!(matches!(runs[1], ShapeTextRun::Math { display: false, .. }));
+        assert!(matches!(runs[2], ShapeTextRun::Break));
+        assert!(matches!(runs[3], ShapeTextRun::Text { .. }));
+    }
 }
 

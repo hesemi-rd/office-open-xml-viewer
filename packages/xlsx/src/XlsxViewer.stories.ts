@@ -1,6 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { XlsxViewer } from './viewer';
 import init, { parse_xlsx } from './wasm/xlsx_parser.js';
+// Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
+// In the monorepo the stories build the same MathRenderer from the core engine
+// so OMML equations in shapes/text boxes render in the demo.
+import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
+const math = { loadMathJax, mathMLToSvg };
 
 type Args = {
   scale: number;
@@ -41,6 +46,7 @@ export function buildViewerUI(
   const viewer = new XlsxViewer(viewerContainer, {
     cellScale: args.scale,
     useGoogleFonts: true,
+    math,
     onReady: (names) => {
       status.textContent = `Loaded — ${names.length} sheet(s)`;
     },
@@ -141,6 +147,7 @@ export const FileUpload: Story = {
       viewer = new XlsxViewer(viewerContainer, {
         cellScale: args.scale,
         useGoogleFonts: true,
+        math,
         onReady: (names) => { status.textContent = `${names.length} sheet(s)`; },
         onSheetChange: (_idx, name) => { status.textContent = `Sheet: ${name}`; },
         onError: (err) => { status.textContent = `Error: ${err.message}`; },
