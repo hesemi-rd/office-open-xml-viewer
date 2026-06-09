@@ -146,6 +146,8 @@ export interface TableRow {
 export interface TableCell {
   textBody: TextBody | null;
   fill: Fill | null;
+  /** Default run text colour inherited from the table style (`<a:tcTxStyle>`); hex, no `#`. */
+  textColor?: string;
   borderL: Stroke | null;
   borderR: Stroke | null;
   borderT: Stroke | null;

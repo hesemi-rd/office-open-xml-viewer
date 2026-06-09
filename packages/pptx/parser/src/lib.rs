@@ -643,6 +643,10 @@ struct TableRow {
 struct TableCell {
     text_body: Option<TextBody>,
     fill: Option<Fill>,
+    /// Default run text colour inherited from the table style (`<a:tcTxStyle>`),
+    /// used when a run carries no explicit colour. Hex, no `#`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_color: Option<String>,
     border_l: Option<Stroke>,
     border_r: Option<Stroke>,
     border_t: Option<Stroke>,
@@ -1284,6 +1288,19 @@ struct TableStyleDef {
     last_row_fill:     Option<Fill>,
     first_col_fill:    Option<Fill>,
     last_col_fill:     Option<Fill>,
+    /// Default text colour per role, from `<a:tcTxStyle>` (schemeClr/srgbClr).
+    /// e.g. wholeTbl → dk1, firstRow header → lt1 (white). Hex, no `#`.
+    whole_text_color:     Option<String>,
+    first_row_text_color: Option<String>,
+    last_row_text_color:  Option<String>,
+    first_col_text_color: Option<String>,
+    last_col_text_color:  Option<String>,
+    /// Default bold per role, from `<a:tcTxStyle b="on">` (ECMA-376 §20.1.4.2.28).
+    /// e.g. a firstRow header is commonly bold.
+    first_row_bold:       Option<bool>,
+    last_row_bold:        Option<bool>,
+    first_col_bold:       Option<bool>,
+    last_col_bold:        Option<bool>,
 }
 
 // ===========================
@@ -1580,15 +1597,30 @@ fn parse_color_node(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<String> {
+    parse_color_node_tint(node, theme, ooxml_common::color::TintMode::PowerPointLinear)
+}
+
+/// Like `parse_color_node`, but lets the caller pick how `<a:tint>` is interpreted.
+/// Table styles (`<a:tcStyle>` band fills) use `TintMode::WordLiteral` — the literal
+/// ECMA-376 §20.1.2.3.34 definition (`val·input + (1-val)·white`, so a 20% tint is a
+/// near-white wash) — which is how PowerPoint renders table band tints. The SmartArt
+/// accent-recolor path keeps `PowerPointLinear` (see `apply_color_transforms`).
+fn parse_color_node_tint(
+    node: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<String> {
+    let xform = |hex: &str, c: roxmltree::Node<'_, '_>|
+        ooxml_common::color::apply_color_transforms(hex, c, tint_mode);
     for c in node.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "srgbClr" => {
                 let hex = attr(&c, "val")?;
-                return Some(apply_color_transforms(&hex, c));
+                return Some(xform(&hex, c));
             }
             "sysClr"  => {
                 let hex = attr(&c, "lastClr")?;
-                return Some(apply_color_transforms(&hex, c));
+                return Some(xform(&hex, c));
             }
             "prstClr" => return preset_color(attr(&c, "val")?.as_str()),
             "schemeClr" => {
@@ -1605,7 +1637,7 @@ fn parse_color_node(
                     other           => other,
                 };
                 let base_hex = theme.get(canonical)?.clone();
-                return Some(apply_color_transforms(&base_hex, c));
+                return Some(xform(&base_hex, c));
             }
             _ => {}
         }
@@ -4601,6 +4633,30 @@ fn parse_background(
 //  Table parsing
 // ===========================
 
+/// Resolve a table-style `<a:fill>` wrapper's colour. Identical to `parse_fill`
+/// for the common solid/no-fill cases, except `<a:tint>` uses the literal
+/// ECMA-376 §20.1.2.3.34 formula (`TintMode::WordLiteral`) so a band's
+/// `accent + tint 20%` renders as the near-white wash PowerPoint draws, rather
+/// than the saturated linear-lerp used for SmartArt accents. Gradient/pattern/
+/// blip fills (rare in table styles) defer to the generic `parse_fill`.
+fn parse_table_style_fill(
+    fill_wrapper: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Fill> {
+    use ooxml_common::color::TintMode::WordLiteral;
+    for c in fill_wrapper.children().filter(|n| n.is_element()) {
+        match c.tag_name().name() {
+            "noFill"    => return Some(Fill::None),
+            "solidFill" => {
+                return parse_color_node_tint(c, theme, WordLiteral)
+                    .map(|color| Fill::Solid { color });
+            }
+            _ => {}
+        }
+    }
+    parse_fill(fill_wrapper, theme)
+}
+
 /// Parse ppt/tableStyles.xml into a map of styleId → TableStyleDef.
 fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap<String, TableStyleDef> {
     let mut map = HashMap::new();
@@ -4618,8 +4674,12 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
                 Some(n) => n,
                 None    => return (None, None, None, None, None, None),
             };
-            // Explicit fill first; fall back to fillRef (table style reference)
-            let fill = parse_fill(tc_style, theme).or_else(|| {
+            // ECMA-376 §20.1.4.2.27 — the cell fill is wrapped in `<a:fill>`
+            // (CT_FillProperties), so descend into it before reading the actual
+            // solidFill/gradFill. Fall back to `<a:fillRef>` (theme style reference).
+            let fill = child(tc_style, "fill")
+                .and_then(|f| parse_table_style_fill(f, theme))
+                .or_else(|| {
                 child(tc_style, "fillRef").and_then(|fr| {
                     let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
                     if idx == 0 { Some(Fill::None) } else {
@@ -4652,6 +4712,19 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
             (fill, inside_h, inside_v, border_b, outer_h, outer_v)
         };
 
+        // Default text colour for a role: `<a:tcTxStyle>` holds a `<a:fontRef>`
+        // followed by a colour child (schemeClr/srgbClr). parse_color_node scans
+        // direct children and skips fontRef, picking up the colour.
+        let parse_tc_tx_color = |role: roxmltree::Node<'_, '_>| -> Option<String> {
+            child(role, "tcTxStyle").and_then(|t| parse_color_node(t, theme))
+        };
+        // `<a:tcTxStyle b="on">` → bold for this role (e.g. a bold header row).
+        let parse_tc_tx_bold = |role: roxmltree::Node<'_, '_>| -> Option<bool> {
+            child(role, "tcTxStyle")
+                .and_then(|t| attr(&t, "b"))
+                .map(|v| v == "on" || v == "1" || v == "true")
+        };
+
         if let Some(whole) = child(style_node, "wholeTbl") {
             let (fill, ih, iv, _, oh, ov) = parse_tc_style(whole);
             def.whole_fill = fill;
@@ -4659,6 +4732,7 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
             def.whole_inside_v = iv;
             def.whole_outer_h  = oh;
             def.whole_outer_v  = ov;
+            def.whole_text_color = parse_tc_tx_color(whole);
         }
         if let Some(band) = child(style_node, "band1H") {
             let (fill, _, _, _, _, _) = parse_tc_style(band);
@@ -4672,18 +4746,26 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
             let (fill, _, _, border_b, _, _) = parse_tc_style(first);
             def.first_row_fill = fill;
             def.first_row_border_b = border_b;
+            def.first_row_text_color = parse_tc_tx_color(first);
+            def.first_row_bold = parse_tc_tx_bold(first);
         }
         if let Some(last) = child(style_node, "lastRow") {
             let (fill, _, _, _, _, _) = parse_tc_style(last);
             def.last_row_fill = fill;
+            def.last_row_text_color = parse_tc_tx_color(last);
+            def.last_row_bold = parse_tc_tx_bold(last);
         }
         if let Some(first) = child(style_node, "firstCol") {
             let (fill, _, _, _, _, _) = parse_tc_style(first);
             def.first_col_fill = fill;
+            def.first_col_text_color = parse_tc_tx_color(first);
+            def.first_col_bold = parse_tc_tx_bold(first);
         }
         if let Some(last) = child(style_node, "lastCol") {
             let (fill, _, _, _, _, _) = parse_tc_style(last);
             def.last_col_fill = fill;
+            def.last_col_text_color = parse_tc_tx_color(last);
+            def.last_col_bold = parse_tc_tx_bold(last);
         }
 
         map.insert(style_id, def);
@@ -4785,6 +4867,38 @@ fn parse_table(
                 // Cell's own tcPr fill wins
                 if cell.fill.is_none() {
                     cell.fill = effective_fill;
+                }
+
+                // ── Text-colour cascade (style `<a:tcTxStyle>`, role-keyed) ──
+                // Mirrors the fill cascade ordering. The header (firstRow) typically
+                // overrides wholeTbl (e.g. white-on-accent header). A run's own
+                // explicit colour still wins later, at render time.
+                let mut effective_text = s.whole_text_color.clone();
+                if first_row && ri == 0 {
+                    if let Some(c) = s.first_row_text_color.clone() { effective_text = Some(c); }
+                }
+                if last_row && ri == last_row_idx {
+                    if let Some(c) = s.last_row_text_color.clone() { effective_text = Some(c); }
+                }
+                if first_col && ci == 0 {
+                    if let Some(c) = s.first_col_text_color.clone() { effective_text = Some(c); }
+                }
+                if last_col && ci == last_col_idx {
+                    if let Some(c) = s.last_col_text_color.clone() { effective_text = Some(c); }
+                }
+                if cell.text_color.is_none() {
+                    cell.text_color = effective_text;
+                }
+
+                // ── Bold cascade (style `<a:tcTxStyle b="on">`, role-keyed) ──
+                // Applied as the cell text body's default bold; a run's own @b wins.
+                let mut effective_bold: Option<bool> = None;
+                if first_row && ri == 0 { effective_bold = effective_bold.or(s.first_row_bold); }
+                if last_row && ri == last_row_idx { effective_bold = effective_bold.or(s.last_row_bold); }
+                if first_col && ci == 0 { effective_bold = effective_bold.or(s.first_col_bold); }
+                if last_col && ci == last_col_idx { effective_bold = effective_bold.or(s.last_col_bold); }
+                if let (Some(b), Some(tb)) = (effective_bold, cell.text_body.as_mut()) {
+                    if tb.default_bold.is_none() { tb.default_bold = Some(b); }
                 }
 
                 // ── Border cascade (style provides inside and outer borders) ──
@@ -4906,6 +5020,7 @@ fn parse_table_cell(
 
     TableCell {
         text_body, fill,
+        text_color: None,
         border_l, border_r, border_t, border_b,
         diagonal_tl, diagonal_tr,
         grid_span, row_span, h_merge, v_merge,
@@ -6397,5 +6512,79 @@ mod tests {
             Some("112233".to_string()),
             "an explicit layout idx colour takes priority over the master default"
         );
+    }
+
+    /// ECMA-376 §20.1.4.2.27 (`CT_TableStyleCellStyle`) — a cell style's fill is
+    /// wrapped in `<a:fill>` and its text colour lives in `<a:tcTxStyle>`. Both the
+    /// `firstRow` (header) and `wholeTbl` roles must resolve. Regression: sample-9
+    /// slides 9–10 — the orange header fill / pink banding never rendered (fill was
+    /// parsed off `<a:tcStyle>` directly, missing the `<a:fill>` wrapper) and the
+    /// white header text was ignored (tcTxStyle was never read).
+    #[test]
+    fn table_style_resolves_fill_wrapper_and_tctxstyle_colour() {
+        let theme: HashMap<String, String> = [
+            ("dk1", "000000"), ("lt1", "FFFFFF"), ("accent2", "B83903"),
+        ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+
+        let xml = r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:tblStyle styleId="{TEST}" styleName="Medium Style 1 - Accent 2">
+            <a:wholeTbl>
+              <a:tcTxStyle>
+                <a:fontRef idx="minor"><a:scrgbClr r="0" g="0" b="0"/></a:fontRef>
+                <a:schemeClr val="dk1"/>
+              </a:tcTxStyle>
+              <a:tcStyle>
+                <a:tcBdr>
+                  <a:insideH><a:ln w="12700"><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></a:ln></a:insideH>
+                </a:tcBdr>
+                <a:fill><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:fill>
+              </a:tcStyle>
+            </a:wholeTbl>
+            <a:band1H>
+              <a:tcStyle>
+                <a:tcBdr/>
+                <a:fill><a:solidFill><a:schemeClr val="accent2"><a:tint val="20000"/></a:schemeClr></a:solidFill></a:fill>
+              </a:tcStyle>
+            </a:band1H>
+            <a:firstRow>
+              <a:tcTxStyle b="on">
+                <a:fontRef idx="minor"><a:scrgbClr r="0" g="0" b="0"/></a:fontRef>
+                <a:schemeClr val="lt1"/>
+              </a:tcTxStyle>
+              <a:tcStyle>
+                <a:tcBdr/>
+                <a:fill><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></a:fill>
+              </a:tcStyle>
+            </a:firstRow>
+          </a:tblStyle>
+        </a:tblStyleLst>"#;
+
+        let map = parse_table_styles_xml(xml, &theme);
+        let def = map.get("{TEST}").expect("style parsed");
+
+        // Fills (wrapped in <a:fill>) must resolve.
+        let solid = |f: &Option<Fill>| match f {
+            Some(Fill::Solid { color }) => Some(color.clone()),
+            _ => None,
+        };
+        assert_eq!(solid(&def.whole_fill).as_deref(), Some("FFFFFF"),
+            "wholeTbl fill should be lt1 white");
+        assert_eq!(solid(&def.first_row_fill).as_deref(), Some("B83903"),
+            "firstRow header fill should be accent2 orange");
+        // band1H = accent2 + `<a:tint val="20000">`. Table styles use the literal
+        // ECMA-376 tint (val·input + (1-val)·white), giving a near-white wash —
+        // NOT the saturated linear-lerp. 0.2·B83903 + 0.8·white = F1D7CD.
+        assert_eq!(solid(&def.band1h_fill).as_deref(), Some("F1D7CD"),
+            "band1H tint should be the literal near-white wash, not a saturated lerp");
+
+        // Text colours from tcTxStyle.
+        assert_eq!(def.whole_text_color.as_deref(), Some("000000"),
+            "wholeTbl text colour should be dk1 black");
+        assert_eq!(def.first_row_text_color.as_deref(), Some("FFFFFF"),
+            "firstRow header text colour should be lt1 white");
+
+        // firstRow `<a:tcTxStyle b="on">` → bold header.
+        assert_eq!(def.first_row_bold, Some(true),
+            "firstRow header should be bold from tcTxStyle b=on");
     }
 }
