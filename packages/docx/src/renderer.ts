@@ -2955,7 +2955,7 @@ function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  *   atLeast → max(natural, value in pt × scale).
  *   null    → natural, or grid pitch if the section defines one.
  */
-function lineBoxHeight(
+export function lineBoxHeight(
   ls: LineSpacing | null,
   ascentPx: number,
   descentPx: number,
@@ -2997,6 +2997,15 @@ function lineBoxHeight(
     // No explicit spacing → single line. Use the intended single-line height
     // (`natural`) off-grid; on-grid, snap to the pitch with the glyph extent
     // as the overflow floor (the grid, not the font metric, governs height).
+    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
+  }
+  // ECMA-376 §17.3.1.33: a zero (or negative) `w:line` is degenerate — an
+  // `exact`/`auto` line of 0 would collapse the line to no height. Word ignores
+  // it and falls back to single line spacing instead of clipping the text away.
+  // (Some generators emit `<w:spacing w:line="0" w:lineRule="exact"/>` on table
+  // cells, e.g. sample-7; the Word-exported PDF renders those rows at normal
+  // height.) Treat it like unspecified spacing.
+  if ((ls.rule === 'exact' || ls.rule === 'auto') && ls.value <= 0) {
     return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {
