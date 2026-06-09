@@ -2114,9 +2114,11 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
         ctx.fillRect(colX, rowY, cellW, cellH);
       }
 
-      // Text body
+      // Text body — default run colour comes from the table style's tcTxStyle
+      // (e.g. white header text on an accent fill); a run's explicit colour wins.
       if (cell.textBody) {
-        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, null, 0, false, false, '#000000', slideNumber, rc);
+        const cellDefaultColor = cell.textColor ? hexToRgba(cell.textColor) : null;
+        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, cellDefaultColor, 0, false, false, '#000000', slideNumber, rc);
       }
 
       // Borders
