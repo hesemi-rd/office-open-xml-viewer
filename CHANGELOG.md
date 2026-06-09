@@ -4,6 +4,33 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.53.0 — 2026-06-09
+
+pptx:
+
+- **Table styles now apply cell fill, text colour and bold from `tcStyle` /
+  `tcTxStyle`.** The cell fill is wrapped in `<a:fill>` (ECMA-376 §20.1.4.2.27),
+  which the parser skipped, so `wholeTbl` / `firstRow` / banding fills never
+  resolved (transparent cells); and `<a:tcTxStyle>` (per-role default colour and
+  `b="on"` bold) was ignored, so header text rendered black/non-bold. Table
+  `<a:tint>` now uses the literal ECMA-376 §20.1.2.3.34 formula (a 20% band is a
+  near-white wash) instead of the SmartArt linear lerp. Built-in "Medium Style 1
+  - Accent 2" tables now match PowerPoint (orange header + white bold text,
+  light-pink banding).
+- **List bullets are inherited from the layout / master `lstStyle`.** Paragraphs
+  with no explicit `<a:buChar>`/`<a:buAutoNum>` now resolve their marker from the
+  per-level bullet cascade (master `bodyStyle`, layout placeholder lstStyles) by
+  `lvl` (§19.7.10 / §21.1.2.4), with the matching hanging-indent metrics — body
+  placeholders that previously rendered with no bullets now show the master `•`
+  or a layout auto-number.
+- **Line arrowheads enlarged to match PowerPoint.** The sm/med/lg width/length
+  multipliers were ~half PowerPoint's size (§20.1.10.32/.33 define the steps only
+  as relative); a lg/lg triangle now measures ≈8× line width, matching the PDF.
+- **Stale slide renders are cancelled to stop canvas ghosting.** `renderSlide`
+  is async (it awaits image/equation decode), so navigating faster than a render
+  completes interleaved multiple slides onto one canvas. A per-canvas render
+  token now makes superseded renders bail, so the latest slide always wins.
+
 ## 0.52.0 — 2026-06-09
 
 pptx:
