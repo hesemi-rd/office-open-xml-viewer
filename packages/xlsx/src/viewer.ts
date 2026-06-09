@@ -285,6 +285,7 @@ export class XlsxViewer {
       this.wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
+        math: this.opts.math,
       });
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
@@ -1199,7 +1200,6 @@ export class XlsxViewer {
       freezeCols,
       selectedRowRange,
       selectedColRange,
-      math: this.opts.math,
     });
   }
 

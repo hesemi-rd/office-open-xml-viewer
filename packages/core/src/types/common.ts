@@ -2,7 +2,6 @@
 // All positions and sizes are in EMUs (English Metric Units).
 
 import type { MathNode } from './math';
-import type { MathRenderer } from '../math/mathjax';
 
 export type PathCmd =
   | { cmd: 'moveTo';     x: number; y: number }
@@ -336,11 +335,4 @@ export interface RenderOptions {
    * the static renderer drawing a duplicate play badge.
    */
   skipMediaControls?: boolean;
-  /**
-   * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
-   * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
-   * omitted, equations are skipped and the ~3 MB engine tree-shakes out of the
-   * bundle entirely (it is referenced nowhere unless you import it).
-   */
-  math?: MathRenderer;
 }

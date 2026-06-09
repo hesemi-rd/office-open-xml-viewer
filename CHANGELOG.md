@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.55.0 — 2026-06-09
+
+API (all formats) — **breaking, opt-in math only:**
+
+- **The `math` engine is now injected once at construction / load, never
+  per-render.** Previously docx took `math` at load while pptx and xlsx took it
+  per-render (`renderSlide` / `renderViewport` options) — three subtly different
+  shapes for the same dependency. Now it is uniform: pass `math` to a viewer
+  constructor (`new DocxViewer/PptxViewer/XlsxViewer(target, { math })`) or to a
+  headless `.load()` (`DocxDocument` / `PptxPresentation` / `XlsxWorkbook`), and
+  every render reuses it. `math` is a dependency injected once, mirroring the
+  viewer ↔ headless symmetry, and render methods now carry only layout options.
+- **Breaking:** `RenderSlideOptions.math` (pptx) and `RenderViewportOptions.math`
+  (xlsx) were removed; `math` was added to the shared `LoadOptions` and removed
+  from the shared `RenderOptions`. Code that passed `math` to `renderSlide` /
+  `renderViewport` must move it to the viewer constructor or `.load()`. Callers
+  that already inject via the viewer/headless constructor (the documented path)
+  are unaffected. docx behaviour is unchanged. The opt-in tree-shaking guarantee
+  is unchanged: omit `math` and the ~3 MB engine never enters the bundle.
+- The VS Code extension now also renders equations in **xlsx** (it already did
+  for docx/pptx); the showcase site's "try" page injects `math` at load.
+
 ## 0.54.0 — 2026-06-09
 
 xlsx:

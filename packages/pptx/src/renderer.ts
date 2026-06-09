@@ -2183,6 +2183,14 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 export type { RenderOptions } from './types';
 
 /**
+ * Internal render options: the shared {@link RenderOptions} plus the opt-in
+ * `math` engine. `math` is internal plumbing — the headless {@link
+ * PptxPresentation} injects it once at load and threads it here on each draw,
+ * so the public `RenderSlideOptions` deliberately does not expose it.
+ */
+type SlideRenderOptions = RenderOptions & { math?: MathRenderer };
+
+/**
  * Render a single slide onto a <canvas> element.
  * Returns the canvas for convenience.
  */
@@ -2191,7 +2199,7 @@ export async function renderSlide(
   slide: Slide,
   slideWidth: number,
   slideHeight: number,
-  opts: RenderOptions = {},
+  opts: SlideRenderOptions = {},
   onTextRun?: TextRunCallback,
 ): Promise<HTMLCanvasElement | OffscreenCanvas> {
   // Cancellation guard. renderSlide is async (it awaits image / equation decode),
@@ -2235,8 +2243,8 @@ export async function renderSlide(
   renderBackground(ctx, slide.background, canvasW, canvasH);
 
   // Pre-rasterize any equations so the synchronous text layout can place them.
-  // Requires the opt-in `math` engine (RenderOptions.math); without it,
-  // equations are skipped and the engine asset never enters the bundle.
+  // `math` is the engine injected once at PptxPresentation.load and threaded in
+  // here; without it, equations are skipped and the asset never enters the bundle.
   if (opts.math) await prepareSlideMath(slide, opts.math);
   if (superseded()) return canvas;
 

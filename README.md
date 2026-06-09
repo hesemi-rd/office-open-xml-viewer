@@ -61,7 +61,7 @@ pptx.nextSlide();
 
 ### Rendering equations
 
-OMML equations (`m:oMath` / `m:oMathPara`) in `.docx` / `.pptx` are rendered with
+OMML equations (`m:oMath` / `m:oMathPara`) in `.docx`, `.pptx` and `.xlsx` are rendered with
 [MathJax](https://www.mathjax.org/) + [STIX Two Math](https://github.com/stipub/stixfonts).
 That engine is ~3 MB, so it is **opt-in**: import the `math` engine from the separate
 `@silurus/ooxml/math` entry and pass it to the viewer. Pass it and equations render;
@@ -78,12 +78,13 @@ const docx = new DocxViewer(canvas, { math }); // ← equations now render
 await docx.load('/paper-with-equations.docx');
 ```
 
-The same `math` engine works for `PptxViewer`, `XlsxViewer`, and the headless
-`DocxDocument` / `PptxPresentation` APIs (which take `math` in their options).
-Excel stores "Insert > Equation" as OMML inside the shared DrawingML `<xdr:txBody>`
-grammar, so `XlsxViewer` renders equations embedded in shapes / text boxes the same
-way — pass `math` and they render; omit it and those equations are skipped and the
-engine is tree-shaken away.
+The same `math` engine works for every viewer (`DocxViewer`, `PptxViewer`,
+`XlsxViewer`) and every headless engine (`DocxDocument`, `PptxPresentation`,
+`XlsxWorkbook`). You inject it **once** where you create the object — the viewer
+constructor or the `.load()` options — and every render reuses it; it is never a
+per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
+DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
+shapes / text boxes the same way.)
 
 ---
 

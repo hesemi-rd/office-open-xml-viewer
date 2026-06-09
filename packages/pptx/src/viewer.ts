@@ -1,24 +1,12 @@
 import type { RenderOptions, PptxTextRunInfo } from './renderer';
-import { PptxPresentation } from './presentation';
+import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 
-export interface PptxViewerOptions extends RenderOptions {
+export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
   /** Called on parse or render errors */
   onError?: (err: Error) => void;
-  /**
-   * Opt in to loading theme-declared webfonts from Google Fonts. Off by
-   * default — see {@link PptxPresentation.load} for privacy implications.
-   */
-  useGoogleFonts?: boolean;
-  /**
-   * Override the per-entry ZIP decompression cap (bytes) used by the zip-bomb
-   * guard in the Rust parser. Defaults to 512 MiB. Raise this to load decks
-   * with very large embedded media, or lower it to tighten the budget for
-   * untrusted input. Zero / negative values fall back to the default.
-   */
-  maxZipEntryBytes?: number;
   /**
    * Enable interactive audio/video playback. When true, slides are rendered
    * via {@link PptxPresentation.presentSlide} so media elements become
@@ -92,6 +80,7 @@ export class PptxViewer {
       this.engine = await PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
+        math: this.opts.math,
       });
       this.currentSlide = 0;
       await this.renderCurrentSlide();
@@ -147,10 +136,9 @@ export class PptxViewer {
         this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
           width: targetWidth,
           dpr,
-          math: this.opts.math,
         });
       } else {
-        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun, math: this.opts.math });
+        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun });
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {

@@ -92,6 +92,7 @@ async function initXlsx(buffer: ArrayBuffer): Promise<void> {
   viewerContainer.appendChild(container);
 
   const viewer = new XlsxViewer(container, {
+    math,
     onError(err) {
       showError(`Error: ${err.message}`);
     },
@@ -204,7 +205,7 @@ function buildPptxTextLayer(
 }
 
 async function initPptx(buffer: ArrayBuffer): Promise<void> {
-  const pres = await PptxPresentation.load(buffer);
+  const pres = await PptxPresentation.load(buffer, { math });
 
   const stack = document.createElement('div');
   stack.className = 'page-stack';
@@ -230,7 +231,7 @@ async function initPptx(buffer: ArrayBuffer): Promise<void> {
     stack.appendChild(wrapper);
 
     const runs: PptxTextRunInfo[] = [];
-    await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r), math });
+    await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
     buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
   }
 

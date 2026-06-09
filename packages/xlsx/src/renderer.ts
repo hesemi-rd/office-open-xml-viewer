@@ -2591,7 +2591,8 @@ function drawShape(
 // Equations are converted to SVG by MathJax once, cached by their MathNode[]
 // reference (stable from parse through render), then drawn as images inside
 // shape text. Mirrors the pptx/docx pipeline so typesetting is identical; the
-// engine is opt-in (RenderViewportOptions.math) and tree-shakes out otherwise.
+// engine is opt-in (injected once at XlsxWorkbook.load via LoadOptions.math,
+// stored on the instance) and tree-shakes out otherwise.
 interface MathRender {
   /** The equation rasterized as opaque black glyphs on transparent. */
   img: HTMLImageElement;

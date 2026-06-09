@@ -48,7 +48,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     const host = document.createElement('div');
     host.className = 'lv-xlsx';
     stage.appendChild(host);
-    const viewer = new XlsxViewer(host, { useGoogleFonts: true, showZoomSlider: true });
+    const viewer = new XlsxViewer(host, { useGoogleFonts: true, showZoomSlider: true, math });
     await viewer.load(buffer);
     return { format: 'xlsx', units: 0, unitLabel: 'sheet' };
   }
@@ -58,14 +58,14 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
   stage.appendChild(sc);
 
   if (ext === 'pptx') {
-    const deck = await PptxPresentation.load(buffer, { useGoogleFonts: true });
+    const deck = await PptxPresentation.load(buffer, { useGoogleFonts: true, math });
     const canvases: HTMLCanvasElement[] = [];
     for (let i = 0; i < deck.slideCount; i++) {
       const c = document.createElement('canvas');
       c.className = 'lv-page';
       c.dataset.slide = String(i);
       sc.appendChild(c);
-      await deck.renderSlide(c, i, { width: SLIDE_W, dpr: DPR(), math });
+      await deck.renderSlide(c, i, { width: SLIDE_W, dpr: DPR() });
       canvases.push(c);
     }
 
@@ -86,7 +86,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
             if (handles.has(idx) || pending.has(idx)) continue;
             pending.add(idx);
             deck
-              .presentSlide(c, idx, { width: SLIDE_W, dpr: DPR(), math })
+              .presentSlide(c, idx, { width: SLIDE_W, dpr: DPR() })
               .then((h) => {
                 pending.delete(idx);
                 if (visible.has(idx)) handles.set(idx, h);

@@ -5,6 +5,7 @@ import {
   WorkerBridge,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
+  type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
 import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
@@ -40,6 +41,10 @@ export class XlsxWorkbook {
   private imageCache = new Map<string, HTMLImageElement>();
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
+  /** Opt-in OMML equation engine, injected once at {@link load}. Every
+   *  `renderViewport` call reuses it — equations in shapes render when present,
+   *  and are skipped (engine tree-shaken) when omitted. */
+  private math: MathRenderer | undefined;
 
   private constructor() {
     this.worker = new InlineWorker();
@@ -69,6 +74,7 @@ export class XlsxWorkbook {
     }
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
+    this.math = opts.math;
     const parsed = await this.bridge.request((id) => ({
       type: 'parse',
       id,
@@ -187,8 +193,8 @@ export class XlsxWorkbook {
     // await and stay fully synchronous — only the first frame that reveals new
     // equations pays the (idempotently cached) MathJax cost. Opt-in: skipped
     // entirely unless the caller supplies a `math` engine.
-    if (opts.math && worksheetHasUncachedMath(ws)) {
-      await prepareWorksheetMath(ws, opts.math);
+    if (this.math && worksheetHasUncachedMath(ws)) {
+      await prepareWorksheetMath(ws, this.math);
     }
 
     // ── Step 2: Resize + draw, all synchronous from here.

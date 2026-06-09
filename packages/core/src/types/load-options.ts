@@ -1,3 +1,5 @@
+import type { MathRenderer } from '../math/mathjax';
+
 /**
  * Common load-time options shared by the docx / pptx / xlsx
  * `Document.load` / `Presentation.load` / `Workbook.load` factories and their
@@ -26,4 +28,14 @@ export interface LoadOptions {
    * untrusted input. Zero / negative values fall back to the default.
    */
   maxZipEntryBytes?: number;
+  /**
+   * Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Inject it
+   * **once** here and every render of this document / presentation / workbook
+   * uses it — the same dependency-injection contract across all three formats
+   * and their viewers. Import it from the separate `@silurus/ooxml/math` entry
+   * (`import { math } from '@silurus/ooxml/math'`). Omit it and equations are
+   * skipped and the engine tree-shakes away entirely (no network, no bundle
+   * cost).
+   */
+  math?: MathRenderer;
 }

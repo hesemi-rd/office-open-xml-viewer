@@ -1,4 +1,4 @@
-import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
+import type { MathNode } from '@silurus/ooxml-core';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -782,11 +782,6 @@ export interface RenderViewportOptions {
   cellScale?: number;
   /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
   loadedImages?: Map<string, HTMLImageElement>;
-  /** Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
-   *  entry and pass it in (`import { math } from '@silurus/ooxml/math'`). When
-   *  omitted, equations in shapes are skipped and the ~3 MB engine never enters
-   *  the bundle. Same DI contract as docx/pptx. */
-  math?: MathRenderer;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
   onTextRun?: (info: XlsxTextRunInfo) => void;
   /** Highlighted row range for selected row headers (1-indexed inclusive).

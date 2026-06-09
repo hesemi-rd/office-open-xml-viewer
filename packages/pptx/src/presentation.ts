@@ -52,12 +52,6 @@ export interface RenderSlideOptions {
    * its own play/pause chrome without duplication.
    */
   skipMediaControls?: boolean;
-  /**
-   * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
-   * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
-   * omitted, equations are skipped and the ~3 MB engine never enters the bundle.
-   */
-  math?: MathRenderer;
 }
 
 /**
@@ -82,6 +76,10 @@ export class PptxPresentation {
   private _mediaCache = new Map<string, Promise<Blob>>();
   private _workerReady = false;
   private _workerReadyCallbacks: Array<() => void> = [];
+  /** Opt-in OMML equation engine, injected once at {@link load}. Every
+   *  `renderSlide` / `presentSlide` reuses it — equations render when present,
+   *  and are skipped (engine tree-shaken) when omitted. */
+  private _math: MathRenderer | undefined;
 
   private constructor() {
     this._worker = new InlineWorker();
@@ -115,6 +113,7 @@ export class PptxPresentation {
     } else {
       buffer = source;
     }
+    pres._math = opts.math;
     await pres._parse(buffer, opts.maxZipEntryBytes);
     const parsed = pres._presentation;
     if (opts.useGoogleFonts && parsed) {
@@ -171,7 +170,7 @@ export class PptxPresentation {
         hlinkColor: this._presentation.hlinkColor ?? null,
         fetchMedia: (path) => this.getMedia(path),
         skipMediaControls: opts.skipMediaControls,
-        math: opts.math,
+        math: this._math,
       },
       opts.onTextRun,
     );
@@ -236,7 +235,6 @@ export class PptxPresentation {
         dpr,
         skipMediaControls: true,
         onTextRun: opts.onTextRun,
-        math: opts.math,
       }),
     });
   }
