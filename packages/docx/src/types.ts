@@ -177,7 +177,7 @@ export interface TabStop {
 }
 
 export interface LineSpacing {
-  value: number;   // multiplier (auto/atLeast) or pt (exact)
+  value: number;   // multiplier (auto) or pt (exact/atLeast)
   rule: 'auto' | 'exact' | 'atLeast';
   /** True when `w:spacing/@w:line` was set on the paragraph's own pPr or on a
    *  named style (not inherited solely from docDefault). Per ECMA-376 §17.6.5,
@@ -354,6 +354,13 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.39 `<w:szCs>` — complex-script font size in pt
    *  (same units as `fontSize`). */
   fontSizeCs?: number;
+  /** ECMA-376 §17.3.2.3 `<w:bCs>` — complex-script bold toggle. */
+  boldCs?: boolean;
+  /** ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. */
+  italicCs?: boolean;
+  /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
+   *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
+  langBidi?: string;
 }
 
 export interface RunRevision {
@@ -427,6 +434,15 @@ export interface DocTable {
   cellMarginRight: number;
   /** table horizontal alignment on the page: 'left' | 'center' | 'right'. */
   jc: string;
+  /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
+   *  (undefined) ⇒ spec default 'autofit': columns are sized by the per-column
+   *  max preferred width (cell `widthPt`), tblGrid only as fallback. 'fixed'
+   *  uses tblGrid widths verbatim (scaled to fit). */
+  layout?: string;
+  /** ECMA-376 §17.4.63 `<w:tblW>` preferred table width (type="dxa"), pt. */
+  widthPt?: number;
+  /** `<w:tblW>` type="pct": 50ths of a percent of available content width. */
+  widthPct?: number;
   /**
    * ECMA-376 §17.4.1 `<w:bidiVisual>` — render columns in right-to-left
    * (visual) order. `true` = RTL columns, `false` = explicitly LTR, absent =
@@ -472,7 +488,13 @@ export interface DocTableCell {
   borders: CellBorders;
   background: string | null;
   vAlign: 'top' | 'center' | 'bottom';
+  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. Drives
+   *  autofit column sizing: each grid column's width is the max `widthPt` over
+   *  the cells anchored in it. */
   widthPt: number | null;
+  /** `<w:tcW>` type="pct": 50ths of a percent of available content width.
+   *  Resolved against the available width at render time. */
+  widthPct?: number;
   /** Per-cell margins (pt) from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42). Each
    *  edge overrides the table-level `cellMargin*` default when set; null/absent
    *  = inherit the table default. */

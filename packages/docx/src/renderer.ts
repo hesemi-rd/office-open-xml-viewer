@@ -11,9 +11,16 @@ import {
   mathToMathML,
   recolorSvg,
   PT_TO_PX,
+  resolveBaseDirection,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
-import { intendedSingleLinePx } from './font-metrics.js';
+import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
+import {
+  segmentsHaveRtl,
+  computeLineVisualOrder,
+  resolveAlignEdge,
+  type LineVisualOrder,
+} from './bidi-line.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -753,9 +760,7 @@ function splitParagraphAcrossPages(
  *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
  *  ECMA-376 §17.4.80, §17.4.85). */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
-  const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
-  const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
-  const colWidths = table.colWidths.map((w) => w * colScale);
+  const colWidths = resolveColumnWidths(table, contentWPt);
 
   const rowHs: number[] = [];
   const restartInfo: Array<{ ri: number; ci: number; contentH: number }> = [];
@@ -808,6 +813,116 @@ function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt:
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
   return computeTableRowHeights(state, table, contentWPt).reduce((s, x) => s + x, 0);
+}
+
+/**
+ * Resolve the per-grid-column widths (pt) for a table, honoring Word's table
+ * layout algorithm (ECMA-376 §17.4.52 tblLayout + §17.4.71/§17.4.63 tcW/tblW).
+ *
+ *   - layout === 'fixed': use the tblGrid widths verbatim (the historical
+ *     behavior), then scale down proportionally if the grid total overflows the
+ *     available content width.
+ *   - layout absent or 'autofit' (the spec default): each grid column's width is
+ *     the maximum *preferred* width (cell `widthPt`, i.e. `<w:tcW type="dxa">`,
+ *     or `widthPct` resolved against `contentWPt`) over the cells anchored in
+ *     it. A gridSpan cell contributes its preference distributed across the
+ *     columns it spans, in proportion to those columns' tblGrid widths, but
+ *     only raises a column above what single-column cells already require.
+ *     Columns with no preference anywhere keep their tblGrid width. If the
+ *     resulting table width exceeds `contentWPt`, all columns are scaled
+ *     proportionally to fit — this is what Word does when the preferred-width
+ *     sum overflows the text column.
+ *
+ * The returned widths sum to at most `contentWPt`. Both `renderTable` (which
+ * then multiplies by the device scale) and `computeTableRowHeights` (which
+ * works directly in pt) consume this.
+ */
+function resolveColumnWidths(table: DocTable, contentWPt: number): number[] {
+  const n = table.colWidths.length;
+  if (n === 0) return [];
+
+  const grid = table.colWidths;
+  const fitToContent = (widths: number[]): number[] => {
+    const total = widths.reduce((s, w) => s + w, 0);
+    if (total > contentWPt && total > 0) {
+      const s = contentWPt / total;
+      return widths.map((w) => w * s);
+    }
+    return widths;
+  };
+
+  // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52). Scale to fit.
+  if (table.layout === 'fixed') {
+    return fitToContent(grid.slice());
+  }
+
+  // Autofit (default): preferred widths drive the column sizes.
+  // `pref[c]` accumulates the strongest single-column preference seen so far.
+  const pref: number[] = new Array(n).fill(0);
+  // `gridFallback[c]` is true while no cell has expressed a preference for c.
+  const hasPref: boolean[] = new Array(n).fill(false);
+
+  // Translate a cell's `<w:tcW>` into a preferred width in pt, or null when the
+  // cell expresses no preference (auto/nil). pct is a fraction of contentWPt
+  // (50ths of a percent — §17.18.90 ST_TblWidth).
+  const cellPreferred = (cell: DocTableCell): number | null => {
+    if (cell.widthPt != null) return cell.widthPt;
+    if (cell.widthPct != null) return (cell.widthPct / 5000) * contentWPt;
+    return null;
+  };
+
+  // First pass: single-column (non-spanning) cells set a hard per-column floor.
+  for (const row of table.rows) {
+    let ci = 0;
+    for (const cell of row.cells) {
+      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
+      if (span === 1) {
+        const p = cellPreferred(cell);
+        if (p != null) {
+          if (p > pref[ci]) pref[ci] = p;
+          hasPref[ci] = true;
+        }
+      }
+      ci += span;
+    }
+  }
+
+  // Second pass: gridSpan cells distribute their preference across the spanned
+  // columns in proportion to the tblGrid widths, but only raise columns that
+  // are still below their share (so a single-column floor is never lowered).
+  for (const row of table.rows) {
+    let ci = 0;
+    for (const cell of row.cells) {
+      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
+      if (span > 1) {
+        const p = cellPreferred(cell);
+        if (p != null) {
+          const spanCols = grid.slice(ci, ci + span);
+          const gridSum = spanCols.reduce((s, w) => s + w, 0);
+          // Current resolved width across the span (grid fallback where unset).
+          const curSum = spanCols.reduce(
+            (s, w, k) => s + (hasPref[ci + k] ? pref[ci + k] : w),
+            0,
+          );
+          // Only widen when the span's preference exceeds what we already have.
+          if (p > curSum) {
+            const extra = p - curSum;
+            for (let k = 0; k < span; k++) {
+              const share = gridSum > 0 ? spanCols[k] / gridSum : 1 / span;
+              const base = hasPref[ci + k] ? pref[ci + k] : grid[ci + k];
+              pref[ci + k] = base + extra * share;
+              hasPref[ci + k] = true;
+            }
+          }
+        }
+      }
+      ci += span;
+    }
+  }
+
+  // Columns with no preference anywhere fall back to their tblGrid width.
+  const widths = pref.map((p, c) => (hasPref[c] ? p : grid[c]));
+  return fitToContent(widths);
 }
 
 /** A page break before row `ri` is unsafe when `ri` continues a vertical merge
@@ -1003,8 +1118,12 @@ function renderParagraph(
 
   const textAreaTopY = state.y;
 
-  const indLeft = para.indentLeft * scale;
-  const indRight = para.indentRight * scale;
+  // ECMA-376 §17.3.1.12 w:ind — the transitional left/right attributes are
+  // logical start/end (Part 4 §14.11.2). In a bidi paragraph the start side is
+  // the physical RIGHT, so the two indents swap physical sides here.
+  const baseRtl = para.bidi === true;
+  const indLeft = (baseRtl ? para.indentRight : para.indentLeft) * scale;
+  const indRight = (baseRtl ? para.indentLeft : para.indentRight) * scale;
   const indFirst = para.indentFirst * scale;
 
   // Numbering prefix (indent is already baked into para.indentLeft / para.indentFirst)
@@ -1096,6 +1215,15 @@ function renderParagraph(
     return c;
   };
 
+  // Bidirectional text. The paragraph's base direction comes from w:bidi
+  // (ECMA-376 §17.3.1.6). We engage the (exact) bidi pass only when the base is
+  // RTL or the line actually contains strong-RTL characters, so pure-LTR
+  // paragraphs keep their byte-identical fast path. `alignEdge` resolves
+  // logical start/end against the base direction. (`baseRtl` is declared with
+  // the indent swap above.)
+  const paraNeedsBidi = baseRtl || segmentsHaveRtl(segments);
+  const alignEdge = resolveAlignEdge(para.alignment, baseRtl);
+
   // Slice bounds — when the paginator split this paragraph across pages,
   // only render lines in [sliceStart, sliceEnd). The first line we paint
   // resets state.y baseline so the slice begins at the page's content top.
@@ -1125,23 +1253,67 @@ function renderParagraph(
     // Per-line X range (may be narrower than paraW when wrapping around floats).
     const lineLeft = paraX + line.xOffset;
     const lineAvailW = line.availWidth;
-    let x = firstLine ? lineLeft + indFirst : lineLeft;
+    // First-line indent shifts the START edge: physical left for LTR; for RTL
+    // the start is the right edge, so it narrows/widens the line's available
+    // width instead of moving x (effAvailW below).
+    let x = firstLine && !baseRtl ? lineLeft + indFirst : lineLeft;
+    const effAvailW = baseRtl && firstLine ? lineAvailW - indFirst : lineAvailW;
+
+    // Visual draw order. Under bidi we reorder the line's segments per UAX#9
+    // (rule L2) and draw each with ctx.direction matching its resolved
+    // direction; ctx.textAlign stays physical 'left' so x is always the
+    // segment's left edge. The LTR fast path is untouched (visual === null).
+    // Computed before justification so the stretch bookkeeping below can use
+    // the same (visual) domain as the draw loop.
+    const visual: LineVisualOrder | null = paraNeedsBidi
+      ? computeLineVisualOrder(line.segments, baseRtl)
+      : null;
+    if (paraNeedsBidi) ctx.textAlign = 'left';
+    const segCount = line.segments.length;
+    // The segment whose trailing spaces sit at the line's PHYSICAL end (no
+    // stretch there): the visually-last segment. Equals the logical last in
+    // the LTR fast path.
+    const lastDrawnSi = visual ? visual.order[segCount - 1] : segCount - 1;
+
+    const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
+    const lineSlack = effAvailW - (x - lineLeft) - lineWidth;
+    const applyJustify = isJustified && (!isLastLine || stretchLastLine);
+    let alignOffset = 0;
+    if (alignEdge === 'right') {
+      alignOffset = lineSlack;
+    } else if (alignEdge === 'center') {
+      alignOffset = lineSlack / 2;
+    } else if (alignEdge === 'justify' && baseRtl && !applyJustify) {
+      // The unstretched (last) line of a justified RTL paragraph aligns to the
+      // leading edge — the RIGHT margin (§17.18.44 `both`: last line is
+      // start-aligned). LTR keeps alignOffset 0 as before.
+      alignOffset = lineSlack;
+    }
+    // 'left' and stretched 'justify' keep alignOffset 0.
+    x += alignOffset;
 
     if (firstLine && numPrefix && !dryRun) {
       const numFontSize = getDefaultFontSize(para) * scale;
       ctx.font = `${numFontSize}px sans-serif`;
       ctx.fillStyle = defaultColor;
-      ctx.fillText(para.numbering!.text, x - numTab, baseline);
+      if (baseRtl) {
+        // The RTL list marker is laid out INLINE at the line's start (right)
+        // edge: its right edge sits numTab (w:hanging) to the right of the
+        // text's start edge, mirroring the LTR `firstLineX - numTab` anchor,
+        // and it follows the text through jc alignment (sample-8 PDF ground
+        // truth: marker right edge = aligned text right edge + hanging).
+        const prevAlign = ctx.textAlign;
+        const prevDir = ctx.direction;
+        ctx.textAlign = 'left';
+        ctx.direction = 'rtl';
+        const markerW = ctx.measureText(para.numbering!.text).width;
+        ctx.fillText(para.numbering!.text, x + lineWidth + numTab - markerW, baseline);
+        ctx.textAlign = prevAlign;
+        ctx.direction = prevDir;
+      } else {
+        ctx.fillText(para.numbering!.text, lineLeft + indFirst - numTab, baseline);
+      }
     }
-
-    const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
-    let alignOffset = 0;
-    if (para.alignment === 'right' || para.alignment === 'end') {
-      alignOffset = lineAvailW - (x - lineLeft) - lineWidth;
-    } else if (para.alignment === 'center') {
-      alignOffset = (lineAvailW - (x - lineLeft) - lineWidth) / 2;
-    }
-    x += alignOffset;
 
     // Inter-word adjustment per whitespace char on this line. Positive slack
     // (lineWidth < availW) expands spaces to fill; negative slack (lineWidth >
@@ -1151,15 +1323,16 @@ function renderParagraph(
     // space, and is only applied when the line is a candidate for justification
     // (jc=both/distribute, not the last line unless distribute).
     let extraPerSpace = 0;
-    const applyJustify = isJustified && (!isLastLine || stretchLastLine);
     if (applyJustify) {
       let totalTrailingSpaces = 0;
-      for (let si = 0; si < line.segments.length; si++) {
+      for (let si = 0; si < segCount; si++) {
         const seg = line.segments[si];
-        if (si === line.segments.length - 1) break; // trailing spaces on final seg don't stretch
+        // Trailing spaces on the visually-final segment don't stretch (they sit
+        // at the physical line end) — same domain as the draw-loop skip below.
+        if (si === lastDrawnSi) continue;
         if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
       }
-      const slack = lineAvailW - (x - lineLeft) - lineWidth;
+      const slack = effAvailW - (x - lineLeft) - lineWidth;
       if (totalTrailingSpaces > 0) {
         extraPerSpace = slack / totalTrailingSpaces;
         // Don't compress past zero-width spaces — limit compression to at most
@@ -1169,9 +1342,11 @@ function renderParagraph(
       }
     }
 
-    for (let si = 0; si < line.segments.length; si++) {
+    for (let vi = 0; vi < segCount; vi++) {
+      const si = visual ? visual.order[vi] : vi;
       const seg = line.segments[si];
-      const isLastSeg = si === line.segments.length - 1;
+      const isLastSeg = vi === segCount - 1;
+      if (visual) ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
       if ('isTab' in seg) {
         // Tabs render as blank space, optionally filled with a leader (TOC dots etc.).
         if (!dryRun && seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
@@ -1292,6 +1467,7 @@ function renderParagraph(
         if (trailing > 0) x += trailing * extraPerSpace;
       }
     }
+    if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
     state.y += lineH;
   }
@@ -1334,6 +1510,15 @@ interface LayoutTextSeg {
   ruby?: { text: string; fontSizePt: number };
   /** Track-changes revision attached to this run (insertion / deletion). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
+  /** ECMA-376 §17.3.2.30 `<w:rtl>` — run carries right-to-left characteristics.
+   *  When true the segment's text is treated as a strong-RTL embedding in the
+   *  per-line bidi pass (so leading digits / neutrals resolve RTL). */
+  rtl?: boolean;
+  /** UAX#9 §4.3 HL1 / Word behaviour: classify this segment's European digits
+   *  (U+0030–0039) as Arabic-Number (AN) in the per-line bidi pass, so a date
+   *  like "28-02-2026" in an Arabic complex-script run reorders to "2026-02-28"
+   *  exactly as Word renders it (ECMA-376 §17.3.2.20 w:lang w:bidi). */
+  digitsAsAN?: boolean;
 }
 
 /**
@@ -1431,17 +1616,41 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
       : undefined;
     const revision = (base as DocxTextRun).revision;
+    const r = base as DocxTextRun;
+    const rtl = r.rtl === true ? true : undefined;
+
+    // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl` (§17.3.2.30)
+    // or an explicit complex-script font (`w:rFonts w:cs`) applies complex-script
+    // formatting to ALL of its characters; otherwise each character is routed by
+    // its Unicode block (Arabic/Hebrew/... → cs; Latin/digits/CJK → ascii/hAnsi).
+    const forceCs = r.rtl === true || r.fontFamilyCs != null;
+
+    // Complex-script (cs) formatting sources, each falling back to its Latin
+    // counterpart when the cs-specific property is absent (the parser already
+    // resolves szCs through the full style chain, mirroring a directly-set
+    // `w:sz` per §17.3.2.18; bCs/iCs per §17.3.2.3/§17.3.2.17).
+    const csFontSize = r.fontSizeCs ?? base.fontSize;
+    const csFontFamily = r.fontFamilyCs ?? base.fontFamily;
+    const csBold = r.boldCs ?? base.bold;
+    const csItalic = r.italicCs ?? base.italic;
+
+    // Word classifies European digits in an Arabic/Hebrew complex-script run as
+    // AN (§17.3.2.20 w:lang w:bidi): use the bidi language's primary subtag when
+    // present, else fall back to the run being rtl-marked.
+    const digitsAsAN =
+      (forceCs || r.rtl === true) && isRtlBidiLang(r.langBidi, r.rtl === true);
+
     let firstSeg = true;
-    for (const word of splitTextForLayout(displayText)) {
+    const emit = (word: string, cs: boolean) => {
       segs.push({
         text: word,
-        bold: base.bold,
-        italic: base.italic,
+        bold: cs ? csBold : base.bold,
+        italic: cs ? csItalic : base.italic,
         underline: base.underline,
         strikethrough: base.strikethrough,
-        fontSize: base.fontSize,
+        fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: base.fontFamily,
+        fontFamily: cs ? csFontFamily : base.fontFamily,
         vertAlign,
         measuredWidth: 0,
         smallCaps: base.smallCaps ?? false,
@@ -1449,8 +1658,30 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         highlight: base.highlight ?? null,
         ruby: firstSeg ? ruby : undefined,
         revision,
+        rtl,
+        digitsAsAN: digitsAsAN ? true : undefined,
       });
       firstSeg = false;
+    };
+
+    for (const word of splitTextForLayout(displayText)) {
+      if (forceCs) {
+        // When the run's digits are AN-classified, split a token into maximal
+        // digit-groups and the surrounding separators so the per-line bidi pass
+        // (which reorders at SEGMENT granularity) can place the groups in Word's
+        // order — e.g. "28-02-2026" → segments [28][-][02][-][2026] reordered to
+        // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
+        // so a single-segment date would otherwise stay 28-02-2026.
+        if (digitsAsAN) {
+          for (const slice of splitDigitGroups(word)) emit(slice, true);
+        } else {
+          emit(word, true);
+        }
+      } else {
+        // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
+        // so each side gets its own (cs vs Latin) size and typeface.
+        for (const slice of splitByComplexScript(word)) emit(slice.text, slice.cs);
+      }
     }
   };
 
@@ -1567,6 +1798,133 @@ function fitCJKPrefix(
  * Split a text run into layout-segment strings.
  * Each segment is an atomic unit for word-level fitting; CJK overflow is handled in layoutLines.
  */
+/** RTL primary language subtags (ISO 639) whose complex-script context makes
+ *  Word classify European digits as Arabic-Number (AN). */
+const RTL_PRIMARY_SUBTAGS = new Set([
+  'ar', // Arabic
+  'fa', // Persian
+  'ur', // Urdu
+  'he', 'iw', // Hebrew (iw = legacy code)
+  'yi', 'ji', // Yiddish
+  'ps', // Pashto
+  'sd', // Sindhi
+  'ug', // Uyghur
+  'dv', // Divehi
+  'syr', // Syriac
+  'ckb', // Central Kurdish (Sorani)
+]);
+
+/**
+ * Decide whether a `w:lang w:bidi` tag (§17.3.2.20) designates an RTL
+ * complex-script language, so the run's European digits are classified AN
+ * (Word's date ordering). The tag's primary subtag (before the first '-') is
+ * matched against {@link RTL_PRIMARY_SUBTAGS}. When the tag is absent OR a
+ * malformed/unknown value (e.g. the "ae-AR" seen in real-world files), fall
+ * back to whether the run is explicitly rtl-marked — `w:rtl` already asserts
+ * the run is complex-script RTL content.
+ */
+function isRtlBidiLang(langBidi: string | undefined, runIsRtl: boolean): boolean {
+  if (langBidi) {
+    const primary = langBidi.split('-')[0].toLowerCase();
+    if (RTL_PRIMARY_SUBTAGS.has(primary)) return true;
+  }
+  return runIsRtl;
+}
+
+/**
+ * ECMA-376 §17.3.2.26 (rFonts) content classification — does this code point
+ * belong to the COMPLEX-SCRIPT (`cs`) category? Word routes such characters to
+ * the run's complex-script formatting (`w:szCs` / `w:rFonts w:cs` / `w:bCs` /
+ * `w:iCs`) instead of the Latin (`ascii`/`hAnsi`) formatting. The ranges are
+ * the Unicode blocks Word treats as complex script: Hebrew, Arabic (incl.
+ * supplements / extended / presentation forms), Syriac, Thaana, NKo,
+ * Samaritan, Mandaic, and the Arabic-math / extended Plane-1 blocks. Latin,
+ * digits (EN), punctuation and CJK are NOT cs.
+ */
+function isComplexScriptCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x0590 && cp <= 0x05ff) || // Hebrew
+    (cp >= 0x0600 && cp <= 0x06ff) || // Arabic
+    (cp >= 0x0700 && cp <= 0x074f) || // Syriac
+    (cp >= 0x0750 && cp <= 0x077f) || // Arabic Supplement
+    (cp >= 0x0780 && cp <= 0x07bf) || // Thaana
+    (cp >= 0x07c0 && cp <= 0x07ff) || // NKo
+    (cp >= 0x0800 && cp <= 0x083f) || // Samaritan
+    (cp >= 0x0840 && cp <= 0x085f) || // Mandaic
+    (cp >= 0x0860 && cp <= 0x08ff) || // Syriac Supp. / Arabic Extended-A/B
+    (cp >= 0xfb1d && cp <= 0xfb4f) || // Hebrew presentation forms
+    (cp >= 0xfb50 && cp <= 0xfdff) || // Arabic Presentation Forms-A
+    (cp >= 0xfe70 && cp <= 0xfeff) || // Arabic Presentation Forms-B
+    (cp >= 0x10800 && cp <= 0x10fff) || // Plane-1 RTL blocks
+    (cp >= 0x1e800 && cp <= 0x1efff)    // Mende/Adlam/Arabic Math
+  );
+}
+
+/**
+ * Split `text` into maximal runs that are uniformly complex-script or not, per
+ * §17.3.2.26 per-character classification. Returns `[{text, cs}]` in logical
+ * order. Used only when a run has NO explicit `w:rtl`/`w:cs` (which would force
+ * the whole run to cs); otherwise the caller treats the entire piece as cs.
+ *
+ * Digits / spaces / punctuation (neutral, non-cs) attach to the PRECEDING slice
+ * so a number embedded in Arabic ("نص 12 نص") does not fragment the word into
+ * extra segments — Word keeps such weak/neutral characters with the script they
+ * border. A leading neutral run takes the first strong slice's class.
+ */
+function splitByComplexScript(text: string): { text: string; cs: boolean }[] {
+  const out: { text: string; cs: boolean }[] = [];
+  let curCs: boolean | null = null;
+  let buf = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    // Neutral (non-letter) characters do not switch the active class; they ride
+    // with whatever script is currently open (or the next one if none yet).
+    const isLetter = /\p{L}/u.test(ch);
+    if (!isLetter) {
+      buf += ch;
+      continue;
+    }
+    const cs = isComplexScriptCodePoint(cp);
+    if (curCs === null) {
+      curCs = cs;
+      buf += ch;
+    } else if (cs === curCs) {
+      buf += ch;
+    } else {
+      out.push({ text: buf, cs: curCs });
+      curCs = cs;
+      buf = ch;
+    }
+  }
+  if (buf.length > 0) out.push({ text: buf, cs: curCs ?? false });
+  return out;
+}
+
+/**
+ * Split a token into maximal runs of European digits (U+0030–0039) versus
+ * everything else, so a date / number in an AN-classified Arabic run can be
+ * reordered group-by-group by the per-line bidi pass (which works at segment
+ * granularity). "28-02-2026" → ["28","-","02","-","2026"].
+ */
+function splitDigitGroups(text: string): string[] {
+  const out: string[] = [];
+  let buf = '';
+  let bufDigit: boolean | null = null;
+  for (const ch of text) {
+    const c = ch.charCodeAt(0);
+    const isDigit = c >= 0x30 && c <= 0x39;
+    if (bufDigit === null || isDigit === bufDigit) {
+      buf += ch;
+    } else {
+      out.push(buf);
+      buf = ch;
+    }
+    bufDigit = isDigit;
+  }
+  if (buf.length > 0) out.push(buf);
+  return out.length ? out : [text];
+}
+
 function splitTextForLayout(text: string): string[] {
   const result: string[] = [];
   let i = 0;
@@ -1884,8 +2242,15 @@ function layoutLines(
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
     // line boxes do not jitter based on the specific characters on each line.
-    let asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
-    const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    // When the document font is substituted by one with different vertical
+    // metrics, rescale to the document font's design line box so the line
+    // height (and thus baseline centering, row auto-heights, cell vAlign
+    // §17.4.84, and pagination) match Word — see font-metrics.ts.
+    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
+    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    const corrected = correctLineMetrics(s.fontFamily, effectiveFontPx(s), rawAsc, rawDesc);
+    let asc = corrected.ascent;
+    const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
     // room for the rt glyphs (ECMA-376 §17.3.3.25). The actual line spacing
     // in docGrid sections is set further down by the paragraph-wide
@@ -2336,11 +2701,24 @@ function renderShapeText(
     const fontPx = block.fontSizePt * scale;
     ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
     ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
+    // The whole block is drawn in one fillText, so Canvas applies UAX#9 over
+    // the full string; we only set the base direction (for neutral resolution)
+    // and resolve alignment. No explicit shape-paragraph rtl flag exists, so
+    // derive the base direction from the content (first-strong).
+    const baseRtl = resolveBaseDirection(undefined, block.text) === 'rtl';
+    // Shape text draws one line per block with no inter-word stretching, so
+    // 'distribute' keeps its pre-bidi approximation (centered) rather than the
+    // justify edge resolveAlignEdge reports for paragraphs.
+    const edge = block.alignment === 'distribute'
+      ? 'center'
+      : resolveAlignEdge(block.alignment, baseRtl);
+    ctx.textAlign = 'left';
+    ctx.direction = baseRtl ? 'rtl' : 'ltr';
     const m = ctx.measureText(block.text);
     let tx = innerX;
-    if (block.alignment === 'center' || block.alignment === 'distribute') {
+    if (edge === 'center') {
       tx = innerX + Math.max(0, (innerW - m.width) / 2);
-    } else if (block.alignment === 'right' || block.alignment === 'end') {
+    } else if (edge === 'right') {
       tx = innerX + Math.max(0, innerW - m.width);
     }
     // Baseline = cursorY + ascent (approx 0.85 of font size for default fonts).
@@ -2348,6 +2726,7 @@ function renderShapeText(
     ctx.fillText(block.text, tx, baseline);
     cursorY += lineHeights[i];
   }
+  ctx.direction = 'ltr'; // reset for subsequent draws
 }
 
 function isWrapFloat(mode?: string): boolean {
@@ -2423,9 +2802,9 @@ function skipPastTopAndBottom(y: number, floats: FloatRect[]): number {
 function renderTable(table: DocTable, state: RenderState): void {
   const { ctx, scale, contentX, contentW, dryRun } = state;
 
-  const totalColW = table.colWidths.reduce((s, w) => s + w, 0) * scale;
-  const colScale = totalColW > contentW ? contentW / totalColW : 1;
-  const colWidths = table.colWidths.map(w => w * scale * colScale);
+  // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
+  // already scaled to fit the available content width, then convert to px.
+  const colWidths = resolveColumnWidths(table, contentW / scale).map((w) => w * scale);
 
   // Horizontal table alignment on the page (w:tblPr/w:jc).
   const tableW = colWidths.reduce((s, w) => s + w, 0);
@@ -2464,6 +2843,16 @@ function renderTable(table: DocTable, state: RenderState): void {
     }
   }
 
+  // ECMA-376 §17.4.1 `<w:bidiVisual>`: lay the grid columns right-to-left, so
+  // logical column 0 sits at the table's RIGHT edge and indices advance
+  // leftward. We mirror by POSITION arithmetic (not canvas transform): a cell
+  // spanning [ci, ci+span) gets physical left x = tableX + tableW − (offset of
+  // its right grid edge). Cell borders are mirrored too — a cell's logical
+  // left/right border specs swap physical sides (its "start" edge is on the
+  // right). gridSpan still consumes the same logical columns; only the mapping
+  // from logical column offset to a physical x flips.
+  const mirror = table.bidiVisual === true;
+
   let y = state.y;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
@@ -2474,6 +2863,11 @@ function renderTable(table: DocTable, state: RenderState): void {
     for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+      // Physical left edge of this cell. LTR: cumulative from the left (`x`).
+      // bidiVisual: place so logical column 0 is rightmost — the cell's left
+      // edge is the table's right edge minus the offset of its trailing grid
+      // line (sum of widths up to and including this span).
+      const leadX = mirror ? tableX + tableW - (x - tableX) - cellW : x;
 
       if (cell.vMerge === false) {
         // continue cell — content is rendered by its restart partner.
@@ -2486,7 +2880,13 @@ function renderTable(table: DocTable, state: RenderState): void {
           drawH = 0;
           for (let rj = ri; rj <= endRi; rj++) drawH += rowHeights[rj];
         }
-        if (!dryRun) renderCell(cell, table, x, y, cellW, drawH, state);
+        // ECMA-376 §17.4.81: an exact row height is honored verbatim and
+        // content taller than the row is clipped to the row box (Word clips;
+        // we would otherwise overflow into neighboring rows). A vMerge=restart
+        // cell spans multiple rows, so it is never governed by a single row's
+        // exact height — only single-row cells clip.
+        const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
+        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, mirror, clipExact);
         else measureCellContent(cell, table, cellW, scale, state);
       }
 
@@ -2650,6 +3050,8 @@ function renderCell(
   w: number,
   h: number,
   state: RenderState,
+  mirror = false,
+  clipExact = false,
 ): void {
   const { ctx, scale } = state;
 
@@ -2658,7 +3060,7 @@ function renderCell(
     ctx.fillRect(x, y, w, h);
   }
 
-  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale);
+  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, mirror);
 
   const cm = effCellMargins(cell, table);
   const mt = cm.top * scale;
@@ -2689,13 +3091,39 @@ function renderCell(
     // rendering of resume "bar chart" cells. Skip a single trailing empty
     // paragraph after a non-paragraph block.
     const visibleContent = trimTrailingStructuralMarker(cell.content);
-    const contentH = visibleContent.reduce(
+    let contentH = visibleContent.reduce(
       (s, ce) => s + measureCellElementHeight(cellState, ce, w - ml - mr, scale), 0);
+    // Word collapses the LAST paragraph's space-after against the cell's bottom
+    // content boundary when vertically aligning. That trailing spacing produces
+    // no ink (nothing follows it inside the cell), so including it in the
+    // centered block height lifts the visible text above true center. Word
+    // centers the line box alone: a header cell whose paragraph carries an 8 pt
+    // space-after still centers the ~16.8 pt line box, not 24.8 pt. This mirrors
+    // how block space-after collapses at a container edge (ECMA-376 §17.3.1.33
+    // describes spacing between paragraphs, not at the frame boundary). The
+    // render path already adds this space-after after the final line where it
+    // has no visual effect, so trimming it here only fixes the measurement.
+    // Spacing BETWEEN two paragraphs inside the cell is left intact.
+    const lastEl = visibleContent[visibleContent.length - 1];
+    if (lastEl && lastEl.type === 'paragraph') {
+      contentH -= (lastEl as unknown as DocParagraph).spaceAfter * scale;
+    }
     if (cell.vAlign === 'center') cellState.y = y + (h - contentH) / 2;
     else cellState.y = y + h - contentH - mb;
   }
 
-  renderCellContent(cell.content, cellState);
+  if (clipExact) {
+    // ECMA-376 §17.4.81: clip content to the exact row box so taller content
+    // does not bleed into adjacent rows (Word's behavior for hRule="exact").
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    renderCellContent(cell.content, cellState);
+    ctx.restore();
+  } else {
+    renderCellContent(cell.content, cellState);
+  }
 }
 
 /** Drop a trailing empty paragraph that follows a non-paragraph block (nested
@@ -2743,11 +3171,15 @@ function drawCellBorders(
   cell: CellBorders,
   table: TableBorders,
   scale: number,
+  mirror = false,
 ): void {
   const top = cell.top ?? table.top;
   const bottom = cell.bottom ?? table.bottom;
-  const left = cell.left ?? table.left;
-  const right = cell.right ?? table.right;
+  // ECMA-376 §17.4.1: under bidiVisual the columns are visually reversed, so a
+  // cell's logical left (start) border is drawn on its physical right edge and
+  // vice versa. Borders are owned by the cell, so swap which spec each side uses.
+  const left = mirror ? (cell.right ?? table.right) : (cell.left ?? table.left);
+  const right = mirror ? (cell.left ?? table.left) : (cell.right ?? table.right);
 
   if (top && top.style !== 'none') drawBorderLine(ctx, x, y, x + w, y, top, scale);
   if (bottom && bottom.style !== 'none') drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale);
@@ -2811,6 +3243,39 @@ function buildFont(
   return `${s} ${w} ${sizePx}px ${f}`;
 }
 
+/** Arabic-script faces that hosts rarely ship; we substitute them with Noto
+ *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
+ *  list MUST mirror the Arabic entries there). A run whose font is one of these
+ *  contains BOTH Arabic and Latin/digit glyphs that Word renders from the same
+ *  single face, so the fallback chain must keep both scripts stylistically
+ *  consistent (Arabic substitute first, serif Latin companion before the sans
+ *  generics) rather than letting Latin/digits leak to a CJK sans face. */
+const ARABIC_SUBSTITUTE_FONTS = new Set([
+  'sakkal majalla',
+  'traditional arabic',
+  'simplified arabic',
+  'arabic typesetting',
+  'univers next arabic',
+  'noto naskh arabic',
+  'noto sans arabic',
+]);
+
+/** Naskh-style traditional Arabic faces ship a serif Latin companion; the
+ *  geometric/modern ones pair with a sans Latin. Drives whether an Arabic-font
+ *  run's Latin+digits route to Noto Naskh Arabic (serif-like) or Noto Sans
+ *  Arabic, and which Latin serif/sans companion follows. */
+const NASKH_SERIF_ARABIC_FONTS = new Set([
+  'sakkal majalla',
+  'traditional arabic',
+  'simplified arabic',
+  'arabic typesetting',
+  'noto naskh arabic',
+]);
+
+function isArabicSubstituteFont(family: string): boolean {
+  return ARABIC_SUBSTITUTE_FONTS.has(family.toLowerCase());
+}
+
 /** Resolve a requested font-family name to a CSS font-family string with
  *  appropriate fallback chain.
  *
@@ -2825,24 +3290,51 @@ function buildFont(
  *     where fontTable says "auto"). Retained as a safety net for theme fonts
  *     and system fonts that OOXML docs do not list in fontTable.xml.
  */
-function normalizeFontFamily(
+export function normalizeFontFamily(
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
 ): string {
-  if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif';
+  if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif';
 
   const escape = (s: string) => s.replace(/"/g, '\\"');
   const head = `"${escape(family)}"`;
   const lower = family.toLowerCase();
+
+  // 0) Arabic-script faces substituted by Noto Naskh/Sans Arabic. A single
+  //    Sakkal Majalla / Traditional Arabic run carries Arabic glyphs AND
+  //    Latin letters/digits; Word draws both from that one face. The browser
+  //    resolves each glyph against the chain in order, so the Arabic substitute
+  //    MUST come first — otherwise the Latin/digit glyphs are grabbed by the
+  //    first chain member that has them (e.g. the CJK "Noto Sans JP"), and
+  //    Latin/digits render in a different, sans face than the Arabic. Keeping
+  //    the Arabic substitute first makes Arabic+Latin+digits all resolve from
+  //    one family, matching Word's single-face rendering.
+  //
+  //    Latin companion: traditional Naskh faces (Sakkal Majalla, Traditional
+  //    Arabic, …) ship a SERIF Latin companion — Word's PDF export of sample-7
+  //    renders the Latin "first leader name" with bracketed serifs and the
+  //    "2026" digits as serif figures. Noto Naskh Arabic, our substitute, also
+  //    ships a serif Latin face (verified: its Latin glyphs carry bracketed
+  //    serifs and closely match the PDF), so placing it first gives Latin+digits
+  //    a serif look consistent with the Arabic — matching Word. "Noto Serif" is
+  //    kept as a serif safety net for the rare case Noto Naskh Arabic is
+  //    unavailable, so Latin still falls to a serif rather than the CJK sans.
+  //    Geometric Arabic faces (Univers Next Arabic) pair with a sans Latin.
+  if (isArabicSubstituteFont(family)) {
+    if (NASKH_SERIF_ARABIC_FONTS.has(lower)) {
+      return `${head}, "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Serif", "Noto Sans JP", "Hiragino Sans", serif`;
+    }
+    return `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+  }
 
   // 1) Authoritative classification from word/fontTable.xml §17.8.3.10.
   const tableClass = fontFamilyClasses[family];
   if (tableClass && tableClass !== 'auto') {
     switch (tableClass) {
       case 'roman':
-        return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
+        return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", "Noto Naskh Arabic", "Noto Sans Arabic", serif`;
       case 'swiss':
-        return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
+        return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
       case 'modern':
         return `${head}, "Courier New", monospace`;
       default:
@@ -2874,22 +3366,22 @@ function normalizeFontFamily(
     family.includes('Noto Serif');
 
   if (isSerif) {
-    return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
+    return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", "Noto Naskh Arabic", "Noto Sans Arabic", serif`;
   }
 
   if (lower.includes('meiryo') || family.includes('メイリオ')) {
-    return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+    return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
   if (family.includes('游ゴシック') || /\byu\s*gothic\b/i.test(family) || lower.includes('yugothic')) {
-    return `${head}, "Yu Gothic", "YuGothic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+    return `${head}, "Yu Gothic", "YuGothic", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
   if (lower.includes('ipa')) {
-    return `${head}, "IPAexGothic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+    return `${head}, "IPAexGothic", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
   if (lower.includes('segoe')) {
-    return `${head}, "Segoe UI", sans-serif`;
+    return `${head}, "Segoe UI", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
-  return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
+  return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
 }
 
 function getDefaultFontSize(para: DocParagraph): number {
@@ -2954,8 +3446,11 @@ function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  *   exact   → value in pt, converted to px (ignores font and grid).
  *   atLeast → max(natural, value in pt × scale).
  *   null    → natural, or grid pitch if the section defines one.
+ *
+ * Exported for unit tests only — not part of the package API (not
+ * re-exported from index.ts).
  */
-function lineBoxHeight(
+export function lineBoxHeight(
   ls: LineSpacing | null,
   ascentPx: number,
   descentPx: number,
@@ -2997,6 +3492,23 @@ function lineBoxHeight(
     // No explicit spacing → single line. Use the intended single-line height
     // (`natural`) off-grid; on-grid, snap to the pitch with the glyph extent
     // as the overflow floor (the grid, not the font metric, governs height).
+    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
+  }
+  // A zero/negative `w:line` is degenerate input whose behavior ECMA-376
+  // §17.3.1.33 does not define (read literally, an `exact` line of 0 would
+  // collapse the line box to no height; some generators emit
+  // `<w:spacing w:line="0" w:lineRule="exact"/>` on table cells, e.g. sample-7).
+  // Word's native model has no such state: per the [MS-DOC] LSPD structure,
+  // "exact" spacing is encoded as a negative dyaLine ("the line spacing, in
+  // twips, is exactly 0x10000 minus dyaLine", so an exact 0 is unrepresentable)
+  // and a non-negative dyaLine in twips mode is "dyaLine or the number of twips
+  // necessary for single spacing, whichever value is greater" — i.e. a stored 0
+  // resolves to exactly single spacing. Word's PDF export of sample-7 confirms
+  // (those rows render at normal single-line height). Match that: treat
+  // exact/auto line <= 0 as single spacing. (LSPD's max() rule is the twips
+  // mode; applying the same fallback to a degenerate auto multiplier <= 0 is
+  // the analogous non-collapsing reading.)
+  if ((ls.rule === 'exact' || ls.rule === 'auto') && ls.value <= 0) {
     return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {

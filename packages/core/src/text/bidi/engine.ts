@@ -4,7 +4,7 @@
 // getMirroredCharacter) without touching renderers or `toVisualSegments`,
 // which sit ABOVE this seam.
 
-import type { BaseDirection, BidiLevels } from './types.js';
+import type { BaseDirection, BidiClass, BidiLevels } from './types.js';
 import { createUax9Engine } from './uax9/index.js';
 
 export interface BidiEngine {
@@ -13,10 +13,18 @@ export interface BidiEngine {
    * unit and the paragraph base level. Code units removed by rule X9 MUST be
    * marked with {@link REMOVED_LEVEL} (255). Mirrors bidi-js
    * `getEmbeddingLevels`.
+   *
+   * `classOverride` is an optional UAX#9 §4.3 HL1 higher-level-protocol hook:
+   * a per-CODE-UNIT array (indexed identically to `text`; surrogate-pair halves
+   * share one entry on the leading unit, trailing unit ignored) whose non-null
+   * entries replace the assigned Bidi_Class of that code point before the
+   * algorithm runs. Used e.g. to classify European digits as AN in Arabic
+   * complex-script context (Word behaviour). Omit it to run pure UAX#9.
    */
   computeLevels(
     text: string,
     base: BaseDirection,
+    classOverride?: ReadonlyArray<BidiClass | null | undefined>,
   ): { levels: BidiLevels; paragraphLevel: number };
 
   /**

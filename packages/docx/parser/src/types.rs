@@ -549,6 +549,20 @@ pub struct TextRun {
     /// units as `font_size`). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size_cs: Option<f64>,
+    /// ECMA-376 §17.3.2.3 `<w:bCs>` — complex-script bold toggle. `None` when
+    /// unspecified (renderer falls back to `bold`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. `None`
+    /// when unspecified (renderer falls back to `italic`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — the complex-script (RTL) language
+    /// tag, lower-cased (e.g. "ar-sa", "ae-ar", "he-il"). Used to decide whether
+    /// European digits in a complex-script run are classified as AN (Word's
+    /// Arabic/Hebrew digit ordering). `None` when unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -675,6 +689,20 @@ pub struct DocTable {
     pub cell_margin_right: f64,
     /// table horizontal alignment on the page: "left" | "center" | "right" (w:tblPr/w:jc).
     pub jc: String,
+    /// ECMA-376 §17.4.52 `<w:tblLayout w:type>`. "fixed" or "autofit".
+    /// Absent in the source ⇒ None, which the renderer treats as the spec
+    /// default "autofit" (size columns by preferred widths). When "fixed" the
+    /// renderer uses the tblGrid widths verbatim (scaled to fit), ignoring tcW.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// ECMA-376 §17.4.63 `<w:tblW>` preferred table width. `width_pt` is set
+    /// only for type="dxa"; `width_pct` carries type="pct" (value in 50ths of a
+    /// percent of the available content width). type="auto"/"nil"/0 ⇒ both None
+    /// (table width is dictated by its columns).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_pt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_pct: Option<f64>,
     /// ECMA-376 §17.4.1 `<w:bidiVisual>` — render columns in right-to-left
     /// (visual) order. `Some(true)` = RTL columns, `Some(false)` = explicitly
     /// LTR, `None` = unspecified. Phase 0: recorded only; column-order
@@ -739,8 +767,15 @@ pub struct DocTableCell {
     pub background: Option<String>,
     /// "top" | "center" | "bottom"
     pub v_align: String,
-    /// pt
+    /// ECMA-376 §17.4.71 `<w:tcW>` preferred cell width, type="dxa", in pt.
+    /// Drives autofit column sizing (the per-column preferred width is the max
+    /// over the cells anchored in it).
     pub width_pt: Option<f64>,
+    /// `<w:tcW>` type="pct": 50ths of a percent of the available content width.
+    /// Resolved against the available width in the renderer (parse time has no
+    /// table width). None unless the cell uses type="pct".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_pct: Option<f64>,
     /// Per-cell margins from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42), in pt.
     /// Each edge overrides the table-level `<w:tblCellMar>` default (§17.4.41)
     /// when present; None = inherit the table default. Used e.g. by résumé
