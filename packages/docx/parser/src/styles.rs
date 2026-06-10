@@ -30,6 +30,9 @@ pub struct RunFmt {
     /// content. Phase 0 of RTL support only records the flag; alignment /
     /// glyph-order resolution is deferred to a later PR.
     pub rtl: Option<bool>,
+    /// ECMA-376 §17.3.2.7 `<w:cs/>` — treat the run as complex-script,
+    /// applying the cs formatting axis to ALL its characters (§17.3.2.26).
+    pub cs_toggle: Option<bool>,
     /// ECMA-376 §17.3.2.26 w:rFonts/@w:cs — complex-script typeface. Parallel
     /// to `font_family_ascii` / `font_family_east_asia`; carries the same
     /// "@theme:<ref>" marker convention for @cstheme references.
@@ -697,6 +700,9 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
     // Complex-script / RTL run (ECMA-376 §17.3.2.30 w:rtl). On-off toggle.
     fmt.rtl = bool_prop(rpr, "rtl");
+    // §17.3.2.7 w:cs — complex-script run toggle (distinct from rFonts@cs,
+    // which is only a font SLOT and must not force cs formatting).
+    fmt.cs_toggle = bool_prop(rpr, "cs");
 
     fmt
 }

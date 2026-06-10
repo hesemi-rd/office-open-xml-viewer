@@ -541,6 +541,10 @@ pub struct TextRun {
     /// Phase 0: recorded only; glyph-order resolution is deferred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtl: Option<bool>,
+    /// ECMA-376 §17.3.2.7 `<w:cs/>` — complex-script run toggle: cs
+    /// formatting applies to ALL characters of the run (§17.3.2.26).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
     /// ECMA-376 §17.3.2.26 `<w:rFonts w:cs>` — complex-script typeface (theme
     /// references resolved to a literal family). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1149,6 +1149,7 @@ fn parse_run_inner(
     // cs font goes through the same theme-ref resolution as the ascii/eastAsia
     // axes so consumers receive a literal family.
     let rtl = fmt.rtl;
+    let cs_toggle = fmt.cs_toggle;
     let font_family_cs = theme.resolve_font_ref(fmt.font_family_cs.clone());
     let font_size_cs = fmt.font_size_cs;
     // Complex-script bold / italic (ECMA-376 §17.3.2.3 / §17.3.2.17) and the
@@ -1186,6 +1187,7 @@ fn parse_run_inner(
                         ruby: None,
                         revision: revision.cloned(),
                         rtl,
+                        cs: cs_toggle,
                         font_family_cs: font_family_cs.clone(),
                         font_size_cs,
                         bold_cs,
@@ -1216,6 +1218,7 @@ fn parse_run_inner(
                     ruby: None,
                     revision: revision.cloned(),
                     rtl,
+                    cs: cs_toggle,
                     font_family_cs: font_family_cs.clone(),
                     font_size_cs,
                     bold_cs,
@@ -1315,6 +1318,7 @@ fn parse_run_inner(
                     ruby: None,
                     revision: revision.cloned(),
                     rtl,
+                    cs: cs_toggle,
                     font_family_cs: font_family_cs.clone(),
                     font_size_cs,
                     bold_cs,
@@ -2724,6 +2728,7 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.background.is_some() { base.background = direct.background.clone(); }
     if direct.vert_align.is_some() { base.vert_align = direct.vert_align.clone(); }
     if direct.rtl.is_some() { base.rtl = direct.rtl; }
+    if direct.cs_toggle.is_some() { base.cs_toggle = direct.cs_toggle; }
     if direct.font_family_cs.is_some() { base.font_family_cs = direct.font_family_cs.clone(); }
     if direct.bold_cs.is_some() { base.bold_cs = direct.bold_cs; }
     if direct.italic_cs.is_some() { base.italic_cs = direct.italic_cs; }
@@ -2864,6 +2869,45 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+}
+
+#[cfg(test)]
+mod cs_toggle_tests {
+    use super::*;
+
+    fn run_of(body_inner: &str) -> TextRun {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body_inner}</w:body></w:document>"#
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body = doc.root_element().descendants().find(|n| n.tag_name().name() == "body").unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let elems = parse_body_elements(body, &style_map, &mut num_map, &HashMap::new(), &HashMap::new(), &ThemeColors::default());
+        for e in elems {
+            if let BodyElement::Paragraph(p) = e {
+                for r in p.runs {
+                    if let DocRun::Text(t) = r { return t; }
+                }
+            }
+        }
+        panic!("no text run");
+    }
+
+    #[test]
+    fn cs_element_sets_run_cs_toggle() {
+        // §17.3.2.7 <w:cs/> — the complex-script run toggle.
+        let run = run_of(r#"<w:p><w:r><w:rPr><w:cs/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        assert_eq!(run.cs, Some(true));
+    }
+
+    #[test]
+    fn rfonts_cs_attribute_does_not_set_the_toggle() {
+        // rFonts@cs is only a font SLOT (§17.3.2.26) — it must not force cs.
+        let run = run_of(r#"<w:p><w:r><w:rPr><w:rFonts w:cs="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        assert_eq!(run.cs, None);
+        assert_eq!(run.font_family_cs.as_deref(), Some("Arial"));
     }
 }
 
