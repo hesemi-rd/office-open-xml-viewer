@@ -85,6 +85,27 @@ describe('computeLineVisualOrder', () => {
     expect(rtl).toEqual([true, true]);
   });
 
+  it('keeps a trailing non-rtl numeric run leftmost in a base-RTL title (§17.3.2.30)', () => {
+    // sample-7 title "المشاريع لعام 2026": three runs, the Arabic ones carry
+    // w:rtl, "2026" does not, in a base-RTL (w:bidi) paragraph. Word renders
+    // "2026" at the LEFT (logically last in the RTL line). A w:rtl run that
+    // already has strong-RTL content must NOT be over-embedded above the base.
+    const { order, rtl } = computeLineVisualOrder(
+      [
+        { text: 'المشاريع ', rtl: true },
+        { text: 'لعام ', rtl: true },
+        { text: '2026', rtl: false },
+      ],
+      true,
+    );
+    // `order` is logical indices in visual LEFT→RIGHT order, so the LEFTMOST
+    // segment is order[0] (cf. the pure-RTL case where order=[1,0] puts the
+    // logically-last word leftmost).
+    expect(order).toEqual([2, 1, 0]);
+    expect(order[0]).toBe(2); // "2026" visually leftmost
+    expect(rtl[2]).toBe(false);
+  });
+
   it('keeps the LTR fast path byte-identical when no rtl marks and no strong-RTL', () => {
     const { order, rtl } = computeLineVisualOrder(
       [{ text: '1. ' }, { text: 'item' }],

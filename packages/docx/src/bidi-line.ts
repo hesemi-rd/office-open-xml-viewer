@@ -65,11 +65,16 @@ const PDF = '‬'; // POP DIRECTIONAL FORMATTING
  * practice because they are space-split); Canvas resolves any residual
  * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
  *
- * Segments flagged `rtl` (run-level `<w:rtl>`, §17.3.2.30) are wrapped in
- * RLE…PDF so their weak/neutral characters resolve against an RTL embedding,
- * while their strong-Latin content keeps its even (LTR) resolved level — i.e.
- * a literal "1. " list prefix mirrors to ".1" at the trailing edge as Word
- * does, but English words in an rtl-marked run keep their LTR word order.
+ * A run-level `<w:rtl>` (§17.3.2.30) gives the run a strong-RTL context for
+ * its OWN weak/neutral characters; it must NOT raise the run's embedding level
+ * relative to the paragraph base. We therefore only RLE…PDF-wrap a w:rtl run
+ * when it carries NO strong-RTL character of its own: a purely neutral/numeric
+ * run (e.g. a literal "1. " list prefix) needs the wrap to resolve RTL, but a
+ * run that already contains strong Arabic/Hebrew is RTL by content — wrapping
+ * it would over-embed it (level base+2) above sibling LTR/numeric runs at the
+ * base level, stranding e.g. a trailing "2026" on the wrong side of an
+ * otherwise-RTL line. Strong-Latin content always keeps its even (LTR) level,
+ * so English words in an rtl-marked run keep their LTR word order either way.
  */
 export function computeLineVisualOrder(
   segments: readonly unknown[],
@@ -89,7 +94,11 @@ export function computeLineVisualOrder(
   const segEnd: number[] = new Array(n);
   for (let i = 0; i < n; i++) {
     const t = segText(segments[i]) ?? '';
-    const isRtl = segRtl(segments[i]);
+    // Only wrap a w:rtl run that has NO strong-RTL char of its own: a run with
+    // strong Arabic/Hebrew is already RTL by content, so an RLE embedding would
+    // over-raise its level above sibling base-level runs (the 2026-on-the-wrong-
+    // side bug). A neutral/numeric w:rtl run still needs the wrap to resolve RTL.
+    const isRtl = segRtl(segments[i]) && !RTL_GATE.test(t);
     if (isRtl) full += RLE;
     segStart[i] = full.length;
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
