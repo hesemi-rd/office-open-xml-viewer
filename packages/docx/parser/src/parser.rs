@@ -2265,7 +2265,6 @@ fn parse_table(
         .and_then(|j| attr_w(j, "val"))
         .unwrap_or_else(|| "left".to_string());
 
-<<<<<<< HEAD
     // ECMA-376 §17.4.52 w:tblLayout/@w:type — "fixed" | "autofit". Absent ⇒ None
     // (renderer applies the spec default "autofit").
     let layout = tbl_pr
@@ -2285,11 +2284,10 @@ fn parse_table(
             }
         })
         .unwrap_or((None, None));
-=======
+
     // ECMA-376 §17.4.1 w:bidiVisual — RTL (visual) column order. On-off toggle.
     // Phase 0: recorded only; column-order resolution is deferred.
     let bidi_visual = tbl_pr.and_then(|p| bool_prop(p, "bidiVisual"));
->>>>>>> origin/main
 
     DocTable {
         col_widths,
@@ -2300,13 +2298,10 @@ fn parse_table(
         cell_margin_left: cm_left,
         cell_margin_right: cm_right,
         jc,
-<<<<<<< HEAD
         layout,
         width_pt: tbl_w_pt,
         width_pct: tbl_w_pct,
-=======
         bidi_visual,
->>>>>>> origin/main
     }
 }
 
@@ -2577,7 +2572,6 @@ fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
-<<<<<<< HEAD
 mod tests {
     use super::*;
     use crate::xml_util::W_NS;
@@ -2663,7 +2657,10 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
-=======
+    }
+}
+
+#[cfg(test)]
 mod rtl_tests {
     use super::*;
 
@@ -2756,6 +2753,5 @@ mod rtl_tests {
             _ => None,
         }).unwrap();
         assert_eq!(run.rtl, Some(false));
->>>>>>> origin/main
     }
 }
