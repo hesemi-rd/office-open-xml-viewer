@@ -1161,7 +1161,8 @@ function renderTextBody(
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
   onTextRun?: TextRunCallback,
-) {
+  measureOnly = false,
+): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
   // "vert270" rotates 270° (= 90° counterclockwise).
@@ -1200,6 +1201,11 @@ function renderTextBody(
         })
       : undefined;
 
+    if (measureOnly) {
+      // The rotated sub-frame's content height runs along the original width
+      // axis; for a table row the vertical extent is the original box width.
+      return bw;
+    }
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
@@ -1472,6 +1478,13 @@ function renderTextBody(
         ({ allLines, totalHeight } = buildLayout(lo));
       }
     }
+  }
+
+  // ── measure-only: return the content height the text body needs ─────────
+  // Used by renderTable to grow rows to fit their tallest cell (ECMA-376
+  // §21.1.3.18: a:tr@h is a minimum). Returns padding + laid-out text height.
+  if (measureOnly) {
+    return tPad + totalHeight + bPad;
   }
 
   // ── anchor="b" with bh=0: auto-height growing upward from by ────────────
@@ -2132,34 +2145,119 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
-  // Convert col widths and row heights to pixels
+  // Convert col widths to pixels.
   const colWidths = el.cols.map(c => emuToPx(c, scale));
+  const numCols = colWidths.length;
+
+  // Spanned width starting at column `ci` for `span` columns.
+  const spannedWidth = (ci: number, span: number): number => {
+    let w = 0;
+    for (let s = 0; s < span; s++) w += colWidths[ci + s] ?? 0;
+    return w;
+  };
+
+  // ── Row heights: ECMA-376 §21.1.3.18 (a:tr@h) is a MINIMUM ────────────────
+  // PowerPoint grows a row to fit its tallest cell's laid-out text (like
+  // Word's "at least" line rule). A literal h=0 therefore becomes
+  // content-driven. We measure each cell's text body at its spanned width
+  // (reusing the same renderTextBody machinery via measureOnly) and take
+  // max(tr@h, tallest single-row cell content). A rowSpan cell distributes
+  // its content height across the rows it covers so it doesn't inflate the
+  // first row.
   const rowHeights = el.rows.map(r => emuToPx(r.height, scale));
 
-  let rowY = y0;
+  // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
-    const rowH = rowHeights[ri];
-    let colX = x0;
+    for (let ci = 0; ci < row.cells.length; ci++) {
+      const cell = row.cells[ci];
+      if (cell.hMerge || cell.vMerge) continue;
+      if ((cell.rowSpan || 1) > 1) continue;
+      if (!cell.textBody) continue;
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const needed = (renderTextBody(
+        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        '#000000', slideNumber, rc, undefined, true,
+      ) as number) || 0;
+      if (needed > rowHeights[ri]) rowHeights[ri] = needed;
+    }
+  }
+
+  // Second pass: rowSpan cells. If the content needs more than the sum of the
+  // rows it spans, distribute the deficit across those rows so the merged area
+  // grows without inflating any single row beyond what its own content needs.
+  for (let ri = 0; ri < el.rows.length; ri++) {
+    const row = el.rows[ri];
+    for (let ci = 0; ci < row.cells.length; ci++) {
+      const cell = row.cells[ci];
+      if (cell.hMerge || cell.vMerge) continue;
+      const span = cell.rowSpan || 1;
+      if (span <= 1 || !cell.textBody) continue;
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const needed = (renderTextBody(
+        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        '#000000', slideNumber, rc, undefined, true,
+      ) as number) || 0;
+      let have = 0;
+      for (let s = 0; s < span && ri + s < rowHeights.length; s++) have += rowHeights[ri + s];
+      if (needed > have) {
+        const extra = (needed - have) / span;
+        for (let s = 0; s < span && ri + s < rowHeights.length; s++) rowHeights[ri + s] += extra;
+      }
+    }
+  }
+
+  // ── Column x-positions ────────────────────────────────────────────────────
+  // ECMA-376 §21.1.3.13 (a:tblPr@rtl): a right-to-left table places column 0
+  // at the right edge, columns advancing leftward. We precompute the left
+  // pixel edge of each column so RTL is a coordinate flip (no ctx.scale(-1,1)
+  // which would mirror text and borders).
+  const tableW = colWidths.reduce((a, b) => a + b, 0);
+  const colLeft: number[] = new Array(numCols);
+  if (el.rtl) {
+    let right = x0 + tableW;
+    for (let ci = 0; ci < numCols; ci++) {
+      right -= colWidths[ci];
+      colLeft[ci] = right;
+    }
+  } else {
+    let left = x0;
+    for (let ci = 0; ci < numCols; ci++) {
+      colLeft[ci] = left;
+      left += colWidths[ci];
+    }
+  }
+
+  // Left pixel edge of a cell spanning columns [ci, ci+span). Under RTL the
+  // span grows leftward, so the merged cell's left edge is the leftmost column.
+  const spannedLeft = (ci: number, span: number): number =>
+    el.rtl ? colLeft[ci + span - 1] : colLeft[ci];
+
+  const rowTop: number[] = new Array(el.rows.length);
+  {
+    let y = y0;
+    for (let ri = 0; ri < el.rows.length; ri++) { rowTop[ri] = y; y += rowHeights[ri]; }
+  }
+
+  for (let ri = 0; ri < el.rows.length; ri++) {
+    const row = el.rows[ri];
+    const rowY = rowTop[ri];
 
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
 
       // Merged cells that are continuations: skip drawing
       if (cell.hMerge || cell.vMerge) {
-        colX += colWidths[ci] ?? 0;
         continue;
       }
 
       // Cell size: span multiple columns/rows
-      let cellW = 0;
-      for (let span = 0; span < (cell.gridSpan || 1); span++) {
-        cellW += colWidths[ci + span] ?? 0;
-      }
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
       let cellH = 0;
       for (let span = 0; span < (cell.rowSpan || 1); span++) {
         cellH += rowHeights[ri + span] ?? 0;
       }
+      const colX = spannedLeft(ci, cell.gridSpan || 1);
 
       // Fill
       const fillColor = resolveFill(cell.fill);
@@ -2221,10 +2319,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
         ctx.stroke();
       }
       ctx.restore();
-
-      colX += colWidths[ci] ?? 0;
     }
-    rowY += rowH;
   }
 }
 

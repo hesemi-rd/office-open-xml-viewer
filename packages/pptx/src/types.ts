@@ -148,6 +148,8 @@ export interface TableElement {
   /** Column widths in EMU */
   cols: number[];
   rows: TableRow[];
+  /** `<a:tblPr rtl="1">` (ECMA-376 §21.1.3.13): right-to-left table — column 0 at the right edge. */
+  rtl?: boolean;
 }
 
 export interface TableRow {

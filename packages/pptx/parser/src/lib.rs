@@ -628,6 +628,10 @@ struct TableElement {
     /// Column widths in EMU
     cols: Vec<i64>,
     rows: Vec<TableRow>,
+    /// `<a:tblPr rtl="1">` (ECMA-376 §21.1.3.13): right-to-left table —
+    /// column 0 renders at the right edge. Skipped when false/absent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rtl: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -4946,6 +4950,8 @@ fn parse_table(
     };
     let first_row = flag("firstRow");
     let last_row  = flag("lastRow");
+    // ECMA-376 §21.1.3.13 (a:tblPr@rtl): right-to-left table layout.
+    let rtl = flag("rtl");
     let band_row  = flag("bandRow");
     let first_col = flag("firstCol");
     let last_col  = flag("lastCol");
@@ -5128,7 +5134,7 @@ fn parse_table(
 
     Some(TableElement {
         x: t.x, y: t.y, width: t.cx, height: t.cy,
-        cols, rows,
+        cols, rows, rtl,
     })
 }
 
@@ -6824,5 +6830,59 @@ mod tests {
         // rtlCol="1" appears under the camelCase key "rtlCol".
         let json_true = serde_json::to_string(&tb).unwrap();
         assert!(json_true.contains("\"rtlCol\":true"), "expected rtlCol:true in JSON; got {json_true}");
+    }
+
+    /// ECMA-376 §21.1.3.13 (`a:tblPr@rtl`): a right-to-left table sets `rtl=true`
+    /// so the renderer can place column 0 at the right edge. Absent/false must be
+    /// omitted from the serialized JSON (TableElement.rtl is optional in TS).
+    #[test]
+    fn table_rtl_attribute_parses() {
+        // An empty in-memory zip is enough: parse_table only reads
+        // ppt/tableStyles.xml (absent → no style cascade) and the tbl node.
+        fn empty_zip() -> Vec<u8> {
+            let mut buf = Vec::new();
+            {
+                let cursor = Cursor::new(&mut buf);
+                let writer = zip::ZipWriter::new(cursor);
+                writer.finish().unwrap();
+            }
+            buf
+        }
+
+        fn parse_tbl(tbl_xml: &str) -> TableElement {
+            let xml = format!(
+                r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{tbl_xml}</root>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let tbl = doc.root_element()
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "tbl")
+                .unwrap();
+            let t = Transform { x: 0, y: 0, cx: 100, cy: 100, rot: 0.0, flip_h: false, flip_v: false };
+            let theme: HashMap<String, String> = HashMap::new();
+            let rels: HashMap<String, String> = HashMap::new();
+            let bytes = empty_zip();
+            let cursor = Cursor::new(bytes.as_slice());
+            let mut zip = zip::ZipArchive::new(cursor).unwrap();
+            parse_table(tbl, &t, &theme, &rels, &mut zip).unwrap()
+        }
+
+        // rtl="1" → rtl=true, serialized.
+        let t_rtl = parse_tbl(
+            r#"<a:tbl><a:tblPr rtl="1"/><a:tblGrid><a:gridCol w="100"/></a:tblGrid>
+               <a:tr h="0"><a:tc><a:txBody/></a:tc></a:tr></a:tbl>"#,
+        );
+        assert!(t_rtl.rtl, "rtl=\"1\" should yield rtl=true");
+        let json = serde_json::to_string(&t_rtl).unwrap();
+        assert!(json.contains("\"rtl\":true"), "expected rtl:true in JSON; got {json}");
+
+        // Absent tblPr@rtl → false, omitted from JSON.
+        let t_ltr = parse_tbl(
+            r#"<a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="100"/></a:tblGrid>
+               <a:tr h="0"><a:tc><a:txBody/></a:tc></a:tr></a:tbl>"#,
+        );
+        assert!(!t_ltr.rtl, "absent rtl should yield rtl=false");
+        let json_ltr = serde_json::to_string(&t_ltr).unwrap();
+        assert!(!json_ltr.contains("\"rtl\""), "rtl=false must be omitted; got {json_ltr}");
     }
 }
