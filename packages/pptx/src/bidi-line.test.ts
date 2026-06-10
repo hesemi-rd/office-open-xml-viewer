@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { segmentsHaveRtl, computeLineVisualOrder, resolveAlignEdge } from './bidi-line.js';
+import { segmentsHaveRtl, computeLineVisualOrder } from './bidi-line.js';
 
 describe('segmentsHaveRtl', () => {
   it('detects Arabic/Hebrew, ignores Latin and objects', () => {
@@ -7,20 +7,6 @@ describe('segmentsHaveRtl', () => {
     expect(segmentsHaveRtl([{ text: 'price 99' }, {}])).toBe(false); // object seg has no text
     expect(segmentsHaveRtl([{ text: 'مرحبا' }])).toBe(true);
     expect(segmentsHaveRtl([{ text: 'abc ' }, { text: 'שלום' }])).toBe(true);
-  });
-});
-
-describe('resolveAlignEdge', () => {
-  it('resolves logical start/end against base direction', () => {
-    expect(resolveAlignEdge(undefined, false)).toBe('left');
-    expect(resolveAlignEdge(undefined, true)).toBe('right');
-    expect(resolveAlignEdge('start', true)).toBe('right');
-    expect(resolveAlignEdge('end', true)).toBe('left');
-    expect(resolveAlignEdge('end', false)).toBe('right');
-    expect(resolveAlignEdge('center', true)).toBe('center');
-    expect(resolveAlignEdge('both', true)).toBe('justify');
-    expect(resolveAlignEdge('left', true)).toBe('left'); // physical stays physical
-    expect(resolveAlignEdge('right', true)).toBe('right');
   });
 });
 

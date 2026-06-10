@@ -1561,7 +1561,10 @@ function renderTextBody(
     }
     cursorY += topGapPx;
     entriesInCol++;
-    const xShift = colIdx * colWidthShift;
+    // §21.1.2.1.1 bodyPr@rtlCol: columns fill right-to-left — mirror the
+    // visual column index. LTR bodies (rtlCol false/absent) are unchanged.
+    const visCol = body.rtlCol ? numCol - 1 - colIdx : colIdx;
+    const xShift = visCol * colWidthShift;
     const textX = entry.textX + xShift;
     const bulletX = entry.bulletX + xShift;
     const textMaxW = entry.textMaxW;
@@ -1603,8 +1606,8 @@ function renderTextBody(
       if (paraNeedsBidi && baseRtl) {
         const prevDir = ctx.direction;
         ctx.direction = 'rtl';
-        const bw = ctx.measureText(bulletLabel).width;
-        ctx.fillText(bulletLabel, textX + textMaxW + (textX - bulletX) - bw, baseline);
+        const bulletW = ctx.measureText(bulletLabel).width;
+        ctx.fillText(bulletLabel, textX + textMaxW + (textX - bulletX) - bulletW, baseline);
         ctx.direction = prevDir;
       } else {
         ctx.fillText(bulletLabel, bulletX, baseline);
@@ -1672,14 +1675,21 @@ function renderTextBody(
       if (ls > 0 && seg.text.length > 1 && !segRtl) {
         // Draw glyph-by-glyph so each character advance is `measure + ls`.
         // Matches OOXML rPr @spc semantics — extra space added to each
-        // character's advance, including after the last one. Skipped for RTL
-        // segments: per-glyph advance would break Arabic cursive joining, so we
-        // draw the whole shaped segment in one fillText instead.
+        // character's advance, including after the last one.
         let cx = penX;
         for (const ch of seg.text) {
           ctx.fillText(ch, cx, segBaseline);
           cx += ctx.measureText(ch).width + ls;
         }
+      } else if (ls > 0 && seg.text.length > 1) {
+        // RTL segment with rPr @spc: per-glyph advance would break Arabic
+        // cursive joining, so distribute the spacing via canvas letterSpacing
+        // and draw the whole shaped segment in one fillText. The painted width
+        // then matches the segW advance below (baseW + ls per character).
+        const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+        try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
+        ctx.fillText(seg.text, penX, segBaseline);
+        try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
       } else {
         ctx.fillText(seg.text, penX, segBaseline);
       }
@@ -1704,6 +1714,11 @@ function renderTextBody(
             ctx.strokeText(ch, cx, segBaseline);
             cx += ctx.measureText(ch).width + ls;
           }
+        } else if (ls > 0 && seg.text.length > 1) {
+          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
+          ctx.strokeText(seg.text, penX, segBaseline);
+          try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
         } else {
           ctx.strokeText(seg.text, penX, segBaseline);
         }

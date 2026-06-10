@@ -14,7 +14,10 @@ import { getDefaultBidiEngine } from '@silurus/ooxml-core';
 /** Strong-RTL scripts (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, …) +
  *  Arabic presentation forms. Used only as a cheap gate to decide whether a
  *  line needs the (exact) bidi pass at all — never for ordering itself. */
-const RTL_GATE = /[֐-ࣿיִ-﷿ﹰ-﻿]|[\u{10800}-\u{10FFF}]/u;
+const RTL_GATE =
+  // strong-RTL blocks incl. presentation forms, Plane-1 RTL blocks, and
+  // RTL-implicating controls (RLM/RLE/RLO/RLI).
+  /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u200F\u202B\u202E\u2067]|[\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
  *  Typed as `unknown` element so the renderer's LayoutSeg union (whose image /
@@ -46,9 +49,12 @@ const OBJECT_PLACEHOLDER = '￼'; // OBJECT REPLACEMENT CHARACTER (bidi class ON
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
  * segments contribute their text; non-text segments contribute one neutral
  * placeholder so they take the surrounding direction. Each segment is assigned
- * the embedding level of its first code unit (segments are single-script in
- * practice because they are space-split); Canvas resolves any residual
- * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
+ * the embedding level of its first code unit. pptx segments are style-merged
+ * (not word-split), so a single-style segment CAN span a direction boundary;
+ * its internal order is still resolved correctly by Canvas (whole segment in
+ * one fillText with the matching `ctx.direction`), while its position among
+ * neighbours uses the first-unit level — a documented approximation, exact
+ * splitting at level boundaries is tracked as a follow-up.
  */
 export function computeLineVisualOrder(
   segments: readonly unknown[],
@@ -81,31 +87,3 @@ export function computeLineVisualOrder(
   return { order, rtl };
 }
 
-/** Physical edge a line aligns to, resolving logical start/end against base direction. */
-export type AlignEdge = 'left' | 'right' | 'center' | 'justify';
-
-/**
- * Resolve a paragraph's `w:jc` value (and base direction) to a physical edge.
- * `start`/`end` are logical (flip under RTL); `left`/`right` are physical;
- * an unset alignment defaults to the leading (logical-start) edge.
- */
-export function resolveAlignEdge(alignment: string | undefined, baseRtl: boolean): AlignEdge {
-  switch (alignment) {
-    case 'center':
-      return 'center';
-    case 'both':
-    case 'justify':
-    case 'distribute':
-      return 'justify';
-    case 'left':
-      return 'left';
-    case 'right':
-      return 'right';
-    case 'end':
-      return baseRtl ? 'left' : 'right';
-    case 'start':
-    case undefined:
-    default:
-      return baseRtl ? 'right' : 'left';
-  }
-}
