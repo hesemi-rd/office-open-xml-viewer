@@ -1106,6 +1106,12 @@ fn parse_run_inner(
     let rtl = fmt.rtl;
     let font_family_cs = theme.resolve_font_ref(fmt.font_family_cs.clone());
     let font_size_cs = fmt.font_size_cs;
+    // Complex-script bold/italic (ECMA-376 §17.3.2.4 / §17.3.2.6). Surfaced as
+    // Option so the renderer can apply them on the CS axis for rtl/cs runs:
+    // `None` ⇒ not set anywhere in the style chain ⇒ not bold/italic for CS
+    // glyphs, regardless of the non-CS `b`/`i`.
+    let bold_cs = fmt.bold_cs;
+    let italic_cs = fmt.italic_cs;
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -1137,6 +1143,8 @@ fn parse_run_inner(
                         rtl,
                         font_family_cs: font_family_cs.clone(),
                         font_size_cs,
+                        bold_cs,
+                        italic_cs,
                     }));
                 }
             }
@@ -1164,6 +1172,8 @@ fn parse_run_inner(
                     rtl,
                     font_family_cs: font_family_cs.clone(),
                     font_size_cs,
+                    bold_cs,
+                    italic_cs,
                 }));
             }
             "br" => {
@@ -1260,6 +1270,8 @@ fn parse_run_inner(
                     rtl,
                     font_family_cs: font_family_cs.clone(),
                     font_size_cs,
+                    bold_cs,
+                    italic_cs,
                 }));
             }
             "AlternateContent" => {
@@ -2535,6 +2547,8 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.rtl.is_some() { base.rtl = direct.rtl; }
     if direct.font_family_cs.is_some() { base.font_family_cs = direct.font_family_cs.clone(); }
     if direct.font_size_cs.is_some() { base.font_size_cs = direct.font_size_cs; }
+    if direct.bold_cs.is_some() { base.bold_cs = direct.bold_cs; }
+    if direct.italic_cs.is_some() { base.italic_cs = direct.italic_cs; }
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {
@@ -2753,5 +2767,56 @@ mod rtl_tests {
             _ => None,
         }).unwrap();
         assert_eq!(run.rtl, Some(false));
+    }
+
+    /// ECMA-376 §17.3.2.4 w:bCs / §17.3.2.6 w:iCs are INDEPENDENT toggles from
+    /// §17.3.2.3 w:b / §17.3.2.5 w:i. A run that sets only `w:b` (no `w:bCs`)
+    /// must surface `bold_cs == None`, so a complex-script consumer renders it
+    /// non-bold — this is the sample-7 date-cell case where Word draws the
+    /// dates at regular weight despite the run carrying `w:b`.
+    #[test]
+    fn complex_script_bold_is_independent_of_non_cs_bold() {
+        let body = body_from(
+            r#"<w:p><w:r>
+                <w:rPr><w:rtl/><w:cs/><w:b/><w:szCs w:val="24"/></w:rPr>
+                <w:t>28-02-2026</w:t>
+            </w:r></w:p>"#,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        let run = para.runs.iter().find_map(|r| match r {
+            DocRun::Text(t) => Some(t),
+            _ => None,
+        }).unwrap();
+        // `w:b` sets the non-CS bold…
+        assert_eq!(run.bold, true, "w:b sets non-CS bold");
+        // …but `w:bCs` is absent, so the CS bold axis stays None (inherit/off),
+        // NOT derived from w:b.
+        assert_eq!(run.bold_cs, None, "absent w:bCs must not inherit w:b");
+        assert_eq!(run.italic_cs, None, "absent w:iCs must not inherit w:i");
+    }
+
+    /// An explicit `w:bCs` / `w:iCs` is surfaced on its own axis (and honors the
+    /// `w:val="0"` off form, §17.3.2.22), independent of `w:b`/`w:i`.
+    #[test]
+    fn complex_script_bold_italic_surface_when_present() {
+        let body = body_from(
+            r#"<w:p><w:r>
+                <w:rPr><w:rtl/><w:bCs/><w:iCs w:val="0"/></w:rPr>
+                <w:t>عربي</w:t>
+            </w:r></w:p>"#,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        let run = para.runs.iter().find_map(|r| match r {
+            DocRun::Text(t) => Some(t),
+            _ => None,
+        }).unwrap();
+        assert_eq!(run.bold_cs, Some(true), "w:bCs sets the CS bold axis");
+        assert_eq!(run.italic_cs, Some(false), "w:iCs val=0 turns CS italic off");
     }
 }

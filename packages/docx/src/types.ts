@@ -354,6 +354,13 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.39 `<w:szCs>` — complex-script font size in pt
    *  (same units as `fontSize`). */
   fontSizeCs?: number;
+  /** ECMA-376 §17.3.2.4 `<w:bCs>` — bold for complex-script text. Independent
+   *  toggle from `bold` (§17.3.2.3 w:b): absent means a complex-script run is
+   *  not bold regardless of `bold`. RTL/complex-script runs use this value. */
+  boldCs?: boolean;
+  /** ECMA-376 §17.3.2.6 `<w:iCs>` — italic for complex-script text.
+   *  Independent toggle from `italic`, same semantics as `boldCs`. */
+  italicCs?: boolean;
 }
 
 export interface RunRevision {

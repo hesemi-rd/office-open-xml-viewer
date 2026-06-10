@@ -37,6 +37,14 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.39 w:szCs/@w:val — complex-script font size in pt
     /// (converted from half-points, same units as `font_size`).
     pub font_size_cs: Option<f64>,
+    /// ECMA-376 §17.3.2.4 w:bCs — bold toggle for complex-script text. This is
+    /// an INDEPENDENT toggle from §17.3.2.3 w:b (which applies to non-complex
+    /// text): an absent w:bCs does not inherit `b`'s value but resolves through
+    /// the style chain on its own axis. RTL/complex-script runs take this value.
+    pub bold_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.6 w:iCs — italic toggle for complex-script text.
+    /// Independent of §17.3.2.5 w:i, same as `bold_cs` above.
+    pub italic_cs: Option<bool>,
 }
 
 /// Resolved paragraph formatting.
@@ -365,6 +373,8 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.rtl.is_some() { dst.rtl = src.rtl; }
     if src.font_family_cs.is_some() { dst.font_family_cs = src.font_family_cs.clone(); }
     if src.font_size_cs.is_some() { dst.font_size_cs = src.font_size_cs; }
+    if src.bold_cs.is_some() { dst.bold_cs = src.bold_cs; }
+    if src.italic_cs.is_some() { dst.italic_cs = src.italic_cs; }
 }
 
 pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
@@ -536,6 +546,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
     fmt.bold = bool_prop(rpr, "b");
     fmt.italic = bool_prop(rpr, "i");
+    // Complex-script bold/italic toggles (ECMA-376 §17.3.2.4 w:bCs,
+    // §17.3.2.6 w:iCs). Parsed on their own axis — never derived from b/i —
+    // so RTL/complex-script runs resolve weight/slant independently per spec.
+    fmt.bold_cs = bool_prop(rpr, "bCs");
+    fmt.italic_cs = bool_prop(rpr, "iCs");
     fmt.strikethrough = bool_prop(rpr, "strike");
 
     // Underline
