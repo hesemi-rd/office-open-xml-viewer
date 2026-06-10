@@ -1010,8 +1010,12 @@ function renderParagraph(
 
   const textAreaTopY = state.y;
 
-  const indLeft = para.indentLeft * scale;
-  const indRight = para.indentRight * scale;
+  // ECMA-376 §17.3.1.12 w:ind — the transitional left/right attributes are
+  // logical start/end (Part 4 §14.11.2). In a bidi paragraph the start side is
+  // the physical RIGHT, so the two indents swap physical sides here.
+  const baseRtl = para.bidi === true;
+  const indLeft = (baseRtl ? para.indentRight : para.indentLeft) * scale;
+  const indRight = (baseRtl ? para.indentLeft : para.indentRight) * scale;
   const indFirst = para.indentFirst * scale;
 
   // Numbering prefix (indent is already baked into para.indentLeft / para.indentFirst)
@@ -1107,8 +1111,8 @@ function renderParagraph(
   // (ECMA-376 §17.3.1.6). We engage the (exact) bidi pass only when the base is
   // RTL or the line actually contains strong-RTL characters, so pure-LTR
   // paragraphs keep their byte-identical fast path. `alignEdge` resolves
-  // logical start/end against the base direction.
-  const baseRtl = para.bidi === true;
+  // logical start/end against the base direction. (`baseRtl` is declared with
+  // the indent swap above.)
   const paraNeedsBidi = baseRtl || segmentsHaveRtl(segments);
   const alignEdge = resolveAlignEdge(para.alignment, baseRtl);
 
@@ -1141,27 +1145,11 @@ function renderParagraph(
     // Per-line X range (may be narrower than paraW when wrapping around floats).
     const lineLeft = paraX + line.xOffset;
     const lineAvailW = line.availWidth;
-    let x = firstLine ? lineLeft + indFirst : lineLeft;
-
-    if (firstLine && numPrefix && !dryRun) {
-      const numFontSize = getDefaultFontSize(para) * scale;
-      ctx.font = `${numFontSize}px sans-serif`;
-      ctx.fillStyle = defaultColor;
-      if (baseRtl) {
-        // RTL list: the marker hangs in the right gutter; its right edge mirrors
-        // the LTR position (firstLineX - numTab) about the line's right edge.
-        const prevAlign = ctx.textAlign;
-        const prevDir = ctx.direction;
-        ctx.textAlign = 'left';
-        ctx.direction = 'rtl';
-        const markerW = ctx.measureText(para.numbering!.text).width;
-        ctx.fillText(para.numbering!.text, lineLeft + lineAvailW + numTab - markerW, baseline);
-        ctx.textAlign = prevAlign;
-        ctx.direction = prevDir;
-      } else {
-        ctx.fillText(para.numbering!.text, x - numTab, baseline);
-      }
-    }
+    // First-line indent shifts the START edge: physical left for LTR; for RTL
+    // the start is the right edge, so it narrows/widens the line's available
+    // width instead of moving x (effAvailW below).
+    let x = firstLine && !baseRtl ? lineLeft + indFirst : lineLeft;
+    const effAvailW = baseRtl && firstLine ? lineAvailW - indFirst : lineAvailW;
 
     // Visual draw order. Under bidi we reorder the line's segments per UAX#9
     // (rule L2) and draw each with ctx.direction matching its resolved
@@ -1180,7 +1168,7 @@ function renderParagraph(
     const lastDrawnSi = visual ? visual.order[segCount - 1] : segCount - 1;
 
     const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
-    const lineSlack = lineAvailW - (x - lineLeft) - lineWidth;
+    const lineSlack = effAvailW - (x - lineLeft) - lineWidth;
     const applyJustify = isJustified && (!isLastLine || stretchLastLine);
     let alignOffset = 0;
     if (alignEdge === 'right') {
@@ -1195,6 +1183,29 @@ function renderParagraph(
     }
     // 'left' and stretched 'justify' keep alignOffset 0.
     x += alignOffset;
+
+    if (firstLine && numPrefix && !dryRun) {
+      const numFontSize = getDefaultFontSize(para) * scale;
+      ctx.font = `${numFontSize}px sans-serif`;
+      ctx.fillStyle = defaultColor;
+      if (baseRtl) {
+        // The RTL list marker is laid out INLINE at the line's start (right)
+        // edge: its right edge sits numTab (w:hanging) to the right of the
+        // text's start edge, mirroring the LTR `firstLineX - numTab` anchor,
+        // and it follows the text through jc alignment (sample-8 PDF ground
+        // truth: marker right edge = aligned text right edge + hanging).
+        const prevAlign = ctx.textAlign;
+        const prevDir = ctx.direction;
+        ctx.textAlign = 'left';
+        ctx.direction = 'rtl';
+        const markerW = ctx.measureText(para.numbering!.text).width;
+        ctx.fillText(para.numbering!.text, x + lineWidth + numTab - markerW, baseline);
+        ctx.textAlign = prevAlign;
+        ctx.direction = prevDir;
+      } else {
+        ctx.fillText(para.numbering!.text, lineLeft + indFirst - numTab, baseline);
+      }
+    }
 
     // Inter-word adjustment per whitespace char on this line. Positive slack
     // (lineWidth < availW) expands spaces to fill; negative slack (lineWidth >
@@ -1213,7 +1224,7 @@ function renderParagraph(
         if (si === lastDrawnSi) continue;
         if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
       }
-      const slack = lineAvailW - (x - lineLeft) - lineWidth;
+      const slack = effAvailW - (x - lineLeft) - lineWidth;
       if (totalTrailingSpaces > 0) {
         extraPerSpace = slack / totalTrailingSpaces;
         // Don't compress past zero-width spaces — limit compression to at most

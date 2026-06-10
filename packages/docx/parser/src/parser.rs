@@ -739,6 +739,12 @@ fn parse_paragraph(
     } else {
         (base_para.indent_left.unwrap_or(0.0), base_para.indent_first.unwrap_or(0.0))
     };
+    // Same for the end-side indent (w:ind@right ≡ end): an RTL list level
+    // defines its indent there (e.g. w:right="720" w:hanging="360").
+    let indent_right = numbering.as_ref()
+        .and_then(|num| num_map.get_level(num.num_id, num.level))
+        .and_then(|l| l.indent_right)
+        .unwrap_or(indent_right);
 
     // Parse runs
     let mut runs = vec![];

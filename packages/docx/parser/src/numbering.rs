@@ -6,7 +6,10 @@ use crate::xml_util::*;
 pub struct LevelDef {
     pub format: String,  // "decimal" | "bullet" | etc.
     pub text: String,    // lvlText val, e.g. "%1." or "•"
-    pub indent_left: f64,   // pt
+    pub indent_left: f64,   // pt — w:ind@left ≡ logical START indent (§17.3.1.12)
+    /// pt — w:ind@right ≡ logical END indent (Part 4 §14.11.2). RTL list levels
+    /// carry their indent here (the renderer maps it to the physical left side).
+    pub indent_right: Option<f64>,
     pub tab: f64,            // pt
     pub start: u32,
 }
@@ -17,6 +20,7 @@ impl Default for LevelDef {
             format: "decimal".to_string(),
             text: "%1.".to_string(),
             indent_left: 36.0,
+            indent_right: None,
             tab: 36.0,
             start: 1,
         }
@@ -60,17 +64,27 @@ impl NumberingMap {
                 let text = child_w(lvl_node, "lvlText")
                     .and_then(|n| attr_w(n, "val"))
                     .unwrap_or_else(|| "%1.".to_string());
-                let indent_left = child_w(lvl_node, "pPr")
-                    .and_then(|p| child_w(p, "ind"))
+                let ind_node = child_w(lvl_node, "pPr").and_then(|p| child_w(p, "ind"));
+                // When the level defines a w:ind, a missing @left means "no
+                // start indent from this source" (an RTL level carries its
+                // indent in @right ≡ end instead); the per-level depth default
+                // applies only when no w:ind exists at all.
+                let indent_left = ind_node
                     .and_then(|i| attr_w(i, "left"))
                     .map(|v| twips_to_pt(&v))
-                    .unwrap_or(720.0 / 20.0 * (levels.len() as f64 + 1.0));
-                let tab = child_w(lvl_node, "pPr")
-                    .and_then(|p| child_w(p, "ind"))
+                    .unwrap_or(if ind_node.is_some() {
+                        0.0
+                    } else {
+                        720.0 / 20.0 * (levels.len() as f64 + 1.0)
+                    });
+                let indent_right = ind_node
+                    .and_then(|i| attr_w(i, "right"))
+                    .map(|v| twips_to_pt(&v));
+                let tab = ind_node
                     .and_then(|i| attr_w(i, "hanging").or_else(|| attr_w(i, "firstLine")))
                     .map(|v| twips_to_pt(&v))
                     .unwrap_or(36.0);
-                levels.push(LevelDef { format, text, indent_left, tab, start });
+                levels.push(LevelDef { format, text, indent_left, indent_right, tab, start });
             }
             map.abstract_nums.insert(abs_id, levels);
         }
