@@ -5,8 +5,10 @@ import type { LineSpacing } from './types.js';
 // Regression: some generators emit <w:spacing w:line="0" w:lineRule="exact"/> on
 // table cells (e.g. private/sample-7.docx). A literal exact-0 line collapsed every
 // line to 0px, so table rows fell back to the 10px minimum and cell content
-// overlapped. Word ignores a zero line value and uses single spacing; lineBoxHeight
-// must do the same (ECMA-376 §17.3.1.33).
+// overlapped. ECMA-376 §17.3.1.33 leaves a zero line undefined; Word's native
+// model ([MS-DOC] LSPD) cannot represent an exact 0 (exact = negative dyaLine)
+// and resolves a non-negative dyaLine as max(dyaLine, single spacing) — so 0
+// means exactly single spacing. lineBoxHeight must do the same.
 
 const exact = (value: number): LineSpacing => ({ value, rule: 'exact', explicit: true });
 const auto = (value: number): LineSpacing => ({ value, rule: 'auto', explicit: true });
