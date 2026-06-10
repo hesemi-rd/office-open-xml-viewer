@@ -760,7 +760,7 @@ function splitParagraphAcrossPages(
  *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
  *  ECMA-376 §17.4.80, §17.4.85). */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
-  const colWidths = resolveColumnWidths(table, contentWPt);
+  const colWidths = resolveColumnWidths(table, contentWPt, state);
 
   const rowHs: number[] = [];
   const restartInfo: Array<{ ri: number; ci: number; contentH: number }> = [];
@@ -837,23 +837,151 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
  * then multiplies by the device scale) and `computeTableRowHeights` (which
  * works directly in pt) consume this.
  */
-function resolveColumnWidths(table: DocTable, contentWPt: number): number[] {
+/** Minimum content width (pt) of a single cell: the widest non-breakable token
+ *  across its paragraphs plus the cell's left/right margins. A column can never
+ *  be narrower than this without clipping/wrapping the longest word — Word's
+ *  auto-fit (ECMA-376 §17.4.52) treats it as the column's hard floor when the
+ *  preferred widths overflow, which is why date strings like "2026-02-28" stay
+ *  on one line even though their preferred `tcW` gets squeezed. */
+function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderState): number {
+  const { ctx, fontFamilyClasses } = state;
+  let maxTokenPt = 0;
+  const scanPara = (para: DocParagraph): void => {
+    for (const run of para.runs) {
+      if (run.type !== 'text') continue;
+      const t = run as unknown as DocxTextRun & { type: 'text' };
+      if (!t.text) continue;
+      // Resolve the complex-script (cs) axis the same way `buildSegments` does
+      // (ECMA-376 §17.3.2.3/§17.3.2.17/§17.3.2.18): a run forcing cs (w:rtl or an
+      // explicit cs font) measures with the cs bold/italic/size/family, each
+      // falling back to its Latin counterpart when absent. We pick the cs axis
+      // for the min-content estimate when the run forces cs so wide Arabic/Hebrew
+      // tokens reserve enough column width; otherwise the Latin axis.
+      const forceCs = t.rtl === true || t.fontFamilyCs != null;
+      const effBold = forceCs ? (t.boldCs ?? t.bold) : t.bold;
+      const effItalic = forceCs ? (t.italicCs ?? t.italic) : t.italic;
+      const effFontSize = forceCs ? (t.fontSizeCs ?? t.fontSize) : t.fontSize;
+      const effFontFamily = forceCs ? (t.fontFamilyCs ?? t.fontFamily) : t.fontFamily;
+      // Measure in pt-space (font size in pt, scale 1) so the result composes
+      // directly with the pt-based column math.
+      ctx.font = buildFont(effBold, effItalic, effFontSize, effFontFamily, fontFamilyClasses);
+      // Non-breakable tokens are the same units the line layout treats as
+      // atomic (UAX#14 has no break inside a word or between a digit and an
+      // adjacent hyphen/period). CJK breaks per-glyph, so its min is one glyph.
+      for (const piece of t.text.split('\t')) {
+        for (const token of splitTextForLayout(piece)) {
+          const trimmed = token.replace(/\s+$/u, '');
+          if (!trimmed) continue;
+          const w = hasCJKBreakOpportunity(trimmed)
+            ? Math.max(...[...trimmed].map((ch) => ctx.measureText(ch).width))
+            : ctx.measureText(trimmed).width;
+          if (w > maxTokenPt) maxTokenPt = w;
+        }
+      }
+    }
+  };
+  for (const ce of cell.content) {
+    if (ce.type === 'paragraph') scanPara(ce as unknown as DocParagraph);
+    // Nested tables: their own columns handle min-width; skip here.
+  }
+  if (maxTokenPt === 0) return 0;
+  const cm = effCellMargins(cell, table);
+  return maxTokenPt + cm.left + cm.right;
+}
+
+function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
   const n = table.colWidths.length;
   if (n === 0) return [];
 
   const grid = table.colWidths;
+
+  // Per-column minimum content width (pt). Single-column cells set a hard floor;
+  // a gridSpan cell's min is distributed across its columns in proportion to the
+  // tblGrid so a wide spanning cell does not over-inflate any one column.
+  const minW: number[] = new Array(n).fill(0);
+  for (const row of table.rows) {
+    let ci = 0;
+    for (const cell of row.cells) {
+      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
+      const m = cellMinContentPt(cell, table, state);
+      if (m > 0) {
+        if (span === 1) {
+          if (m > minW[ci]) minW[ci] = m;
+        } else {
+          const spanCols = grid.slice(ci, ci + span);
+          const gridSum = spanCols.reduce((s, w) => s + w, 0);
+          for (let k = 0; k < span; k++) {
+            const share = gridSum > 0 ? spanCols[k] / gridSum : 1 / span;
+            const part = m * share;
+            if (part > minW[ci + k]) minW[ci + k] = part;
+          }
+        }
+      }
+      ci += span;
+    }
+  }
+
+  // Fit a desired-width vector (preferred `tcW`, floored at min content) to the
+  // available width. When the desired total overflows, Word's auto-fit
+  // (ECMA-376 §17.4.52) distributes the available width in proportion to each
+  // column's PREFERRED width — but never below its minimum content width. A
+  // column pinned to its min keeps that width and the leftover space is shared
+  // among the still-shrinkable columns (again proportional to preferred). This
+  // is what makes a date column with a small preferred width settle at exactly
+  // the date string's width (its content min) while a column with a large
+  // preferred width keeps proportionally more, matching Word's PDF layout.
   const fitToContent = (widths: number[]): number[] => {
     const total = widths.reduce((s, w) => s + w, 0);
-    if (total > contentWPt && total > 0) {
-      const s = contentWPt / total;
-      return widths.map((w) => w * s);
+    if (total <= contentWPt || total <= 0) return widths;
+    const minTotal = minW.reduce((s, w) => s + w, 0);
+    if (minTotal >= contentWPt) {
+      // Even the minimums overflow — scale the minimums so the table still
+      // fits (content clips, as Word does when forced narrower than its words).
+      const s = contentWPt / minTotal;
+      return minTotal > 0 ? minW.map((w) => w * s) : widths.map(() => contentWPt / n);
     }
-    return widths;
+    // Iteratively pin columns to their min and redistribute the rest by
+    // preferred-width proportion. Converges in ≤ n passes (each pass pins at
+    // least one new column or finishes). `widths` already encodes the preferred
+    // width (floored at min) per column, used as the distribution weight.
+    const out = widths.slice();
+    const pinned = new Array(n).fill(false);
+    for (let pass = 0; pass < n; pass++) {
+      let free = contentWPt;
+      let weightSum = 0;
+      for (let c = 0; c < n; c++) {
+        if (pinned[c]) free -= out[c];
+        else weightSum += widths[c];
+      }
+      if (weightSum <= 0) break;
+      let pinnedAny = false;
+      for (let c = 0; c < n; c++) {
+        if (pinned[c]) continue;
+        const share = free * (widths[c] / weightSum);
+        if (share < minW[c]) {
+          out[c] = minW[c];
+          pinned[c] = true;
+          pinnedAny = true;
+        } else {
+          out[c] = share;
+        }
+      }
+      if (!pinnedAny) break;
+    }
+    return out;
   };
 
-  // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52). Scale to fit.
+  // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52) and content is
+  // clipped, never grown — so scale proportionally to fit, ignoring min content
+  // widths (which only govern the autofit branch below).
   if (table.layout === 'fixed') {
-    return fitToContent(grid.slice());
+    const g = grid.slice();
+    const total = g.reduce((s, w) => s + w, 0);
+    if (total > contentWPt && total > 0) {
+      const s = contentWPt / total;
+      return g.map((w) => w * s);
+    }
+    return g;
   }
 
   // Autofit (default): preferred widths drive the column sizes.
@@ -920,8 +1048,11 @@ function resolveColumnWidths(table: DocTable, contentWPt: number): number[] {
     }
   }
 
-  // Columns with no preference anywhere fall back to their tblGrid width.
-  const widths = pref.map((p, c) => (hasPref[c] ? p : grid[c]));
+  // Columns with no preference anywhere fall back to their tblGrid width. A
+  // column's desired width is then floored at its minimum content width: a
+  // preferred `tcW` narrower than the longest unbreakable token cannot actually
+  // be honored (ECMA-376 §17.4.52 — auto layout grows a column to fit content).
+  const widths = pref.map((p, c) => Math.max(hasPref[c] ? p : grid[c], minW[c]));
   return fitToContent(widths);
 }
 
@@ -1600,6 +1731,18 @@ interface WrapLayoutCtx {
   pageH: number;
 }
 
+/**
+ * Resolve the formatting axis that actually governs a run's glyphs.
+ *
+ * ECMA-376 §17.3.2.30 `w:rtl` marks a run as complex-script. For such a run the
+ * complex-script properties take effect — §17.3.2.4 `bCs` (bold), §17.3.2.6
+ * `iCs` (italic), §17.3.2.26 `rFonts@cs` (typeface), §17.3.2.39 `szCs` (size) —
+ * instead of the non-CS `b`/`i`/`rFonts@ascii`/`sz`, which apply to
+ * non-complex (Latin/CJK) text. `bCs`/`iCs` are INDEPENDENT toggles: an absent
+ * `bCs` does not inherit `b`'s value, so a complex-script run that carries only
+ * `w:b` renders non-bold. (sample-7's date cells carry `b` without `bCs`, and
+ * Word draws them at regular weight; the header carries both and is bold.)
+ */
 function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const pushTextPiece = (
@@ -2804,7 +2947,7 @@ function renderTable(table: DocTable, state: RenderState): void {
 
   // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
   // already scaled to fit the available content width, then convert to px.
-  const colWidths = resolveColumnWidths(table, contentW / scale).map((w) => w * scale);
+  const colWidths = resolveColumnWidths(table, contentW / scale, state).map((w) => w * scale);
 
   // Horizontal table alignment on the page (w:tblPr/w:jc).
   const tableW = colWidths.reduce((s, w) => s + w, 0);

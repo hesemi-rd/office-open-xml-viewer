@@ -3096,4 +3096,58 @@ mod rtl_tests {
         assert!(tbl.borders.left.is_some(), "w:start should map to tblBorders.left");
         assert!(tbl.borders.right.is_some(), "w:end should map to tblBorders.right");
     }
+
+    /// ECMA-376 §17.3.2.4 w:bCs / §17.3.2.6 w:iCs are INDEPENDENT toggles from
+    /// §17.3.2.3 w:b / §17.3.2.5 w:i AT THE PARSER LEVEL: a run that sets only
+    /// `w:b` (no `w:bCs`) surfaces `bold_cs == None`. NOTE: the renderer's cs
+    /// axis intentionally MIRRORS the non-cs value when bCs is absent
+    /// (`csBold = boldCs ?? base.bold`) — PDF sample-7 page-1 headings carry
+    /// `w:b` without `w:bCs` and render BOLD in Word. So `None` here means
+    /// "not set on the cs axis at the parser level", not "renders non-bold".
+    #[test]
+    fn complex_script_bold_is_independent_of_non_cs_bold() {
+        let body = body_from(
+            r#"<w:p><w:r>
+                <w:rPr><w:rtl/><w:cs/><w:b/><w:szCs w:val="24"/></w:rPr>
+                <w:t>28-02-2026</w:t>
+            </w:r></w:p>"#,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        let run = para.runs.iter().find_map(|r| match r {
+            DocRun::Text(t) => Some(t),
+            _ => None,
+        }).unwrap();
+        // `w:b` sets the non-CS bold…
+        assert_eq!(run.bold, true, "w:b sets non-CS bold");
+        // …and `w:bCs` is absent, so the parser leaves the CS bold axis None.
+        // The renderer mirrors it from `bold` (boldCs ?? bold) per the PDF-
+        // verified sample-7 page-1 behaviour; that fallback lives in renderer.ts.
+        assert_eq!(run.bold_cs, None, "absent w:bCs stays None at the parser level");
+        assert_eq!(run.italic_cs, None, "absent w:iCs stays None at the parser level");
+    }
+
+    /// An explicit `w:bCs` / `w:iCs` is surfaced on its own axis (and honors the
+    /// `w:val="0"` off form, §17.3.2.22), independent of `w:b`/`w:i`.
+    #[test]
+    fn complex_script_bold_italic_surface_when_present() {
+        let body = body_from(
+            r#"<w:p><w:r>
+                <w:rPr><w:rtl/><w:bCs/><w:iCs w:val="0"/></w:rPr>
+                <w:t>عربي</w:t>
+            </w:r></w:p>"#,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        let run = para.runs.iter().find_map(|r| match r {
+            DocRun::Text(t) => Some(t),
+            _ => None,
+        }).unwrap();
+        assert_eq!(run.bold_cs, Some(true), "w:bCs sets the CS bold axis");
+        assert_eq!(run.italic_cs, Some(false), "w:iCs val=0 turns CS italic off");
+    }
 }
