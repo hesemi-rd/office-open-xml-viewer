@@ -74,11 +74,13 @@ describe('computeLineVisualOrder', () => {
   });
 
   it('resolves a leading-digit run-level rtl run with digits at the trailing (right) end', () => {
-    // "1. " + Hebrew, both run-level rtl, base LTR (no w:bidi). Per §17.3.2.30
-    // the digits must embed RTL, so visually the Hebrew is leftmost and the
-    // "1. " (read RTL → ".1") sits at the right end.
+    // "1. " + Hebrew, both run-level rtl, base LTR (no w:bidi). The renderer
+    // marks rtl-run digits `digitsAsAN` (w:lang w:bidi RTL or the rtl-marked
+    // fallback, §17.3.2.20), classifying them AN; the rtl mark resolves the
+    // "." to R (§17.3.2.30). Visually the Hebrew is leftmost and the "1. "
+    // (read RTL → ".1") sits at the right end.
     const { order, rtl } = computeLineVisualOrder(
-      [{ text: '1. ', rtl: true }, { text: 'תוכן', rtl: true }],
+      [{ text: '1. ', rtl: true, digitsAsAN: true }, { text: 'תוכן', rtl: true }],
       false,
     );
     expect(order).toEqual([1, 0]); // Hebrew visually left, "1." visually right
@@ -140,9 +142,10 @@ describe('computeLineVisualOrder', () => {
     expect(visual).toBe('2026-02-28');
   });
 
-  it('leaves a date as logical order when digits are NOT AN-classified (pure UAX#9 EN)', () => {
-    // Same split, base RTL, but without the digitsAsAN flag: European digits
-    // stay EN, all at the even embedded level, so the groups keep logical order.
+  it('reorders date groups even without AN classification when the run is rtl-marked', () => {
+    // Same split, base RTL, no digitsAsAN: the digits stay EN, but the
+    // rtl-marked "-" separators are ambiguous punctuation and resolve R per
+    // §17.3.2.30, so the EN groups still reorder to Word's visual order.
     const segs = [
       { text: '28', rtl: true },
       { text: '-', rtl: true },
@@ -152,6 +155,72 @@ describe('computeLineVisualOrder', () => {
     ];
     const { order } = computeLineVisualOrder(segs, true);
     const visual = order.map((i) => segs[i].text).join('');
-    expect(visual).toBe('28-02-2026');
+    expect(visual).toBe('2026-02-28');
+  });
+});
+
+describe('rtl-marked run punctuation (§17.3.2.30 ambiguous → RTL)', () => {
+  it('places a trailing rtl-marked "." at the line start edge, not after the number', () => {
+    // sample-7 page 1: logical [Arabic… (rtl)]["2022"][". " (rtl)] under w:bidi.
+    // Word renders the period at the visual LEFT end (".2022 …"); the old
+    // RLE…PDF wrap over-embedded the "." to level base+2 and produced "2022.".
+    const segs = [
+      { text: 'يناير ', rtl: true },
+      { text: '2022' },
+      { text: '.', rtl: true },
+    ];
+    const { order, rtl } = computeLineVisualOrder(segs, true);
+    // Visual left→right: [.][2022][Arabic]
+    expect(order).toEqual([2, 1, 0]);
+    expect(rtl[2]).toBe(true); // the "." draws in RTL context
+  });
+
+  it('still mirrors a literal "1. " prefix to ".1" (digit group + period)', () => {
+    // digitsAsAN pre-split of an rtl-marked "1. " run in a base-LTR paragraph
+    // (sample-7's zero-height numbered headings).
+    const segs = [
+      { text: '1', rtl: true, digitsAsAN: true },
+      { text: '. ', rtl: true, digitsAsAN: true },
+    ];
+    const { order } = computeLineVisualOrder(segs, false);
+    // Visual left→right: [". "]["1"] → rendered ".1"
+    expect(order).toEqual([1, 0]);
+  });
+
+  it('does not reorder English words in rtl-marked runs (spaces untouched)', () => {
+    const segs = [
+      { text: 'first ', rtl: true },
+      { text: 'leader ', rtl: true },
+      { text: 'name', rtl: true },
+    ];
+    const { order, rtl } = computeLineVisualOrder(segs, false);
+    expect(order).toEqual([0, 1, 2]);
+    expect(rtl).toEqual([false, false, false]);
+  });
+
+  it('keeps a non-rtl trailing number at the left end of an RTL title', () => {
+    // sample-7 page-1 title: rtl Arabic runs + plain "2026" run, w:bidi center.
+    const segs = [
+      { text: 'المشاريع ', rtl: true },
+      { text: 'لعام', rtl: true },
+      { text: ' ', rtl: true },
+      { text: '2026' },
+    ];
+    const { order } = computeLineVisualOrder(segs, true);
+    // "2026" must be visually leftmost (first in visual order).
+    expect(order[0]).toBe(3);
+  });
+
+  it('keeps the date group order under digitsAsAN', () => {
+    const segs = [
+      { text: '28', rtl: true, digitsAsAN: true },
+      { text: '-', rtl: true, digitsAsAN: true },
+      { text: '02', rtl: true, digitsAsAN: true },
+      { text: '-', rtl: true, digitsAsAN: true },
+      { text: '2026', rtl: true, digitsAsAN: true },
+    ];
+    const { order } = computeLineVisualOrder(segs, true);
+    // Visual left→right: 2026 - 02 - 28
+    expect(order).toEqual([4, 3, 2, 1, 0]);
   });
 });

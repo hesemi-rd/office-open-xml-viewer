@@ -60,8 +60,14 @@ export interface LineVisualOrder {
 }
 
 const OBJECT_PLACEHOLDER = '￼'; // OBJECT REPLACEMENT CHARACTER (bidi class ON)
-const RLE = '‫'; // RIGHT-TO-LEFT EMBEDDING
-const PDF = '‬'; // POP DIRECTIONAL FORMATTING
+
+/** Punctuation/symbols — the "ambiguous" characters a run-level `<w:rtl>`
+ *  resolves to RTL (§17.3.2.30). Whitespace is deliberately EXCLUDED: an
+ *  inter-word space classified R would reverse the mutual order of English
+ *  words inside an rtl-marked run, which Word does not do. Letters/digits are
+ *  excluded too — strong chars keep their class, and digits are handled by the
+ *  separate `digitsAsAN` (w:lang-gated) override. */
+const AMBIGUOUS_CHAR = /[\p{P}\p{S}]/u;
 
 /**
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
@@ -71,16 +77,16 @@ const PDF = '‬'; // POP DIRECTIONAL FORMATTING
  * practice because they are space-split); Canvas resolves any residual
  * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
  *
- * A run-level `<w:rtl>` (§17.3.2.30) gives the run a strong-RTL context for
- * its OWN weak/neutral characters; it must NOT raise the run's embedding level
- * relative to the paragraph base. We therefore only RLE…PDF-wrap a w:rtl run
- * when it carries NO strong-RTL character of its own: a purely neutral/numeric
- * run (e.g. a literal "1. " list prefix) needs the wrap to resolve RTL, but a
- * run that already contains strong Arabic/Hebrew is RTL by content — wrapping
- * it would over-embed it (level base+2) above sibling LTR/numeric runs at the
- * base level, stranding e.g. a trailing "2026" on the wrong side of an
- * otherwise-RTL line. Strong-Latin content always keeps its even (LTR) level,
- * so English words in an rtl-marked run keep their LTR word order either way.
+ * A run-level `<w:rtl>` (§17.3.2.30) gives the run's AMBIGUOUS characters
+ * right-to-left characteristics. This is modelled as a UAX#9 §4.3 HL1
+ * Bidi_Class override (punctuation/symbols → R), NOT as an RLE…PDF embedding:
+ * an embedding raises the run's level above the paragraph base, which strands
+ * sibling base-level content on the wrong side (e.g. a trailing "." run after
+ * "2022" in an RTL paragraph was over-embedded to level 3 and reordered to
+ * "2022." where Word renders ".2022"). With the class override the run's
+ * neutrals resolve RTL at the BASE level, exactly like Word: a literal "1. "
+ * prefix mirrors to ".1", while strong-Latin content keeps its even (LTR)
+ * level so English words in an rtl-marked run keep their LTR word order.
  */
 export function computeLineVisualOrder(
   segments: readonly unknown[],
@@ -90,39 +96,39 @@ export function computeLineVisualOrder(
   if (n === 0) return { order: [], rtl: [] };
 
   // Concatenate every segment into one logical string for the bidi algorithm.
-  // A run-level `<w:rtl>` segment (§17.3.2.30) is wrapped in RLE…PDF so that its
-  // neutral/weak characters (e.g. leading Western digits in "1. ") resolve to an
-  // RTL embedding, matching Word. `segStart[i]` points at the segment's FIRST
-  // REAL code unit (skipping the injected RLE) so the per-segment level is read
-  // from the content, not the formatting control.
   let full = '';
   const segStart: number[] = new Array(n);
   const segEnd: number[] = new Array(n);
   // UAX#9 §4.3 HL1 per-code-unit Bidi_Class override (see engine.computeLevels).
-  // We mark European digits inside `digitsAsAN` segments as AN so a logical
-  // "28-02-2026" reorders to Word's "2026-02-28" under an RTL base. `undefined`
-  // until any segment opts in, so the pure algorithm runs for ordinary lines.
+  //  - `digitsAsAN` segments: European digits → AN, so a logical "28-02-2026"
+  //    reorders to Word's "2026-02-28" under an RTL base (§17.3.2.20).
+  //  - rtl-marked segments (§17.3.2.30): punctuation/symbols → R, so the run's
+  //    ambiguous characters resolve RTL at the base level (see doc above).
+  // `undefined` until any segment opts in, so the pure algorithm runs for
+  // ordinary lines.
   let classOverride: (BidiClass | null)[] | undefined;
+  const ensureOverride = (): (BidiClass | null)[] => {
+    if (!classOverride) classOverride = [];
+    while (classOverride.length < full.length) classOverride.push(null);
+    return classOverride;
+  };
   for (let i = 0; i < n; i++) {
     const t = segText(segments[i]) ?? '';
-    // Only wrap a w:rtl run that has NO strong-RTL char of its own: a run with
-    // strong Arabic/Hebrew is already RTL by content, so an RLE embedding would
-    // over-raise its level above sibling base-level runs (the 2026-on-the-wrong-
-    // side bug). A neutral/numeric w:rtl run still needs the wrap to resolve RTL.
-    const isRtl = segRtl(segments[i]) && !RTL_GATE.test(t);
-    if (isRtl) full += RLE;
     segStart[i] = full.length;
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
     segEnd[i] = full.length;
-    if (isRtl) full += PDF;
 
-    if (segDigitsAsAN(segments[i]) && t.length > 0) {
-      if (!classOverride) classOverride = new Array(0);
-      // Extend lazily to the current length, then tag each European digit AN.
-      while (classOverride.length < full.length) classOverride.push(null);
+    if (t.length > 0 && (segDigitsAsAN(segments[i]) || segRtl(segments[i]))) {
+      const ov = ensureOverride();
+      const digitsAN = segDigitsAsAN(segments[i]);
+      const rtlMarked = segRtl(segments[i]);
       for (let k = segStart[i]; k < segEnd[i]; k++) {
         const c = full.charCodeAt(k);
-        if (c >= 0x30 && c <= 0x39) classOverride[k] = 'AN';
+        if (digitsAN && c >= 0x30 && c <= 0x39) {
+          ov[k] = 'AN';
+        } else if (rtlMarked && AMBIGUOUS_CHAR.test(full[k])) {
+          ov[k] = 'R';
+        }
       }
     }
   }
@@ -136,16 +142,16 @@ export function computeLineVisualOrder(
   );
 
   // Ordering level = the RESOLVED level of the segment's first real code unit.
-  // No level forcing for rtl-marked segments: inside their RLE…PDF embedding,
-  // Latin letters legitimately resolve to the even embedded level (so English
-  // words in an rtl-marked run keep their mutual LTR order, as Word renders
-  // them), while digits/neutrals resolve per UAX#9 against the RTL embedding.
+  // No level forcing for rtl-marked segments: Latin letters keep their even
+  // (LTR) level (so English words in an rtl-marked run keep their mutual LTR
+  // order, as Word renders them), while the run's punctuation resolves to the
+  // odd level via the §17.3.2.30 class override above.
   //
   // Direction hint = "does the segment contain ANY odd-level unit". A
-  // digits-with-punctuation slice like "1. " inside an RTL embedding has its
-  // "." resolve to the odd embedding level, so the slice draws with
-  // ctx.direction rtl and Canvas mirrors it to ".1" exactly as Word does —
-  // whereas a pure-Latin slice is all-even and keeps its LTR rendering.
+  // digits-with-punctuation slice like "1. " has its "." resolve to the odd
+  // level, so the slice draws with ctx.direction rtl and Canvas mirrors it to
+  // ".1" exactly as Word does — whereas a pure-Latin slice is all-even and
+  // keeps its LTR rendering.
   const segLevels = new Uint8Array(n);
   const rtl: boolean[] = new Array(n);
   for (let i = 0; i < n; i++) {
