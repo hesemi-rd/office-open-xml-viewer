@@ -10,7 +10,9 @@ import { createUax9Engine } from './uax9/index.js';
 export interface BidiEngine {
   /**
    * UAX#9 P2-P3 + X..I rules. Returns the resolved embedding level per code
-   * unit and the paragraph base level. Mirrors bidi-js `getEmbeddingLevels`.
+   * unit and the paragraph base level. Code units removed by rule X9 MUST be
+   * marked with {@link REMOVED_LEVEL} (255). Mirrors bidi-js
+   * `getEmbeddingLevels`.
    *
    * `classOverride` is an optional UAX#9 §4.3 HL1 higher-level-protocol hook:
    * a per-CODE-UNIT array (indexed identically to `text`; surrogate-pair halves

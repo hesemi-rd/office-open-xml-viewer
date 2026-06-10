@@ -50,6 +50,16 @@ describe('toVisualSegments', () => {
     expect(segs[0].parts.map((p) => p.run.meta)).toEqual(['red', 'blue']);
   });
 
+  it('retains X9-removed join controls (ZWJ) in the drawn text', () => {
+    // BN-class characters (ZWJ etc.) are removed by rule X9 for LEVEL purposes
+    // but must stay in the text passed to the shaper (emoji ZWJ sequences,
+    // Arabic join control). Regression: they were dropped and split the atom.
+    const family = '\u{1F469}\u200D\u{1F469}\u200D\u{1F467}'; // woman-woman-girl ZWJ sequence
+    const segs = toVisualSegments([mk(family)], 'ltr');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].text).toBe(family);
+  });
+
   it('splits a word at a shape-affecting (font-size) change', () => {
     const segs = toVisualSegments(
       [mk('مر', { fontSizePx: 16 }), mk('حبا', { fontSizePx: 20 })],

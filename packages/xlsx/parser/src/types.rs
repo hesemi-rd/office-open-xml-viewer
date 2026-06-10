@@ -820,7 +820,9 @@ pub struct ShapeParagraph {
     /// `<a:pPr@algn>` — `l` (default), `ctr`, `r`, `just`, `dist`.
     pub align: String,
     /// `<a:pPr@rtl>` — whether the paragraph reads right-to-left (ECMA-376
-    /// §21.1.2.2.45). Defaults to false (left-to-right).
+    /// §21.1.2.2.7). Omitted from JSON when false so existing output stays
+    /// byte-identical (additive, like the other Phase 0 direction flags).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rtl: bool,
     pub runs: Vec<ShapeTextRun>,
 }

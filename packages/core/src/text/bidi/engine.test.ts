@@ -35,6 +35,17 @@ describe('BidiEngine seam', () => {
     expect(typeof getDefaultBidiEngine().getMirror).toBe('function');
   });
 
+  it('retains characters at resolved level MAX_DEPTH+1 (deep isolates)', () => {
+    // 63 RLEs raise the explicit level to the 125 cap; an L character there
+    // resolves to 126 via I2 (UAX#9 §3.3.4). It must still appear in the
+    // visual order (regression: a `level <= MAX_DEPTH` filter dropped it).
+    const engine = getDefaultBidiEngine();
+    const text = '‫'.repeat(63) + 'a';
+    const { levels } = engine.computeLevels(text, 'ltr');
+    expect(levels[63]).toBe(126);
+    expect(engine.reorderVisual(levels, 0, text.length)).toContain(63);
+  });
+
   it('the default engine mirrors brackets (L4) and computes levels', () => {
     const engine = getDefaultBidiEngine();
     expect(engine.getMirror(0x28)).toBe(0x29); // ( -> )

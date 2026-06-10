@@ -25,6 +25,13 @@ export type BidiClass =
 export type BidiLevels = Uint8Array;
 
 /**
+ * Level sentinel for code units removed by UAX#9 rule X9 (explicit formatting
+ * characters and BN). Part of the BidiEngine contract: computeLevels MUST mark
+ * removed code units with this value, and reorderVisual MUST exclude them.
+ */
+export const REMOVED_LEVEL = 255;
+
+/**
  * One styled run as the renderer sees it. `meta` is opaque payload the renderer
  * gets back on each produced segment (color, decoration, vertical alignment, a
  * back-reference to its own run object, etc.).

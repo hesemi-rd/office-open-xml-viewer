@@ -58,9 +58,11 @@ describe('UAX#9 conformance — BidiTest.txt (class sequences)', () => {
 
   it(
     'matches resolved levels and reorder for every line × paragraph direction',
-    () => {
+    (ctx) => {
       if (content === null) {
-        console.warn('[bidi bunched] fixture unavailable — skipping (not a pass).');
+        // Report as SKIPPED, not passed — a silent green here would hide a
+        // missing conformance run (e.g. unicode.org unreachable).
+        ctx.skip();
         return;
       }
 

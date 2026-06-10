@@ -6,10 +6,9 @@
 // Arabic joining) -> engine.reorderVisual (L2) over the atoms -> VisualSegment[]
 // in visual order, each carrying its logical-order text and per-run parts.
 
+import { REMOVED_LEVEL } from './types.js';
 import type { BaseDirection, StyledRun, VisualSegment, SegmentPart } from './types.js';
 import { getDefaultBidiEngine } from './engine.js';
-
-const REMOVED_UNIT = 255;
 
 /** Two runs share shape-style iff a glyph can join/shape across their boundary. */
 function sameShapeStyle(a: StyledRun, b: StyledRun): boolean {
@@ -58,26 +57,41 @@ export function toVisualSegments(runs: StyledRun[], base: BaseDirection): Visual
   const engine = getDefaultBidiEngine();
   const { levels } = engine.computeLevels(full, base);
 
-  // Build atoms in logical order. A new atom starts at a removed unit, a level
-  // change, or a shape-style change; a run change with the SAME shape-style only
-  // starts a new part within the current atom.
+  // Build atoms in logical order. A new atom starts at a level change or a
+  // shape-style change; a run change with the SAME shape-style only starts a
+  // new part within the current atom.
+  //
+  // X9-removed units (level sentinel 255) are RETAINED in the drawn text per
+  // UAX#9 §5.2 ("retaining explicit formatting characters"): the BN class
+  // includes ZWJ/ZWNJ/soft hyphen, which the font shaper still needs (emoji
+  // ZWJ sequences, Arabic join control). They neither start nor break an atom
+  // — they ride along with the surrounding text, attached to the current atom
+  // (or buffered onto the next one when they appear before any atom).
   const atoms: Atom[] = [];
   let cur: Atom | null = null;
   let curRun = -1;
+  let pendingRemoved = '';
 
   for (let i = 0; i < full.length; i++) {
     const lvl = levels[i];
-    if (lvl === REMOVED_UNIT) {
-      cur = null; // removed unit breaks the contiguous slice
-      curRun = -1;
-      continue;
-    }
     const runIdx = unitRun[i];
     const ch = full[i];
 
+    if (lvl === REMOVED_LEVEL) {
+      if (cur !== null) cur.parts[cur.parts.length - 1].text += ch;
+      else pendingRemoved += ch;
+      continue;
+    }
+
     const styleBreak = cur !== null && !sameShapeStyle(runs[curRun], runs[runIdx]);
     if (cur === null || cur.level !== lvl || styleBreak) {
-      cur = { level: lvl, start: i, parts: [{ text: ch, run: runs[runIdx] }] };
+      const lead = pendingRemoved;
+      pendingRemoved = '';
+      cur = {
+        level: lvl,
+        start: i - lead.length,
+        parts: [{ text: lead + ch, run: runs[runIdx] }],
+      };
       atoms.push(cur);
       curRun = runIdx;
     } else if (runIdx !== curRun) {

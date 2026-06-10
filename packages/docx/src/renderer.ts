@@ -760,9 +760,7 @@ function splitParagraphAcrossPages(
  *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
  *  ECMA-376 §17.4.80, §17.4.85). */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
-  const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
-  const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
-  const colWidths = table.colWidths.map((w) => w * colScale);
+  const colWidths = resolveColumnWidths(table, contentWPt);
 
   const rowHs: number[] = [];
   const restartInfo: Array<{ ri: number; ci: number; contentH: number }> = [];
@@ -815,6 +813,116 @@ function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt:
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
   return computeTableRowHeights(state, table, contentWPt).reduce((s, x) => s + x, 0);
+}
+
+/**
+ * Resolve the per-grid-column widths (pt) for a table, honoring Word's table
+ * layout algorithm (ECMA-376 §17.4.52 tblLayout + §17.4.71/§17.4.63 tcW/tblW).
+ *
+ *   - layout === 'fixed': use the tblGrid widths verbatim (the historical
+ *     behavior), then scale down proportionally if the grid total overflows the
+ *     available content width.
+ *   - layout absent or 'autofit' (the spec default): each grid column's width is
+ *     the maximum *preferred* width (cell `widthPt`, i.e. `<w:tcW type="dxa">`,
+ *     or `widthPct` resolved against `contentWPt`) over the cells anchored in
+ *     it. A gridSpan cell contributes its preference distributed across the
+ *     columns it spans, in proportion to those columns' tblGrid widths, but
+ *     only raises a column above what single-column cells already require.
+ *     Columns with no preference anywhere keep their tblGrid width. If the
+ *     resulting table width exceeds `contentWPt`, all columns are scaled
+ *     proportionally to fit — this is what Word does when the preferred-width
+ *     sum overflows the text column.
+ *
+ * The returned widths sum to at most `contentWPt`. Both `renderTable` (which
+ * then multiplies by the device scale) and `computeTableRowHeights` (which
+ * works directly in pt) consume this.
+ */
+function resolveColumnWidths(table: DocTable, contentWPt: number): number[] {
+  const n = table.colWidths.length;
+  if (n === 0) return [];
+
+  const grid = table.colWidths;
+  const fitToContent = (widths: number[]): number[] => {
+    const total = widths.reduce((s, w) => s + w, 0);
+    if (total > contentWPt && total > 0) {
+      const s = contentWPt / total;
+      return widths.map((w) => w * s);
+    }
+    return widths;
+  };
+
+  // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52). Scale to fit.
+  if (table.layout === 'fixed') {
+    return fitToContent(grid.slice());
+  }
+
+  // Autofit (default): preferred widths drive the column sizes.
+  // `pref[c]` accumulates the strongest single-column preference seen so far.
+  const pref: number[] = new Array(n).fill(0);
+  // `gridFallback[c]` is true while no cell has expressed a preference for c.
+  const hasPref: boolean[] = new Array(n).fill(false);
+
+  // Translate a cell's `<w:tcW>` into a preferred width in pt, or null when the
+  // cell expresses no preference (auto/nil). pct is a fraction of contentWPt
+  // (50ths of a percent — §17.18.90 ST_TblWidth).
+  const cellPreferred = (cell: DocTableCell): number | null => {
+    if (cell.widthPt != null) return cell.widthPt;
+    if (cell.widthPct != null) return (cell.widthPct / 5000) * contentWPt;
+    return null;
+  };
+
+  // First pass: single-column (non-spanning) cells set a hard per-column floor.
+  for (const row of table.rows) {
+    let ci = 0;
+    for (const cell of row.cells) {
+      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
+      if (span === 1) {
+        const p = cellPreferred(cell);
+        if (p != null) {
+          if (p > pref[ci]) pref[ci] = p;
+          hasPref[ci] = true;
+        }
+      }
+      ci += span;
+    }
+  }
+
+  // Second pass: gridSpan cells distribute their preference across the spanned
+  // columns in proportion to the tblGrid widths, but only raise columns that
+  // are still below their share (so a single-column floor is never lowered).
+  for (const row of table.rows) {
+    let ci = 0;
+    for (const cell of row.cells) {
+      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
+      if (span > 1) {
+        const p = cellPreferred(cell);
+        if (p != null) {
+          const spanCols = grid.slice(ci, ci + span);
+          const gridSum = spanCols.reduce((s, w) => s + w, 0);
+          // Current resolved width across the span (grid fallback where unset).
+          const curSum = spanCols.reduce(
+            (s, w, k) => s + (hasPref[ci + k] ? pref[ci + k] : w),
+            0,
+          );
+          // Only widen when the span's preference exceeds what we already have.
+          if (p > curSum) {
+            const extra = p - curSum;
+            for (let k = 0; k < span; k++) {
+              const share = gridSum > 0 ? spanCols[k] / gridSum : 1 / span;
+              const base = hasPref[ci + k] ? pref[ci + k] : grid[ci + k];
+              pref[ci + k] = base + extra * share;
+              hasPref[ci + k] = true;
+            }
+          }
+        }
+      }
+      ci += span;
+    }
+  }
+
+  // Columns with no preference anywhere fall back to their tblGrid width.
+  const widths = pref.map((p, c) => (hasPref[c] ? p : grid[c]));
+  return fitToContent(widths);
 }
 
 /** A page break before row `ri` is unsafe when `ri` continues a vertical merge
@@ -2694,9 +2802,9 @@ function skipPastTopAndBottom(y: number, floats: FloatRect[]): number {
 function renderTable(table: DocTable, state: RenderState): void {
   const { ctx, scale, contentX, contentW, dryRun } = state;
 
-  const totalColW = table.colWidths.reduce((s, w) => s + w, 0) * scale;
-  const colScale = totalColW > contentW ? contentW / totalColW : 1;
-  const colWidths = table.colWidths.map(w => w * scale * colScale);
+  // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
+  // already scaled to fit the available content width, then convert to px.
+  const colWidths = resolveColumnWidths(table, contentW / scale).map((w) => w * scale);
 
   // Horizontal table alignment on the page (w:tblPr/w:jc).
   const tableW = colWidths.reduce((s, w) => s + w, 0);
@@ -3338,8 +3446,11 @@ function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  *   exact   → value in pt, converted to px (ignores font and grid).
  *   atLeast → max(natural, value in pt × scale).
  *   null    → natural, or grid pitch if the section defines one.
+ *
+ * Exported for unit tests only — not part of the package API (not
+ * re-exported from index.ts).
  */
-function lineBoxHeight(
+export function lineBoxHeight(
   ls: LineSpacing | null,
   ascentPx: number,
   descentPx: number,
@@ -3381,6 +3492,23 @@ function lineBoxHeight(
     // No explicit spacing → single line. Use the intended single-line height
     // (`natural`) off-grid; on-grid, snap to the pitch with the glyph extent
     // as the overflow floor (the grid, not the font metric, governs height).
+    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
+  }
+  // A zero/negative `w:line` is degenerate input whose behavior ECMA-376
+  // §17.3.1.33 does not define (read literally, an `exact` line of 0 would
+  // collapse the line box to no height; some generators emit
+  // `<w:spacing w:line="0" w:lineRule="exact"/>` on table cells, e.g. sample-7).
+  // Word's native model has no such state: per the [MS-DOC] LSPD structure,
+  // "exact" spacing is encoded as a negative dyaLine ("the line spacing, in
+  // twips, is exactly 0x10000 minus dyaLine", so an exact 0 is unrepresentable)
+  // and a non-negative dyaLine in twips mode is "dyaLine or the number of twips
+  // necessary for single spacing, whichever value is greater" — i.e. a stored 0
+  // resolves to exactly single spacing. Word's PDF export of sample-7 confirms
+  // (those rows render at normal single-line height). Match that: treat
+  // exact/auto line <= 0 as single spacing. (LSPD's max() rule is the twips
+  // mode; applying the same fallback to a degenerate auto multiplier <= 0 is
+  // the analogous non-collapsing reading.)
+  if ((ls.rule === 'exact' || ls.rule === 'auto') && ls.value <= 0) {
     return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {

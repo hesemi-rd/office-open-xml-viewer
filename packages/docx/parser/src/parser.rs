@@ -1106,7 +1106,7 @@ fn parse_run_inner(
     let double_strikethrough = fmt.dstrike.unwrap_or(false);
     let highlight = fmt.highlight.clone();
     // RTL / complex-script properties (ECMA-376 §17.3.2.30 / §17.3.2.26 /
-    // §17.3.2.18). Phase 0: recorded on the run, not yet used for layout. The
+    // §17.3.2.39). Phase 0: recorded on the run, not yet used for layout. The
     // cs font goes through the same theme-ref resolution as the ascii/eastAsia
     // axes so consumers receive a literal family.
     let rtl = fmt.rtl;
@@ -2408,6 +2408,26 @@ fn parse_table(
         .and_then(|j| attr_w(j, "val"))
         .unwrap_or_else(|| "left".to_string());
 
+    // ECMA-376 §17.4.52 w:tblLayout/@w:type — "fixed" | "autofit". Absent ⇒ None
+    // (renderer applies the spec default "autofit").
+    let layout = tbl_pr
+        .and_then(|p| child_w(p, "tblLayout"))
+        .and_then(|l| attr_w(l, "type"));
+
+    // ECMA-376 §17.4.63 w:tblW (ST_TblWidth): dxa ⇒ width_pt, pct ⇒ width_pct
+    // (50ths of a percent of available width), auto/nil/0 ⇒ both None.
+    let (tbl_w_pt, tbl_w_pct) = tbl_pr
+        .and_then(|p| child_w(p, "tblW"))
+        .map(|w| {
+            let wtype = attr_w(w, "type").unwrap_or_else(|| "dxa".to_string());
+            match wtype.as_str() {
+                "dxa" => (attr_w(w, "w").map(|v| twips_to_pt(&v)).filter(|v| *v > 0.0), None),
+                "pct" => (None, attr_w(w, "w").and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0)),
+                _ => (None, None),
+            }
+        })
+        .unwrap_or((None, None));
+
     // ECMA-376 §17.4.1 w:bidiVisual — RTL (visual) column order. On-off toggle.
     // Phase 0: recorded only; column-order resolution is deferred.
     let bidi_visual = tbl_pr.and_then(|p| bool_prop(p, "bidiVisual"));
@@ -2421,6 +2441,9 @@ fn parse_table(
         cell_margin_left: cm_left,
         cell_margin_right: cm_right,
         jc,
+        layout,
+        width_pt: tbl_w_pt,
+        width_pct: tbl_w_pct,
         bidi_visual,
     }
 }
@@ -2492,20 +2515,23 @@ fn parse_table_cell(
         .and_then(|v| attr_w(v, "val"))
         .unwrap_or_default();
 
-    // ECMA-376 §17.18.87 ST_TblWidth:
-    //   dxa  — twentieths of a point (1/20pt)
-    //   pct  — 50ths of a percent of the table width (e.g. w="2500" = 50%).
-    //         We don't know the table width here, so leave None and fall
-    //         back to grid allocation like the other non-dxa cases.
-    //   auto, nil — width is dictated by content/grid; treat as None.
-    let width_pt = tc_pr.and_then(|p| child_w(p, "tcW"))
-        .and_then(|w| {
+    // ECMA-376 §17.4.71 (w:tcW) + §17.18.90 ST_TblWidth:
+    //   dxa  — twentieths of a point (1/20pt) ⇒ width_pt.
+    //   pct  — 50ths of a percent of the available content width (e.g.
+    //          w="2500" = 50%). Resolved in the renderer where the available
+    //          width is known ⇒ width_pct.
+    //   auto, nil — no width preference; both None (column falls back to grid).
+    let tc_w = tc_pr.and_then(|p| child_w(p, "tcW"));
+    let (width_pt, width_pct) = tc_w
+        .map(|w| {
             let wtype = attr_w(w, "type").unwrap_or_else(|| "dxa".to_string());
             match wtype.as_str() {
-                "dxa" => attr_w(w, "w").map(|v| twips_to_pt(&v)),
-                _ => None,
+                "dxa" => (attr_w(w, "w").map(|v| twips_to_pt(&v)), None),
+                "pct" => (None, attr_w(w, "w").and_then(|v| v.parse::<f64>().ok())),
+                _ => (None, None),
             }
-        });
+        })
+        .unwrap_or((None, None));
 
     // Per-cell margins (ECMA-376 §17.4.42 `<w:tcPr><w:tcMar>`). Each edge,
     // when present, overrides the table-level `<w:tblCellMar>` default; absent
@@ -2536,7 +2562,7 @@ fn parse_table_cell(
     }
 
     DocTableCell {
-        content, col_span, v_merge, borders, background, v_align, width_pt,
+        content, col_span, v_merge, borders, background, v_align, width_pt, width_pct,
         margin_top, margin_bottom, margin_left, margin_right,
     }
 }
@@ -2714,6 +2740,95 @@ fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    fn parse_tbl(body: &str) -> DocTable {
+        let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_table(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+        )
+    }
+
+    // ECMA-376 §17.4.71 — a cell's `<w:tcW>` preferred width (type="dxa") reaches
+    // the model as `width_pt` so the renderer can size autofit columns by it.
+    #[test]
+    fn cell_tcw_dxa_surfaces_as_width_pt() {
+        let t = parse_tbl(
+            r#"<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="8306"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                 <w:p/></w:tc></w:tr>"#,
+        );
+        let cell = &t.rows[0].cells[0];
+        // 2000 twips = 100 pt.
+        assert_eq!(cell.width_pt, Some(100.0));
+        assert_eq!(cell.width_pct, None);
+        // tblGrid still parsed independently (8306 twips ≈ 415.3 pt).
+        assert!((t.col_widths[0] - 415.3).abs() < 0.1);
+    }
+
+    // ECMA-376 §17.4.71 + §17.18.90 — type="pct" carries no twips; it surfaces as
+    // `width_pct` (50ths of a percent) for the renderer to resolve.
+    #[test]
+    fn cell_tcw_pct_surfaces_as_width_pct() {
+        let t = parse_tbl(
+            r#"<w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcW w:w="2500" w:type="pct"/></w:tcPr>
+                 <w:p/></w:tc></w:tr>"#,
+        );
+        let cell = &t.rows[0].cells[0];
+        assert_eq!(cell.width_pt, None);
+        assert_eq!(cell.width_pct, Some(2500.0));
+    }
+
+    // ECMA-376 §17.4.52 — absent `<w:tblLayout>` ⇒ None (renderer default autofit).
+    #[test]
+    fn absent_tbl_layout_is_none() {
+        let t = parse_tbl(
+            r#"<w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.layout, None);
+    }
+
+    // ECMA-376 §17.4.52 — explicit fixed layout reaches the model verbatim.
+    #[test]
+    fn fixed_tbl_layout_surfaces() {
+        let t = parse_tbl(
+            r#"<w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.layout.as_deref(), Some("fixed"));
+    }
+
+    // ECMA-376 §17.4.63 — `<w:tblW w:type="auto" w:w="0">` carries no preference.
+    #[test]
+    fn tbl_w_auto_zero_is_none() {
+        let t = parse_tbl(
+            r#"<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.width_pt, None);
+        assert_eq!(t.width_pct, None);
+    }
+}
+
+#[cfg(test)]
 mod rtl_tests {
     use super::*;
 
@@ -2741,7 +2856,7 @@ mod rtl_tests {
     }
 
     /// ECMA-376 §17.3.1.6 w:bidi, §17.3.2.30 w:rtl, §17.3.2.26 w:rFonts@cs,
-    /// §17.3.2.18 w:szCs, §17.4.1 w:bidiVisual — all surfaced on the model.
+    /// §17.3.2.39 w:szCs, §17.4.1 w:bidiVisual — all surfaced on the model.
     #[test]
     fn rtl_direction_attributes_are_extracted() {
         let body = body_from(

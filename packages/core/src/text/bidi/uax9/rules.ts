@@ -489,7 +489,7 @@ export function resolveLevels(
 /**
  * Rule L2: given resolved levels for the range [start, end), return the visual
  * order as a permutation of logical indices (REMOVED code points are skipped).
- * Works for any level array whose removed sentinel is < 0 or > MAX_DEPTH
+ * Works for any level array whose removed sentinel is < 0 or > MAX_DEPTH + 1
  * (so both the code-point REMOVED=-1 and the code-unit 255 are excluded).
  */
 export function reorderByLevels(
@@ -500,12 +500,15 @@ export function reorderByLevels(
   const order: number[] = [];
   for (let i = start; i < end; i++) {
     const l = levels[i];
-    if (l >= 0 && l <= MAX_DEPTH) order.push(i);
+    // Valid resolved levels reach MAX_DEPTH + 1: I1/I2 add up to +2 on top of
+    // the explicit-level cap (UAX#9 §3.3.4). Anything above is a removed
+    // sentinel (code-point REMOVED=-1 maps to <0; code-unit sentinel is 255).
+    if (l >= 0 && l <= MAX_DEPTH + 1) order.push(i);
   }
   if (order.length === 0) return order;
 
   let highest = 0;
-  let lowestOdd = MAX_DEPTH + 1;
+  let lowestOdd = MAX_DEPTH + 2;
   for (const idx of order) {
     const l = levels[idx];
     if (l > highest) highest = l;

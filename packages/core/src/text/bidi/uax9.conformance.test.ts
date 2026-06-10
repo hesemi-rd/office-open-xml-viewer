@@ -39,9 +39,11 @@ beforeAll(async () => {
 describe('UAX#9 conformance — BidiCharacterTest.txt', () => {
   it(
     'matches resolved levels and reorder for every line',
-    () => {
+    (ctx) => {
       if (content === null) {
-        console.warn('[bidi conformance] fixture unavailable — skipping (not a pass).');
+        // Report as SKIPPED, not passed — a silent green here would hide a
+        // missing conformance run (e.g. unicode.org unreachable).
+        ctx.skip();
         return;
       }
 

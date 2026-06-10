@@ -465,8 +465,8 @@ export interface ShapeParagraph {
   /** `<a:pPr@algn>` — `l` (default) | `ctr` | `r` | `just` | `dist`. */
   align: string;
   /** `<a:pPr@rtl>` — whether the paragraph reads right-to-left
-   *  (ECMA-376 §21.1.2.2.45). Defaults to false. */
-  rtl: boolean;
+   *  (ECMA-376 §21.1.2.2.7). Omitted (undefined) when false. */
+  rtl?: boolean;
   runs: ShapeTextRun[];
 }
 

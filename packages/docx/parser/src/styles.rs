@@ -34,7 +34,7 @@ pub struct RunFmt {
     /// to `font_family_ascii` / `font_family_east_asia`; carries the same
     /// "@theme:<ref>" marker convention for @cstheme references.
     pub font_family_cs: Option<String>,
-    /// ECMA-376 §17.3.2.18 w:szCs/@w:val — complex-script font size in pt
+    /// ECMA-376 §17.3.2.39 w:szCs/@w:val — complex-script font size in pt
     /// (converted from half-points, same units as `font_size`).
     pub font_size_cs: Option<f64>,
     /// True when `w:sz` was set at THIS level (direct rPr or a named style),
@@ -592,7 +592,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         }
     }
 
-    // Complex-script font size (ECMA-376 §17.3.2.18 w:szCs, half-points).
+    // Complex-script font size (ECMA-376 §17.3.2.39 w:szCs, half-points).
     // Recorded independently of the sz/szCs fallback above so RTL runs can use
     // the complex-script metric without disturbing the existing Latin/CJK size.
     if let Some(sz_cs) = child_w(rpr, "szCs") {

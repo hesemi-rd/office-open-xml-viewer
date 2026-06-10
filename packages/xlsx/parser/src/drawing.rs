@@ -404,7 +404,7 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
                     match pc.tag_name().name() {
                         "pPr" => {
                             if let Some(a) = pc.attribute("algn") { align = a.to_string(); }
-                            // ECMA-376 §21.1.2.2.45 `<a:pPr@rtl>` — right-to-left
+                            // ECMA-376 §21.1.2.2.7 `<a:pPr@rtl>` — right-to-left
                             // paragraph. Default false (left-to-right).
                             rtl = pc.attribute("rtl").map(|v| v == "1" || v == "true").unwrap_or(false);
                         }
@@ -1049,7 +1049,7 @@ mod math_tests {
         assert!(matches!(runs[3], ShapeTextRun::Text { .. }));
     }
 
-    /// `<a:pPr rtl="1">` (ECMA-376 §21.1.2.2.45) marks the paragraph as
+    /// `<a:pPr rtl="1">` (ECMA-376 §21.1.2.2.7) marks the paragraph as
     /// right-to-left.
     #[test]
     fn parses_paragraph_rtl_attribute() {
