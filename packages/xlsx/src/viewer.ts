@@ -308,7 +308,6 @@ export class XlsxViewer {
 
   async showSheet(index: number): Promise<void> {
     this.currentSheet = index;
-    this.scrollHost.scrollLeft = 0;
     this.scrollHost.scrollTop = 0;
     this.anchorCell = null;
     this.activeCell = null;
@@ -317,8 +316,50 @@ export class XlsxViewer {
     this.updateTabActive(index);
     this.currentWorksheet = await this.workbook.getWorksheet(index);
     this.updateSpacerSize(this.currentWorksheet);
+    // Reset the horizontal scroll origin to the natural START of the sheet.
+    // For RTL sheets the start column (col A) lives at the RIGHT, which means
+    // the native scrollbar thumb must sit at its right end (max scrollLeft);
+    // for LTR sheets the start is scrollLeft=0. updateSpacerSize must run first
+    // so scrollWidth reflects the new sheet before we read the max offset.
+    this.resetHorizontalScroll();
     await this.renderCurrentSheet();
     this.opts.onSheetChange?.(index, this.workbook.sheetNames[index] ?? '');
+  }
+
+  /** True when the current sheet's grid is laid out right-to-left. */
+  private get isRtl(): boolean {
+    return this.currentWorksheet?.rightToLeft === true;
+  }
+
+  /** Maximum horizontal scroll offset the native scroll host allows (≥ 0). */
+  private get maxScrollLeft(): number {
+    return Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+  }
+
+  /**
+   * The logical horizontal scroll position used to find the start-of-sheet
+   * (col A) edge, in *scaled* CSS pixels — the same unit as
+   * `scrollHost.scrollLeft`. The renderer always lays the grid out LTR and then
+   * mirrors it (ECMA-376 §18.3.1.87), so the viewer must hand it a position
+   * where 0 = the START of the sheet (col A) and increasing values reveal later
+   * columns.
+   *
+   * For LTR that is exactly the native `scrollLeft`. For RTL the sheet starts at
+   * the RIGHT, so the native scrollbar runs the opposite way: thumb fully right
+   * (`scrollLeft = maxScrollLeft`) is the start, thumb left is the far columns.
+   * Inverting here makes wheel/trackpad follow the finger and aligns the
+   * thumb↔page mapping with Excel, without depending on browser-specific RTL
+   * `scrollLeft` sign conventions.
+   */
+  private get effectiveScrollLeft(): number {
+    const raw = this.scrollHost.scrollLeft;
+    return this.isRtl ? this.maxScrollLeft - raw : raw;
+  }
+
+  /** Park the scrollbar at the sheet's natural start: scrollLeft=0 for LTR,
+   *  the right end for RTL (so col A shows first). */
+  private resetHorizontalScroll(): void {
+    this.scrollHost.scrollLeft = this.isRtl ? this.maxScrollLeft : 0;
   }
 
   /** 0-based index of the currently displayed sheet. */
@@ -415,7 +456,7 @@ export class XlsxViewer {
       }
       if (col === -1) return null;
     } else {
-      const contentX = innerX - frozenW + this.scrollHost.scrollLeft / cs;
+      const contentX = innerX - frozenW + this.effectiveScrollLeft / cs;
       col = -1;
       let acc = 0;
       for (let c = freezeCols + 1; c <= 16384; c++) {
@@ -461,7 +502,7 @@ export class XlsxViewer {
       const scrollAreaX = sp(HEADER_W) + frozenW;
 
       // Mirror renderCurrentSheet's startCol / offsetX search (binary search).
-      const logicalScrollX = this.scrollHost.scrollLeft / cs;
+      const logicalScrollX = this.effectiveScrollLeft / cs;
       const colAxis = getSheetAxes(ws, mdw).col;
       const { index: startCol, partial: offsetX } =
         colAxis.indexAt(logicalScrollX + colAxis.offsetOf(freezeCols + 1));
@@ -577,7 +618,7 @@ export class XlsxViewer {
       }
       return null;
     }
-    const contentX = innerX - frozenW + this.scrollHost.scrollLeft / cs;
+    const contentX = innerX - frozenW + this.effectiveScrollLeft / cs;
     let acc = 0;
     for (let c = freezeCols + 1; c <= 16384; c++) {
       acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
@@ -1086,7 +1127,18 @@ export class XlsxViewer {
     // The tab-nav block spans the row-header width, which scales with the cells.
     this.navGroup.style.width = `${Math.round(HEADER_W * next)}px`;
 
-    if (this.currentWorksheet) this.updateSpacerSize(this.currentWorksheet);
+    if (this.currentWorksheet) {
+      // Preserve the START-anchored effective scroll position across the zoom.
+      // The spacer (scrollWidth) is re-sized below, which changes maxScrollLeft;
+      // for RTL the native scrollLeft is the inverse of the effective position,
+      // so we must re-derive scrollLeft from the preserved effective value or
+      // the view would jump toward the start on every zoom step.
+      const prevEffective = this.effectiveScrollLeft;
+      this.updateSpacerSize(this.currentWorksheet);
+      if (this.isRtl) {
+        this.scrollHost.scrollLeft = Math.max(0, this.maxScrollLeft - prevEffective);
+      }
+    }
     void this.renderCurrentSheet();
     this.updateSelectionOverlay();
     this.updateNavButtons();
@@ -1152,8 +1204,10 @@ export class XlsxViewer {
     }
 
     // DOM scrollLeft/scrollTop are in scaled (physical) CSS pixels.
-    // Convert to logical pixels for cell-finding by dividing by cs.
-    const logicalScrollX = this.scrollHost.scrollLeft / cs;
+    // Convert to logical pixels for cell-finding by dividing by cs. For RTL
+    // sheets effectiveScrollLeft inverts the native scrollLeft so that 0 = col A
+    // at the (mirrored) right edge — see the getter for the rationale.
+    const logicalScrollX = this.effectiveScrollLeft / cs;
     const logicalScrollY = this.scrollHost.scrollTop / cs;
 
     // Find startCol / startRow in logical pixel space (binary search over the
