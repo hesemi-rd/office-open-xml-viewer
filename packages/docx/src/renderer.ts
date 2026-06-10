@@ -2888,6 +2888,39 @@ function buildFont(
   return `${s} ${w} ${sizePx}px ${f}`;
 }
 
+/** Arabic-script faces that hosts rarely ship; we substitute them with Noto
+ *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
+ *  list MUST mirror the Arabic entries there). A run whose font is one of these
+ *  contains BOTH Arabic and Latin/digit glyphs that Word renders from the same
+ *  single face, so the fallback chain must keep both scripts stylistically
+ *  consistent (Arabic substitute first, serif Latin companion before the sans
+ *  generics) rather than letting Latin/digits leak to a CJK sans face. */
+const ARABIC_SUBSTITUTE_FONTS = new Set([
+  'sakkal majalla',
+  'traditional arabic',
+  'simplified arabic',
+  'arabic typesetting',
+  'univers next arabic',
+  'noto naskh arabic',
+  'noto sans arabic',
+]);
+
+/** Naskh-style traditional Arabic faces ship a serif Latin companion; the
+ *  geometric/modern ones pair with a sans Latin. Drives whether an Arabic-font
+ *  run's Latin+digits route to Noto Naskh Arabic (serif-like) or Noto Sans
+ *  Arabic, and which Latin serif/sans companion follows. */
+const NASKH_SERIF_ARABIC_FONTS = new Set([
+  'sakkal majalla',
+  'traditional arabic',
+  'simplified arabic',
+  'arabic typesetting',
+  'noto naskh arabic',
+]);
+
+function isArabicSubstituteFont(family: string): boolean {
+  return ARABIC_SUBSTITUTE_FONTS.has(family.toLowerCase());
+}
+
 /** Resolve a requested font-family name to a CSS font-family string with
  *  appropriate fallback chain.
  *
@@ -2902,7 +2935,7 @@ function buildFont(
  *     where fontTable says "auto"). Retained as a safety net for theme fonts
  *     and system fonts that OOXML docs do not list in fontTable.xml.
  */
-function normalizeFontFamily(
+export function normalizeFontFamily(
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
 ): string {
@@ -2911,6 +2944,33 @@ function normalizeFontFamily(
   const escape = (s: string) => s.replace(/"/g, '\\"');
   const head = `"${escape(family)}"`;
   const lower = family.toLowerCase();
+
+  // 0) Arabic-script faces substituted by Noto Naskh/Sans Arabic. A single
+  //    Sakkal Majalla / Traditional Arabic run carries Arabic glyphs AND
+  //    Latin letters/digits; Word draws both from that one face. The browser
+  //    resolves each glyph against the chain in order, so the Arabic substitute
+  //    MUST come first — otherwise the Latin/digit glyphs are grabbed by the
+  //    first chain member that has them (e.g. the CJK "Noto Sans JP"), and
+  //    Latin/digits render in a different, sans face than the Arabic. Keeping
+  //    the Arabic substitute first makes Arabic+Latin+digits all resolve from
+  //    one family, matching Word's single-face rendering.
+  //
+  //    Latin companion: traditional Naskh faces (Sakkal Majalla, Traditional
+  //    Arabic, …) ship a SERIF Latin companion — Word's PDF export of sample-7
+  //    renders the Latin "first leader name" with bracketed serifs and the
+  //    "2026" digits as serif figures. Noto Naskh Arabic, our substitute, also
+  //    ships a serif Latin face (verified: its Latin glyphs carry bracketed
+  //    serifs and closely match the PDF), so placing it first gives Latin+digits
+  //    a serif look consistent with the Arabic — matching Word. "Noto Serif" is
+  //    kept as a serif safety net for the rare case Noto Naskh Arabic is
+  //    unavailable, so Latin still falls to a serif rather than the CJK sans.
+  //    Geometric Arabic faces (Univers Next Arabic) pair with a sans Latin.
+  if (isArabicSubstituteFont(family)) {
+    if (NASKH_SERIF_ARABIC_FONTS.has(lower)) {
+      return `${head}, "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Serif", "Noto Sans JP", "Hiragino Sans", serif`;
+    }
+    return `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+  }
 
   // 1) Authoritative classification from word/fontTable.xml §17.8.3.10.
   const tableClass = fontFamilyClasses[family];
