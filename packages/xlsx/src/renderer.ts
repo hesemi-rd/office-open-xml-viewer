@@ -19,7 +19,14 @@ import { computeLineVisualOrder, cellBaseRtl, segmentsHaveRtl } from './bidi-lin
 // true })`. Listing it in the cascade means: Calibri (Windows / Office)
 // → Carlito (loaded webfont) → Arial → sans-serif. Caladea is the same
 // for Cambria.
-const DEFAULT_FONT_FAMILY = '"Calibri", "Carlito", "Cambria", "Caladea", Arial, sans-serif';
+// The two trailing Noto Arabic faces are generic Arabic-script fallbacks:
+// when the primary Latin faces (Calibri / Carlito / Arial) lack a requested
+// glyph, the browser advances down the cascade per-glyph, so any Arabic
+// codepoint resolves to a real web font (loaded by `XlsxWorkbook.load`'s
+// useGoogleFonts path) instead of an oversized OS Arabic face. Latin glyphs
+// still bind to the earlier faces, so Latin rendering is unchanged.
+const DEFAULT_FONT_FAMILY =
+  '"Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif';
 const DEFAULT_FONT_SIZE = 11;
 // Fallback Max Digit Width of the Normal-style font when the workbook's
 // default font isn't known. Calibri 11 pt at 96 DPI ≈ 8 px (Canvas2D
@@ -1227,17 +1234,31 @@ function renderQuadrant(
       // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
+      // Whether this cell painted an opaque fill over its rect. The
+      // neighbour-edge inherit below (which redraws the shared boundary line
+      // the left/above cell already drew) is only needed to repair a line
+      // that *this* cell's fill over-painted. An empty, fill-less cell paints
+      // nothing over the boundary, so inheriting the neighbour's edge there is
+      // a pure double-draw — invisible in LTR (it lands on the same pixel the
+      // neighbour drew) but in an RTL mirror (ECMA-376 §18.3.1.87) the cell's
+      // own "left" maps to its *screen-left* edge, away from the neighbour,
+      // producing a spurious vertical line Excel never draws (sample-29 E1).
+      let paintedFill = false;
       if (paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH)) {
         // own fill painted; tableStyle fallbacks intentionally skipped
+        paintedFill = true;
       } else if (tableStyle && tableStyle.isHeader && tsDxfHeader?.fill?.fgColor) {
         ctx.fillStyle = hexToRgba(tsDxfHeader.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
+        paintedFill = true;
       } else if (tableStyle && !tableStyle.isHeader && !tableStyle.isTotals && tsDxfWhole?.fill?.fgColor) {
         ctx.fillStyle = hexToRgba(tsDxfWhole.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
+        paintedFill = true;
       } else if (tableStyle && tableStyle.isBanded) {
         ctx.fillStyle = stripeColorFor(tableStyle.accent);
         ctx.fillRect(cx, cy, cellW, cellH);
+        paintedFill = true;
       }
 
       // Comment indicator triangle — drawn above fill but below borders so
@@ -1319,7 +1340,7 @@ function renderQuadrant(
       // inherit picks the visually dominant style instead of always favouring
       // the lower cell's own.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
-      const aboveBottom = aboveCell
+      const aboveBottom = paintedFill && aboveCell
         ? resolveXf(styles, aboveCell.styleIndex).border.bottom
         : null;
       let invertedTop = false;
@@ -1334,7 +1355,7 @@ function renderQuadrant(
         invertedTop = picked === aboveBottom && before !== aboveBottom;
       }
       let invertedLeft = false;
-      if (!suppressLeftGridCol.has(ci)) {
+      if (paintedFill && !suppressLeftGridCol.has(ci)) {
         // Skip the inherit when the left edge was deliberately suppressed for
         // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
         // neighbour's xf.right re-introduces the internal vertical that we
