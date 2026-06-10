@@ -348,6 +348,10 @@ export interface DocxTextRun {
    *  `true` = RTL, `false` = explicitly LTR, absent = unspecified.
    *  Phase 0: recorded only; glyph-order resolution is deferred. */
   rtl?: boolean;
+  /** ECMA-376 §17.3.2.7 `<w:cs/>` — complex-script run toggle: cs formatting
+   *  applies to ALL characters of the run (§17.3.2.26). Distinct from
+   *  `rFonts@cs` (`fontFamilyCs`), which is only a font slot. */
+  cs?: boolean;
   /** ECMA-376 §17.3.2.26 `<w:rFonts w:cs>` — complex-script typeface
    *  (theme references resolved to a literal family). */
   fontFamilyCs?: string;

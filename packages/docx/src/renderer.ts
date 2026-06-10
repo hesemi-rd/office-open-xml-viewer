@@ -852,12 +852,14 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
       const t = run as unknown as DocxTextRun & { type: 'text' };
       if (!t.text) continue;
       // Resolve the complex-script (cs) axis the same way `buildSegments` does
-      // (ECMA-376 §17.3.2.3/§17.3.2.17/§17.3.2.18): a run forcing cs (w:rtl or an
-      // explicit cs font) measures with the cs bold/italic/size/family, each
-      // falling back to its Latin counterpart when absent. We pick the cs axis
-      // for the min-content estimate when the run forces cs so wide Arabic/Hebrew
-      // tokens reserve enough column width; otherwise the Latin axis.
-      const forceCs = t.rtl === true || t.fontFamilyCs != null;
+      // (ECMA-376 §17.3.2.3/§17.3.2.17/§17.3.2.18): a run forcing cs (w:rtl or
+      // the §17.3.2.7 <w:cs/> toggle) measures with the cs bold/italic/size/
+      // family, each falling back to its Latin counterpart when absent. We pick
+      // the cs axis for the min-content estimate when the run forces cs so wide
+      // Arabic/Hebrew tokens reserve enough column width; otherwise the Latin
+      // axis. NOTE rFonts@cs alone is just a font SLOT — it must not force cs
+      // (a Latin heading whose style defines cstheme would wrongly take szCs).
+      const forceCs = t.rtl === true || t.cs === true;
       const effBold = forceCs ? (t.boldCs ?? t.bold) : t.bold;
       const effItalic = forceCs ? (t.italicCs ?? t.italic) : t.italic;
       const effFontSize = forceCs ? (t.fontSizeCs ?? t.fontSize) : t.fontSize;
@@ -1762,11 +1764,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     const r = base as DocxTextRun;
     const rtl = r.rtl === true ? true : undefined;
 
-    // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl` (§17.3.2.30)
-    // or an explicit complex-script font (`w:rFonts w:cs`) applies complex-script
+    // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl`
+    // (§17.3.2.30) or the `<w:cs/>` toggle (§17.3.2.7) applies complex-script
     // formatting to ALL of its characters; otherwise each character is routed by
     // its Unicode block (Arabic/Hebrew/... → cs; Latin/digits/CJK → ascii/hAnsi).
-    const forceCs = r.rtl === true || r.fontFamilyCs != null;
+    // NOTE rFonts@cs (fontFamilyCs) alone is just a font SLOT and must NOT
+    // force cs — e.g. sample-1's Heading1 (Latin) has cstheme + szCs=52 but
+    // renders at w:sz=24; forcing cs blew its size up to 26pt.
+    const forceCs = r.rtl === true || r.cs === true;
 
     // Complex-script (cs) formatting sources, each falling back to its Latin
     // counterpart when the cs-specific property is absent (the parser already
