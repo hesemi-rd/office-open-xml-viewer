@@ -16,6 +16,20 @@ describe('segmentsHaveRtl', () => {
   });
 });
 
+  it('keeps LTR word order for English text in rtl-marked runs', () => {
+    // w:rtl on a run of pure Latin (e.g. "first leader name" in sample-7's
+    // signature block): the RLE embedding must NOT reverse the words — only
+    // weak/neutral content (digits, punctuation) takes the RTL embedding.
+    const segs = [
+      { text: 'first ', rtl: true },
+      { text: 'leader ', rtl: true },
+      { text: 'name', rtl: true },
+    ];
+    const { order, rtl } = computeLineVisualOrder(segs, false);
+    expect(order).toEqual([0, 1, 2]);
+    expect(rtl).toEqual([false, false, false]);
+  });
+
 describe('resolveAlignEdge', () => {
   it('resolves logical start/end against base direction', () => {
     expect(resolveAlignEdge(undefined, false)).toBe('left');

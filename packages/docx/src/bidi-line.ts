@@ -66,9 +66,10 @@ const PDF = '‬'; // POP DIRECTIONAL FORMATTING
  * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
  *
  * Segments flagged `rtl` (run-level `<w:rtl>`, §17.3.2.30) are wrapped in
- * RLE…PDF and assigned the RTL embedding level directly, so a run whose text is
- * purely neutral/numeric (e.g. a literal "1. " list prefix) still embeds and
- * mirrors right-to-left as Word does.
+ * RLE…PDF so their weak/neutral characters resolve against an RTL embedding,
+ * while their strong-Latin content keeps its even (LTR) resolved level — i.e.
+ * a literal "1. " list prefix mirrors to ".1" at the trailing edge as Word
+ * does, but English words in an rtl-marked run keep their LTR word order.
  */
 export function computeLineVisualOrder(
   segments: readonly unknown[],
@@ -85,42 +86,57 @@ export function computeLineVisualOrder(
   // from the content, not the formatting control.
   let full = '';
   const segStart: number[] = new Array(n);
+  const segEnd: number[] = new Array(n);
   for (let i = 0; i < n; i++) {
     const t = segText(segments[i]) ?? '';
     const isRtl = segRtl(segments[i]);
     if (isRtl) full += RLE;
     segStart[i] = full.length;
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
+    segEnd[i] = full.length;
     if (isRtl) full += PDF;
   }
 
   const engine = getDefaultBidiEngine();
   const { levels, paragraphLevel } = engine.computeLevels(full, baseRtl ? 'rtl' : 'ltr');
 
-  // Embedding level established by a top-level RLE = smallest odd level above
-  // the paragraph level (UAX#9 X2). A run-level `<w:rtl>` segment draws RTL by
-  // definition (§17.3.2.30), so it takes this odd level directly — without it,
-  // a digits-only run (European Number) would resolve to an even level and be
-  // drawn LTR even though Word mirrors it ("1. " → ".1") at the trailing edge.
-  const rtlEmbedLevel = paragraphLevel | 1;
-
+  // Ordering level = the RESOLVED level of the segment's first real code unit.
+  // No level forcing for rtl-marked segments: inside their RLE…PDF embedding,
+  // Latin letters legitimately resolve to the even embedded level (so English
+  // words in an rtl-marked run keep their mutual LTR order, as Word renders
+  // them), while digits/neutrals resolve per UAX#9 against the RTL embedding.
+  //
+  // Direction hint = "does the segment contain ANY odd-level unit". A
+  // digits-with-punctuation slice like "1. " inside an RTL embedding has its
+  // "." resolve to the odd embedding level, so the slice draws with
+  // ctx.direction rtl and Canvas mirrors it to ".1" exactly as Word does —
+  // whereas a pure-Latin slice is all-even and keeps its LTR rendering.
   const segLevels = new Uint8Array(n);
+  const rtl: boolean[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    if (segRtl(segments[i])) {
-      segLevels[i] = rtlEmbedLevel;
-      continue;
-    }
     const lvl = levels[segStart[i]];
     // 255 = removed by X9 (no glyph); fall back to the paragraph level.
     segLevels[i] = lvl === 255 ? paragraphLevel : lvl;
+    // Scan excludes the segment's TRAILING whitespace: an inter-word space's
+    // level is seam context (N2 gives it the embedding level between
+    // opposite-direction neighbours), not segment content — only the content
+    // decides whether the slice must mirror.
+    let scanEnd = segEnd[i];
+    while (scanEnd > segStart[i] && full[scanEnd - 1] === ' ') scanEnd--;
+    let anyOdd = false;
+    for (let k = segStart[i]; k < scanEnd; k++) {
+      const l = levels[k];
+      if (l !== 255 && (l & 1) === 1) {
+        anyOdd = true;
+        break;
+      }
+    }
+    rtl[i] = anyOdd;
   }
 
   const order = engine.reorderVisual(segLevels, 0, n);
-  const rtl: boolean[] = new Array(n);
-  for (let i = 0; i < n; i++) rtl[i] = (segLevels[i] & 1) === 1;
   return { order, rtl };
 }
-
 /** Physical edge a line aligns to, resolving logical start/end against base direction. */
 export type AlignEdge = 'left' | 'right' | 'center' | 'justify';
 
