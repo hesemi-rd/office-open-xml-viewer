@@ -37,6 +37,22 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.18 w:szCs/@w:val — complex-script font size in pt
     /// (converted from half-points, same units as `font_size`).
     pub font_size_cs: Option<f64>,
+    /// True when `w:sz` was set at THIS level (direct rPr or a named style),
+    /// regardless of whether `w:szCs` was also set. Word resolves the
+    /// complex-script size by mirroring a directly-applied `w:sz` when no
+    /// `w:szCs` accompanies it at the same level (a directly-set Latin size
+    /// shadows an inherited complex-script size); §17.3.2.38 / §17.3.2.18.
+    pub font_size_set_here: bool,
+    /// True when `w:szCs` was set at THIS level. Lets the merge mirror an
+    /// unaccompanied `w:sz` into `font_size_cs` (see `apply_run`).
+    pub font_size_cs_set_here: bool,
+    /// ECMA-376 §17.3.2.3 w:bCs — complex-script bold toggle.
+    pub bold_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.17 w:iCs — complex-script italic toggle.
+    pub italic_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:bidi — complex-script (RTL) language tag,
+    /// lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering.
+    pub lang_bidi: Option<String>,
 }
 
 /// Resolved paragraph formatting.
@@ -364,7 +380,31 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.highlight.is_some() { dst.highlight = src.highlight.clone(); }
     if src.rtl.is_some() { dst.rtl = src.rtl; }
     if src.font_family_cs.is_some() { dst.font_family_cs = src.font_family_cs.clone(); }
-    if src.font_size_cs.is_some() { dst.font_size_cs = src.font_size_cs; }
+    if src.bold_cs.is_some() { dst.bold_cs = src.bold_cs; }
+    if src.italic_cs.is_some() { dst.italic_cs = src.italic_cs; }
+    if src.lang_bidi.is_some() { dst.lang_bidi = src.lang_bidi.clone(); }
+
+    // Complex-script font size resolution (ECMA-376 §17.3.2.18). Word treats a
+    // directly-applied `w:sz` as also setting the complex-script size UNLESS the
+    // same level supplies its own `w:szCs`: a run/style that sets only `w:sz`
+    // renders its Arabic/Hebrew text at that size too (e.g. sample-7's underlined
+    // title sets sz=36 with no szCs and Word draws the Arabic at 18pt, not at the
+    // inherited docDefaults szCs=11pt). So at a level that sets sz-without-szCs,
+    // the Latin size shadows the inherited cs size; an explicit szCs always wins.
+    if src.font_size_cs_set_here {
+        dst.font_size_cs = src.font_size_cs;
+    } else if src.font_size_set_here {
+        dst.font_size_cs = src.font_size;
+    } else if src.font_size_cs.is_some() {
+        // Inherited-only szCs (no sz/szCs literally on this level): carry it.
+        dst.font_size_cs = src.font_size_cs;
+    }
+    // OR-propagate the "set here" markers. `apply_run` may be used to fold a
+    // whole (rStyle) sub-chain into a single RunFmt that is later re-applied via
+    // `apply_direct_run`; carrying these flags forward lets that later merge see
+    // that the sub-chain set sz/szCs and apply the same mirroring rule.
+    dst.font_size_set_here |= src.font_size_set_here;
+    dst.font_size_cs_set_here |= src.font_size_cs_set_here;
 }
 
 pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
@@ -558,6 +598,28 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     if let Some(sz_cs) = child_w(rpr, "szCs") {
         if let Some(v) = attr_w(sz_cs, "val") {
             fmt.font_size_cs = Some(half_pt_to_pt(&v));
+        }
+    }
+
+    // Record which of w:sz / w:szCs were set AT THIS LEVEL so the style-chain
+    // merge can mirror a directly-applied Latin size into the complex-script
+    // size when no szCs accompanies it (Word's behaviour — §17.3.2.18). Use the
+    // literal child presence (not the sz/szCs fallback above, which conflates
+    // them).
+    fmt.font_size_set_here = child_w(rpr, "sz").is_some();
+    fmt.font_size_cs_set_here = child_w(rpr, "szCs").is_some();
+
+    // Complex-script bold / italic toggles (ECMA-376 §17.3.2.3 / §17.3.2.17).
+    fmt.bold_cs = bool_prop(rpr, "bCs");
+    fmt.italic_cs = bool_prop(rpr, "iCs");
+
+    // Complex-script language tag (ECMA-376 §17.3.2.20 w:lang/@w:bidi). Lower-
+    // cased; its primary subtag later decides European-digit AN classification.
+    if let Some(lang) = child_w(rpr, "lang") {
+        if let Some(bidi) = attr_w(lang, "bidi") {
+            if !bidi.is_empty() {
+                fmt.lang_bidi = Some(bidi.to_lowercase());
+            }
         }
     }
 

@@ -1106,6 +1106,12 @@ fn parse_run_inner(
     let rtl = fmt.rtl;
     let font_family_cs = theme.resolve_font_ref(fmt.font_family_cs.clone());
     let font_size_cs = fmt.font_size_cs;
+    // Complex-script bold / italic (ECMA-376 §17.3.2.3 / §17.3.2.17) and the
+    // complex-script language tag (§17.3.2.20). Recorded so the renderer can
+    // route cs-classified content to cs formatting and decide AN digit ordering.
+    let bold_cs = fmt.bold_cs;
+    let italic_cs = fmt.italic_cs;
+    let lang_bidi = fmt.lang_bidi.clone();
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -1137,6 +1143,9 @@ fn parse_run_inner(
                         rtl,
                         font_family_cs: font_family_cs.clone(),
                         font_size_cs,
+                        bold_cs,
+                        italic_cs,
+                        lang_bidi: lang_bidi.clone(),
                     }));
                 }
             }
@@ -1164,6 +1173,9 @@ fn parse_run_inner(
                     rtl,
                     font_family_cs: font_family_cs.clone(),
                     font_size_cs,
+                    bold_cs,
+                    italic_cs,
+                    lang_bidi: lang_bidi.clone(),
                 }));
             }
             "br" => {
@@ -1260,6 +1272,9 @@ fn parse_run_inner(
                     rtl,
                     font_family_cs: font_family_cs.clone(),
                     font_size_cs,
+                    bold_cs,
+                    italic_cs,
+                    lang_bidi: lang_bidi.clone(),
                 }));
             }
             "AlternateContent" => {
@@ -2639,7 +2654,23 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.vert_align.is_some() { base.vert_align = direct.vert_align.clone(); }
     if direct.rtl.is_some() { base.rtl = direct.rtl; }
     if direct.font_family_cs.is_some() { base.font_family_cs = direct.font_family_cs.clone(); }
-    if direct.font_size_cs.is_some() { base.font_size_cs = direct.font_size_cs; }
+    if direct.bold_cs.is_some() { base.bold_cs = direct.bold_cs; }
+    if direct.italic_cs.is_some() { base.italic_cs = direct.italic_cs; }
+    if direct.lang_bidi.is_some() { base.lang_bidi = direct.lang_bidi.clone(); }
+
+    // Complex-script font size: a directly-applied `w:sz` without an
+    // accompanying `w:szCs` mirrors into the cs size (ECMA-376 §17.3.2.18 —
+    // see `styles::apply_run` for the full rationale). An explicit `w:szCs`
+    // always wins; otherwise inherited-only szCs is carried unchanged.
+    if direct.font_size_cs_set_here {
+        base.font_size_cs = direct.font_size_cs;
+    } else if direct.font_size_set_here {
+        base.font_size_cs = direct.font_size;
+    } else if direct.font_size_cs.is_some() {
+        base.font_size_cs = direct.font_size_cs;
+    }
+    base.font_size_set_here = false;
+    base.font_size_cs_set_here = false;
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {
@@ -2769,6 +2800,71 @@ mod rtl_tests {
             _ => None,
         }).unwrap();
         assert_eq!(run.rtl, Some(false));
+    }
+
+    /// ECMA-376 §17.3.2.18: a directly-applied `w:sz` with NO accompanying
+    /// `w:szCs` mirrors into the complex-script size (Word draws Arabic in a
+    /// run that only sets `w:sz` at that size — sample-7's underlined title sets
+    /// sz=36 / no szCs and renders the Arabic at 18pt). An explicit `w:szCs`
+    /// still wins independently.
+    #[test]
+    fn direct_sz_without_szcs_mirrors_into_cs_size() {
+        // sz=36 (18pt), no szCs -> font_size_cs == font_size == 18.
+        let body = body_from(
+            r#"<w:p><w:r><w:rPr><w:b/><w:sz w:val="36"/></w:rPr><w:t>نبذة</w:t></w:r></w:p>"#,
+        );
+        let run = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }).expect("text run present");
+        assert_eq!(run.font_size, 18.0, "sz=36 half-pts → 18pt");
+        assert_eq!(
+            run.font_size_cs,
+            Some(18.0),
+            "sz without szCs mirrors into the complex-script size (§17.3.2.18)"
+        );
+
+        // sz=36 AND szCs=24 -> cs size honors the explicit szCs (12pt).
+        let body2 = body_from(
+            r#"<w:p><w:r><w:rPr><w:sz w:val="36"/><w:szCs w:val="24"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        let run2 = body2.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }).unwrap();
+        assert_eq!(run2.font_size, 18.0);
+        assert_eq!(run2.font_size_cs, Some(12.0), "explicit szCs wins over sz mirroring");
+    }
+
+    /// ECMA-376 §17.3.2.3 w:bCs, §17.3.2.17 w:iCs, §17.3.2.20 w:lang/@w:bidi —
+    /// complex-script bold/italic toggles and the RTL language tag (lower-cased)
+    /// are surfaced on the run model for the renderer's cs-formatting path.
+    #[test]
+    fn complex_script_bold_italic_and_lang_bidi_are_extracted() {
+        let body = body_from(
+            r#"<w:p><w:r><w:rPr><w:rtl/><w:bCs/><w:iCs/>
+              <w:lang w:val="en-AE" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
+        );
+        let run = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }).expect("text run present");
+        assert_eq!(run.bold_cs, Some(true), "w:bCs → run.boldCs");
+        assert_eq!(run.italic_cs, Some(true), "w:iCs → run.italicCs");
+        assert_eq!(
+            run.lang_bidi.as_deref(),
+            Some("ae-ar"),
+            "w:lang@w:bidi lower-cased → run.langBidi"
+        );
     }
 
     /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a

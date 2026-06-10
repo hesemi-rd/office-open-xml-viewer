@@ -1395,6 +1395,11 @@ interface LayoutTextSeg {
    *  When true the segment's text is treated as a strong-RTL embedding in the
    *  per-line bidi pass (so leading digits / neutrals resolve RTL). */
   rtl?: boolean;
+  /** UAX#9 §4.3 HL1 / Word behaviour: classify this segment's European digits
+   *  (U+0030–0039) as Arabic-Number (AN) in the per-line bidi pass, so a date
+   *  like "28-02-2026" in an Arabic complex-script run reorders to "2026-02-28"
+   *  exactly as Word renders it (ECMA-376 §17.3.2.20 w:lang w:bidi). */
+  digitsAsAN?: boolean;
 }
 
 /**
@@ -1492,18 +1497,41 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
       : undefined;
     const revision = (base as DocxTextRun).revision;
-    const rtl = (base as DocxTextRun).rtl === true ? true : undefined;
+    const r = base as DocxTextRun;
+    const rtl = r.rtl === true ? true : undefined;
+
+    // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl` (§17.3.2.30)
+    // or an explicit complex-script font (`w:rFonts w:cs`) applies complex-script
+    // formatting to ALL of its characters; otherwise each character is routed by
+    // its Unicode block (Arabic/Hebrew/... → cs; Latin/digits/CJK → ascii/hAnsi).
+    const forceCs = r.rtl === true || r.fontFamilyCs != null;
+
+    // Complex-script (cs) formatting sources, each falling back to its Latin
+    // counterpart when the cs-specific property is absent (the parser already
+    // resolves szCs through the full style chain, mirroring a directly-set
+    // `w:sz` per §17.3.2.18; bCs/iCs per §17.3.2.3/§17.3.2.17).
+    const csFontSize = r.fontSizeCs ?? base.fontSize;
+    const csFontFamily = r.fontFamilyCs ?? base.fontFamily;
+    const csBold = r.boldCs ?? base.bold;
+    const csItalic = r.italicCs ?? base.italic;
+
+    // Word classifies European digits in an Arabic/Hebrew complex-script run as
+    // AN (§17.3.2.20 w:lang w:bidi): use the bidi language's primary subtag when
+    // present, else fall back to the run being rtl-marked.
+    const digitsAsAN =
+      (forceCs || r.rtl === true) && isRtlBidiLang(r.langBidi, r.rtl === true);
+
     let firstSeg = true;
-    for (const word of splitTextForLayout(displayText)) {
+    const emit = (word: string, cs: boolean) => {
       segs.push({
         text: word,
-        bold: base.bold,
-        italic: base.italic,
+        bold: cs ? csBold : base.bold,
+        italic: cs ? csItalic : base.italic,
         underline: base.underline,
         strikethrough: base.strikethrough,
-        fontSize: base.fontSize,
+        fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: base.fontFamily,
+        fontFamily: cs ? csFontFamily : base.fontFamily,
         vertAlign,
         measuredWidth: 0,
         smallCaps: base.smallCaps ?? false,
@@ -1512,8 +1540,29 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         ruby: firstSeg ? ruby : undefined,
         revision,
         rtl,
+        digitsAsAN: digitsAsAN ? true : undefined,
       });
       firstSeg = false;
+    };
+
+    for (const word of splitTextForLayout(displayText)) {
+      if (forceCs) {
+        // When the run's digits are AN-classified, split a token into maximal
+        // digit-groups and the surrounding separators so the per-line bidi pass
+        // (which reorders at SEGMENT granularity) can place the groups in Word's
+        // order — e.g. "28-02-2026" → segments [28][-][02][-][2026] reordered to
+        // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
+        // so a single-segment date would otherwise stay 28-02-2026.
+        if (digitsAsAN) {
+          for (const slice of splitDigitGroups(word)) emit(slice, true);
+        } else {
+          emit(word, true);
+        }
+      } else {
+        // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
+        // so each side gets its own (cs vs Latin) size and typeface.
+        for (const slice of splitByComplexScript(word)) emit(slice.text, slice.cs);
+      }
     }
   };
 
@@ -1630,6 +1679,133 @@ function fitCJKPrefix(
  * Split a text run into layout-segment strings.
  * Each segment is an atomic unit for word-level fitting; CJK overflow is handled in layoutLines.
  */
+/** RTL primary language subtags (ISO 639) whose complex-script context makes
+ *  Word classify European digits as Arabic-Number (AN). */
+const RTL_PRIMARY_SUBTAGS = new Set([
+  'ar', // Arabic
+  'fa', // Persian
+  'ur', // Urdu
+  'he', 'iw', // Hebrew (iw = legacy code)
+  'yi', 'ji', // Yiddish
+  'ps', // Pashto
+  'sd', // Sindhi
+  'ug', // Uyghur
+  'dv', // Divehi
+  'syr', // Syriac
+  'ckb', // Central Kurdish (Sorani)
+]);
+
+/**
+ * Decide whether a `w:lang w:bidi` tag (§17.3.2.20) designates an RTL
+ * complex-script language, so the run's European digits are classified AN
+ * (Word's date ordering). The tag's primary subtag (before the first '-') is
+ * matched against {@link RTL_PRIMARY_SUBTAGS}. When the tag is absent OR a
+ * malformed/unknown value (e.g. the "ae-AR" seen in real-world files), fall
+ * back to whether the run is explicitly rtl-marked — `w:rtl` already asserts
+ * the run is complex-script RTL content.
+ */
+function isRtlBidiLang(langBidi: string | undefined, runIsRtl: boolean): boolean {
+  if (langBidi) {
+    const primary = langBidi.split('-')[0].toLowerCase();
+    if (RTL_PRIMARY_SUBTAGS.has(primary)) return true;
+  }
+  return runIsRtl;
+}
+
+/**
+ * ECMA-376 §17.3.2.26 (rFonts) content classification — does this code point
+ * belong to the COMPLEX-SCRIPT (`cs`) category? Word routes such characters to
+ * the run's complex-script formatting (`w:szCs` / `w:rFonts w:cs` / `w:bCs` /
+ * `w:iCs`) instead of the Latin (`ascii`/`hAnsi`) formatting. The ranges are
+ * the Unicode blocks Word treats as complex script: Hebrew, Arabic (incl.
+ * supplements / extended / presentation forms), Syriac, Thaana, NKo,
+ * Samaritan, Mandaic, and the Arabic-math / extended Plane-1 blocks. Latin,
+ * digits (EN), punctuation and CJK are NOT cs.
+ */
+function isComplexScriptCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x0590 && cp <= 0x05ff) || // Hebrew
+    (cp >= 0x0600 && cp <= 0x06ff) || // Arabic
+    (cp >= 0x0700 && cp <= 0x074f) || // Syriac
+    (cp >= 0x0750 && cp <= 0x077f) || // Arabic Supplement
+    (cp >= 0x0780 && cp <= 0x07bf) || // Thaana
+    (cp >= 0x07c0 && cp <= 0x07ff) || // NKo
+    (cp >= 0x0800 && cp <= 0x083f) || // Samaritan
+    (cp >= 0x0840 && cp <= 0x085f) || // Mandaic
+    (cp >= 0x0860 && cp <= 0x08ff) || // Syriac Supp. / Arabic Extended-A/B
+    (cp >= 0xfb1d && cp <= 0xfb4f) || // Hebrew presentation forms
+    (cp >= 0xfb50 && cp <= 0xfdff) || // Arabic Presentation Forms-A
+    (cp >= 0xfe70 && cp <= 0xfeff) || // Arabic Presentation Forms-B
+    (cp >= 0x10800 && cp <= 0x10fff) || // Plane-1 RTL blocks
+    (cp >= 0x1e800 && cp <= 0x1efff)    // Mende/Adlam/Arabic Math
+  );
+}
+
+/**
+ * Split `text` into maximal runs that are uniformly complex-script or not, per
+ * §17.3.2.26 per-character classification. Returns `[{text, cs}]` in logical
+ * order. Used only when a run has NO explicit `w:rtl`/`w:cs` (which would force
+ * the whole run to cs); otherwise the caller treats the entire piece as cs.
+ *
+ * Digits / spaces / punctuation (neutral, non-cs) attach to the PRECEDING slice
+ * so a number embedded in Arabic ("نص 12 نص") does not fragment the word into
+ * extra segments — Word keeps such weak/neutral characters with the script they
+ * border. A leading neutral run takes the first strong slice's class.
+ */
+function splitByComplexScript(text: string): { text: string; cs: boolean }[] {
+  const out: { text: string; cs: boolean }[] = [];
+  let curCs: boolean | null = null;
+  let buf = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    // Neutral (non-letter) characters do not switch the active class; they ride
+    // with whatever script is currently open (or the next one if none yet).
+    const isLetter = /\p{L}/u.test(ch);
+    if (!isLetter) {
+      buf += ch;
+      continue;
+    }
+    const cs = isComplexScriptCodePoint(cp);
+    if (curCs === null) {
+      curCs = cs;
+      buf += ch;
+    } else if (cs === curCs) {
+      buf += ch;
+    } else {
+      out.push({ text: buf, cs: curCs });
+      curCs = cs;
+      buf = ch;
+    }
+  }
+  if (buf.length > 0) out.push({ text: buf, cs: curCs ?? false });
+  return out;
+}
+
+/**
+ * Split a token into maximal runs of European digits (U+0030–0039) versus
+ * everything else, so a date / number in an AN-classified Arabic run can be
+ * reordered group-by-group by the per-line bidi pass (which works at segment
+ * granularity). "28-02-2026" → ["28","-","02","-","2026"].
+ */
+function splitDigitGroups(text: string): string[] {
+  const out: string[] = [];
+  let buf = '';
+  let bufDigit: boolean | null = null;
+  for (const ch of text) {
+    const c = ch.charCodeAt(0);
+    const isDigit = c >= 0x30 && c <= 0x39;
+    if (bufDigit === null || isDigit === bufDigit) {
+      buf += ch;
+    } else {
+      out.push(buf);
+      buf = ch;
+    }
+    bufDigit = isDigit;
+  }
+  if (buf.length > 0) out.push(buf);
+  return out.length ? out : [text];
+}
+
 function splitTextForLayout(text: string): string[] {
   const result: string[] = [];
   let i = 0;

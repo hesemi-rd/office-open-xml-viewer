@@ -10,7 +10,7 @@
 // resolved direction. Inline objects (image / math / tab) participate as a
 // single neutral object-replacement character.
 
-import { getDefaultBidiEngine } from '@silurus/ooxml-core';
+import { getDefaultBidiEngine, type BidiClass } from '@silurus/ooxml-core';
 
 /** Strong-RTL scripts (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, …) +
  *  Arabic presentation forms. Used only as a cheap gate to decide whether a
@@ -31,6 +31,12 @@ const segText = (s: unknown): string | undefined => {
 
 /** Does this segment carry a run-level `<w:rtl>` (ECMA-376 §17.3.2.30)? */
 const segRtl = (s: unknown): boolean => (s as { rtl?: unknown }).rtl === true;
+
+/** Should this segment's European digits be classified AN (Word's Arabic
+ *  complex-script digit ordering)? Set by the renderer from `w:lang w:bidi`
+ *  (§17.3.2.20). See {@link computeLineVisualOrder}. */
+const segDigitsAsAN = (s: unknown): boolean =>
+  (s as { digitsAsAN?: unknown }).digitsAsAN === true;
 
 /**
  * Cheap gate: does this run of segments need the bidi pass? True when any
@@ -92,6 +98,11 @@ export function computeLineVisualOrder(
   let full = '';
   const segStart: number[] = new Array(n);
   const segEnd: number[] = new Array(n);
+  // UAX#9 §4.3 HL1 per-code-unit Bidi_Class override (see engine.computeLevels).
+  // We mark European digits inside `digitsAsAN` segments as AN so a logical
+  // "28-02-2026" reorders to Word's "2026-02-28" under an RTL base. `undefined`
+  // until any segment opts in, so the pure algorithm runs for ordinary lines.
+  let classOverride: (BidiClass | null)[] | undefined;
   for (let i = 0; i < n; i++) {
     const t = segText(segments[i]) ?? '';
     // Only wrap a w:rtl run that has NO strong-RTL char of its own: a run with
@@ -104,10 +115,25 @@ export function computeLineVisualOrder(
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
     segEnd[i] = full.length;
     if (isRtl) full += PDF;
+
+    if (segDigitsAsAN(segments[i]) && t.length > 0) {
+      if (!classOverride) classOverride = new Array(0);
+      // Extend lazily to the current length, then tag each European digit AN.
+      while (classOverride.length < full.length) classOverride.push(null);
+      for (let k = segStart[i]; k < segEnd[i]; k++) {
+        const c = full.charCodeAt(k);
+        if (c >= 0x30 && c <= 0x39) classOverride[k] = 'AN';
+      }
+    }
   }
+  if (classOverride) while (classOverride.length < full.length) classOverride.push(null);
 
   const engine = getDefaultBidiEngine();
-  const { levels, paragraphLevel } = engine.computeLevels(full, baseRtl ? 'rtl' : 'ltr');
+  const { levels, paragraphLevel } = engine.computeLevels(
+    full,
+    baseRtl ? 'rtl' : 'ltr',
+    classOverride,
+  );
 
   // Ordering level = the RESOLVED level of the segment's first real code unit.
   // No level forcing for rtl-marked segments: inside their RLE…PDF embedding,

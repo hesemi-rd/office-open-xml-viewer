@@ -435,10 +435,19 @@ function resolveSequence(
 export function resolveLevels(
   cps: number[],
   base: BaseDirection,
+  classOverride?: ReadonlyArray<BidiClass | null | undefined>,
 ): { levels: number[]; paragraphLevel: number } {
   const n = cps.length;
   const origTypes: BidiClass[] = new Array(n);
-  for (let i = 0; i < n; i++) origTypes[i] = bidiClass(cps[i]);
+  // UAX#9 §4.3 HL1 higher-level protocol: a caller may override the assigned
+  // Bidi_Class of selected code points BEFORE the algorithm runs (e.g. Word
+  // classifying European digits as AN inside Arabic-language complex-script
+  // context — see W2). The pure algorithm is unchanged when `classOverride` is
+  // absent, so the UAX#9 conformance suite (which passes no override) still
+  // drives `resolveLevels` exactly as the standard specifies.
+  for (let i = 0; i < n; i++) {
+    origTypes[i] = classOverride?.[i] ?? bidiClass(cps[i]);
+  }
 
   const paragraphLevel =
     base === 'rtl' ? 1 : base === 'ltr' ? 0 : firstStrongLevel(origTypes, 0, n);

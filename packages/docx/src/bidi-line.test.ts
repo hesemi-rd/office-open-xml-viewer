@@ -120,4 +120,38 @@ describe('computeLineVisualOrder', () => {
     const { order } = computeLineVisualOrder([{ text: 'שלום ' }, {}, { text: 'טוב' }], true);
     expect(order).toEqual([2, 1, 0]);
   });
+
+  it('orders an AN-classified date to Word ordering (2026-02-28)', () => {
+    // sample-7 date cell: logical "28-02-2026" in an Arabic complex-script run
+    // (w:rtl, w:lang w:bidi="ae-AR"). The renderer pre-splits it into digit-
+    // group / separator segments and tags each with `digitsAsAN`. Under the
+    // RTL cell base, classifying the European digits as AN reorders the groups
+    // to Word's "2026-02-28" (UAX#9 §4.3 HL1 higher-level protocol).
+    const segs = [
+      { text: '28', rtl: true, digitsAsAN: true },
+      { text: '-', rtl: true, digitsAsAN: true },
+      { text: '02', rtl: true, digitsAsAN: true },
+      { text: '-', rtl: true, digitsAsAN: true },
+      { text: '2026', rtl: true, digitsAsAN: true },
+    ];
+    const { order } = computeLineVisualOrder(segs, true);
+    // Visual L→R: 2026 - 02 - 28  →  logical indices [4,3,2,1,0].
+    const visual = order.map((i) => segs[i].text).join('');
+    expect(visual).toBe('2026-02-28');
+  });
+
+  it('leaves a date as logical order when digits are NOT AN-classified (pure UAX#9 EN)', () => {
+    // Same split, base RTL, but without the digitsAsAN flag: European digits
+    // stay EN, all at the even embedded level, so the groups keep logical order.
+    const segs = [
+      { text: '28', rtl: true },
+      { text: '-', rtl: true },
+      { text: '02', rtl: true },
+      { text: '-', rtl: true },
+      { text: '2026', rtl: true },
+    ];
+    const { order } = computeLineVisualOrder(segs, true);
+    const visual = order.map((i) => segs[i].text).join('');
+    expect(visual).toBe('28-02-2026');
+  });
 });

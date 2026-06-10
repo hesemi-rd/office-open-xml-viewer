@@ -549,6 +549,20 @@ pub struct TextRun {
     /// units as `font_size`). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size_cs: Option<f64>,
+    /// ECMA-376 §17.3.2.3 `<w:bCs>` — complex-script bold toggle. `None` when
+    /// unspecified (renderer falls back to `bold`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. `None`
+    /// when unspecified (renderer falls back to `italic`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — the complex-script (RTL) language
+    /// tag, lower-cased (e.g. "ar-sa", "ae-ar", "he-il"). Used to decide whether
+    /// European digits in a complex-script run are classified as AN (Word's
+    /// Arabic/Hebrew digit ordering). `None` when unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

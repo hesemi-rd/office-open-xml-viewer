@@ -354,6 +354,13 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.18 `<w:szCs>` — complex-script font size in pt
    *  (same units as `fontSize`). */
   fontSizeCs?: number;
+  /** ECMA-376 §17.3.2.3 `<w:bCs>` — complex-script bold toggle. */
+  boldCs?: boolean;
+  /** ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. */
+  italicCs?: boolean;
+  /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
+   *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
+  langBidi?: string;
 }
 
 export interface RunRevision {

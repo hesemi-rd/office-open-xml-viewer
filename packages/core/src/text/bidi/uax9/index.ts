@@ -4,34 +4,44 @@
 // core to the string / code-unit surface renderers use.
 
 import type { BidiEngine } from '../engine.js';
-import type { BaseDirection, BidiLevels } from '../types.js';
+import type { BaseDirection, BidiClass, BidiLevels } from '../types.js';
 import { mirror as mirrorGlyph } from '../char-data.js';
 import { resolveLevels, reorderByLevels, REMOVED } from './rules.js';
 
 /** Code-unit sentinel for code units removed by rule X9 (REMOVED maps here). */
 const REMOVED_UNIT = 255;
 
-/** Decode a UTF-16 string into code points + how many code units each occupies. */
-function decode(text: string): { cps: number[]; units: number[] } {
+/** Decode a UTF-16 string into code points, their code-unit widths, and the
+ *  code-unit offset at which each code point begins. */
+function decode(text: string): { cps: number[]; units: number[]; starts: number[] } {
   const cps: number[] = [];
   const units: number[] = [];
+  const starts: number[] = [];
   for (let i = 0; i < text.length; ) {
     const cp = text.codePointAt(i)!;
     const len = cp > 0xffff ? 2 : 1;
     cps.push(cp);
     units.push(len);
+    starts.push(i);
     i += len;
   }
-  return { cps, units };
+  return { cps, units, starts };
 }
 
 class Uax9Engine implements BidiEngine {
   computeLevels(
     text: string,
     base: BaseDirection,
+    classOverride?: ReadonlyArray<BidiClass | null | undefined>,
   ): { levels: BidiLevels; paragraphLevel: number } {
-    const { cps, units } = decode(text);
-    const { levels: cpLevels, paragraphLevel } = resolveLevels(cps, base);
+    const { cps, units, starts } = decode(text);
+    // Collapse the per-code-UNIT override the renderer supplies into the
+    // per-code-POINT space the rule engine works in (read it at the code
+    // point's leading unit). Skipped entirely when no override is passed.
+    const cpOverride = classOverride
+      ? cps.map((_, i) => classOverride[starts[i]] ?? null)
+      : undefined;
+    const { levels: cpLevels, paragraphLevel } = resolveLevels(cps, base, cpOverride);
 
     // Expand per-code-point levels back to per-code-unit (both surrogate halves
     // share the level), mapping the REMOVED sentinel to 255.
