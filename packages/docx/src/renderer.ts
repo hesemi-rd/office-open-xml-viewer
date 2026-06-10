@@ -2541,6 +2541,16 @@ function renderTable(table: DocTable, state: RenderState): void {
     }
   }
 
+  // ECMA-376 §17.4.1 `<w:bidiVisual>`: lay the grid columns right-to-left, so
+  // logical column 0 sits at the table's RIGHT edge and indices advance
+  // leftward. We mirror by POSITION arithmetic (not canvas transform): a cell
+  // spanning [ci, ci+span) gets physical left x = tableX + tableW − (offset of
+  // its right grid edge). Cell borders are mirrored too — a cell's logical
+  // left/right border specs swap physical sides (its "start" edge is on the
+  // right). gridSpan still consumes the same logical columns; only the mapping
+  // from logical column offset to a physical x flips.
+  const mirror = table.bidiVisual === true;
+
   let y = state.y;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
@@ -2551,6 +2561,11 @@ function renderTable(table: DocTable, state: RenderState): void {
     for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+      // Physical left edge of this cell. LTR: cumulative from the left (`x`).
+      // bidiVisual: place so logical column 0 is rightmost — the cell's left
+      // edge is the table's right edge minus the offset of its trailing grid
+      // line (sum of widths up to and including this span).
+      const leadX = mirror ? tableX + tableW - (x - tableX) - cellW : x;
 
       if (cell.vMerge === false) {
         // continue cell — content is rendered by its restart partner.
@@ -2563,7 +2578,7 @@ function renderTable(table: DocTable, state: RenderState): void {
           drawH = 0;
           for (let rj = ri; rj <= endRi; rj++) drawH += rowHeights[rj];
         }
-        if (!dryRun) renderCell(cell, table, x, y, cellW, drawH, state);
+        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, mirror);
         else measureCellContent(cell, table, cellW, scale, state);
       }
 
@@ -2727,6 +2742,7 @@ function renderCell(
   w: number,
   h: number,
   state: RenderState,
+  mirror = false,
 ): void {
   const { ctx, scale } = state;
 
@@ -2735,7 +2751,7 @@ function renderCell(
     ctx.fillRect(x, y, w, h);
   }
 
-  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale);
+  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, mirror);
 
   const cm = effCellMargins(cell, table);
   const mt = cm.top * scale;
@@ -2820,11 +2836,15 @@ function drawCellBorders(
   cell: CellBorders,
   table: TableBorders,
   scale: number,
+  mirror = false,
 ): void {
   const top = cell.top ?? table.top;
   const bottom = cell.bottom ?? table.bottom;
-  const left = cell.left ?? table.left;
-  const right = cell.right ?? table.right;
+  // ECMA-376 §17.4.1: under bidiVisual the columns are visually reversed, so a
+  // cell's logical left (start) border is drawn on its physical right edge and
+  // vice versa. Borders are owned by the cell, so swap which spec each side uses.
+  const left = mirror ? (cell.right ?? table.right) : (cell.left ?? table.left);
+  const right = mirror ? (cell.left ?? table.left) : (cell.right ?? table.right);
 
   if (top && top.style !== 'none') drawBorderLine(ctx, x, y, x + w, y, top, scale);
   if (bottom && bottom.style !== 'none') drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale);
