@@ -2257,14 +2257,22 @@ function layoutLines(
   // Use an explicit queue so CJK split-tails can be re-queued
   const queue: LayoutSeg[] = [...segs];
 
+  // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
+  // content of the paragraph that new line is an EMPTY line that still
+  // occupies one line height (Word reserves it; visible e.g. as extra table
+  // row height). Track the trailing break so it can be flushed after the loop.
+  let trailingBreakFontSize: number | null = null;
+
   while (queue.length > 0) {
     const seg = queue.shift()!;
 
     // ── Line-break sentinel ──────────────────────────────
     if ('lineBreak' in seg) {
       flush(seg.fontSize);
+      trailingBreakFontSize = seg.fontSize;
       continue;
     }
+    trailingBreakFontSize = null;
 
     // ── Tab segment ──────────────────────────────────────
     if ('isTab' in seg) {
@@ -2469,6 +2477,8 @@ function layoutLines(
   }
 
   if (currentLine.length > 0) flush();
+  // Trailing <w:br/>: emit the empty line it opened (§17.3.3.1).
+  else if (trailingBreakFontSize !== null) flush(trailingBreakFontSize);
 
   return lines;
 }
