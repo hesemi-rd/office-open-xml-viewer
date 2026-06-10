@@ -177,7 +177,7 @@ export interface TabStop {
 }
 
 export interface LineSpacing {
-  value: number;   // multiplier (auto/atLeast) or pt (exact)
+  value: number;   // multiplier (auto) or pt (exact/atLeast)
   rule: 'auto' | 'exact' | 'atLeast';
   /** True when `w:spacing/@w:line` was set on the paragraph's own pPr or on a
    *  named style (not inherited solely from docDefault). Per ECMA-376 §17.6.5,

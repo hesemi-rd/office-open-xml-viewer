@@ -2954,8 +2954,11 @@ function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  *   exact   → value in pt, converted to px (ignores font and grid).
  *   atLeast → max(natural, value in pt × scale).
  *   null    → natural, or grid pitch if the section defines one.
+ *
+ * Exported for unit tests only — not part of the package API (not
+ * re-exported from index.ts).
  */
-function lineBoxHeight(
+export function lineBoxHeight(
   ls: LineSpacing | null,
   ascentPx: number,
   descentPx: number,
@@ -2997,6 +3000,23 @@ function lineBoxHeight(
     // No explicit spacing → single line. Use the intended single-line height
     // (`natural`) off-grid; on-grid, snap to the pitch with the glyph extent
     // as the overflow floor (the grid, not the font metric, governs height).
+    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
+  }
+  // A zero/negative `w:line` is degenerate input whose behavior ECMA-376
+  // §17.3.1.33 does not define (read literally, an `exact` line of 0 would
+  // collapse the line box to no height; some generators emit
+  // `<w:spacing w:line="0" w:lineRule="exact"/>` on table cells, e.g. sample-7).
+  // Word's native model has no such state: per the [MS-DOC] LSPD structure,
+  // "exact" spacing is encoded as a negative dyaLine ("the line spacing, in
+  // twips, is exactly 0x10000 minus dyaLine", so an exact 0 is unrepresentable)
+  // and a non-negative dyaLine in twips mode is "dyaLine or the number of twips
+  // necessary for single spacing, whichever value is greater" — i.e. a stored 0
+  // resolves to exactly single spacing. Word's PDF export of sample-7 confirms
+  // (those rows render at normal single-line height). Match that: treat
+  // exact/auto line <= 0 as single spacing. (LSPD's max() rule is the twips
+  // mode; applying the same fallback to a degenerate auto multiplier <= 0 is
+  // the analogous non-collapsing reading.)
+  if ((ls.rule === 'exact' || ls.rule === 'auto') && ls.value <= 0) {
     return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {
