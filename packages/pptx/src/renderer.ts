@@ -431,7 +431,22 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'calibri light': 'Carlito',
   'cambria': 'Caladea',
   'cambria math': 'Caladea',
+  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
+  // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
+  // Univers Next Arabic) render with a real web font instead of an oversized
+  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
+  // covers the modern geometric ones.
+  'sakkal majalla': 'Noto Naskh Arabic',
+  'traditional arabic': 'Noto Naskh Arabic',
+  'simplified arabic': 'Noto Naskh Arabic',
+  'arabic typesetting': 'Noto Naskh Arabic',
+  'univers next arabic': 'Noto Sans Arabic',
 };
+
+/** Generic Arabic fallbacks appended to every named-font canvas stack (before
+ *  the CSS generic) so Arabic-script glyphs in an unmapped family still resolve
+ *  to a real Arabic web font when `useGoogleFonts` is on. */
+const ARABIC_FALLBACKS = '"Noto Naskh Arabic", "Noto Sans Arabic"';
 
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
@@ -440,12 +455,12 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  // Named font + (metric-compatible substitute, if an Office face) + inferred
-  // generic fallback, so browsers degrade consistently when the exact typeface
-  // is not installed.
+  // Named font + (metric-compatible substitute, if an Office face) + generic
+  // Arabic web fonts + inferred generic fallback, so browsers degrade
+  // consistently when the exact typeface is not installed.
   const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
   const subPart = sub ? `"${sub}", ` : '';
-  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${genericFallback(normalized)}`;
+  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${genericFallback(normalized)}`;
 }
 
 /**

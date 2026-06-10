@@ -18,6 +18,11 @@ import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
  *  substitute into the canvas font stack so missing Office fonts degrade to a
  *  same-width webfont instead of a wider system serif/sans. The remaining
  *  entries omit `loadFamily` because Google Fonts ships the same family name. */
+const NOTO_NASKH_ARABIC_URL =
+  'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
+const NOTO_SANS_ARABIC_URL =
+  'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
+
 const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
   'calibri light':     { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
@@ -32,6 +37,21 @@ const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
+  // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
+  // Univers Next Arabic) render with a real web font instead of an oversized
+  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
+  // covers the modern geometric ones.
+  'sakkal majalla':      { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
+  'traditional arabic':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
+  'simplified arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
+  'arabic typesetting':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
+  'univers next arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // Self-referencing entries so the generic Arabic fallback fonts (appended to
+  // the renderer's font stack) are themselves loaded whenever useGoogleFonts is
+  // enabled — see `load`, which always queues these names.
+  'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
+  'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
 };
 
 /** Options for {@link PptxPresentation.load}. The shared load-options type
@@ -117,7 +137,13 @@ export class PptxPresentation {
     await pres._parse(buffer, opts.maxZipEntryBytes);
     const parsed = pres._presentation;
     if (opts.useGoogleFonts && parsed) {
-      await preloadGoogleFonts([parsed.majorFont, parsed.minorFont], PPTX_GOOGLE_FONTS);
+      // Always load the generic Arabic fallbacks so any Arabic-script run gets
+      // a real web font even when its named family is unmapped (the renderer's
+      // canvas font stack ends with these two Noto faces).
+      await preloadGoogleFonts(
+        [parsed.majorFont, parsed.minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic'],
+        PPTX_GOOGLE_FONTS,
+      );
     }
     return pres;
   }
