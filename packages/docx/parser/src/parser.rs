@@ -48,12 +48,24 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 
     // Theme is referenced by a relationship with Type ending in "/theme" — resolve
     // to word/<target> and parse the clrScheme.
-    let theme = find_rel_target(&rels_xml, "theme")
+    let mut theme = find_rel_target(&rels_xml, "theme")
         .map(|t| {
             let p = if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) };
             read_zip_entry(&mut zip, &p).map(|s| ThemeColors::parse(&s)).unwrap_or_default()
         })
         .unwrap_or_default();
+
+    // §17.15.1.88 w:themeFontLang — when the theme leaves a cs typeface empty,
+    // the settings' bidi language decides the actual complex-script face.
+    let settings_path = find_rel_target(&rels_xml, "settings")
+        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .unwrap_or_else(|| "word/settings.xml".to_string());
+    if let Ok(settings_xml) = read_zip_entry(&mut zip, &settings_path) {
+        if let Some(lang) = parse_theme_font_bidi_lang(&settings_xml) {
+            theme.fill_default_cs_font(&lang);
+        }
+    }
+    let theme = theme;
 
     let media_map = load_media_map(&mut zip, &rel_map, "word/");
 
@@ -290,6 +302,24 @@ impl ThemeColors {
         self.fonts.get(&format!("{group}/{axis}")).cloned()
     }
 
+    /// Fill the complex-script theme slots when the theme leaves them EMPTY
+    /// (`<a:cs typeface=""/>`). ECMA-376 §17.15.1.88 `w:themeFontLang`: the
+    /// document's bidi language selects the actual face for an unspecified
+    /// theme font. Word substitutes Arial for Arabic/Hebrew here (verified
+    /// against sample-7.pdf: the no-rFonts table cells embed ArialMT while
+    /// explicit-rFonts runs embed Sakkal Majalla).
+    pub fn fill_default_cs_font(&mut self, bidi_lang: &str) {
+        let primary = bidi_lang.split('-').next().unwrap_or("").to_ascii_lowercase();
+        let default = match primary.as_str() {
+            "ar" | "he" => "Arial",
+            _ => return,
+        };
+        for group in ["minor", "major"] {
+            let key = format!("{group}/cs");
+            self.fonts.entry(key).or_insert_with(|| default.to_string());
+        }
+    }
+
     /// Resolve an rFonts theme reference (e.g. "minorHAnsi" → minor.latin,
     /// "minorEastAsia" → minor.ea, "majorHAnsi" → major.latin). Returns None
     /// when the reference is unknown or the theme has no matching typeface.
@@ -305,6 +335,15 @@ impl ThemeColors {
         };
         self.fonts.get(&format!("{group}/{axis}")).cloned()
     }
+}
+
+/// Extract `<w:themeFontLang w:bidi="…"/>` from word/settings.xml (§17.15.1.88).
+fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
+    let doc = XmlDoc::parse(settings_xml).ok()?;
+    let node = doc.root_element()
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "themeFontLang")?;
+    attr_w(node, "bidi").filter(|s| !s.is_empty())
 }
 
 fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
@@ -2825,6 +2864,57 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+}
+
+#[cfg(test)]
+mod theme_cs_tests {
+    use super::*;
+
+    #[test]
+    fn empty_theme_cs_falls_back_to_arial_for_arabic_bidi_lang() {
+        // §17.15.1.88: theme <a:cs typeface=""/> + themeFontLang bidi="ar-SA"
+        // → Word uses Arial for theme-referenced complex-script fonts
+        // (sample-7.pdf embeds ArialMT for the no-rFonts table cells).
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:themeElements><a:fontScheme name="Office">
+            <a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>
+            <a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>
+          </a:fontScheme></a:themeElements></a:theme>"#;
+        let mut theme = ThemeColors::parse(theme_xml);
+        assert_eq!(theme.resolve_font("minorBidi"), None, "empty cs typeface is unset");
+        theme.fill_default_cs_font("ar-SA");
+        assert_eq!(theme.resolve_font("minorBidi").as_deref(), Some("Arial"));
+        assert_eq!(theme.resolve_font("majorBidi").as_deref(), Some("Arial"));
+        // Latin axes untouched
+        assert_eq!(theme.resolve_font("minorHAnsi").as_deref(), Some("Calibri"));
+    }
+
+    #[test]
+    fn explicit_theme_cs_font_is_not_overridden() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:themeElements><a:fontScheme name="X">
+            <a:minorFont><a:latin typeface="Calibri"/><a:cs typeface="Sakkal Majalla"/></a:minorFont>
+          </a:fontScheme></a:themeElements></a:theme>"#;
+        let mut theme = ThemeColors::parse(theme_xml);
+        theme.fill_default_cs_font("ar-SA");
+        assert_eq!(theme.resolve_font("minorBidi").as_deref(), Some("Sakkal Majalla"));
+    }
+
+    #[test]
+    fn non_rtl_bidi_lang_adds_no_default() {
+        let mut theme = ThemeColors::parse("<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"/>");
+        theme.fill_default_cs_font("en-US");
+        assert_eq!(theme.resolve_font("minorBidi"), None);
+    }
+
+    #[test]
+    fn theme_font_lang_bidi_is_extracted_from_settings() {
+        let settings = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:themeFontLang w:val="en-AE" w:bidi="ar-SA"/></w:settings>"#;
+        assert_eq!(parse_theme_font_bidi_lang(settings).as_deref(), Some("ar-SA"));
+        let none = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        assert_eq!(parse_theme_font_bidi_lang(none), None);
     }
 }
 
