@@ -73,14 +73,26 @@ interface WinMetric {
 /** A known font's win metrics. Keyed by a normalized (lowercased) name test. */
 const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinMetric]> = [
   // Meiryo / Meiryo UI — unitsPerEm 2048, usWinAscent 2210, usWinDescent 1059
-  // → raw sum 3269/2048 = 1.5962. Cross-checked against the sample-3 reference
-  // PDF: the 48 pt Title (`line="168"` = 0.7×) measures 53.8 pt cap-top to
-  // cap-top → singleLine = 53.8 / 0.7 / 48 = 1.60 em, so the sum is pinned to
-  // exactly 1.60 (its long-standing cross-checked value); the ascent:descent
-  // split keeps the OS/2 proportion (2210:1059).
+  // (OS/2 table; USE_TYPO_METRICS fsSelection bit 7 is clear, so Word uses the
+  // win metric for `lineRule="auto"` single spacing, §17.3.1.33). The single-
+  // line ratio is therefore the raw win sum 3269/2048 = 1.5962 em, carried as
+  // the true ascent/descent ratios so the baseline split stays Meiryo's own.
+  //
+  // Provenance / cross-check: sample-3's single-spaced body uses Meiryo UI.
+  // Measured against the Word-export reference PNG, the 11 pt intro paragraph
+  // renders at 17.5 px ≈ 1.591 em/pt — i.e. exactly the 1.5962 win ratio. (An
+  // earlier revision pinned this to a round 1.60 from a 48 pt-title eyeball;
+  // that title is Latin/Arial Nova, not Meiryo, so the pin had no Meiryo basis.
+  // Per the package CLAUDE.md "spec over empirical constant" rule it is replaced
+  // here by the documented OS/2 win sum.) The 9 pt body in the same document
+  // measures ~15.0 px = 1.667 em/pt in Word, ABOVE 1.5962: that residual is
+  // Word's per-line device-pixel rounding at small CJK sizes (cumulative line
+  // tops snapped to whole pixels), not a different single-line ratio — it is not
+  // reproducible from any OS/2 value and is intentionally NOT encoded as a
+  // constant here.
   [
     (n) => n.includes('meiryo') || n.includes('メイリオ'),
-    { asc: 1.6 * (2210 / 3269), desc: 1.6 * (1059 / 3269) },
+    { asc: 2210 / 2048, desc: 1059 / 2048 },
   ],
   // Sakkal Majalla — unitsPerEm 2048, usWinAscent 1810, usWinDescent 1050
   // → asc 0.8838, desc 0.5127, sum = 1.3965. Extracted directly from the
