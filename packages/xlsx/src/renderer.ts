@@ -8,6 +8,7 @@ import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, mathToMathML, recol
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
+import { computeLineVisualOrder, cellBaseRtl, segmentsHaveRtl } from './bidi-line.js';
 
 // Default font stack. Calibri is the workbook default font in Excel; on
 // systems without Office (macOS / Linux) the browser would otherwise fall
@@ -18,7 +19,14 @@ import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 // true })`. Listing it in the cascade means: Calibri (Windows / Office)
 // → Carlito (loaded webfont) → Arial → sans-serif. Caladea is the same
 // for Cambria.
-const DEFAULT_FONT_FAMILY = '"Calibri", "Carlito", "Cambria", "Caladea", Arial, sans-serif';
+// The two trailing Noto Arabic faces are generic Arabic-script fallbacks:
+// when the primary Latin faces (Calibri / Carlito / Arial) lack a requested
+// glyph, the browser advances down the cascade per-glyph, so any Arabic
+// codepoint resolves to a real web font (loaded by `XlsxWorkbook.load`'s
+// useGoogleFonts path) instead of an oversized OS Arabic face. Latin glyphs
+// still bind to the earlier faces, so Latin rendering is unchanged.
+const DEFAULT_FONT_FAMILY =
+  '"Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif';
 const DEFAULT_FONT_SIZE = 11;
 // Fallback Max Digit Width of the Normal-style font when the workbook's
 // default font isn't known. Calibri 11 pt at 96 DPI ≈ 8 px (Canvas2D
@@ -772,6 +780,17 @@ interface RenderContext {
    *  unit column widths into pixels. */
   mdw: number;
   onTextRun?: (info: XlsxTextRunInfo) => void;
+  /** Sheet-level right-to-left grid mirror (ECMA-376 §18.3.1.87
+   *  `<sheetView rightToLeft>`). When true the whole grid is mirrored:
+   *  column A sits at the right edge, columns flow right-to-left, and the
+   *  row-number header strip sits on the right of the canvas. Implemented
+   *  by remapping each cell's canvas x to `canvasW - cx - cellW` (mirror
+   *  about the cell-area band) — glyphs themselves are NOT flipped, and
+   *  cell-level left/right alignment stays physical (Excel behavior). */
+  rtl: boolean;
+  /** Logical canvas width (device-independent px). Needed by the RTL
+   *  mirror; identical to the value the top-level render fn computes. */
+  canvasW: number;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -990,6 +1009,16 @@ function renderQuadrant(
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
 
+  // RTL grid mirror (ECMA-376 §18.3.1.87). Maps a left-anchored cell rect
+  // [x, x+w] to its mirror [canvasW - x - w, canvasW - x] within the
+  // cell-area band. Because the LTR cell area is [hw, canvasW] and the RTL
+  // cell area is [0, canvasW - hw] (header strip moves to the right), the
+  // transform for any cell/quadrant collapses to `canvasW - x - w`. Applied
+  // to every column x (so fills, borders, gridlines, text positions, merge
+  // spans and the clip rect all mirror) while leaving glyphs un-flipped and
+  // cell-level left/right alignment physical.
+  const mirrorX = (x: number, w: number): number => rc.rtl ? rc.canvasW - x - w : x;
+
   // Canvas x for each column
   const colXs: number[] = [];
   let x = -pixOffsetX;
@@ -1008,7 +1037,7 @@ function renderQuadrant(
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(clipX, clipY, clipW, clipH);
+  ctx.rect(mirrorX(clipX, clipW), clipY, clipW, clipH);
   ctx.clip();
 
   // Deferred text drawing. Excel renders cell text on top of *all* cell
@@ -1056,6 +1085,7 @@ function renderQuadrant(
     }
 
     const cW = info.totalW, cH = info.totalH;
+    aCx = mirrorX(aCx, cW);
     const key = `${aRow}:${aCol}`;
     const cell = rc.cellMap.get(key);
     const { font, fill, border, xf } = resolveXf(styles, cell?.styleIndex ?? 0);
@@ -1169,9 +1199,11 @@ function renderQuadrant(
 
     for (let ci = 0; ci < numCols; ci++) {
       const colIndex = startCol + ci;
-      const cx = originX + colXs[ci];
+      const ltrCx = originX + colXs[ci];
       const cw = colWidths[ci];
-      if (cx + cw <= clipX || cx >= clipX + clipW) continue;
+      // Cull against the (un-mirrored) clip band — visibility is preserved
+      // by the mirror, so the LTR test is correct for both directions.
+      if (ltrCx + cw <= clipX || ltrCx >= clipX + clipW) continue;
 
       const key = `${rowIndex}:${colIndex}`;
       if (mergeSkipSet.has(key)) continue;
@@ -1179,6 +1211,9 @@ function renderQuadrant(
       const mergeInfo = mergeAnchorMap.get(key);
       const cellW = mergeInfo ? mergeInfo.totalW : cw;
       const cellH = mergeInfo ? mergeInfo.totalH : ch;
+      // Mirror the cell's canvas x for RTL. Uses the *full* drawn width
+      // (merge span included) so the rect lands at the correct mirror band.
+      const cx = mirrorX(ltrCx, cellW);
 
       const cell = cellMap.get(key);
       const styleIndex = cell?.styleIndex ?? 0;
@@ -1199,17 +1234,31 @@ function renderQuadrant(
       // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
+      // Whether this cell painted an opaque fill over its rect. The
+      // neighbour-edge inherit below (which redraws the shared boundary line
+      // the left/above cell already drew) is only needed to repair a line
+      // that *this* cell's fill over-painted. An empty, fill-less cell paints
+      // nothing over the boundary, so inheriting the neighbour's edge there is
+      // a pure double-draw — invisible in LTR (it lands on the same pixel the
+      // neighbour drew) but in an RTL mirror (ECMA-376 §18.3.1.87) the cell's
+      // own "left" maps to its *screen-left* edge, away from the neighbour,
+      // producing a spurious vertical line Excel never draws (sample-29 E1).
+      let paintedFill = false;
       if (paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH)) {
         // own fill painted; tableStyle fallbacks intentionally skipped
+        paintedFill = true;
       } else if (tableStyle && tableStyle.isHeader && tsDxfHeader?.fill?.fgColor) {
         ctx.fillStyle = hexToRgba(tsDxfHeader.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
+        paintedFill = true;
       } else if (tableStyle && !tableStyle.isHeader && !tableStyle.isTotals && tsDxfWhole?.fill?.fgColor) {
         ctx.fillStyle = hexToRgba(tsDxfWhole.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
+        paintedFill = true;
       } else if (tableStyle && tableStyle.isBanded) {
         ctx.fillStyle = stripeColorFor(tableStyle.accent);
         ctx.fillRect(cx, cy, cellW, cellH);
+        paintedFill = true;
       }
 
       // Comment indicator triangle — drawn above fill but below borders so
@@ -1291,7 +1340,7 @@ function renderQuadrant(
       // inherit picks the visually dominant style instead of always favouring
       // the lower cell's own.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
-      const aboveBottom = aboveCell
+      const aboveBottom = paintedFill && aboveCell
         ? resolveXf(styles, aboveCell.styleIndex).border.bottom
         : null;
       let invertedTop = false;
@@ -1306,7 +1355,7 @@ function renderQuadrant(
         invertedTop = picked === aboveBottom && before !== aboveBottom;
       }
       let invertedLeft = false;
-      if (!suppressLeftGridCol.has(ci)) {
+      if (paintedFill && !suppressLeftGridCol.has(ci)) {
         // Skip the inherit when the left edge was deliberately suppressed for
         // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
         // neighbour's xf.right re-introduces the internal vertical that we
@@ -1617,11 +1666,14 @@ function renderQuadrant(
       if (letterSpacingPx > 0) {
         try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${letterSpacingPx}px`; } catch { /* ignore */ }
       }
-      if (xf.readingOrder === 2) {
-        try { (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction = 'rtl'; } catch { /* ignore */ }
-      } else if (xf.readingOrder === 1) {
-        try { (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction = 'ltr'; } catch { /* ignore */ }
-      }
+      // §18.8.1 readingOrder: 1 = LTR, 2 = RTL, 0/absent = Context (first
+      // strong character decides). Always set the direction explicitly — the
+      // previous explicit-only ladder leaked the prior cell's direction into
+      // Context cells.
+      try {
+        (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction =
+          cellBaseRtl(xf.readingOrder, text) ? 'rtl' : 'ltr';
+      } catch { /* ignore */ }
 
       // Rich text: draw each run with its own font. Only supported for the
       // non-wrap path (wrap with mixed fonts is significantly more complex).
@@ -1639,6 +1691,11 @@ function renderQuadrant(
         else yy = cy + cellH - totalH - paddingY;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
+        // Bidi base direction for the cell (xf @readingOrder / first-strong).
+        // Gated so pure-LTR cells keep the exact pre-bidi path.
+        const wrapNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
+        const wrapBaseRtl = wrapNeedsBidi && cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
+        const dctxW = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         for (const line of rLines) {
           const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
           const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
@@ -1646,7 +1703,12 @@ function renderQuadrant(
           if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
           else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
           else xx = cx + leftPad;
-          for (const seg of line.segments) {
+          // Draw the line's segments in visual order (rule L2).
+          const wvis = wrapNeedsBidi ? computeLineVisualOrder(line.segments, wrapBaseRtl) : null;
+          for (let vi = 0; vi < line.segments.length; vi++) {
+            const li2 = wvis ? wvis.order[vi] : vi;
+            const seg = line.segments[li2];
+            if (wvis) { try { dctxW.direction = wvis.rtl[li2] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
             ctx.font = buildFont(seg.font, cs);
             const segColor = cf.fontColor ?? seg.font.color;
             ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
@@ -1669,6 +1731,8 @@ function renderQuadrant(
           }
           yy += lineH;
         }
+        // Defensive reset (the per-cell ctx.restore() also restores direction).
+        if (wrapNeedsBidi) { try { dctxW.direction = 'ltr'; } catch { /* ignore */ } }
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = Math.round(font.size * PT_TO_PX * 1.2);
@@ -1709,8 +1773,20 @@ function renderQuadrant(
         if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
         else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
         else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+        // Bidi: draw the runs in visual order (UAX#9 rule L2) under the cell's
+        // base direction (xf @readingOrder, or first-strong for Context), each
+        // with ctx.direction set so Canvas shapes/orders it internally. The
+        // x-budget (totalWidth/startX) is order-independent. Gated so pure-LTR
+        // cells keep the exact pre-bidi path (no per-repaint UAX#9 cost).
+        const richNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
+        const richVis = richNeedsBidi
+          ? computeLineVisualOrder(runs, cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join('')))
+          : null;
+        const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         let runX = startX;
-        for (let i = 0; i < runs.length; i++) {
+        for (let vi = 0; vi < runs.length; vi++) {
+          const i = richVis ? richVis.order[vi] : vi;
+          if (richVis) { try { dctx.direction = richVis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
           const rf = drawRunFonts[i];
           const baseRf = baseRunFonts[i];
           ctx.font = buildFont(rf, cs);
@@ -1750,6 +1826,8 @@ function renderQuadrant(
           }
           runX += runWidths[i];
         }
+        // Defensive reset (the per-cell ctx.restore() also restores direction).
+        if (richVis) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
       } else {
         // ECMA-376 §18.4.6 — cell-level super/subscript: render the glyphs at
         // ~65% size, shifted off the baseline so the cell still reads at the
@@ -2004,6 +2082,8 @@ export function renderViewport(
     sparklineMap,
     mdw,
     onTextRun: opts.onTextRun,
+    rtl: worksheet.rightToLeft === true,
+    canvasW,
   };
 
   // Canvas areas for each quadrant
@@ -2107,16 +2187,27 @@ export function renderViewport(
     hw, hh, cs, dpr,
     opts.selectedRowRange ?? null,
     opts.selectedColRange ?? null,
+    worksheet.rightToLeft === true,
   );
 
   // ── Freeze pane separator lines ──────────────────────────────
+  // RTL mirrors the vertical freeze divider to the left edge of the frozen
+  // band (which now anchors at the right). The horizontal divider is
+  // unaffected by the x-mirror but its row-header end moves to the right.
+  const rtl = worksheet.rightToLeft === true;
   if (freezeRows > 0) {
     ctx.save();
     ctx.strokeStyle = FREEZE_LINE_COLOR;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(hw, scrollAreaY + 0.5);
-    ctx.lineTo(canvasW, scrollAreaY + 0.5);
+    if (rtl) {
+      // cell area is [0, canvasW - hw]
+      ctx.moveTo(0, scrollAreaY + 0.5);
+      ctx.lineTo(canvasW - hw, scrollAreaY + 0.5);
+    } else {
+      ctx.moveTo(hw, scrollAreaY + 0.5);
+      ctx.lineTo(canvasW, scrollAreaY + 0.5);
+    }
     ctx.stroke();
     ctx.restore();
   }
@@ -2125,8 +2216,12 @@ export function renderViewport(
     ctx.strokeStyle = FREEZE_LINE_COLOR;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(scrollAreaX + 0.5, hh);
-    ctx.lineTo(scrollAreaX + 0.5, canvasH);
+    // Divider sits between the frozen band and the scroll band. In LTR that
+    // is at scrollAreaX = hw + frozenW; mirrored that becomes
+    // canvasW - scrollAreaX.
+    const dividerX = rtl ? canvasW - scrollAreaX + 0.5 : scrollAreaX + 0.5;
+    ctx.moveTo(dividerX, hh);
+    ctx.lineTo(dividerX, canvasH);
     ctx.stroke();
     ctx.restore();
   }
@@ -2147,6 +2242,7 @@ function renderHeaders(
   hw: number, hh: number, cs: number, dpr: number,
   selectedRowRange: { start: number; end: number; strong: boolean } | null,
   selectedColRange: { start: number; end: number; strong: boolean } | null,
+  rtl: boolean,
 ): void {
   const HEADER_BG = '#f8f9fa';
   const HEADER_BG_SUBTLE = '#e8eaed';
@@ -2177,16 +2273,23 @@ function renderHeaders(
   const scrollAreaY = hh + frozenH;
   const hp = 0.5 / dpr;  // half device-pixel offset for 1dp crisp lines
 
+  // RTL grid mirror (ECMA-376 §18.3.1.87). The cell-area band mirrors about
+  // canvasW: a left-anchored col-header rect [x, x+w] maps to its mirror.
+  // The corner box and the row-number strip move from the left edge
+  // ([0, hw]) to the right edge ([canvasW - hw, canvasW]).
+  const mirrorX = (x: number, w: number): number => rtl ? canvasW - x - w : x;
+  const cornerX = rtl ? canvasW - hw : 0;  // x-origin of the corner / row-header strip
+
   // Corner – draw all 4 edges (standalone box)
   ctx.fillStyle = HEADER_BG;
-  ctx.fillRect(0, 0, hw, hh);
+  ctx.fillRect(cornerX, 0, hw, hh);
   ctx.strokeStyle = HEADER_BORDER;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
-  ctx.moveTo(hp, 0); ctx.lineTo(hp, hh);          // left  (outward — canvas edge)
-  ctx.moveTo(0, hp); ctx.lineTo(hw, hp);            // top   (outward — canvas edge)
-  ctx.moveTo(hw - hp, 0); ctx.lineTo(hw - hp, hh);  // right  (inset — aligns with row-header right)
-  ctx.moveTo(0, hh - hp); ctx.lineTo(hw, hh - hp);  // bottom (inset — aligns with col-header bottom)
+  ctx.moveTo(cornerX + hp, 0); ctx.lineTo(cornerX + hp, hh);          // left
+  ctx.moveTo(cornerX, hp); ctx.lineTo(cornerX + hw, hp);              // top
+  ctx.moveTo(cornerX + hw - hp, 0); ctx.lineTo(cornerX + hw - hp, hh);  // right
+  ctx.moveTo(cornerX, hh - hp); ctx.lineTo(cornerX + hw, hh - hp);    // bottom
   ctx.stroke();
 
   ctx.font = HEADER_FONT;
@@ -2195,7 +2298,8 @@ function renderHeaders(
   // Helper: draw one column header cell.
   // Borders are drawn INSET (-hp) so that the next cell's fillRect (which starts at cx+cw)
   // never overwrites the current cell's right/bottom border line.
-  const drawColHeader = (col: number, cx: number, cw: number) => {
+  const drawColHeader = (col: number, ltrCx: number, cw: number) => {
+    const cx = mirrorX(ltrCx, cw);
     ctx.fillStyle = colBg(col);
     ctx.fillRect(cx, 0, cw, hh);
     ctx.strokeStyle = colBorder(col);
@@ -2214,26 +2318,35 @@ function renderHeaders(
   // Helper: draw one row header cell.
   // Borders drawn inset so adjacent cell's fill never overwrites them.
   const drawRowHeader = (row: number, cy: number, ch: number) => {
+    const rx = cornerX;  // left edge of the row-header strip (mirrors to the right in RTL)
     ctx.fillStyle = rowBg(row);
-    ctx.fillRect(0, cy, hw, ch);
+    ctx.fillRect(rx, cy, hw, ch);
     ctx.strokeStyle = rowBorder(row);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(hw - hp, cy);  ctx.lineTo(hw - hp, cy + ch);   // right (inset)
-    ctx.moveTo(0, cy + ch - hp); ctx.lineTo(hw, cy + ch - hp); // bottom (inset)
-    ctx.moveTo(hp, cy);       ctx.lineTo(hp, cy + ch);          // left
+    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (inset)
+    ctx.moveTo(rx, cy + ch - hp); ctx.lineTo(rx + hw, cy + ch - hp);    // bottom (inset)
+    ctx.moveTo(rx + hp, cy);       ctx.lineTo(rx + hp, cy + ch);         // left
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
-    ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(String(row), hw - Math.max(2, Math.round(4 * cs)), cy + ch / 2);
+    const pad = Math.max(2, Math.round(4 * cs));
+    if (rtl) {
+      // Strip is on the right; the grid sits to its left, so anchor the
+      // number toward the grid-facing (left) edge.
+      ctx.textAlign = 'left';
+      ctx.fillText(String(row), rx + pad, cy + ch / 2);
+    } else {
+      ctx.textAlign = 'right';
+      ctx.fillText(String(row), rx + hw - pad, cy + ch / 2);
+    }
   };
 
   // Frozen col headers (no h-scroll, fixed positions)
   if (frozenColWidths.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(hw, 0, frozenW, hh);
+    ctx.rect(mirrorX(hw, frozenW), 0, frozenW, hh);
     ctx.clip();
     let cx = hw;
     for (let ci = 0; ci < frozenColWidths.length; ci++) {
@@ -2246,7 +2359,7 @@ function renderHeaders(
   // Scrollable col headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, hh);
+  ctx.rect(mirrorX(scrollAreaX, canvasW - scrollAreaX), 0, canvasW - scrollAreaX, hh);
   ctx.clip();
   let cx = scrollAreaX - scrollOffsetX;
   for (let ci = 0; ci < scrollColWidths.length; ci++) {
@@ -2262,7 +2375,7 @@ function renderHeaders(
   if (frozenRowHeights.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, hh, hw, frozenH);
+    ctx.rect(cornerX, hh, hw, frozenH);
     ctx.clip();
     let cy = hh;
     for (let ri = 0; ri < frozenRowHeights.length; ri++) {
@@ -2275,7 +2388,7 @@ function renderHeaders(
   // Scrollable row headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, scrollAreaY, hw, canvasH - scrollAreaY);
+  ctx.rect(cornerX, scrollAreaY, hw, canvasH - scrollAreaY);
   ctx.clip();
   let cy = scrollAreaY - scrollOffsetY;
   for (let ri = 0; ri < scrollRowHeights.length; ri++) {

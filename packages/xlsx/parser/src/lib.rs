@@ -650,8 +650,8 @@ fn parse_worksheet(
                 }
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
-                let custom = node.attribute("customWidth").map(|v| v == "1").unwrap_or(false);
-                let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                let custom = attr_bool(&node, "customWidth").unwrap_or(false);
+                let hidden = attr_bool(&node, "hidden").unwrap_or(false);
                 // Only record widths for custom-widthed columns OR hidden columns
                 if !custom && !hidden { continue; }
                 let min: u32 = node.attribute("min").and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -668,11 +668,11 @@ fn parse_worksheet(
                 }
             }
             "sheetView" if node.tag_name().namespace() == Some(ns) => {
-                show_zeros = node.attribute("showZeros").map(|v| v != "0").unwrap_or(true);
-                show_gridlines = node.attribute("showGridLines").map(|v| v != "0").unwrap_or(true);
+                show_zeros = attr_bool(&node, "showZeros").unwrap_or(true);
+                show_gridlines = attr_bool(&node, "showGridLines").unwrap_or(true);
                 // ECMA-376 §18.3.1.87 `rightToLeft` — mirrors the whole grid so
                 // column A is on the right. Default false (left-to-right).
-                right_to_left = node.attribute("rightToLeft").map(|v| v == "1" || v == "true").unwrap_or(false);
+                right_to_left = attr_bool(&node, "rightToLeft").unwrap_or(false);
             }
             "tabColor" if node.tag_name().namespace() == Some(ns) => {
                 tab_color = parse_color(&node, theme_colors);
@@ -730,7 +730,7 @@ fn parse_worksheet(
             }
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                let hidden = attr_bool(&node, "hidden").unwrap_or(false);
                 // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
                 // Gating the value on `@customHeight="1"` (0.37.0) was too
                 // strict — `demo/sample-1` sheets 2-5 store `ht="36.95"` on
@@ -1434,6 +1434,18 @@ fn parse_row_cells(
     cells
 }
 
+/// Parse an `ST_Boolean` (ECMA-376 §22.9.2.7, xsd:boolean) attribute value.
+/// Accepts `1`/`true`/`on` as true and `0`/`false`/`off` as false (case-insensitive).
+/// Returns `None` when the attribute is absent so callers can apply their own default.
+pub(crate) fn attr_bool(node: &roxmltree::Node, name: &str) -> Option<bool> {
+    node.attribute(name).map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on"
+        )
+    })
+}
+
 pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
     let col_str: String = r.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
     let row_str: String = r.chars().skip_while(|c| c.is_ascii_alphabetic()).collect();
@@ -1607,5 +1619,32 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert!(!ws.right_to_left, "absent @rightToLeft → right_to_left false");
+    }
+
+    /// ECMA-376 §22.9.2.7 `ST_Boolean` allows `true`/`false` as well as `1`/`0`.
+    /// LibreOffice writes `<col customWidth="true" .../>`; the parser must honor
+    /// the recorded width instead of skipping the `<col>` (which would leave the
+    /// column at `defaultColWidth`).
+    #[test]
+    fn col_custom_width_accepts_true_literal() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols><col customWidth="true" min="1" max="1" width="22"/></cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(
+            ws.col_widths.get(&1).copied(),
+            Some(22.0),
+            "customWidth=\"true\" → width 22 recorded for column 1"
+        );
+    }
+
+    /// `customWidth="1"` (Excel's spelling) must keep working after the helper change.
+    #[test]
+    fn col_custom_width_accepts_one_literal() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols><col customWidth="1" min="2" max="2" width="10"/></cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
     }
 }
