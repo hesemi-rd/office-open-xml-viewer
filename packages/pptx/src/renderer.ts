@@ -443,10 +443,30 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'univers next arabic': 'Noto Sans Arabic',
 };
 
-/** Generic Arabic fallbacks appended to every named-font canvas stack (before
- *  the CSS generic) so Arabic-script glyphs in an unmapped family still resolve
- *  to a real Arabic web font when `useGoogleFonts` is on. */
+/** Generic Arabic fallbacks appended to an Arabic-script font's canvas stack
+ *  (before the CSS generic) so Arabic glyphs in an Arabic-targeted family that
+ *  the host lacks still resolve to a real Arabic web font when `useGoogleFonts`
+ *  is on. */
 const ARABIC_FALLBACKS = '"Noto Naskh Arabic", "Noto Sans Arabic"';
+
+/**
+ * True when `family` names an Arabic-script face. Only such faces get the Noto
+ * Arabic web fonts appended to their canvas stack.
+ *
+ * These fallback faces (esp. Noto Naskh Arabic) also carry serif-style *Latin*
+ * glyphs, so appending them to every font stack made Latin text in an
+ * uninstalled Latin/CJK face (e.g. a Japanese gothic carrying "About us") fall
+ * into the serif Naskh face instead of degrading to the sans-serif generic.
+ * Gating on Arabic-script faces keeps RTL decks (Amiri, Sakkal Majalla, …)
+ * correct while letting Latin/CJK text degrade to the right generic.
+ */
+function isArabicScriptFace(family: string): boolean {
+  // Faces we explicitly substitute to a Noto Arabic web font are Arabic-script.
+  if (OFFICE_FONT_SUBSTITUTE[family.toLowerCase()]?.includes('Arabic')) return true;
+  const l = family.toLowerCase();
+  // Common Arabic-script family-name markers (Latin transliterations + Arabic).
+  return /arabic|naskh|kufi|nastaliq|amiri|scheherazade|lateef|aldhabi|urdu|farsi|العرب|[؀-ۿ]/.test(l);
+}
 
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
@@ -455,12 +475,14 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  // Named font + (metric-compatible substitute, if an Office face) + generic
-  // Arabic web fonts + inferred generic fallback, so browsers degrade
-  // consistently when the exact typeface is not installed.
+  // Named font + (metric-compatible substitute, if an Office face) + Arabic web
+  // fonts (only for Arabic-script faces — see isArabicScriptFace) + inferred
+  // generic fallback, so browsers degrade consistently when the exact typeface
+  // is not installed.
   const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
   const subPart = sub ? `"${sub}", ` : '';
-  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${genericFallback(normalized)}`;
+  const arabicPart = isArabicScriptFace(normalized) ? `${ARABIC_FALLBACKS}, ` : '';
+  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${arabicPart}${genericFallback(normalized)}`;
 }
 
 /**
