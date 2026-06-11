@@ -2028,25 +2028,13 @@ async function renderPicture(
       if (el.flipV) ctx.scale(1, -1);
       ctx.translate(-(x + w / 2), -(y + h / 2));
     }
-    if (el.clipAdjust != null) {
-      const minDim = Math.min(w, h);
-      const r = (el.clipAdjust / 100000) * minDim;
-      ctx.beginPath();
-      ctx.roundRect(x, y, w, h, r);
-      ctx.clip();
-    } else if (el.custGeom && el.custGeom.length > 0) {
-      // ECMA-376 §20.1.9.8: a `<p:pic>` may carry `<a:custGeom>` (the same
-      // path model as a shape) that defines a non-rectangular silhouette.
-      // The bitmap is then trimmed to that path — e.g. the laptop frame on
-      // sample-2 slide-12 keeps the surrounding bezel visible because the
-      // image is clipped to just the screen + body shape.
-      buildCustomPath(ctx, el.custGeom, x, y, w, h);
-      ctx.clip();
-    }
-    // ECMA-376 a:srcRect — draw a sub-rectangle of the source image.
-    // Edge values are fractions of source dims (negative values mean extend past
-    // the image, which in OOXML duplicates edge pixels; we clamp to [0,1]).
+
+    // ── srcRect sub-rectangle (ECMA-376 a:srcRect). Edge values are fractions
+    // of source dims (negative values mean extend past the image, duplicating
+    // edge pixels in OOXML; we clamp to [0,1]). Resolve once so both the live
+    // paint and the effect aux paints share identical crop coordinates.
     const sr = el.srcRect;
+    let crop: { sx: number; sy: number; sw: number; sh: number } | null = null;
     if (sr && (sr.l || sr.t || sr.r || sr.b)) {
       const bw = bitmap.width, bh = bitmap.height;
       const sl = Math.max(0, Math.min(1, sr.l ?? 0));
@@ -2055,12 +2043,118 @@ async function renderPicture(
       const sbB = Math.max(0, Math.min(1, sr.b ?? 0));
       const sx = sl * bw;
       const sy = st * bh;
-      const sw = Math.max(1, bw - sx - srR * bw);
-      const sh = Math.max(1, bh - sy - sbB * bh);
-      ctx.drawImage(bitmap, sx, sy, sw, sh, x, y, w, h);
-    } else {
-      ctx.drawImage(bitmap, x, y, w, h);
+      crop = {
+        sx,
+        sy,
+        sw: Math.max(1, bw - sx - srR * bw),
+        sh: Math.max(1, bh - sy - sbB * bh),
+      };
     }
+
+    // Apply the picture clip (roundRect / custGeom) to an arbitrary target.
+    // ECMA-376 §20.1.9.8: a `<p:pic>` may carry `<a:custGeom>` defining a
+    // non-rectangular silhouette the bitmap is trimmed to (e.g. a laptop frame).
+    const applyClip = (target: CanvasRenderingContext2D): void => {
+      if (el.clipAdjust != null) {
+        const minDim = Math.min(w, h);
+        const r = (el.clipAdjust / 100000) * minDim;
+        target.beginPath();
+        target.roundRect(x, y, w, h, r);
+        target.clip();
+      } else if (el.custGeom && el.custGeom.length > 0) {
+        buildCustomPath(target, el.custGeom, x, y, w, h);
+        target.clip();
+      }
+    };
+
+    // Draw the (clipped, optionally cropped) bitmap into a target context. This
+    // is the picture "body" that the effect helpers re-paint onto aux canvases,
+    // so reflections/soft edges mirror the real image rather than a flat shape.
+    const paintImage = (target: CanvasRenderingContext2D): void => {
+      target.save();
+      applyClip(target);
+      if (crop) {
+        target.drawImage(bitmap, crop.sx, crop.sy, crop.sw, crop.sh, x, y, w, h);
+      } else {
+        target.drawImage(bitmap, x, y, w, h);
+      }
+      target.restore();
+    };
+
+    // Flat opaque silhouette of the clipped picture rectangle, used as the mask
+    // for innerShdw / softEdge. Falls back to the bounding rect when the picture
+    // is a plain rectangle (no clip path).
+    const paintMask = (target: CanvasRenderingContext2D, color: string): void => {
+      target.save();
+      applyClip(target);
+      target.fillStyle = color;
+      target.fillRect(x, y, w, h);
+      target.restore();
+    };
+
+    // ── effectLst (§19.3.1.37 routes p:pic's spPr through CT_ShapeProperties,
+    // so §20.1.8.16 effects apply to images). Same sequence as the p:sp path.
+    const deviceW = (ctx.canvas as { width: number }).width || 0;
+    const deviceH = (ctx.canvas as { height: number }).height || 0;
+    const liveTransform = ctx.getTransform();
+    const det = Math.abs(
+      liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c,
+    );
+    const devScale = det > 0 ? Math.sqrt(det) : 1;
+    const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
+    const effScale = scale * devScale; // EMU → device px
+    const applyLiveTransform = (c: CanvasRenderingContext2D) => c.setTransform(liveTransform);
+    const haveAux = deviceW > 0 && deviceH > 0;
+
+    // Reflection sits below the picture — paint it first. §20.1.8.50. The aux
+    // paint bakes in the live rotation/flip via setTransform, so the blit runs
+    // at identity.
+    if (el.reflection && haveAux) {
+      ctx.save();
+      ctx.setTransform(new DOMMatrix());
+      applyReflection(
+        ctx,
+        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintImage(c as CanvasRenderingContext2D); },
+        effBBox, el.reflection, effScale, deviceW, deviceH,
+      );
+      ctx.restore();
+    }
+
+    // outerShdw / glow use the single Canvas shadow slot, cast by the image's
+    // own opaque pixels. Outer shadow wins when both are present (as in p:sp).
+    if (el.shadow) applyShadow(ctx, el.shadow, scale);
+    else if (el.glow) applyGlow(ctx, el.glow, scale);
+
+    // softEdge feathers the whole picture, REPLACING the direct body paint
+    // (§20.1.8.53). The shadow/glow set above is carried into the aux paint via
+    // setTransform of the same live context, so it still casts.
+    if (el.softEdge && haveAux) {
+      ctx.save();
+      ctx.setTransform(new DOMMatrix());
+      applySoftEdge(
+        ctx,
+        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintImage(c as CanvasRenderingContext2D); },
+        effBBox, el.softEdge, effScale, deviceW, deviceH,
+        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintMask(c as CanvasRenderingContext2D, '#000'); },
+      );
+      ctx.restore();
+    } else {
+      paintImage(ctx);
+    }
+    if (el.shadow || el.glow) clearShadow(ctx);
+
+    // innerShdw casts inward, on top of the picture (§20.1.8.40).
+    if (el.innerShadow && haveAux) {
+      ctx.save();
+      ctx.setTransform(new DOMMatrix());
+      applyInnerShadow(
+        ctx,
+        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintMask(c as CanvasRenderingContext2D, '#000'); },
+        effBBox, el.innerShadow, effScale, deviceW, deviceH,
+      );
+      ctx.restore();
+    }
+
     ctx.restore();
     // bitmap is owned by getCachedBitmap's cache — do not close it here.
   } catch {

@@ -294,6 +294,20 @@ export interface PictureElement {
    * trimmed to the laptop / device silhouette declared in the file.
    */
   custGeom?: PathCmd[][] | null;
+  /**
+   * Drop shadow from `spPr > effectLst > outerShdw`. A `p:pic`'s `spPr` is
+   * `CT_ShapeProperties` (ECMA-376 §19.3.1.37), so the same effects shapes
+   * carry apply to images. ECMA-376 §20.1.8.45 (CT_OuterShadowEffect).
+   */
+  shadow?: Shadow;
+  /** Inner (inset) shadow from effectLst > innerShdw. ECMA-376 §20.1.8.40. */
+  innerShadow?: Shadow;
+  /** Coloured glow halo from effectLst > glow. ECMA-376 §20.1.8.32. */
+  glow?: Glow;
+  /** Soft (feathered) edge from effectLst > softEdge. ECMA-376 §20.1.8.53. */
+  softEdge?: SoftEdge;
+  /** Mirrored reflection from effectLst > reflection. ECMA-376 §20.1.8.50. */
+  reflection?: Reflection;
 }
 
 // ===== Worker message protocol =====
