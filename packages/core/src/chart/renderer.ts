@@ -11,7 +11,7 @@ import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 
 // ─── Palette + helpers ──────────────────────────────────────────────────────
 
-const CHART_PALETTE = [
+export const CHART_PALETTE = [
   '4472C4','ED7D31','A9D18E','FF0000','70AD47','4BACC6',
   'FFC000','9E480E','843C0C','636363','255E91','967300',
 ];
@@ -25,6 +25,40 @@ function pieSliceColor(idx: number, series: ChartSeries): string {
   const override = series.dataPointColors?.[idx];
   if (override) return `#${override}`;
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
+}
+
+/** Chart types whose legend lists one entry per category (data point of the
+ *  first series) rather than one entry per series. Excel/PowerPoint draw pie
+ *  and doughnut legends this way: each slice gets its own row, colored with
+ *  the slice's color. ECMA-376 §21.2.2.114 (`<c:varyColors>` defaults true for
+ *  pie/doughnut). */
+function legendIsCategoryDriven(chartType: string | undefined): boolean {
+  return chartType === 'pie' || chartType === 'doughnut';
+}
+
+/** Resolve the color for legend entry `entryIndex`, matching the marks the
+ *  plot actually draws.
+ *
+ *  - Category-driven legends (pie / doughnut): the entry maps to data point
+ *    `entryIndex` of the first series, so it must use the *same* resolution as
+ *    {@link pieSliceColor} — explicit per-point `dPt` color, else the palette
+ *    indexed by point. The series-level fill is deliberately ignored: a pie
+ *    series carries a single `<c:spPr>` solidFill that, if honored here, would
+ *    collapse every swatch to one color while the slices stay multi-colored.
+ *  - Series-driven legends (bar / line / area / …): the entry maps to series
+ *    `entryIndex`, so it uses {@link chartColor} — explicit series fill else
+ *    the palette indexed by series. */
+export function legendEntryColor(
+  chartType: string | undefined,
+  series: ChartSeries[],
+  entryIndex: number,
+): string {
+  if (legendIsCategoryDriven(chartType)) {
+    const first = series[0];
+    if (first) return pieSliceColor(entryIndex, first);
+    return `#${CHART_PALETTE[entryIndex % CHART_PALETTE.length]}`;
+  }
+  return chartColor(entryIndex, series[entryIndex]);
 }
 
 function drawAxisTitle(
@@ -92,6 +126,30 @@ function drawLegendSwatch(
   }
 }
 
+/** A single legend row: a label and the color of its swatch. Built so that the
+ *  swatch color is resolved exactly like the mark it represents (slice / bar /
+ *  line). See {@link legendEntryColor}. */
+interface LegendEntry { label: string; color: string }
+
+/** Build the legend entries for a chart. Pie/doughnut legends are
+ *  category-driven (one row per data point of the first series, labeled by
+ *  category); every other chart type is series-driven (one row per series). */
+function buildLegendEntries(series: ChartSeries[], chartType: string | undefined): LegendEntry[] {
+  if (legendIsCategoryDriven(chartType)) {
+    const first = series[0];
+    const n = first ? first.values.length : 0;
+    const cats = first?.categories ?? [];
+    return Array.from({ length: n }, (_, i) => ({
+      label: (cats[i] ?? `Item ${i + 1}`).toString(),
+      color: legendEntryColor(chartType, series, i),
+    }));
+  }
+  return series.map((s, i) => ({
+    label: s.name || `Series ${i + 1}`,
+    color: legendEntryColor(chartType, series, i),
+  }));
+}
+
 function drawLegend(
   ctx: CanvasRenderingContext2D,
   series: ChartSeries[],
@@ -101,35 +159,34 @@ function drawLegend(
 ): void {
   const sw = 10; const gap = 4;
   const swatchStyle = legendSwatchStyle(chartType);
+  const entries = buildLegendEntries(series, chartType);
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
     const fontSize = Math.max(9, Math.min(12, lh * 0.7));
     ctx.font = `${fontSize}px sans-serif`;
     ctx.textBaseline = 'middle';
     const itemGap = 12;
-    const labels = series.map((s, i) => s.name || `Series ${i + 1}`);
-    const itemWidths = labels.map((l) => sw + gap + ctx.measureText(l.slice(0, 30)).width);
-    const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * Math.max(0, series.length - 1);
+    const itemWidths = entries.map((e) => sw + gap + ctx.measureText(e.label.slice(0, 30)).width);
+    const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * Math.max(0, entries.length - 1);
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
-    for (let i = 0; i < series.length; i++) {
-      drawLegendSwatch(ctx, swatchStyle, chartColor(i, series[i]), rx, ry - fontSize / 2, sw, fontSize);
+    for (let i = 0; i < entries.length; i++) {
+      drawLegendSwatch(ctx, swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize);
       ctx.fillStyle = '#333'; ctx.textAlign = 'left';
-      ctx.fillText(labels[i].slice(0, 30), rx + sw + gap, ry);
+      ctx.fillText(entries[i].label.slice(0, 30), rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
     }
     return;
   }
-  const fontSize = Math.max(9, Math.min(12, lh / (series.length + 1)));
+  const fontSize = Math.max(9, Math.min(12, lh / (entries.length + 1)));
   ctx.font = `${fontSize}px sans-serif`;
   ctx.textBaseline = 'middle';
   const rowH = fontSize + 4;
-  let ry = ly + (lh - rowH * series.length) / 2;
-  for (let i = 0; i < series.length; i++) {
-    drawLegendSwatch(ctx, swatchStyle, chartColor(i, series[i]), lx, ry, sw, fontSize);
+  let ry = ly + (lh - rowH * entries.length) / 2;
+  for (let i = 0; i < entries.length; i++) {
+    drawLegendSwatch(ctx, swatchStyle, entries[i].color, lx, ry, sw, fontSize);
     ctx.fillStyle = '#333'; ctx.textAlign = 'left';
-    const label = series[i].name || `Series ${i + 1}`;
-    ctx.fillText(label.slice(0, 20), lx + sw + gap, ry + fontSize / 2);
+    ctx.fillText(entries[i].label.slice(0, 20), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
   }
   void lw;
@@ -1025,13 +1082,13 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   }
 
   if (pieLeg) {
-    // Pie legend is category-driven; build a pseudo-series array whose per-
-    // index palette matches the pie's slice colors so the swatches line up.
-    const legendSeries: ChartSeries[] = vals.map((_, i) => ({
-      name: (cats[i] ?? `Item ${i + 1}`).toString(),
-      color: s.dataPointColors?.[i] ?? s.color ?? CHART_PALETTE[i % CHART_PALETTE.length],
-      values: [],
-    }));
+    // Pie/doughnut legends are category-driven: one row per slice, each colored
+    // exactly like its slice (`pieSliceColor`). `buildLegendEntries` derives the
+    // rows from the real series, so pass it through unchanged (with the resolved
+    // category labels attached). The previous pseudo-series collapsed all
+    // swatches to one color because it folded the series-level fill (`s.color`)
+    // into every entry while the slices used the per-index palette.
+    const legendSeries: ChartSeries[] = [{ ...s, categories: cats }];
     const plotLeft = cx2 - pw / 2;
     drawLegendForLayout(
       ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
