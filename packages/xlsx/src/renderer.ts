@@ -880,14 +880,27 @@ function drawAutoFilterArrow(ctx: CanvasRenderingContext2D, cx: number, cy: numb
 }
 
 // ────────────────────────────────────────────────────────────────
-// Excel Table style overlays (ECMA-376 §18.5)
+// Excel Table style overlays (ECMA-376 §18.5 / §18.8.83)
 // ────────────────────────────────────────────────────────────────
-// We don't ship the full built-in table-style catalog — instead we derive a
-// single "accent" color from the style name and overlay bold header + banded
-// fills + horizontal rules so that `TableStyle*` files render with visible
-// structure rather than as blank ranges.
+// Two distinct paths:
+//
+// 1. CUSTOM styles (defined in the file's `<tableStyles>` block, §18.5.1.2):
+//    rendered strictly from the dxfs of their declared `<tableStyleElement>`s.
+//    A custom style contributes ONLY what its elements define — if none carry
+//    a border, Excel draws no table-level border (the visible structure comes
+//    from theme borders baked into each cell `xf`, which we render separately).
+//    `isCustom` cells therefore never get accent synthesis.
+//
+// 2. BUILT-IN style names (`TableStyleLight18`, …) whose definitions are NOT
+//    in the file. We don't yet ship the preset catalog, so we approximate them
+//    from a single "accent" color: bold header + banded fills + horizontal
+//    rules, so those files render with visible structure rather than blank
+//    ranges. This is an approximation, kept until a real catalog ships
+//    (post-1.0).
 export interface TableCellStyle {
   accent: string;
+  /** `true` for a custom `<tableStyle>` — disables all accent approximation. */
+  isCustom: boolean;
   isHeader: boolean;
   isTotals: boolean;
   /** `true` when this is a banded data row that should get the stripe fill. */
@@ -897,11 +910,20 @@ export interface TableCellStyle {
   isTopEdge: boolean;
   isBottomEdge: boolean;
   /** Dxf for the whole-table element of a custom `<tableStyle>`
-   *  (ECMA-376 §18.8.40). Border/fill apply to every cell as a base layer. */
+   *  (ECMA-376 §18.8.83). Border/fill apply to every cell as a base layer. */
   wholeTableDxf?: number;
   /** Dxf for the header-row element of a custom `<tableStyle>`. Provides
    *  header fill, font color/weight, and vertical separators. */
   headerRowDxf?: number;
+  /** Dxf for the total-row element. */
+  totalRowDxf?: number;
+  /** Dxf for the first-column element (when `showFirstColumn`). */
+  firstColumnDxf?: number;
+  /** Dxf for the last-column element (when `showLastColumn`). */
+  lastColumnDxf?: number;
+  /** Dxf for the stripe (band1=odd, band2=even) that applies to this row when
+   *  `showRowStripes` is set; undefined when this row is not a stripe. */
+  stripeDxf?: number;
 }
 
 function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
@@ -914,6 +936,7 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
     if (!t.styleName) continue;
     const { top, bottom, left, right } = t.range;
     const accent = t.accentColor || '#808080';
+    const isCustom = !!t.isCustom;
     const hdr = Math.max(0, t.headerRowCount ?? 1);
     const tot = Math.max(0, t.totalsRowCount ?? 0);
     const headerEnd = top + hdr - 1;
@@ -922,9 +945,17 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
       const isHeader = hdr > 0 && r <= headerEnd;
       const isTotals = tot > 0 && r >= totalsStart;
       const dataIdx = (!isHeader && !isTotals) ? (r - headerEnd - 1) : -1;
+      // Row banding stripes alternate band1 (odd) / band2 (even) over the data
+      // region (§18.18.93). For built-in approximation we only paint the odd
+      // stripe via `isBanded`; for custom styles we pick the matching dxf.
+      const isStripeRow = t.showRowStripes && dataIdx >= 0;
+      const stripeDxf = isStripeRow
+        ? (dataIdx % 2 === 1 ? t.band1HorizontalDxf : t.band2HorizontalDxf)
+        : undefined;
       for (let c = left; c <= right; c++) {
         map.set(`${r}:${c}`, {
           accent,
+          isCustom,
           isHeader,
           isTotals,
           isBanded: t.showRowStripes && dataIdx >= 0 && dataIdx % 2 === 1,
@@ -934,11 +965,77 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
           isBottomEdge: r === bottom,
           wholeTableDxf: t.wholeTableDxf,
           headerRowDxf: t.headerRowDxf,
+          totalRowDxf: t.totalRowDxf,
+          firstColumnDxf: t.firstColumnDxf,
+          lastColumnDxf: t.lastColumnDxf,
+          stripeDxf,
         });
       }
     }
   }
   return map;
+}
+
+/**
+ * Result of resolving a table cell's overlay *border* (ECMA-376 §18.8.83).
+ *  - `none`   — draw nothing extra (custom style with no border dxf, or a
+ *               built-in cell that has no rule on this edge).
+ *  - `dxf`    — draw `border` exactly as the resolved dxf defines it.
+ *  - `accent` — built-in approximation only: a synthesized accent-colored rule
+ *               under the cell (plus the table top edge when `topEdge`).
+ */
+export type TableOverlayBorder =
+  | { kind: 'none' }
+  | { kind: 'dxf'; border: Border }
+  | { kind: 'accent'; color: string; lineWidth: number; topEdge: boolean };
+
+/**
+ * Decide the table-style overlay border for one cell.
+ *
+ * `dxfWhole` / `dxfHeader` are the already-resolved dxfs for the cell's
+ * wholeTable / headerRow elements (undefined when the element is absent).
+ * `colIndex` is the cell's column index *within the table* (0 = first column),
+ * used to draw the table's outer-left edge only on the leftmost column.
+ *
+ * Custom styles (`ts.isCustom`) draw only from these dxfs and never synthesize
+ * accent rules: when no border dxf is present they contribute nothing. Built-in
+ * style names keep the accent approximation.
+ */
+export function tableOverlayBorder(
+  ts: TableCellStyle,
+  dxfWhole: Dxf | undefined,
+  dxfHeader: Dxf | undefined,
+  colIndex: number,
+): TableOverlayBorder {
+  const horiz = dxfWhole?.border?.horizontal;
+  const wtTop = dxfWhole?.border?.top;
+  const wtBot = dxfWhole?.border?.bottom;
+  const wtLeft = dxfWhole?.border?.left;
+  const wtRight = dxfWhole?.border?.right;
+  const hdrBot = dxfHeader?.border?.bottom;
+  const hdrTop = dxfHeader?.border?.top;
+  const hasDxfBorder = !!(horiz || wtTop || wtBot || wtLeft || wtRight || hdrBot || hdrTop);
+
+  if (hasDxfBorder) {
+    // Compose per-edge from the table-style hierarchy
+    // (wholeTable < headerRow), §18.8.83. The inner `horizontal` rule fills
+    // top/bottom for interior rows; outer edges come from the table extents.
+    const overlay: Border = { left: null, right: null, top: null, bottom: null };
+    if (ts.isTopEdge) overlay.top = wtTop ?? null;
+    else if (horiz) overlay.top = horiz;
+    if (ts.isHeader && hdrBot) overlay.bottom = hdrBot;
+    else if (ts.isBottomEdge) overlay.bottom = wtBot ?? null;
+    else if (horiz) overlay.bottom = horiz;
+    if (ts.isFirstCol || colIndex === 0) overlay.left = wtLeft ?? null;
+    if (ts.isLastCol) overlay.right = wtRight ?? null;
+    return { kind: 'dxf', border: overlay };
+  }
+
+  // No border dxf. A custom style contributes nothing here (§18.5.1.2):
+  // Excel draws no table-level border, only the theme borders baked into the
+  // cell xf. Built-in names fall through to the accent approximation.
+  if (ts.isCustom) return { kind: 'none' };
+  return { kind: 'accent', color: ts.accent, lineWidth: ts.isHeader ? 1.5 : 1, topEdge: ts.isTopEdge };
 }
 
 /** Flatten the worksheet's parsed `sparklineGroups` into a per-cell render
@@ -1247,13 +1344,29 @@ function renderQuadrant(
       const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
       const effectiveFill = cf.fill ?? fill;
       const tableStyle = rc.tableStyleMap.get(key);
-      // Custom `<tableStyle>` dxfs (ECMA-376 §18.8.40). When present, they
-      // drive header fill / font color and inter-row borders instead of the
-      // built-in accent fallback.
-      const tsDxfWhole = (tableStyle?.wholeTableDxf != null)
-        ? (styles.dxfs ?? [])[tableStyle.wholeTableDxf] : undefined;
-      const tsDxfHeader = (tableStyle?.headerRowDxf != null)
-        ? (styles.dxfs ?? [])[tableStyle.headerRowDxf] : undefined;
+      // Custom `<tableStyle>` dxfs (ECMA-376 §18.8.83). When present, they
+      // drive fills / font color and borders strictly from the declared
+      // elements — no accent fallback for custom styles.
+      const dxfList = styles.dxfs ?? [];
+      const dxfAt = (i?: number) => (i != null ? dxfList[i] : undefined);
+      const tsDxfWhole = dxfAt(tableStyle?.wholeTableDxf);
+      const tsDxfHeader = dxfAt(tableStyle?.headerRowDxf);
+      const tsDxfTotal = dxfAt(tableStyle?.totalRowDxf);
+      const tsDxfFirstCol = dxfAt(tableStyle?.firstColumnDxf);
+      const tsDxfLastCol = dxfAt(tableStyle?.lastColumnDxf);
+      const tsDxfStripe = dxfAt(tableStyle?.stripeDxf);
+      // Per-cell table fill resolved from the element hierarchy
+      // (§18.8.83: wholeTable < band < column < header/total). The later a
+      // layer appears the higher its precedence; we pick the most specific
+      // fill that defines a fgColor.
+      const tableFillDxf =
+        (tableStyle?.isHeader && tsDxfHeader?.fill?.fgColor) ? tsDxfHeader :
+        (tableStyle?.isTotals && tsDxfTotal?.fill?.fgColor) ? tsDxfTotal :
+        (tableStyle?.isLastCol && tsDxfLastCol?.fill?.fgColor) ? tsDxfLastCol :
+        (tableStyle?.isFirstCol && tsDxfFirstCol?.fill?.fgColor) ? tsDxfFirstCol :
+        (tsDxfStripe?.fill?.fgColor) ? tsDxfStripe :
+        (!tableStyle?.isHeader && !tableStyle?.isTotals && tsDxfWhole?.fill?.fgColor) ? tsDxfWhole :
+        undefined;
 
       // Background fill (base or CF override). ECMA-376 §18.8.22 ST_PatternType.
       // - solid/gray*: blend fgColor with bgColor at the pattern's fg coverage.
@@ -1273,15 +1386,15 @@ function renderQuadrant(
       if (paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH)) {
         // own fill painted; tableStyle fallbacks intentionally skipped
         paintedFill = true;
-      } else if (tableStyle && tableStyle.isHeader && tsDxfHeader?.fill?.fgColor) {
-        ctx.fillStyle = hexToRgba(tsDxfHeader.fill.fgColor);
+      } else if (tableStyle && tableFillDxf?.fill?.fgColor) {
+        // Custom or built-in: a resolved table-element dxf fill wins.
+        ctx.fillStyle = hexToRgba(tableFillDxf.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
         paintedFill = true;
-      } else if (tableStyle && !tableStyle.isHeader && !tableStyle.isTotals && tsDxfWhole?.fill?.fgColor) {
-        ctx.fillStyle = hexToRgba(tsDxfWhole.fill.fgColor);
-        ctx.fillRect(cx, cy, cellW, cellH);
-        paintedFill = true;
-      } else if (tableStyle && tableStyle.isBanded) {
+      } else if (tableStyle && !tableStyle.isCustom && tableStyle.isBanded) {
+        // Accent-tint banding is an approximation for built-in style names
+        // only. Custom styles with no stripe dxf get no banding fill (Excel
+        // draws none — §18.5.1.2).
         ctx.fillStyle = stripeColorFor(tableStyle.accent);
         ctx.fillRect(cx, cy, cellW, cellH);
         paintedFill = true;
@@ -1399,40 +1512,24 @@ function renderQuadrant(
       }
       renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft);
 
-      // Excel Table style overlay: thin horizontal rules between rows and a
-      // thicker bottom edge under the header row (ECMA-376 §18.5). Drawn on
-      // top of cell borders so an empty-border data cell still shows table
-      // structure. None-style tables produce no entry in `tableStyleMap`
-      // (see `buildTableStyleMap`), so this block is naturally skipped.
+      // Excel Table style overlay (ECMA-376 §18.8.83). Custom styles draw only
+      // their dxf-defined borders; built-in style names fall back to a
+      // synthesized accent rule. Drawn on top of cell borders so an
+      // empty-border data cell still shows the table structure that the style
+      // actually defines. None-style tables produce no entry in
+      // `tableStyleMap` (see `buildTableStyleMap`), so this block is skipped.
       if (tableStyle) {
-        const horiz = tsDxfWhole?.border?.horizontal;
-        const vert  = tsDxfWhole?.border?.vertical;
-        const wtTop = tsDxfWhole?.border?.top;
-        const wtBot = tsDxfWhole?.border?.bottom;
-        const wtLeft = tsDxfWhole?.border?.left;
-        const wtRight = tsDxfWhole?.border?.right;
-        const hdrBot = tsDxfHeader?.border?.bottom;
-        const hdrTop = tsDxfHeader?.border?.top;
-        const hasDxfBorder = !!(horiz || vert || wtTop || wtBot || wtLeft || wtRight || hdrBot || hdrTop);
-        if (hasDxfBorder) {
-          const overlay: Border = { left: null, right: null, top: null, bottom: null };
-          if (tableStyle.isTopEdge) overlay.top = wtTop ?? null;
-          else if (horiz) overlay.top = horiz;
-          if (tableStyle.isHeader && hdrBot) overlay.bottom = hdrBot;
-          else if (tableStyle.isBottomEdge) overlay.bottom = wtBot ?? null;
-          else if (horiz) overlay.bottom = horiz;
-          if (tableStyle.isFirstCol || colIndex === 0) overlay.left = wtLeft ?? null;
-          if (tableStyle.isLastCol) overlay.right = wtRight ?? null;
-          // Outer table left/right edges
-          renderBorder(ctx, overlay, cx, cy, cellW, cellH);
-        } else {
+        const overlay = tableOverlayBorder(tableStyle, tsDxfWhole, tsDxfHeader, colIndex);
+        if (overlay.kind === 'dxf') {
+          renderBorder(ctx, overlay.border, cx, cy, cellW, cellH);
+        } else if (overlay.kind === 'accent') {
           const hp = 0.5 / dpr;
-          ctx.strokeStyle = tableStyle.accent;
-          ctx.lineWidth = tableStyle.isHeader ? 1.5 : 1;
+          ctx.strokeStyle = overlay.color;
+          ctx.lineWidth = overlay.lineWidth;
           ctx.beginPath();
           ctx.moveTo(cx, cy + cellH - hp);
           ctx.lineTo(cx + cellW, cy + cellH - hp);
-          if (tableStyle.isTopEdge) {
+          if (overlay.topEdge) {
             ctx.moveTo(cx, cy + hp);
             ctx.lineTo(cx + cellW, cy + hp);
           }
@@ -1450,7 +1547,23 @@ function renderQuadrant(
       if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
       textTasks.push(() => {
-      const tableBold = !!(tableStyle && (tableStyle.isHeader || tableStyle.isTotals));
+      // The table-element dxf that applies to this cell's font (header/total/
+      // column/stripe/wholeTable), resolved by the same §18.8.83 hierarchy as
+      // the fill above. Used for both bold and color of custom styles.
+      const tableFontDxf =
+        (tableStyle?.isHeader) ? tsDxfHeader :
+        (tableStyle?.isTotals) ? tsDxfTotal :
+        (tableStyle?.isLastCol && tsDxfLastCol) ? tsDxfLastCol :
+        (tableStyle?.isFirstCol && tsDxfFirstCol) ? tsDxfFirstCol :
+        (tsDxfStripe) ? tsDxfStripe :
+        (tableStyle ? tsDxfWhole : undefined);
+      // Built-in style names: synthesize bold header/total rows (approximation).
+      // Custom styles: bold comes strictly from the element dxf font (§18.5.1.2).
+      const tableBold = tableStyle
+        ? (tableStyle.isCustom
+            ? !!tableFontDxf?.font?.bold
+            : (tableStyle.isHeader || tableStyle.isTotals))
+        : false;
       const effectiveBold = font.bold || !!cf.fontBold || tableBold;
       const effectiveItalic = font.italic || !!cf.fontItalic;
       const effectiveUnderline = font.underline || !!cf.fontUnderline;
@@ -1463,11 +1576,9 @@ function renderQuadrant(
         : font;
       ctx.font = buildFont(fontForDraw, cs);
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
-      // Custom table-style header dxfs can override font color (ECMA-376 §18.8.40).
-      const tableFontColor =
-        (tableStyle?.isHeader && tsDxfHeader?.font?.color) ? tsDxfHeader.font.color :
-        (tableStyle && !tableStyle.isHeader && !tableStyle.isTotals && tsDxfWhole?.font?.color) ? tsDxfWhole.font.color :
-        null;
+      // Table-style element dxfs can override font color (ECMA-376 §18.8.83),
+      // following the same element hierarchy as the fill/bold above.
+      const tableFontColor = tableFontDxf?.font?.color ?? null;
       const textColor = hyperlinkUrl
         ? '#0563C1'
         : (cf.fontColor ?? tableFontColor ?? font.color);

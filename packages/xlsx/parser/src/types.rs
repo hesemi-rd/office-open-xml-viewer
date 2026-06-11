@@ -212,8 +212,15 @@ pub struct TableInfo {
     /// theme accents (e.g. `TableStyleLight18` → accent3 of theme1.xml). Used
     /// by the renderer to draw banding, header background, and rules.
     pub accent_color: String,
+    /// `true` when `style_name` is defined in the file's `<tableStyles>` block,
+    /// i.e. a *custom* style (ECMA-376 §18.5.1.2). The renderer must draw such
+    /// tables strictly from their declared element dxfs and must NOT apply the
+    /// accent-based approximation (banding, synthesized rules/header) that is
+    /// reserved for built-in style names whose definitions are absent.
+    #[serde(default)]
+    pub is_custom: bool,
     /// Dxf index for the `wholeTable` element of a custom `<tableStyle>`
-    /// (ECMA-376 §18.8.40). When set, its border/fill apply to every cell
+    /// (ECMA-376 §18.8.83). When set, its border/fill apply to every cell
     /// of the table as a base layer. Built-in style names use the renderer's
     /// accent-based fallback, not this field.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -223,6 +230,23 @@ pub struct TableInfo {
     /// vertical separator borders shown between header cells.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_row_dxf: Option<u32>,
+    /// Dxf index for the `totalRow` element (ECMA-376 §18.18.93).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_row_dxf: Option<u32>,
+    /// Dxf index for the `firstColumn` element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_column_dxf: Option<u32>,
+    /// Dxf index for the `lastColumn` element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_column_dxf: Option<u32>,
+    /// Dxf index for the `firstRowStripe` (band1 horizontal) element — the odd
+    /// banded-row stripe applied when `show_row_stripes` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band1_horizontal_dxf: Option<u32>,
+    /// Dxf index for the `secondRowStripe` (band2 horizontal) element — the
+    /// even banded-row stripe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band2_horizontal_dxf: Option<u32>,
     /// Per-column DXF references (ECMA-376 §18.5.1.3 `tableColumn`). Length
     /// matches the number of `<tableColumn>` children in the table XML, so
     /// `columns[c - range.left]` gives the DXFs for the cell column. The

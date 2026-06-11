@@ -17,14 +17,31 @@ use std::io::Cursor;
 /// `theme_colors` is in OOXML natural order — accent1 lives at index 4, so
 /// accent_n is at `theme_colors[3 + n]`. Falls back to a neutral gray when
 /// the style name is unrecognised or the theme is missing accents.
-/// dxf indices for the ECMA-376 §18.8.40 `<tableStyleElement>` roles we care
-/// about. Built-in styles (`TableStyleLight18`, etc.) have no entry in the
-/// file's `<tableStyles>` block and fall through to accent-based rendering;
-/// custom styles (`"Gift Budget"`) reference dxfs from `<dxfs>`.
+/// dxf indices for the ECMA-376 §18.8.83 `<tableStyleElement>` roles we
+/// render. The presence of an entry in the file's `<tableStyles>` block marks
+/// a *custom* style: built-in styles (`TableStyleLight18`, etc.) have no entry
+/// here and fall through to accent-based rendering, whereas custom styles
+/// (`"予算"`, `"交通費"`) reference dxfs from `<dxfs>` and must be drawn from
+/// those dxfs alone — a custom style contributes ONLY what its declared
+/// elements define (§18.5.1.2 tableStyleInfo). If none of its elements carry a
+/// border dxf, Excel draws no table-level border at all.
+///
+/// `ST_TableStyleType` (§18.18.93) defines many element types. We cover the
+/// region-level ones that affect rendering here: wholeTable, headerRow,
+/// totalRow, firstColumn, lastColumn, and the two horizontal banding stripes
+/// (firstRowStripe / secondRowStripe). Vertical banding stripes and the corner
+/// cell types (first/last header/total cell) are out of scope for now.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TableStyleElements {
     whole_table: Option<u32>,
     header_row: Option<u32>,
+    total_row: Option<u32>,
+    first_column: Option<u32>,
+    last_column: Option<u32>,
+    /// `firstRowStripe` — band1 horizontal stripe dxf (§18.18.93).
+    band1_horizontal: Option<u32>,
+    /// `secondRowStripe` — band2 horizontal stripe dxf.
+    band2_horizontal: Option<u32>,
 }
 
 /// Parse `<tableStyles><tableStyle name="…"><tableStyleElement type="…" dxfId="…"/>`
@@ -59,9 +76,16 @@ pub(crate) fn parse_table_styles_map(
             {
                 let t = el.attribute("type").unwrap_or("");
                 let dxf: Option<u32> = el.attribute("dxfId").and_then(|s| s.parse().ok());
+                // §18.18.93 ST_TableStyleType. firstRowStripe/secondRowStripe
+                // are the horizontal banding stripes (row banding).
                 match t {
                     "wholeTable" => elems.whole_table = dxf,
                     "headerRow" => elems.header_row = dxf,
+                    "totalRow" => elems.total_row = dxf,
+                    "firstColumn" => elems.first_column = dxf,
+                    "lastColumn" => elems.last_column = dxf,
+                    "firstRowStripe" => elems.band1_horizontal = dxf,
+                    "secondRowStripe" => elems.band2_horizontal = dxf,
                     _ => {}
                 }
             }
@@ -189,10 +213,19 @@ pub(crate) fn load_sheet_tables(
                 None => (false, false, false, false),
             };
         let accent_color = resolve_table_style_accent(&style_name, theme_colors);
-        let (whole_table_dxf, header_row_dxf) = match custom_styles.get(&style_name) {
-            Some(e) => (e.whole_table, e.header_row),
-            None => (None, None),
-        };
+        // §18.5.1.2: a style is *custom* iff it is defined in the file's
+        // `<tableStyles>` block. Custom styles render strictly from their
+        // declared element dxfs (no accent approximation); built-in style
+        // names (absent from the block) keep the accent-based fallback.
+        let style_elems = custom_styles.get(&style_name);
+        let is_custom = style_elems.is_some();
+        let whole_table_dxf = style_elems.and_then(|e| e.whole_table);
+        let header_row_dxf = style_elems.and_then(|e| e.header_row);
+        let total_row_dxf = style_elems.and_then(|e| e.total_row);
+        let first_column_dxf = style_elems.and_then(|e| e.first_column);
+        let last_column_dxf = style_elems.and_then(|e| e.last_column);
+        let band1_horizontal_dxf = style_elems.and_then(|e| e.band1_horizontal);
+        let band2_horizontal_dxf = style_elems.and_then(|e| e.band2_horizontal);
         // ECMA-376 §18.5.1.3: each `<tableColumn>` may carry its own
         // `dataDxfId`, `headerRowDxfId`, `totalsRowDxfId`. We collect them in
         // document order so the renderer can index them via
@@ -216,8 +249,14 @@ pub(crate) fn load_sheet_tables(
             show_first_column,
             show_last_column,
             accent_color,
+            is_custom,
             whole_table_dxf,
             header_row_dxf,
+            total_row_dxf,
+            first_column_dxf,
+            last_column_dxf,
+            band1_horizontal_dxf,
+            band2_horizontal_dxf,
             columns,
         });
     }
