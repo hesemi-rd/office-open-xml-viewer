@@ -848,12 +848,48 @@ function layoutParagraph(
 
 // ===== Element renderers =====
 
-function renderBackground(
+async function renderBackground(
   ctx: CanvasRenderingContext2D,
   fill: Fill | null,
   canvasW: number,
   canvasH: number
 ) {
+  // ECMA-376 §20.1.8.14 — image (blipFill) background. Decode the embedded blip
+  // and stretch it into the destination rect derived from the §20.1.8.30
+  // fillRect insets. Paint an opaque white base first so a partially
+  // transparent image (alphaModFix) composites over white, and so a decode
+  // failure still leaves a defined background.
+  if (fill && fill.fillType === 'image') {
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+    try {
+      const bitmap = await getCachedBitmap(fill.dataUrl);
+      // fillRect edges are fractions of the fill region; negative = overscan.
+      // ECMA-376 §20.1.8.30: l/t are left/top insets, r/b are right/bottom
+      // insets, so the destination spans [l, 1-r] × [t, 1-b] of the box.
+      const fr = fill.fillRect ?? {};
+      const l = fr.l ?? 0;
+      const t = fr.t ?? 0;
+      const r = fr.r ?? 0;
+      const b = fr.b ?? 0;
+      const dx = l * canvasW;
+      const dy = t * canvasH;
+      const dw = canvasW * (1 - l - r);
+      const dh = canvasH * (1 - t - b);
+      ctx.save();
+      // Clip to the slide rectangle so overscan (negative insets) is cropped at
+      // the slide edge rather than spilling onto neighbouring content.
+      ctx.beginPath();
+      ctx.rect(0, 0, canvasW, canvasH);
+      ctx.clip();
+      if (fill.alpha != null) ctx.globalAlpha = fill.alpha;
+      ctx.drawImage(bitmap, dx, dy, dw, dh);
+      ctx.restore();
+    } catch {
+      // Decode failed — the white base painted above remains as the fallback.
+    }
+    return;
+  }
   const bg = resolveShapeFill(fill, ctx, 0, 0, canvasW, canvasH);
   ctx.fillStyle = bg ?? '#FFFFFF';
   ctx.fillRect(0, 0, canvasW, canvasH);
@@ -2837,7 +2873,8 @@ export async function renderSlide(
     themeHlinkColor: opts.hlinkColor ?? null,
   };
 
-  renderBackground(ctx, slide.background, canvasW, canvasH);
+  await renderBackground(ctx, slide.background, canvasW, canvasH);
+  if (superseded()) return canvas;
 
   // Pre-rasterize any equations so the synchronous text layout can place them.
   // `math` is the engine injected once at PptxPresentation.load and threaded in
