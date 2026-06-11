@@ -691,6 +691,110 @@ struct TextRect {
     height: i64,
 }
 
+/// DrawingML 3D rotation in sphere coordinates — ECMA-376 §20.1.5.11
+/// (`CT_SphereCoords`). All three angles are stored in **degrees** (the XML
+/// carries 60000ths of a degree; we divide once here). Per the spec, `lat` and
+/// `lon` are latitude/longitude and `rev` is the revolution about the resulting
+/// view axis.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+struct Rot3d {
+    /// Latitude — rotation about the horizontal (X) axis, degrees.
+    lat: f64,
+    /// Longitude — rotation about the vertical (Y) axis, degrees.
+    lon: f64,
+    /// Revolution — in-plane rotation about the view (Z) axis, degrees.
+    rev: f64,
+}
+
+/// `<a:camera>` — ECMA-376 §20.1.5.5 (`CT_Camera`). Defines the camera that
+/// views the 3D scene. `prst` selects one of the 62 preset cameras
+/// (§20.1.10.47); `fov`/`zoom` optionally override the preset.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Camera3d {
+    /// Preset camera name (`ST_PresetCameraType`), e.g. "perspectiveRelaxed".
+    prst: String,
+    /// Field-of-view override in **degrees** (60000ths in XML). None = use the
+    /// preset's default FOV. Only meaningful for perspective presets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fov: Option<f64>,
+    /// Zoom factor as a unit ratio (1.0 = 100%). XML carries an
+    /// `ST_PositivePercentage` (e.g. 100000 = 100%); we divide by 100000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zoom: Option<f64>,
+    /// Camera rotation override (`<a:rot>`). None = use the preset's base
+    /// orientation unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rot: Option<Rot3d>,
+}
+
+/// `<a:lightRig>` — ECMA-376 §20.1.5.9 (`CT_LightRig`). Parsed for Phase B
+/// (lighting/bevel shading); the Phase A camera renderer ignores it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LightRig {
+    /// Light-rig preset (`ST_LightRigType`), e.g. "threePt".
+    rig: String,
+    /// Light direction (`ST_LightRigDirection`): tl/t/tr/l/r/bl/b/br.
+    dir: String,
+    /// Optional rotation override of the rig.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rot: Option<Rot3d>,
+}
+
+/// `<a:scene3d>` — ECMA-376 §20.1.4.1.41 (`CT_Scene3D`). Holds the camera and
+/// light rig for a shape's 3D scene.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Scene3d {
+    camera: Camera3d,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    light_rig: Option<LightRig>,
+}
+
+/// `<a:bevel>` — ECMA-376 §20.1.5.3 (`CT_Bevel`). Lengths in EMU; `w`/`h`
+/// default to 76200 EMU and `prst` to "circle" per the schema.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Bevel3d {
+    /// Bevel width in EMU.
+    w: i64,
+    /// Bevel height in EMU.
+    h: i64,
+    /// Bevel preset name (`ST_BevelPresetType`).
+    prst: String,
+}
+
+/// `<a:sp3d>` — ECMA-376 §20.1.5.12 (`CT_Shape3D`). Parsed in full but **not
+/// rendered in Phase A** (camera-only). The contour/extrusion/bevel surfaces
+/// are Phase B; the renderer reads only `scene3d` for the perspective
+/// projection.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Sp3d {
+    /// Z position of the shape's front face in EMU (default 0).
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    z: i64,
+    /// Extrusion (depth) height in EMU (default 0).
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    extrusion_h: i64,
+    /// Contour (outline) width in EMU (default 0).
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    contour_w: i64,
+    /// Preset surface material (`ST_PresetMaterialType`), default "warmMatte".
+    prst_material: String,
+    /// Top bevel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bevel_t: Option<Bevel3d>,
+    /// Bottom bevel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bevel_b: Option<Bevel3d>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ShapeElement {
@@ -768,6 +872,15 @@ struct ShapeElement {
     /// ordinary shapes (renderer falls back to the preset text rectangle).
     #[serde(skip_serializing_if = "Option::is_none")]
     text_rect: Option<TextRect>,
+    /// `<p:spPr><a:scene3d>` (ECMA-376 §20.1.4.1.41 / §20.1.5.5) — 3D camera
+    /// scene. When the camera is non-identity the renderer projects the shape's
+    /// 2D drawing through the camera homography (Phase A).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene3d: Option<Scene3d>,
+    /// `<p:spPr><a:sp3d>` (ECMA-376 §20.1.5.12) — 3D shape properties
+    /// (bevel/contour/extrusion). Parsed but not rendered in Phase A.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp3d: Option<Sp3d>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -814,6 +927,16 @@ struct PictureElement {
     /// Mirrored reflection from spPr > effectLst > reflection. §20.1.8.50.
     #[serde(skip_serializing_if = "Option::is_none")]
     reflection: Option<Reflection>,
+    /// `<p:spPr><a:scene3d>` (ECMA-376 §20.1.4.1.41 / §20.1.5.5). A `p:pic`'s
+    /// `spPr` is `CT_ShapeProperties` (§19.3.1.37), so 3D scenes apply to images
+    /// too. When non-identity, the renderer projects the picture through the
+    /// camera homography (Phase A).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene3d: Option<Scene3d>,
+    /// `<p:spPr><a:sp3d>` (ECMA-376 §20.1.5.12). Parsed but not rendered in
+    /// Phase A.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp3d: Option<Sp3d>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -2008,6 +2131,72 @@ fn parse_effect_lst(
         soft_edge: effect_lst.and_then(parse_soft_edge),
         reflection: effect_lst.and_then(parse_reflection),
     }
+}
+
+// ===========================
+//  3D scene parsing (scene3d / sp3d)
+// ===========================
+
+/// Parse `<a:rot>` (`CT_SphereCoords`, ECMA-376 §20.1.5.11). Angles are stored
+/// in the XML as 60000ths of a degree; we convert to degrees. All three
+/// attributes are required by the schema, but we default missing ones to 0 to
+/// stay tolerant of malformed input.
+fn parse_rot3d(rot: roxmltree::Node<'_, '_>) -> Rot3d {
+    let deg = |name: &str| attr_f64(&rot, name).unwrap_or(0.0) / 60_000.0;
+    Rot3d {
+        lat: deg("lat"),
+        lon: deg("lon"),
+        rev: deg("rev"),
+    }
+}
+
+/// Parse `<a:scene3d>` (`CT_Scene3D`, ECMA-376 §20.1.4.1.41). Requires a
+/// `<a:camera>` child (§20.1.5.5); `<a:lightRig>` is optional for our purposes
+/// (Phase A renders the camera only). Returns None when no camera is present.
+fn parse_scene3d(sppr: roxmltree::Node<'_, '_>) -> Option<Scene3d> {
+    let scene = child(sppr, "scene3d")?;
+    let cam = child(scene, "camera")?;
+    let camera = Camera3d {
+        prst: attr(&cam, "prst")?,
+        // §20.1.5.5: fov is an ST_FOVAngle in 60000ths of a degree.
+        fov: attr_f64(&cam, "fov").map(|v| v / 60_000.0),
+        // zoom is an ST_PositivePercentage (100000 = 100%).
+        zoom: attr_f64(&cam, "zoom").map(|v| v / 100_000.0),
+        rot: child(cam, "rot").map(parse_rot3d),
+    };
+    let light_rig = child(scene, "lightRig").and_then(|lr| {
+        Some(LightRig {
+            rig: attr(&lr, "rig")?,
+            dir: attr(&lr, "dir")?,
+            rot: child(lr, "rot").map(parse_rot3d),
+        })
+    });
+    Some(Scene3d { camera, light_rig })
+}
+
+/// Parse `<a:bevel>` (`CT_Bevel`, ECMA-376 §20.1.5.3). `w`/`h` default to
+/// 76200 EMU and `prst` to "circle" per the schema.
+fn parse_bevel3d(bevel: roxmltree::Node<'_, '_>) -> Bevel3d {
+    Bevel3d {
+        w: attr_i64(&bevel, "w").unwrap_or(76_200),
+        h: attr_i64(&bevel, "h").unwrap_or(76_200),
+        prst: attr(&bevel, "prst").unwrap_or_else(|| "circle".into()),
+    }
+}
+
+/// Parse `<a:sp3d>` (`CT_Shape3D`, ECMA-376 §20.1.5.12). Defaults follow the
+/// schema: z=0, extrusionH=0, contourW=0, prstMaterial="warmMatte". Parsed in
+/// full but not rendered in Phase A.
+fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
+    let n = child(sppr, "sp3d")?;
+    Some(Sp3d {
+        z: attr_i64(&n, "z").unwrap_or(0),
+        extrusion_h: attr_i64(&n, "extrusionH").unwrap_or(0),
+        contour_w: attr_i64(&n, "contourW").unwrap_or(0),
+        prst_material: attr(&n, "prstMaterial").unwrap_or_else(|| "warmMatte".into()),
+        bevel_t: child(n, "bevelT").map(parse_bevel3d),
+        bevel_b: child(n, "bevelB").map(parse_bevel3d),
+    })
 }
 
 // ===========================
@@ -5562,6 +5751,8 @@ fn parse_shape(
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
         text_rect: None,
+        scene3d: sp_pr.and_then(parse_scene3d),
+        sp3d: sp_pr.and_then(parse_sp3d),
     })
 }
 
@@ -5649,6 +5840,8 @@ fn parse_picture(
         glow,
         soft_edge,
         reflection,
+        scene3d: parse_scene3d(sp_pr),
+        sp3d: parse_sp3d(sp_pr),
     })
 }
 
@@ -6668,6 +6861,8 @@ fn parse_sp_tree_node(
                                     glow,
                                     soft_edge,
                                     reflection,
+                                    scene3d: sp_pr_node.and_then(parse_scene3d),
+                                    sp3d: sp_pr_node.and_then(parse_sp3d),
                                 }));
                                 return;
                             }
@@ -6708,6 +6903,8 @@ fn parse_sp_tree_node(
                                     glow: None,
                                     soft_edge: None,
                                     reflection: None,
+                                    scene3d: None,
+                                    sp3d: None,
                                 }));
                                 return;
                             }
@@ -6762,6 +6959,8 @@ fn parse_sp_tree_node(
                                         glow: None,
                                         soft_edge: None,
                                         reflection: None,
+                                        scene3d: None,
+                                        sp3d: None,
                                     }));
                                 }
                             }
@@ -7312,6 +7511,8 @@ fn parse_connector(
         placeholder_type: None,
         placeholder_idx: None,
         text_rect: None,
+        scene3d: parse_scene3d(sp_pr),
+        sp3d: parse_sp3d(sp_pr),
     })
 }
 
@@ -8512,5 +8713,116 @@ mod tests {
             !json_ltr.contains("\"rtl\""),
             "rtl=false must be omitted; got {json_ltr}"
         );
+    }
+
+    // ===== scene3d / sp3d parsing (ECMA-376 §20.1.5.5 / §20.1.5.12) =====
+
+    /// Wrap a `<p:spPr>` fragment with the `a:`/`p:` namespaces and return the
+    /// spPr node so parse_scene3d / parse_sp3d can run against it.
+    fn parse_sppr_frag<'a>(doc: &'a roxmltree::Document<'a>) -> roxmltree::Node<'a, 'a> {
+        doc.root_element()
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+            .unwrap()
+    }
+
+    #[test]
+    fn test_parse_scene3d_slide3_fragment() {
+        // The exact scene3d/sp3d from sample-11 slide 3, "図 3".
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:scene3d>
+              <a:camera prst="perspectiveRelaxed">
+                <a:rot lat="19800000" lon="1200000" rev="20820000"/>
+              </a:camera>
+              <a:lightRig rig="threePt" dir="t"/>
+            </a:scene3d>
+            <a:sp3d contourW="6350" prstMaterial="matte">
+              <a:bevelT w="101600" h="101600"/>
+            </a:sp3d>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+
+        let scene = parse_scene3d(sppr).expect("scene3d should parse");
+        assert_eq!(scene.camera.prst, "perspectiveRelaxed");
+        let rot = scene.camera.rot.expect("rot present");
+        // 60000ths of a degree → degrees.
+        assert!((rot.lat - 330.0).abs() < 1e-9, "lat = {}", rot.lat);
+        assert!((rot.lon - 20.0).abs() < 1e-9, "lon = {}", rot.lon);
+        assert!((rot.rev - 347.0).abs() < 1e-9, "rev = {}", rot.rev);
+        // No fov/zoom in this file → None.
+        assert!(scene.camera.fov.is_none());
+        assert!(scene.camera.zoom.is_none());
+        let lr = scene.light_rig.as_ref().expect("lightRig present");
+        assert_eq!(lr.rig, "threePt");
+        assert_eq!(lr.dir, "t");
+
+        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        assert_eq!(sp3d.contour_w, 6350);
+        assert_eq!(sp3d.prst_material, "matte");
+        assert_eq!(sp3d.z, 0); // default
+        assert_eq!(sp3d.extrusion_h, 0); // default
+        let bt = sp3d.bevel_t.expect("bevelT present");
+        assert_eq!(bt.w, 101600);
+        assert_eq!(bt.h, 101600);
+        assert_eq!(bt.prst, "circle"); // schema default
+        assert!(sp3d.bevel_b.is_none());
+
+        // camelCase JSON round-trip surfaces the right keys.
+        let json = serde_json::to_string(&scene).unwrap();
+        assert!(json.contains("\"prst\":\"perspectiveRelaxed\""), "{json}");
+        assert!(json.contains("\"lat\":330.0"), "{json}");
+        assert!(json.contains("\"lightRig\""), "{json}");
+    }
+
+    #[test]
+    fn test_parse_camera_fov_zoom_and_defaults() {
+        // fov + zoom present; sp3d with all attributes omitted → schema defaults.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:scene3d>
+              <a:camera prst="perspectiveContrastingRightFacing" fov="6900000" zoom="200000"/>
+              <a:lightRig rig="threePt" dir="t"/>
+            </a:scene3d>
+            <a:sp3d/>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+
+        let scene = parse_scene3d(sppr).unwrap();
+        // fov: 6900000 / 60000 = 115 degrees.
+        assert!((scene.camera.fov.unwrap() - 115.0).abs() < 1e-9);
+        // zoom: 200000 / 100000 = 2.0 (200%).
+        assert!((scene.camera.zoom.unwrap() - 2.0).abs() < 1e-9);
+        // No <a:rot> → None (renderer uses the preset base orientation).
+        assert!(scene.camera.rot.is_none());
+
+        let sp3d = parse_sp3d(sppr).unwrap();
+        assert_eq!(sp3d.z, 0);
+        assert_eq!(sp3d.extrusion_h, 0);
+        assert_eq!(sp3d.contour_w, 0);
+        assert_eq!(sp3d.prst_material, "warmMatte"); // schema default
+        assert!(sp3d.bevel_t.is_none());
+        assert!(sp3d.bevel_b.is_none());
+    }
+
+    #[test]
+    fn test_parse_scene3d_absent_is_none() {
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr><a:prstGeom prst="rect"/></p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        assert!(parse_scene3d(sppr).is_none());
+        assert!(parse_sp3d(sppr).is_none());
     }
 }
