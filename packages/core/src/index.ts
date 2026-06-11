@@ -64,18 +64,39 @@ export {
   type PaintShape,
   type EffectBBox,
 } from './shape/effects';
-// DrawingML 3D camera perspective projection (Phase A — planar homography).
-// ECMA-376 §20.1.5.5 (camera) / §20.1.5.11 (rot). sp3d / lightRig shading is
-// Phase B and not implemented here.
+// DrawingML 3D camera perspective projection (planar homography).
+// ECMA-376 §20.1.5.5 (camera) / §20.1.5.11 (rot). sp3d bevel / extrusion / light
+// shading lives in ./shape/bevel-shading (exported below).
 export {
   computeScene3dQuad,
   isScene3dNonIdentity,
+  computeDepthOffset,
   type CameraInput,
   type RotInput,
   type Scene3dQuad,
   type Vec2,
 } from './shape/scene3d-camera';
 export { drawProjected } from './shape/scene3d-draw';
+// DrawingML 3D bevel shading (Phase B). ECMA-376 §20.1.5.12 (sp3d) /
+// §20.1.5.3 (bevel) / §20.1.10.9 (ST_BevelPresetType) / §20.1.5.9 (lightRig).
+export {
+  applyBevelShading,
+  applyExtrusion,
+  type ExtrusionInput,
+  computeBevelNormals,
+  bevelHeightProfile,
+  distanceToEdge,
+  edt1d,
+  shadePixel,
+  shadeParamsFor,
+  lightDirFromRig,
+  materialClass,
+  type BevelMaterial,
+  type BevelShadeParams,
+  type BevelInput,
+  type BevelCtx,
+  type Vec3,
+} from './shape/bevel-shading';
 export {
   renderSparkline,
   type SparklineKind,

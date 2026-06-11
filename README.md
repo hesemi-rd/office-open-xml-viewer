@@ -520,9 +520,10 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Inner shadow (`innerShdw`) | ✅ |
 | | Soft edge (`softEdge`) | ✅ |
 | | Reflection (`reflection`) | ✅ |
-| | 3D camera / perspective projection (`scene3d` camera + `rot`) on pictures | ✅ |
-| | 3D contour edge (`sp3d` `contourW` / `contourClr`) on pictures — flat approximation, no bevel shading | ⚠️ |
-| | Bevel / 3D extrusion (`sp3d` `bevelT` / `bevelB` / `extrusionH`) | ⚠️ parsed; rendering planned |
+| | 3D camera / perspective projection (`scene3d` camera + `rot`) on pictures and shapes — projected shape text is drawn but not selectable | ✅ |
+| | 3D contour edge (`sp3d` `contourW` / `contourClr`) — flat approximation | ⚠️ |
+| | Bevel shading (`sp3d` `bevelT` / `bevelB`) — distance-field lip lit by `lightRig`, `matte`/`plastic` materials | ✅ |
+| | 3D extrusion (`sp3d` `extrusionH` / `extrusionClr`) — swept side-wall approximation (visible only under a tilted camera) | ⚠️ |
 | **Text — characters** | Bold, italic, strikethrough (incl. `dblStrike`) | ✅ |
 | | Underline styles (`sng` / `dbl` / `dotted` / `dash` / `dashLong` / `dotDash` / `dotDotDash` / `wavy` / `wavyDbl` and `*Heavy` variants) | ✅ |
 | | Per-run underline colour (`uFill` / `uFillTx`) | ✅ |

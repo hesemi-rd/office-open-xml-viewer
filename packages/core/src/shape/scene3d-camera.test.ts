@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   computeScene3dQuad,
   isScene3dNonIdentity,
+  computeDepthOffset,
   type CameraInput,
   type Vec2,
 } from './scene3d-camera';
@@ -177,5 +178,33 @@ describe('computeScene3dQuad', () => {
     const botW = q.corners[2].x - q.corners[3].x;
     expect(topW).toBeLessThan(botW);
     expect(q.corners.map((c) => r(c, 2))).toMatchSnapshot();
+  });
+});
+
+describe('computeDepthOffset (extrusion side-wall direction, §20.1.5.12)', () => {
+  it('is ~zero for a face-on camera (−Z projects straight into the screen)', () => {
+    const cam: CameraInput = { prst: 'perspectiveFront' };
+    const o = computeDepthOffset(cam, W, H, 20);
+    expect(Math.hypot(o.x, o.y)).toBeLessThan(0.5);
+  });
+
+  it('is exactly zero for orthographicFront (parallel, no tilt)', () => {
+    const cam: CameraInput = { prst: 'orthographicFront' };
+    const o = computeDepthOffset(cam, W, H, 20);
+    expect(o.x).toBeCloseTo(0, 6);
+    expect(o.y).toBeCloseTo(0, 6);
+  });
+
+  it('reveals a side wall when the camera is tilted (non-zero offset)', () => {
+    const cam: CameraInput = { prst: 'perspectiveRelaxed', rot: { lat: 330, lon: 20, rev: 0 } };
+    const o = computeDepthOffset(cam, W, H, 40);
+    expect(Math.hypot(o.x, o.y)).toBeGreaterThan(1);
+  });
+
+  it('scales with the extrusion depth', () => {
+    const cam: CameraInput = { prst: 'perspectiveRelaxed', rot: { lat: 330, lon: 20, rev: 0 } };
+    const a = computeDepthOffset(cam, W, H, 20);
+    const b = computeDepthOffset(cam, W, H, 40);
+    expect(Math.hypot(b.x, b.y)).toBeGreaterThan(Math.hypot(a.x, a.y));
   });
 });

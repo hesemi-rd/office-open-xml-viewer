@@ -207,8 +207,8 @@ export interface Camera3d {
 }
 
 /**
- * `<a:lightRig>` — ECMA-376 §20.1.5.9 (`CT_LightRig`). Parsed for Phase B
- * (lighting/bevel shading); the Phase A camera renderer ignores it.
+ * `<a:lightRig>` — ECMA-376 §20.1.5.9 (`CT_LightRig`). Drives the bevel-lip
+ * lighting (Phase B): `dir` selects the key-light octant.
  */
 export interface LightRig {
   /** Light-rig preset (`ST_LightRigType`), e.g. "threePt". */
@@ -242,9 +242,10 @@ export interface Bevel3d {
 }
 
 /**
- * `<a:sp3d>` — ECMA-376 §20.1.5.12 (`CT_Shape3D`). Parsed in full but **not
- * rendered in Phase A** (camera-only). bevel/contour/extrusion are Phase B.
- * Numeric fields are omitted from JSON when zero.
+ * `<a:sp3d>` — ECMA-376 §20.1.5.12 (`CT_Shape3D`). Rendered in Phase B: bevelT/
+ * bevelB are shaded as a lit lip (distance-field + lightRig), extrusionH as a
+ * swept side wall, and contour as a flat outline approximation. Numeric fields
+ * are omitted from JSON when zero.
  */
 export interface Sp3d {
   /** Z position of the front face in EMU (default 0). */
