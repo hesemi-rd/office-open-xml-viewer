@@ -599,13 +599,11 @@ pub(crate) fn parse_chart_xml(
                                     data_label_position = d.attribute("val").map(|s| s.to_string());
                                 }
                             }
-                            "numFmt" => {
-                                if data_label_format_code.is_none() {
-                                    data_label_format_code = d
-                                        .attribute("formatCode")
-                                        .map(|s| s.to_string())
-                                        .filter(|s| !s.is_empty() && s != "General");
-                                }
+                            "numFmt" if data_label_format_code.is_none() => {
+                                data_label_format_code = d
+                                    .attribute("formatCode")
+                                    .map(|s| s.to_string())
+                                    .filter(|s| !s.is_empty() && s != "General");
                             }
                             // txPr (data-label text color) is now resolved
                             // up front via ooxml_common::chart::extract_data_label_font_color.
@@ -659,13 +657,11 @@ pub(crate) fn parse_chart_xml(
                                 data_label_position = d.attribute("val").map(|s| s.to_string());
                             }
                         }
-                        "numFmt" => {
-                            if data_label_format_code.is_none() {
-                                data_label_format_code = d
-                                    .attribute("formatCode")
-                                    .map(|s| s.to_string())
-                                    .filter(|s| !s.is_empty() && s != "General");
-                            }
+                        "numFmt" if data_label_format_code.is_none() => {
+                            data_label_format_code = d
+                                .attribute("formatCode")
+                                .map(|s| s.to_string())
+                                .filter(|s| !s.is_empty() && s != "General");
                         }
                         // txPr (data-label text color) handled by the
                         // shared helper before this loop runs.

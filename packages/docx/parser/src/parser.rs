@@ -687,20 +687,18 @@ fn parse_body_elements(
                 let tbl = parse_table(child, style_map, num_map, media_map, rel_map, theme);
                 body.push(BodyElement::Table(tbl));
             }
-            "sectPr" => {
-                // Mid-body loose sectPr (rare) would behave like a page break.
-                // The final body-level sectPr only defines section settings — skip it.
-                if Some(child.id()) != body_level_sect_id {
-                    match read_section_break_type(child).as_deref() {
-                        Some("continuous") => {}
-                        Some("oddPage") => body.push(BodyElement::PageBreak {
-                            parity: Some("odd".to_string()),
-                        }),
-                        Some("evenPage") => body.push(BodyElement::PageBreak {
-                            parity: Some("even".to_string()),
-                        }),
-                        _ => body.push(BodyElement::PageBreak { parity: None }),
-                    }
+            // Mid-body loose sectPr (rare) behaves like a page break. The
+            // final body-level sectPr only defines section settings — skip it.
+            "sectPr" if Some(child.id()) != body_level_sect_id => {
+                match read_section_break_type(child).as_deref() {
+                    Some("continuous") => {}
+                    Some("oddPage") => body.push(BodyElement::PageBreak {
+                        parity: Some("odd".to_string()),
+                    }),
+                    Some("evenPage") => body.push(BodyElement::PageBreak {
+                        parity: Some("even".to_string()),
+                    }),
+                    _ => body.push(BodyElement::PageBreak { parity: None }),
                 }
             }
             _ => {}
