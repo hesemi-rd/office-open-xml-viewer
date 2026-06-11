@@ -32,10 +32,12 @@ import {
   applyInnerShadow,
   applySoftEdge,
   applyReflection,
+  renderPresetShape,
+  hasPreset,
+  getConnectorAnchors,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
-import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
