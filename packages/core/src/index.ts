@@ -43,6 +43,14 @@ export { buildCustomPath } from './shape/custGeom';
 export { hexToRgba, resolveFill, applyStroke } from './shape/paint';
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
 export {
+  applyInnerShadow,
+  applySoftEdge,
+  applyReflection,
+  createAuxCanvas,
+  type PaintShape,
+  type EffectBBox,
+} from './shape/effects';
+export {
   renderSparkline,
   type SparklineKind,
   type SparklineModel,

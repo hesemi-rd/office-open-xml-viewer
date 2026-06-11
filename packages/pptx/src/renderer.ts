@@ -29,6 +29,9 @@ import {
   EMU_PER_PT as PT_TO_EMU,
   mathToMathML,
   recolorSvg,
+  applyInnerShadow,
+  applySoftEdge,
+  applyReflection,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
@@ -978,14 +981,6 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     'callout1', 'bordercallout1', 'accentcallout1', 'accentbordercallout1',
   ]);
 
-  const applyAndStroke = el.stroke
-    ? () => {
-        applyStroke(ctx, el.stroke!, scale);
-        ctx.stroke();
-      }
-    : null;
-  const clearShadowOnce = () => clearShadow(ctx);
-
   // ── Dispatch to preset engine when possible ────────────────────────────
   // Preference order: custGeom → generic preset engine → legacy switch.
   // `arc` keeps its bespoke case because its fill semantics (pie-wedge vs
@@ -993,31 +988,128 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const usePresetEngine =
     !el.custGeom && geom !== 'arc' && hasPreset(geom);
 
-  if (usePresetEngine) {
-    renderPresetShape(
-      ctx, geom, x, y, w, h,
-      [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
-      fillStyle, applyAndStroke, clearShadowOnce,
-    );
-  } else {
-    ctx.beginPath();
+  /**
+   * Paint the shape's body (fill + stroke) into an arbitrary target context,
+   * dispatching through the same preset / custGeom / legacy paths as the live
+   * render. Extracted into a closure so the edge/blur effect helpers
+   * (innerShdw §20.1.8.40, softEdge §20.1.8.53, reflection §20.1.8.50) can
+   * re-paint the shape onto auxiliary canvases.
+   *
+   * `silhouette`: when set, paint a flat opaque silhouette in that colour
+   * (filled path only, no stroke, no gradients) — used by innerShdw to build
+   * its mask. The silhouette honours the same even-odd / preset path topology.
+   */
+  const paintShapeBody = (
+    target: CanvasRenderingContext2D,
+    silhouette?: string,
+  ): void => {
+    const tFill = silhouette ?? fillStyle;
+    const tStroke = silhouette
+      ? null
+      : el.stroke
+        ? () => {
+            applyStroke(target, el.stroke!, scale);
+            target.stroke();
+          }
+        : null;
+    const tClearShadow = () => clearShadow(target);
+
+    if (usePresetEngine && !silhouette) {
+      renderPresetShape(
+        target, geom, x, y, w, h,
+        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+        tFill, tStroke, tClearShadow,
+      );
+      return;
+    }
+
+    target.beginPath();
     if (el.custGeom && el.custGeom.length > 0) {
-      buildCustomPath(ctx, el.custGeom, x, y, w, h);
+      buildCustomPath(target, el.custGeom, x, y, w, h);
+    } else if (usePresetEngine) {
+      // Silhouette of a preset shape: build a single filled outline. Preset
+      // path 0 is the body outline (secondary paths are highlights), so the
+      // legacy buildShapePath gives a faithful silhouette of the body.
+      buildShapePath(target, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
     } else {
-      buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
+      buildShapePath(target, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
     }
-    if (fillStyle && geom !== 'arc') {
-      ctx.fillStyle = fillStyle;
+    if (tFill && geom !== 'arc') {
+      target.fillStyle = tFill;
       if (geom === 'donut' || geom === 'smileyface' || geom === 'frame') {
-        ctx.fill('evenodd');
+        target.fill('evenodd');
       } else {
-        ctx.fill();
+        target.fill();
       }
-      clearShadow(ctx);
+      if (!silhouette) tClearShadow();
     }
-    if (applyAndStroke) {
-      applyAndStroke();
+    if (tStroke) {
+      tStroke();
     }
+  };
+
+  // ── effectLst edge/blur effects (independent siblings, ECMA-376 §20.1.8.25)
+  // Device-pixel canvas extent for the auxiliary effect canvases.
+  const deviceW = (ctx.canvas as { width: number }).width || 0;
+  const deviceH = (ctx.canvas as { height: number }).height || 0;
+  // The effect helpers operate in DEVICE pixels: the aux silhouette is painted
+  // through the live transform (which already folds in devicePixelRatio +
+  // rotation + flip), and the blit happens at identity. So bbox / radii passed
+  // to the helpers must be in device px too. The uniform device scale equals
+  // sqrt(|det|) of the transform's linear part — for scale(dpr)·rot·flip this
+  // is exactly dpr, independent of rotation or mirroring.
+  const liveTransform = ctx.getTransform();
+  const det = Math.abs(liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c);
+  const devScale = det > 0 ? Math.sqrt(det) : 1;
+  const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
+  const effScale = scale * devScale; // EMU → device px
+  const applyLiveTransform = (c: CanvasRenderingContext2D) => {
+    c.setTransform(liveTransform);
+  };
+
+  // Reflection sits BEHIND/below the shape — draw it first so the body paints
+  // on top. §20.1.8.50. The aux silhouette bakes in the live rotation/flip via
+  // setTransform, and the helper's mirror transform operates in device space,
+  // so the live ctx must blit at identity.
+  if (el.reflection && deviceW > 0 && deviceH > 0) {
+    ctx.save();
+    ctx.setTransform(new DOMMatrix());
+    applyReflection(
+      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
+      effBBox, el.reflection, effScale, deviceW, deviceH,
+    );
+    ctx.restore();
+  }
+
+  // softEdge feathers the whole body, so it REPLACES the direct body paint.
+  // §20.1.8.53. When absent, paint the body normally.
+  if (el.softEdge && deviceW > 0 && deviceH > 0) {
+    // The feathered body is composited in untransformed device space, so reset
+    // the live transform around the blit and re-apply the same transform when
+    // painting the body into the aux canvas.
+    ctx.save();
+    ctx.setTransform(new DOMMatrix());
+    applySoftEdge(
+      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
+      effBBox, el.softEdge, effScale, deviceW, deviceH,
+      // Mask is the flat filled silhouette (no stroke) — see applySoftEdge.
+      (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
+    );
+    ctx.restore();
+  } else {
+    paintShapeBody(ctx);
+  }
+
+  // innerShdw casts inward, ON TOP of the fill. §20.1.8.40. Composite after the
+  // body. The silhouette callback paints a flat opaque mask.
+  if (el.innerShadow && deviceW > 0 && deviceH > 0) {
+    ctx.save();
+    ctx.setTransform(new DOMMatrix());
+    applyInnerShadow(
+      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
+      effBBox, el.innerShadow, effScale, deviceW, deviceH,
+    );
+    ctx.restore();
   }
 
   if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
