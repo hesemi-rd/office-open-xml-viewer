@@ -163,6 +163,17 @@ export class XlsxViewer {
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
   private resizeObserver: ResizeObserver | null = null;
+  /**
+   * Start-anchored horizontal scroll position (the {@link effectiveScrollLeft}
+   * value last produced by a real user scroll or a programmatic reset), kept
+   * as the source of truth across container size changes. The native
+   * `scrollLeft` cannot serve that role for RTL sheets (ECMA-376 §18.3.1.87):
+   * it is the *inverse* of the start-anchored offset, and the browser clamps
+   * any assignment to 0 while the host is unlaid-out (`display:none` mount —
+   * e.g. a host revealed only after `load()` resolves), which would otherwise
+   * strand the view at the sheet's far end once the host gains its real size.
+   */
+  private effectiveH = 0;
 
   // Selection state
   private anchorCell: CellAddress | null = null;
@@ -266,12 +277,23 @@ export class XlsxViewer {
     container.appendChild(wrapper);
 
     this.scrollHost.addEventListener('scroll', () => {
+      // Track the start-anchored position, but only while the host is laid
+      // out: a hidden host reports clientWidth 0 and fires bogus scroll
+      // events when the browser clamps scrollLeft, which must not overwrite
+      // the last real position.
+      if (this.scrollHost.clientWidth > 0) {
+        this.effectiveH = this.effectiveScrollLeft;
+      }
       this.renderCurrentSheet();
       this.updateSelectionOverlay();
     });
 
-    // Re-render whenever the canvas area changes size
+    // Re-render whenever the canvas area changes size. Re-anchor first: a
+    // size change shifts maxScrollLeft, and for RTL sheets the native
+    // scrollLeft must be re-derived from the start-anchored position or the
+    // view drifts (or, after a hidden mount, stays stranded at the far end).
     this.resizeObserver = new ResizeObserver(() => {
+      this.reanchorHorizontalScroll();
       this.renderCurrentSheet();
       this.updateSelectionOverlay();
       this.updateNavButtons();
@@ -381,7 +403,20 @@ export class XlsxViewer {
   /** Park the scrollbar at the sheet's natural start: scrollLeft=0 for LTR,
    *  the right end for RTL (so col A shows first). */
   private resetHorizontalScroll(): void {
+    this.effectiveH = 0;
     this.scrollHost.scrollLeft = this.isRtl ? this.maxScrollLeft : 0;
+  }
+
+  /** Re-derive the native scrollLeft from the tracked start-anchored
+   *  position after the scroll host's size changes. Only RTL needs this:
+   *  for LTR the native scrollLeft *is* start-anchored and the browser
+   *  already clamps it sensibly on resize. */
+  private reanchorHorizontalScroll(): void {
+    if (!this.isRtl || this.scrollHost.clientWidth === 0) return;
+    const want = Math.max(0, this.maxScrollLeft - this.effectiveH);
+    if (Math.abs(this.scrollHost.scrollLeft - want) > 1) {
+      this.scrollHost.scrollLeft = want;
+    }
   }
 
   /** 0-based index of the currently displayed sheet. */
@@ -1173,6 +1208,7 @@ export class XlsxViewer {
       // the view would jump toward the start on every zoom step.
       const prevEffective = this.effectiveScrollLeft;
       this.updateSpacerSize(this.currentWorksheet);
+      this.effectiveH = prevEffective;
       if (this.isRtl) {
         this.scrollHost.scrollLeft = Math.max(0, this.maxScrollLeft - prevEffective);
       }
