@@ -245,6 +245,10 @@ fn slide_structure(slide: &Value) -> Value {
 
 // ─── Spatial geometry helpers (used by `pptx_get_shape_relations`) ───────────
 
+/// A named alignment axis: its label plus an accessor extracting the edge/center
+/// coordinate (EMU) used to group shapes that share that axis.
+type AlignmentAxis = (&'static str, fn(&Bbox) -> i64);
+
 /// EMU values are i64 in the parser output. Bounding box in EMU.
 #[derive(Debug, Clone, Copy)]
 struct Bbox {
@@ -1219,11 +1223,10 @@ impl PptxTools {
             if outer_conn {
                 continue;
             }
-            for j in 0..bboxes.len() {
+            for (j, &(idx_inner, inner_bb, inner_conn)) in bboxes.iter().enumerate() {
                 if i == j {
                     continue;
                 }
-                let (idx_inner, inner_bb, inner_conn) = bboxes[j];
                 if inner_conn {
                     continue;
                 }
@@ -1243,8 +1246,7 @@ impl PptxTools {
             if a_conn {
                 continue;
             }
-            for j in (i + 1)..bboxes.len() {
-                let (idx_b, b_bb, b_conn) = bboxes[j];
+            for &(idx_b, b_bb, b_conn) in bboxes.iter().skip(i + 1) {
                 if b_conn {
                     continue;
                 }
@@ -1270,7 +1272,7 @@ impl PptxTools {
             .map(|(i, b, _)| (*i, *b))
             .collect();
 
-        let alignment_axes: [(&str, fn(&Bbox) -> i64); 3] = [
+        let alignment_axes: [AlignmentAxis; 3] = [
             ("top", |b| b.y),
             ("center", |b| b.cy()),
             ("bottom", |b| b.bottom()),
@@ -1278,7 +1280,7 @@ impl PptxTools {
         for (axis, get_y) in alignment_axes {
             push_alignment_groups(&real, "alignH", axis, get_y, tol, &mut relations);
         }
-        let alignment_axes_v: [(&str, fn(&Bbox) -> i64); 3] = [
+        let alignment_axes_v: [AlignmentAxis; 3] = [
             ("left", |b| b.x),
             ("center", |b| b.cx()),
             ("right", |b| b.right()),
