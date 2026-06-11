@@ -174,27 +174,25 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .and_then(|p| read_zip_entry(&mut zip, &p).ok())
         .map(|xml| parse_comments(&xml))
         .unwrap_or_default();
-    let footnotes = find_rel_target(&rels_xml, "footnotes")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", t)
-            }
-        })
-        .and_then(|p| read_zip_entry(&mut zip, &p).ok())
-        .map(|xml| parse_notes(&xml, "footnote"))
+    let footnotes_path = find_rel_target(&rels_xml, "footnotes").map(|t| {
+        if t.starts_with('/') {
+            t.trim_start_matches('/').to_string()
+        } else {
+            format!("word/{}", t)
+        }
+    });
+    let footnotes = footnotes_path
+        .map(|p| parse_notes(&mut zip, &p, "footnote", &style_map, &mut num_map, &theme))
         .unwrap_or_default();
-    let endnotes = find_rel_target(&rels_xml, "endnotes")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", t)
-            }
-        })
-        .and_then(|p| read_zip_entry(&mut zip, &p).ok())
-        .map(|xml| parse_notes(&xml, "endnote"))
+    let endnotes_path = find_rel_target(&rels_xml, "endnotes").map(|t| {
+        if t.starts_with('/') {
+            t.trim_start_matches('/').to_string()
+        } else {
+            format!("word/{}", t)
+        }
+    });
+    let endnotes = endnotes_path
+        .map(|p| parse_notes(&mut zip, &p, "endnote", &style_map, &mut num_map, &theme))
         .unwrap_or_default();
 
     Ok(Document {
@@ -309,11 +307,44 @@ fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
     out
 }
 
-/// Parse word/footnotes.xml or word/endnotes.xml. Excludes the two
-/// reserved entries (id="-1" separator, id="0" continuation separator)
-/// per ECMA-376 §17.11.10.
-fn parse_notes(xml: &str, element_name: &str) -> Vec<crate::types::DocxNote> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
+/// Parse word/footnotes.xml or word/endnotes.xml into a list of notes, each
+/// carrying its full block-level content (ECMA-376 §17.11.2 / §17.11.10).
+/// Excludes the reserved entries — separator (id="-1") and
+/// continuationSeparator (id="0") — and any note declared
+/// `w:type="separator" | "continuationSeparator" | "continuationNotice"`.
+/// Note content is parsed with the document's styles + numbering so the
+/// FootnoteText/EndnoteText style and the `<w:footnoteRef/>` auto-number marker
+/// resolve correctly; the note part's own relationships supply media.
+fn parse_notes(
+    zip: &mut Zip,
+    path: &str,
+    element_name: &str,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    theme: &ThemeColors,
+) -> Vec<crate::types::DocxNote> {
+    let Ok(xml) = read_zip_entry(zip, path) else {
+        return Vec::new();
+    };
+
+    // Per-part rels for media (e.g. an image inside a footnote). The part lives
+    // at e.g. word/footnotes.xml, so its rels are word/_rels/footnotes.xml.rels.
+    let (dir, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let rels_path = if dir.is_empty() {
+        format!("_rels/{}.rels", file)
+    } else {
+        format!("{}/_rels/{}.rels", dir, file)
+    };
+    let base_dir = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", dir)
+    };
+    let rels_xml = read_zip_entry(zip, &rels_path).unwrap_or_default();
+    let local_rel_map = parse_rels(&rels_xml);
+    let local_media_map = load_media_map(zip, &local_rel_map, &base_dir);
+
+    let Ok(doc) = XmlDoc::parse(&xml) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -321,24 +352,27 @@ fn parse_notes(xml: &str, element_name: &str) -> Vec<crate::types::DocxNote> {
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == element_name)
     {
-        let id = n
-            .attributes()
-            .find(|a| a.name() == "id")
-            .map(|a| a.value().to_string())
-            .unwrap_or_default();
-        if id.is_empty() || id == "-1" || id == "0" {
+        let id = attr_w(n, "id").unwrap_or_default();
+        // ECMA-376 §17.11.18 ST_FtnEdn — skip reserved special notes. They are
+        // tagged `w:type` (separator / continuationSeparator / continuationNotice)
+        // and conventionally use ids -1 / 0.
+        let note_type = attr_w(n, "type");
+        let is_special = matches!(
+            note_type.as_deref(),
+            Some("separator") | Some("continuationSeparator") | Some("continuationNotice")
+        );
+        if id.is_empty() || id == "-1" || id == "0" || is_special {
             continue;
         }
-        let mut text = String::new();
-        for t in n
-            .descendants()
-            .filter(|t| t.is_element() && t.tag_name().name() == "t")
-        {
-            if let Some(s) = t.text() {
-                text.push_str(s);
-            }
-        }
-        out.push(crate::types::DocxNote { id, text });
+        let content = parse_body_elements(
+            n,
+            style_map,
+            num_map,
+            &local_media_map,
+            &local_rel_map,
+            theme,
+        );
+        out.push(crate::types::DocxNote { id, content });
     }
     out
 }
@@ -1197,6 +1231,9 @@ fn parse_paragraph(
         // chain + direct pPr. The renderer reads it as the paragraph base
         // direction for the UAX#9 reordering and alignment-edge passes.
         bidi: base_para.bidi,
+        // ECMA-376 §17.3.1.32 — when explicitly off, the renderer skips docGrid
+        // line snapping for this paragraph (e.g. footnote text).
+        snap_to_grid: base_para.snap_to_grid,
     }
 }
 
@@ -1607,6 +1644,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        note_ref: None,
                     }));
                 }
             }
@@ -1638,6 +1676,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    note_ref: None,
                 }));
             }
             "br" => {
@@ -1725,13 +1764,25 @@ fn parse_run_inner(
                     runs.push(r);
                 }
             }
-            "footnoteReference" | "endnoteReference" => {
-                // ECMA-376 §17.11.16: render the footnote number as superscript
-                // at the reference point. Full bottom-of-page footnote
-                // rendering isn't implemented; we at least place the marker.
-                let id_str = attr_w(child, "id").unwrap_or_else(|| "?".to_string());
+            "footnoteReference" | "endnoteReference" | "footnoteRef" | "endnoteRef" => {
+                // ECMA-376 §17.11.6 / §17.11.7 / §17.11.16 / §17.11.17.
+                // `*Reference` is the in-body mark; `*Ref` is the auto-number
+                // placeholder that sits at the start of the note's own content.
+                // Both render as a superscript number. The DISPLAYED number is
+                // the note's sequential position (resolved by the renderer from
+                // the footnotes/endnotes ordering), not the raw `@w:id` — we keep
+                // the id in `text` only as a fallback. The `*Ref` placeholder
+                // carries no id of its own, so it is tagged with an empty id and
+                // the renderer substitutes the enclosing note's number.
+                let tag = child.tag_name().name();
+                let kind = if tag.starts_with("footnote") {
+                    "footnote"
+                } else {
+                    "endnote"
+                };
+                let id_str = attr_w(child, "id").unwrap_or_default();
                 runs.push(DocRun::Text(TextRun {
-                    text: id_str,
+                    text: id_str.clone(),
                     bold,
                     italic,
                     underline,
@@ -1758,6 +1809,10 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    note_ref: Some(crate::types::NoteRef {
+                        kind: kind.to_string(),
+                        id: id_str,
+                    }),
                 }));
             }
             "AlternateContent" => {
@@ -3604,6 +3659,9 @@ fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
     if direct.bidi.is_some() {
         base.bidi = direct.bidi;
     }
+    if direct.snap_to_grid.is_some() {
+        base.snap_to_grid = direct.snap_to_grid;
+    }
 }
 
 fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
@@ -4394,5 +4452,112 @@ mod rtl_tests {
             Some(false),
             "w:iCs val=0 turns CS italic off"
         );
+    }
+}
+
+#[cfg(test)]
+mod footnote_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    fn first_para(body_inner: &str) -> crate::types::DocParagraph {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let elems = parse_body_elements(
+            body_node,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
+        for e in elems {
+            if let BodyElement::Paragraph(p) = e {
+                return p;
+            }
+        }
+        panic!("no paragraph parsed");
+    }
+
+    /// ECMA-376 §17.11.17 — a body `<w:footnoteReference>` becomes a superscript
+    /// TextRun tagged with `note_ref { kind:"footnote", id }`.
+    #[test]
+    fn footnote_reference_is_tagged_as_note_ref() {
+        let p = first_para(
+            r#"<w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>
+                 <w:footnoteReference w:id="3"/></w:r></w:p>"#,
+        );
+        let run = p
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .expect("text run");
+        let nr = run.note_ref.as_ref().expect("note_ref set");
+        assert_eq!(nr.kind, "footnote");
+        assert_eq!(nr.id, "3");
+        assert_eq!(run.vert_align.as_deref(), Some("superscript"));
+    }
+
+    /// ECMA-376 §17.11.16 — the in-note `<w:footnoteRef>` placeholder is tagged
+    /// with an empty id (the renderer substitutes the enclosing note's number).
+    #[test]
+    fn footnote_ref_placeholder_has_empty_id() {
+        let p = first_para(r#"<w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> body</w:t></w:r></w:p>"#);
+        let nr = p
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => t.note_ref.clone(),
+                _ => None,
+            })
+            .expect("note_ref set");
+        assert_eq!(nr.kind, "footnote");
+        assert_eq!(nr.id, "");
+    }
+
+    /// ECMA-376 §17.11.6 — endnote references carry kind "endnote".
+    #[test]
+    fn endnote_reference_kind_is_endnote() {
+        let p = first_para(r#"<w:p><w:r><w:endnoteReference w:id="2"/></w:r></w:p>"#);
+        let nr = p
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => t.note_ref.clone(),
+                _ => None,
+            })
+            .expect("note_ref set");
+        assert_eq!(nr.kind, "endnote");
+        assert_eq!(nr.id, "2");
+    }
+
+    /// ECMA-376 §17.3.1.32 — w:snapToGrid val=0 surfaces as Some(false) so the
+    /// renderer can opt the paragraph out of the docGrid.
+    #[test]
+    fn snap_to_grid_off_is_surfaced() {
+        let p = first_para(
+            r#"<w:p><w:pPr><w:snapToGrid w:val="0"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(p.snap_to_grid, Some(false));
+    }
+
+    #[test]
+    fn snap_to_grid_absent_is_none() {
+        let p = first_para(r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#);
+        assert_eq!(p.snap_to_grid, None);
     }
 }

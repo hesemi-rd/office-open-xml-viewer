@@ -107,6 +107,13 @@ pub struct ParaFmt {
     /// model, where the renderer uses it as the base direction for UAX#9
     /// reordering, indent swapping, and `w:jc` start/end edge resolution.
     pub bidi: Option<bool>,
+    /// ECMA-376 §17.3.1.32 w:snapToGrid — when `Some(false)` this paragraph
+    /// opts OUT of the document grid (`w:docGrid`), so its lines use natural
+    /// font metrics / the line-spacing multiplier directly instead of snapping
+    /// to the grid pitch. `None` = inherit (default true). Word's built-in
+    /// "Footnote Text" style sets this off, which is why footnote bodies use
+    /// compact natural line height rather than the 18 pt grid pitch.
+    pub snap_to_grid: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -433,6 +440,9 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.bidi.is_some() {
         dst.bidi = src.bidi;
     }
+    if src.snap_to_grid.is_some() {
+        dst.snap_to_grid = src.snap_to_grid;
+    }
 }
 
 fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
@@ -655,6 +665,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // the model as the paragraph base direction; the renderer feeds it to the
     // UAX#9 pass and to start/end alignment-edge resolution.
     fmt.bidi = bool_prop(ppr, "bidi");
+
+    // snapToGrid — ECMA-376 §17.3.1.32. On-off toggle (default on). When off,
+    // the paragraph ignores the section's docGrid line pitch and uses natural
+    // line metrics. Carried to the model so the renderer can skip grid snapping
+    // for this paragraph.
+    fmt.snap_to_grid = bool_prop(ppr, "snapToGrid");
 
     // outlineLvl — 0..8 marks this paragraph (or its style) as a heading.
     // ECMA-376 §17.3.1.20 lists only 0–8 and "no level" (absent). Word

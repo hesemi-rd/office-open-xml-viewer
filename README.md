@@ -420,9 +420,11 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | Text boxes / drawing shapes | ✅ |
 | | WMF / EMF metafile images (legacy vector) | ❌ Not planned |
-| **Advanced** | Footnote / endnote reference markers | ✅ |
+| **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
+| | Endnotes — reference markers + bodies at document end (`w:endnoteReference`, §17.11) | ✅ |
+| | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
 | | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
-| | Comments / footnote bodies (parsed, not yet rendered inline) | ⚠️ |
+| | Comments — author / date / text via the document model (`doc.comments`, §17.13.4; not drawn on the page) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 

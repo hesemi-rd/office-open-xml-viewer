@@ -106,11 +106,18 @@ pub struct DocxComment {
     pub text: String,
 }
 
+/// ECMA-376 §17.11.2 (endnote) / §17.11.10 (footnote) — one note's block-level
+/// content. Retains the full paragraph/run structure (FootnoteText style, the
+/// `<w:footnoteRef/>` auto-number placeholder, inline formatting) so the
+/// renderer can lay it out faithfully at page bottom / document end, and so the
+/// data-only API can surface the plain text.
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DocxNote {
     pub id: String,
-    pub text: String,
+    /// Block-level content of the note (paragraphs / nested tables), parsed with
+    /// the document's styles + numbering. Empty for an empty note.
+    pub content: Vec<BodyElement>,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
@@ -241,6 +248,13 @@ pub struct DocParagraph {
     /// `w:jc` start/end alignment edges against it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi: Option<bool>,
+    /// ECMA-376 §17.3.1.32 `<w:snapToGrid>` — `Some(false)` opts the paragraph
+    /// OUT of the section's document grid, so its lines use natural font
+    /// metrics / the line-spacing multiplier directly instead of snapping to the
+    /// grid pitch. `None` = inherit (default on). Set on Word's "Footnote Text"
+    /// style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -619,6 +633,26 @@ pub struct TextRun {
     /// Arabic/Hebrew digit ordering). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.11.6 / §17.11.7 / §17.11.16 / §17.11.17 — set when this run
+    /// is a footnote/endnote reference mark (`<w:footnoteReference>` in the body,
+    /// `<w:footnoteRef>` inside the note content, and the endnote equivalents).
+    /// `text` holds the raw `@w:id` as a fallback; the renderer overrides the
+    /// displayed glyph with the note's sequential number (the displayed number is
+    /// the note's 1-based position, not the raw id). `None` for ordinary runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_ref: Option<NoteRef>,
+}
+
+/// A footnote / endnote reference marker. The displayed number is resolved by
+/// the renderer from the note's sequential position (ECMA-376 numbering), so
+/// only the kind + id need to travel through the model.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteRef {
+    /// "footnote" | "endnote".
+    pub kind: String,
+    /// The `@w:id` linking the marker to its note in footnotes.xml / endnotes.xml.
+    pub id: String,
 }
 
 #[derive(Serialize, Debug, Clone)]

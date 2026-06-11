@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
+  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
 } from './types';
 import {
   buildCustomPath,
@@ -169,6 +169,16 @@ interface RenderState {
   /** When false, runs tagged with a `revision` render without the
    *  track-changes overlay (no author colour, no underline/strikethrough). */
   showTrackChanges: boolean;
+  /** ECMA-376 §17.11 — footnote/endnote reference markers (`noteRef` runs)
+   *  display the note's 1-based sequential number, not the raw `@w:id`. Keyed by
+   *  `"footnote:<id>"` / `"endnote:<id>"`. The in-note `<w:footnoteRef>`
+   *  placeholder (empty id) is substituted with the number provided via
+   *  {@link currentNoteNumber} while drawing that note's content. */
+  noteNumbers?: Map<string, number>;
+  /** Set while laying out a footnote/endnote's own content, so the leading
+   *  `<w:footnoteRef>` placeholder (which carries no id) renders the note's
+   *  number. Undefined for body text. */
+  currentNoteNumber?: number;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -352,11 +362,20 @@ export async function renderDocumentToCanvas(
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
   const kinsoku = resolveKinsokuRules(doc.settings);
-  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {}, kinsoku);
+  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
   const images = await preloadImages(doc);
+
+  // ECMA-376 §17.11: map each note id to its 1-based display number so the
+  // reference markers (and the in-note footnoteRef placeholder) show the
+  // sequential number, not the raw @w:id.
+  const footnoteNums = buildNoteNumberMap(doc.footnotes);
+  const endnoteNums = buildNoteNumberMap(doc.endnotes);
+  const noteNumbers = new Map<string, number>();
+  for (const [id, n] of footnoteNums) noteNumbers.set(`footnote:${id}`, n);
+  for (const [id, n] of endnoteNums) noteNumbers.set(`endnote:${id}`, n);
 
   const baseState: RenderState = {
     ctx,
@@ -381,6 +400,7 @@ export async function renderDocumentToCanvas(
     kinsoku,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
+    noteNumbers,
   };
 
   // Header: top of page, starting at headerDistance
@@ -400,11 +420,236 @@ export async function renderDocumentToCanvas(
   // Body
   const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale };
   renderBodyElements(elements, bodyState);
+
+  // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
+  // the text column, above a short separator rule. The page area was already
+  // reserved during pagination so the body stops short of them.
+  drawPageFootnotes(elements, doc, baseState, scale, cssHeight, sec);
+
+  // Endnotes (§17.11 endnotePr default position = document end) on the last
+  // page, after the body flow. Minimal impl: a heading-less list at doc end.
+  if (pageIndex === totalPages - 1) {
+    drawEndnotes(doc, bodyState, scale, cssHeight, sec);
+  }
+}
+
+/** Measure a note's content block in pt (paragraphs only), using a fresh
+ *  pt-scale measure state. Returns the full height and the last paragraph's
+ *  trailing spaceAfter (which overflows the bottom margin, like body text). */
+function measureNoteBlockForDraw(
+  note: DocNote,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  sec: SectionProps,
+  fontFamilyClasses: Record<string, string>,
+  kinsoku: KinsokuRules,
+): { total: number; trailingSpaceAfter: number } {
+  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku);
+  const contentWPt = sec.pageWidth - sec.marginLeft - sec.marginRight;
+  return measureFootnoteBlockPt(note, measure, contentWPt);
+}
+
+/** Draw the footnote area for the current page: a separator rule (§17.11.9)
+ *  followed by each referenced note's content, numbered. */
+function drawPageFootnotes(
+  elements: PaginatedBodyElement[],
+  doc: DocxDocumentModel,
+  baseState: RenderState,
+  scale: number,
+  cssHeight: number,
+  sec: SectionProps,
+): void {
+  if (!doc.footnotes || doc.footnotes.length === 0) return;
+  const noteById = indexNotes(doc.footnotes);
+
+  // Collect referenced footnote ids in document (reading) order, de-duplicated.
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const scan = (els: PaginatedBodyElement[]) => {
+    for (const el of els) {
+      if (el.type !== 'paragraph') continue;
+      for (const id of footnoteRefsInRuns((el as unknown as DocParagraph).runs)) {
+        if (!seen.has(id) && noteById.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+    }
+  };
+  scan(elements);
+  if (ids.length === 0) return;
+
+  // Total block height (pt). The last note's trailing spaceAfter overflows the
+  // bottom margin (like body text), so the block is positioned by its content
+  // height — placing the last footnote line just above the bottom margin.
+  let totalPt = 0;
+  let lastTrailingPt = 0;
+  for (const id of ids) {
+    const note = noteById.get(id);
+    if (!note) continue;
+    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku);
+    totalPt += m.total;
+    lastTrailingPt = m.trailingSpaceAfter;
+  }
+  const contentPt = Math.max(0, totalPt - lastTrailingPt);
+  const gapPx = FOOTNOTE_SEPARATOR_GAP_PT * scale;
+  const blockTopY = cssHeight - sec.marginBottom * scale - contentPt * scale;
+
+  // Separator rule: short left-aligned line (Word's default footnote separator,
+  // ~1/3 of the text width), centered in the gap above the notes.
+  const leftX = sec.marginLeft * scale;
+  const ruleY = Math.round(blockTopY - gapPx);
+  const ctx = baseState.ctx;
+  ctx.save();
+  ctx.strokeStyle = baseState.defaultColor;
+  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
+  ctx.beginPath();
+  ctx.moveTo(leftX, ruleY + 0.5);
+  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + 0.5);
+  ctx.stroke();
+  ctx.restore();
+
+  // Draw each note's content, numbered, flowing down from blockTopY.
+  const noteState: RenderState = { ...baseState, y: blockTopY };
+  for (const id of ids) {
+    const note = noteById.get(id);
+    if (!note) continue;
+    noteState.currentNoteNumber = doc.footnotes.findIndex((n) => n.id === id) + 1;
+    const paras = note.content.filter((e) => e.type === 'paragraph') as unknown as DocParagraph[];
+    renderParaList(paras, noteState);
+  }
+}
+
+/** Draw endnotes after the body flow on the final page (§17.11, default
+ *  docEnd position). Each note is numbered with its endnote sequence. */
+function drawEndnotes(
+  doc: DocxDocumentModel,
+  bodyState: RenderState,
+  scale: number,
+  cssHeight: number,
+  sec: SectionProps,
+): void {
+  if (!doc.endnotes || doc.endnotes.length === 0) return;
+  // Skip empty endnotes (only the reserved entries were filtered in the parser;
+  // a note with no text contributes nothing).
+  const notes = doc.endnotes.filter((n) =>
+    n.content.some((e) => e.type === 'paragraph' && (e as unknown as DocParagraph).runs.length > 0),
+  );
+  if (notes.length === 0) return;
+
+  // Continue from the body cursor with a small gap; clamp inside the bottom
+  // margin. We do NOT spill endnotes onto a dedicated trailing page yet.
+  const ctx = bodyState.ctx;
+  let y = bodyState.y + FOOTNOTE_SEPARATOR_GAP_PT * 2 * scale;
+  const maxY = cssHeight - sec.marginBottom * scale;
+  if (y >= maxY) return;
+
+  // Separator rule above the endnotes.
+  const leftX = sec.marginLeft * scale;
+  ctx.save();
+  ctx.strokeStyle = bodyState.defaultColor;
+  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
+  ctx.beginPath();
+  ctx.moveTo(leftX, Math.round(y) + 0.5);
+  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, Math.round(y) + 0.5);
+  ctx.stroke();
+  ctx.restore();
+
+  const noteState: RenderState = { ...bodyState, y: y + FOOTNOTE_SEPARATOR_GAP_PT * scale };
+  for (const note of notes) {
+    noteState.currentNoteNumber = doc.endnotes.findIndex((n) => n.id === note.id) + 1;
+    const paras = note.content.filter((e) => e.type === 'paragraph') as unknown as DocParagraph[];
+    renderParaList(paras, noteState);
+  }
+}
+
+// ── Footnotes / endnotes ────────────────────────────────────────────────────
+// ECMA-376 §17.11. A `<w:footnoteReference>` in the body (and the
+// `<w:footnoteRef>` placeholder inside the note) is tagged on its run as
+// `noteRef`. The DISPLAYED number is the note's 1-based position in document
+// order (we don't honor numFmt/numStart overrides yet — the samples don't use
+// them; see dev log). The note bodies are drawn at the bottom of the page that
+// holds their first reference, above a short separator rule (§17.11.9).
+// Endnotes (§17.11 endnotePr@pos, default docEnd) are appended after the body
+// flow; we don't lay them on their own trailing page yet.
+
+/** Vertical space (pt) Word allocates for the footnote separator region — the
+ *  short rule plus the small leading above the first footnote. Word draws the
+ *  separator in its own paragraph (the reserved id=-1 note, default single
+ *  spacing) above the notes; one blank line's worth of leading is a faithful
+ *  approximation for the common case. */
+const FOOTNOTE_SEPARATOR_GAP_PT = 6;
+
+/** Build a map from a note's `@w:id` to its 1-based sequential number, in the
+ *  order the notes appear in footnotes.xml / endnotes.xml (ECMA-376 §17.11
+ *  default decimal numbering, start=1, no restart). */
+function buildNoteNumberMap(notes: DocNote[] | undefined): Map<string, number> {
+  const m = new Map<string, number>();
+  if (!notes) return m;
+  notes.forEach((n, i) => m.set(n.id, i + 1));
+  return m;
+}
+
+/** Index footnotes by id for content lookup. */
+function indexNotes(notes: DocNote[] | undefined): Map<string, DocNote> {
+  const m = new Map<string, DocNote>();
+  if (!notes) return m;
+  for (const n of notes) m.set(n.id, n);
+  return m;
+}
+
+/** Collect, in document order, the footnote ids referenced by a paragraph's
+ *  runs (kind === 'footnote'). Endnote refs are excluded — they aren't drawn
+ *  per-page. */
+function footnoteRefsInRuns(runs: DocRun[]): string[] {
+  const ids: string[] = [];
+  for (const r of runs) {
+    if (r.type !== 'text') continue;
+    const nr = (r as DocxTextRun).noteRef;
+    if (nr && nr.kind === 'footnote' && nr.id) ids.push(nr.id);
+  }
+  return ids;
+}
+
+/** Measure one footnote's content block (pt). `total` is every paragraph's full
+ *  height; `trailingSpaceAfter` is the last paragraph's `spaceAfter`, which —
+ *  like a body paragraph's trailing space — may legally overflow the bottom
+ *  margin and so is NOT counted when reserving page space. */
+function measureFootnoteBlockPt(
+  note: DocNote,
+  state: RenderState,
+  contentWPt: number,
+): { total: number; trailingSpaceAfter: number } {
+  let total = 0;
+  let trailingSpaceAfter = 0;
+  for (const el of note.content) {
+    if (el.type !== 'paragraph') continue;
+    const para = el as unknown as DocParagraph;
+    total += estimateParagraphHeight(state, para, contentWPt, false);
+    trailingSpaceAfter = para.spaceAfter;
+  }
+  return { total, trailingSpaceAfter };
+}
+
+/** Height (pt) to RESERVE on the page for a footnote: its content minus the
+ *  trailing spaceAfter (overflows the bottom margin) plus the separator region. */
+function footnoteReserveHeightPt(
+  note: DocNote,
+  state: RenderState,
+  contentWPt: number,
+  includeSeparator: boolean,
+): number {
+  const { total, trailingSpaceAfter } = measureFootnoteBlockPt(note, state, contentWPt);
+  return Math.max(0, total - trailingSpaceAfter) + (includeSeparator ? FOOTNOTE_SEPARATOR_GAP_PT : 0);
 }
 
 /**
  * Split body into pages, honoring explicit page breaks AND measuring content
  * overflow for automatic pagination. All measurements are done in pt (scale=1).
+ *
+ * When `footnotes` is provided, the content area of each page shrinks by the
+ * measured height of every footnote whose reference first appears on that page
+ * (ECMA-376 §17.11): the footnote bodies occupy the bottom of the text column,
+ * so the body must stop short of them.
  */
 export function computePages(
   body: BodyElement[],
@@ -412,10 +657,16 @@ export function computePages(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string> = {},
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
+  footnotes: DocNote[] = [],
 ): PaginatedBodyElement[][] {
-  const contentH = section.pageHeight - section.marginTop - section.marginBottom;
+  const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
   const contentW = section.pageWidth - section.marginLeft - section.marginRight;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku);
+  const noteById = indexNotes(footnotes);
+  const haveFootnotes = noteById.size > 0;
+  // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
+  // footnote references are placed on the current page.
+  const footnoteReservePt: number[] = [0];
 
   const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
@@ -432,6 +683,17 @@ export function computePages(
   // like the real renderer does.
   measureState.y = section.marginTop;
   measureState.floats = [];
+  // Footnote ids already reserved on the current page (so a paragraph that
+  // references the same note twice doesn't double-count, and the renderer draws
+  // each note once). Reset on every page flip.
+  let pageNoteIds = new Set<string>();
+  // Effective content height for the current page: the full text column minus
+  // the footnote area reserved at the bottom of THIS page.
+  const effContentH = () => fullContentH - (footnoteReservePt[pages.length - 1] ?? 0);
+  const startPageBookkeeping = () => {
+    footnoteReservePt[pages.length - 1] = 0;
+    pageNoteIds = new Set<string>();
+  };
   const newPage = () => {
     if (pages[pages.length - 1].length > 0) {
       pages.push([]);
@@ -440,6 +702,7 @@ export function computePages(
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
+      startPageBookkeeping();
     }
   };
 
@@ -474,13 +737,16 @@ export function computePages(
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
+      startPageBookkeeping();
       // ECMA-376 §17.18.79 ST_SectionMark: oddPage / evenPage breaks pad
       // with a blank page when the new section would otherwise start on the
       // wrong parity. pages.length here is the next page's 1-based index.
       if (el.parity === 'odd' && pages.length % 2 === 0) {
         pages.push([]);
+        startPageBookkeeping();
       } else if (el.parity === 'even' && pages.length % 2 === 1) {
         pages.push([]);
+        startPageBookkeeping();
       }
       continue;
     }
@@ -506,6 +772,38 @@ export function computePages(
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
       const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
+
+      // ECMA-376 §17.11: a footnote shares the page with its reference, so the
+      // body must stop short of the footnote area. Measure the footnotes this
+      // paragraph newly references (not already reserved on this page) and fold
+      // their height into the fit decision — if the paragraph + its footnote(s)
+      // don't fit, both move to the next page together.
+      let newRefIds: string[] = [];
+      let addReservePt = 0;
+      // Sum the reserve for a set of newly-referenced notes, charging the
+      // separator region only to the first note on a page (when that page has
+      // no reserve yet).
+      const sumReserve = (ids: string[]): number => {
+        let sum = 0;
+        for (let k = 0; k < ids.length; k++) {
+          const note = noteById.get(ids[k]);
+          if (!note) continue;
+          const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
+          sum += footnoteReserveHeightPt(note, measureState, contentW, firstOnPage);
+        }
+        return sum;
+      };
+      if (haveFootnotes) {
+        const seen = new Set<string>();
+        for (const id of footnoteRefsInRuns(para.runs)) {
+          if (pageNoteIds.has(id) || seen.has(id)) continue;
+          if (!noteById.has(id)) continue;
+          seen.add(id);
+          newRefIds.push(id);
+        }
+        addReservePt = sumReserve(newRefIds);
+      }
+
       // Break if this paragraph alone doesn't fit, OR if keepNext is set and
       // placing it would leave no room for the next block on the same page.
       // Per Word's layout behavior: `spaceAfter` is trailing whitespace that
@@ -514,20 +812,24 @@ export function computePages(
       // `w:spacing/@w:after` land flush against the bottom margin.
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
       const fitHeight = h - para.spaceAfter;
-      const needed = fitHeight + needNext;
-      if (y > 0 && y + needed > contentH) {
+      const needed = fitHeight + needNext + addReservePt;
+      if (y > 0 && y + needed > effContentH()) {
         newPage();
+        // The references move to the new page; nothing was reserved there yet,
+        // so the separator region still applies to the first footnote.
+        if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
       }
 
       // ECMA-376 doesn't say "paragraphs must fit on one page" — Word
       // splits long paragraphs at line boundaries. If the paragraph is
       // taller than the remaining content area, walk the laid-out lines
       // and emit one PaginatedBodyElement slice per page.
-      const remainingH = contentH - y;
-      if (h > remainingH && h > contentH * 0.5) {
+      const pageContentH = effContentH();
+      const remainingH = pageContentH - y;
+      if (h > remainingH && h > pageContentH * 0.5) {
         const placed = splitParagraphAcrossPages(
           measureState, para, contentW, suppressBefore, section.marginLeft,
-          y, contentH, pages,
+          y, pageContentH, pages,
           () => { newPage(); },
         );
         // After splitting, `y` is the bottom of the last slice on the
@@ -535,27 +837,46 @@ export function computePages(
         // filled their pages exactly, so newPage was called between them).
         y = placed.endY;
         measureState.y = section.marginTop + placed.endY;
+        // A split footnote-bearing paragraph reserves on the page where it
+        // ends. Rare; the separator region re-applies if that page had none.
+        if (haveFootnotes && newRefIds.length > 0) {
+          newRefIds = newRefIds.filter((id) => !pageNoteIds.has(id));
+          addReservePt = sumReserve(newRefIds);
+        }
       } else {
         pages[pages.length - 1].push(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
       }
+
+      // Commit the footnote reserve onto the page the paragraph landed on.
+      if (haveFootnotes && newRefIds.length > 0) {
+        const idx = pages.length - 1;
+        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addReservePt;
+        for (const id of newRefIds) pageNoteIds.add(id);
+      }
+
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
       const rowHs = computeTableRowHeights(measureState, tbl, contentW);
       const h = rowHs.reduce((s, x) => s + x, 0);
-      if (h > contentH) {
+      // Footnote references inside table cells are not folded into the reserve
+      // (the per-page reserve is driven by body paragraphs); they still draw at
+      // page bottom via the renderer's page scan. effContentH() respects any
+      // reserve already accumulated on this page.
+      const tableContentH = effContentH();
+      if (h > tableContentH) {
         // Taller than a full page: split row-by-row so the overflow continues
         // onto the next page instead of being clipped (ECMA-376 table
         // pagination). Tables that fit on a page keep the simple place-whole
         // path below.
-        const endY = splitTableAcrossPages(tbl, rowHs, y, contentH, pages, () => newPage());
+        const endY = splitTableAcrossPages(tbl, rowHs, y, tableContentH, pages, () => newPage());
         y = endY;
         measureState.y = section.marginTop + endY;
       } else {
-        if (y + h > contentH) newPage();
+        if (y + h > tableContentH) newPage();
         pages[pages.length - 1].push(el);
         y += h;
         measureState.y += h;
@@ -612,11 +933,12 @@ function estimateParagraphHeight(
   // in a paragraph that carries ANY furigana snaps to the same pitch
   // multiple, otherwise mixed-ruby paragraphs jitter and pagination drifts.
   const paraHasRuby = paragraphHasRuby(para);
+  const grid = paraGrid(para, state);
   let textH: number;
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, 1);
-    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, 1));
+    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, grid, paraHasRuby, emptyIntendedSinglePx(para, 1));
   } else {
     // When anchor-image floats are active on the current page the paragraph
     // wraps around them, adding lines compared to a full-width layout. Use
@@ -625,7 +947,7 @@ function estimateParagraphHeight(
       startPageY: state.y,
       paraX: paraXPt,
       floats: state.floats,
-      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby, is ?? 0),
+      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
@@ -633,13 +955,13 @@ function estimateParagraphHeight(
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
       const uniform = snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, true, l.intendedSingle))),
-        state.docGrid,
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, true, l.intendedSingle))),
+        grid,
         1,
       );
       textH = uniform * lines.length;
     } else {
-      textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, false, l.intendedSingle), 0);
+      textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, false, l.intendedSingle), 0);
     }
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
@@ -667,6 +989,13 @@ function paragraphHasRuby(para: DocParagraph): boolean {
     if (run.type === 'text' && (run as unknown as DocxTextRun).ruby) return true;
   }
   return false;
+}
+
+/** The docGrid that governs a paragraph's line heights. ECMA-376 §17.3.1.32:
+ *  a paragraph with `w:snapToGrid` explicitly off ignores the section grid, so
+ *  its lines use natural font metrics / the spacing multiplier directly. */
+function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
+  return para.snapToGrid === false ? { type: null, linePitchPt: null } : state.docGrid;
 }
 
 /** Lay out a paragraph's lines, then walk the line list distributing them
@@ -1286,11 +1615,12 @@ function renderParagraph(
   // in a paragraph that carries ANY furigana snaps to the same pitch
   // multiple. Compute once at paragraph scope and share with the line loop.
   const paraHasRuby = paragraphHasRuby(para);
+  const grid = paraGrid(para, state);
 
   if (segments.length === 0) {
     const fontSizePt = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fontSizePt, scale);
-    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, scale));
+    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale));
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
       ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
@@ -1308,7 +1638,7 @@ function renderParagraph(
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid, paraHasRuby, is ?? 0),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0),
     pageH: state.pageH,
   } : undefined;
 
@@ -1324,15 +1654,15 @@ function renderParagraph(
   // else just the max natural.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, true, l.intendedSingle))),
-        state.docGrid,
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle))),
+        grid,
         scale,
       )
     : 0;
   const lineHForLine = (l: typeof lines[number]): number =>
     paraHasRuby
       ? uniformLineH
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, false, l.intendedSingle);
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle);
 
   if (para.shading && !dryRun) {
     const totalTextH = lines.reduce((s, l) => s + lineHForLine(l), 0);
@@ -1845,6 +2175,21 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   for (const run of runs) {
     if (run.type === 'text') {
       const t = run as unknown as DocxTextRun & { type: 'text' };
+      // ECMA-376 §17.11: substitute a footnote/endnote reference marker's glyph
+      // with the note's resolved sequential number. The body `*Reference` run
+      // carries the id; the in-note `*Ref` placeholder carries an empty id, so
+      // we fall back to the note number currently being drawn.
+      const noteText =
+        t.noteRef
+          ? (t.noteRef.id
+              ? state.noteNumbers?.get(`${t.noteRef.kind}:${t.noteRef.id}`)
+              : state.currentNoteNumber)
+          : undefined;
+      if (t.noteRef) {
+        const label = noteText != null ? String(noteText) : (t.text || '');
+        if (label.length > 0) pushTextPiece(label, t, t.vertAlign ?? 'super');
+        continue;
+      }
       // Split on tab chars so tab alignment can be resolved during layout.
       const parts = t.text.split('\t');
       for (let i = 0; i < parts.length; i++) {
@@ -3321,13 +3666,14 @@ function measureParaHeight(
 ): number {
   const segs = buildSegments(para.runs, state);
   const paraHasRuby = paragraphHasRuby(para);
+  const grid = paraGrid(para, state);
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
-    return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, scale));
+    return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale));
   }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby, l.intendedSingle), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle), 0);
 }
 
 /** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376
