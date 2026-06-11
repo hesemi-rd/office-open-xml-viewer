@@ -40,8 +40,11 @@ import {
   isScene3dNonIdentity,
   drawProjected,
   createAuxCanvas,
+  applyBevelShading,
+  lightDirFromRig,
+  materialClass,
 } from '@silurus/ooxml-core';
-import type { CameraInput, Vec2 } from '@silurus/ooxml-core';
+import type { CameraInput, Vec2, BevelInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import {
@@ -2031,8 +2034,69 @@ function renderTextBody(
 const IMAGE_BITMAP_CACHE_MAX = 256;
 const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
 
+/** Local view of the parsed `<a:sp3d>` (1:1 with the Sp3d TS type). */
+interface Sp3dLike {
+  extrusionH?: number;
+  extrusionClr?: string;
+  bevelT?: { w: number; h: number; prst: string };
+  bevelB?: { w: number; h: number; prst: string };
+}
+/** Local view of `<a:lightRig>` (1:1 with the LightRig TS type). */
+interface LightRigLike {
+  rig: string;
+  dir: string;
+}
+
 /**
- * Project a shape/picture body through a DrawingML 3D camera (scene3d, Phase A).
+ * Build the bevel-shading inputs for an sp3d, in DEVICE px. ECMA-376 §20.1.5.12
+ * `bevelT`/`bevelB`. Returns an empty list when there is no bevel to shade.
+ *
+ * The bevel band/height are EMU (§20.1.5.3); convert to device px via the EMU→
+ * CSS-px `scale` and the canvas `devScale`, because the shading reads/writes the
+ * device-resolution offscreen. The light vector comes from the scene's lightRig
+ * (§20.1.5.9); when absent we default to the OOXML default rig "threePt"/"t"
+ * (PowerPoint's default 3-D scene light) so a bevel with no explicit rig still
+ * picks up a top key light rather than rendering flat.
+ */
+function buildBevelInputs(
+  sp3d: Sp3dLike | undefined,
+  lightRig: LightRigLike | undefined,
+  prstMaterial: string | undefined,
+  scale: number,
+  devScale: number,
+): BevelInput[] {
+  if (!sp3d) return [];
+  const rig = lightRig?.rig ?? 'threePt';
+  const dir = lightRig?.dir ?? 't';
+  const light = lightDirFromRig(rig, dir);
+  const material = materialClass(prstMaterial);
+  const emuToDev = scale * devScale;
+  const out: BevelInput[] = [];
+  if (sp3d.bevelT && sp3d.bevelT.w > 0 && sp3d.bevelT.h > 0) {
+    out.push({
+      widthPx: sp3d.bevelT.w * emuToDev,
+      heightPx: sp3d.bevelT.h * emuToDev,
+      prst: sp3d.bevelT.prst || 'circle',
+      material,
+      light,
+    });
+  }
+  if (sp3d.bevelB && sp3d.bevelB.w > 0 && sp3d.bevelB.h > 0) {
+    out.push({
+      widthPx: sp3d.bevelB.w * emuToDev,
+      heightPx: sp3d.bevelB.h * emuToDev,
+      prst: sp3d.bevelB.prst || 'circle',
+      material,
+      light,
+      bottom: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * Project a shape/picture body through a DrawingML 3D camera (scene3d, Phase A),
+ * with optional sp3d bevel shading baked in BEFORE the projection (Phase B).
  *
  * ECMA-376 §20.1.5.5: the camera acts in the shape's *local* space, ahead of
  * the shape's 2D placement. We therefore render the body — normally drawn at
@@ -2043,11 +2107,28 @@ const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
  * projection composes *inside* that transform, exactly matching "scene3d first,
  * then the 2D xfrm" ordering.
  *
+ * Phase B: when `bevels` is non-empty, the bevel lip shading is baked into the
+ * offscreen bitmap (`applyBevelShading`) right after `paintBody` and before the
+ * warp, so the lit/shadowed rim rides the same camera homography as the body
+ * (matching PowerPoint, which shades the 3-D solid then projects it).
+ *
  * `paintBody(octx, ox, oy, ow, oh)` paints the body (clip + fill/stroke/image)
  * into the offscreen context at the given local rect. Returns true if it
  * projected, false when no offscreen canvas is available (headless) — callers
  * then fall back to painting directly.
  */
+interface Project3dOpts {
+  /** Bevel lips to bake into the body before the warp (§20.1.5.12 bevelT/B). */
+  bevels?: BevelInput[];
+  /**
+   * Paint edges (a:ln border + sp3d contour) into the offscreen AFTER the bevel
+   * shading but in the same local rect. Kept separate from `paintBody` so the
+   * bevel reads the body silhouette's alpha without the outside-aligned contour
+   * stroke contaminating the distance transform.
+   */
+  paintEdges?: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void;
+}
+
 function projectScene3dPaint(
   target: CanvasRenderingContext2D,
   camera: CameraInput,
@@ -2056,6 +2137,7 @@ function projectScene3dPaint(
   w: number,
   h: number,
   paintBody: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void,
+  opts: Project3dOpts = {},
 ): boolean {
   if (w <= 0 || h <= 0) return false;
   // Device scale folded into target's current transform, so the offscreen is
@@ -2076,6 +2158,20 @@ function projectScene3dPaint(
   paintBody(octx, 0, 0, w, h);
   octx.restore();
 
+  // Bake bevel lip shading into the body bitmap (device-px band) before the
+  // warp so the lit/shadowed rim rides the camera homography (§20.1.5.12).
+  if (opts.bevels && opts.bevels.length > 0) {
+    for (const bevel of opts.bevels) applyBevelShading(octx, bevel);
+  }
+
+  // Edges (border + contour) on top of the beveled body, still pre-projection.
+  if (opts.paintEdges) {
+    octx.save();
+    octx.scale(devScale, devScale);
+    opts.paintEdges(octx, 0, 0, w, h);
+    octx.restore();
+  }
+
   // Project the w×h box and offset the quad to the element's (x,y).
   const quad = computeScene3dQuad(camera, w, h);
   const corners = quad.corners.map((c) => ({ x: x + c.x, y: y + c.y })) as [
@@ -2087,6 +2183,49 @@ function projectScene3dPaint(
   // drawProjected runs in target's CSS-px space (the device scale lives in the
   // target transform), warping the ow×oh offscreen onto the CSS-space quad.
   drawProjected(aux as unknown as CanvasImageSource, target, ow, oh, corners);
+  return true;
+}
+
+/**
+ * Bake bevel shading + edges into a body that is NOT camera-projected (identity
+ * camera, e.g. orthographicFront). Renders the body to a device-px offscreen,
+ * shades the bevel, paints the edges, then blits the offscreen back at (x,y).
+ * Falls back to false (caller paints flat) when no offscreen is available.
+ */
+function paintBeveledFlat(
+  target: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  bevels: BevelInput[],
+  paintBody: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void,
+  paintEdges?: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void,
+): boolean {
+  if (w <= 0 || h <= 0 || bevels.length === 0) return false;
+  const tf = target.getTransform();
+  const det = Math.abs(tf.a * tf.d - tf.b * tf.c);
+  const devScale = det > 0 ? Math.sqrt(det) : 1;
+  const ow = Math.max(1, Math.ceil(w * devScale));
+  const oh = Math.max(1, Math.ceil(h * devScale));
+  const aux = createAuxCanvas(ow, oh);
+  if (!aux) return false;
+  const octx = aux.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!octx) return false;
+
+  octx.save();
+  octx.scale(devScale, devScale);
+  paintBody(octx, 0, 0, w, h);
+  octx.restore();
+  for (const bevel of bevels) applyBevelShading(octx, bevel);
+  if (paintEdges) {
+    octx.save();
+    octx.scale(devScale, devScale);
+    paintEdges(octx, 0, 0, w, h);
+    octx.restore();
+  }
+  // Blit the device-px offscreen back into target's CSS-px space at (x,y).
+  target.drawImage(aux as unknown as CanvasImageSource, x, y, w, h);
   return true;
 }
 
@@ -2289,10 +2428,10 @@ async function renderPicture(
     // but NOT rendered in Phase A — see the TS Sp3d type doc.
     const scene3d = el.scene3d && isScene3dNonIdentity(el.scene3d.camera) ? el.scene3d : null;
 
-    // Paint the picture body at an arbitrary local rect (origin-relative when
-    // projecting, absolute otherwise) so it can target either the live ctx or
-    // the scene3d offscreen.
-    const paintImageAt = (
+    // Paint JUST the (clipped, optionally cropped) bitmap body at a local rect —
+    // no border/contour. Separated from the edges so the bevel shading reads the
+    // body silhouette's alpha without the outside-aligned contour stroke.
+    const paintBitmapBodyAt = (
       target: CanvasRenderingContext2D,
       ox: number,
       oy: number,
@@ -2307,24 +2446,57 @@ async function renderPicture(
         target.drawImage(bitmap, ox, oy, ow, oh);
       }
       target.restore();
-      // Border (a:ln) and 3D contour edge (sp3d) are stroked AFTER the bitmap so
-      // they sit on top of / around the image, and — because this runs inside
-      // paintImageAt — they ride through the scene3d projection and effectLst
-      // re-paints (reflection / soft edge) along with the picture body.
+    };
+
+    // Paint the full picture body (bitmap + edges) at a local rect. Used by the
+    // effect aux re-paints (reflection / soft edge) and the headless flat path,
+    // which don't apply bevel. Border (a:ln) and the flat sp3d contour edge are
+    // stroked AFTER the bitmap so they sit on top of / around the image.
+    const paintImageAt = (
+      target: CanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
+      paintBitmapBodyAt(target, ox, oy, ow, oh);
       strokePictureEdges(target, ox, oy, ow, oh);
     };
+
+    // ── sp3d bevel (ECMA-376 §20.1.5.12 bevelT/bevelB, Phase B). Device-px lip
+    //    shading baked into the body bitmap before any camera projection so the
+    //    rim rides the warp. The light comes from the scene's lightRig; with no
+    //    rig PowerPoint's default 3-D scene light (threePt / "t") applies.
+    const tf0 = ctx.getTransform();
+    const det0 = Math.abs(tf0.a * tf0.d - tf0.b * tf0.c);
+    const ctxDevScale = det0 > 0 ? Math.sqrt(det0) : 1;
+    const bevels = buildBevelInputs(
+      el.sp3d as Sp3dLike | undefined,
+      el.scene3d?.lightRig as LightRigLike | undefined,
+      (el.sp3d as Sp3dLike | undefined) ? (el.sp3d as { prstMaterial?: string }).prstMaterial : undefined,
+      scale,
+      ctxDevScale,
+    );
 
     // Draw the (clipped, optionally cropped) bitmap into a target context. This
     // is the picture "body" that the effect helpers re-paint onto aux canvases,
     // so reflections/soft edges mirror the real image rather than a flat shape.
     // When scene3d is active the body is warped through the camera homography
     // first; effects then composite over the projected result (PowerPoint
-    // applies effects after the 3D transform).
+    // applies effects after the 3D transform). When sp3d carries a bevel the lip
+    // shading is baked into the body before the warp (or blit, for an identity
+    // camera) so it tracks the silhouette and the projection.
     const paintImage = (target: CanvasRenderingContext2D): void => {
       if (scene3d) {
-        const ok = projectScene3dPaint(target, scene3d.camera, x, y, w, h, paintImageAt);
+        const ok = projectScene3dPaint(target, scene3d.camera, x, y, w, h, paintBitmapBodyAt, {
+          bevels,
+          paintEdges: strokePictureEdges,
+        });
         if (ok) return;
-        // Headless fallback: draw flat.
+        // Headless fallback: draw flat (no bevel).
+      } else if (bevels.length > 0) {
+        const ok = paintBeveledFlat(target, x, y, w, h, bevels, paintBitmapBodyAt, strokePictureEdges);
+        if (ok) return;
       }
       paintImageAt(target, x, y, w, h);
     };

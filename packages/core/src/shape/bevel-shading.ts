@@ -468,6 +468,15 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
   );
   const params = shadeParamsFor(input.material, input.light);
 
+  // Reference brightness of the FLAT top face (normal = +Z). The flat interior
+  // of the shape is left untouched (multiplier 1.0), so we divide every band
+  // pixel's absolute shade by this reference: the lip's lit side then comes out
+  // > 1 (brighter than the face) and the shadowed side < 1, reproducing the
+  // raised-relief look. Without this normalisation the whole band would read as
+  // a *darker* outline because the flat-face Lambert term (ambient + diffuse·L.z)
+  // is < 1 yet we never applied it to the face.
+  const faceFactor = shadePixel({ x: 0, y: 0, z: 1 }, params) || 1;
+
   for (let i = 0; i < w * h; i++) {
     if (bandMask[i] === 0) continue;
     let nx = normals[i * 3];
@@ -479,7 +488,7 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
       nx = -nx;
       ny = -ny;
     }
-    const f = shadePixel({ x: nx, y: ny, z: nz }, params);
+    const f = shadePixel({ x: nx, y: ny, z: nz }, params) / faceFactor;
     const o = i * 4;
     px[o] = Math.max(0, Math.min(255, px[o] * f));
     px[o + 1] = Math.max(0, Math.min(255, px[o + 1] * f));
