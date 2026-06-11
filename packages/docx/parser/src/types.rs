@@ -47,6 +47,33 @@ pub struct Document {
     /// `footnotes`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub endnotes: Vec<DocxNote>,
+    /// ECMA-376 §17.15.1.* — document-wide compatibility / typography settings
+    /// from `word/settings.xml`. Currently the Japanese line-breaking (kinsoku)
+    /// configuration. `None` when settings.xml carries none of these elements
+    /// (the renderer then uses spec defaults: kinsoku ON).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<DocumentSettings>,
+}
+
+/// Document-wide settings surfaced from `word/settings.xml`. Only the
+/// typography settings the renderer needs are extracted.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSettings {
+    /// §17.15.1.58 `w:kinsoku` — East-Asian line-breaking toggle. `None` means
+    /// the element is absent; the spec default is ON, so the renderer treats
+    /// `None` and `Some(true)` identically. `Some(false)` disables kinsoku.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinsoku: Option<bool>,
+    /// §17.15.1.60 `w:noLineBreaksBefore@w:val` — custom set of characters that
+    /// cannot begin a line (行頭禁則). When present it REPLACES the application
+    /// default set. Multiple per-`w:lang` elements are concatenated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_line_breaks_before: Option<String>,
+    /// §17.15.1.59 `w:noLineBreaksAfter@w:val` — custom set of characters that
+    /// cannot end a line (行末禁則). Replaces the default when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_line_breaks_after: Option<String>,
 }
 
 /// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.

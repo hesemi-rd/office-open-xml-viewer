@@ -160,6 +160,10 @@ interface RenderState {
   /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
    *  resolveFontFamily as the authoritative source of serif/sans-serif classification. */
   fontFamilyClasses: Record<string, string>;
+  /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
+   *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
+   *  Default is the application's Japanese kinsoku table with kinsoku ON. */
+  kinsoku: KinsokuRules;
   /** Callback for building a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
   /** When false, runs tagged with a `revision` render without the
@@ -347,7 +351,8 @@ export async function renderDocumentToCanvas(
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {});
+  const kinsoku = resolveKinsokuRules(doc.settings);
+  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {}, kinsoku);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -373,6 +378,7 @@ export async function renderDocumentToCanvas(
     floats: [],
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
+    kinsoku,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
   };
@@ -405,10 +411,11 @@ export function computePages(
   section: SectionProps,
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string> = {},
+  kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
 ): PaginatedBodyElement[][] {
   const contentH = section.pageHeight - section.marginTop - section.marginBottom;
   const contentW = section.pageWidth - section.marginLeft - section.marginRight;
-  const measureState = buildMeasureState(ctx, section, fontFamilyClasses);
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku);
 
   const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
@@ -563,6 +570,7 @@ function buildMeasureState(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
+  kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
 ): RenderState {
   return {
     ctx,
@@ -584,6 +592,7 @@ function buildMeasureState(
     floats: [],
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
     fontFamilyClasses,
+    kinsoku,
     showTrackChanges: false,
   };
 }
@@ -619,7 +628,7 @@ function estimateParagraphHeight(
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
     if (paraHasRuby) {
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
@@ -697,7 +706,7 @@ function splitParagraphAcrossPages(
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
   const paraHasRuby = paragraphHasRuby(para);
 
   const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle);
@@ -1303,7 +1312,7 @@ function renderParagraph(
     pageH: state.pageH,
   } : undefined;
 
-  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft);
+  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
 
   // For paragraphs that carry any ruby annotation, Word renders every line
   // at the SAME height. Per the user's note: when the section's docGrid is
@@ -1942,6 +1951,162 @@ function fitCJKPrefix(
   return chars.slice(0, lo).join('');
 }
 
+/* ------------------------------------------------------------------ *
+ * Japanese line-breaking (kinsoku shori / 禁則処理)
+ *
+ * ECMA-376 §17.15.1.58 `w:kinsoku` is a document-wide on/off toggle for
+ * "East Asian typography line-breaking rules". Its default, when the
+ * element is absent from settings.xml, is TRUE (the toggle is a
+ * ST_OnOff whose absence Word treats as enabled for kinsoku). So a doc
+ * with no <w:kinsoku> still gets Japanese line breaking — which is what
+ * Word does and what users see.
+ *
+ * §17.15.1.59 `w:noLineBreaksAfter` / §17.15.1.60 `w:noLineBreaksBefore`
+ * let a document override the character set used by the kinsoku engine
+ * for a given language (`w:lang`):
+ *   - noLineBreaksBefore (§.60): characters that "cannot begin a line"
+ *     (行頭禁則 — line-start-forbidden).
+ *   - noLineBreaksAfter  (§.59): characters that "cannot end a line"
+ *     (行末禁則 — line-end-forbidden).
+ * The spec states the `w:val` "specifies the set of characters" — it is
+ * the COMPLETE set, so a present override REPLACES the application's
+ * default set for that language (it does not extend it). When the
+ * element is absent the application's own default set is used. We
+ * implement replace-vs-default exactly per that wording.
+ *
+ * The default sets below are Word's documented Japanese kinsoku tables
+ * (Tools ▸ Options ▸ Typography ▸ "Use default kinsoku rules"). They
+ * coincide with JIS X 4051 §6.1 (行頭禁則文字 / 行末禁則文字). We encode
+ * them as two flat string constants (data, not scattered conditionals);
+ * membership is a Set lookup.
+ *
+ * Word applies kinsoku only to East-Asian wrapping (the per-character
+ * break path). Pure-Latin word wrap is untouched: these sets contain no
+ * ASCII letters/space, and the Latin path never consults them.
+ * ------------------------------------------------------------------ */
+
+/** §17.15.1.60 default 行頭禁則 — characters that may NOT begin a line.
+ *  Closing brackets/quotes, mid/end punctuation, small kana, prolonged
+ *  sound mark, iteration marks, and their halfwidth forms. */
+const KINSOKU_DEFAULT_LINE_START_FORBIDDEN =
+  // closing brackets / quotes (fullwidth)
+  '”’）〕］｝〉》」』】〙〗〟｠»' +
+  // mid / end punctuation (fullwidth)
+  '、。，．・：；／？！‐ー゠–〜～' +
+  // small kana
+  'ぁぃぅぇぉっゃゅょゎゕゖ' +
+  'ァィゥェォッャュョヮヵヶ' +
+  'ㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ' +
+  // iteration / sound marks
+  '々〻ゝゞヽヾ゛゜' +
+  // misc trailing symbols
+  '％‰℃°′″' +
+  // halfwidth forms (cannot start a line either)
+  '｡｣､･ｰﾞﾟ' +
+  '!),.:;?]}｠';
+
+/** §17.15.1.59 default 行末禁則 — characters that may NOT end a line.
+ *  Opening brackets / quotes and currency/lead symbols. */
+const KINSOKU_DEFAULT_LINE_END_FORBIDDEN =
+  // opening brackets / quotes (fullwidth)
+  '“‘（〔［｛〈《「『【〘〖〝｟«' +
+  // currency / lead symbols
+  '＄￥＃￡￠' +
+  // halfwidth opening forms
+  '([{｟';
+
+/** Resolved kinsoku configuration for a document.
+ *  `enabled` reflects §17.15.1.58; the two sets are §.60 / §.59 (custom
+ *  sets replace the defaults — see resolveKinsokuRules). */
+export interface KinsokuRules {
+  enabled: boolean;
+  /** Code points forbidden at line START (行頭禁則). */
+  lineStartForbidden: Set<number>;
+  /** Code points forbidden at line END (行末禁則). */
+  lineEndForbidden: Set<number>;
+}
+
+function codePointSet(text: string): Set<number> {
+  const out = new Set<number>();
+  for (const ch of text) out.add(ch.codePointAt(0)!);
+  return out;
+}
+
+/** Build the active {@link KinsokuRules} from the document settings.
+ *  - `enabled` defaults to TRUE when undefined (§17.15.1.58 default).
+ *  - A non-undefined custom set REPLACES the default for that direction
+ *    (§17.15.1.59 / §.60 "specifies the set of characters"). An empty
+ *    string is a legitimate replacement that disables that direction.
+ */
+export function resolveKinsokuRules(settings?: {
+  kinsoku?: boolean;
+  noLineBreaksBefore?: string;
+  noLineBreaksAfter?: string;
+}): KinsokuRules {
+  return {
+    enabled: settings?.kinsoku !== false,
+    lineStartForbidden: codePointSet(
+      settings?.noLineBreaksBefore ?? KINSOKU_DEFAULT_LINE_START_FORBIDDEN,
+    ),
+    lineEndForbidden: codePointSet(
+      settings?.noLineBreaksAfter ?? KINSOKU_DEFAULT_LINE_END_FORBIDDEN,
+    ),
+  };
+}
+
+/** The default Japanese kinsoku rules (no document overrides). */
+export const DEFAULT_KINSOKU_RULES: KinsokuRules = resolveKinsokuRules();
+
+/**
+ * Adjust a CJK line-break position so it does not violate kinsoku.
+ *
+ * Given a line being split into `head = chars[0..splitAt)` (stays on the
+ * current line) and `tail = chars[splitAt..]` (overflows to the next),
+ * return the largest legal `splitAt' <= splitAt` such that:
+ *   1. `tail'[0]` is not line-START-forbidden (行頭禁則 追い出し — the
+ *      offending char and any preceding forbidden chars are pulled down
+ *      onto the next line), AND
+ *   2. `head'[last]` is not line-END-forbidden (push a dangling opener
+ *      to the next line).
+ *
+ * Retraction is bounded: we never retract below `minSplit` (default 1,
+ * so at least one code point always stays on a non-empty line and we
+ * keep forward progress). If no legal split exists within that bound
+ * (pathological run of forbidden chars), the original `splitAt` is
+ * returned unchanged — Word likewise lets an over-long forbidden run
+ * overflow rather than loop forever.
+ *
+ * `chars` must be an array of single code points (e.g. `[...text]`).
+ */
+export function kinsokuAdjustedSplit(
+  chars: string[],
+  splitAt: number,
+  rules: KinsokuRules,
+  minSplit = 1,
+): number {
+  if (!rules.enabled) return splitAt;
+  if (splitAt <= 0 || splitAt >= chars.length) return splitAt;
+
+  const startForbidden = (i: number): boolean =>
+    i < chars.length && rules.lineStartForbidden.has(chars[i].codePointAt(0)!);
+  const endForbidden = (i: number): boolean =>
+    i >= 0 && rules.lineEndForbidden.has(chars[i].codePointAt(0)!);
+
+  let s = splitAt;
+  // Retract while the tail begins with a start-forbidden char OR the head
+  // ends with an end-forbidden char. Each retraction moves one code point
+  // from the head onto the tail (追い出し). Bounded by minSplit.
+  while (s > minSplit && (startForbidden(s) || endForbidden(s - 1))) {
+    s--;
+  }
+  // If we hit the floor and it is still illegal, no legal break exists in
+  // range — fall back to the unrestricted split (never empty, never hang).
+  if (s <= minSplit && (startForbidden(s) || endForbidden(s - 1))) {
+    return splitAt;
+  }
+  return s;
+}
+
 /**
  * Split a text run into layout-segment strings.
  * Each segment is an atomic unit for word-level fitting; CJK overflow is handled in layoutLines.
@@ -2098,6 +2263,9 @@ function layoutLines(
   // Paragraph left-indent in px. Tab-stop positions are measured from the text
   // margin (ECMA-376 §17.3.1.37), but layout is paraX-relative, so subtract this.
   tabOriginPx: number = 0,
+  // ECMA-376 §17.15.1.58–.60 Japanese line-breaking rules. Default kinsoku is
+  // ON; the CJK overflow path retracts the break to a kinsoku-legal position.
+  kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -2447,7 +2615,19 @@ function layoutLines(
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const prefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
+      // Apply kinsoku to the break position: retract leftwards so the tail
+      // never begins with a 行頭禁則 char and the head never ends with a
+      // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
+      // already has content, retracting to an empty prefix is allowed — the
+      // whole run moves to the next (fresh) line, which is Word's 追い出し.
+      // When the line is empty we keep at least one char (minSplit=1) so we
+      // never lose forward progress.
+      const allChars = [...s.text];
+      const rawSplit = [...rawPrefix].length;
+      const minSplit = currentLine.length > 0 ? 0 : 1;
+      const split = kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit);
+      const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {
         const pm = ctx.measureText(prefix);
         const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pm.width };
@@ -3146,7 +3326,7 @@ function measureParaHeight(
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, scale));
   }
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses);
+  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku);
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby, l.intendedSingle), 0);
 }
 

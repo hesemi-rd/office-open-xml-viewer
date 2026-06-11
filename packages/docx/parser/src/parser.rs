@@ -60,10 +60,12 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let settings_path = find_rel_target(&rels_xml, "settings")
         .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
         .unwrap_or_else(|| "word/settings.xml".to_string());
+    let mut document_settings: Option<crate::types::DocumentSettings> = None;
     if let Ok(settings_xml) = read_zip_entry(&mut zip, &settings_path) {
         if let Some(lang) = parse_theme_font_bidi_lang(&settings_xml) {
             theme.fill_default_cs_font(&lang);
         }
+        document_settings = parse_document_settings(&settings_xml);
     }
     let theme = theme;
 
@@ -127,6 +129,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     Ok(Document {
         section, body, headers, footers, major_font, minor_font, font_family_classes,
         revisions, comments, footnotes, endnotes,
+        settings: document_settings,
     })
 }
 
@@ -344,6 +347,50 @@ fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "themeFontLang")?;
     attr_w(node, "bidi").filter(|s| !s.is_empty())
+}
+
+/// Parse the typography settings the renderer needs from `word/settings.xml`.
+///
+/// - §17.15.1.58 `w:kinsoku` — East-Asian line-breaking toggle (ST_OnOff;
+///   absence means ON, which the renderer assumes, so we only surface an
+///   explicit `Some(false)`/`Some(true)`).
+/// - §17.15.1.60 `w:noLineBreaksBefore` / §17.15.1.59 `w:noLineBreaksAfter` —
+///   custom 行頭/行末禁則 character sets. The spec says `w:val` "specifies the
+///   set of characters", i.e. a present element REPLACES the application
+///   default set. A document may emit one element per `w:lang`; we concatenate
+///   the `w:val` strings into one set (the renderer is language-agnostic here
+///   and applies the union to its single CJK break path).
+///
+/// Returns `None` when none of these elements are present, so the renderer
+/// falls back to its built-in Japanese defaults with kinsoku ON.
+fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentSettings> {
+    let doc = XmlDoc::parse(settings_xml).ok()?;
+    let root = doc.root_element();
+
+    let kinsoku = bool_prop(root, "kinsoku");
+
+    let collect = |tag: &str| -> Option<String> {
+        let mut found = false;
+        let mut acc = String::new();
+        for node in root.children().filter(|n| n.is_element() && n.tag_name().name() == tag) {
+            found = true;
+            if let Some(val) = attr_w(node, "val") {
+                acc.push_str(&val);
+            }
+        }
+        if found { Some(acc) } else { None }
+    };
+    let no_line_breaks_before = collect("noLineBreaksBefore");
+    let no_line_breaks_after = collect("noLineBreaksAfter");
+
+    if kinsoku.is_none() && no_line_breaks_before.is_none() && no_line_breaks_after.is_none() {
+        return None;
+    }
+    Some(crate::types::DocumentSettings {
+        kinsoku,
+        no_line_breaks_before,
+        no_line_breaks_after,
+    })
 }
 
 fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
@@ -2959,6 +3006,52 @@ mod theme_cs_tests {
         assert_eq!(parse_theme_font_bidi_lang(settings).as_deref(), Some("ar-SA"));
         let none = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
         assert_eq!(parse_theme_font_bidi_lang(none), None);
+    }
+
+    #[test]
+    fn document_settings_absent_when_no_kinsoku_elements() {
+        // §17.15.1.58 default kinsoku=ON ⇒ no element ⇒ None (renderer defaults).
+        let xml = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:themeFontLang w:val="ja-JP"/></w:settings>"#;
+        assert!(parse_document_settings(xml).is_none());
+    }
+
+    #[test]
+    fn document_settings_kinsoku_off_is_surfaced() {
+        // §17.15.1.58 explicit w:val="0" disables kinsoku.
+        let xml = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:kinsoku w:val="0"/></w:settings>"#;
+        let s = parse_document_settings(xml).expect("settings present");
+        assert_eq!(s.kinsoku, Some(false));
+        assert_eq!(s.no_line_breaks_before, None);
+        assert_eq!(s.no_line_breaks_after, None);
+    }
+
+    #[test]
+    fn document_settings_kinsoku_on_explicit() {
+        let xml = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:kinsoku w:val="1"/></w:settings>"#;
+        assert_eq!(parse_document_settings(xml).unwrap().kinsoku, Some(true));
+    }
+
+    #[test]
+    fn document_settings_custom_no_line_breaks_replace_default() {
+        // §17.15.1.59/.60 — custom sets surfaced verbatim (renderer replaces).
+        let xml = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:noLineBreaksBefore w:lang="ja-JP" w:val="、。"/>
+          <w:noLineBreaksAfter w:lang="ja-JP" w:val="（「"/></w:settings>"#;
+        let s = parse_document_settings(xml).unwrap();
+        assert_eq!(s.no_line_breaks_before.as_deref(), Some("、。"));
+        assert_eq!(s.no_line_breaks_after.as_deref(), Some("（「"));
+    }
+
+    #[test]
+    fn document_settings_multiple_lang_no_line_breaks_concatenated() {
+        let xml = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:noLineBreaksBefore w:lang="ja-JP" w:val="、"/>
+          <w:noLineBreaksBefore w:lang="zh-CN" w:val="。"/></w:settings>"#;
+        let s = parse_document_settings(xml).unwrap();
+        assert_eq!(s.no_line_breaks_before.as_deref(), Some("、。"));
     }
 }
 

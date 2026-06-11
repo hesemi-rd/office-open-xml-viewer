@@ -34,6 +34,24 @@ export interface DocxDocumentModel {
   /** ECMA-376 §17.11.4 — `word/endnotes.xml` (id + text). Same shape as
    *  `footnotes`. */
   endnotes?: DocNote[];
+  /** ECMA-376 §17.15.1.* — document-wide compatibility / typography settings
+   *  from `word/settings.xml`. Currently carries the Japanese line-breaking
+   *  (kinsoku) configuration. Absent when settings.xml has no relevant
+   *  elements (the renderer then uses spec defaults: kinsoku ON). */
+  settings?: DocSettings;
+}
+
+export interface DocSettings {
+  /** §17.15.1.58 `w:kinsoku` — East-Asian line-breaking toggle. `undefined`
+   *  means the element is absent; the spec default is ON (treated as `true`). */
+  kinsoku?: boolean;
+  /** §17.15.1.60 `w:noLineBreaksBefore@w:val` — custom set of characters that
+   *  cannot begin a line (行頭禁則). When present it REPLACES the application
+   *  default set. Word's per-`w:lang` sets are merged into one string. */
+  noLineBreaksBefore?: string;
+  /** §17.15.1.59 `w:noLineBreaksAfter@w:val` — custom set of characters that
+   *  cannot end a line (行末禁則). Replaces the default when present. */
+  noLineBreaksAfter?: string;
 }
 
 export interface DocRevision {

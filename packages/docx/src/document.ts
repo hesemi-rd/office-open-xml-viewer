@@ -8,7 +8,7 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerResponse } from './types';
-import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns } from './renderer';
+import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns, resolveKinsokuRules } from './renderer';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
  *  PPTX map — these are the well-known free webfont alternatives Microsoft
@@ -142,7 +142,16 @@ export class DocxDocument {
       this._pages = [this._document.body];
       return this._pages;
     }
-    this._pages = computePages(this._document.body, this._document.section, ctx);
+    // Pagination must use the same fontFamilyClasses + kinsoku rules as the
+    // render path, otherwise line-break decisions (and thus page breaks)
+    // diverge between measurement and paint. ECMA-376 §17.15.1.58–.60.
+    this._pages = computePages(
+      this._document.body,
+      this._document.section,
+      ctx,
+      this._document.fontFamilyClasses ?? {},
+      resolveKinsokuRules(this._document.settings),
+    );
     return this._pages;
   }
 
