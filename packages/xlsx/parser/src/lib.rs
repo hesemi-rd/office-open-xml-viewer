@@ -1434,7 +1434,16 @@ pub(crate) fn read_zip_bytes(
 
 /// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
 pub(crate) fn resolve_zip_path(base_dir: &str, target: &str) -> String {
-    let mut parts: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+    // An absolute Target (leading "/", e.g. openpyxl's
+    // `/xl/drawings/drawing1.xml`) is package-root-relative and must ignore
+    // `base_dir`; otherwise the base would be prepended, producing a path that
+    // doesn't exist in the archive (ECMA-376 / OPC part names are root-anchored
+    // when they start with "/").
+    let mut parts: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base_dir.split('/').filter(|s| !s.is_empty()).collect()
+    };
     for seg in target.split('/') {
         match seg {
             ".." => {
@@ -2066,6 +2075,38 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+}
+
+#[cfg(test)]
+mod resolve_zip_path_tests {
+    use super::resolve_zip_path;
+
+    /// A relative Target resolves against the base directory, honoring `..`.
+    #[test]
+    fn relative_target_resolves_against_base() {
+        assert_eq!(
+            resolve_zip_path("xl/worksheets", "../drawings/drawing1.xml"),
+            "xl/drawings/drawing1.xml"
+        );
+        assert_eq!(
+            resolve_zip_path("xl/drawings", "../media/image1.png"),
+            "xl/media/image1.png"
+        );
+    }
+
+    /// An absolute Target (leading "/", as openpyxl writes for drawings) is
+    /// package-root-relative and ignores the base directory.
+    #[test]
+    fn absolute_target_ignores_base() {
+        assert_eq!(
+            resolve_zip_path("xl/worksheets", "/xl/drawings/drawing1.xml"),
+            "xl/drawings/drawing1.xml"
+        );
+        assert_eq!(
+            resolve_zip_path("xl/drawings", "/xl/charts/chart1.xml"),
+            "xl/charts/chart1.xml"
+        );
     }
 }
 

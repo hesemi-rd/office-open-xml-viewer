@@ -64,13 +64,19 @@ pub(crate) fn load_sheet_charts(
             .map(|xml| parse_rels_map(&xml))
             .unwrap_or_default();
 
-        // Iterate over twoCellAnchor elements
+        // Iterate over chart anchors. Charts may be saved either as a
+        // `<xdr:twoCellAnchor>` (from + to cells — Excel's default) or a
+        // `<xdr:oneCellAnchor>` (from cell + a saved `<xdr:ext cx cy>` EMU
+        // size, ECMA-376 §20.5.2.16). openpyxl and some other writers emit
+        // oneCellAnchor; both must produce a chart.
         for anchor in draw_doc
             .root_element()
             .children()
             .filter(|n| n.is_element())
         {
-            if anchor.tag_name().name() != "twoCellAnchor"
+            let anchor_tag = anchor.tag_name().name();
+            let is_one_cell = anchor_tag == "oneCellAnchor";
+            if (anchor_tag != "twoCellAnchor" && !is_one_cell)
                 || anchor.tag_name().namespace() != Some(xdr_ns)
             {
                 continue;
@@ -79,6 +85,8 @@ pub(crate) fn load_sheet_charts(
             let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) =
                 (0u32, 0i64, 0u32, 0i64);
             let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
+            // oneCellAnchor size: `<xdr:ext cx cy>` in EMU.
+            let (mut ext_cx, mut ext_cy) = (0i64, 0i64);
             let mut chart_rid: Option<String> = None;
 
             for child in anchor.children() {
@@ -113,6 +121,17 @@ pub(crate) fn load_sheet_charts(
                             to_row_off = row_off;
                         }
                     }
+                    "ext" => {
+                        // oneCellAnchor's `<xdr:ext cx cy>` size in EMU.
+                        ext_cx = child
+                            .attribute("cx")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        ext_cy = child
+                            .attribute("cy")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                    }
                     "graphicFrame" => {
                         // Look for a:graphic/a:graphicData/c:chart[@r:id]
                         for gf_child in child.descendants() {
@@ -131,6 +150,17 @@ pub(crate) fn load_sheet_charts(
                     }
                     _ => {}
                 }
+            }
+
+            // For a oneCellAnchor the `<to>` corner is absent; the chart's
+            // size is the saved EMU extent (ECMA-376 §20.5.2.16). Encode it as
+            // a `to` corner pinned to the `from` cell plus the extent offset so
+            // the renderer's from/to → pixel math yields exactly `ext` px.
+            if is_one_cell {
+                to_col = from_col;
+                to_row = from_row;
+                to_col_off = from_col_off + ext_cx;
+                to_row_off = from_row_off + ext_cy;
             }
 
             let Some(rid) = chart_rid else {
@@ -2068,6 +2098,83 @@ pub(crate) fn collect_num_cache(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod pie_doughnut_tests {
+    use super::*;
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    fn theme() -> Vec<String> {
+        vec!["111111".into(); 12]
+    }
+
+    /// A single-series chartSpace whose plotArea holds `chart_elem`
+    /// (`pieChart` or `doughnutChart`). One series, three categories.
+    fn pie_chart_xml(chart_elem: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:title><c:tx><c:rich><a:p><a:r><a:t>Share</a:t></a:r></a:p></c:rich></c:tx></c:title>
+    <c:plotArea>
+      <c:layout/>
+      <c:{ce}>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Region</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>North</c:v></c:pt>
+            <c:pt idx="1"><c:v>South</c:v></c:pt>
+            <c:pt idx="2"><c:v>East</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>30</c:v></c:pt>
+            <c:pt idx="1"><c:v>50</c:v></c:pt>
+            <c:pt idx="2"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:{ce}>
+    </c:plotArea>
+    <c:legend><c:legendPos val="r"/></c:legend>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+            ce = chart_elem,
+        )
+    }
+
+    /// ECMA-376 §21.2.2.141 `<c:pieChart>` → chart_type "pie"; categories and
+    /// the single series' values are carried through unchanged.
+    #[test]
+    fn pie_chart_series_and_categories() {
+        let xml = pie_chart_xml("pieChart");
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("pie chart parses");
+        assert_eq!(chart.chart_type, "pie");
+        assert_eq!(chart.title.as_deref(), Some("Share"));
+        assert_eq!(chart.categories, vec!["North", "South", "East"]);
+        assert_eq!(chart.series.len(), 1);
+        assert_eq!(
+            chart.series[0].values,
+            vec![Some(30.0), Some(50.0), Some(20.0)]
+        );
+    }
+
+    /// ECMA-376 §21.2.2.50 `<c:doughnutChart>` → chart_type "doughnut".
+    #[test]
+    fn doughnut_chart_type() {
+        let xml = pie_chart_xml("doughnutChart");
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("doughnut chart parses");
+        assert_eq!(chart.chart_type, "doughnut");
+        assert_eq!(chart.categories.len(), 3);
+        assert_eq!(chart.series.len(), 1);
+        assert_eq!(
+            chart.series[0].values,
+            vec![Some(30.0), Some(50.0), Some(20.0)]
+        );
+    }
 }
 
 #[cfg(test)]

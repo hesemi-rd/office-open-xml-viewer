@@ -173,7 +173,7 @@ describe('cellIs — text operators (case-insensitive)', () => {
 
 // ─── colorScale ──────────────────────────────────────────────────
 describe('colorScale — gradient interpolation (ECMA-376 §18.3.1.16)', () => {
-  function colorAt(value: number, values: number[], rule: CfRule): string | undefined {
+  function colorAt(value: number, values: number[], rule: CfRule): string | null | undefined {
     const ws = sheetFromColumn(values, [{ sqref: [fullColumnSqref(values.length)], rules: [rule] }]);
     const ctx = compileCf(ws);
     const res = evaluateCf(numCell(0, 0, value), 0, 0, ctx, []);
