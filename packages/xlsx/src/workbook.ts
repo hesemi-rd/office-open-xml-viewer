@@ -7,8 +7,14 @@ import {
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse, Cell } from './types.js';
 import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
+import { formatCellValue } from './number-format.js';
+import {
+  parseListFormula,
+  resolveListValues,
+  type ResolvedList,
+} from './validation-list.js';
 
 /** Office font name → metric-compatible Google Fonts substitute. These are
  *  the well-known pairings Microsoft and Google both publish and ship on
@@ -155,6 +161,62 @@ export class XlsxWorkbook {
     const ws = (res as Extract<WorkerResponse, { type: 'parsedSheet' }>).worksheet;
     this.sheetCache.set(sheetIndex, ws);
     return ws;
+  }
+
+  /**
+   * Resolve a `list`-type data-validation `formula1` (ECMA-376 §18.3.1.32) into
+   * the set of allowed values to display, evaluated relative to `sheetIndex`
+   * (the sheet that owns the validation, used to resolve unqualified ranges):
+   *
+   * - Inline quoted list `"A,B,C"`        → the literal values.
+   * - Range ref `$B$2:$B$5`               → each non-empty cell's *display
+   *   string* (the same formatted text the grid shows, via {@link formatCellValue}),
+   *   walked row-major. `Sheet2!$A$1:$A$9` resolves against the named sheet
+   *   (lazily parsed via {@link getWorksheet}, hence async).
+   * - Named range / complex formula       → `{ kind: 'formula' }` carrying the
+   *   raw text so the caller can disclose it rather than blanking it.
+   *
+   * Read-only: this only reads cell values for display; it never writes.
+   */
+  async resolveValidationList(
+    sheetIndex: number,
+    formula1: string | undefined,
+  ): Promise<ResolvedList> {
+    if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
+    const parsed = parseListFormula(formula1);
+    if (parsed.kind !== 'range') {
+      // Inline / unresolved need no cell lookup.
+      return resolveListValues(parsed, () => null);
+    }
+
+    // Pick the target sheet: the qualifier name (case-insensitive) or, when the
+    // range is unqualified, the sheet that owns the validation.
+    let targetIndex = sheetIndex;
+    if (parsed.sheet) {
+      const names = this.sheetNames;
+      const found = names.findIndex(
+        (n) => n.toLowerCase() === parsed.sheet?.toLowerCase(),
+      );
+      // Unknown sheet name (e.g. an external reference) → cannot expand;
+      // surface the formula instead of silently dropping it.
+      if (found < 0) return { kind: 'formula', formula: formula1 ?? '' };
+      targetIndex = found;
+    }
+
+    const ws = await this.getWorksheet(targetIndex);
+    const styles = this.parsedWorkbook.styles;
+    // Index the target sheet's cells by "row:col" for O(1) lookup during the
+    // row-major walk in resolveListValues.
+    const byRC = new Map<string, Cell>();
+    for (const r of ws.rows) {
+      for (const c of r.cells) byRC.set(`${c.row}:${c.col}`, c);
+    }
+
+    return resolveListValues(parsed, (row, col) => {
+      const cell = byRC.get(`${row}:${col}`);
+      if (!cell) return null;
+      return formatCellValue(cell, styles);
+    });
   }
 
   async renderViewport(

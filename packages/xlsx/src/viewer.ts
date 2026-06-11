@@ -5,6 +5,10 @@ import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet, rt
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
 import { computeCommentPopupPosition } from './comment-popup.js';
+import {
+  computeValidationPanelPosition,
+  type ResolvedList,
+} from './validation-list.js';
 
 /** Delay (ms) before a hovered comment popup appears. A short hover dwell
  *  prevents the popup from flickering while the cursor sweeps across many
@@ -16,6 +20,11 @@ const COMMENT_POPUP_DELAY_MS = 150;
 const COMMENT_POPUP_MAX_W = 280;
 /** Max height before the body scrolls/clips (CSS px). */
 const COMMENT_POPUP_MAX_H = 200;
+
+/** Max width of the list-validation dropdown panel (CSS px). */
+const VALIDATION_PANEL_MAX_W = 240;
+/** Max height before the value list scrolls (CSS px). */
+const VALIDATION_PANEL_MAX_H = 200;
 
 const TAB_BAR_H = 30;
 // Gap between adjacent sheet tabs. The first tab also gets this much leading
@@ -216,6 +225,23 @@ export class XlsxViewer {
   /** Pending show timer (see {@link COMMENT_POPUP_DELAY_MS}). */
   private commentPopupTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // ─── List data-validation dropdown panel (display-only) ───────────────────
+  /** DOM overlay listing a list-validated cell's allowed values. Lives in
+   *  canvasArea above the scrollHost; unlike the comment popup this is a click
+   *  target (`pointer-events:auto`). Read-only: hovering an item highlights it
+   *  but selecting does NOT change the cell. */
+  private validationPanel: HTMLDivElement;
+  /** `"row:col"` of the cell whose panel is currently open, or null. Lets a
+   *  re-click on the same arrow toggle the panel closed. */
+  private validationPanelKey: string | null = null;
+  /** Screen rect (canvasArea CSS px) of the dropdown arrow button last drawn by
+   *  {@link maybeDrawValidationDropdown}, so pointerdown can hit-test it. Null
+   *  when no arrow is currently visible. */
+  private validationArrowRect: { x: number; y: number; w: number; h: number } | null = null;
+  /** Document-level pointerdown listener that closes the panel on an outside
+   *  click; installed only while the panel is open. */
+  private validationOutsideHandler: ((e: PointerEvent) => void) | null = null;
+
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
 
@@ -256,10 +282,27 @@ export class XlsxViewer {
       `box-shadow:1px 2px 5px rgba(0,0,0,0.25);` +
       `font:12px/1.4 sans-serif;color:#222;white-space:pre-wrap;word-break:break-word;`;
 
+    // List-validation dropdown panel. z-index 4 sits above the comment popup
+    // and scrollHost; pointer-events:auto because it IS a click target (the
+    // user opens it by clicking the arrow and scrolls inside it). The wheel
+    // handler below keeps that scroll from leaking to the grid.
+    this.validationPanel = document.createElement('div');
+    this.validationPanel.setAttribute('data-xlsx-validation-panel', '');
+    this.validationPanel.style.cssText =
+      `position:absolute;z-index:4;pointer-events:auto;display:none;` +
+      `min-width:80px;max-width:${VALIDATION_PANEL_MAX_W}px;max-height:${VALIDATION_PANEL_MAX_H}px;overflow-y:auto;` +
+      `box-sizing:border-box;background:#fff;border:1px solid #7f7f7f;` +
+      `box-shadow:1px 2px 5px rgba(0,0,0,0.25);` +
+      `font:12px/1.4 sans-serif;color:#222;`;
+    // Keep a wheel inside the panel from scrolling the grid behind it. The panel
+    // itself still scrolls (default action) up to its own bounds.
+    this.validationPanel.addEventListener('wheel', (e) => e.stopPropagation());
+
     this.canvasArea.appendChild(this.canvas);
     this.canvasArea.appendChild(this.selectionOverlay);
     this.canvasArea.appendChild(this.scrollHost);
     this.canvasArea.appendChild(this.commentPopup);
+    this.canvasArea.appendChild(this.validationPanel);
 
     const headerW = Math.round(HEADER_W * (this.opts.cellScale ?? 1));
 
@@ -328,6 +371,9 @@ export class XlsxViewer {
       // A comment popup is anchored to a cell's on-screen rect, which moves
       // under the cursor while scrolling — hide it (Excel does the same).
       this.hideCommentPopup();
+      // The validation panel is anchored to the cell too; Excel closes its
+      // dropdown on scroll, so do the same.
+      this.hideValidationPanel();
       // Track the start-anchored position, but only while the host is laid
       // out: a hidden host reports clientWidth 0 and fires bogus scroll
       // events when the browser clamps scrollLeft, which must not overwrite
@@ -394,6 +440,7 @@ export class XlsxViewer {
     this.activeCell = null;
     this.selectionMode = 'cells';
     this.hideCommentPopup();
+    this.hideValidationPanel();
     this.updateSelectionOverlay();
     this.updateTabActive(index);
     this.currentWorksheet = await this.workbook.getWorksheet(index);
@@ -666,6 +713,25 @@ export class XlsxViewer {
   }
 
   /**
+   * Programmatically select a single cell by A1 reference (e.g. `"B2"`), as if
+   * the user had clicked it: updates the active/anchor cell, redraws the
+   * selection overlay (including any list-validation dropdown arrow), and fires
+   * `onSelectionChange`. A no-op for malformed refs. Closes any open validation
+   * panel, matching the click path.
+   */
+  select(ref: string): void {
+    const p = parseA1(ref);
+    if (!p) return;
+    this.hideValidationPanel();
+    this.selectionMode = 'cells';
+    this.anchorCell = { row: p.row, col: p.col };
+    this.activeCell = { row: p.row, col: p.col };
+    this.updateSelectionOverlay();
+    void this.renderCurrentSheet();
+    this.opts.onSelectionChange?.(this.selection);
+  }
+
+  /**
    * Returns what the header area contains at the given client coordinates.
    * Returns null when the point is in the cell grid (not a header).
    */
@@ -893,9 +959,10 @@ export class XlsxViewer {
     // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
     // in-cell dropdown button only while the cell is *selected* and only for
     // `list`-type rules — so it is drawn here (selection overlay) rather than in
-    // the canvas renderer. Display only: clicking it does nothing, since opening
-    // the list / picking a value is out of scope for a read-only viewer (TODO:
-    // surface the choices on click once an interaction model is defined).
+    // the canvas renderer. The button itself is non-interactive
+    // (pointer-events:none); clicks are hit-tested against its rect in the
+    // pointerdown handler, which opens a panel listing the allowed values
+    // (display only — picking a value never changes the cell).
     this.maybeDrawValidationDropdown();
   }
 
@@ -905,6 +972,10 @@ export class XlsxViewer {
    *  whole range) to mirror Excel, which attaches the button to the active
    *  cell of the selection. */
   private maybeDrawValidationDropdown(): void {
+    // The overlay is rebuilt on every selection / scroll change, so the
+    // arrow's hit-test rect is recomputed here each time (cleared when no arrow
+    // is currently shown).
+    this.validationArrowRect = null;
     if (this.selectionMode !== 'cells') return;
     const ws = this.currentWorksheet;
     const active = this.activeCell;
@@ -944,6 +1015,153 @@ export class XlsxViewer {
       `<svg width="${arrow}" height="${arrow}" viewBox="0 0 10 6" aria-hidden="true">` +
       `<path d="M0 0 L10 0 L5 6 Z" fill="#333"/></svg>`;
     this.selectionOverlay.appendChild(btn);
+
+    // Record the arrow's on-screen rect (canvasArea space) for pointer
+    // hit-testing. The button element has pointer-events:none, so clicks fall
+    // through to the scrollHost where the pointerdown handler tests this rect.
+    this.validationArrowRect = { x: screenLeft, y: btnY, w: side, h: side };
+
+    // Keep an already-open panel glued to the arrow as the grid scrolls. If the
+    // active cell's validation differs from the open panel (selection moved),
+    // close it instead.
+    if (this.validationPanel.style.display !== 'none') {
+      if (this.validationPanelKey === `${active.row}:${active.col}`) {
+        this.positionValidationPanel();
+      } else {
+        this.hideValidationPanel();
+      }
+    }
+  }
+
+  // ─── List data-validation dropdown panel (display-only) ───────────────────
+
+  /** Toggle the dropdown panel for the active cell's list validation. Called
+   *  from pointerdown when the arrow rect is hit. Re-clicking the same arrow
+   *  closes it. */
+  private toggleValidationPanel(): void {
+    const ws = this.currentWorksheet;
+    const active = this.activeCell;
+    if (!ws || !active) return;
+    const key = `${active.row}:${active.col}`;
+    if (this.validationPanelKey === key && this.validationPanel.style.display !== 'none') {
+      this.hideValidationPanel();
+      return;
+    }
+    const dv = findListValidationAt(ws.dataValidations, active.row, active.col);
+    if (!dv) return;
+    void this.openValidationPanel(active, dv.formula1);
+  }
+
+  /** Resolve the allowed values for `formula1` (relative to the current sheet)
+   *  and render them in the panel anchored below the active cell. Async because
+   *  cross-sheet range references may need a lazily-parsed worksheet. */
+  private async openValidationPanel(cell: CellAddress, formula1: string | undefined): Promise<void> {
+    let resolved: ResolvedList;
+    try {
+      resolved = await this.workbook.resolveValidationList(this.currentSheet, formula1);
+    } catch {
+      // A resolution failure (e.g. a missing sheet) must not break the viewer;
+      // fall back to disclosing the raw formula.
+      resolved = { kind: 'formula', formula: formula1 ?? '' };
+    }
+    // The selection may have moved while awaiting — bail if so.
+    const active = this.activeCell;
+    if (!active || active.row !== cell.row || active.col !== cell.col) return;
+
+    this.validationPanelKey = `${cell.row}:${cell.col}`;
+    this.renderValidationPanel(resolved);
+    this.positionValidationPanel();
+    this.installValidationOutsideHandler();
+  }
+
+  /** Build the panel's children. Uses textContent throughout (no HTML injection
+   *  from cell values). Items highlight on hover but are NOT selectable —
+   *  this is a read-only viewer, so clicking a value must not change the cell. */
+  private renderValidationPanel(resolved: ResolvedList): void {
+    const panel = this.validationPanel;
+    panel.textContent = '';
+    if (resolved.kind === 'formula' || resolved.values.length === 0) {
+      // Unresolved operand (named range / complex formula) or an empty range:
+      // disclose the formula / a placeholder rather than showing a blank box.
+      const note = document.createElement('div');
+      note.style.cssText = 'padding:4px 8px;color:#666;font-style:italic;white-space:pre-wrap;word-break:break-word;';
+      note.textContent =
+        resolved.kind === 'formula'
+          ? (resolved.formula ? `= ${resolved.formula}` : '(no list)')
+          : '(empty list)';
+      panel.appendChild(note);
+      return;
+    }
+    for (const value of resolved.values) {
+      const item = document.createElement('div');
+      item.setAttribute('data-xlsx-validation-item', '');
+      item.style.cssText = 'padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;';
+      item.textContent = value;
+      // Hover highlight only — no click/select (read-only viewer).
+      item.addEventListener('pointerenter', () => {
+        item.style.background = '#cfe3ff';
+      });
+      item.addEventListener('pointerleave', () => {
+        item.style.background = '';
+      });
+      panel.appendChild(item);
+    }
+  }
+
+  /** Position the (already-populated, visible-or-becoming-visible) panel below
+   *  the dropdown arrow / active cell using the pure geometry calculator. */
+  private positionValidationPanel(): void {
+    const active = this.activeCell;
+    if (!active) return;
+    const rect = this.getCellRect(active.row, active.col);
+    if (!rect) return;
+    const screenLeft = this.screenX(rect.x, rect.w);
+    // Make it measurable off-screen first so offsetWidth/Height reflect content.
+    this.validationPanel.style.left = '-9999px';
+    this.validationPanel.style.top = '-9999px';
+    this.validationPanel.style.display = 'block';
+    const pos = computeValidationPanelPosition({
+      cell: { x: screenLeft, y: rect.y, w: rect.w, h: rect.h },
+      panel: { w: this.validationPanel.offsetWidth, h: this.validationPanel.offsetHeight },
+      viewport: { w: this.canvasArea.clientWidth, h: this.canvasArea.clientHeight },
+      rtl: this.isRtl,
+    });
+    this.validationPanel.style.left = `${pos.left}px`;
+    this.validationPanel.style.top = `${pos.top}px`;
+  }
+
+  /** Install a document-level pointerdown listener that closes the panel on a
+   *  click outside it (and outside the arrow, which toggles via its own path).
+   *  Removed by {@link hideValidationPanel}. */
+  private installValidationOutsideHandler(): void {
+    if (this.validationOutsideHandler) return;
+    this.validationOutsideHandler = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && this.validationPanel.contains(target)) return; // inside panel
+      // A click on the arrow is handled by the scrollHost pointerdown (toggle);
+      // don't double-handle it here. Detect by hit-testing the arrow rect.
+      const rect = this.canvasArea.getBoundingClientRect();
+      const ax = e.clientX - rect.left;
+      const ay = e.clientY - rect.top;
+      const ar = this.validationArrowRect;
+      if (ar && ax >= ar.x && ax <= ar.x + ar.w && ay >= ar.y && ay <= ar.y + ar.h) {
+        return;
+      }
+      this.hideValidationPanel();
+    };
+    // Capture phase so we see the click before it mutates selection.
+    document.addEventListener('pointerdown', this.validationOutsideHandler, true);
+  }
+
+  /** Hide the panel and detach its outside-click listener. Called on re-click,
+   *  outside click, Esc, scroll, selection change, sheet switch and destroy. */
+  private hideValidationPanel(): void {
+    this.validationPanel.style.display = 'none';
+    this.validationPanelKey = null;
+    if (this.validationOutsideHandler) {
+      document.removeEventListener('pointerdown', this.validationOutsideHandler, true);
+      this.validationOutsideHandler = null;
+    }
   }
 
   // ─── Comment hover popup ──────────────────────────────────────────────────
@@ -1095,6 +1313,22 @@ export class XlsxViewer {
     this.scrollHost.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
 
+      // List-validation dropdown arrow: if the press lands on the (display-only)
+      // arrow button drawn on the active cell, toggle the value panel instead of
+      // re-selecting the cell. The arrow's rect is in canvasArea space, so map
+      // the client point through canvasArea's box.
+      const ar = this.validationArrowRect;
+      if (ar) {
+        const areaRect = this.canvasArea.getBoundingClientRect();
+        const ax = e.clientX - areaRect.left;
+        const ay = e.clientY - areaRect.top;
+        if (ax >= ar.x && ax <= ar.x + ar.w && ay >= ar.y && ay <= ar.y + ar.h) {
+          e.preventDefault();
+          this.toggleValidationPanel();
+          return;
+        }
+      }
+
       // A pointerdown on the native scrollbar must not move the cell
       // selection — dragging the thumb would otherwise select whatever cell
       // sits underneath it. Two scrollbar styles need different handling:
@@ -1210,6 +1444,8 @@ export class XlsxViewer {
     this.keydownHandler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
         this.copySelection();
+      } else if (e.key === 'Escape' && this.validationPanel.style.display !== 'none') {
+        this.hideValidationPanel();
       }
     };
     document.addEventListener('keydown', this.keydownHandler);
@@ -1619,6 +1855,7 @@ export class XlsxViewer {
   destroy(): void {
     this.resizeObserver?.disconnect();
     this.hideCommentPopup();
+    this.hideValidationPanel();
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
     }
