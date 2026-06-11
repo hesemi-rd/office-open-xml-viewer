@@ -75,6 +75,24 @@ export {
   type Vec2,
 } from './shape/scene3d-camera';
 export { drawProjected } from './shape/scene3d-draw';
+// DrawingML 3D bevel shading (Phase B). ECMA-376 §20.1.5.12 (sp3d) /
+// §20.1.5.3 (bevel) / §20.1.10.9 (ST_BevelPresetType) / §20.1.5.9 (lightRig).
+export {
+  applyBevelShading,
+  computeBevelNormals,
+  bevelHeightProfile,
+  distanceToEdge,
+  edt1d,
+  shadePixel,
+  shadeParamsFor,
+  lightDirFromRig,
+  materialClass,
+  type BevelMaterial,
+  type BevelShadeParams,
+  type BevelInput,
+  type BevelCtx,
+  type Vec3,
+} from './shape/bevel-shading';
 export {
   renderSparkline,
   type SparklineKind,
