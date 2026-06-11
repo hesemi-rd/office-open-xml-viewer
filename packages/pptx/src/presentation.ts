@@ -237,9 +237,9 @@ export class PptxPresentation {
 
   /**
    * Render a slide and attach canvas-native playback controls for any
-   * embedded audio/video. Returns a disposable handle that owns the RAF loop,
-   * media elements, and object URLs. Unlike {@link renderSlide}, this method
-   * is stateful — always call `handle.dispose()` when leaving the slide.
+   * embedded audio/video. Returns a {@link PresentationHandle} that owns the
+   * RAF loop, media elements, and object URLs. Unlike {@link renderSlide}, this
+   * method is stateful — always call `handle.destroy()` when leaving the slide.
    */
   async presentSlide(
     canvas: HTMLCanvasElement,

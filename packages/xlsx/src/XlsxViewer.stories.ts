@@ -43,15 +43,18 @@ export function buildViewerUI(
   viewerContainer.style.cssText = 'flex:1;min-height:0;';
   root.appendChild(viewerContainer);
 
+  let sheetNames: string[] = [];
+
   const viewer = new XlsxViewer(viewerContainer, {
     cellScale: args.scale,
     useGoogleFonts: true,
     math,
     onReady: (names) => {
+      sheetNames = names;
       status.textContent = `Loaded — ${names.length} sheet(s)`;
     },
-    onSheetChange: (_idx, name) => {
-      status.textContent = `Sheet: ${name}`;
+    onSheetChange: (idx, total) => {
+      status.textContent = `Sheet ${idx + 1} / ${total}: ${sheetNames[idx] ?? ''}`;
     },
     onError: (err) => { status.textContent = `Error: ${err.message}`; },
   });
@@ -140,6 +143,7 @@ export const FileUpload: Story = {
     root.appendChild(viewerContainer);
 
     let viewer: XlsxViewer | null = null;
+    let sheetNames: string[] = [];
 
     async function loadBuffer(buf: ArrayBuffer) {
       viewer?.destroy();
@@ -148,8 +152,8 @@ export const FileUpload: Story = {
         cellScale: args.scale,
         useGoogleFonts: true,
         math,
-        onReady: (names) => { status.textContent = `${names.length} sheet(s)`; },
-        onSheetChange: (_idx, name) => { status.textContent = `Sheet: ${name}`; },
+        onReady: (names) => { sheetNames = names; status.textContent = `${names.length} sheet(s)`; },
+        onSheetChange: (idx, total) => { status.textContent = `Sheet ${idx + 1} / ${total}: ${sheetNames[idx] ?? ''}`; },
         onError: (err) => { status.textContent = `Error: ${err.message}`; },
       });
       await viewer.load(buf);

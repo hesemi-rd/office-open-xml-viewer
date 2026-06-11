@@ -120,7 +120,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ZIP,
         MATH,
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
-        { name: 'onSheetChange', type: '(index: number, name: string) => void', desc: 'Called when the active sheet changes.' },
+        { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],

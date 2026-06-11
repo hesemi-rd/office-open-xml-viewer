@@ -90,14 +90,14 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
               .then((h) => {
                 pending.delete(idx);
                 if (visible.has(idx)) handles.set(idx, h);
-                else h.dispose(); // scrolled away before it resolved
+                else h.destroy(); // scrolled away before it resolved
               })
               .catch(() => pending.delete(idx));
           } else {
             visible.delete(idx);
             const h = handles.get(idx);
             if (h) {
-              h.dispose(); // stops media + RAF; the static base frame remains
+              h.destroy(); // stops media + RAF; the static base frame remains
               handles.delete(idx);
             }
           }
@@ -108,7 +108,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     canvases.forEach((c) => io.observe(c));
     activeCleanup = () => {
       io.disconnect();
-      handles.forEach((h) => h.dispose());
+      handles.forEach((h) => h.destroy());
       handles.clear();
       pending.clear();
       visible.clear();

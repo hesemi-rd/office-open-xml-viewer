@@ -21,7 +21,15 @@ export interface XlsxViewerOptions {
   zoomMin?: number;
   zoomMax?: number;
   onReady?: (sheetNames: string[]) => void;
-  onSheetChange?: (index: number, name: string) => void;
+  /**
+   * Called when the active sheet changes, with the new sheet's zero-based
+   * `index` and the `total` number of sheets in the workbook. This mirrors the
+   * docx `onPageChange` and pptx `onSlideChange` contracts so all three viewers
+   * share one callback shape. To get the sheet *name*, look it up by index from
+   * `viewer.sheetNames[index]` (or the `sheetNames` array delivered to
+   * `onReady`).
+   */
+  onSheetChange?: (index: number, total: number) => void;
   onError?: (err: Error) => void;
   /** Called when the selected cell range changes. null means no selection. */
   onSelectionChange?: (selection: CellRange | null) => void;
@@ -323,7 +331,7 @@ export class XlsxViewer {
     // so scrollWidth reflects the new sheet before we read the max offset.
     this.resetHorizontalScroll();
     await this.renderCurrentSheet();
-    this.opts.onSheetChange?.(index, this.workbook.sheetNames[index] ?? '');
+    this.opts.onSheetChange?.(index, this.workbook.sheetNames.length);
   }
 
   /** True when the current sheet's grid is laid out right-to-left. */
