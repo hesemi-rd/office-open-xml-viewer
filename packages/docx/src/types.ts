@@ -73,7 +73,31 @@ export interface DocComment {
 
 export interface DocNote {
   id: string;
-  text: string;
+  /** ECMA-376 §17.11.2 / §17.11.10 — the note's block-level content
+   *  (paragraphs / nested tables), parsed with the document's styles +
+   *  numbering. The leading run is the `<w:footnoteRef/>` auto-number marker
+   *  (carries a {@link DocxTextRun.noteRef}). Use {@link noteText} to extract
+   *  the plain-text body without the marker. */
+  content: BodyElement[];
+}
+
+/** Flatten a footnote/endnote's content to its plain-text body, excluding the
+ *  auto-number reference marker. Convenience for data-only consumers
+ *  (the renderer draws {@link DocNote.content} directly). */
+export function noteText(note: DocNote): string {
+  const parts: string[] = [];
+  for (const el of note.content) {
+    if (el.type !== 'paragraph') continue;
+    let s = '';
+    for (const run of (el as DocParagraph).runs) {
+      if (run.type === 'text' && !(run as DocxTextRun).noteRef) {
+        s += (run as DocxTextRun).text;
+      }
+    }
+    s = s.trim();
+    if (s) parts.push(s);
+  }
+  return parts.join(' ');
 }
 
 export interface HeadersFooters {
@@ -171,6 +195,14 @@ export interface DocParagraph {
    * right.
    */
   bidi?: boolean;
+  /**
+   * ECMA-376 §17.3.1.32 `<w:snapToGrid>` — when `false`, this paragraph opts out
+   * of the section's document grid (`w:docGrid`): its lines use natural font
+   * metrics / the line-spacing multiplier directly instead of snapping to the
+   * grid pitch. `undefined` = inherit (default on). Set on Word's "Footnote
+   * Text" style, so footnote bodies use compact natural line height.
+   */
+  snapToGrid?: boolean;
 }
 
 export interface ParagraphBorders {
@@ -388,6 +420,21 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
    *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
   langBidi?: string;
+  /** ECMA-376 §17.11.6/.7/.16/.17 — set when this run is a footnote/endnote
+   *  reference marker (`<w:footnoteReference>` in the body, `<w:footnoteRef>` at
+   *  the start of the note's content, and the endnote equivalents). `text` holds
+   *  the raw `@w:id`; the renderer overrides the displayed glyph with the note's
+   *  sequential number. */
+  noteRef?: NoteRef;
+}
+
+/** A footnote / endnote reference marker (ECMA-376 §17.11). */
+export interface NoteRef {
+  /** "footnote" | "endnote" */
+  kind: 'footnote' | 'endnote' | string;
+  /** `@w:id` linking the marker to its note. Empty for the in-note
+   *  `<w:footnoteRef/>` placeholder (the renderer uses the enclosing note). */
+  id: string;
 }
 
 export interface RunRevision {
