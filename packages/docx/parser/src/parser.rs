@@ -1794,7 +1794,10 @@ fn parse_run_inner(
                     background: fmt.background.clone(),
                     // Force superscript regardless of the run's original
                     // vertAlign so reference markers appear above the line.
-                    vert_align: Some("superscript".to_string()),
+                    // NOTE: the model value is "super" (see the styles.rs
+                    // w:vertAlign mapping) — the renderer only raises the
+                    // baseline for that exact token.
+                    vert_align: Some("super".to_string()),
                     hyperlink: hyperlink.clone(),
                     all_caps,
                     small_caps,
@@ -4509,7 +4512,10 @@ mod footnote_tests {
         let nr = run.note_ref.as_ref().expect("note_ref set");
         assert_eq!(nr.kind, "footnote");
         assert_eq!(nr.id, "3");
-        assert_eq!(run.vert_align.as_deref(), Some("superscript"));
+        // Model value is "super" (the styles.rs mapping of w:vertAlign
+        // val="superscript"), NOT the raw XML token — the renderer raises
+        // the baseline only for "super".
+        assert_eq!(run.vert_align.as_deref(), Some("super"));
     }
 
     /// ECMA-376 §17.11.16 — the in-note `<w:footnoteRef>` placeholder is tagged
