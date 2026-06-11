@@ -69,6 +69,12 @@ export async function preloadGoogleFonts(
   const seen = new Set<string>();
   const targetFamilies = new Set<string>();
   const linkPromises: Promise<void>[] = [];
+  // Families that could not be made available (link injection threw, or every
+  // matching FontFace.load() rejected). Surfaced once at the end via a single
+  // console.warn so a failed web font no longer falls back to a system face
+  // completely silently. The renderer still degrades gracefully — this is
+  // diagnostics only, the return contract stays `Promise<void>`.
+  const failedFamilies = new Set<string>();
 
   for (const name of fontNames) {
     if (!name) continue;
@@ -86,7 +92,9 @@ export async function preloadGoogleFonts(
         link.href = entry.url;
         document.head.appendChild(link);
       } catch {
-        // Network or DOM error — silently skip; renderer falls back to system.
+        // DOM error injecting the stylesheet — record so it is reported, then
+        // skip; renderer falls back to the system font for this family.
+        failedFamilies.add((entry.loadFamily ?? name).toLowerCase());
         link = null;
       }
     }
@@ -113,8 +121,20 @@ export async function preloadGoogleFonts(
     targetFamilies.has(f.family.toLowerCase()),
   );
   await withCeiling(
-    Promise.allSettled(registered.map((f) => f.load())).then(() =>
-      document.fonts.ready,
-    ),
+    Promise.allSettled(registered.map((f) => f.load())).then((results) => {
+      results.forEach((res, i) => {
+        if (res.status === 'rejected') {
+          failedFamilies.add(registered[i].family.toLowerCase());
+        }
+      });
+      return document.fonts.ready;
+    }),
   );
+
+  if (failedFamilies.size > 0) {
+    console.warn(
+      `[ooxml] failed to preload web font(s): ${[...failedFamilies].join(', ')}; ` +
+        `falling back to system fonts (text may shift or differ).`,
+    );
+  }
 }

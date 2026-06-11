@@ -6,6 +6,7 @@
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
 import { niceStep, niceAxisMax, niceAxisMin } from './axis-scale.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
+import { hexToRgba } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 
 // ─── Palette + helpers ──────────────────────────────────────────────────────
@@ -24,14 +25,6 @@ function pieSliceColor(idx: number, series: ChartSeries): string {
   const override = series.dataPointColors?.[idx];
   if (override) return `#${override}`;
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const h = hex.startsWith('#') ? hex.slice(1) : hex;
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
 }
 
 function drawAxisTitle(

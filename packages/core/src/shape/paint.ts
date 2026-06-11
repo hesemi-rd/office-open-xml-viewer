@@ -5,12 +5,14 @@ import { buildPatternBitmap } from './pattern-bitmaps';
  * Convert a 6- or 8-char hex colour to a CSS `rgba()` string.
  * 8-char hex encodes alpha in the last two chars (RRGGBBAA).
  * `alpha` applies to 6-char hex; ignored for 8-char.
+ * A leading `#` is tolerated (`#RRGGBB` and `RRGGBB` both work).
  */
 export function hexToRgba(hex: string, alpha = 1): string {
-  const r = parseInt(hex.slice(0, 2), 16);
-  const g = parseInt(hex.slice(2, 4), 16);
-  const b = parseInt(hex.slice(4, 6), 16);
-  const a = hex.length >= 8 ? parseInt(hex.slice(6, 8), 16) / 255 : alpha;
+  const h = hex.charCodeAt(0) === 35 /* '#' */ ? hex.slice(1) : hex;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const a = h.length >= 8 ? parseInt(h.slice(6, 8), 16) / 255 : alpha;
   return `rgba(${r},${g},${b},${a})`;
 }
 
