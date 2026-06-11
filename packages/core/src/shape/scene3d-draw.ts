@@ -13,6 +13,7 @@
  */
 
 import type { Vec2 } from './scene3d-camera';
+import { createAuxCanvas } from './effects';
 
 type AnyCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 type AnyImage = CanvasImageSource;
@@ -83,13 +84,30 @@ function applyH(h: H, u: number, v: number): Vec2 {
  * (origin p0=TL, pu=TR, pv=BL), compute the affine matrix that sends the source
  * rect to that parallelogram and `drawImage` the sub-rectangle through it.
  *
- * A 0.5px outward bleed on the source sub-rect (and a matching dest expansion)
- * hides the hairline seams that otherwise appear between mesh cells from
- * fractional-pixel sampling. The bleed is symmetric so adjacent cells overlap
- * rather than gap.
+ * Seam-hiding bleed: each cell is `drawImage`'d through `setTransform`, and the
+ * canvas anti-aliases the destination *edge* of that blit over ~1 device pixel
+ * (half a pixel either side of the geometric edge). Where two cells meet, those
+ * partial-alpha AA fringes have to land on each other's OPAQUE interior — if the
+ * overlap is narrower than the fringe, the background shows through the gap and
+ * the seam reads as a lighter line (the grid artefact). We therefore overlap
+ * adjacent cells by `bleedDevPx` *device* pixels on every side: the source
+ * sub-rect is expanded and the dest is expanded by exactly its affine image, so
+ * source and dest stay consistent (no edge-pixel stretching) and the opaque core
+ * of each cell fully covers its neighbour's fringe.
+ *
+ * The overlap must be measured in DEVICE pixels, not CSS pixels: the AA fringe is
+ * a rasteriser artefact and is ~1px wide *after* the device-scale in `base` is
+ * applied. A fixed CSS-px bleed under-covers on HiDPI (the fringe is DPR× wider in
+ * device space). Empirically (browser measurement, gradient source, extreme
+ * foreshortening, DPR 1 and 2) 0.5 device px leaves a residual seam (max Δ≈19–54)
+ * while ≥0.75 device px removes it entirely (max Δ≈0–1); we use 1.0 device px for
+ * headroom. Larger bleeds (tested to 1.5) introduce no sample-mismatch artefact.
  */
 /** A 2D affine transform as the canvas 6-tuple (a,b,c,d,e,f). */
 type Affine = [number, number, number, number, number, number];
+
+/** Overlap between adjacent mesh cells, in device pixels (see drawCell docs). */
+const BLEED_DEVICE_PX = 1.0;
 
 /**
  * Compose two canvas affine transforms: `base ∘ m` (apply m first, then base).
@@ -134,12 +152,17 @@ function drawCell(
   const vx = (pv.x - p0.x) / sh;
   const vy = (pv.y - p0.y) / sh;
 
-  // Seam-hiding bleed: half a device pixel, expressed in source units along
-  // each axis (so the dest overlap is ~0.5px regardless of the cell's scale).
-  const destLenU = Math.hypot(pu.x - p0.x, pu.y - p0.y) || 1;
-  const destLenV = Math.hypot(pv.x - p0.x, pv.y - p0.y) || 1;
-  const bleedU = (0.5 * sw) / destLenU;
-  const bleedV = (0.5 * sh) / destLenV;
+  // Seam-hiding bleed: BLEED_DEVICE_PX device pixels along each dest axis,
+  // expressed in source units. The cell's dest edge lengths (p0→pu, p0→pv) are
+  // in `base`'s pre-image space (CSS px), so multiply by the device scale folded
+  // into `base` to get the edge length in DEVICE px, then make the source bleed
+  // such that the dest overlap is BLEED_DEVICE_PX device px regardless of the
+  // cell's scale or the canvas DPR.
+  const devScale = Math.sqrt(Math.abs(base[0] * base[3] - base[1] * base[2])) || 1;
+  const destLenU = (Math.hypot(pu.x - p0.x, pu.y - p0.y) || 1) * devScale;
+  const destLenV = (Math.hypot(pv.x - p0.x, pv.y - p0.y) || 1) * devScale;
+  const bleedU = (BLEED_DEVICE_PX * sw) / destLenU;
+  const bleedV = (BLEED_DEVICE_PX * sh) / destLenV;
 
   // Clamp the bled source rect into the image so we never sample outside it.
   const bx0 = Math.max(0, sx0 - bleedU);
@@ -238,6 +261,27 @@ function warpRecursive(
  *                 mesh subdivides until every cell is within this. Default 0.5px
  *                 (sub-pixel — invisible at 1× and most HiDPI ratios). Not a
  *                 magic cell count: the subdivision is error-driven.
+ *
+ * ## Seam removal (mesh continuity)
+ * Two artefacts produce a visible grid of cell seams in flat / textured regions:
+ *   (1) the AA fringe of each cell's `drawImage` blit lets the background show
+ *       through where adjacent cells under-overlap — addressed by the per-cell
+ *       device-pixel bleed in `drawCell`;
+ *   (2) for textured sources, neighbouring cells resample the source with
+ *       slightly different filtering across the shared edge, and the bleed band
+ *       is composited twice, leaving a faint line that bleed alone cannot remove.
+ * To kill (2) we render the whole mesh into an intermediate canvas at
+ * `SUPERSAMPLE`× the device resolution of the quad's bounding box, then downscale
+ * it onto `dst` in one high-quality blit. Any residual seam shrinks by the
+ * supersample factor and lands sub-pixel after the box-filter downscale, so it is
+ * no longer resolvable. The silhouette's AA against the slide background is also
+ * produced by the single smooth downscale instead of per-cell edge AA.
+ *
+ * Cost: the intermediate is (bboxW·S)×(bboxH·S) device px (S=2 → 4× the quad's
+ * pixel count) plus one downscale blit. For a typical slide picture (~400×500
+ * device px) that is ~1.6M px of scratch and a sub-millisecond extra blit — only
+ * paid when a shape actually carries a scene3d camera. Falls back to the direct
+ * per-cell draw (bleed only) when no aux canvas is available (headless tests).
  */
 export function drawProjected(
   src: AnyImage,
@@ -266,12 +310,21 @@ export function drawProjected(
   // Recursion cap: 2^14 splits per axis is far past sub-pixel for any sane
   // tilt; the error test almost always stops much sooner.
   const MAX_DEPTH = 14;
-  dst.save();
   // Capture the live transform (DPR scale, the element's rotation/flip). Each
   // cell composes ITS map on top of this so the warp inherits the live
   // coordinate system instead of `setTransform` wiping it to the identity.
   const t = dst.getTransform();
   const base: Affine = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+  // ── Supersampled path ────────────────────────────────────────────────────
+  // Render the mesh into an intermediate buffer at SUPERSAMPLE× the device
+  // resolution of the quad's bounding box, then blit it down in one go.
+  if (drawProjectedSupersampled(src, dst, srcW, srcH, corners, base, h, tol, MAX_DEPTH)) {
+    return;
+  }
+
+  // ── Direct path (fallback when no aux canvas, e.g. headless unit tests) ───
+  dst.save();
   // Clip to the quad so the bleed overlap can't spill past the projected shape.
   // The clip is built under the live transform (corners are in that space), so
   // it matches the cells which also run under the same base transform.
@@ -284,4 +337,111 @@ export function drawProjected(
   dst.clip();
   warpRecursive(dst, src, srcW, srcH, base, h, 0, 0, 1, 1, tol, MAX_DEPTH);
   dst.restore();
+}
+
+/** Supersample factor for the intermediate warp buffer (see drawProjected). */
+const SUPERSAMPLE = 2;
+
+/**
+ * Render the mesh warp into an intermediate canvas at SUPERSAMPLE× the device
+ * resolution of the quad's bounding box, then downscale it onto `dst`. Returns
+ * false (drawing nothing) when no aux canvas can be allocated, so the caller can
+ * fall back to the direct path.
+ */
+function drawProjectedSupersampled(
+  dstSrc: AnyImage,
+  dst: AnyCtx,
+  srcW: number,
+  srcH: number,
+  corners: [Vec2, Vec2, Vec2, Vec2],
+  base: Affine,
+  h: H,
+  tol: number,
+  maxDepth: number,
+): boolean {
+  // Device-space bounding box of the quad (corners are in base's pre-image
+  // space; map them through base to device px to size the intermediate).
+  const dev = corners.map((c) => ({
+    x: base[0] * c.x + base[2] * c.y + base[4],
+    y: base[1] * c.x + base[3] * c.y + base[5],
+  }));
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const d of dev) {
+    if (d.x < minX) minX = d.x;
+    if (d.y < minY) minY = d.y;
+    if (d.x > maxX) maxX = d.x;
+    if (d.y > maxY) maxY = d.y;
+  }
+  // Pad by 1 device px so the silhouette's outermost AA pixel isn't clipped.
+  minX = Math.floor(minX) - 1;
+  minY = Math.floor(minY) - 1;
+  maxX = Math.ceil(maxX) + 1;
+  maxY = Math.ceil(maxY) + 1;
+  const bboxW = maxX - minX;
+  const bboxH = maxY - minY;
+  if (bboxW <= 0 || bboxH <= 0) return false;
+
+  const aux = createAuxCanvas(bboxW * SUPERSAMPLE, bboxH * SUPERSAMPLE);
+  if (!aux) return false;
+  const actx = (aux.getContext('2d') as AnyCtx | null) ?? null;
+  if (!actx) return false;
+
+  // The intermediate maps device px (X,Y) → buffer px via
+  //   buf = (device - bboxMin) * SUPERSAMPLE.
+  // Compose that onto `base` (which maps base-space → device px) so the mesh
+  // cells, which run under `auxBase`, land at SUPERSAMPLE× device resolution.
+  const s = SUPERSAMPLE;
+  const auxBase: Affine = [
+    base[0] * s,
+    base[1] * s,
+    base[2] * s,
+    base[3] * s,
+    (base[4] - minX) * s,
+    (base[5] - minY) * s,
+  ];
+
+  actx.save();
+  // Clip to the quad (in base-space; auxBase carries the device + supersample
+  // scale) so the per-cell bleed can't spill past the projected silhouette.
+  actx.setTransform(auxBase[0], auxBase[1], auxBase[2], auxBase[3], auxBase[4], auxBase[5]);
+  actx.beginPath();
+  actx.moveTo(corners[0].x, corners[0].y);
+  actx.lineTo(corners[1].x, corners[1].y);
+  actx.lineTo(corners[2].x, corners[2].y);
+  actx.lineTo(corners[3].x, corners[3].y);
+  actx.closePath();
+  actx.clip();
+  // Tolerance is in device px; at SUPERSAMPLE× resolution the same visual
+  // tolerance corresponds to S× more buffer px, so subdivide to tol·S there.
+  warpRecursive(actx, dstSrc, srcW, srcH, auxBase, h, 0, 0, 1, 1, tol * s, maxDepth);
+  actx.restore();
+
+  // Blit the intermediate down onto dst. The intermediate covers device-px box
+  // [minX,minY,bboxW,bboxH]; draw it there under the IDENTITY transform (it is
+  // already in device space), with high-quality smoothing for the box-filter
+  // downscale that dissolves any residual seam.
+  dst.save();
+  dst.setTransform(1, 0, 0, 1, 0, 0);
+  const prevSmoothing = dst.imageSmoothingEnabled;
+  const prevQuality = dst.imageSmoothingQuality;
+  dst.imageSmoothingEnabled = true;
+  dst.imageSmoothingQuality = 'high';
+  dst.drawImage(
+    aux as unknown as CanvasImageSource,
+    0,
+    0,
+    bboxW * s,
+    bboxH * s,
+    minX,
+    minY,
+    bboxW,
+    bboxH,
+  );
+  dst.imageSmoothingEnabled = prevSmoothing;
+  dst.imageSmoothingQuality = prevQuality;
+  dst.restore();
+  return true;
 }

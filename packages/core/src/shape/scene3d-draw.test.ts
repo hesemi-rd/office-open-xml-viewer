@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { drawProjected } from './scene3d-draw';
 import { computeScene3dQuad, type Vec2 } from './scene3d-camera';
 
@@ -13,6 +13,8 @@ class RecordingCtx {
   clips = 0;
   savedDepth = 0;
   maxSavedDepth = 0;
+  imageSmoothingEnabled = true;
+  imageSmoothingQuality: 'low' | 'medium' | 'high' = 'low';
 
   save(): void {
     this.savedDepth++;
@@ -115,6 +117,88 @@ describe('drawProjected', () => {
     ];
     drawProjected(fakeImage, asCtx(ctx), 100, 80, corners);
     expect(ctx.draws.length).toBe(0);
+  });
+
+  // ── Supersampled path ──────────────────────────────────────────────────────
+  // When an aux canvas IS available (browser / OffscreenCanvas), drawProjected
+  // renders the mesh into an intermediate buffer at 2× device resolution and
+  // blits it down in one pass — this is what dissolves the per-cell seams. We
+  // stub OffscreenCanvas so the node test can exercise that path and assert its
+  // contract: the mesh cells land on the AUX ctx, and dst receives exactly one
+  // downscale drawImage at the identity transform.
+  describe('supersampled path (aux canvas available)', () => {
+    afterEach(() => {
+      // Remove the stub so the other tests keep exercising the fallback path.
+      delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+    });
+
+    function installAuxStub(): { dst: RecordingCtx; auxes: RecordingCtx[] } {
+      const auxes: RecordingCtx[] = [];
+      class FakeOffscreen {
+        constructor(
+          public width: number,
+          public height: number,
+        ) {}
+        getContext(): RecordingCtx {
+          const c = new RecordingCtx();
+          auxes.push(c);
+          return c;
+        }
+      }
+      (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas = FakeOffscreen;
+      return { dst: new RecordingCtx(), auxes };
+    }
+
+    it('warps into the aux buffer and blits once onto dst (identity transform)', () => {
+      const { dst, auxes } = installAuxStub();
+      const corners: [Vec2, Vec2, Vec2, Vec2] = [
+        { x: 30, y: 0 },
+        { x: 70, y: 0 },
+        { x: 100, y: 80 },
+        { x: 0, y: 80 },
+      ];
+      drawProjected(fakeImage, asCtx(dst), 100, 80, corners, 0.5);
+
+      // One aux canvas allocated; its ctx carries the mesh cells.
+      expect(auxes.length).toBe(1);
+      expect(auxes[0].draws.length).toBeGreaterThan(4); // perspective → many cells
+      expect(auxes[0].clips).toBe(1); // quad clip on the aux buffer
+
+      // dst receives exactly the single downscale blit, at the identity transform.
+      expect(dst.draws.length).toBe(1);
+      const [a, b, c, d] = dst.transforms[dst.transforms.length - 1];
+      expect([a, b, c, d]).toEqual([1, 0, 0, 1]);
+      // The blit downscales the 2× buffer (sw,sh) into the 1× bbox (dw,dh).
+      const blit = dst.draws[0];
+      expect(blit.sw).toBeCloseTo(blit.dw * 2, 5);
+      expect(blit.sh).toBeCloseTo(blit.dh * 2, 5);
+    });
+
+    it('identity quad warped+blitted-back reproduces the source rect (within 1px)', () => {
+      // Contract for an identity camera: the source rectangle, warped through a
+      // quad equal to its own bounds and blitted back, must land on the same
+      // device rect. We verify the geometry end-to-end through the aux buffer:
+      // the downscale blit covers exactly the source's device bbox.
+      const { dst, auxes } = installAuxStub();
+      // A genuinely rectangular identity quad (source bounds → same bounds).
+      const rect: [Vec2, Vec2, Vec2, Vec2] = [
+        { x: 0, y: 0 },
+        { x: 100, y: 0 },
+        { x: 100, y: 80 },
+        { x: 0, y: 80 },
+      ];
+      drawProjected(fakeImage, asCtx(dst), 100, 80, rect, 0.5);
+      expect(auxes.length).toBe(1);
+      // Identity quad → single un-subdivided cell in the aux buffer.
+      expect(auxes[0].draws.length).toBe(1);
+      // Downscale blit back onto dst at identity covers ~the 100×80 source bbox
+      // (plus the 1px AA pad on each side → ≤102×82).
+      const blit = dst.draws[0];
+      expect(blit.dw).toBeGreaterThanOrEqual(100);
+      expect(blit.dw).toBeLessThanOrEqual(103);
+      expect(blit.dh).toBeGreaterThanOrEqual(80);
+      expect(blit.dh).toBeLessThanOrEqual(83);
+    });
   });
 
   it('end-to-end: projects a camera quad onto cells covering the image', () => {
