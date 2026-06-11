@@ -1194,7 +1194,8 @@ fn parse_paragraph(
             .or_else(|| theme.resolve_font_ref(base_run.font_family_east_asia.clone())),
         outline_level: base_para.outline_level,
         // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
-        // chain + direct pPr. Recorded only in Phase 0.
+        // chain + direct pPr. The renderer reads it as the paragraph base
+        // direction for the UAX#9 reordering and alignment-edge passes.
         bidi: base_para.bidi,
     }
 }
@@ -1557,9 +1558,10 @@ fn parse_run_inner(
     let double_strikethrough = fmt.dstrike.unwrap_or(false);
     let highlight = fmt.highlight.clone();
     // RTL / complex-script properties (ECMA-376 §17.3.2.30 / §17.3.2.26 /
-    // §17.3.2.39). Phase 0: recorded on the run, not yet used for layout. The
-    // cs font goes through the same theme-ref resolution as the ascii/eastAsia
-    // axes so consumers receive a literal family.
+    // §17.3.2.39). The renderer uses `rtl` to drive complex-script shaping and
+    // the UAX#9 reordering / direction-mirroring pass. The cs font goes through
+    // the same theme-ref resolution as the ascii/eastAsia axes so consumers
+    // receive a literal family.
     let rtl = fmt.rtl;
     let cs_toggle = fmt.cs_toggle;
     let font_family_cs = theme.resolve_font_ref(fmt.font_family_cs.clone());
@@ -3245,7 +3247,8 @@ fn parse_table(
         .unwrap_or((None, None));
 
     // ECMA-376 §17.4.1 w:bidiVisual — RTL (visual) column order. On-off toggle.
-    // Phase 0: recorded only; column-order resolution is deferred.
+    // The renderer mirrors the grid (logical column 0 rightmost) and flips
+    // per-cell left/right borders when this is set.
     let bidi_visual = tbl_pr.and_then(|p| bool_prop(p, "bidiVisual"));
 
     DocTable {

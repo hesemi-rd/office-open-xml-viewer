@@ -164,8 +164,11 @@ export interface DocParagraph {
   defaultFontFamily?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
-   * `false` = explicitly LTR, absent = unspecified (inherit). Phase 0 of RTL
-   * support: recorded only; alignment/column-order resolution is deferred.
+   * `false` = explicitly LTR, absent = unspecified (inherit). The renderer uses
+   * this as the paragraph base direction: it seeds the UAX#9 reordering pass
+   * (`computeLineVisualOrder`), swaps the left/right indents, resolves the
+   * `w:jc` start/end edges (`resolveAlignEdge`), and lays out lines from the
+   * right.
    */
   bidi?: boolean;
 }
@@ -363,8 +366,10 @@ export interface DocxTextRun {
    *  tracked changes appear inline. */
   revision?: RunRevision;
   /** ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
-   *  `true` = RTL, `false` = explicitly LTR, absent = unspecified.
-   *  Phase 0: recorded only; glyph-order resolution is deferred. */
+   *  `true` = RTL, `false` = explicitly LTR, absent = unspecified. The renderer
+   *  treats a `true` run as RTL for the UAX#9 pass (it forces complex-script
+   *  shaping and marks the segment so `computeLineVisualOrder` reorders it), and
+   *  draws the slice with `ctx.direction = 'rtl'` so Canvas mirrors the glyphs. */
   rtl?: boolean;
   /** ECMA-376 §17.3.2.7 `<w:cs/>` — complex-script run toggle: cs formatting
    *  applies to ALL characters of the run (§17.3.2.26). Distinct from
@@ -468,8 +473,8 @@ export interface DocTable {
   /**
    * ECMA-376 §17.4.1 `<w:bidiVisual>` — render columns in right-to-left
    * (visual) order. `true` = RTL columns, `false` = explicitly LTR, absent =
-   * unspecified. Phase 0 of RTL support: recorded only; column-order
-   * resolution is deferred.
+   * unspecified. When `true` the renderer mirrors the grid so logical column 0
+   * is placed rightmost, and flips per-cell left/right borders accordingly.
    */
   bidiVisual?: boolean;
 }

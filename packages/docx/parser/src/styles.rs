@@ -27,8 +27,9 @@ pub struct RunFmt {
     /// Highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     pub highlight: Option<String>,
     /// ECMA-376 §17.3.2.30 w:rtl — this run contains complex-script (RTL)
-    /// content. Phase 0 of RTL support only records the flag; alignment /
-    /// glyph-order resolution is deferred to a later PR.
+    /// content. Resolved through the style chain onto the run model, where the
+    /// renderer uses it to force complex-script shaping and feed the UAX#9
+    /// reordering / `ctx.direction = 'rtl'` mirroring pass.
     pub rtl: Option<bool>,
     /// ECMA-376 §17.3.2.7 `<w:cs/>` — treat the run as complex-script,
     /// applying the cs formatting axis to ALL its characters (§17.3.2.26).
@@ -102,8 +103,9 @@ pub struct ParaFmt {
     /// code uses this to infer that behavior.
     pub outline_level: Option<u32>,
     /// ECMA-376 §17.3.1.6 w:bidi — right-to-left paragraph (text and column
-    /// order flow RTL). Phase 0 only records the flag; alignment start/end
-    /// resolution is deferred to a later PR.
+    /// order flow RTL). Resolved through the style chain onto the paragraph
+    /// model, where the renderer uses it as the base direction for UAX#9
+    /// reordering, indent swapping, and `w:jc` start/end edge resolution.
     pub bidi: Option<bool>,
 }
 
@@ -649,8 +651,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     fmt.widow_control = bool_prop(ppr, "widowControl");
 
     // bidi — right-to-left paragraph (ECMA-376 §17.3.1.6). On-off toggle:
-    // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Phase 0
-    // records the flag only; alignment direction resolution is deferred.
+    // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Carried to
+    // the model as the paragraph base direction; the renderer feeds it to the
+    // UAX#9 pass and to start/end alignment-edge resolution.
     fmt.bidi = bool_prop(ppr, "bidi");
 
     // outlineLvl — 0..8 marks this paragraph (or its style) as a heading.

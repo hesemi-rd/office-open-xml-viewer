@@ -236,8 +236,9 @@ pub struct DocParagraph {
     pub outline_level: Option<u32>,
     /// ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `Some(true)` =
     /// RTL, `Some(false)` = explicitly LTR, `None` = unspecified (inherit).
-    /// Phase 0 of RTL support: recorded only; alignment/column-order resolution
-    /// is deferred to a later PR.
+    /// The renderer consumes this as the paragraph base direction: it seeds the
+    /// UAX#9 reordering pass, swaps the left/right indents, and resolves the
+    /// `w:jc` start/end alignment edges against it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi: Option<bool>,
 }
@@ -587,7 +588,9 @@ pub struct TextRun {
     pub revision: Option<RunRevision>,
     /// ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
     /// `Some(true)` = RTL, `Some(false)` = explicitly LTR, `None` = unspecified.
-    /// Phase 0: recorded only; glyph-order resolution is deferred.
+    /// The renderer marks a `Some(true)` run as RTL for the UAX#9 pass (forcing
+    /// complex-script shaping) and draws it with `ctx.direction = 'rtl'` so the
+    /// glyph order is mirrored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtl: Option<bool>,
     /// ECMA-376 §17.3.2.7 `<w:cs/>` — complex-script run toggle: cs
@@ -760,8 +763,9 @@ pub struct DocTable {
     pub width_pct: Option<f64>,
     /// ECMA-376 §17.4.1 `<w:bidiVisual>` — render columns in right-to-left
     /// (visual) order. `Some(true)` = RTL columns, `Some(false)` = explicitly
-    /// LTR, `None` = unspecified. Phase 0: recorded only; column-order
-    /// resolution is deferred to a later PR.
+    /// LTR, `None` = unspecified. When `Some(true)` the renderer mirrors the
+    /// grid so logical column 0 is placed rightmost and flips the per-cell
+    /// left/right borders accordingly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi_visual: Option<bool>,
 }
