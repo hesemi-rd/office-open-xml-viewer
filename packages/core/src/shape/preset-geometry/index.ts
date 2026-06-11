@@ -23,6 +23,40 @@ export function hasPreset(geom: string): boolean {
   return geom.toLowerCase() in PRESETS;
 }
 
+/**
+ * Append a preset geometry's outline to the CURRENT path of `ctx` (no
+ * `beginPath` / `fill` / `stroke` — the caller owns those). Every `<path>` of the
+ * preset is emitted as its own subpath, so the result is suitable for use as a
+ * clip region, a silhouette to stroke, or an even-odd cut-out.
+ *
+ * This is the geometry-only counterpart of {@link renderPresetShape}: it shares
+ * the same evaluator + path executor, so a picture clipped by `<a:prstGeom>`
+ * (ECMA-376 §20.1.9.18 — a picture's preset geometry is its clip silhouette) is
+ * traced by exactly the same code that draws the equivalent `<p:sp>`. Returns
+ * false when the preset name is unknown so the caller can fall back to a rect.
+ *
+ * Note: fill modifiers (`lighten` / `darken`) and multi-path highlight overlays
+ * are irrelevant to a silhouette, so every path is emitted regardless of its
+ * `fill` mode — the union of all subpaths is the shape's outer outline.
+ */
+export function buildPresetGeometryPath(
+  ctx: CanvasRenderingContext2D,
+  geom: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  adj: (number | null | undefined)[] = [],
+): boolean {
+  const def = PRESETS[geom.toLowerCase()];
+  if (!def) return false;
+  const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
+  for (const path of def.paths) {
+    applyPresetPath(ctx, path, evaluator, x, y, w, h);
+  }
+  return true;
+}
+
 // A wedge callout's tail only protrudes when its tip is OUTSIDE the body. When
 // the author drags the tip into the body (e.g. to hide the tail), PowerPoint
 // renders just the base shape — no inward dent. The literal ECMA-376 preset

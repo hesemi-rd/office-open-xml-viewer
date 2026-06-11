@@ -49,6 +49,7 @@ export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/prese
 export {
   renderPresetShape,
   hasPreset,
+  buildPresetGeometryPath,
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
@@ -60,6 +61,18 @@ export {
   type PaintShape,
   type EffectBBox,
 } from './shape/effects';
+// DrawingML 3D camera perspective projection (Phase A — planar homography).
+// ECMA-376 §20.1.5.5 (camera) / §20.1.5.11 (rot). sp3d / lightRig shading is
+// Phase B and not implemented here.
+export {
+  computeScene3dQuad,
+  isScene3dNonIdentity,
+  type CameraInput,
+  type RotInput,
+  type Scene3dQuad,
+  type Vec2,
+} from './shape/scene3d-camera';
+export { drawProjected } from './shape/scene3d-draw';
 export {
   renderSparkline,
   type SparklineKind,

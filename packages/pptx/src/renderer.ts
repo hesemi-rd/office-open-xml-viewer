@@ -34,8 +34,14 @@ import {
   applyReflection,
   renderPresetShape,
   hasPreset,
+  buildPresetGeometryPath,
   getConnectorAnchors,
+  computeScene3dQuad,
+  isScene3dNonIdentity,
+  drawProjected,
+  createAuxCanvas,
 } from '@silurus/ooxml-core';
+import type { CameraInput, Vec2 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import {
@@ -1989,6 +1995,65 @@ function renderTextBody(
 const IMAGE_BITMAP_CACHE_MAX = 256;
 const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
 
+/**
+ * Project a shape/picture body through a DrawingML 3D camera (scene3d, Phase A).
+ *
+ * ECMA-376 §20.1.5.5: the camera acts in the shape's *local* space, ahead of
+ * the shape's 2D placement. We therefore render the body — normally drawn at
+ * (x,y,w,h) in `target`'s coordinate space — into a separate device-resolution
+ * offscreen canvas sized to the w×h box, then warp that bitmap onto `target`
+ * with `drawProjected` (a piecewise-affine homography). Because `target` already
+ * carries the element's 2D rotation/flip transform when this runs, the
+ * projection composes *inside* that transform, exactly matching "scene3d first,
+ * then the 2D xfrm" ordering.
+ *
+ * `paintBody(octx, ox, oy, ow, oh)` paints the body (clip + fill/stroke/image)
+ * into the offscreen context at the given local rect. Returns true if it
+ * projected, false when no offscreen canvas is available (headless) — callers
+ * then fall back to painting directly.
+ */
+function projectScene3dPaint(
+  target: CanvasRenderingContext2D,
+  camera: CameraInput,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  paintBody: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void,
+): boolean {
+  if (w <= 0 || h <= 0) return false;
+  // Device scale folded into target's current transform, so the offscreen is
+  // rasterised at the same pixel density as the live canvas (no blur on HiDPI).
+  const tf = target.getTransform();
+  const det = Math.abs(tf.a * tf.d - tf.b * tf.c);
+  const devScale = det > 0 ? Math.sqrt(det) : 1;
+  const ow = Math.max(1, Math.ceil(w * devScale));
+  const oh = Math.max(1, Math.ceil(h * devScale));
+  const aux = createAuxCanvas(ow, oh);
+  if (!aux) return false;
+  const octx = aux.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!octx) return false;
+
+  // Paint the body into the offscreen with the origin at (0,0); scale device px.
+  octx.save();
+  octx.scale(devScale, devScale);
+  paintBody(octx, 0, 0, w, h);
+  octx.restore();
+
+  // Project the w×h box and offset the quad to the element's (x,y).
+  const quad = computeScene3dQuad(camera, w, h);
+  const corners = quad.corners.map((c) => ({ x: x + c.x, y: y + c.y })) as [
+    Vec2,
+    Vec2,
+    Vec2,
+    Vec2,
+  ];
+  // drawProjected runs in target's CSS-px space (the device scale lives in the
+  // target transform), warping the ow×oh offscreen onto the CSS-space quad.
+  drawProjected(aux as unknown as CanvasImageSource, target, ow, oh, corners);
+  return true;
+}
+
 function getCachedBitmap(dataUrl: string): Promise<ImageBitmap> {
   const existing = imageBitmapCache.get(dataUrl);
   if (existing) {
@@ -2053,45 +2118,207 @@ async function renderPicture(
       };
     }
 
-    // Apply the picture clip (roundRect / custGeom) to an arbitrary target.
-    // ECMA-376 §20.1.9.8: a `<p:pic>` may carry `<a:custGeom>` defining a
-    // non-rectangular silhouette the bitmap is trimmed to (e.g. a laptop frame).
-    const applyClip = (target: CanvasRenderingContext2D): void => {
-      if (el.clipAdjust != null) {
-        const minDim = Math.min(w, h);
-        const r = (el.clipAdjust / 100000) * minDim;
-        target.beginPath();
-        target.roundRect(x, y, w, h, r);
-        target.clip();
-      } else if (el.custGeom && el.custGeom.length > 0) {
-        buildCustomPath(target, el.custGeom, x, y, w, h);
+    // Trace the picture's clip silhouette (roundRect / custGeom / plain rect).
+    // Shared by the clip and the border / contour strokes so the outline always
+    // hugs the exact silhouette the bitmap is trimmed to. ECMA-376 §20.1.9.8:
+    // a `<p:pic>` may carry `<a:custGeom>` (e.g. a laptop frame) or a roundRect
+    // preset clip.
+    //
+    // `...Subpath` appends the silhouette as a fresh subpath of the CURRENT path
+    // (no `beginPath`). Used when combining the silhouette with an enclosing
+    // rect for an even-odd "outside" clip region.
+    const tracePictureSilhouetteSubpath = (
+      target: CanvasRenderingContext2D,
+      cx: number,
+      cy: number,
+      cw: number,
+      ch: number,
+    ): void => {
+      if (el.custGeom && el.custGeom.length > 0) {
+        // custGeom takes priority over prstGeom (ECMA-376 §20.1.9.8).
+        buildCustomPath(target, el.custGeom, cx, cy, cw, ch);
+      } else if (el.prstGeom) {
+        // §20.1.9.18 — the picture's preset geometry is its clip silhouette.
+        // Driven by the shared preset-geometry engine (roundRect, ellipse, and
+        // the other 184 presets), with the avLst adjust handles; the engine
+        // substitutes each preset's declared default for any omitted guide.
+        const ok = buildPresetGeometryPath(
+          target,
+          el.prstGeom,
+          cx,
+          cy,
+          cw,
+          ch,
+          el.prstAdjust ?? [],
+        );
+        // Unknown preset name → fall back to a plain rectangle so the bitmap
+        // still draws (matches the pre-generalisation rect fallback).
+        if (!ok) target.rect(cx, cy, cw, ch);
+      } else {
+        target.rect(cx, cy, cw, ch);
+      }
+    };
+
+    const tracePictureSilhouette = (
+      target: CanvasRenderingContext2D,
+      cx: number,
+      cy: number,
+      cw: number,
+      ch: number,
+    ): void => {
+      target.beginPath();
+      tracePictureSilhouetteSubpath(target, cx, cy, cw, ch);
+    };
+
+    // Apply the picture clip (roundRect / custGeom) at an arbitrary local rect.
+    // The rect is parameterised so the same clip applies to the live draw
+    // (x,y,w,h) and to the scene3d offscreen (0,0,w,h). A plain rectangle needs
+    // no clip (the bitmap already fills the rect), so we only clip when there
+    // is an actual non-rectangular / rounded silhouette.
+    const applyClipAt = (
+      target: CanvasRenderingContext2D,
+      cx: number,
+      cy: number,
+      cw: number,
+      ch: number,
+    ): void => {
+      if (el.prstGeom || (el.custGeom && el.custGeom.length > 0)) {
+        tracePictureSilhouette(target, cx, cy, cw, ch);
         target.clip();
       }
+    };
+
+    // Stroke the picture's silhouette with the `<a:ln>` border and/or the
+    // `<a:sp3d>` contour edge. Drawn *after* the bitmap inside `paintImageAt`,
+    // so when scene3d is active the strokes are warped through the same camera
+    // homography and effectLst (reflection / soft edge) re-paints them too —
+    // matching PowerPoint, which applies the 3D transform and effects to the
+    // framed picture as a whole.
+    const strokePictureEdges = (
+      target: CanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
+      // 1) a:ln picture border (ECMA-376 §20.1.2.2.24). Centre-aligned stroke,
+      //    the Canvas default — PowerPoint draws the picture frame straddling
+      //    the silhouette edge.
+      if (el.stroke) {
+        target.save();
+        applyStroke(target, el.stroke, scale);
+        tracePictureSilhouette(target, ox, oy, ow, oh);
+        target.stroke();
+        target.restore();
+      }
+      // 2) sp3d contour edge (ECMA-376 §20.1.5.12 `contourW` / `<a:contourClr>`).
+      //    The spec's contour is the extruded 3D edge surface lit by the scene's
+      //    light rig. Phase A draws a FLAT approximation: a uniform-width outline
+      //    in the contour colour, with no bevel shading or light-rig response
+      //    (bevelT/bevelB shading remains Phase B — see the Sp3d type doc).
+      //    Position assumption: the contour grows OUTWARD from the front face
+      //    in 3D, so Phase A draws it as an OUTSIDE-aligned stroke (the framed
+      //    edge sits just beyond the picture, not over the image). Canvas has no
+      //    outside-stroke mode, so we (a) clip to the region OUTSIDE the
+      //    silhouette — traced silhouette + an enclosing rect with the even-odd
+      //    rule — then (b) stroke the silhouette at 2× width centred on the
+      //    edge; only the outer half survives the clip. When Phase B implements
+      //    the true 3D extruded edge (with bevel/light-rig shading) it replaces
+      //    this flat band.
+      const sp3d = el.sp3d;
+      if (sp3d && (sp3d.contourW ?? 0) > 0 && sp3d.contourClr) {
+        const wPx = Math.max(0.5, (sp3d.contourW as number) * scale);
+        target.save();
+        // Clip to everything OUTSIDE the silhouette: trace the silhouette plus a
+        // generously enlarged enclosing rect, filled even-odd, so the silhouette
+        // interior is excluded from the clip region.
+        target.beginPath();
+        const pad = wPx * 2 + Math.max(ow, oh);
+        target.rect(ox - pad, oy - pad, ow + 2 * pad, oh + 2 * pad);
+        tracePictureSilhouetteSubpath(target, ox, oy, ow, oh);
+        target.clip('evenodd');
+        target.beginPath();
+        tracePictureSilhouette(target, ox, oy, ow, oh);
+        target.strokeStyle = hexToRgba(sp3d.contourClr);
+        target.lineWidth = wPx * 2;
+        target.setLineDash([]);
+        target.stroke();
+        target.restore();
+      }
+    };
+
+    // scene3d (ECMA-376 §20.1.5.5, Phase A camera projection). Active only when
+    // the camera actually transforms the shape; identity/front cameras fall
+    // through to the normal flat draw. sp3d (bevel/contour/extrusion) is parsed
+    // but NOT rendered in Phase A — see the TS Sp3d type doc.
+    const scene3d = el.scene3d && isScene3dNonIdentity(el.scene3d.camera) ? el.scene3d : null;
+
+    // Paint the picture body at an arbitrary local rect (origin-relative when
+    // projecting, absolute otherwise) so it can target either the live ctx or
+    // the scene3d offscreen.
+    const paintImageAt = (
+      target: CanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
+      target.save();
+      applyClipAt(target, ox, oy, ow, oh);
+      if (crop) {
+        target.drawImage(bitmap, crop.sx, crop.sy, crop.sw, crop.sh, ox, oy, ow, oh);
+      } else {
+        target.drawImage(bitmap, ox, oy, ow, oh);
+      }
+      target.restore();
+      // Border (a:ln) and 3D contour edge (sp3d) are stroked AFTER the bitmap so
+      // they sit on top of / around the image, and — because this runs inside
+      // paintImageAt — they ride through the scene3d projection and effectLst
+      // re-paints (reflection / soft edge) along with the picture body.
+      strokePictureEdges(target, ox, oy, ow, oh);
     };
 
     // Draw the (clipped, optionally cropped) bitmap into a target context. This
     // is the picture "body" that the effect helpers re-paint onto aux canvases,
     // so reflections/soft edges mirror the real image rather than a flat shape.
+    // When scene3d is active the body is warped through the camera homography
+    // first; effects then composite over the projected result (PowerPoint
+    // applies effects after the 3D transform).
     const paintImage = (target: CanvasRenderingContext2D): void => {
-      target.save();
-      applyClip(target);
-      if (crop) {
-        target.drawImage(bitmap, crop.sx, crop.sy, crop.sw, crop.sh, x, y, w, h);
-      } else {
-        target.drawImage(bitmap, x, y, w, h);
+      if (scene3d) {
+        const ok = projectScene3dPaint(target, scene3d.camera, x, y, w, h, paintImageAt);
+        if (ok) return;
+        // Headless fallback: draw flat.
       }
-      target.restore();
+      paintImageAt(target, x, y, w, h);
     };
 
     // Flat opaque silhouette of the clipped picture rectangle, used as the mask
     // for innerShdw / softEdge. Falls back to the bounding rect when the picture
     // is a plain rectangle (no clip path).
-    const paintMask = (target: CanvasRenderingContext2D, color: string): void => {
+    const paintMaskAt = (
+      target: CanvasRenderingContext2D,
+      color: string,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
       target.save();
-      applyClip(target);
+      applyClipAt(target, ox, oy, ow, oh);
       target.fillStyle = color;
-      target.fillRect(x, y, w, h);
+      target.fillRect(ox, oy, ow, oh);
       target.restore();
+    };
+
+    const paintMask = (target: CanvasRenderingContext2D, color: string): void => {
+      if (scene3d) {
+        const ok = projectScene3dPaint(target, scene3d.camera, x, y, w, h, (octx, ox, oy, ow, oh) =>
+          paintMaskAt(octx, color, ox, oy, ow, oh),
+        );
+        if (ok) return;
+      }
+      paintMaskAt(target, color, x, y, w, h);
     };
 
     // ── effectLst (§19.3.1.37 routes p:pic's spPr through CT_ShapeProperties,

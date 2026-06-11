@@ -1,0 +1,22 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`computeScene3dQuad > snapshot — sample-11 slide-3 camera (perspectiveRelaxed lat330 lon20 rev347) 1`] = `
+[
+  {
+    "x": 76.51,
+    "y": 23.83,
+  },
+  {
+    "x": 400,
+    "y": 25.48,
+  },
+  {
+    "x": 377.39,
+    "y": 276.17,
+  },
+  {
+    "x": 0,
+    "y": 239.31,
+  },
+]
+`;

@@ -17,6 +17,13 @@ export type {
   ChartElement,
   MediaElement,
   TextRect,
+  // 3D scene types (reachable via ShapeElement.scene3d / .sp3d).
+  Scene3d,
+  Camera3d,
+  Rot3d,
+  LightRig,
+  Sp3d,
+  Bevel3d,
   // Fill / stroke variants (reachable via ShapeElement.fill / .stroke etc.).
   Fill,
   SolidFill,

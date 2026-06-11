@@ -512,12 +512,15 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Dash / dot styles | ✅ |
 | | Arrow heads (`headEnd` / `tailEnd`) | ✅ |
 | | Compound / double lines (`<a:ln cmpd="dbl|thinThick|thickThin|tri">` — straight connectors) | ✅ |
+| | Picture border (`a:ln` on `p:pic`) — stroked along the clip silhouette | ✅ |
 | **Shape effects** | Drop shadow (`outerShdw`) | ✅ |
 | | Glow (`glow` — radius + colour) | ✅ |
 | | Inner shadow (`innerShdw`) | ✅ |
 | | Soft edge (`softEdge`) | ✅ |
 | | Reflection (`reflection`) | ✅ |
-| | Bevel / 3D extrusion | ❌ |
+| | 3D camera / perspective projection (`scene3d` camera + `rot`) on pictures | ✅ |
+| | 3D contour edge (`sp3d` `contourW` / `contourClr`) on pictures — flat approximation, no bevel shading | ⚠️ |
+| | Bevel / 3D extrusion (`sp3d` `bevelT` / `bevelB` / `extrusionH`) | ⚠️ parsed; rendering planned |
 | **Text — characters** | Bold, italic, strikethrough (incl. `dblStrike`) | ✅ |
 | | Underline styles (`sng` / `dbl` / `dotted` / `dash` / `dashLong` / `dotDash` / `dotDotDash` / `wavy` / `wavyDbl` and `*Heavy` variants) | ✅ |
 | | Per-run underline colour (`uFill` / `uFillTx`) | ✅ |

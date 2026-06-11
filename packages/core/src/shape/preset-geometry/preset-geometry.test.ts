@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderPresetShape, hasPreset } from './index';
+import { renderPresetShape, hasPreset, buildPresetGeometryPath } from './index';
 
 /**
  * Records every path vertex the engine emits so we can assert on the resulting
@@ -124,6 +124,46 @@ describe('renderPresetShape (core preset-geometry engine)', () => {
       () => {},
     );
     expect(ok).toBe(false);
+  });
+
+  // buildPresetGeometryPath — the geometry-only entry used for picture clip
+  // silhouettes (ECMA-376 §20.1.9.18). It emits each preset path as a subpath
+  // of the current path with no fill/stroke.
+  describe('buildPresetGeometryPath (picture clip silhouette)', () => {
+    it('builds an ellipse spanning the full box for prst="ellipse"', () => {
+      const { ctx, points } = makeRecorder();
+      const ok = buildPresetGeometryPath(ctx, 'ellipse', 10, 20, 200, 300);
+      expect(ok).toBe(true);
+      // The recorder turns ctx.ellipse into its 4 axis-extreme points. The
+      // ellipse must be inscribed in the bbox: x∈{10,210}, y∈{20,320}, centred.
+      const { xs, ys } = distinct(points);
+      expect(Math.min(...xs)).toBe(10);
+      expect(Math.max(...xs)).toBe(210);
+      expect(Math.min(...ys)).toBe(20);
+      expect(Math.max(...ys)).toBe(320);
+      // The corners of the bbox must NOT be on the path (an ellipse, not a rect).
+      const hasCorner = points.some((p) => Math.round(p.x) === 10 && Math.round(p.y) === 20);
+      expect(hasCorner).toBe(false);
+    });
+
+    it('builds a rounded-rect silhouette whose corner radius tracks the adjust', () => {
+      // roundRect's rounded corners pull the path inward from the box corners by
+      // the radius; a larger adjust → vertices further from the corner.
+      const inset = (adj: number) => {
+        const { ctx, points } = makeRecorder();
+        buildPresetGeometryPath(ctx, 'roundRect', 0, 0, 200, 200, [adj]);
+        // Smallest non-zero x touched along the top edge ≈ corner radius.
+        return Math.min(...points.map((p) => Math.round(p.x)).filter((x) => x > 0));
+      };
+      expect(inset(40000)).toBeGreaterThan(inset(10000));
+    });
+
+    it('returns false for an unknown preset so the caller can fall back to rect', () => {
+      const { ctx, points } = makeRecorder();
+      const ok = buildPresetGeometryPath(ctx, 'totallyMadeUpShape', 0, 0, 10, 10);
+      expect(ok).toBe(false);
+      expect(points.length).toBe(0);
+    });
   });
 
   it('honours an explicit adjust value (parallelogram skew)', () => {

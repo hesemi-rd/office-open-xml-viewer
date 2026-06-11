@@ -691,6 +691,115 @@ struct TextRect {
     height: i64,
 }
 
+/// DrawingML 3D rotation in sphere coordinates — ECMA-376 §20.1.5.11
+/// (`CT_SphereCoords`). All three angles are stored in **degrees** (the XML
+/// carries 60000ths of a degree; we divide once here). Per the spec, `lat` and
+/// `lon` are latitude/longitude and `rev` is the revolution about the resulting
+/// view axis.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+struct Rot3d {
+    /// Latitude — rotation about the horizontal (X) axis, degrees.
+    lat: f64,
+    /// Longitude — rotation about the vertical (Y) axis, degrees.
+    lon: f64,
+    /// Revolution — in-plane rotation about the view (Z) axis, degrees.
+    rev: f64,
+}
+
+/// `<a:camera>` — ECMA-376 §20.1.5.5 (`CT_Camera`). Defines the camera that
+/// views the 3D scene. `prst` selects one of the 62 preset cameras
+/// (§20.1.10.47); `fov`/`zoom` optionally override the preset.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Camera3d {
+    /// Preset camera name (`ST_PresetCameraType`), e.g. "perspectiveRelaxed".
+    prst: String,
+    /// Field-of-view override in **degrees** (60000ths in XML). None = use the
+    /// preset's default FOV. Only meaningful for perspective presets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fov: Option<f64>,
+    /// Zoom factor as a unit ratio (1.0 = 100%). XML carries an
+    /// `ST_PositivePercentage` (e.g. 100000 = 100%); we divide by 100000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zoom: Option<f64>,
+    /// Camera rotation override (`<a:rot>`). None = use the preset's base
+    /// orientation unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rot: Option<Rot3d>,
+}
+
+/// `<a:lightRig>` — ECMA-376 §20.1.5.9 (`CT_LightRig`). Parsed for Phase B
+/// (lighting/bevel shading); the Phase A camera renderer ignores it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LightRig {
+    /// Light-rig preset (`ST_LightRigType`), e.g. "threePt".
+    rig: String,
+    /// Light direction (`ST_LightRigDirection`): tl/t/tr/l/r/bl/b/br.
+    dir: String,
+    /// Optional rotation override of the rig.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rot: Option<Rot3d>,
+}
+
+/// `<a:scene3d>` — ECMA-376 §20.1.4.1.41 (`CT_Scene3D`). Holds the camera and
+/// light rig for a shape's 3D scene.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Scene3d {
+    camera: Camera3d,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    light_rig: Option<LightRig>,
+}
+
+/// `<a:bevel>` — ECMA-376 §20.1.5.3 (`CT_Bevel`). Lengths in EMU; `w`/`h`
+/// default to 76200 EMU and `prst` to "circle" per the schema.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Bevel3d {
+    /// Bevel width in EMU.
+    w: i64,
+    /// Bevel height in EMU.
+    h: i64,
+    /// Bevel preset name (`ST_BevelPresetType`).
+    prst: String,
+}
+
+/// `<a:sp3d>` — ECMA-376 §20.1.5.12 (`CT_Shape3D`). Parsed in full but **not
+/// rendered in Phase A** (camera-only). The contour/extrusion/bevel surfaces
+/// are Phase B; the renderer reads only `scene3d` for the perspective
+/// projection.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Sp3d {
+    /// Z position of the shape's front face in EMU (default 0).
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    z: i64,
+    /// Extrusion (depth) height in EMU (default 0).
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    extrusion_h: i64,
+    /// Contour (outline) width in EMU (default 0).
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    contour_w: i64,
+    /// Contour colour (`<a:contourClr>` child, ECMA-376 §20.1.5.12). Resolved
+    /// hex (e.g. "969696"). `None` when absent (the schema default is to reuse
+    /// the shape's line/fill colour, which the renderer does not approximate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contour_clr: Option<String>,
+    /// Preset surface material (`ST_PresetMaterialType`), default "warmMatte".
+    prst_material: String,
+    /// Top bevel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bevel_t: Option<Bevel3d>,
+    /// Bottom bevel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bevel_b: Option<Bevel3d>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ShapeElement {
@@ -768,6 +877,15 @@ struct ShapeElement {
     /// ordinary shapes (renderer falls back to the preset text rectangle).
     #[serde(skip_serializing_if = "Option::is_none")]
     text_rect: Option<TextRect>,
+    /// `<p:spPr><a:scene3d>` (ECMA-376 §20.1.4.1.41 / §20.1.5.5) — 3D camera
+    /// scene. When the camera is non-identity the renderer projects the shape's
+    /// 2D drawing through the camera homography (Phase A).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene3d: Option<Scene3d>,
+    /// `<p:spPr><a:sp3d>` (ECMA-376 §20.1.5.12) — 3D shape properties
+    /// (bevel/contour/extrusion). Parsed but not rendered in Phase A.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp3d: Option<Sp3d>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -781,9 +899,25 @@ struct PictureElement {
     flip_h: bool,
     flip_v: bool,
     data_url: String,
-    /// OOXML adj value (0–100000) for roundRect clip; None = plain rectangle
+    /// Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24
+    /// CT_LineProperties; §19.3.1.37 routes a `p:pic`'s spPr through
+    /// CT_ShapeProperties, so a picture carries the same line as a shape). Same
+    /// model as `ShapeElement.stroke`. `None` when there is no `<a:ln>` or it
+    /// resolves to `<a:noFill/>` (border explicitly suppressed).
     #[serde(skip_serializing_if = "Option::is_none")]
-    clip_adjust: Option<i64>,
+    stroke: Option<Stroke>,
+    /// `<p:spPr><a:prstGeom prst="…">` preset name (e.g. "roundRect",
+    /// "ellipse"). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
+    /// silhouette and the path its border / contour hug. None = plain rectangle
+    /// (prst="rect" or no prstGeom). custGeom takes priority when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prst_geom: Option<String>,
+    /// Adjust guides from the prstGeom `<a:avLst>` (1/1000-of-a-percent OOXML
+    /// units, in `gd@name` declaration order). Index 0 = adj/adj1, 1 = adj2, …
+    /// Empty / None → the preset's own declared defaults apply. Carried generically
+    /// so any of the 186 presets (not just roundRect) can be reconstructed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prst_adjust: Option<Vec<i64>>,
     /// ECMA-376 §20.1.8.55 a:srcRect — source image crop in 1/100000 fractions of
     /// source width/height. Only serialized when any edge is non-zero.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -814,6 +948,16 @@ struct PictureElement {
     /// Mirrored reflection from spPr > effectLst > reflection. §20.1.8.50.
     #[serde(skip_serializing_if = "Option::is_none")]
     reflection: Option<Reflection>,
+    /// `<p:spPr><a:scene3d>` (ECMA-376 §20.1.4.1.41 / §20.1.5.5). A `p:pic`'s
+    /// `spPr` is `CT_ShapeProperties` (§19.3.1.37), so 3D scenes apply to images
+    /// too. When non-identity, the renderer projects the picture through the
+    /// camera homography (Phase A).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene3d: Option<Scene3d>,
+    /// `<p:spPr><a:sp3d>` (ECMA-376 §20.1.5.12). Parsed but not rendered in
+    /// Phase A.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp3d: Option<Sp3d>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -2008,6 +2152,77 @@ fn parse_effect_lst(
         soft_edge: effect_lst.and_then(parse_soft_edge),
         reflection: effect_lst.and_then(parse_reflection),
     }
+}
+
+// ===========================
+//  3D scene parsing (scene3d / sp3d)
+// ===========================
+
+/// Parse `<a:rot>` (`CT_SphereCoords`, ECMA-376 §20.1.5.11). Angles are stored
+/// in the XML as 60000ths of a degree; we convert to degrees. All three
+/// attributes are required by the schema, but we default missing ones to 0 to
+/// stay tolerant of malformed input.
+fn parse_rot3d(rot: roxmltree::Node<'_, '_>) -> Rot3d {
+    let deg = |name: &str| attr_f64(&rot, name).unwrap_or(0.0) / 60_000.0;
+    Rot3d {
+        lat: deg("lat"),
+        lon: deg("lon"),
+        rev: deg("rev"),
+    }
+}
+
+/// Parse `<a:scene3d>` (`CT_Scene3D`, ECMA-376 §20.1.4.1.41). Requires a
+/// `<a:camera>` child (§20.1.5.5); `<a:lightRig>` is optional for our purposes
+/// (Phase A renders the camera only). Returns None when no camera is present.
+fn parse_scene3d(sppr: roxmltree::Node<'_, '_>) -> Option<Scene3d> {
+    let scene = child(sppr, "scene3d")?;
+    let cam = child(scene, "camera")?;
+    let camera = Camera3d {
+        prst: attr(&cam, "prst")?,
+        // §20.1.5.5: fov is an ST_FOVAngle in 60000ths of a degree.
+        fov: attr_f64(&cam, "fov").map(|v| v / 60_000.0),
+        // zoom is an ST_PositivePercentage (100000 = 100%).
+        zoom: attr_f64(&cam, "zoom").map(|v| v / 100_000.0),
+        rot: child(cam, "rot").map(parse_rot3d),
+    };
+    let light_rig = child(scene, "lightRig").and_then(|lr| {
+        Some(LightRig {
+            rig: attr(&lr, "rig")?,
+            dir: attr(&lr, "dir")?,
+            rot: child(lr, "rot").map(parse_rot3d),
+        })
+    });
+    Some(Scene3d { camera, light_rig })
+}
+
+/// Parse `<a:bevel>` (`CT_Bevel`, ECMA-376 §20.1.5.3). `w`/`h` default to
+/// 76200 EMU and `prst` to "circle" per the schema.
+fn parse_bevel3d(bevel: roxmltree::Node<'_, '_>) -> Bevel3d {
+    Bevel3d {
+        w: attr_i64(&bevel, "w").unwrap_or(76_200),
+        h: attr_i64(&bevel, "h").unwrap_or(76_200),
+        prst: attr(&bevel, "prst").unwrap_or_else(|| "circle".into()),
+    }
+}
+
+/// Parse `<a:sp3d>` (`CT_Shape3D`, ECMA-376 §20.1.5.12). Defaults follow the
+/// schema: z=0, extrusionH=0, contourW=0, prstMaterial="warmMatte". Parsed in
+/// full but not rendered in Phase A.
+fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
+    let n = child(sppr, "sp3d")?;
+    // contourClr is colour-only here; pass an empty theme map because sp3d
+    // contour colours in practice are srgbClr (no theme lookup needed) and this
+    // parser has the theme threaded only into the line/fill paths.
+    let contour_clr = child(n, "contourClr").and_then(|c| parse_color_node(c, &HashMap::new()));
+    Some(Sp3d {
+        z: attr_i64(&n, "z").unwrap_or(0),
+        extrusion_h: attr_i64(&n, "extrusionH").unwrap_or(0),
+        contour_w: attr_i64(&n, "contourW").unwrap_or(0),
+        contour_clr,
+        prst_material: attr(&n, "prstMaterial").unwrap_or_else(|| "warmMatte".into()),
+        bevel_t: child(n, "bevelT").map(parse_bevel3d),
+        bevel_b: child(n, "bevelB").map(parse_bevel3d),
+    })
 }
 
 // ===========================
@@ -5562,6 +5777,8 @@ fn parse_shape(
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
         text_rect: None,
+        scene3d: sp_pr.and_then(parse_scene3d),
+        sp3d: sp_pr.and_then(parse_sp3d),
     })
 }
 
@@ -5569,25 +5786,43 @@ fn parse_shape(
 //  Picture parsing  (p:pic)
 // ===========================
 
-/// Corner radius for a picture body clipped by `<a:prstGeom prst="roundRect">`
-/// on its spPr (§20.1.9.18 — the preset geometry of a picture acts as its clip
-/// silhouette). Returns the `adj` guide in 1000ths of a percent; when avLst
-/// omits the guide, the roundRect preset's own definition supplies 16667
-/// (OOXML presetShapeDefinitions). Non-roundRect presets are handled by the
-/// shared preset/custGeom paths, not this corner-radius shortcut.
-fn parse_round_rect_clip_adjust(sp_pr: roxmltree::Node<'_, '_>) -> Option<i64> {
-    let pg =
-        child(sp_pr, "prstGeom").filter(|pg| attr(pg, "prst").as_deref() == Some("roundRect"))?;
-    Some(
-        child(pg, "avLst")
-            .and_then(|avlst| avlst.children().find(|n| n.is_element()))
-            .and_then(|gd| attr(&gd, "fmla"))
-            .and_then(|fmla| {
-                fmla.strip_prefix("val ")
-                    .and_then(|v| v.parse::<i64>().ok())
-            })
-            .unwrap_or(16_667),
-    )
+/// Preset clip geometry for a picture body (§20.1.9.18 — the preset geometry of
+/// a `<p:pic>` acts as its clip silhouette and the path its border / contour
+/// hug). Returns the prstGeom `prst` name plus every `<a:avLst><a:gd>` adjust
+/// value in declaration order (1/1000-of-a-percent OOXML units), so any of the
+/// 186 presets — roundRect, ellipse, and the rest — can be reconstructed by the
+/// shared preset-geometry engine on the TS side. The preset's own declared
+/// defaults fill in any omitted guide, so the `adj` Vec may be shorter than the
+/// preset's adjust count (the engine substitutes defaults per index).
+///
+/// `prst="rect"` returns None: a plain rectangle needs no clip path (the bitmap
+/// already fills the bbox), matching the previous behaviour.
+fn parse_pic_prst_geom(sp_pr: roxmltree::Node<'_, '_>) -> (Option<String>, Option<Vec<i64>>) {
+    let pg = match child(sp_pr, "prstGeom") {
+        Some(n) => n,
+        None => return (None, None),
+    };
+    let prst = match attr(&pg, "prst") {
+        Some(p) if p != "rect" => p,
+        _ => return (None, None),
+    };
+    let adjust: Vec<i64> = child(pg, "avLst")
+        .map(|av| {
+            av.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                .filter_map(|gd| {
+                    attr(&gd, "fmla")
+                        .and_then(|f| f.strip_prefix("val ").and_then(|v| v.parse::<i64>().ok()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let adjust = if adjust.is_empty() {
+        None
+    } else {
+        Some(adjust)
+    };
+    (Some(prst), adjust)
 }
 
 fn parse_picture(
@@ -5631,6 +5866,12 @@ fn parse_picture(
         reflection,
     } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
 
+    // §20.1.2.2.24 — a `p:pic`'s spPr may carry an `<a:ln>` border (e.g. the
+    // white frame of PowerPoint's picture styles). `parse_stroke` returns None
+    // for `<a:noFill/>`, so an explicitly border-less picture stays None.
+    let stroke = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
+
+    let (prst_geom, prst_adjust) = parse_pic_prst_geom(sp_pr);
     Some(PictureElement {
         x: t.x,
         y: t.y,
@@ -5640,7 +5881,9 @@ fn parse_picture(
         flip_h: t.flip_h,
         flip_v: t.flip_v,
         data_url,
-        clip_adjust: parse_round_rect_clip_adjust(sp_pr),
+        stroke,
+        prst_geom,
+        prst_adjust,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
         cust_geom,
@@ -5649,6 +5892,8 @@ fn parse_picture(
         glow,
         soft_edge,
         reflection,
+        scene3d: parse_scene3d(sp_pr),
+        sp3d: parse_sp3d(sp_pr),
     })
 }
 
@@ -6633,8 +6878,10 @@ fn parse_sp_tree_node(
                             if let Some(bytes) = read_zip_bytes(zip, &image_path) {
                                 let mime = mime_from_ext(&image_path);
                                 let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
-                                // If the sp has a roundRect preset geometry, record adj for corner clipping
-                                let clip_adjust = sp_pr_node.and_then(parse_round_rect_clip_adjust);
+                                // §20.1.9.18 — the sp's prstGeom (any preset, not
+                                // just roundRect) is the picture's clip silhouette.
+                                let (prst_geom, prst_adjust) =
+                                    sp_pr_node.map(parse_pic_prst_geom).unwrap_or((None, None));
                                 let cust_geom = sp_pr_node
                                     .and_then(|p| child(p, "custGeom"))
                                     .map(parse_cust_geom);
@@ -6650,6 +6897,11 @@ fn parse_sp_tree_node(
                                     sp_pr_node.and_then(|p| child(p, "effectLst")),
                                     theme,
                                 );
+                                // §20.1.2.2.24 — a blipFill-painted sp can carry
+                                // an `<a:ln>` border just like a real p:pic.
+                                let stroke = sp_pr_node
+                                    .and_then(|p| child(p, "ln"))
+                                    .and_then(|n| parse_stroke(n, theme));
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -6659,7 +6911,9 @@ fn parse_sp_tree_node(
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
                                     data_url,
-                                    clip_adjust,
+                                    stroke,
+                                    prst_geom,
+                                    prst_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
                                     cust_geom,
@@ -6668,6 +6922,8 @@ fn parse_sp_tree_node(
                                     glow,
                                     soft_edge,
                                     reflection,
+                                    scene3d: sp_pr_node.and_then(parse_scene3d),
+                                    sp3d: sp_pr_node.and_then(parse_sp3d),
                                 }));
                                 return;
                             }
@@ -6690,6 +6946,13 @@ fn parse_sp_tree_node(
                         let t = slide_xfrm.or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
                         if let Some(t) = t {
                             if t.cx > 0 && t.cy > 0 {
+                                // §20.1.2.2.24 — honour the slide sp's own `<a:ln>`
+                                // border, falling back to the inherited layout
+                                // placeholder stroke when the slide omits one.
+                                let stroke = match sp_pr_node.and_then(|p| child(p, "ln")) {
+                                    Some(ln) => parse_stroke(ln, theme),
+                                    None => lph.lookup_stroke(&ph_type, ph_idx),
+                                };
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -6699,7 +6962,9 @@ fn parse_sp_tree_node(
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
                                     data_url: bf.data_url,
-                                    clip_adjust: None,
+                                    stroke,
+                                    prst_geom: None,
+                                    prst_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
                                     cust_geom: None,
@@ -6708,6 +6973,8 @@ fn parse_sp_tree_node(
                                     glow: None,
                                     soft_edge: None,
                                     reflection: None,
+                                    scene3d: None,
+                                    sp3d: None,
                                 }));
                                 return;
                             }
@@ -6744,6 +7011,14 @@ fn parse_sp_tree_node(
                                     let mime = mime_from_ext(&image_path);
                                     let data_url =
                                         format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+                                    // §20.1.2.2.24 — placeholder pic border: the
+                                    // p:pic's own `<a:ln>`, else the inherited
+                                    // layout placeholder stroke.
+                                    let stroke =
+                                        match child(node, "spPr").and_then(|p| child(p, "ln")) {
+                                            Some(ln) => parse_stroke(ln, theme),
+                                            None => lph.by_idx_stroke.get(&idx).cloned(),
+                                        };
                                     out.push(SlideElement::Picture(PictureElement {
                                         x: t.x,
                                         y: t.y,
@@ -6753,7 +7028,9 @@ fn parse_sp_tree_node(
                                         flip_h: t.flip_h,
                                         flip_v: t.flip_v,
                                         data_url,
-                                        clip_adjust: None,
+                                        stroke,
+                                        prst_geom: None,
+                                        prst_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
                                         cust_geom: None,
@@ -6762,6 +7039,8 @@ fn parse_sp_tree_node(
                                         glow: None,
                                         soft_edge: None,
                                         reflection: None,
+                                        scene3d: None,
+                                        sp3d: None,
                                     }));
                                 }
                             }
@@ -7312,6 +7591,8 @@ fn parse_connector(
         placeholder_type: None,
         placeholder_idx: None,
         text_rect: None,
+        scene3d: parse_scene3d(sp_pr),
+        sp3d: parse_sp3d(sp_pr),
     })
 }
 
@@ -8020,45 +8301,76 @@ mod tests {
     }
 
     /// §20.1.9.18 — `<a:prstGeom prst="roundRect">` on a picture's spPr clips
-    /// the bitmap to a rounded rect. An explicit `adj` guide wins.
+    /// the bitmap to a rounded rect. An explicit `adj` guide is carried through;
+    /// the preset default is supplied by the shared engine, not the parser.
     #[test]
-    fn test_pic_round_rect_clip_explicit_adj() {
+    fn test_pic_prst_geom_round_rect_explicit_adj() {
         let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <prstGeom prst="roundRect"><avLst><gd name="adj" fmla="val 8594"/></avLst></prstGeom>
         </spPr>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         assert_eq!(
-            parse_round_rect_clip_adjust(doc.root_element()),
-            Some(8_594)
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("roundRect".to_owned()), Some(vec![8_594]))
         );
     }
 
-    /// When avLst omits the guide, the roundRect preset's own definition
-    /// supplies `adj = 16667` (OOXML presetShapeDefinitions).
+    /// When avLst omits the guide, the parser carries the name with no adjust;
+    /// the preset's own default (roundRect adj = 16667) is filled in downstream
+    /// by the TS preset-geometry engine, keeping defaults in one place.
     #[test]
-    fn test_pic_round_rect_clip_default_adj() {
+    fn test_pic_prst_geom_round_rect_default_adj() {
         let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <prstGeom prst="roundRect"><avLst/></prstGeom>
         </spPr>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         assert_eq!(
-            parse_round_rect_clip_adjust(doc.root_element()),
-            Some(16_667)
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("roundRect".to_owned()), None)
         );
     }
 
-    /// A plain rect (or no prstGeom at all) means no corner clipping.
+    /// §20.1.9.18 generalised — a non-roundRect preset (ellipse, empty avLst) is
+    /// now carried generically so the picture clips to that silhouette.
     #[test]
-    fn test_pic_round_rect_clip_absent() {
+    fn test_pic_prst_geom_ellipse() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <prstGeom prst="ellipse"><avLst/></prstGeom>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert_eq!(
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("ellipse".to_owned()), None)
+        );
+    }
+
+    /// Multiple adjust guides are captured in declaration order.
+    #[test]
+    fn test_pic_prst_geom_multi_adj() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <prstGeom prst="round2SameRect"><avLst>
+                <gd name="adj1" fmla="val 16667"/><gd name="adj2" fmla="val 0"/>
+            </avLst></prstGeom>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert_eq!(
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("round2SameRect".to_owned()), Some(vec![16_667, 0]))
+        );
+    }
+
+    /// A plain rect (or no prstGeom at all) means no clip path.
+    #[test]
+    fn test_pic_prst_geom_absent() {
         let rect = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <prstGeom prst="rect"><avLst/></prstGeom>
         </spPr>"#;
         let doc = roxmltree::Document::parse(rect).unwrap();
-        assert_eq!(parse_round_rect_clip_adjust(doc.root_element()), None);
+        assert_eq!(parse_pic_prst_geom(doc.root_element()), (None, None));
 
         let bare = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"/>"#;
         let doc = roxmltree::Document::parse(bare).unwrap();
-        assert_eq!(parse_round_rect_clip_adjust(doc.root_element()), None);
+        assert_eq!(parse_pic_prst_geom(doc.root_element()), (None, None));
     }
 
     /// ECMA-376 §20.1.8.42 — `<a:ln cmpd="dbl"/>` should round-trip.
@@ -8512,5 +8824,193 @@ mod tests {
             !json_ltr.contains("\"rtl\""),
             "rtl=false must be omitted; got {json_ltr}"
         );
+    }
+
+    // ===== scene3d / sp3d parsing (ECMA-376 §20.1.5.5 / §20.1.5.12) =====
+
+    /// Wrap a `<p:spPr>` fragment with the `a:`/`p:` namespaces and return the
+    /// spPr node so parse_scene3d / parse_sp3d can run against it.
+    fn parse_sppr_frag<'a>(doc: &'a roxmltree::Document<'a>) -> roxmltree::Node<'a, 'a> {
+        doc.root_element()
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+            .unwrap()
+    }
+
+    #[test]
+    fn test_parse_scene3d_slide3_fragment() {
+        // The exact scene3d/sp3d from sample-11 slide 3, "図 3".
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:scene3d>
+              <a:camera prst="perspectiveRelaxed">
+                <a:rot lat="19800000" lon="1200000" rev="20820000"/>
+              </a:camera>
+              <a:lightRig rig="threePt" dir="t"/>
+            </a:scene3d>
+            <a:sp3d contourW="6350" prstMaterial="matte">
+              <a:bevelT w="101600" h="101600"/>
+            </a:sp3d>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+
+        let scene = parse_scene3d(sppr).expect("scene3d should parse");
+        assert_eq!(scene.camera.prst, "perspectiveRelaxed");
+        let rot = scene.camera.rot.expect("rot present");
+        // 60000ths of a degree → degrees.
+        assert!((rot.lat - 330.0).abs() < 1e-9, "lat = {}", rot.lat);
+        assert!((rot.lon - 20.0).abs() < 1e-9, "lon = {}", rot.lon);
+        assert!((rot.rev - 347.0).abs() < 1e-9, "rev = {}", rot.rev);
+        // No fov/zoom in this file → None.
+        assert!(scene.camera.fov.is_none());
+        assert!(scene.camera.zoom.is_none());
+        let lr = scene.light_rig.as_ref().expect("lightRig present");
+        assert_eq!(lr.rig, "threePt");
+        assert_eq!(lr.dir, "t");
+
+        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        assert_eq!(sp3d.contour_w, 6350);
+        assert_eq!(sp3d.prst_material, "matte");
+        assert_eq!(sp3d.z, 0); // default
+        assert_eq!(sp3d.extrusion_h, 0); // default
+        let bt = sp3d.bevel_t.expect("bevelT present");
+        assert_eq!(bt.w, 101600);
+        assert_eq!(bt.h, 101600);
+        assert_eq!(bt.prst, "circle"); // schema default
+        assert!(sp3d.bevel_b.is_none());
+
+        // camelCase JSON round-trip surfaces the right keys.
+        let json = serde_json::to_string(&scene).unwrap();
+        assert!(json.contains("\"prst\":\"perspectiveRelaxed\""), "{json}");
+        assert!(json.contains("\"lat\":330.0"), "{json}");
+        assert!(json.contains("\"lightRig\""), "{json}");
+    }
+
+    #[test]
+    fn test_parse_camera_fov_zoom_and_defaults() {
+        // fov + zoom present; sp3d with all attributes omitted → schema defaults.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:scene3d>
+              <a:camera prst="perspectiveContrastingRightFacing" fov="6900000" zoom="200000"/>
+              <a:lightRig rig="threePt" dir="t"/>
+            </a:scene3d>
+            <a:sp3d/>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+
+        let scene = parse_scene3d(sppr).unwrap();
+        // fov: 6900000 / 60000 = 115 degrees.
+        assert!((scene.camera.fov.unwrap() - 115.0).abs() < 1e-9);
+        // zoom: 200000 / 100000 = 2.0 (200%).
+        assert!((scene.camera.zoom.unwrap() - 2.0).abs() < 1e-9);
+        // No <a:rot> → None (renderer uses the preset base orientation).
+        assert!(scene.camera.rot.is_none());
+
+        let sp3d = parse_sp3d(sppr).unwrap();
+        assert_eq!(sp3d.z, 0);
+        assert_eq!(sp3d.extrusion_h, 0);
+        assert_eq!(sp3d.contour_w, 0);
+        assert_eq!(sp3d.prst_material, "warmMatte"); // schema default
+        assert!(sp3d.bevel_t.is_none());
+        assert!(sp3d.bevel_b.is_none());
+    }
+
+    #[test]
+    fn test_parse_scene3d_absent_is_none() {
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr><a:prstGeom prst="rect"/></p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        assert!(parse_scene3d(sppr).is_none());
+        assert!(parse_sp3d(sppr).is_none());
+    }
+
+    // ===== sp3d contour colour (ECMA-376 §20.1.5.12 contourClr) =====
+
+    #[test]
+    fn test_parse_sp3d_contour_clr_slide3() {
+        // The exact sp3d from sample-11 slide 3: contourW + grey contourClr.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:sp3d contourW="6350" prstMaterial="matte">
+              <a:bevelT w="101600" h="101600"/>
+              <a:contourClr><a:srgbClr val="969696"/></a:contourClr>
+            </a:sp3d>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        assert_eq!(sp3d.contour_w, 6350);
+        assert_eq!(sp3d.contour_clr.as_deref(), Some("969696"));
+        let json = serde_json::to_string(&sp3d).unwrap();
+        assert!(json.contains("\"contourClr\":\"969696\""), "{json}");
+    }
+
+    #[test]
+    fn test_parse_sp3d_contour_clr_absent() {
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr><a:sp3d contourW="6350"/></p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let sp3d = parse_sp3d(sppr).unwrap();
+        assert!(sp3d.contour_clr.is_none());
+        // Omitted from JSON when absent.
+        let json = serde_json::to_string(&sp3d).unwrap();
+        assert!(!json.contains("contourClr"), "{json}");
+    }
+
+    // ===== picture a:ln stroke (ECMA-376 §20.1.2.2.24, §19.3.1.37) =====
+
+    #[test]
+    fn test_parse_pic_stroke_solid_fill() {
+        // <p:pic>'s spPr > ln with a solidFill → a visible border.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:ln w="38100"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let theme: HashMap<String, String> = HashMap::new();
+        let stroke = child(sppr, "ln")
+            .and_then(|n| parse_stroke(n, &theme))
+            .expect("pic stroke should parse");
+        assert_eq!(stroke.color, "FFFFFF");
+        assert_eq!(stroke.width, 38100);
+    }
+
+    #[test]
+    fn test_parse_pic_stroke_no_fill_is_none() {
+        // sample-11's pic borders are <a:ln><a:noFill/></a:ln> → no border.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr><a:ln><a:noFill/></a:ln></p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let theme: HashMap<String, String> = HashMap::new();
+        let stroke = child(sppr, "ln").and_then(|n| parse_stroke(n, &theme));
+        assert!(stroke.is_none());
     }
 }
