@@ -228,6 +228,11 @@ export interface Sp3d {
   extrusionH?: number;
   /** Contour (outline) width in EMU (default 0). */
   contourW?: number;
+  /** Contour colour (`<a:contourClr>`, ECMA-376 §20.1.5.12) as a hex string
+   *  (e.g. "969696"). Omitted when absent. The renderer draws a flat
+   *  approximation of the 3D contour edge (uniform-width outline, no bevel
+   *  shading) when both `contourW` and `contourClr` are present. */
+  contourClr?: string;
   /** Preset surface material (`ST_PresetMaterialType`), default "warmMatte". */
   prstMaterial: string;
   /** Top bevel. */
@@ -374,6 +379,14 @@ export interface PictureElement {
   flipV: boolean;
   /** Data URL, e.g. "data:image/png;base64,..." */
   dataUrl: string;
+  /**
+   * Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24). A
+   * `p:pic`'s spPr is `CT_ShapeProperties` (§19.3.1.37), so a picture carries
+   * the same line model as a shape. `null` when there is no `<a:ln>` or it
+   * resolves to `<a:noFill/>` (border explicitly suppressed). The border is
+   * stroked along the picture's clip silhouette (roundRect / custGeom / rect).
+   */
+  stroke: Stroke | null;
   /** OOXML adj value (0–100000) for roundRect clip, null = plain rectangle */
   clipAdjust: number | null;
   /**

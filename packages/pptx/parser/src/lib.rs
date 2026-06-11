@@ -785,6 +785,11 @@ struct Sp3d {
     #[serde(skip_serializing_if = "is_zero_i64")]
     #[serde(default)]
     contour_w: i64,
+    /// Contour colour (`<a:contourClr>` child, ECMA-376 §20.1.5.12). Resolved
+    /// hex (e.g. "969696"). `None` when absent (the schema default is to reuse
+    /// the shape's line/fill colour, which the renderer does not approximate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contour_clr: Option<String>,
     /// Preset surface material (`ST_PresetMaterialType`), default "warmMatte".
     prst_material: String,
     /// Top bevel.
@@ -894,6 +899,13 @@ struct PictureElement {
     flip_h: bool,
     flip_v: bool,
     data_url: String,
+    /// Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24
+    /// CT_LineProperties; §19.3.1.37 routes a `p:pic`'s spPr through
+    /// CT_ShapeProperties, so a picture carries the same line as a shape). Same
+    /// model as `ShapeElement.stroke`. `None` when there is no `<a:ln>` or it
+    /// resolves to `<a:noFill/>` (border explicitly suppressed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stroke: Option<Stroke>,
     /// OOXML adj value (0–100000) for roundRect clip; None = plain rectangle
     #[serde(skip_serializing_if = "Option::is_none")]
     clip_adjust: Option<i64>,
@@ -2189,10 +2201,15 @@ fn parse_bevel3d(bevel: roxmltree::Node<'_, '_>) -> Bevel3d {
 /// full but not rendered in Phase A.
 fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
     let n = child(sppr, "sp3d")?;
+    // contourClr is colour-only here; pass an empty theme map because sp3d
+    // contour colours in practice are srgbClr (no theme lookup needed) and this
+    // parser has the theme threaded only into the line/fill paths.
+    let contour_clr = child(n, "contourClr").and_then(|c| parse_color_node(c, &HashMap::new()));
     Some(Sp3d {
         z: attr_i64(&n, "z").unwrap_or(0),
         extrusion_h: attr_i64(&n, "extrusionH").unwrap_or(0),
         contour_w: attr_i64(&n, "contourW").unwrap_or(0),
+        contour_clr,
         prst_material: attr(&n, "prstMaterial").unwrap_or_else(|| "warmMatte".into()),
         bevel_t: child(n, "bevelT").map(parse_bevel3d),
         bevel_b: child(n, "bevelB").map(parse_bevel3d),
@@ -5822,6 +5839,11 @@ fn parse_picture(
         reflection,
     } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
 
+    // §20.1.2.2.24 — a `p:pic`'s spPr may carry an `<a:ln>` border (e.g. the
+    // white frame of PowerPoint's picture styles). `parse_stroke` returns None
+    // for `<a:noFill/>`, so an explicitly border-less picture stays None.
+    let stroke = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
+
     Some(PictureElement {
         x: t.x,
         y: t.y,
@@ -5831,6 +5853,7 @@ fn parse_picture(
         flip_h: t.flip_h,
         flip_v: t.flip_v,
         data_url,
+        stroke,
         clip_adjust: parse_round_rect_clip_adjust(sp_pr),
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
@@ -6843,6 +6866,11 @@ fn parse_sp_tree_node(
                                     sp_pr_node.and_then(|p| child(p, "effectLst")),
                                     theme,
                                 );
+                                // §20.1.2.2.24 — a blipFill-painted sp can carry
+                                // an `<a:ln>` border just like a real p:pic.
+                                let stroke = sp_pr_node
+                                    .and_then(|p| child(p, "ln"))
+                                    .and_then(|n| parse_stroke(n, theme));
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -6852,6 +6880,7 @@ fn parse_sp_tree_node(
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
                                     data_url,
+                                    stroke,
                                     clip_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
@@ -6885,6 +6914,13 @@ fn parse_sp_tree_node(
                         let t = slide_xfrm.or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
                         if let Some(t) = t {
                             if t.cx > 0 && t.cy > 0 {
+                                // §20.1.2.2.24 — honour the slide sp's own `<a:ln>`
+                                // border, falling back to the inherited layout
+                                // placeholder stroke when the slide omits one.
+                                let stroke = match sp_pr_node.and_then(|p| child(p, "ln")) {
+                                    Some(ln) => parse_stroke(ln, theme),
+                                    None => lph.lookup_stroke(&ph_type, ph_idx),
+                                };
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -6894,6 +6930,7 @@ fn parse_sp_tree_node(
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
                                     data_url: bf.data_url,
+                                    stroke,
                                     clip_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
@@ -6941,6 +6978,14 @@ fn parse_sp_tree_node(
                                     let mime = mime_from_ext(&image_path);
                                     let data_url =
                                         format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+                                    // §20.1.2.2.24 — placeholder pic border: the
+                                    // p:pic's own `<a:ln>`, else the inherited
+                                    // layout placeholder stroke.
+                                    let stroke =
+                                        match child(node, "spPr").and_then(|p| child(p, "ln")) {
+                                            Some(ln) => parse_stroke(ln, theme),
+                                            None => lph.by_idx_stroke.get(&idx).cloned(),
+                                        };
                                     out.push(SlideElement::Picture(PictureElement {
                                         x: t.x,
                                         y: t.y,
@@ -6950,6 +6995,7 @@ fn parse_sp_tree_node(
                                         flip_h: t.flip_h,
                                         flip_v: t.flip_v,
                                         data_url,
+                                        stroke,
                                         clip_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
@@ -8824,5 +8870,82 @@ mod tests {
         let sppr = parse_sppr_frag(&doc);
         assert!(parse_scene3d(sppr).is_none());
         assert!(parse_sp3d(sppr).is_none());
+    }
+
+    // ===== sp3d contour colour (ECMA-376 §20.1.5.12 contourClr) =====
+
+    #[test]
+    fn test_parse_sp3d_contour_clr_slide3() {
+        // The exact sp3d from sample-11 slide 3: contourW + grey contourClr.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:sp3d contourW="6350" prstMaterial="matte">
+              <a:bevelT w="101600" h="101600"/>
+              <a:contourClr><a:srgbClr val="969696"/></a:contourClr>
+            </a:sp3d>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        assert_eq!(sp3d.contour_w, 6350);
+        assert_eq!(sp3d.contour_clr.as_deref(), Some("969696"));
+        let json = serde_json::to_string(&sp3d).unwrap();
+        assert!(json.contains("\"contourClr\":\"969696\""), "{json}");
+    }
+
+    #[test]
+    fn test_parse_sp3d_contour_clr_absent() {
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr><a:sp3d contourW="6350"/></p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let sp3d = parse_sp3d(sppr).unwrap();
+        assert!(sp3d.contour_clr.is_none());
+        // Omitted from JSON when absent.
+        let json = serde_json::to_string(&sp3d).unwrap();
+        assert!(!json.contains("contourClr"), "{json}");
+    }
+
+    // ===== picture a:ln stroke (ECMA-376 §20.1.2.2.24, §19.3.1.37) =====
+
+    #[test]
+    fn test_parse_pic_stroke_solid_fill() {
+        // <p:pic>'s spPr > ln with a solidFill → a visible border.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr>
+            <a:ln w="38100"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln>
+          </p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let theme: HashMap<String, String> = HashMap::new();
+        let stroke = child(sppr, "ln")
+            .and_then(|n| parse_stroke(n, &theme))
+            .expect("pic stroke should parse");
+        assert_eq!(stroke.color, "FFFFFF");
+        assert_eq!(stroke.width, 38100);
+    }
+
+    #[test]
+    fn test_parse_pic_stroke_no_fill_is_none() {
+        // sample-11's pic borders are <a:ln><a:noFill/></a:ln> → no border.
+        let xml = r#"<root
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:spPr><a:ln><a:noFill/></a:ln></p:spPr>
+        </root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sppr = parse_sppr_frag(&doc);
+        let theme: HashMap<String, String> = HashMap::new();
+        let stroke = child(sppr, "ln").and_then(|n| parse_stroke(n, &theme));
+        assert!(stroke.is_none());
     }
 }
