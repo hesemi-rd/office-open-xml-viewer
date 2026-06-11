@@ -60,8 +60,8 @@ export interface Worksheet {
   /** Full-fidelity comment bodies (cell ref + author + plain text) for every
    *  `<comment>` in `xl/commentsN.xml` (ECMA-376 §18.7). Parallel to
    *  {@link commentRefs} (one entry per ref). Consume this to read the note
-   *  text; the renderer only uses {@link commentRefs} for the red indicator.
-   *  Hover popups are out of scope (TODO). */
+   *  text; the renderer uses {@link commentRefs} for the red indicator and the
+   *  viewer surfaces these bodies in an Excel-style hover popup. */
   comments?: XlsxComment[];
   /** Data-validation rules on this sheet (ECMA-376 §18.3.1.32–33). Exposed for
    *  tooling. The viewer draws a list-dropdown arrow on the active cell when the

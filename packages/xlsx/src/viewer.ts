@@ -1,8 +1,21 @@
 import { XlsxWorkbook } from './workbook.js';
-import type { ViewportRange, Worksheet } from './types.js';
+import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { MathRenderer } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
+import { parseA1 } from './a1.js';
+import { computeCommentPopupPosition } from './comment-popup.js';
+
+/** Delay (ms) before a hovered comment popup appears. A short hover dwell
+ *  prevents the popup from flickering while the cursor sweeps across many
+ *  commented cells; ~150ms is the common tooltip-show threshold (responsive yet
+ *  long enough to suppress transient passes). Excel itself uses a comparable
+ *  short hover delay before showing a note. */
+const COMMENT_POPUP_DELAY_MS = 150;
+/** Max width of the comment popup body (CSS px). */
+const COMMENT_POPUP_MAX_W = 280;
+/** Max height before the body scrolls/clips (CSS px). */
+const COMMENT_POPUP_MAX_H = 200;
 
 const TAB_BAR_H = 30;
 // Gap between adjacent sheet tabs. The first tab also gets this much leading
@@ -190,6 +203,19 @@ export class XlsxViewer {
   // the cell underneath).
   private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
 
+  // ─── Comment hover popup (Excel-style note) ───────────────────────────────
+  /** DOM overlay element that shows the hovered cell's comment. Lives in
+   *  canvasArea above the scrollHost; `pointer-events:none` so it never blocks
+   *  cell interaction. */
+  private commentPopup: HTMLDivElement;
+  /** `"row:col"` → comment for the current sheet, rebuilt on every showSheet. */
+  private commentMap = new Map<string, XlsxComment>();
+  /** `"row:col"` of the cell whose popup is currently shown (or pending), so a
+   *  pointermove within the same cell doesn't restart the show timer. */
+  private commentPopupKey: string | null = null;
+  /** Pending show timer (see {@link COMMENT_POPUP_DELAY_MS}). */
+  private commentPopupTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
 
@@ -217,9 +243,23 @@ export class XlsxViewer {
     this.spacer.style.cssText = `position:absolute;top:0;left:0;pointer-events:none;`;
     this.scrollHost.appendChild(this.spacer);
 
+    // Comment hover popup. z-index 3 sits above the scrollHost (z-index 2) so
+    // it is visible over the grid; pointer-events:none keeps cell interaction
+    // (selection, scroll) working through it. The zoom slider lives in a
+    // sibling tab-bar flex child, so there is no stacking conflict.
+    this.commentPopup = document.createElement('div');
+    this.commentPopup.style.cssText =
+      `position:absolute;z-index:3;pointer-events:none;display:none;` +
+      `max-width:${COMMENT_POPUP_MAX_W}px;max-height:${COMMENT_POPUP_MAX_H}px;overflow:hidden;` +
+      `box-sizing:border-box;padding:6px 8px;` +
+      `background:#fffbcc;border:1px solid #b8b8a0;` +
+      `box-shadow:1px 2px 5px rgba(0,0,0,0.25);` +
+      `font:12px/1.4 sans-serif;color:#222;white-space:pre-wrap;word-break:break-word;`;
+
     this.canvasArea.appendChild(this.canvas);
     this.canvasArea.appendChild(this.selectionOverlay);
     this.canvasArea.appendChild(this.scrollHost);
+    this.canvasArea.appendChild(this.commentPopup);
 
     const headerW = Math.round(HEADER_W * (this.opts.cellScale ?? 1));
 
@@ -285,6 +325,9 @@ export class XlsxViewer {
       // scrollbar-thumb drag (overlay scrollbars) or a touch swipe, not a
       // cell click.
       this.pendingTap = null;
+      // A comment popup is anchored to a cell's on-screen rect, which moves
+      // under the cursor while scrolling — hide it (Excel does the same).
+      this.hideCommentPopup();
       // Track the start-anchored position, but only while the host is laid
       // out: a hidden host reports clientWidth 0 and fires bogus scroll
       // events when the browser clamps scrollLeft, which must not overwrite
@@ -350,9 +393,11 @@ export class XlsxViewer {
     this.anchorCell = null;
     this.activeCell = null;
     this.selectionMode = 'cells';
+    this.hideCommentPopup();
     this.updateSelectionOverlay();
     this.updateTabActive(index);
     this.currentWorksheet = await this.workbook.getWorksheet(index);
+    this.buildCommentMap(this.currentWorksheet);
     this.updateSpacerSize(this.currentWorksheet);
     // Reset the horizontal scroll origin to the natural START of the sheet.
     // For RTL sheets the start column (col A) lives at the RIGHT, which means
@@ -901,6 +946,88 @@ export class XlsxViewer {
     this.selectionOverlay.appendChild(btn);
   }
 
+  // ─── Comment hover popup ──────────────────────────────────────────────────
+
+  /** Build the `"row:col"` → comment index for the given sheet. Parses each
+   *  `XlsxComment.cellRef` with the shared {@link parseA1}; later refs win on a
+   *  collision (Excel allows at most one note per cell, so this is moot in
+   *  practice). */
+  private buildCommentMap(ws: Worksheet): void {
+    this.commentMap = new Map();
+    for (const c of ws.comments ?? []) {
+      const p = parseA1(c.cellRef);
+      if (p) this.commentMap.set(`${p.row}:${p.col}`, c);
+    }
+  }
+
+  /** Show the popup for the comment on `cell` after the hover dwell, anchored to
+   *  the cell's current on-screen rect. No-op when the cell carries no comment.
+   *  Re-hovering the same cell does not restart the timer. */
+  private scheduleCommentPopup(cell: CellAddress): void {
+    const key = `${cell.row}:${cell.col}`;
+    const comment = this.commentMap.get(key);
+    if (!comment) {
+      this.hideCommentPopup();
+      return;
+    }
+    if (this.commentPopupKey === key) return; // already shown / pending here
+    this.hideCommentPopup();
+    this.commentPopupKey = key;
+    this.commentPopupTimer = setTimeout(() => {
+      this.commentPopupTimer = null;
+      this.renderCommentPopup(cell, comment);
+    }, COMMENT_POPUP_DELAY_MS);
+  }
+
+  /** Immediately render the popup for `comment` anchored to `cell` (used by the
+   *  hover-dwell timer and by touch selection, which has no hover). */
+  private renderCommentPopup(cell: CellAddress, comment: XlsxComment): void {
+    const rect = this.getCellRect(cell.row, cell.col);
+    if (!rect) return;
+
+    // Author on its own bold line (when present), then the body text with
+    // newlines preserved. textContent escapes everything — no HTML injection
+    // from comment text.
+    this.commentPopup.textContent = '';
+    if (comment.author) {
+      const authorEl = document.createElement('div');
+      authorEl.style.cssText = 'font-weight:bold;margin-bottom:2px;';
+      authorEl.textContent = comment.author;
+      this.commentPopup.appendChild(authorEl);
+    }
+    const bodyEl = document.createElement('div');
+    bodyEl.textContent = comment.text;
+    this.commentPopup.appendChild(bodyEl);
+
+    // Anchor to the cell's *screen* rect (RTL already mirrored by screenX), then
+    // run the pure position calc against the popup's measured size. Make it
+    // visible (off-screen) first so offsetWidth/Height reflect the wrapped text.
+    const screenLeft = this.screenX(rect.x, rect.w);
+    this.commentPopup.style.left = '-9999px';
+    this.commentPopup.style.top = '-9999px';
+    this.commentPopup.style.display = 'block';
+
+    const pos = computeCommentPopupPosition({
+      cell: { x: screenLeft, y: rect.y, w: rect.w, h: rect.h },
+      popup: { w: this.commentPopup.offsetWidth, h: this.commentPopup.offsetHeight },
+      viewport: { w: this.canvasArea.clientWidth, h: this.canvasArea.clientHeight },
+      rtl: this.isRtl,
+    });
+    this.commentPopup.style.left = `${pos.left}px`;
+    this.commentPopup.style.top = `${pos.top}px`;
+  }
+
+  /** Hide the popup and cancel any pending show. Called on cell-out, scroll,
+   *  sheet switch and destroy. */
+  private hideCommentPopup(): void {
+    if (this.commentPopupTimer !== null) {
+      clearTimeout(this.commentPopupTimer);
+      this.commentPopupTimer = null;
+    }
+    this.commentPopupKey = null;
+    this.commentPopup.style.display = 'none';
+  }
+
   private applyPointerSelection(clientX: number, clientY: number, shiftKey: boolean, pointerId: number, allowDrag: boolean): void {
     const headerHit = this.getHeaderHit(clientX, clientY);
 
@@ -1014,6 +1141,15 @@ export class XlsxViewer {
         }
       }
 
+      // Comment hover popup (mouse only — touch/pen have no hover, so they get
+      // the popup on selection instead, below). Suppressed while drag-selecting
+      // so the popup doesn't fight the selection rect. A header hover hides it.
+      if (e.pointerType === 'mouse' && !this.isSelecting) {
+        const hovered = this.getCellAt(e.clientX, e.clientY);
+        if (hovered) this.scheduleCommentPopup(hovered);
+        else this.hideCommentPopup();
+      }
+
       if (!this.isSelecting) return;
 
       if (this.selectionMode === 'rows') {
@@ -1043,6 +1179,18 @@ export class XlsxViewer {
         const dy = e.clientY - this.pendingTap.y;
         if (dx * dx + dy * dy <= TAP_SLOP * TAP_SLOP) {
           this.applyPointerSelection(e.clientX, e.clientY, this.pendingTap.shiftKey, e.pointerId, false);
+          // Touch / pen have no hover, so surface the comment popup on a tap
+          // (the active cell after the selection commit). Mouse uses hover.
+          if (e.pointerType !== 'mouse' && this.activeCell) {
+            const key = `${this.activeCell.row}:${this.activeCell.col}`;
+            const comment = this.commentMap.get(key);
+            if (comment) {
+              this.hideCommentPopup();
+              this.renderCommentPopup(this.activeCell, comment);
+            } else {
+              this.hideCommentPopup();
+            }
+          }
         }
         this.pendingTap = null;
       }
@@ -1055,6 +1203,9 @@ export class XlsxViewer {
       }
       this.isSelecting = false;
     });
+
+    // Hide the comment popup when the cursor leaves the grid entirely.
+    this.scrollHost.addEventListener('pointerleave', () => this.hideCommentPopup());
 
     this.keydownHandler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
@@ -1467,6 +1618,7 @@ export class XlsxViewer {
 
   destroy(): void {
     this.resizeObserver?.disconnect();
+    this.hideCommentPopup();
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
     }
