@@ -7416,23 +7416,25 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Local-only sample (redistribution-prohibited, gitignored). Tests that
+    // depend on it must skip gracefully on a clean checkout / in CI where the
+    // file is absent. See packages/pptx/public/private/.
+    const LOCAL_SAMPLE_2: &str = "../public/private/sample-2.pptx";
+
     #[test]
     fn test_parse_chartex() {
-        let xml = std::fs::read_to_string("../public/sample-2.pptx")
-            .ok()
-            .and_then(|_| None::<String>)
-            .unwrap_or_else(|| {
-                // read from zip directly
-                let data = std::fs::read("../public/sample-2.pptx").unwrap();
-                let cursor = std::io::Cursor::new(data.as_slice());
-                let mut zip = zip::ZipArchive::new(cursor).unwrap();
-                let mut s = String::new();
-                zip.by_name("ppt/charts/chartEx1.xml")
-                    .unwrap()
-                    .read_to_string(&mut s)
-                    .unwrap();
-                s
-            });
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_parse_chartex: local sample not found");
+            return;
+        };
+        let cursor = std::io::Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let mut xml = String::new();
+        zip.by_name("ppt/charts/chartEx1.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
         let theme = HashMap::new();
         let result = parse_chartex(&xml, &theme);
         println!("parse_chartex result: {:?}", result.is_some());
@@ -7450,7 +7452,10 @@ mod tests {
 
     #[test]
     fn test_slide8_chart_rid() {
-        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_slide8_chart_rid: local sample not found");
+            return;
+        };
         let cursor = std::io::Cursor::new(data.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let mut slide_xml = String::new();
@@ -7495,7 +7500,10 @@ mod tests {
 
     #[test]
     fn test_slide8_full_parse() {
-        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_slide8_full_parse: local sample not found");
+            return;
+        };
         let pres = parse_presentation(&data).unwrap();
         let slide = &pres.slides[7]; // 0-indexed, slide 8
         println!("Slide 8 elements: {}", slide.elements.len());
@@ -7517,7 +7525,10 @@ mod tests {
 
     #[test]
     fn test_slide8_chartex_pipeline() {
-        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_slide8_chartex_pipeline: local sample not found");
+            return;
+        };
         let cursor = std::io::Cursor::new(data.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
