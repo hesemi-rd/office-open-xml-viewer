@@ -6709,6 +6709,10 @@ fn parse_slide(
     layout_xml: Option<&str>,
     layout_rels: &HashMap<String, String>,
     layout_dir: &str,
+    master_xml: Option<&str>,
+    master_rels: &HashMap<String, String>,
+    master_dir: &str,
+    master_smartart_drawings: &HashMap<String, String>,
     master_bg: Option<Fill>,
     master_font_sizes: &HashMap<String, f64>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
@@ -6820,6 +6824,57 @@ fn parse_slide(
 
     let slide_dir = "ppt/slides";
     let mut elements = Vec::new();
+
+    // ── showMasterSp resolution (ECMA-376 §19.3.1.38 sld / §19.3.1.39
+    // sldLayout, AG_ChildSlide, default true) ─────────────────────────────
+    // Master decorative shapes are composited beneath the slide only when both
+    // the slide and its layout permit it. Either one setting showMasterSp="0"
+    // suppresses the master's spTree decorations (the slide flag is honored for
+    // the slide itself; the layout flag for shapes inherited through it).
+    // OOXML booleans accept "0"/"false" for false and "1"/"true" for true.
+    fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
+        match attr(&node, "showMasterSp").as_deref() {
+            Some("0") | Some("false") => false,
+            _ => true, // default true (absent / "1" / "true")
+        }
+    }
+    let slide_show_master_sp = read_show_master_sp(root);
+    let layout_show_master_sp = layout_xml
+        .and_then(|lx| roxmltree::Document::parse(lx).ok())
+        .map(|d| read_show_master_sp(d.root_element()))
+        .unwrap_or(true);
+    let show_master_sp = slide_show_master_sp && layout_show_master_sp;
+
+    // ── Master non-placeholder shapes (rendered BELOW layout & slide) ─────
+    // The slide master's spTree may carry decorative pictures/shapes (logos,
+    // bands) that are not placeholder anchors. PowerPoint composites them at
+    // the very bottom, beneath the layout's decorations and the slide content.
+    // Gated by showMasterSp (above). Placeholders are skipped — only the
+    // master's decorative content is drawn here.
+    if show_master_sp {
+        if let Some(mxml) = master_xml {
+            if let Ok(mdoc) = roxmltree::Document::parse(mxml) {
+                let mroot = mdoc.root_element();
+                if let Some(msp_tree) = child(mroot, "cSld").and_then(|n| child(n, "spTree")) {
+                    let empty_lph = LayoutPlaceholders::default();
+                    for node in msp_tree.children().filter(|n| n.is_element()) {
+                        parse_sp_tree_node(
+                            node,
+                            &empty_lph,
+                            master_dir,
+                            master_rels,
+                            master_smartart_drawings,
+                            zip,
+                            theme,
+                            &mut elements,
+                            true, // skip placeholder shapes
+                            None, // no inherited group fill at top level
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
     // These are decorative background elements defined in the slide layout
@@ -7782,15 +7837,19 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .as_deref()
         .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
         .unwrap_or_else(|| "ppt/slideMasters".to_owned());
-    let master_rels: HashMap<String, String> = master_path
+    let master_rels_xml: String = master_path
         .as_deref()
         .and_then(|p| {
             let file = p.split('/').next_back().unwrap_or("slideMaster1.xml");
             let rels_p = format!("ppt/slideMasters/_rels/{file}.rels");
             read_zip_str(&mut zip, &rels_p).ok()
         })
-        .map(|xml| parse_rels(&xml))
         .unwrap_or_default();
+    let master_rels: HashMap<String, String> = parse_rels(&master_rels_xml);
+    // SmartArt drawings referenced from the master's rels, so master spTree
+    // decorations can resolve <dgm:relIds> the same way slides/layouts do.
+    let master_smartart_drawings: HashMap<String, String> =
+        build_smartart_drawings(&master_rels_xml, &mut zip);
 
     let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
         let doc = roxmltree::Document::parse(master_xml).ok()?;
@@ -7934,6 +7993,10 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             raw.layout_xml.as_deref(),
             &raw.layout_rels,
             &raw.layout_dir,
+            master_xml_opt.as_deref(),
+            &master_rels,
+            &master_dir,
+            &master_smartart_drawings,
             master_bg.clone(),
             &master_font_sizes,
             &master_level_font_sizes,
@@ -9237,5 +9300,227 @@ mod tests {
         let theme: HashMap<String, String> = HashMap::new();
         let stroke = child(sppr, "ln").and_then(|n| parse_stroke(n, &theme));
         assert!(stroke.is_none());
+    }
+
+    // ===== Master spTree decorative shapes (ECMA-376 §19.3.1.38 sld /
+    // §19.3.1.39 sldLayout, showMasterSp) =====
+
+    /// Build a minimal in-memory .pptx whose slide master spTree carries a
+    /// decorative picture (image1.png at a non-centred position) plus a
+    /// solid-fill rectangle. `layout_show_master_sp` controls the layout's
+    /// `showMasterSp` attribute so the test can exercise the suppression path.
+    fn build_master_sp_pptx(layout_show_master_sp: Option<bool>) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+
+        // 1×1 transparent PNG (smallest valid PNG).
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        let layout_attr = match layout_show_master_sp {
+            Some(true) => r#" showMasterSp="1""#.to_string(),
+            Some(false) => r#" showMasterSp="0""#.to_string(),
+            None => String::new(),
+        };
+
+        let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster"/></p:sldMasterIdLst>
+  <p:sldIdLst><p:sldId id="256" r:id="rIdSlide1"/></p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#;
+
+        let pres_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>"#;
+
+        let theme_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+  <a:themeElements><a:clrScheme name="C">
+    <a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+    <a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+    <a:accent1><a:srgbClr val="FF0000"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2>
+    <a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4>
+    <a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6>
+    <a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink>
+  </a:clrScheme>
+  <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>
+    <a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+  <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+  </a:themeElements>
+</a:theme>"#;
+
+        // Master spTree: a decorative pic (image1.png at x=600000,y=400000) and a
+        // solid-fill rectangle. No placeholder, so both are decorative.
+        let master_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+    <p:pic>
+      <p:nvPicPr><p:cNvPr id="10" name="MasterLogo"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+      <p:blipFill><a:blip r:embed="rIdImg1"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+      <p:spPr><a:xfrm><a:off x="600000" y="400000"/><a:ext cx="800000" cy="800000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+    </p:pic>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="11" name="MasterBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="200000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:solidFill><a:srgbClr val="123456"/></a:solidFill></p:spPr>
+    </p:sp>
+  </p:spTree></p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
+    accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout"/></p:sldLayoutIdLst>
+</p:sldMaster>"#;
+
+        let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#;
+
+        let layout_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"{layout_attr} type="blank">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sldLayout>"#
+        );
+
+        let layout_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"#;
+
+        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sld>"#;
+
+        let slide_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"#;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            let mut put = |path: &str, bytes: &[u8]| {
+                zw.start_file(path, opts).unwrap();
+                use std::io::Write;
+                zw.write_all(bytes).unwrap();
+            };
+            put("ppt/presentation.xml", presentation_xml.as_bytes());
+            put("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes());
+            put("ppt/theme/theme1.xml", theme_xml.as_bytes());
+            put("ppt/slideMasters/slideMaster1.xml", master_xml.as_bytes());
+            put(
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                master_rels.as_bytes(),
+            );
+            put("ppt/slideLayouts/slideLayout1.xml", layout_xml.as_bytes());
+            put(
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                layout_rels.as_bytes(),
+            );
+            put("ppt/slides/slide1.xml", slide_xml.as_bytes());
+            put("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes());
+            put("ppt/media/image1.png", PNG_1X1);
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// §19.3.1.38/§19.3.1.39: a master spTree picture (non-placeholder) is
+    /// composited onto the slide. Without the fix the master spTree is dropped
+    /// and the slide has no elements.
+    #[test]
+    fn master_sptree_pic_appears_on_slide() {
+        let data = build_master_sp_pptx(None);
+        let pres = parse_presentation(&data).expect("parse");
+        let slide = &pres.slides[0];
+
+        let pic = slide.elements.iter().find_map(|e| match e {
+            SlideElement::Picture(p) => Some(p),
+            _ => None,
+        });
+        let pic = pic.expect("master decorative picture should be rendered on the slide");
+        // Non-centred position from the master xfrm is preserved.
+        assert_eq!(pic.x, 600000, "master pic x");
+        assert_eq!(pic.y, 400000, "master pic y");
+        assert!(
+            pic.data_url.starts_with("data:image/png;base64,"),
+            "master pic should resolve image1.png via master rels; got {}",
+            &pic.data_url[..pic.data_url.len().min(40)]
+        );
+
+        // The decorative rectangle also shows up.
+        let has_band = slide
+            .elements
+            .iter()
+            .any(|e| matches!(e, SlideElement::Shape(_)));
+        assert!(has_band, "master decorative shape should be rendered");
+    }
+
+    /// §19.3.1.39: a layout with showMasterSp="0" suppresses the master's
+    /// decorative shapes for slides using that layout.
+    #[test]
+    fn master_sptree_hidden_when_layout_show_master_sp_false() {
+        let data = build_master_sp_pptx(Some(false));
+        let pres = parse_presentation(&data).expect("parse");
+        let slide = &pres.slides[0];
+
+        let has_master_pic = slide
+            .elements
+            .iter()
+            .any(|e| matches!(e, SlideElement::Picture(_)));
+        assert!(
+            !has_master_pic,
+            "showMasterSp=\"0\" on the layout must suppress master decorations"
+        );
+        assert!(
+            slide.elements.is_empty(),
+            "no master decorations expected; got {} elements",
+            slide.elements.len()
+        );
+    }
+
+    /// showMasterSp="1" (explicit true) on the layout keeps master shapes —
+    /// guards against an inverted boolean parse.
+    #[test]
+    fn master_sptree_shown_when_layout_show_master_sp_true() {
+        let data = build_master_sp_pptx(Some(true));
+        let pres = parse_presentation(&data).expect("parse");
+        let slide = &pres.slides[0];
+        assert!(
+            slide
+                .elements
+                .iter()
+                .any(|e| matches!(e, SlideElement::Picture(_))),
+            "showMasterSp=\"1\" must keep master decorations"
+        );
     }
 }
