@@ -1106,8 +1106,21 @@ fn parse_worksheet(
                                 .attribute("aboveAverage")
                                 .map(|v| v != "0")
                                 .unwrap_or(true);
+                            // ECMA-376 §18.3.1.10: `equalAverage` (default
+                            // false) and `stdDev` (optional, number of
+                            // standard deviations for the band threshold).
+                            let equal_average = cf
+                                .attribute("equalAverage")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false);
+                            let std_dev = cf
+                                .attribute("stdDev")
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .filter(|&n| n > 0);
                             rules.push(CfRule::AboveAverage {
                                 above_average,
+                                equal_average,
+                                std_dev,
                                 dxf_id,
                                 priority,
                             });
@@ -1421,7 +1434,16 @@ pub(crate) fn read_zip_bytes(
 
 /// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
 pub(crate) fn resolve_zip_path(base_dir: &str, target: &str) -> String {
-    let mut parts: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+    // An absolute Target (leading "/", e.g. openpyxl's
+    // `/xl/drawings/drawing1.xml`) is package-root-relative and must ignore
+    // `base_dir`; otherwise the base would be prepended, producing a path that
+    // doesn't exist in the archive (ECMA-376 / OPC part names are root-anchored
+    // when they start with "/").
+    let mut parts: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base_dir.split('/').filter(|s| !s.is_empty()).collect()
+    };
     for seg in target.split('/') {
         match seg {
             ".." => {
@@ -2053,5 +2075,109 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+}
+
+#[cfg(test)]
+mod resolve_zip_path_tests {
+    use super::resolve_zip_path;
+
+    /// A relative Target resolves against the base directory, honoring `..`.
+    #[test]
+    fn relative_target_resolves_against_base() {
+        assert_eq!(
+            resolve_zip_path("xl/worksheets", "../drawings/drawing1.xml"),
+            "xl/drawings/drawing1.xml"
+        );
+        assert_eq!(
+            resolve_zip_path("xl/drawings", "../media/image1.png"),
+            "xl/media/image1.png"
+        );
+    }
+
+    /// An absolute Target (leading "/", as openpyxl writes for drawings) is
+    /// package-root-relative and ignores the base directory.
+    #[test]
+    fn absolute_target_ignores_base() {
+        assert_eq!(
+            resolve_zip_path("xl/worksheets", "/xl/drawings/drawing1.xml"),
+            "xl/drawings/drawing1.xml"
+        );
+        assert_eq!(
+            resolve_zip_path("xl/drawings", "/xl/charts/chart1.xml"),
+            "xl/charts/chart1.xml"
+        );
+    }
+}
+
+#[cfg(test)]
+mod conditional_format_tests {
+    use super::parse_worksheet;
+    use crate::types::CfRule;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    fn parse_cf_rules(cf_xml: &str) -> Vec<CfRule> {
+        let xml = format!(r#"<worksheet xmlns="{NS}"><sheetData/>{cf_xml}</worksheet>"#);
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        ws.conditional_formats
+            .into_iter()
+            .flat_map(|cf| cf.rules)
+            .collect()
+    }
+
+    /// ECMA-376 §18.3.1.10: an `aboveAverage` rule with no extra attributes
+    /// defaults to `aboveAverage=true`, `equalAverage=false`, no `stdDev`.
+    #[test]
+    fn above_average_defaults() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1:A5"><cfRule type="aboveAverage" dxfId="0" priority="1"/></conditionalFormatting>"#,
+        );
+        match &rules[..] {
+            [CfRule::AboveAverage {
+                above_average,
+                equal_average,
+                std_dev,
+                ..
+            }] => {
+                assert!(*above_average, "aboveAverage defaults to true");
+                assert!(!*equal_average, "equalAverage defaults to false");
+                assert_eq!(*std_dev, None, "no stdDev by default");
+            }
+            other => panic!("expected one AboveAverage rule, got {other:?}"),
+        }
+    }
+
+    /// `aboveAverage="0"` flips to below-average; `equalAverage="1"` is honored.
+    #[test]
+    fn below_average_with_equal_average() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1:A5"><cfRule type="aboveAverage" aboveAverage="0" equalAverage="1" dxfId="0" priority="1"/></conditionalFormatting>"#,
+        );
+        match &rules[..] {
+            [CfRule::AboveAverage {
+                above_average,
+                equal_average,
+                ..
+            }] => {
+                assert!(!*above_average, "aboveAverage=\"0\" → false");
+                assert!(*equal_average, "equalAverage=\"1\" → true");
+            }
+            other => panic!("expected one AboveAverage rule, got {other:?}"),
+        }
+    }
+
+    /// `stdDev="2"` is captured as a band multiplier (ECMA-376 §18.3.1.10).
+    #[test]
+    fn above_average_std_dev() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1:A5"><cfRule type="aboveAverage" stdDev="2" dxfId="0" priority="1"/></conditionalFormatting>"#,
+        );
+        match &rules[..] {
+            [CfRule::AboveAverage { std_dev, .. }] => {
+                assert_eq!(*std_dev, Some(2), "stdDev=\"2\" captured");
+            }
+            other => panic!("expected one AboveAverage rule, got {other:?}"),
+        }
     }
 }

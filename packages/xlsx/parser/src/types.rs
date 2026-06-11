@@ -1072,6 +1072,15 @@ pub enum CfRule {
     #[serde(rename_all = "camelCase")]
     AboveAverage {
         above_average: bool,
+        /// ECMA-376 §18.3.1.10 `equalAverage`: include cells equal to the
+        /// average in the highlighted set. Default false.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        equal_average: bool,
+        /// ECMA-376 §18.3.1.10 `stdDev`: when present, the threshold becomes
+        /// `mean ± stdDev · σ` (population standard deviation) instead of the
+        /// plain mean. Absent (None) means a simple above/below-average rule.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        std_dev: Option<u32>,
         dxf_id: Option<u32>,
         priority: i32,
     },
