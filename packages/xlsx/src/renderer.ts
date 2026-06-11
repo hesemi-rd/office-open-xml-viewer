@@ -9,6 +9,7 @@ import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, segmentsHaveRtl } from './bidi-line.js';
+import { parseA1 } from './a1.js';
 
 // Default font stack. Calibri is the workbook default font in Excel; on
 // systems without Office (macOS / Linux) the browser would otherwise fall
@@ -476,22 +477,10 @@ function buildGradientFill(
   return grad;
 }
 
-/**
- * Parse an A1-style cell reference ("A1", "B12", "AA3") to 1-based row/col.
- * Returns null when the input doesn't match the expected shape (parser-side
- * data is trusted, but we still guard against malformed refs).
- */
-function parseA1Ref(ref: string): { row: number; col: number } | null {
-  const m = /^([A-Z]+)(\d+)$/.exec(ref);
-  if (!m) return null;
-  const colLetters = m[1];
-  const row = parseInt(m[2], 10);
-  let col = 0;
-  for (let i = 0; i < colLetters.length; i++) {
-    col = col * 26 + (colLetters.charCodeAt(i) - 64);
-  }
-  return { row, col };
-}
+/** Parse an A1-style cell reference to 1-based row/col. Aliased to the shared
+ *  {@link parseA1} so the renderer, data-validation and the comment popup all
+ *  agree on ref parsing (the shared form also tolerates `$`-absolute markers). */
+const parseA1Ref = parseA1;
 
 /**
  * Draw Excel's comment marker — a small filled triangle in the top-right

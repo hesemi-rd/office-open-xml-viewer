@@ -1,17 +1,5 @@
 import type { DataValidation } from './types.js';
-
-/** Parse an A1-style cell reference ("A1", "B12", "AA3") to 1-based row/col.
- *  Strips `$` absolute markers. Returns null on malformed input. */
-function parseA1(ref: string): { row: number; col: number } | null {
-  const m = /^\$?([A-Z]+)\$?(\d+)$/.exec(ref.trim());
-  if (!m) return null;
-  const letters = m[1];
-  let col = 0;
-  for (let i = 0; i < letters.length; i++) {
-    col = col * 26 + (letters.charCodeAt(i) - 64);
-  }
-  return { row: parseInt(m[2], 10), col };
-}
+import { parseA1 } from './a1.js';
 
 /**
  * Test whether a 1-based (row, col) cell falls inside a `@sqref` (ECMA-376
