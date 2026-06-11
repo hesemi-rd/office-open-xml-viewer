@@ -1106,8 +1106,21 @@ fn parse_worksheet(
                                 .attribute("aboveAverage")
                                 .map(|v| v != "0")
                                 .unwrap_or(true);
+                            // ECMA-376 §18.3.1.10: `equalAverage` (default
+                            // false) and `stdDev` (optional, number of
+                            // standard deviations for the band threshold).
+                            let equal_average = cf
+                                .attribute("equalAverage")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false);
+                            let std_dev = cf
+                                .attribute("stdDev")
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .filter(|&n| n > 0);
                             rules.push(CfRule::AboveAverage {
                                 above_average,
+                                equal_average,
+                                std_dev,
                                 dxf_id,
                                 priority,
                             });
@@ -2053,5 +2066,77 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+}
+
+#[cfg(test)]
+mod conditional_format_tests {
+    use super::parse_worksheet;
+    use crate::types::CfRule;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    fn parse_cf_rules(cf_xml: &str) -> Vec<CfRule> {
+        let xml = format!(r#"<worksheet xmlns="{NS}"><sheetData/>{cf_xml}</worksheet>"#);
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        ws.conditional_formats
+            .into_iter()
+            .flat_map(|cf| cf.rules)
+            .collect()
+    }
+
+    /// ECMA-376 §18.3.1.10: an `aboveAverage` rule with no extra attributes
+    /// defaults to `aboveAverage=true`, `equalAverage=false`, no `stdDev`.
+    #[test]
+    fn above_average_defaults() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1:A5"><cfRule type="aboveAverage" dxfId="0" priority="1"/></conditionalFormatting>"#,
+        );
+        match &rules[..] {
+            [CfRule::AboveAverage {
+                above_average,
+                equal_average,
+                std_dev,
+                ..
+            }] => {
+                assert!(*above_average, "aboveAverage defaults to true");
+                assert!(!*equal_average, "equalAverage defaults to false");
+                assert_eq!(*std_dev, None, "no stdDev by default");
+            }
+            other => panic!("expected one AboveAverage rule, got {other:?}"),
+        }
+    }
+
+    /// `aboveAverage="0"` flips to below-average; `equalAverage="1"` is honored.
+    #[test]
+    fn below_average_with_equal_average() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1:A5"><cfRule type="aboveAverage" aboveAverage="0" equalAverage="1" dxfId="0" priority="1"/></conditionalFormatting>"#,
+        );
+        match &rules[..] {
+            [CfRule::AboveAverage {
+                above_average,
+                equal_average,
+                ..
+            }] => {
+                assert!(!*above_average, "aboveAverage=\"0\" → false");
+                assert!(*equal_average, "equalAverage=\"1\" → true");
+            }
+            other => panic!("expected one AboveAverage rule, got {other:?}"),
+        }
+    }
+
+    /// `stdDev="2"` is captured as a band multiplier (ECMA-376 §18.3.1.10).
+    #[test]
+    fn above_average_std_dev() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1:A5"><cfRule type="aboveAverage" stdDev="2" dxfId="0" priority="1"/></conditionalFormatting>"#,
+        );
+        match &rules[..] {
+            [CfRule::AboveAverage { std_dev, .. }] => {
+                assert_eq!(*std_dev, Some(2), "stdDev=\"2\" captured");
+            }
+            other => panic!("expected one AboveAverage rule, got {other:?}"),
+        }
     }
 }

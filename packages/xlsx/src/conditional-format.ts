@@ -16,6 +16,9 @@ export interface CompiledCfRule {
   top10IsTop?: boolean;
   avgValue?: number;
   avgIsAbove?: boolean;
+  /** Population standard deviation of the sampled range, when the
+   *  aboveAverage rule carries a `stdDev` attribute (ECMA-376 §18.3.1.10). */
+  avgStdDev?: number;
   iconThresholds?: number[];
 }
 
@@ -135,8 +138,16 @@ export function compileCf(worksheet: Worksheet): CfContext {
         }
       } else if (rule.type === 'aboveAverage') {
         if (samples.length > 0) {
-          entry.avgValue = samples.reduce((a, b) => a + b, 0) / samples.length;
+          const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+          entry.avgValue = mean;
           entry.avgIsAbove = rule.aboveAverage;
+          if (rule.stdDev && rule.stdDev > 0) {
+            // ECMA-376 §18.3.1.10: Excel uses the population standard
+            // deviation (divide by N, not N-1) for stdDev bands.
+            const variance =
+              samples.reduce((a, b) => a + (b - mean) * (b - mean), 0) / samples.length;
+            entry.avgStdDev = Math.sqrt(variance);
+          }
         }
       } else if (rule.type === 'iconSet') {
         entry.iconThresholds = rule.cfvos.map(cfv => resolveCfvoValue(cfv, samples));
@@ -307,7 +318,15 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'aboveAverage') {
       if (numVal == null || entry.avgValue == null) continue;
-      const matches = entry.avgIsAbove ? numVal > entry.avgValue : numVal < entry.avgValue;
+      // ECMA-376 §18.3.1.10: with `stdDev=N` the threshold is mean ± N·σ
+      // (population σ); otherwise it is the plain mean. `equalAverage`
+      // includes cells exactly at the threshold in the highlighted set.
+      const band = entry.avgStdDev != null ? entry.avgStdDev * (rule.stdDev ?? 1) : 0;
+      const threshold = entry.avgIsAbove ? entry.avgValue + band : entry.avgValue - band;
+      const eq = rule.equalAverage === true;
+      const matches = entry.avgIsAbove
+        ? (eq ? numVal >= threshold : numVal > threshold)
+        : (eq ? numVal <= threshold : numVal < threshold);
       if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'iconSet') {
       if (numVal == null || !entry.iconThresholds?.length) continue;
