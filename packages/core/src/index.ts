@@ -24,6 +24,7 @@ export type {
   TextOutline,
   TextRun,
   TextRunData,
+  TileInfo,
 } from './types/common';
 export type {
   ChartDataLabelOverride,

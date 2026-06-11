@@ -1073,6 +1073,53 @@ fn parse_fill_rect(stretch: roxmltree::Node<'_, '_>) -> Option<FillRect> {
     }
 }
 
+/// Parse `<a:tile tx ty sx sy flip algn>` (ECMA-376 §20.1.8.58 CT_TileInfoProperties).
+///
+/// - `tx` / `ty`: ST_Coordinate offset of the first tile, in EMU. Default 0.
+/// - `sx` / `sy`: ST_Percentage scale of the tile (1000ths of a percent →
+///   `/100000` gives a fraction). Absent → `1.0` (100% = native blip size).
+/// - `flip`: ST_TileFlipMode (none|x|y|xy). Default "none".
+/// - `algn`: ST_RectAlignment (tl|t|tr|l|ctr|r|bl|b|br) — the anchor corner the
+///   tile grid is registered against. The schema gives no default; PowerPoint
+///   treats an absent `algn` as "tl" (the first tile sits at the box origin
+///   plus tx/ty). We carry it verbatim and default to "tl".
+fn parse_tile(tile: roxmltree::Node<'_, '_>) -> TileInfo {
+    let scale = |name: &str| -> f64 {
+        attr(&tile, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+            .unwrap_or(1.0)
+    };
+    TileInfo {
+        tx: attr_i64(&tile, "tx").unwrap_or(0),
+        ty: attr_i64(&tile, "ty").unwrap_or(0),
+        sx: scale("sx"),
+        sy: scale("sy"),
+        flip: attr(&tile, "flip").unwrap_or_else(|| "none".to_owned()),
+        algn: attr(&tile, "algn").unwrap_or_else(|| "tl".to_owned()),
+    }
+}
+
+/// ECMA-376 §20.1.8.58 (CT_TileInfoProperties) — tiled blip-fill placement.
+/// Mutually exclusive with `stretch` inside a single `a:blipFill`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TileInfo {
+    /// Horizontal offset of the first tile, EMU (`tx`). Default 0.
+    tx: i64,
+    /// Vertical offset of the first tile, EMU (`ty`). Default 0.
+    ty: i64,
+    /// Horizontal tile scale as a fraction (`sx` / 100000). Default 1.0.
+    sx: f64,
+    /// Vertical tile scale as a fraction (`sy` / 100000). Default 1.0.
+    sy: f64,
+    /// Mirror mode: "none" | "x" | "y" | "xy" (`flip`). Default "none".
+    flip: String,
+    /// Anchor corner the tile grid registers against: tl|t|tr|l|ctr|r|bl|b|br
+    /// (`algn`). Default "tl".
+    algn: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct GradStop {
@@ -1174,18 +1221,24 @@ enum Fill {
         preset: String,
     },
     /// Image fill — ECMA-376 §20.1.8.14 `a:blipFill`. The referenced blip is
-    /// resolved to a base64 data URL at parse time. Only the `stretch`
-    /// fill-mode (§20.1.8.58) is modelled; the `tile` mode (§20.1.8.32) is not
-    /// implemented (see `parse_blip_fill`).
+    /// resolved to a base64 data URL at parse time. Both fill-modes are
+    /// modelled and mutually exclusive: `stretch` (§20.1.8.56) carries a
+    /// `fill_rect`; `tile` (§20.1.8.58) carries a `tile` descriptor (see
+    /// `parse_blip_fill`).
     #[serde(rename_all = "camelCase")]
     Image {
         /// `data:<mime>;base64,…` of the embedded blip.
         data_url: String,
         /// `<a:stretch><a:fillRect>` (§20.1.8.30 CT_RelativeRect). Edge insets
         /// as fractions of the fill region; negative values overscan past the
-        /// bounding box. `None` when stretch has no fillRect (= full box).
+        /// bounding box. `None` when stretch has no fillRect (= full box) or
+        /// the fill-mode is `tile`.
         #[serde(skip_serializing_if = "Option::is_none")]
         fill_rect: Option<FillRect>,
+        /// `<a:tile>` (§20.1.8.58). `Some` only when the blipFill is tiled;
+        /// mutually exclusive with `fill_rect`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile: Option<TileInfo>,
         /// `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). None = opaque.
         #[serde(skip_serializing_if = "Option::is_none")]
         alpha: Option<f64>,
@@ -2053,27 +2106,36 @@ fn parse_fill(node: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) ->
 /// closure maps the `<a:blip r:embed>` rId to a base64 data URL using the
 /// caller's rels + zip (each inheritance level resolves against its own part).
 ///
-/// Only the `stretch` fill-mode (§20.1.8.58) is honoured: its `fillRect`
-/// (§20.1.8.30) is captured so the renderer can place the (possibly
-/// overscanned) image. The `tile` fill-mode (§20.1.8.32) is **not implemented**
-/// — a tile-only blipFill returns None so callers keep their existing
-/// solid/bgRef fallback rather than mis-rendering a tiled image as stretched.
+/// Both fill-modes are honoured and mutually exclusive:
+/// - `stretch` (§20.1.8.56): the `fillRect` (§20.1.8.30) is captured so the
+///   renderer can place the (possibly overscanned) image into the box.
+/// - `tile` (§20.1.8.58): the tile offset/scale/flip/align descriptor is
+///   captured so the renderer can repeat the blip at its native (scaled) size.
+///
+/// When neither child is present the blip defaults to full-box placement
+/// (stretch with no fillRect).
 fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     blip_fill: roxmltree::Node<'_, '_>,
     resolve_blip: &mut F,
 ) -> Option<Fill> {
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
     let data_url = resolve_blip(&r_id)?;
-    // tile mode is unsupported; only proceed for stretch (or no explicit mode,
-    // which defaults to stretch-like full-box placement).
-    if child(blip_fill, "tile").is_some() {
-        return None;
+    let alpha = parse_blip_alpha(blip_fill);
+    // §20.1.8.58 tile takes precedence when present (stretch/tile are an
+    // either-or choice in CT_BlipFillProperties).
+    if let Some(tile_node) = child(blip_fill, "tile") {
+        return Some(Fill::Image {
+            data_url,
+            fill_rect: None,
+            tile: Some(parse_tile(tile_node)),
+            alpha,
+        });
     }
     let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
-    let alpha = parse_blip_alpha(blip_fill);
     Some(Fill::Image {
         data_url,
         fill_rect,
+        tile: None,
         alpha,
     })
 }
@@ -8369,6 +8431,7 @@ mod tests {
             Fill::Image {
                 data_url,
                 fill_rect,
+                tile,
                 alpha,
             } => {
                 assert_eq!(data_url, "data:image/jpeg;base64,QUJD");
@@ -8376,16 +8439,56 @@ mod tests {
                 assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
                 assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
                 assert!(is_zero_f64(&fr.l) && is_zero_f64(&fr.r));
+                assert!(tile.is_none(), "stretch fill must not carry tile");
                 assert!((alpha.expect("alpha") - 0.8).abs() < 1e-6);
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
     }
 
-    /// A `bgPr > blipFill` whose fill-mode is `tile` is unsupported: it must NOT
-    /// produce a `Fill::Image` (so callers keep their solid/bgRef fallback).
+    /// ECMA-376 §20.1.8.14 + §20.1.8.58 — a `bgPr > blipFill` with `<a:tile>`
+    /// parses into `Fill::Image` carrying a `TileInfo` (and no `fillRect`).
+    /// tx/ty stay EMU, sx/sy convert ST_Percentage → fraction, flip/algn pass
+    /// through verbatim.
     #[test]
-    fn test_parse_background_blip_fill_tile_unsupported() {
+    fn test_parse_background_blip_fill_tile() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <p:bg><p:bgPr>
+                <a:blipFill>
+                    <a:blip r:embed="rId2"/>
+                    <a:tile tx="457200" ty="-228600" sx="50000" sy="75000" flip="xy" algn="ctr"/>
+                </a:blipFill>
+            </p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut resolve =
+            |_: &str| -> Option<String> { Some("data:image/png;base64,QQ==".to_owned()) };
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("tiled blip background should resolve to Fill::Image");
+        match fill {
+            Fill::Image {
+                fill_rect, tile, ..
+            } => {
+                assert!(fill_rect.is_none(), "tile fill must not carry fillRect");
+                let t = tile.expect("tile should be present");
+                assert_eq!(t.tx, 457_200);
+                assert_eq!(t.ty, -228_600);
+                assert!((t.sx - 0.5).abs() < 1e-9, "sx={}", t.sx);
+                assert!((t.sy - 0.75).abs() < 1e-9, "sy={}", t.sy);
+                assert_eq!(t.flip, "xy");
+                assert_eq!(t.algn, "ctr");
+            }
+            other => panic!("expected Fill::Image, got {other:?}"),
+        }
+    }
+
+    /// §20.1.8.58 defaults: a bare `<a:tile/>` yields tx/ty=0, sx/sy=1.0
+    /// (100% native size), flip="none", algn="tl".
+    #[test]
+    fn test_parse_background_blip_fill_tile_defaults() {
         let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
                               xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
                               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
@@ -8397,8 +8500,20 @@ mod tests {
         let theme = HashMap::new();
         let mut resolve =
             |_: &str| -> Option<String> { Some("data:image/png;base64,QQ==".to_owned()) };
-        // No solidFill fallback inside bgPr → overall None (caller falls through).
-        assert!(parse_background(doc.root_element(), &theme, &mut resolve).is_none());
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("bare tile should still resolve to Fill::Image");
+        match fill {
+            Fill::Image { tile, .. } => {
+                let t = tile.expect("tile should be present");
+                assert_eq!(t.tx, 0);
+                assert_eq!(t.ty, 0);
+                assert!((t.sx - 1.0).abs() < 1e-9);
+                assert!((t.sy - 1.0).abs() < 1e-9);
+                assert_eq!(t.flip, "none");
+                assert_eq!(t.algn, "tl");
+            }
+            other => panic!("expected Fill::Image, got {other:?}"),
+        }
     }
 
     /// ECMA-376 §21.1.2.3.16 — underline_style carries non-default underline

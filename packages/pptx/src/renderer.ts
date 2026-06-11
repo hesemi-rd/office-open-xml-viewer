@@ -6,6 +6,7 @@ import type {
   MediaElement,
   TableElement,
   Fill,
+  TileInfo,
   Stroke,
   TextBody,
   Paragraph,
@@ -852,38 +853,44 @@ async function renderBackground(
   ctx: CanvasRenderingContext2D,
   fill: Fill | null,
   canvasW: number,
-  canvasH: number
+  canvasH: number,
+  scale: number,
 ) {
-  // ECMA-376 §20.1.8.14 — image (blipFill) background. Decode the embedded blip
-  // and stretch it into the destination rect derived from the §20.1.8.30
-  // fillRect insets. Paint an opaque white base first so a partially
-  // transparent image (alphaModFix) composites over white, and so a decode
-  // failure still leaves a defined background.
+  // ECMA-376 §20.1.8.14 — image (blipFill) background. Paint an opaque white
+  // base first so a partially transparent image (alphaModFix) composites over
+  // white, and so a decode failure still leaves a defined background.
   if (fill && fill.fillType === 'image') {
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvasW, canvasH);
     try {
       const bitmap = await getCachedBitmap(fill.dataUrl);
-      // fillRect edges are fractions of the fill region; negative = overscan.
-      // ECMA-376 §20.1.8.30: l/t are left/top insets, r/b are right/bottom
-      // insets, so the destination spans [l, 1-r] × [t, 1-b] of the box.
-      const fr = fill.fillRect ?? {};
-      const l = fr.l ?? 0;
-      const t = fr.t ?? 0;
-      const r = fr.r ?? 0;
-      const b = fr.b ?? 0;
-      const dx = l * canvasW;
-      const dy = t * canvasH;
-      const dw = canvasW * (1 - l - r);
-      const dh = canvasH * (1 - t - b);
       ctx.save();
-      // Clip to the slide rectangle so overscan (negative insets) is cropped at
-      // the slide edge rather than spilling onto neighbouring content.
+      // Clip to the slide rectangle so overscan (negative insets) or tile
+      // bleed is cropped at the slide edge rather than spilling onto
+      // neighbouring content.
       ctx.beginPath();
       ctx.rect(0, 0, canvasW, canvasH);
       ctx.clip();
       if (fill.alpha != null) ctx.globalAlpha = fill.alpha;
-      ctx.drawImage(bitmap, dx, dy, dw, dh);
+      if (fill.tile) {
+        // §20.1.8.58 — tiled placement: repeat the blip at its native size.
+        paintTiledBackground(ctx, bitmap, fill.tile, canvasW, canvasH, scale);
+      } else {
+        // §20.1.8.56 stretch into the destination rect from the §20.1.8.30
+        // fillRect insets. l/t are left/top insets, r/b are right/bottom
+        // insets, so the destination spans [l, 1-r] × [t, 1-b] of the box;
+        // negative edges overscan past the box.
+        const fr = fill.fillRect ?? {};
+        const l = fr.l ?? 0;
+        const t = fr.t ?? 0;
+        const r = fr.r ?? 0;
+        const b = fr.b ?? 0;
+        const dx = l * canvasW;
+        const dy = t * canvasH;
+        const dw = canvasW * (1 - l - r);
+        const dh = canvasH * (1 - t - b);
+        ctx.drawImage(bitmap, dx, dy, dw, dh);
+      }
       ctx.restore();
     } catch {
       // Decode failed — the white base painted above remains as the fallback.
@@ -893,6 +900,127 @@ async function renderBackground(
   const bg = resolveShapeFill(fill, ctx, 0, 0, canvasW, canvasH);
   ctx.fillStyle = bg ?? '#FFFFFF';
   ctx.fillRect(0, 0, canvasW, canvasH);
+}
+
+/**
+ * EMU per pixel at 96 DPI. A blip's intrinsic pixel size is interpreted at
+ * 96 DPI to get its native EMU size, matching how PowerPoint sizes a tile.
+ * 914400 EMU / inch ÷ 96 px / inch = 9525 EMU / px.
+ */
+const EMU_PER_PX_96 = 9525;
+
+/**
+ * Compute the anchor (origin) of the first tile inside the fill box for a
+ * given §20.1.8.41 ST_RectAlignment value. The returned point is where the
+ * tile grid is registered; tx/ty then shift it further. The pattern is then
+ * phase-shifted so a tile edge passes through this anchor.
+ *
+ * - `tl` → box origin (0,0); the first tile's top-left sits at the box origin.
+ * - `ctr` → box centre; a tile is centred in the box.
+ * - `br` → box bottom-right corner; a tile's bottom-right sits there.
+ * etc. The anchor is expressed as the position (px) of the tile's top-left
+ * for the corresponding alignment, before tx/ty.
+ */
+export function tileAnchorOffset(
+  algn: string,
+  boxW: number,
+  boxH: number,
+  tileW: number,
+  tileH: number,
+): { ax: number; ay: number } {
+  // Horizontal: tl/l/bl = left, t/ctr/b = centre, tr/r/br = right.
+  let ax: number;
+  if (algn === 't' || algn === 'ctr' || algn === 'b') {
+    ax = (boxW - tileW) / 2;
+  } else if (algn === 'tr' || algn === 'r' || algn === 'br') {
+    ax = boxW - tileW;
+  } else {
+    ax = 0; // tl, l, bl (and any unknown) anchor left.
+  }
+  // Vertical: tl/t/tr = top, l/ctr/r = middle, bl/b/br = bottom.
+  let ay: number;
+  if (algn === 'l' || algn === 'ctr' || algn === 'r') {
+    ay = (boxH - tileH) / 2;
+  } else if (algn === 'bl' || algn === 'b' || algn === 'br') {
+    ay = boxH - tileH;
+  } else {
+    ay = 0; // tl, t, tr (and any unknown) anchor top.
+  }
+  return { ax, ay };
+}
+
+/**
+ * Paint a tiled blip background (ECMA-376 §20.1.8.58 CT_TileInfoProperties).
+ *
+ * The blip repeats at its native pixel size (interpreted at 96 DPI → EMU)
+ * scaled by sx/sy and the slide `scale`. `flip` mirrors alternate tiles, which
+ * we pre-compose into a 2×2 "super-tile" so a plain `repeat` pattern reproduces
+ * the mirror cadence. `algn` registers the grid against a box corner/edge and
+ * tx/ty add a further EMU offset. The whole pattern is phase-shifted via a
+ * `DOMMatrix` translate on the pattern transform.
+ *
+ * The caller has already clipped to the slide box and set globalAlpha.
+ */
+function paintTiledBackground(
+  ctx: CanvasRenderingContext2D,
+  bitmap: ImageBitmap,
+  tile: TileInfo,
+  canvasW: number,
+  canvasH: number,
+  scale: number,
+): void {
+  // Native tile size in slide px: image px → EMU @96dpi → × sx/sy → × scale.
+  const tileW = bitmap.width * EMU_PER_PX_96 * tile.sx * scale;
+  const tileH = bitmap.height * EMU_PER_PX_96 * tile.sy * scale;
+  if (!(tileW > 0) || !(tileH > 0)) return;
+
+  const flipX = tile.flip === 'x' || tile.flip === 'xy';
+  const flipY = tile.flip === 'y' || tile.flip === 'xy';
+
+  // Build the repeating cell. Without flip it is one tile; with flip it is a
+  // 2×2 block whose neighbours are mirrored, so the seam between repeats is a
+  // mirror line (PowerPoint's tile-flip behaviour).
+  const cellW = tileW * (flipX ? 2 : 1);
+  const cellH = tileH * (flipY ? 2 : 1);
+  const aux = createAuxCanvas(cellW, cellH);
+  if (!aux) return;
+  const actx = aux.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!actx) return;
+
+  const drawCell = (cx: number, cy: number, mx: boolean, my: boolean) => {
+    actx.save();
+    actx.translate(cx + (mx ? tileW : 0), cy + (my ? tileH : 0));
+    actx.scale(mx ? -1 : 1, my ? -1 : 1);
+    actx.drawImage(bitmap, 0, 0, tileW, tileH);
+    actx.restore();
+  };
+  // Top-left tile is always un-mirrored; mirror the X/Y neighbours.
+  drawCell(0, 0, false, false);
+  if (flipX) drawCell(tileW, 0, true, false);
+  if (flipY) drawCell(0, tileH, false, true);
+  if (flipX && flipY) drawCell(tileW, tileH, true, true);
+
+  const pattern = ctx.createPattern(aux as unknown as CanvasImageSource, 'repeat');
+  if (!pattern) return;
+
+  // Phase: register the grid against the alignment anchor, then add tx/ty.
+  const { ax, ay } = tileAnchorOffset(tile.algn, canvasW, canvasH, tileW, tileH);
+  const px = ax + emuToPx(tile.tx, scale);
+  const py = ay + emuToPx(tile.ty, scale);
+  // `setTransform` exists where DOMMatrix is available (browser + skia-canvas).
+  // The translate aligns a cell origin with (px, py); `repeat` covers the box.
+  if (typeof pattern.setTransform === 'function' && typeof DOMMatrix !== 'undefined') {
+    pattern.setTransform(new DOMMatrix().translateSelf(px, py));
+    ctx.fillStyle = pattern;
+    ctx.fillRect(0, 0, canvasW, canvasH);
+  } else {
+    // Fallback: bake the phase into the fill origin by translating the context.
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.fillStyle = pattern;
+    ctx.fillRect(-px, -py, canvasW, canvasH);
+    ctx.restore();
+  }
 }
 
 function applyShadow(ctx: CanvasRenderingContext2D, shadow: Shadow | null, scale: number) {
@@ -2873,7 +3001,7 @@ export async function renderSlide(
     themeHlinkColor: opts.hlinkColor ?? null,
   };
 
-  await renderBackground(ctx, slide.background, canvasW, canvasH);
+  await renderBackground(ctx, slide.background, canvasW, canvasH, scale);
   if (superseded()) return canvas;
 
   // Pre-rasterize any equations so the synchronous text layout can place them.

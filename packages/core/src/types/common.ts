@@ -63,16 +63,48 @@ export interface FillRect {
 }
 
 /**
+ * ECMA-376 §20.1.8.58 (CT_TileInfoProperties) — tiled blip-fill placement.
+ * The blip repeats at its native size (scaled by sx/sy) across the fill box.
+ * Mutually exclusive with {@link ImageFill.fillRect} (the `stretch` mode).
+ */
+export interface TileInfo {
+  /** Horizontal offset of the first tile, in EMU (`tx`). Default 0. */
+  tx: number;
+  /** Vertical offset of the first tile, in EMU (`ty`). Default 0. */
+  ty: number;
+  /** Horizontal tile scale as a fraction (`sx` / 100000). Default 1.0. */
+  sx: number;
+  /** Vertical tile scale as a fraction (`sy` / 100000). Default 1.0. */
+  sy: number;
+  /** Mirror mode: `'none' | 'x' | 'y' | 'xy'` (`flip`). Default `'none'`. */
+  flip: string;
+  /**
+   * Anchor corner the tile grid registers against:
+   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`). Default `'tl'`.
+   */
+  algn: string;
+}
+
+/**
  * Image fill — ECMA-376 §20.1.8.14 (CT_BlipFillProperties). The embedded blip
- * is resolved to a base64 data URL at parse time. Only the `stretch` fill-mode
- * (§20.1.8.58) is modelled; `tile` is not yet supported.
+ * is resolved to a base64 data URL at parse time. Both fill-modes are modelled
+ * and mutually exclusive: `stretch` (§20.1.8.56) carries {@link ImageFill.fillRect};
+ * `tile` (§20.1.8.58) carries {@link ImageFill.tile}.
  */
 export interface ImageFill {
   fillType: 'image';
   /** `data:<mime>;base64,…` of the embedded blip. */
   dataUrl: string;
-  /** `<a:stretch><a:fillRect>` insets. Absent → fills the whole box. */
+  /**
+   * `<a:stretch><a:fillRect>` insets. Absent → fills the whole box (or the
+   * fill is tiled — see {@link ImageFill.tile}).
+   */
   fillRect?: FillRect;
+  /**
+   * `<a:tile>` descriptor. Present only when the blipFill is tiled; mutually
+   * exclusive with {@link ImageFill.fillRect}.
+   */
+  tile?: TileInfo;
   /** `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). Absent = opaque. */
   alpha?: number;
 }

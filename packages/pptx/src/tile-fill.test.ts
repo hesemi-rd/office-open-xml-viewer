@@ -1,0 +1,45 @@
+import { describe, it, expect } from 'vitest';
+import { tileAnchorOffset } from './renderer';
+
+/**
+ * ECMA-376 §20.1.8.58 (CT_TileInfoProperties) `algn` + §20.1.8.41
+ * (ST_RectAlignment). The tile grid registers against a corner / edge / centre
+ * of the fill box; `tileAnchorOffset` returns the top-left position (px) of the
+ * tile that sits at that anchor, before the tx/ty offset is added.
+ *
+ * Box 100×100, tile 40×30 — distinct W/H so axis mix-ups surface.
+ */
+describe('tileAnchorOffset — §20.1.8.41 ST_RectAlignment', () => {
+  const W = 100;
+  const H = 100;
+  const TW = 40;
+  const TH = 30;
+
+  // Horizontal: left = 0, centre = (W-TW)/2 = 30, right = W-TW = 60.
+  // Vertical:   top  = 0, middle = (H-TH)/2 = 35, bottom = H-TH = 70.
+  const cases: Array<[string, number, number]> = [
+    ['tl', 0, 0],
+    ['t', 30, 0],
+    ['tr', 60, 0],
+    ['l', 0, 35],
+    ['ctr', 30, 35],
+    ['r', 60, 35],
+    ['bl', 0, 70],
+    ['b', 30, 70],
+    ['br', 60, 70],
+  ];
+
+  for (const [algn, ax, ay] of cases) {
+    it(`algn="${algn}" anchors at (${ax}, ${ay})`, () => {
+      const got = tileAnchorOffset(algn, W, H, TW, TH);
+      expect(got.ax).toBeCloseTo(ax, 6);
+      expect(got.ay).toBeCloseTo(ay, 6);
+    });
+  }
+
+  it('defaults an unknown algn to top-left (tl)', () => {
+    // §20.1.8.58 gives no schema default; PowerPoint treats absent/unknown as
+    // tl, which the parser already normalises to "tl".
+    expect(tileAnchorOffset('???', W, H, TW, TH)).toEqual({ ax: 0, ay: 0 });
+  });
+});

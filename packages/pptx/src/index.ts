@@ -35,6 +35,7 @@ export type {
   GradientStop,
   ImageFill,
   FillRect,
+  TileInfo,
   Stroke,
   // Effect types (reachable via ShapeElement.shadow / .glow / …).
   Shadow,
