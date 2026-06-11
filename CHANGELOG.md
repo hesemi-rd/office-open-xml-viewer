@@ -4,6 +4,61 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.57.0 — 2026-06-11
+
+The effects & 3D release: DrawingML shape/picture effects, scene3d camera
+perspective, and the shared preset-geometry engine now serving both pptx
+and xlsx. Includes two breaking API changes ahead of v1.0 (below).
+
+core:
+
+- Preset-geometry engine (186 presets, ECMA-376 §20.1.9 / §19.5.31.3) moved
+  from pptx into `@silurus/ooxml-core` so every format shares it (#392).
+- scene3d camera projection: §20.1.5.5/.11 rotation model (left-handed,
+  lat/lon/rev), calibrated perspective lens, and a scale-invariant
+  supersampled homography warp — mesh error is measured in raster space so
+  large / HiDPI renders stay crack-free (#393).
+- Canvas effect helpers for inner shadow (§20.1.8.40), soft edge
+  (§20.1.8.53) and reflection (§20.1.8.50) (#385).
+
+pptx:
+
+- Shape effects now render: `innerShdw`, `softEdge`, `reflection` (#385);
+  the same effectLst applies to pictures (`p:pic`, §19.3.1.37) including
+  `outerShdw` and glow (#389).
+- Pictures clip to any preset geometry (`prstGeom` as clip silhouette,
+  §20.1.9.18) — previously roundRect/custGeom only; the omitted-`avLst`
+  default adj is honored (#391, #393).
+- 3D camera perspective (`scene3d` camera + `rot`) on pictures, with
+  effects applied after projection; `sp3d` contour edge rendered as a flat
+  approximation (bevel shading planned) (#393).
+- Picture borders: `a:ln` on `p:pic` stroked along the clip silhouette
+  (#393).
+
+xlsx:
+
+- Custom table styles (`<tableStyles>`, §18.8.83) no longer synthesize
+  borders the file does not define; all seven renderable
+  `tableStyleElement` roles are honored (#388).
+- Drawing shapes render through the shared preset engine with `avLst`
+  adjust handles — parallelograms, callouts, triangles et al. no longer
+  fall back to rectangles (#392).
+- RTL sheets (`rightToLeft`, §18.3.1.87) keep their top-right start
+  position when the host is laid out late or resized (#390).
+
+API (breaking, pre-1.0):
+
+- `XlsxViewerOptions.onSheetChange` is now `(index, total)` matching the
+  docx/pptx viewers; read the sheet name via `sheetNames[index]` (#387).
+- `PresentationHandle.dispose()` renamed to `destroy()` (#387).
+- All types reachable from the public barrels are exported, guarded by a
+  compile-time completeness test (#387).
+
+infra:
+
+- CI gates Rust: `cargo fmt --check`, `clippy -D warnings`, and the full
+  test suite run on every PR (#386).
+
 ## 0.56.0 — 2026-06-11
 
 The right-to-left release: full RTL (Arabic / Hebrew) rendering across all
