@@ -17,7 +17,8 @@ pub(crate) fn render_document(doc: &Document) -> String {
     if !doc.footnotes.is_empty() {
         out.push_str("\n## Footnotes\n\n");
         for note in &doc.footnotes {
-            let text = note.text.trim();
+            let text = note_inline_text(&note.content);
+            let text = text.trim();
             if text.is_empty() {
                 continue;
             }
@@ -27,7 +28,8 @@ pub(crate) fn render_document(doc: &Document) -> String {
     if !doc.endnotes.is_empty() {
         out.push_str("\n## Endnotes\n\n");
         for note in &doc.endnotes {
-            let text = note.text.trim();
+            let text = note_inline_text(&note.content);
+            let text = text.trim();
             if text.is_empty() {
                 continue;
             }
@@ -86,6 +88,24 @@ fn render_paragraph(p: &DocParagraph, out: &mut String) {
     let _ = writeln!(out, "{}\n", trimmed);
 }
 
+/// Flatten a note's block-level content into a single inline markdown string
+/// (paragraphs joined with a space). Used for the `[^id]:` footnote/endnote
+/// projection, which is single-line by convention. Reference markers are
+/// dropped by `format_text_run`.
+fn note_inline_text(content: &[BodyElement]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for el in content {
+        if let BodyElement::Paragraph(p) = el {
+            let t = render_runs(&p.runs);
+            let t = t.trim();
+            if !t.is_empty() {
+                parts.push(t.to_string());
+            }
+        }
+    }
+    parts.join(" ")
+}
+
 fn render_runs(runs: &[DocRun]) -> String {
     let mut out = String::new();
     for run in runs {
@@ -123,6 +143,12 @@ fn render_runs(runs: &[DocRun]) -> String {
 }
 
 fn format_text_run(t: &crate::types::TextRun) -> String {
+    // Footnote/endnote reference markers carry only the note's id; the linkage
+    // is expressed via the `[^id]` syntax elsewhere, so drop the marker glyph
+    // from the inline text projection.
+    if t.note_ref.is_some() {
+        return String::new();
+    }
     let raw = &t.text;
     if raw.is_empty() {
         return String::new();
