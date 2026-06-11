@@ -57,6 +57,17 @@ export interface Worksheet {
   /** A1-style cell refs of commented cells (ECMA-376 §18.7.3). Rendered as a
    *  small red triangle in each cell's top-right corner. */
   commentRefs?: string[];
+  /** Full-fidelity comment bodies (cell ref + author + plain text) for every
+   *  `<comment>` in `xl/commentsN.xml` (ECMA-376 §18.7). Parallel to
+   *  {@link commentRefs} (one entry per ref). Consume this to read the note
+   *  text; the renderer only uses {@link commentRefs} for the red indicator.
+   *  Hover popups are out of scope (TODO). */
+  comments?: XlsxComment[];
+  /** Data-validation rules on this sheet (ECMA-376 §18.3.1.32–33). Exposed for
+   *  tooling. The viewer draws a list-dropdown arrow on the active cell when the
+   *  selection intersects a `list`-type rule's `sqref` (display only — opening
+   *  the list / picking a value is out of scope for a viewer). */
+  dataValidations?: DataValidation[];
   /** Defined names in scope for this sheet (ECMA-376 §18.2.5). Used by
    *  conditional-formatting `expression` rules that call named ranges
    *  (e.g. `task_start`, `today`). */
@@ -199,6 +210,46 @@ export interface TableColumnInfo {
 export interface DefinedName {
   name: string;
   formula: string;
+}
+
+/** One cell comment. Sourced from the classic notes file `xl/commentsN.xml`
+ *  (ECMA-376 §18.7) when present, otherwise from the Office-365 threaded
+ *  comments part `xl/threadedComments/` (MS-XLSX schema
+ *  `…/spreadsheetml/2018/threadedcomments`, `personId` resolved via
+ *  `xl/persons/`). `text` is the joined plain text — every `<r><t>` run for
+ *  classic notes, every reply in the thread (newline-joined) for threaded
+ *  comments; rich-text formatting is dropped. 1:1 with the Rust `XlsxComment`
+ *  (serde camelCase). */
+export interface XlsxComment {
+  /** A1-style cell reference (`@ref` on the comment element). */
+  cellRef: string;
+  /** Resolved author name — the `<authors>` entry (classic) or the `<person>`
+   *  `displayName` (threaded). Absent when unresolved. */
+  author?: string;
+  /** Concatenated plain text of every run / threaded reply. */
+  text: string;
+}
+
+/** One `<dataValidation>` rule (ECMA-376 §18.3.1.33). `type` is the constraint
+ *  class (`list` | `whole` | `decimal` | `date` | `time` | `textLength` |
+ *  `custom`); `operator` qualifies it (`between` | `notBetween` | `equal` | …).
+ *  `formula1` / `formula2` are the operands (for `list`, `formula1` is the
+ *  comma-separated literal list or a range/named reference). 1:1 with the Rust
+ *  `DataValidation` (serde camelCase). */
+export interface DataValidation {
+  /** Affected cell ranges, verbatim from `@sqref` (space-separated A1 refs). */
+  sqref: string;
+  /** Constraint class. Absent means the spec default (`none`, no constraint). */
+  validationType?: string;
+  operator?: string;
+  formula1?: string;
+  formula2?: string;
+  /** `@allowBlank` — empty input is permitted. */
+  allowBlank?: boolean;
+  promptTitle?: string;
+  prompt?: string;
+  errorTitle?: string;
+  errorMessage?: string;
 }
 
 // ─── Chart types ─────────────────────────────────────────────────────────────

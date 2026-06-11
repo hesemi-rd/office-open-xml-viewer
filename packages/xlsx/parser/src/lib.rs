@@ -1247,32 +1247,147 @@ fn load_sheet_comments(
         return Vec::new();
     };
 
-    // Accept both plain ("/comments") and threaded ("/threadedComment") relTypes
-    // but prefer the classic comments file — threaded comments live in a
-    // separate namespace and are an extension.
-    let mut comments_target: Option<String> = None;
+    // A sheet may carry classic notes (`/comments`, ECMA-376 §18.7) and/or
+    // Office-365 threaded comments (`/threadedComment`, MS extension). Excel
+    // writes a back-compat `xl/commentsN.xml` alongside every threaded comment,
+    // so the classic file is preferred when present (it already includes the
+    // threaded text). Only when there is no classic file do we fall back to the
+    // threaded part — which is the case for files authored by tools that emit
+    // threaded comments exclusively.
+    let mut classic_target: Option<String> = None;
+    let mut threaded_target: Option<String> = None;
     for rel in rels_doc
         .root_element()
         .children()
         .filter(|n| n.is_element())
     {
         let rel_type = rel.attribute("Type").unwrap_or("");
+        let Some(t) = rel.attribute("Target") else {
+            continue;
+        };
         if rel_type.ends_with("/comments") {
-            if let Some(t) = rel.attribute("Target") {
-                comments_target = Some(t.to_string());
-                break;
+            classic_target.get_or_insert_with(|| t.to_string());
+        } else if rel_type.ends_with("/threadedComment") {
+            threaded_target.get_or_insert_with(|| t.to_string());
+        }
+    }
+
+    if let Some(target) = classic_target {
+        let comments_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        if let Ok(comments_xml) = read_zip_entry(archive, &comments_path) {
+            return parse_comments_xml(&comments_xml);
+        }
+    }
+
+    if let Some(target) = threaded_target {
+        let tc_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        if let Ok(tc_xml) = read_zip_entry(archive, &tc_path) {
+            let persons = load_persons(archive);
+            return parse_threaded_comments_xml(&tc_xml, &persons);
+        }
+    }
+
+    Vec::new()
+}
+
+/// Load `personId` → display-name map from `xl/persons/person*.xml`
+/// (Office-365 threaded-comment authors, MS-XLSX schema
+/// `…/office/spreadsheetml/2018/threadedcomments`). `<person displayName id/>`.
+/// Returns an empty map when no persons part exists.
+fn load_persons(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    // Persons live under xl/persons/ by convention; collect every part there so
+    // we don't depend on the exact file name (person.xml vs person1.xml).
+    let person_paths: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .filter(|n| n.starts_with("xl/persons/") && n.ends_with(".xml"))
+        .collect();
+    for path in person_paths {
+        let Ok(xml) = read_zip_entry(archive, &path) else {
+            continue;
+        };
+        let Ok(doc) = roxmltree::Document::parse(&xml) else {
+            continue;
+        };
+        for p in doc
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "person")
+        {
+            if let (Some(id), Some(name)) = (p.attribute("id"), p.attribute("displayName")) {
+                out.insert(id.to_string(), name.to_string());
             }
         }
     }
-    let Some(target) = comments_target else {
-        return Vec::new();
-    };
+    out
+}
 
-    let comments_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-    let Ok(comments_xml) = read_zip_entry(archive, &comments_path) else {
+/// Parse `xl/threadedComments/threadedCommentN.xml` (MS-XLSX threaded comments,
+/// schema `…/office/spreadsheetml/2018/threadedcomments`). Each
+/// `<threadedComment ref personId>` carries a `<text>`; `personId` resolves to a
+/// display name via the `persons` map. Multiple comments on the same cell (a
+/// thread of replies) are joined into one body, mirroring how the classic
+/// back-compat file flattens a thread. Returns one `XlsxComment` per cell that
+/// has at least one threaded comment.
+fn parse_threaded_comments_xml(
+    tc_xml: &str,
+    persons: &HashMap<String, String>,
+) -> Vec<XlsxComment> {
+    let Ok(doc) = roxmltree::Document::parse(tc_xml) else {
         return Vec::new();
     };
-    let Ok(comments_doc) = roxmltree::Document::parse(&comments_xml) else {
+    // Preserve document order of first appearance per cell ref.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_ref: HashMap<String, (Option<String>, String)> = HashMap::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "threadedComment")
+    {
+        let Some(cell_ref) = node.attribute("ref") else {
+            continue;
+        };
+        let author = node
+            .attribute("personId")
+            .and_then(|id| persons.get(id).cloned())
+            .filter(|s| !s.is_empty());
+        let text = node
+            .children()
+            .find(|c| c.is_element() && c.tag_name().name() == "text")
+            .and_then(|t| t.text())
+            .unwrap_or("")
+            .to_string();
+        let entry = by_ref.entry(cell_ref.to_string()).or_insert_with(|| {
+            order.push(cell_ref.to_string());
+            (None, String::new())
+        });
+        // First comment in the thread sets the author; replies are appended.
+        if entry.0.is_none() {
+            entry.0 = author;
+        }
+        if !entry.1.is_empty() {
+            entry.1.push('\n');
+        }
+        entry.1.push_str(&text);
+    }
+    order
+        .into_iter()
+        .map(|cell_ref| {
+            let (author, text) = by_ref.remove(&cell_ref).unwrap();
+            XlsxComment {
+                cell_ref,
+                author,
+                text,
+            }
+        })
+        .collect()
+}
+
+/// Parse a `xl/commentsN.xml` document (ECMA-376 §18.7) into structured
+/// `XlsxComment`s. Resolves `@authorId` against the `<authors>` block and joins
+/// every `<text>/<r>/<t>` run into plain text (rich-text formatting dropped).
+/// Returns an empty vec on malformed XML. Split out from `load_sheet_comments`
+/// so the parse path is unit-testable without a ZIP archive.
+fn parse_comments_xml(comments_xml: &str) -> Vec<XlsxComment> {
+    let Ok(comments_doc) = roxmltree::Document::parse(comments_xml) else {
         return Vec::new();
     };
 
@@ -2179,5 +2294,181 @@ mod conditional_format_tests {
             }
             other => panic!("expected one AboveAverage rule, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod data_validation_tests {
+    use super::parse_worksheet;
+    use crate::types::DataValidation;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    fn parse_dvs(dv_xml: &str) -> Vec<DataValidation> {
+        let xml = format!(r#"<worksheet xmlns="{NS}"><sheetData/>{dv_xml}</worksheet>"#);
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        ws.data_validations
+    }
+
+    /// ECMA-376 §18.3.1.33 — a `list` rule captures type, sqref and the
+    /// `<formula1>` literal list. `allowBlank="1"` is honored.
+    #[test]
+    fn list_validation_captures_formula_and_sqref() {
+        let dvs = parse_dvs(
+            r#"<dataValidations count="1"><dataValidation sqref="B2:B5" type="list" allowBlank="1"><formula1>"Pending,Shipped,Delivered"</formula1></dataValidation></dataValidations>"#,
+        );
+        assert_eq!(dvs.len(), 1, "one rule parsed");
+        let dv = &dvs[0];
+        assert_eq!(dv.sqref, "B2:B5");
+        assert_eq!(dv.validation_type.as_deref(), Some("list"));
+        assert_eq!(dv.formula1.as_deref(), Some("\"Pending,Shipped,Delivered\""));
+        assert!(dv.allow_blank, "allowBlank=\"1\" → true");
+    }
+
+    /// A `whole`/`between` rule keeps both operands and the operator.
+    #[test]
+    fn whole_between_keeps_both_operands() {
+        let dvs = parse_dvs(
+            r#"<dataValidations count="1"><dataValidation sqref="C2:C5" type="whole" operator="between"><formula1>1</formula1><formula2>100</formula2></dataValidation></dataValidations>"#,
+        );
+        let dv = &dvs[0];
+        assert_eq!(dv.validation_type.as_deref(), Some("whole"));
+        assert_eq!(dv.operator.as_deref(), Some("between"));
+        assert_eq!(dv.formula1.as_deref(), Some("1"));
+        assert_eq!(dv.formula2.as_deref(), Some("100"));
+        assert!(!dv.allow_blank, "absent allowBlank → false");
+    }
+
+    /// A rule without a `@sqref` is dropped (nothing to anchor it to).
+    #[test]
+    fn rule_without_sqref_is_skipped() {
+        let dvs = parse_dvs(
+            r#"<dataValidations count="1"><dataValidation type="list"><formula1>"A,B"</formula1></dataValidation></dataValidations>"#,
+        );
+        assert!(dvs.is_empty(), "missing sqref → rule dropped");
+    }
+
+    /// Multiple rules in one block are all captured, preserving order.
+    #[test]
+    fn multiple_rules_preserved() {
+        let dvs = parse_dvs(
+            r#"<dataValidations count="2"><dataValidation sqref="B2:B5" type="list"><formula1>"A,B"</formula1></dataValidation><dataValidation sqref="C2:C5" type="whole" operator="between"><formula1>1</formula1><formula2>9</formula2></dataValidation></dataValidations>"#,
+        );
+        assert_eq!(dvs.len(), 2);
+        assert_eq!(dvs[0].sqref, "B2:B5");
+        assert_eq!(dvs[1].sqref, "C2:C5");
+    }
+
+    /// Absent `<dataValidations>` yields an empty vec (no panic).
+    #[test]
+    fn absent_block_yields_empty() {
+        let dvs = parse_dvs("");
+        assert!(dvs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::parse_comments_xml;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    /// ECMA-376 §18.7 — each `<comment>` yields its cell ref, the author
+    /// resolved from `@authorId`, and the joined `<t>` text.
+    #[test]
+    fn resolves_ref_author_and_text() {
+        let xml = format!(
+            r#"<comments xmlns="{NS}"><authors><author>Reviewer</author><author>Ops Team</author></authors><commentList><comment ref="B1" authorId="0"><text><t>Set the order status.</t></text></comment><comment ref="C3" authorId="1"><text><t>Verify qty.</t></text></comment></commentList></comments>"#
+        );
+        let cs = parse_comments_xml(&xml);
+        assert_eq!(cs.len(), 2);
+        assert_eq!(cs[0].cell_ref, "B1");
+        assert_eq!(cs[0].author.as_deref(), Some("Reviewer"));
+        assert_eq!(cs[0].text, "Set the order status.");
+        assert_eq!(cs[1].cell_ref, "C3");
+        assert_eq!(cs[1].author.as_deref(), Some("Ops Team"));
+    }
+
+    /// Multiple `<r><t>` runs in one comment are concatenated into plain text.
+    #[test]
+    fn joins_multiple_runs() {
+        let xml = format!(
+            r#"<comments xmlns="{NS}"><authors><author>A</author></authors><commentList><comment ref="A1" authorId="0"><text><r><t>Hello </t></r><r><t>world</t></r></text></comment></commentList></comments>"#
+        );
+        let cs = parse_comments_xml(&xml);
+        assert_eq!(cs[0].text, "Hello world");
+    }
+
+    /// An out-of-range or absent `@authorId` leaves the author as None.
+    #[test]
+    fn missing_author_is_none() {
+        let xml = format!(
+            r#"<comments xmlns="{NS}"><authors><author>A</author></authors><commentList><comment ref="A1" authorId="9"><text><t>orphan</t></text></comment></commentList></comments>"#
+        );
+        let cs = parse_comments_xml(&xml);
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].author, None, "authorId out of range → None");
+        assert_eq!(cs[0].text, "orphan");
+    }
+
+    /// Malformed XML returns an empty vec instead of panicking.
+    #[test]
+    fn malformed_xml_yields_empty() {
+        assert!(parse_comments_xml("<comments><not closed").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod threaded_comment_tests {
+    use super::parse_threaded_comments_xml;
+    use std::collections::HashMap;
+
+    const TC_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments";
+
+    fn persons() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert("{p1}".to_string(), "Reviewer".to_string());
+        m.insert("{p2}".to_string(), "Ops Team".to_string());
+        m
+    }
+
+    /// MS-XLSX threaded comments — each `<threadedComment>` yields its cell ref,
+    /// the author resolved from `personId`, and the `<text>` body.
+    #[test]
+    fn resolves_ref_person_and_text() {
+        let xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="B1" personId="{{p1}}" id="a"><text>Set the status.</text></threadedComment><threadedComment ref="C3" personId="{{p2}}" id="b"><text>Verify qty.</text></threadedComment></ThreadedComments>"#
+        );
+        let cs = parse_threaded_comments_xml(&xml, &persons());
+        assert_eq!(cs.len(), 2);
+        assert_eq!(cs[0].cell_ref, "B1");
+        assert_eq!(cs[0].author.as_deref(), Some("Reviewer"));
+        assert_eq!(cs[0].text, "Set the status.");
+        assert_eq!(cs[1].author.as_deref(), Some("Ops Team"));
+    }
+
+    /// A thread of replies on one cell is flattened into a single comment body,
+    /// keeping the original author.
+    #[test]
+    fn replies_collapse_into_one_thread() {
+        let xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{p1}}" id="a"><text>Question?</text></threadedComment><threadedComment ref="A1" personId="{{p2}}" id="b" parentId="a"><text>Answer.</text></threadedComment></ThreadedComments>"#
+        );
+        let cs = parse_threaded_comments_xml(&xml, &persons());
+        assert_eq!(cs.len(), 1, "one comment per cell");
+        assert_eq!(cs[0].cell_ref, "A1");
+        assert_eq!(cs[0].author.as_deref(), Some("Reviewer"), "first author kept");
+        assert_eq!(cs[0].text, "Question?\nAnswer.");
+    }
+
+    /// An unknown `personId` leaves the author as None (no persons part).
+    #[test]
+    fn unknown_person_is_none() {
+        let xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{zzz}}" id="a"><text>hi</text></threadedComment></ThreadedComments>"#
+        );
+        let cs = parse_threaded_comments_xml(&xml, &HashMap::new());
+        assert_eq!(cs[0].author, None);
+        assert_eq!(cs[0].text, "hi");
     }
 }

@@ -37,6 +37,10 @@ export type {
   // Workbook-level metadata.
   DefinedName,
   Hyperlink,
+  // Cell comments / notes (reachable via Worksheet.comments).
+  XlsxComment,
+  // Data validation rules (reachable via Worksheet.dataValidations).
+  DataValidation,
   // Excel tables (reachable via Worksheet.tables).
   TableInfo,
   TableColumnInfo,

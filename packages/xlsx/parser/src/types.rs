@@ -274,19 +274,25 @@ pub struct TableColumnInfo {
     pub totals_row_dxf_id: Option<u32>,
 }
 
-/// One `<comment>` from xl/commentsN.xml (ECMA-376 §18.7). `text` is the
-/// joined plain text of every `<r><t>` run; rich-text formatting is dropped.
+/// One cell comment. Sourced from the classic notes file `xl/commentsN.xml`
+/// (ECMA-376 §18.7) when present, otherwise from the Office-365 threaded
+/// comments part `xl/threadedComments/threadedCommentN.xml` (MS-XLSX schema
+/// `…/office/spreadsheetml/2018/threadedcomments`, `personId` resolved against
+/// `xl/persons/person*.xml`). `text` is the joined plain text — every `<r><t>`
+/// run for classic notes, every reply in the thread (newline-joined) for
+/// threaded comments; rich-text formatting is dropped.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxComment {
     /// A1-style cell reference (`@ref` on the comment element).
     pub cell_ref: String,
-    /// Resolved author name from the parent `<authors>` block (`@authorId`
-    /// indexes into that list). `None` when the workbook omits authors or
-    /// the `authorId` is out of range.
+    /// Resolved author name. For classic notes this is the `<authors>` entry
+    /// indexed by `@authorId`; for threaded comments it is the `<person>`
+    /// `displayName` matching `@personId`. `None` when unresolved / absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
-    /// Concatenated plain text of every text run.
+    /// Concatenated plain text (every run for classic; every threaded reply,
+    /// newline-joined, for threaded).
     pub text: String,
 }
 
