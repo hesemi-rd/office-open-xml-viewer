@@ -391,3 +391,52 @@ export function isScene3dNonIdentity(camera: CameraInput): boolean {
   const { isIdentity } = computeScene3dQuad(camera, 1000, 1000);
   return !isIdentity;
 }
+
+/**
+ * Screen-space displacement (in shape-local px, +X right / +Y down) of pushing a
+ * point at the shape centre by `depthPx` along the object's −Z axis (i.e. AWAY
+ * from the viewer — the direction an extrusion's back face sits). Used by the
+ * extrusion renderer to offset the swept side-wall band (§20.1.5.12 extrusionH).
+ *
+ * For a face-on camera (orthographicFront / perspectiveFront with no rot) the
+ * −Z axis projects straight back into the screen, so the screen displacement is
+ * ~0 and the side walls are (correctly) invisible. A tilted/rotated camera turns
+ * −Z partly into the screen plane, revealing the side wall as this offset.
+ *
+ * This is the LINEARISED offset of the box centre; for a perspective camera the
+ * exact side-wall outline is a frustum sweep that varies per silhouette point.
+ * Phase B uses this single centre offset as the documented approximation (good
+ * for small extrusions / gentle tilts; see the renderer's extrusion note).
+ */
+export function computeDepthOffset(camera: CameraInput, w: number, h: number, depthPx: number): Vec2 {
+  const def = presetDef(camera.prst);
+  const R = buildRotation(def, camera.rot);
+  if (w <= 0 || h <= 0 || depthPx === 0) return { x: 0, y: 0 };
+
+  const hw = w / 2;
+  const hh = h / 2;
+  const halfMax = Math.max(hw, hh);
+  const zoom = camera.zoom ?? 1;
+
+  // Project the centre at object-z 0 and at object-z −depthPx, take the screen
+  // delta. Mirrors the per-corner math in computeScene3dQuad (same rotation,
+  // same perspective divide), but without the box refit — we only need the
+  // direction/scale of the displacement, which the caller applies in the
+  // refitted offscreen space (a close approximation for small depths).
+  const project = (oz: number): [number, number] => {
+    const [rx, ry, rz] = applyMat3(R, 0, 0, oz);
+    if (def.kind === 'perspective') {
+      const fovDeg = camera.fov ?? def.fovDeg;
+      const fov = (Math.max(1, Math.min(179, fovDeg)) * Math.PI) / 180;
+      const d = halfMax / Math.tan(fov / 2);
+      const depth = d - rz;
+      const safe = Math.abs(depth) < 1e-6 ? 1e-6 * Math.sign(depth || 1) : depth;
+      const f = d / safe;
+      return [rx * f * zoom, ry * f * zoom];
+    }
+    return [rx * zoom, ry * zoom];
+  };
+  const [x0, y0] = project(0);
+  const [x1, y1] = project(-depthPx);
+  return { x: x1 - x0, y: y1 - y0 };
+}

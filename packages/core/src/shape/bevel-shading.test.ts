@@ -5,8 +5,34 @@ import {
   computeBevelNormals,
   shadePixel,
   lightDirFromRig,
+  applyBevelShading,
+  applyExtrusion,
   type BevelShadeParams,
+  type BevelCtx,
 } from './bevel-shading';
+
+/** Minimal ImageData-backed BevelCtx for the compositor functions. */
+function fakeCtx(w: number, h: number, fill?: (x: number, y: number) => [number, number, number, number]): BevelCtx & { data: Uint8ClampedArray } {
+  const data = new Uint8ClampedArray(w * h * 4);
+  if (fill) {
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const [r, g, b, a] = fill(x, y);
+        const o = (y * w + x) * 4;
+        data[o] = r; data[o + 1] = g; data[o + 2] = b; data[o + 3] = a;
+      }
+  }
+  return {
+    data,
+    canvas: { width: w, height: h },
+    getImageData() {
+      return { data: data.slice(), width: w, height: h } as unknown as ImageData;
+    },
+    putImageData(img: ImageData) {
+      data.set(img.data);
+    },
+  };
+}
 
 describe('bevelHeightProfile', () => {
   it('circle profile rises as a quarter-circle: h(0)=0, h(w)=1, convex', () => {
@@ -150,6 +176,59 @@ describe('computeBevelNormals (finite-difference of height field)', () => {
     const alpha = new Uint8ClampedArray(W * H); // all zero
     const { bandMask } = computeBevelNormals(alpha, W, H, 2, 'circle', 1);
     expect(bandMask.every((v) => v === 0)).toBe(true);
+  });
+});
+
+describe('applyExtrusion (side-wall sweep, §20.1.5.12)', () => {
+  it('fills the swept band behind the front face with the wall colour', () => {
+    // 20x20 with an opaque 8x8 block at (6,6)-(13,13). Push it right+down by
+    // (4,4): the side wall is the L-shaped band uncovered to the right/below.
+    const W = 20;
+    const H = 20;
+    const ctx = fakeCtx(W, H, (x, y) =>
+      x >= 6 && x < 14 && y >= 6 && y < 14 ? [10, 20, 200, 255] : [0, 0, 0, 0],
+    );
+    applyExtrusion(ctx, { offsetX: 4, offsetY: 4, rgb: [50, 50, 50] });
+    // A pixel just below-right of the block (e.g. (15,15)) should now be wall.
+    const wall = (15 * W + 15) * 4;
+    expect(ctx.data[wall + 3]).toBe(255);
+    expect(ctx.data[wall]).toBe(50);
+    // The front face is untouched.
+    const face = (8 * W + 8) * 4;
+    expect(ctx.data[face]).toBe(10);
+    expect(ctx.data[face + 2]).toBe(200);
+  });
+
+  it('is a no-op for a sub-pixel offset (face-on camera)', () => {
+    const W = 10;
+    const H = 10;
+    const ctx = fakeCtx(W, H, (x, y) => (x >= 3 && x < 7 && y >= 3 && y < 7 ? [10, 10, 10, 255] : [0, 0, 0, 0]));
+    const before = ctx.data.slice();
+    applyExtrusion(ctx, { offsetX: 0.2, offsetY: 0.1, rgb: [99, 99, 99] });
+    expect(Array.from(ctx.data)).toEqual(Array.from(before));
+  });
+});
+
+describe('applyBevelShading (end-to-end on a filled square)', () => {
+  it('brightens the top lip and darkens the bottom lip under a top light', () => {
+    const W = 24;
+    const H = 24;
+    // Mid-grey opaque square filling the canvas.
+    const ctx = fakeCtx(W, H, () => [120, 120, 120, 255]);
+    applyBevelShading(ctx, {
+      widthPx: 5,
+      heightPx: 4,
+      prst: 'circle',
+      material: 'matte',
+      light: lightDirFromRig('threePt', 't'),
+    });
+    const lumAt = (x: number, y: number) => {
+      const o = (y * W + x) * 4;
+      return ctx.data[o] * 0.299 + ctx.data[o + 1] * 0.587 + ctx.data[o + 2] * 0.114;
+    };
+    // Top lip (y=1) lit brighter than the flat centre; bottom lip (y=22) darker.
+    expect(lumAt(12, 1)).toBeGreaterThan(lumAt(12, 12));
+    expect(lumAt(12, 22)).toBeLessThan(lumAt(12, 12));
   });
 });
 

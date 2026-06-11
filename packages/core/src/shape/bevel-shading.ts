@@ -353,6 +353,18 @@ export function lightDirFromRig(_rig: string, dir: string): Vec3 {
  * ambient 0.62 / diffuse 0.45 reproduces the rim's lightest band ≈ +28% and the
  * darkest ≈ −12% relative to the flat face, matching the PDF rim sampling.
  */
+/**
+ * Screen-blend weight for the lit lip's highlight, per unit of shade excess over
+ * the flat face. A chamfer facing the key light reads as a bright edge even on a
+ * dark texture, which a pure multiply can't produce; the screen term lifts it
+ * toward white. CALIBRATED vs sample-11.pdf p3: the lit top rim there sits a
+ * clear step above the face but well short of white. With the matte weights the
+ * lit lip's normalised factor peaks near 1.15, so a gain of 2.0 yields a screen
+ * weight ≈0.3 — a visible but soft highlight matching the PDF (a higher gain
+ * blows the rim to pure white, which p3 does not show).
+ */
+const SCREEN_GAIN = 2.0;
+
 const MATERIAL: Record<BevelMaterial, { ambient: number; diffuse: number; specular: number; shininess: number }> = {
   matte: { ambient: 0.62, diffuse: 0.45, specular: 0.0, shininess: 8 },
   plastic: { ambient: 0.55, diffuse: 0.5, specular: 0.35, shininess: 22 },
@@ -490,9 +502,94 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
     }
     const f = shadePixel({ x: nx, y: ny, z: nz }, params) / faceFactor;
     const o = i * 4;
-    px[o] = Math.max(0, Math.min(255, px[o] * f));
-    px[o + 1] = Math.max(0, Math.min(255, px[o + 1] * f));
-    px[o + 2] = Math.max(0, Math.min(255, px[o + 2] * f));
+    if (f >= 1) {
+      // Lit lip: a chamfer facing the light reads as a bright highlight even
+      // over a dark texture (in PowerPoint the bevel is a separate lit surface,
+      // not a darkened copy of the front-face image). Multiply alone can only
+      // brighten a dark pixel a little, so we ALSO screen-blend toward white by
+      // the excess over the face brightness — the multiply/screen composite the
+      // brief calls for. `hi` is the screen weight, capped so a strong lit lip
+      // approaches (but doesn't blow past) white.
+      const hi = Math.min(1, (f - 1) * SCREEN_GAIN);
+      for (let c = 0; c < 3; c++) {
+        const base = Math.min(255, px[o + c] * f);
+        px[o + c] = base + (255 - base) * hi;
+      }
+    } else {
+      // Shadowed lip: straight multiply darkening.
+      px[o] = Math.max(0, px[o] * f);
+      px[o + 1] = Math.max(0, px[o + 1] * f);
+      px[o + 2] = Math.max(0, px[o + 2] * f);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+export interface ExtrusionInput {
+  /** Screen-space depth offset of the back face (device px), from the camera. */
+  offsetX: number;
+  offsetY: number;
+  /** Side-wall colour as [r,g,b] (extrusionClr, or a darkened body colour). */
+  rgb: [number, number, number];
+}
+
+/**
+ * Bake an extrusion side-wall band into a painted body bitmap (§20.1.5.12
+ * `extrusionH`). The front face sits at z=0 and the back face is pushed to
+ * −depth; the screen projection of that push is `(offsetX, offsetY)` device px
+ * (from `computeDepthOffset`). The visible side wall is the region swept between
+ * the front silhouette and the offset back silhouette.
+ *
+ * APPROXIMATION (Phase B, documented): we sweep the front silhouette by the
+ * single centre depth-offset vector and fill the newly-uncovered pixels (those
+ * transparent in the body but covered by an offset copy of the silhouette) with
+ * the side-wall colour, UNDER the front face. This is exact for a parallel sweep
+ * and a good approximation for small extrusions / gentle tilts; it does NOT
+ * model per-silhouette-point frustum divergence or self-occlusion of a deep
+ * extrusion under a strong perspective. When the offset is sub-pixel (face-on
+ * camera) there is no visible wall and this is a no-op.
+ */
+export function applyExtrusion(ctx: BevelCtx, input: ExtrusionInput): void {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+  if (w <= 0 || h <= 0) return;
+  const dx = input.offsetX;
+  const dy = input.offsetY;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.75) return; // sub-pixel — no visible side wall.
+
+  const img = ctx.getImageData(0, 0, w, h);
+  const px = img.data;
+  // Source alpha snapshot (the front face silhouette).
+  const srcA = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < w * h; i++) srcA[i] = px[i * 4 + 3];
+
+  const steps = Math.max(1, Math.ceil(len));
+  const [r, g, b] = input.rgb;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (srcA[i] >= 128) continue; // covered by the front face — wall hidden.
+      // Walk back toward the front face along the depth vector; if any sample
+      // along the sweep lands on the front silhouette, this pixel is side wall.
+      let onWall = false;
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        const sx = Math.round(x - dx * t);
+        const sy = Math.round(y - dy * t);
+        if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+        if (srcA[sy * w + sx] >= 128) {
+          onWall = true;
+          break;
+        }
+      }
+      if (!onWall) continue;
+      const o = i * 4;
+      px[o] = r;
+      px[o + 1] = g;
+      px[o + 2] = b;
+      px[o + 3] = 255;
+    }
   }
   ctx.putImageData(img, 0, 0);
 }

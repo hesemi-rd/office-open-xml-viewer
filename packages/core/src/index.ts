@@ -69,6 +69,7 @@ export {
 export {
   computeScene3dQuad,
   isScene3dNonIdentity,
+  computeDepthOffset,
   type CameraInput,
   type RotInput,
   type Scene3dQuad,
@@ -79,6 +80,8 @@ export { drawProjected } from './shape/scene3d-draw';
 // §20.1.5.3 (bevel) / §20.1.10.9 (ST_BevelPresetType) / §20.1.5.9 (lightRig).
 export {
   applyBevelShading,
+  applyExtrusion,
+  type ExtrusionInput,
   computeBevelNormals,
   bevelHeightProfile,
   distanceToEdge,
