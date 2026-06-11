@@ -20,7 +20,13 @@ interface MediaState {
 export interface PresentationHandle {
   play(mediaPath?: string): void;
   pause(mediaPath?: string): void;
-  dispose(): void;
+  /**
+   * Stop the playback RAF loop, detach pointer listeners and release every
+   * media blob URL. Named `destroy()` to match the teardown method on the
+   * viewers/documents (`PptxViewer.destroy()`, `XlsxWorkbook.destroy()`, …)
+   * so the public API uses one consistent teardown verb.
+   */
+  destroy(): void;
 }
 
 export interface PresentOptions {
@@ -40,7 +46,7 @@ export interface PresentOptions {
  * Attach canvas-native playback to a slide. Layers each media element's video
  * frame (via HTMLVideoElement → drawImage) and a self-drawn play/progress
  * overlay on top of the base rendering. Click on a media element to toggle
- * playback. Call dispose() to stop the RAF loop and release blob URLs.
+ * playback. Call destroy() to stop the RAF loop and release blob URLs.
  */
 export async function createPresentationHandle(
   canvas: HTMLCanvasElement,
@@ -254,7 +260,7 @@ export async function createPresentationHandle(
         if (!mediaPath || s.el.mediaPath === mediaPath) s.media.pause();
       }
     },
-    dispose() {
+    destroy() {
       if (disposed) return;
       disposed = true;
       if (rafId !== null) cancelAnimationFrame(rafId);

@@ -125,7 +125,7 @@ export class PptxViewer {
     this.canvas.style.width = `${targetWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
 
-    this.handle?.dispose();
+    this.handle?.destroy();
     this.handle = null;
 
     const runs: PptxTextRunInfo[] = [];
@@ -197,7 +197,7 @@ export class PptxViewer {
 
   /** Clean up the viewer and terminate the background worker. */
   destroy(): void {
-    this.handle?.dispose();
+    this.handle?.destroy();
     this.handle = null;
     this.engine?.destroy();
     this.wrapper.remove();
