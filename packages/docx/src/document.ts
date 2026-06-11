@@ -7,7 +7,7 @@ import {
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerResponse } from './types';
+import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerResponse, DocComment, DocNote } from './types';
 import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns, resolveKinsokuRules } from './renderer';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
@@ -133,6 +133,38 @@ export class DocxDocument {
     return this._document;
   }
 
+  /**
+   * ECMA-376 §17.13.4 — the document's comments (`word/comments.xml`), each with
+   * id / author / initials / date / plain-text body. Comments are a data-only
+   * API: they are NOT drawn on the page (Word renders them in a margin pane /
+   * balloons, which this viewer does not reproduce). Use this to build a review
+   * panel, export an annotation list, etc. Returns `[]` when the document has no
+   * comments part. The same data is also reachable via `document.comments`.
+   */
+  get comments(): DocComment[] {
+    return this._document?.comments ?? [];
+  }
+
+  /**
+   * ECMA-376 §17.11.10 — the document's footnotes (`word/footnotes.xml`),
+   * excluding the reserved separator entries. Each note carries its `id` and
+   * block-level `content`; use {@link noteText} for the plain-text body. These
+   * ARE drawn at the bottom of the page that holds their reference; this getter
+   * additionally exposes them as data. Returns `[]` when absent.
+   */
+  get footnotes(): DocNote[] {
+    return this._document?.footnotes ?? [];
+  }
+
+  /**
+   * ECMA-376 §17.11.4 — the document's endnotes (`word/endnotes.xml`). Same
+   * shape as {@link footnotes}; rendered at the end of the document. Returns
+   * `[]` when absent.
+   */
+  get endnotes(): DocNote[] {
+    return this._document?.endnotes ?? [];
+  }
+
   private _getPages(): PaginatedBodyElement[][] {
     if (this._pages) return this._pages;
     if (!this._document) return [];
@@ -151,6 +183,7 @@ export class DocxDocument {
       ctx,
       this._document.fontFamilyClasses ?? {},
       resolveKinsokuRules(this._document.settings),
+      this._document.footnotes ?? [],
     );
     return this._pages;
   }

@@ -1,6 +1,7 @@
 export { DocxDocument, type LoadOptions } from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
+export { noteText } from './types';
 export type {
   DocxDocumentModel,
   DocSettings,
@@ -22,6 +23,7 @@ export type {
   DocRevision,
   DocComment,
   DocNote,
+  NoteRef,
   // Paragraph / line-spacing sub-types.
   LineSpacing,
   TabStop,
