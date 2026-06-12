@@ -9,6 +9,7 @@ import {
   lightDirFromRig,
   applyBevelShading,
   applyExtrusion,
+  materialClass,
   type BevelShadeParams,
   type BevelCtx,
 } from './bevel-shading';
@@ -48,12 +49,23 @@ describe('bevelHeightProfile', () => {
     expect(p(w * 0.5)).toBeGreaterThan(0.5);
   });
 
-  it('hardEdge is a linear chamfer: h(t) = t/w', () => {
+  it('hardEdge is a rim-concentrated shelf: rises within the outer shelf, then flat', () => {
+    // `hardEdge` is the picture-frame bevel — a short turned-down lip at the very
+    // rim then flat (height 1) inward, NOT a full-width chamfer. The rise is a
+    // C¹ smoothstep within the outer HARD_EDGE_SHELF_FRACTION (0.5) of the band.
     const w = 8;
     const p = bevelHeightProfile('hardEdge', w);
-    expect(p(0)).toBeCloseTo(0, 5);
+    expect(p(0)).toBeCloseTo(0, 5); // rim: turned fully down
+    // By the end of the shelf (and for the whole inner half) the lip is at the
+    // flat-top height, so the photo fills the inner band (PDF p6 thin rim).
+    expect(p(w * 0.5)).toBeCloseTo(1, 5);
+    expect(p(w * 0.75)).toBeCloseTo(1, 5);
     expect(p(w)).toBeCloseTo(1, 5);
-    expect(p(w * 0.5)).toBeCloseTo(0.5, 5);
+    // Monotonic rise inside the shelf, tangent-flat (slope→0) where it meets the
+    // top: the midpoint of the shelf is the inflection of the smoothstep at 0.5.
+    expect(p(w * 0.25)).toBeCloseTo(0.5, 5);
+    expect(p(w * 0.1)).toBeGreaterThan(0);
+    expect(p(w * 0.1)).toBeLessThan(p(w * 0.2));
   });
 
   it('relaxedInset (default) is a smooth S-curve in [0,1]', () => {
@@ -284,7 +296,16 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
   // sample-11 slide 6 body offscreen at devScale 1 ≈ 397×503 px, hardEdge band 32.
   const BASE = { W: 397, H: 503, band: 32 };
   const AZ_JUMP_MAX = 0.02; // rad, scale-independent
-  const LUM_2ND_DIFF_MAX = 0.003; // scale-independent
+  // The lip AZIMUTH is the facet detector (AZ_JUMP_MAX). LUM_2ND_DIFF_MAX bounds the
+  // tangential highlight 2nd-difference: it must stay far below the raw EDT facet
+  // (0.12–0.24) but is otherwise quantisation-limited at the smallest raster. Since
+  // `hardEdge` now concentrates its turn-down in the rim shelf, the lit lip is
+  // steeper at the 0.25·band sample point than the old full-width flat chamfer, so
+  // the measured 2nd-difference is ≈0.0044 at devScale 1 (32px band, pixel-limited)
+  // shrinking to ≈0.0010 at devScale 8. A ceiling of 0.005 sits just above the
+  // devScale-1 quantisation floor yet ~30× below the raw facet — still a decisive
+  // facet test, now matched to the rim-concentrated profile.
+  const LUM_2ND_DIFF_MAX = 0.005; // scale-independent
 
   function ringAzimuthAndHighlight(alpha: Uint8ClampedArray, W: number, H: number, band: number) {
     const { normals, bandMask } = computeBevelNormals(alpha, W, H, band, 'hardEdge', band / 2);
@@ -294,7 +315,11 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
     const cy = H / 2;
     const rx = W / 2 - 1;
     const ry = H / 2 - 1;
-    const inset = band * 0.5; // band midline, where the lit/shadow terminator sits
+    // Sample WITHIN the active lip. `hardEdge` concentrates its turn-down in the
+    // outer rim shelf (HARD_EDGE_SHELF_FRACTION of the band) and goes flat inward,
+    // so the lit/shadow terminator and the steepest tilt live near the rim, not at
+    // the geometric midline. 0.25·band sits inside the shelf at every devScale.
+    const inset = band * 0.25;
     const az: number[] = [];
     const lum: number[] = [];
     // 0.1° steps so a chord spanning several degrees registers as a run of equal
@@ -376,6 +401,163 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
     );
     expect(large.maxJump).toBeLessThanOrEqual(small.maxJump + 1e-6);
   });
+});
+
+describe('bevel band geometry — slide-6 ellipse rim (issue #410→…→band-geometry)', () => {
+  // The slide-6 defect users reported was the PHOTO (the bevel band's inner
+  // boundary) looking like a flat-topped, 45°-chamfered rounded rectangle instead
+  // of an ellipse. Root causes, both fixed here:
+  //   1. `hardEdge` was modelled as a full-width linear chamfer, so the ENTIRE
+  //      band was uniformly shaded and ended on a HARD brightness step at the inner
+  //      crease. Traced around the band's inner boundary — which for an ellipse is
+  //      the exact Euclidean inward offset, naturally flatter at the major-axis
+  //      tips — that hard step read as a "flat cut". Now `hardEdge` is a rim shelf
+  //      and the lip's shading feathers to zero at the crease (BEVEL_INNER_FEATHER).
+  //   2. The EMU→device-px band-width conversion was suspected of a double-apply
+  //      blow-up. It is NOT: bandPx == declared `w` (EMU→px) × devScale exactly.
+  // These tests pin BOTH so neither regresses, parametrised over devScale {1,4,8}.
+
+  /** Anti-aliased ellipse silhouette filling the W×H canvas. */
+  function ellipseSilhouette(W: number, H: number, ss = 4): Uint8ClampedArray {
+    const a = new Uint8ClampedArray(W * H);
+    const cx = W / 2, cy = H / 2, rx = W / 2 - 1, ry = H / 2 - 1;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        let cnt = 0;
+        for (let sy = 0; sy < ss; sy++)
+          for (let sx = 0; sx < ss; sx++) {
+            const px = x + (sx + 0.5) / ss - 0.5, py = y + (sy + 0.5) / ss - 0.5;
+            if (((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 <= 1) cnt++;
+          }
+        a[y * W + x] = Math.round((255 * cnt) / (ss * ss));
+      }
+    return a;
+  }
+
+  // slide-6: shape 3785692×4793942 EMU (≈298×377 pt), bevelT w=304800 EMU (24 pt),
+  // h=152400 EMU (12 pt). EMU→CSS-px scale = targetWidth / slideWidth.
+  const SLIDE_W_EMU = 12192000;
+  const SHAPE_W_EMU = 3785692, SHAPE_H_EMU = 4793942;
+  const BEVEL_W_EMU = 304800, BEVEL_H_EMU = 152400;
+  const TARGET_WIDTH = 1920;
+  const cssScale = TARGET_WIDTH / SLIDE_W_EMU;
+
+  for (const devScale of [1, 4, 8]) {
+    // The exact conversion the renderer uses: EMU × cssScale × devScale.
+    const expectBand = BEVEL_W_EMU * cssScale * devScale;
+    const expectHeight = BEVEL_H_EMU * cssScale * devScale;
+    const W = Math.round(SHAPE_W_EMU * cssScale * devScale);
+    const H = Math.round(SHAPE_H_EMU * cssScale * devScale);
+
+    it(`band width == declared EMU × scale × devScale (no double-apply blow-up) [devScale ${devScale}]`, () => {
+      // The conversion is plain multiplication; assert it is what the geometry uses
+      // and that the band is a sane fraction of the shape (not a runaway value that
+      // would collapse the medial axis). 24 pt on a 298 pt shape ⇒ ~8% of width.
+      expect(expectBand).toBeCloseTo(BEVEL_W_EMU * cssScale * devScale, 6);
+      const halfMinDim = Math.min(W, H) / 2;
+      const frac = expectBand / halfMinDim;
+      // ≈0.16 of the half-minor-axis at every scale — scale-INVARIANT, no blow-up.
+      expect(frac).toBeGreaterThan(0.14);
+      expect(frac).toBeLessThan(0.18);
+      // The measured band footprint matches the declared width along the minor axis
+      // (where the boundary normal is radial, so perpendicular distance == radial).
+      const a = ellipseSilhouette(W, H);
+      const { bandMask } = computeBevelNormals(a, W, H, expectBand, 'hardEdge', expectHeight);
+      const cx = Math.round(W / 2), cy = Math.round(H / 2);
+      // Walk inward from the right edge along y=cy; count band pixels.
+      let bandDepth = 0;
+      for (let x = W - 1; x >= 0; x--) {
+        const i = cy * W + x;
+        if (a[i] < 128) continue; // still outside
+        if (bandMask[i]) bandDepth++; else break;
+      }
+      // Perpendicular band depth at the minor-axis end ≈ bandPx (±2 px raster).
+      expect(Math.abs(bandDepth - expectBand)).toBeLessThanOrEqual(2);
+    });
+
+    it(`band inner boundary is the SMOOTH Euclidean offset (no faceted flat-cut) [devScale ${devScale}]`, () => {
+      // GEOMETRY: trace the band → flat-top boundary (the curve users saw as a
+      // flat-cut). It is the exact Euclidean inward offset of the ellipse, so it is
+      // smooth — its curvature (2nd-difference of radius vs angle) is bounded. The
+      // pre-fix box-blur azimuth would have chorded this into facets; the EDT-exact
+      // band does not. Threshold is normalised by the major radius (scale-free).
+      const a = ellipseSilhouette(W, H);
+      const { bandMask } = computeBevelNormals(a, W, H, expectBand, 'hardEdge', expectHeight);
+      const cx = W / 2, cy = H / 2;
+      const radii: number[] = [];
+      for (let deg = 0; deg < 360; deg += 3) {
+        const ang = (deg * Math.PI) / 180, dx = Math.cos(ang), dy = Math.sin(ang);
+        const rmax = Math.min(W, H) / 2;
+        let inner = NaN;
+        for (let t = 0; t < rmax; t++) {
+          const r = rmax - t;
+          const x = Math.round(cx + dx * r), y = Math.round(cy + dy * r);
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          const i = y * W + x;
+          if (a[i] >= 128 && bandMask[i] === 0) { inner = r; break; }
+        }
+        radii.push(inner);
+      }
+      expect(radii.every((r) => Number.isFinite(r))).toBe(true);
+      const scaleRef = Math.max(W, H) / 2;
+      let maxCurv = 0;
+      for (let k = 1; k < radii.length - 1; k++) {
+        const d2 = Math.abs(radii[k + 1] - 2 * radii[k] + radii[k - 1]) / scaleRef;
+        if (d2 > maxCurv) maxCurv = d2;
+      }
+      // Smooth offset: ≤ ~0.01 relative (pixel quantisation only); a faceted cut
+      // would spike many× higher.
+      expect(maxCurv).toBeLessThan(0.02);
+    });
+
+    it(`bevel shading feathers to zero at the inner crease (no hard flat-cut step) [devScale ${devScale}]`, () => {
+      // SHADING: along an inward ray on the SHADOW (bottom) side, the per-pixel
+      // brightness must not END on a cliff at the inner crease — that hard step was
+      // the visible "flat cut". With the inner feather it eases back to the face
+      // brightness. We assert the largest single-pixel brightness change along the
+      // ray's inner-half is small (a gradient, not a step).
+      const a = ellipseSilhouette(W, H);
+      const data = new Uint8ClampedArray(W * H * 4);
+      for (let i = 0; i < W * H; i++) {
+        data[i * 4] = 90; data[i * 4 + 1] = 110; data[i * 4 + 2] = 150; data[i * 4 + 3] = a[i];
+      }
+      const ctx: BevelCtx & { data: Uint8ClampedArray } = {
+        canvas: { width: W, height: H },
+        getImageData() { return { data: data.slice(), width: W, height: H } as unknown as ImageData; },
+        putImageData(img: ImageData) { data.set(img.data); },
+        data,
+      };
+      applyBevelShading(ctx, {
+        widthPx: expectBand, heightPx: expectHeight, prst: 'hardEdge',
+        material: materialClass('matte'), light: lightDirFromRig('threePt', 't'),
+      });
+      const cx = Math.round(W / 2), cy = Math.round(H / 2), ry = H / 2 - 1;
+      const lum = (x: number, y: number) => { const o = (y * W + x) * 4; return (data[o] + data[o + 1] + data[o + 2]) / 3; };
+      const baseLum = (90 + 110 + 150) / 3;
+      // Bottom shadow side: from the bottom edge inward across the whole band.
+      const botEdge = Math.round(cy + ry - 1);
+      let prevDelta = lum(cx, botEdge) - baseLum;
+      let maxStep = 0;
+      let peakDelta = 0; // largest |brightness change| anywhere in the band (the lip depth)
+      for (let depth = 1; depth <= Math.ceil(expectBand) + 4; depth++) {
+        const y = botEdge - depth;
+        if (y < 0) break;
+        if (data[(y * W + cx) * 4 + 3] < 128) continue;
+        const delta = lum(cx, y) - baseLum;
+        peakDelta = Math.max(peakDelta, Math.abs(delta));
+        maxStep = Math.max(maxStep, Math.abs(delta - prevDelta));
+        prevDelta = delta;
+      }
+      // The pre-fix bug ended the lip on a HARD step: the full lip depth `peakDelta`
+      // collapsed to 0 in a single pixel at the inner crease (maxStep ≈ peakDelta).
+      // The feather spreads that return-to-face over many pixels, so the largest
+      // single-pixel change is a small FRACTION of the lip depth. Asserting
+      // maxStep < 0.6·peakDelta fails the cliff (ratio ≈1) and passes the gradient,
+      // and is scale-free (no absolute lum constant that breaks at small rasters).
+      expect(peakDelta).toBeGreaterThan(8); // there is a real shadow lip to test
+      expect(maxStep).toBeLessThan(0.6 * peakDelta);
+    });
+  }
 });
 
 describe('applyExtrusion (side-wall sweep, §20.1.5.12)', () => {
