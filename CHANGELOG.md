@@ -4,6 +4,51 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.58.0 — 2026-06-12
+
+The sp3d release: full DrawingML 3-D shape shading — bevels, extrusion side
+walls, and a calibrated light rig — layered on the scene3d camera from 0.57.0.
+Plus xlsx list data-validation dropdowns, pie/doughnut charts, and an opt-in
+Google Fonts toggle in the VS Code preview.
+
+core:
+
+- Bevel shading primitives for `sp3d` (§20.1.5.9 `bevelT` / §20.1.5.5
+  `bevelB`): the lip is a distance-field raster whose azimuth is sourced from
+  the gradient of a *blurred* distance field (not raw coverage), so the lit
+  band is scale-invariant and crack-free at HiDPI — anti-facet passes remove
+  the terminator facet on curved silhouettes (#414, #415, #416, #417).
+- Bevel band geometry no longer "flat-cuts" elliptical silhouettes; the lip
+  width is locked across render scales (#417).
+- Light rig (§20.1.5.12 `lightRig`): `rot` reversal + three-point fill light,
+  calibrated so matte/plastic materials read correctly (#421).
+
+pptx:
+
+- `sp3d` bevel shading now renders on shapes and pictures — `bevelT` /
+  `bevelB` lips lit by `lightRig`, with `matte` / `plastic` materials
+  (§20.1.5.9 / .5, #410, #414–#418).
+- Extrusion side walls (§20.1.5.3 `extrusionH` / `extrusionClr`) swept under
+  the `scene3d` camera, plus `p:sp` scene3d projection so shape text is drawn
+  in the projected frame (#410).
+- The bevel/scene3d offscreen no longer clips centre-aligned shape borders
+  (#420).
+
+xlsx:
+
+- List-type data validation (§18.3.1.32): the selected cell shows a dropdown
+  arrow whose click opens a read-only panel listing the allowed values,
+  resolved from inline lists or range references
+  (`XlsxWorkbook.resolveValidationList`) (#411).
+- Charts: pie and doughnut series now render (#396).
+
+vscode:
+
+- Opt-in `ooxmlViewer.useGoogleFonts` setting surfaces the library's
+  metric-compatible font substitution in the preview, widening the webview
+  CSP to the Google Fonts CDN only while enabled (off by default, and
+  force-disabled in untrusted workspaces) (#414).
+
 ## 0.57.0 — 2026-06-11
 
 The effects & 3D release: DrawingML shape/picture effects, scene3d camera
