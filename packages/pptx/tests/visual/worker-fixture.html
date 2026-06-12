@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>* { margin: 0; padding: 0; } canvas { display: block; }</style>
+</head>
+<body>
+  <canvas id="main-canvas"></canvas>
+  <canvas id="worker-canvas"></canvas>
+  <script type="module">
+    import { PptxPresentation } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('pptx') ?? 'demo/sample-1';
+    const slide = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
+    const width = 1280;
+    const dpr = 1;
+
+    try {
+      const resp = await fetch(`/${name}.pptx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.pptx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+
+      const paint = (id, bmp) => {
+        const c = document.getElementById(id);
+        c.width = bmp.width;
+        c.height = bmp.height;
+        c.getContext('2d').drawImage(bmp, 0, 0);
+        bmp.close();
+      };
+
+      const main = await PptxPresentation.load(buf.slice(0), { useGoogleFonts: true });
+      paint('main-canvas', await main.renderSlideToBitmap(slide, { width, dpr }));
+      main.destroy();
+
+      const wk = await PptxPresentation.load(buf.slice(0), { mode: 'worker', useGoogleFonts: true });
+      paint('worker-canvas', await wk.renderSlideToBitmap(slide, { width, dpr }));
+      wk.destroy();
+
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[worker-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>
