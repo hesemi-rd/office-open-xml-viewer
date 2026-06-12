@@ -277,6 +277,73 @@ describe('computeBevelNormals — smooth lip on a curved silhouette (anti-facet)
     }
     expect(Math.abs(Math.abs(net) - 2 * Math.PI)).toBeLessThan(0.5);
   });
+
+  // REGRESSION (high-DPR facet, this PR): the size-dependent bevel bug has now
+  // slipped through THREE times, each time at a larger raster scale:
+  //   1. PR #410 mesh cracks — grew with shape size.
+  //   2. PR #413 lip facets — grew with band width (devScale ≤ 2 fixed).
+  //   3. THIS PR — the lit/shadow-terminator facet on sample-11 slide 6 at
+  //      deviceScaleFactor 4, where the hardEdge band is ~128 px deep (4× the
+  //      ~32 px of devScale 1). #413's height-field blur smooths the gradient
+  //      MAGNITUDE but not its DIRECTION; on a linear (hardEdge) profile the
+  //      gradient azimuth still snaps to EDT Voronoi cells, and the screen-blend
+  //      highlight amplifies that into a visible chord. The fix low-passes the
+  //      in-plane normal DIRECTION over a band-proportional radius.
+  // This case mirrors the real geometry at devScale 4 (large ellipse, band 128).
+  // It is RED before the direction-smoothing fix (azimuth holds across a Voronoi
+  // cell then jumps) and GREEN after. The deep-band sampling (inset = band·0.7)
+  // is where the terminator sits and where the chord was visible.
+  it('lip azimuth stays smooth at the real high-DPR body scale (1590×2014, band 128)', () => {
+    // Match sample-11 slide 6's BODY offscreen at deviceScaleFactor 4 exactly:
+    // the diagnostic build logged w=1590 h=2014 bandPx=128 (hardEdge). At that
+    // scale the per-pixel EDT-gradient azimuth holds across each Voronoi cell then
+    // jumps — and the lit/shadow terminator (amplified by the screen-blend
+    // highlight) renders those jumps as the visible chord. Stage 1's height blur
+    // does NOT remove it (the hardEdge profile is ~linear, so its gradient
+    // *direction* still snaps); stage 2's tangential normal-direction blur does.
+    const W = 1590;
+    const H = 2014;
+    const band = 128;
+    const alpha = ellipseAlpha(W, H);
+    const { normals, bandMask } = computeBevelNormals(alpha, W, H, band, 'hardEdge', band / 2);
+
+    const cx = W / 2;
+    const cy = H / 2;
+    const rx = W / 2 - 1;
+    const ry = H / 2 - 1;
+    // Sample at the band midline (inset = band/2), where the lit/shadow terminator
+    // sits and the chord was visible. 0.1° steps so a chord spanning several
+    // degrees registers as a run of equal azimuths broken by a sudden jump.
+    const inset = band * 0.5;
+    const azimuths: number[] = [];
+    for (let deg = 0; deg < 360; deg += 0.1) {
+      const ang = (deg * Math.PI) / 180;
+      const x = Math.round(cx + Math.cos(ang) * (rx - inset));
+      const y = Math.round(cy + Math.sin(ang) * (ry - inset));
+      if (x < 0 || y < 0 || x >= W || y >= H) continue;
+      const i = y * W + x;
+      if (!bandMask[i]) continue;
+      const nx = normals[i * 3];
+      const ny = normals[i * 3 + 1];
+      if (Math.hypot(nx, ny) < 1e-3) continue;
+      azimuths.push(Math.atan2(ny, nx));
+    }
+    expect(azimuths.length).toBeGreaterThan(3000);
+
+    // Largest single-step azimuth jump. Measured: without stage-2 smoothing the
+    // un-regularised field peaks at ~0.016 rad/step (the Voronoi-cell jumps);
+    // with it the azimuth advances continuously at ~0.004 rad/step. A ceiling of
+    // 0.010 rad sits cleanly between the two, so this is RED before the fix and
+    // GREEN after, at the exact scale that regressed.
+    let maxJump = 0;
+    for (let i = 1; i < azimuths.length; i++) {
+      let d = azimuths[i] - azimuths[i - 1];
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      maxJump = Math.max(maxJump, Math.abs(d));
+    }
+    expect(maxJump).toBeLessThan(0.01);
+  });
 });
 
 describe('applyExtrusion (side-wall sweep, §20.1.5.12)', () => {

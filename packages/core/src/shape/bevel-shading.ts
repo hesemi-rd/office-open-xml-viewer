@@ -321,7 +321,111 @@ export function computeBevelNormals(
       normals[i * 3 + 2] = nz;
     }
   }
+  // ── Anti-facet stage 2: regularise the in-plane normal DIRECTION ───────────
+  // Stage 1 (the height-field box blur above) smooths the gradient MAGNITUDE and
+  // removes the facet for narrow bands (≤ ~32 px / devScale ≤ 2). But for a wide
+  // band on a strongly-curved silhouette — sample-11 slide 6 at high DPR, where
+  // the hardEdge band is ~128 px deep — the facet returns on the lit/shadow
+  // terminator. Root cause: the height field of a `hardEdge` (linear) profile is
+  // ~linear in `dist`, so its gradient *direction* (the lip azimuth) still flips
+  // sharply across the EDT's Voronoi-cell boundaries; a blur of the scalar height
+  // barely rotates that gradient. The screen-blend highlight (lit lip → white,
+  // SCREEN_GAIN) is a high-contrast operator that amplifies tiny azimuth jitter
+  // at the terminator into a visible bright chord. The shadow (plain multiply)
+  // and the un-modulated band do not show it — only the lit highlight does
+  // (confirmed by ablation: bevel off → smooth; lit-only → faceted; flat → smooth).
+  //
+  // The geometrically correct regulariser is therefore a *direct* low-pass of the
+  // in-plane normal VECTOR (nx, ny) — the azimuth itself — over a tangential
+  // neighbourhood proportional to the band. The Voronoi cell's tangential extent
+  // grows with the band depth, so the only intrinsic length scale is the band
+  // width; a radius of ~0.25·bandPx spans several cells at every devScale,
+  // collapsing the chorded azimuth onto the silhouette's macroscopic direction
+  // while leaving the lip's rise (height) and the band mask exact. (0.12·bandPx —
+  // the stage-1 fraction — still leaves a faint chord at 128 px; 0.25 clears it
+  // with margin.) Separable, masked to band pixels, O(N·r); paid once per bevel
+  // on the device offscreen, like stage 1.
+  //
+  // GATE — only for bands wide enough to actually facet. The Voronoi facet is
+  // invisible until the band is many px deep: at devScale ≤ ~1 the band is a
+  // handful of px (sample-11 slide 3's circle bevel is ~11 px) and stage 1 alone
+  // already reads as smooth. Running stage 2 there would low-pass the few-px lip
+  // and perturb the PDF-CALIBRATED slide-3 shading for no visible gain. We
+  // therefore engage stage 2 only when `bandPx ≥ 24` — comfortably above slide-3
+  // (≈11 px, left exactly as #410/#413 calibrated it) and below the facet's onset
+  // band (slide 6 is 32 px at devScale 1, 64/96/128 px at devScale 2/3/4, all
+  // smoothed). This is the only data-dependent constant; it is a *visibility*
+  // gate, not a per-sample fudge, and is documented as such per CLAUDE.md.
+  const FACET_MIN_BAND_PX = 24;
+  if (bandPx >= FACET_MIN_BAND_PX) {
+    const normalBlurR = Math.max(1, Math.round(bandPx * 0.25));
+    smoothNormalsTangential(normals, bandMask, w, h, normalBlurR);
+  }
   return { normals, bandMask };
+}
+
+/**
+ * Separable box blur of the in-plane normal components (nx, ny) over band pixels
+ * only, then re-normalise (recovering nz from the unit-length constraint). This
+ * regularises the lip AZIMUTH along the silhouette — see the "Anti-facet stage 2"
+ * note in computeBevelNormals for why direction (not just height magnitude) must
+ * be smoothed to kill the high-DPR terminator facet. Out-of-band taps are skipped
+ * so the smoothing is purely tangential and never averages the flat interior /
+ * exterior into the lip. O(N·r), r small (≈ 0.25·bandPx).
+ */
+function smoothNormalsTangential(
+  normals: Float32Array,
+  bandMask: Uint8Array,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const nx = new Float64Array(w * h);
+  const ny = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    nx[i] = normals[i * 3];
+    ny[i] = normals[i * 3 + 1];
+  }
+  const tmpX = new Float64Array(w * h);
+  const tmpY = new Float64Array(w * h);
+  // Horizontal.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!bandMask[i]) { tmpX[i] = nx[i]; tmpY[i] = ny[i]; continue; }
+      let sx = 0, sy = 0, n = 0;
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k;
+        if (xx < 0 || xx >= w) continue;
+        const j = y * w + xx;
+        if (!bandMask[j]) continue;
+        sx += nx[j]; sy += ny[j]; n++;
+      }
+      tmpX[i] = n ? sx / n : nx[i];
+      tmpY[i] = n ? sy / n : ny[i];
+    }
+  }
+  // Vertical + re-normalise.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!bandMask[i]) continue;
+      let sx = 0, sy = 0, n = 0;
+      for (let k = -r; k <= r; k++) {
+        const yy = y + k;
+        if (yy < 0 || yy >= h) continue;
+        const j = yy * w + x;
+        if (!bandMask[j]) continue;
+        sx += tmpX[j]; sy += tmpY[j]; n++;
+      }
+      const ax = n ? sx / n : nx[i];
+      const ay = n ? sy / n : ny[i];
+      const m = Math.hypot(ax, ay, 1) || 1;
+      normals[i * 3] = ax / m;
+      normals[i * 3 + 1] = ay / m;
+      normals[i * 3 + 2] = 1 / m;
+    }
+  }
 }
 
 /**
