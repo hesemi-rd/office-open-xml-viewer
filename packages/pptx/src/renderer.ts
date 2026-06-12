@@ -2266,7 +2266,7 @@ interface LightRigLike {
  * (PowerPoint's default 3-D scene light) so a bevel with no explicit rig still
  * picks up a top key light rather than rendering flat.
  */
-function buildBevelInputs(
+export function buildBevelInputs(
   sp3d: Sp3dLike | undefined,
   lightRig: LightRigLike | undefined,
   prstMaterial: string | undefined,

@@ -82,7 +82,24 @@ export function bevelHeightProfile(prst: string, w: number): (d: number) => numb
   }
   const norm = (d: number) => Math.max(0, Math.min(1, d / w));
   switch (prst) {
-    case 'hardEdge':
+    case 'hardEdge': {
+      // `hardEdge` is the picture-frame bevel: a SHORT turned-down lip at the very
+      // rim, then flat — its defining "hard edge" is the crease near the rim, not a
+      // gentle full-width ramp. Concentrating the rise in a rim shelf (height
+      // reaches 1 by `HARD_EDGE_SHELF_FRACTION` of the band) makes the lit lip a
+      // thin rim with the rest of the band at the flat-top height (dh/dd → 0
+      // inward), matching PowerPoint (sample-11.pdf p6: the photo fills the ellipse
+      // to a thin rim, NOT a wide darkened band). The rise is a smoothstep, so the
+      // profile is C¹ — tangent-flat where the shelf meets the top — and the lip
+      // azimuth stays facet-free (no slope discontinuity to kink the normal). SPEC
+      // GAP (§20.1.10.9 names the preset only): this is the geometric reading of the
+      // name. A plain straight chamfer is the separate `angle` preset below.
+      const shelf = HARD_EDGE_SHELF_FRACTION;
+      return (d) => {
+        const u = Math.min(1, norm(d) / shelf);
+        return u * u * (3 - 2 * u); // smoothstep 0→1 within the shelf, flat after
+      };
+    }
     case 'angle':
     case 'slope':
       // Straight chamfer: linear ramp from rim to top.
@@ -316,6 +333,37 @@ export function distanceToEdge(
 const COVERAGE_SIGMA_FRACTION = 0.25;
 
 /**
+ * Fraction of the band width over which the lip's shading eases back to the flat
+ * top at the INNER crease (d → bandPx). Without it the band→top transition is a
+ * hard 0/1 step in `bandMask`: every band pixel is fully shaded, the next pixel
+ * inward is the untouched face, so a visible brightness discontinuity traces the
+ * band's inner boundary. For an ellipse that inner boundary is the exact Euclidean
+ * inward offset, which is naturally *flatter than the silhouette at the major-axis
+ * tips* (the offset of a high-curvature convex arc recedes faster) — so the hard
+ * step reads as the "flat-top + 45° chamfer" cut users reported on slide 6, even
+ * though the boundary curve itself is smooth and correct.
+ *
+ * PowerPoint fillets the bevel/face junction, so the lip fades into the top rather
+ * than ending on a crisp edge. We reproduce that by ramping the lip's coverage —
+ * and hence its shading weight — from 1 to 0 over the inner `BEVEL_INNER_FEATHER`
+ * of the band with a smoothstep (tangent-flat at both ends). The geometry of the
+ * band (the EDT iso-distance set) is unchanged; only the *visibility* of the lip
+ * tapers, removing the discontinuity that was the visible artifact. `circle` and
+ * the smoothstep presets already have slope → 0 at the inner edge so their shading
+ * was near-zero there anyway — the feather is (correctly) almost a no-op for them
+ * and the PDF-calibrated slide-3 `circle` brightness is preserved. It is the
+ * straight-chamfer presets (`angle`/`slope`) and the rim-shelf `hardEdge`, whose
+ * shading does NOT vanish at the inner edge, that the feather rescues.
+ */
+const BEVEL_INNER_FEATHER = 0.35;
+
+/**
+ * `hardEdge` rises to full height within this fraction of the band: a short, sharp
+ * turned-down shelf at the rim, flat thereafter. See `bevelHeightProfile`.
+ */
+const HARD_EDGE_SHELF_FRACTION = 0.5;
+
+/**
  * Compute per-pixel surface normals for the bevel lip of a silhouette.
  *
  * @param alpha     W·H alpha mask of the painted body (≥128 = inside).
@@ -379,10 +427,16 @@ export function computeBevelNormals(
   bandPx: number,
   prst: string,
   heightPx: number,
-): { normals: Float32Array; bandMask: Uint8Array } {
+): { normals: Float32Array; bandMask: Uint8Array; bandWeight: Float32Array } {
   const normals = new Float32Array(w * h * 3);
   const bandMask = new Uint8Array(w * h);
-  if (w <= 0 || h <= 0) return { normals, bandMask };
+  // Feathered shading weight in [0,1]: 1 over the outer band, easing to 0 at the
+  // inner crease so the lip's brightness change fades into the flat top instead of
+  // ending on a hard step. `bandMask` stays a crisp 0/1 membership for callers that
+  // need the band footprint; `bandWeight` is what the compositor multiplies the
+  // shade excess by. See BEVEL_INNER_FEATHER.
+  const bandWeight = new Float32Array(w * h);
+  if (w <= 0 || h <= 0) return { normals, bandMask, bandWeight };
   const dist = distanceToEdge(alpha, w, h);
   const profile = bevelHeightProfile(prst, bandPx);
   const inside = (x: number, y: number) => (alpha[y * w + x] ?? 0) >= 128;
@@ -426,6 +480,18 @@ export function computeBevelNormals(
         normals[i * 3 + 2] = 1; // flat top of the shape
         continue;
       }
+      // Inner-crease feather: t01 is the fractional distance across the band
+      // (0 at the rim, 1 at the inner edge). Over the inner BEVEL_INNER_FEATHER of
+      // the band the shading weight smoothsteps from 1 down to 0 so the lip eases
+      // into the flat top with no hard discontinuity (the visible "flat cut").
+      const t01 = d / bandPx;
+      const fadeStart = 1 - BEVEL_INNER_FEATHER;
+      let weight = 1;
+      if (t01 > fadeStart) {
+        const u = Math.min(1, (t01 - fadeStart) / BEVEL_INNER_FEATHER);
+        weight = 1 - u * u * (3 - 2 * u); // 1→0 smoothstep
+      }
+      bandWeight[i] = weight;
       // Outward azimuth = −∇C/|∇C| (coverage decreases toward the rim, so the
       // negative gradient points outward, along the silhouette's outward normal).
       const xl = x > 0 ? x - 1 : x;
@@ -455,7 +521,7 @@ export function computeBevelNormals(
       normals[i * 3 + 2] = nz;
     }
   }
-  return { normals, bandMask };
+  return { normals, bandMask, bandWeight };
 }
 
 // ── Light rig ───────────────────────────────────────────────────────────────
@@ -637,7 +703,7 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
   const alpha = new Uint8ClampedArray(w * h);
   for (let i = 0; i < w * h; i++) alpha[i] = px[i * 4 + 3];
 
-  const { normals, bandMask } = computeBevelNormals(
+  const { bandMask, bandWeight, normals } = computeBevelNormals(
     alpha,
     w,
     h,
@@ -658,6 +724,8 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
 
   for (let i = 0; i < w * h; i++) {
     if (bandMask[i] === 0) continue;
+    const wt = bandWeight[i];
+    if (wt <= 0) continue; // fully faded inner crease — leave the face untouched.
     let nx = normals[i * 3];
     let ny = normals[i * 3 + 1];
     const nz = normals[i * 3 + 2];
@@ -667,7 +735,11 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
       nx = -nx;
       ny = -ny;
     }
-    const f = shadePixel({ x: nx, y: ny, z: nz }, params) / faceFactor;
+    // Per-pixel shade factor, then ease it back toward 1.0 (no change) by the
+    // inner-crease feather weight so the lip fades into the flat top with no hard
+    // step. wt=1 keeps the full lip near the rim; wt→0 at the inner edge.
+    const fRaw = shadePixel({ x: nx, y: ny, z: nz }, params) / faceFactor;
+    const f = 1 + (fRaw - 1) * wt;
     const o = i * 4;
     if (f >= 1) {
       // Lit lip: a chamfer facing the light reads as a bright highlight even
