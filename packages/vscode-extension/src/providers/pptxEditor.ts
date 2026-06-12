@@ -1,54 +1,14 @@
 import * as vscode from 'vscode';
-import { getWebviewHtml } from '../webviewHtml';
+import { BaseEditorProvider } from './baseEditor';
 
-export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider {
+export class PptxEditorProvider extends BaseEditorProvider {
   static readonly viewType = 'ooxmlViewer.pptxEditor';
+  protected readonly fileType = 'pptx' as const;
 
   static register(context: vscode.ExtensionContext): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       PptxEditorProvider.viewType,
       new PptxEditorProvider(context),
     );
-  }
-
-  constructor(private readonly context: vscode.ExtensionContext) {}
-
-  async openCustomDocument(
-    uri: vscode.Uri,
-  ): Promise<vscode.CustomDocument> {
-    return { uri, dispose: () => undefined };
-  }
-
-  async resolveCustomEditor(
-    document: vscode.CustomDocument,
-    webviewPanel: vscode.WebviewPanel,
-  ): Promise<void> {
-    webviewPanel.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
-        vscode.Uri.joinPath(document.uri, '..'),
-      ],
-    };
-
-    webviewPanel.webview.html = getWebviewHtml(
-      webviewPanel.webview,
-      this.context.extensionUri,
-      'pptx',
-    );
-
-    const docUrl = webviewPanel.webview.asWebviewUri(document.uri).toString();
-
-    webviewPanel.webview.onDidReceiveMessage(async (msg) => {
-      if (msg.type === 'webview-ready') {
-        await webviewPanel.webview.postMessage({
-          type: 'ooxml-init',
-          fileType: 'pptx',
-          url: docUrl,
-        });
-      } else if (msg.type === 'copy') {
-        vscode.env.clipboard.writeText(msg.text);
-      }
-    });
   }
 }

@@ -1,35 +1,78 @@
 import * as vscode from 'vscode';
 
+/** Origin that serves the Google Fonts *stylesheets* (`<link rel="stylesheet">`). */
+const GOOGLE_FONTS_CSS_ORIGIN = 'https://fonts.googleapis.com';
+/** Origin that serves the actual `.woff2` font binaries referenced by the CSS. */
+const GOOGLE_FONTS_FILES_ORIGIN = 'https://fonts.gstatic.com';
+
+/**
+ * Build the webview Content-Security-Policy string.
+ *
+ * Pure function (no VSCode API) so it can be unit-tested for both states.
+ *
+ * When `useGoogleFonts` is false the policy is fully offline: the only allowed
+ * origin is the extension's own `cspSource`. When true we widen exactly two
+ * directives, no more:
+ *   - `style-src` gains {@link GOOGLE_FONTS_CSS_ORIGIN} because the library
+ *     loads each Google Fonts CSS via an injected `<link rel="stylesheet">`.
+ *   - `font-src` gains {@link GOOGLE_FONTS_FILES_ORIGIN} because the `@font-face`
+ *     rules in that CSS point their `src:` at `fonts.gstatic.com` woff2 files.
+ * `connect-src` is deliberately NOT widened: the preload path
+ * (`packages/core/src/fonts/preload.ts`) never `fetch()`es either origin — the
+ * browser font engine fetches the binaries, governed by `font-src`.
+ */
+export function buildContentSecurityPolicy(
+  cspSource: string,
+  nonce: string,
+  useGoogleFonts: boolean,
+): string {
+  const fontSrc = useGoogleFonts
+    ? `font-src ${cspSource} ${GOOGLE_FONTS_FILES_ORIGIN};`
+    : `font-src ${cspSource};`;
+  const styleSrc = useGoogleFonts
+    ? `style-src 'unsafe-inline' ${GOOGLE_FONTS_CSS_ORIGIN};`
+    : `style-src 'unsafe-inline';`;
+
+  return [
+    `default-src 'none';`,
+    `img-src ${cspSource} data: blob:;`,
+    `media-src ${cspSource} blob:;`,
+    fontSrc,
+    `script-src 'nonce-${nonce}' 'wasm-unsafe-eval';`,
+    `worker-src data: blob:;`,
+    styleSrc,
+    `connect-src ${cspSource} data: blob:;`,
+  ].join(' ');
+}
+
 /**
  * Generate the HTML for the webview panel.
  * The webview script (dist/webview.js) is allowed via the content security policy,
  * and receives the file bytes via a `ooxml-init` message posted from the extension host.
+ *
+ * When `useGoogleFonts` is true the CSP is widened to allow the metric-compatible
+ * font CDN (see {@link buildContentSecurityPolicy}); the flag is also forwarded to
+ * the viewers via the `ooxml-init` message in the editor providers.
  */
 export function getWebviewHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
   fileType: 'docx' | 'xlsx' | 'pptx',
+  useGoogleFonts = false,
 ): string {
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
   );
 
   const nonce = getNonce();
+  const csp = buildContentSecurityPolicy(webview.cspSource, nonce, useGoogleFonts);
 
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none';
-             img-src ${webview.cspSource} data: blob:;
-             media-src ${webview.cspSource} blob:;
-             font-src ${webview.cspSource};
-             script-src 'nonce-${nonce}' 'wasm-unsafe-eval';
-             worker-src data: blob:;
-             style-src 'unsafe-inline';
-             connect-src ${webview.cspSource} data: blob:;" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <title>OOXML Viewer</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
