@@ -74,7 +74,7 @@ if (filePath.toLowerCase().endsWith('.pptx')) {
   const dpr = 2;
   const cssH = Math.round(slideHeight * (width / slideWidth));
   const canvas = factory.createCanvas(width * dpr, cssH * dpr);
-  await renderSlideNode(canvas, presentation, slideIdx, { width, dpr });
+  await renderSlideNode(canvas, presentation, slideIdx, { width, dpr, factory });
   const png = await canvas.toBuffer('png');
   writeFileSync(outPath, png);
   console.log(`Wrote ${outPath} (slide ${slideIdx + 1} / ${presentation.slides.length})`);
