@@ -417,6 +417,14 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
     return { maxJump, maxLum2, net, n: az.length };
   }
 
+  // The devScale-8 cases rasterise a ~3176×4024 px alpha plane and run a full
+  // EDT + 3-box Gaussian over it; on a loaded Linux CI runner that lands near
+  // ~6 s — over vitest's 5 s default (a pure timeout, not a correctness fail).
+  // Give the scale-sweep tests generous headroom rather than shrinking the
+  // raster: devScale 8 IS the point of the scale-invariance assertion. Fast
+  // low-scale iterations finish in ms and are unaffected by a high ceiling.
+  const SCALE_SWEEP_TIMEOUT_MS = 30_000;
+
   for (const ds of DEV_SCALES) {
     const W = BASE.W * ds;
     const H = BASE.H * ds;
@@ -431,7 +439,7 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
       expect(r.maxLum2).toBeLessThan(LUM_2ND_DIFF_MAX);
       // (c) the azimuth makes one full turn — it tracks the rim, not a few facets.
       expect(Math.abs(Math.abs(r.net) - 2 * Math.PI)).toBeLessThan(0.5);
-    });
+    }, SCALE_SWEEP_TIMEOUT_MS);
 
     it(`thin-ring lip is smooth at devScale ${ds} (band ${band}px)`, () => {
       // A ring whose band reaches toward the medial axis — the medial-ridge case
@@ -442,7 +450,7 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
       expect(r.maxJump).toBeLessThan(AZ_JUMP_MAX);
       expect(r.maxLum2).toBeLessThan(LUM_2ND_DIFF_MAX);
       expect(Math.abs(Math.abs(r.net) - 2 * Math.PI)).toBeLessThan(0.5);
-    });
+    }, SCALE_SWEEP_TIMEOUT_MS);
   }
 
   it('smoothness does NOT degrade as scale grows (the property prior patches lacked)', () => {
@@ -463,7 +471,7 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
       BASE.band * 8,
     );
     expect(large.maxJump).toBeLessThanOrEqual(small.maxJump + 1e-6);
-  });
+  }, SCALE_SWEEP_TIMEOUT_MS);
 });
 
 describe('bevel lip azimuth tracks the TRUE silhouette normal (issue #417→#418 apex plateau)', () => {
