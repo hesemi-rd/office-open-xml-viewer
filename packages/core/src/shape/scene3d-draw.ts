@@ -452,8 +452,17 @@ function drawProjectedSupersampled(
   const bboxH = maxY - minY;
   if (bboxW <= 0 || bboxH <= 0) return false;
 
-  const aux = createAuxCanvas(bboxW * SUPERSAMPLE, bboxH * SUPERSAMPLE);
+  const reqW = Math.max(1, Math.ceil(bboxW * SUPERSAMPLE));
+  const reqH = Math.max(1, Math.ceil(bboxH * SUPERSAMPLE));
+  const aux = createAuxCanvas(reqW, reqH);
   if (!aux) return false;
+  // Browsers silently clamp an OffscreenCanvas / <canvas> that exceeds the
+  // max dimension or total-area limit (Chrome ≈ 16384 px / side, ≈ 268 MP),
+  // returning a SMALLER buffer than requested. If we proceeded the mesh would
+  // rasterise into that shrunken buffer and the silhouette would quantise into
+  // chords on upscale. Detect the clamp and fall back to the non-supersampled
+  // direct path (which warps at the live device resolution) instead.
+  if (aux.width !== reqW || aux.height !== reqH) return false;
   const actx = (aux.getContext('2d') as AnyCtx | null) ?? null;
   if (!actx) return false;
 
