@@ -47,6 +47,8 @@ import {
   computeDepthOffset,
   lightDirFromRig,
   materialClass,
+  isHTMLCanvas,
+  defaultDpr,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -3454,16 +3456,16 @@ export async function renderSlide(
   const myToken = (tokenHost.__pptxRenderToken = (tokenHost.__pptxRenderToken ?? 0) + 1);
   const superseded = () => tokenHost.__pptxRenderToken !== myToken;
 
-  const targetWidth = opts.width ?? ((canvas instanceof HTMLCanvasElement ? canvas.offsetWidth : 0) || 960);
+  const targetWidth = opts.width ?? ((isHTMLCanvas(canvas) ? canvas.offsetWidth : 0) || 960);
   const scale = targetWidth / slideWidth;
   const canvasW = Math.round(targetWidth);
   const canvasH = Math.round(slideHeight * scale);
 
-  const dpr = opts.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
+  const dpr = opts.dpr ?? defaultDpr();
   canvas.width  = canvasW * dpr;
   canvas.height = canvasH * dpr;
   // CSS size only applies to the visible HTMLCanvasElement (not OffscreenCanvas)
-  if (typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement) {
+  if (isHTMLCanvas(canvas)) {
     canvas.style.width = `${canvasW}px`;
     // Mirror the docx renderer: when callers use `renderSlide(canvas, ...)`
     // directly without the {@link PptxViewer} wrapper, set `display:block`

@@ -5,6 +5,7 @@ import { selectNotes } from './notes';
 import {
   preloadGoogleFonts,
   WorkerBridge,
+  defaultDpr,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
@@ -204,7 +205,7 @@ export class PptxPresentation {
     if (!this._presentation) throw new Error('Presentation not loaded');
     const slide = this._presentation.slides[slideIndex];
     if (!slide) throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
-    const dpr = opts.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
+    const dpr = opts.dpr ?? defaultDpr();
     const width = opts.width ?? (canvas.offsetWidth || 960);
     await renderSlide(
       canvas,
@@ -273,7 +274,7 @@ export class PptxPresentation {
     if (!this._presentation) throw new Error('Presentation not loaded');
     const slide = this._presentation.slides[slideIndex];
     if (!slide) throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
-    const dpr = opts.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
+    const dpr = opts.dpr ?? defaultDpr();
     const width = opts.width ?? (canvas.offsetWidth || 960);
     return createPresentationHandle(canvas, slide, {
       width,

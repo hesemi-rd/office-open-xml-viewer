@@ -12,6 +12,8 @@ import {
   recolorSvg,
   PT_TO_PX,
   resolveBaseDirection,
+  isHTMLCanvas,
+  defaultDpr,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -341,7 +343,7 @@ export async function renderDocumentToCanvas(
   opts: RenderDocumentOptions = {},
 ): Promise<void> {
   const sec = doc.section;
-  const dpr = opts.dpr ?? devicePixelRatio ?? 1;
+  const dpr = opts.dpr ?? defaultDpr();
   const cssWidth = opts.width ?? sec.pageWidth * PT_TO_PX;
   const scale = cssWidth / sec.pageWidth;  // px per pt
   const cssHeight = sec.pageHeight * scale;
@@ -349,7 +351,7 @@ export async function renderDocumentToCanvas(
   canvas.width = Math.round(cssWidth * dpr);
   canvas.height = Math.round(cssHeight * dpr);
 
-  if (canvas instanceof HTMLCanvasElement) {
+  if (isHTMLCanvas(canvas)) {
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
     if (!canvas.style.display) canvas.style.display = 'block';

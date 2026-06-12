@@ -3,6 +3,8 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   WorkerBridge,
+  isHTMLCanvas,
+  defaultDpr,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
@@ -285,9 +287,9 @@ export class XlsxWorkbook {
     }
 
     // ── Step 2: Resize + draw, all synchronous from here.
-    const dpr = opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1);
-    const rawW = target instanceof HTMLCanvasElement ? (target.clientWidth || 800) : target.width;
-    const rawH = target instanceof HTMLCanvasElement ? (target.clientHeight || 600) : target.height;
+    const dpr = opts.dpr ?? defaultDpr();
+    const rawW = isHTMLCanvas(target) ? (target.clientWidth || 800) : target.width;
+    const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
     const width = opts.width ?? rawW;
     const height = opts.height ?? rawH;
 
@@ -296,7 +298,7 @@ export class XlsxWorkbook {
     // Set CSS display size so the browser renders at 1:1 device pixels (no browser-level scaling).
     // Without this, canvas.width=2400 on a DPR=2 display causes the canvas to be laid out at
     // 2400 CSS px, making all content appear blurry when viewed in a 1200 CSS px container.
-    if (target instanceof HTMLCanvasElement) {
+    if (isHTMLCanvas(target)) {
       target.style.width = `${width}px`;
       target.style.height = `${height}px`;
     }
