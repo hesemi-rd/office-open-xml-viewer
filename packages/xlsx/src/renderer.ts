@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, renderPresetShape, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -363,10 +363,12 @@ function hatchPattern(
   // multiplies it back. Result: the source bit lands on exactly one
   // destination device pixel regardless of the user's CSS zoom.
   const tile = rows.length;
-  const off = document.createElement('canvas');
-  off.width = tile;
-  off.height = tile;
-  const octx = off.getContext('2d');
+  const off = createAuxCanvas(tile, tile);
+  if (!off) { PATTERN_CACHE.set(key, null); return null; }
+  const octx = off.getContext('2d') as
+    | CanvasRenderingContext2D
+    | OffscreenCanvasRenderingContext2D
+    | null;
   if (!octx) { PATTERN_CACHE.set(key, null); return null; }
 
   octx.fillStyle = hexToRgba(bgHex);
