@@ -1541,6 +1541,67 @@ function toRoman(n: number): string {
   return result;
 }
 
+/**
+ * True when a paragraph has renderable content — at least one non-empty text
+ * run, or any equation run. Line breaks alone (a paragraph the user created by
+ * pressing Enter on an empty line) do NOT count as content.
+ *
+ * PowerPoint does not draw a bullet/number marker on an empty paragraph and
+ * does not advance an autoNum counter for it (a blank line between "1." and
+ * "2." stays unnumbered and the sequence continues). ECMA-376 §21.1.2.4.x
+ * (CT_Bullet / CT_TextCharBullet / CT_TextAutoNumberBullet) gives no numeric
+ * rule for this, so PowerPoint's behaviour is the reference: suppress the
+ * marker whenever the paragraph carries no real content. This is the plain
+ * "is there content?" test, not a sample-specific heuristic.
+ */
+export function paragraphHasRenderableContent(para: Paragraph): boolean {
+  for (const r of para.runs) {
+    if (r.type === 'text' && r.text !== '') return true;
+    if (r.type === 'math') return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve the bullet/number marker *label string* for a paragraph, mutating
+ * the per-level autoNum counter map as a side effect. Returns '' (= no marker)
+ * for `none`/`inherit` bullets and for empty paragraphs.
+ *
+ * Empty-paragraph handling (PowerPoint reference behaviour, see
+ * `paragraphHasRenderableContent`): when the paragraph has no renderable
+ * content we draw no marker AND do not advance the autoNum counter, so a blank
+ * line between numbered items keeps the sequence going (… "1." / "" / "2." …).
+ *
+ * The counter-reset semantics (clear on char bullets / non-list paragraphs)
+ * are intentionally kept here so the same map walk the renderer relied on is
+ * exercised by the unit tests. Font and colour resolution stay in the renderer
+ * because they depend on canvas/theme context.
+ */
+export function resolveBulletLabel(
+  para: Paragraph,
+  autoNumCounters: Map<number, number>,
+): string {
+  const hasContent = paragraphHasRenderableContent(para);
+  if (para.bullet.type === 'char') {
+    // Reset counters when switching to char bullets.
+    autoNumCounters.clear();
+    return hasContent ? applySymbolFont(para.bullet.char, para.bullet.fontFamily ?? '') : '';
+  }
+  if (para.bullet.type === 'autoNum') {
+    if (!hasContent) return '';
+    const lvl = para.lvl;
+    if (!autoNumCounters.has(lvl)) {
+      autoNumCounters.set(lvl, para.bullet.startAt ?? 1);
+    } else {
+      autoNumCounters.set(lvl, autoNumCounters.get(lvl)! + 1);
+    }
+    return formatAutoNum(autoNumCounters.get(lvl)!, para.bullet.numType);
+  }
+  // none / inherit — not a list paragraph; reset autoNum counters.
+  autoNumCounters.clear();
+  return '';
+}
+
 function renderTextBody(
   ctx: CanvasRenderingContext2D,
   body: TextBody,
@@ -1726,33 +1787,26 @@ function renderTextBody(
     let bulletFont   = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
     let bulletColor  = bulletInheritedColor;
 
+    // Resolve the marker label and advance the autoNum counter. Empty
+    // paragraphs (Enter on a blank line) draw no marker and do not advance the
+    // counter — PowerPoint keeps a blank line between numbered items unnumbered
+    // while continuing the sequence. ECMA-376 §21.1.2.4.x gives no numeric
+    // rule, so PowerPoint's behaviour is the reference (see resolveBulletLabel).
+    bulletLabel = resolveBulletLabel(para, autoNumCounters);
+
     if (para.bullet.type === 'char') {
       const b = para.bullet;
       const bSizePx = b.sizePct != null
         ? bulletBaseSizePx * (b.sizePct / 100)
         : bulletBaseSizePx;
-      bulletLabel = applySymbolFont(b.char, b.fontFamily ?? '');
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
       const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
       bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
       bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
-      // Reset counters when switching to char bullets
-      autoNumCounters.clear();
     } else if (para.bullet.type === 'autoNum') {
-      const b = para.bullet;
-      const lvl = para.lvl;
-      if (!autoNumCounters.has(lvl)) {
-        autoNumCounters.set(lvl, b.startAt ?? 1);
-      } else {
-        autoNumCounters.set(lvl, autoNumCounters.get(lvl)! + 1);
-      }
-      bulletLabel = formatAutoNum(autoNumCounters.get(lvl)!, b.numType);
       bulletFont  = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
       bulletColor = bulletInheritedColor;
-    } else {
-      // Not a list paragraph — reset autoNum counters
-      autoNumCounters.clear();
     }
 
     // Text start X and wrap width.
