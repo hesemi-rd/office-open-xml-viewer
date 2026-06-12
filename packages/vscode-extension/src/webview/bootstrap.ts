@@ -61,6 +61,11 @@ window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
   if (msg.type !== 'ooxml-init') return;
 
+  // Opt-in flag forwarded from the extension host (gated by the
+  // `ooxmlViewer.useGoogleFonts` setting AND workspace trust). When false the
+  // viewers never touch the network — the matching CSP keeps the webview offline.
+  const useGoogleFonts: boolean = msg.useGoogleFonts === true;
+
   let buffer: ArrayBuffer;
   try {
     const res = await fetch(msg.url);
@@ -73,11 +78,11 @@ window.addEventListener('message', async (event: MessageEvent) => {
 
   try {
     if (fileType === 'docx') {
-      await initDocx(buffer);
+      await initDocx(buffer, useGoogleFonts);
     } else if (fileType === 'xlsx') {
-      await initXlsx(buffer);
+      await initXlsx(buffer, useGoogleFonts);
     } else if (fileType === 'pptx') {
-      await initPptx(buffer);
+      await initPptx(buffer, useGoogleFonts);
     }
   } catch (err) {
     showError(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -86,13 +91,14 @@ window.addEventListener('message', async (event: MessageEvent) => {
 
 // ── XLSX ─────────────────────────────────────────────────────────────────────
 
-async function initXlsx(buffer: ArrayBuffer): Promise<void> {
+async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
   const container = document.createElement('div');
   container.style.cssText = 'width:100%;height:100vh;';
   viewerContainer.appendChild(container);
 
   const viewer = new XlsxViewer(container, {
     math,
+    useGoogleFonts,
     onError(err) {
       showError(`Error: ${err.message}`);
     },
@@ -133,8 +139,8 @@ function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): voi
   }
 }
 
-async function initDocx(buffer: ArrayBuffer): Promise<void> {
-  const doc = await DocxDocument.load(buffer, { math });
+async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
+  const doc = await DocxDocument.load(buffer, { math, useGoogleFonts });
 
   const stack = document.createElement('div');
   stack.className = 'page-stack';
@@ -204,8 +210,8 @@ function buildPptxTextLayer(
   }
 }
 
-async function initPptx(buffer: ArrayBuffer): Promise<void> {
-  const pres = await PptxPresentation.load(buffer, { math });
+async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
+  const pres = await PptxPresentation.load(buffer, { math, useGoogleFonts });
 
   const stack = document.createElement('div');
   stack.className = 'page-stack';

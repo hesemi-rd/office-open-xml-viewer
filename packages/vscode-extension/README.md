@@ -6,7 +6,7 @@
 
 A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
 
-> **Private by design.** All parsing and rendering happens locally inside the VS Code Webview via WebAssembly. **No file contents, no metadata, and no telemetry leave your machine.** The extension makes no network requests.
+> **Private by design.** All parsing and rendering happens locally inside the VS Code Webview via WebAssembly. **No file contents, no metadata, and no telemetry ever leave your machine.** The extension makes **no network requests** out of the box. Only two strictly opt-in features can cause any outbound request — the [MCP server](#mcp-server-for-ai-agents) (downloads a binary from GitHub) and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) (loads metric-compatible fonts from a CDN) — and both are off by default.
 
 ## Screenshots
 
@@ -51,10 +51,25 @@ Open a workspace that contains a `.xlsx` / `.docx` / `.pptx` file and the extens
 - `OOXML Viewer: Install / Enable MCP Server`
 - `OOXML Viewer: Disable MCP Server`
 
+## Font substitution (Google Fonts, opt-in)
+
+Office files often reference fonts that aren't installed on your machine — `Calibri`, `Cambria`, and the like. By default the viewer falls back to whatever system font is closest, which can shift line breaks and column widths away from how Word / PowerPoint / Excel would lay the document out.
+
+Enabling **`ooxmlViewer.useGoogleFonts`** lets the preview load *metric-compatible* substitutes from the Google Fonts CDN so the layout matches Office:
+
+- **Calibri → [Carlito](https://fonts.google.com/specimen/Carlito)**, **Cambria → [Caladea](https://fonts.google.com/specimen/Caladea)** (same metrics by design).
+- **Arabic / RTL** scripts → **Noto Naskh/Sans Arabic**.
+- A handful of common web fonts (Open Sans, Roboto, Lato, Montserrat, …) when a document asks for them directly.
+
+**Network disclosure:** when (and only when) this setting is enabled and the workspace is trusted, the preview requests stylesheets from `fonts.googleapis.com` and font files from `fonts.gstatic.com`. No file content is ever sent — only the standard font requests a browser makes. The webview's Content-Security-Policy is widened to exactly those two origins solely while the setting is on; with it off, the policy blocks every external origin and the extension stays fully offline.
+
+**Settings:**
+- `ooxmlViewer.useGoogleFonts`: `false` (default — fully offline) or `true` (load metric-compatible fonts from the CDN). Force-disabled in untrusted workspaces. Toggling it re-renders already-open previews immediately.
+
 ## Privacy & Security
 
 - **Local file I/O only.** The viewer reads bytes via `vscode.workspace.fs.readFile` and never writes back — files are opened read-only.
-- **Webview is offline.** The Webview's Content Security Policy disallows outbound connections to any origin other than the extension itself. No analytics, no font CDN, no remote API.
+- **Webview is offline by default.** The Webview's Content Security Policy disallows outbound connections to any origin other than the extension itself. No analytics, no remote API. The only exception is the opt-in [Google Fonts substitution](#font-substitution-google-fonts-opt-in): enabling `ooxmlViewer.useGoogleFonts` widens the CSP to allow `fonts.googleapis.com` / `fonts.gstatic.com` and nothing else, and only in trusted workspaces.
 - **MCP server is opt-in and offline-after-install.** Until you accept the install prompt the extension makes no network requests. The download itself only contacts `github.com`, is checksum-verified, and the resulting binary parses local files only — it does not phone home. Whatever the connected AI agent does with the data is governed by that agent's own privacy settings.
 - **Open source.** Source code at [github.com/yukiyokotani/office-open-xml-viewer](https://github.com/yukiyokotani/office-open-xml-viewer).
 
