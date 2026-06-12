@@ -76,7 +76,7 @@ export {
   type Scene3dQuad,
   type Vec2,
 } from './shape/scene3d-camera';
-export { drawProjected } from './shape/scene3d-draw';
+export { drawProjected, expandProjectedQuad } from './shape/scene3d-draw';
 // DrawingML 3D bevel shading (Phase B). ECMA-376 §20.1.5.12 (sp3d) /
 // §20.1.5.3 (bevel) / §20.1.10.9 (ST_BevelPresetType) / §20.1.5.9 (lightRig).
 export {

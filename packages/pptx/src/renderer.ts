@@ -40,6 +40,7 @@ import {
   computeScene3dQuad,
   isScene3dNonIdentity,
   drawProjected,
+  expandProjectedQuad,
   createAuxCanvas,
   applyBevelShading,
   applyExtrusion,
@@ -1193,7 +1194,18 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         // No onTextRun → the projected text is not selectable (see the note).
         renderShape(octx, localEl, scale, themeDefaultColor, slideNumber, rc, undefined);
       },
-      { bevels, extrusion: extrusion ?? undefined },
+      {
+        bevels,
+        extrusion: extrusion ?? undefined,
+        // Edge margin so the centre-aligned stroke's outer half and the
+        // extrusion sweep aren't clipped by the box-sized offscreen (see
+        // Project3dOpts.edgePadCss).
+        edgePadCss:
+          (el.stroke ? (el.stroke.width * scale) / 2 : 0) +
+          (el.sp3d?.contourW ? el.sp3d.contourW * scale : 0) +
+          (extrusion ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale : 0) +
+          2,
+      },
     );
     if (ok) {
       ctx.restore();
@@ -2367,12 +2379,26 @@ interface Project3dOpts {
   /** Extrusion side-wall to bake in before the bevel (§20.1.5.12 extrusionH). */
   extrusion?: ExtrusionInput;
   /**
-   * Paint edges (a:ln border + sp3d contour) into the offscreen AFTER the bevel
-   * shading but in the same local rect. Kept separate from `paintBody` so the
-   * bevel reads the body silhouette's alpha without the outside-aligned contour
-   * stroke contaminating the distance transform.
+   * Paint edges that sit OUTSIDE the beveled front face (the sp3d contour, an
+   * outside-aligned rim of the extruded side edge) into the offscreen AFTER the
+   * bevel shading, in the same local rect. The a:ln border belongs to the front
+   * face itself — PowerPoint's bevel lights the framed picture as one surface —
+   * so the border is painted inside `paintBody`, BEFORE the bevel, and only the
+   * contour goes here (it must not contaminate the lip's distance transform).
    */
   paintEdges?: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void;
+  /**
+   * Margin (CSS px) added on every side of the offscreen around the shape's
+   * w×h box. The box alone CLIPS everything a shape legitimately paints past
+   * it: the outer half of the centre-aligned a:ln border, the outside-aligned
+   * contour, and the extrusion sweep. For a silhouette that touches its box
+   * (an inscribed ellipse touches it at all four apices) that clip cuts the
+   * rim along the straight box edge — the "sliced ellipse" slide-6 bug. The
+   * margin also keeps the silhouette away from the offscreen border so the
+   * bevel's distance transform (which treats out-of-bounds as background)
+   * measures the true silhouette distance instead of the canvas edge.
+   */
+  edgePadCss?: number;
 }
 
 function projectScene3dPaint(
@@ -2391,16 +2417,34 @@ function projectScene3dPaint(
   const tf = target.getTransform();
   const det = Math.abs(tf.a * tf.d - tf.b * tf.c);
   const devScale = det > 0 ? Math.sqrt(det) : 1;
-  const ow = Math.max(1, Math.ceil(w * devScale));
-  const oh = Math.max(1, Math.ceil(h * devScale));
+
+  // Edge margin (see Project3dOpts.edgePadCss). Quantised to whole device px so
+  // the body lands on the same pixel grid as the unpadded layout, then mapped
+  // onto the destination by extrapolating the camera quad through its own
+  // homography (computeScene3dQuad re-fits to the box it is given, so it must
+  // NOT be called with the padded size). Degenerate extrapolation → pad 0.
+  let padDev = Math.max(0, Math.ceil((opts.edgePadCss ?? 0) * devScale));
+  const quad = computeScene3dQuad(camera, w, h);
+  let quadCorners = quad.corners;
+  if (padDev > 0) {
+    const padCss = padDev / devScale;
+    const expanded = expandProjectedQuad(quad.corners, padCss / w, padCss / h);
+    if (expanded) quadCorners = expanded;
+    else padDev = 0;
+  }
+  const padCss = padDev / devScale;
+
+  const ow = Math.max(1, Math.ceil(w * devScale) + 2 * padDev);
+  const oh = Math.max(1, Math.ceil(h * devScale) + 2 * padDev);
   const aux = createAuxCanvas(ow, oh);
   if (!aux) return false;
   const octx = aux.getContext('2d') as CanvasRenderingContext2D | null;
   if (!octx) return false;
 
-  // Paint the body into the offscreen with the origin at (0,0); scale device px.
+  // Paint the body into the offscreen with the origin at (pad,pad); device px.
   octx.save();
   octx.scale(devScale, devScale);
+  octx.translate(padCss, padCss);
   paintBody(octx, 0, 0, w, h);
   octx.restore();
 
@@ -2414,17 +2458,19 @@ function projectScene3dPaint(
     for (const bevel of opts.bevels) applyBevelShading(octx, bevel);
   }
 
-  // Edges (border + contour) on top of the beveled body, still pre-projection.
+  // Post-bevel edges (the contour rim) on top of the beveled body, still
+  // pre-projection. The a:ln border is painted inside paintBody (see
+  // Project3dOpts.paintEdges).
   if (opts.paintEdges) {
     octx.save();
     octx.scale(devScale, devScale);
+    octx.translate(padCss, padCss);
     opts.paintEdges(octx, 0, 0, w, h);
     octx.restore();
   }
 
-  // Project the w×h box and offset the quad to the element's (x,y).
-  const quad = computeScene3dQuad(camera, w, h);
-  const corners = quad.corners.map((c) => ({ x: x + c.x, y: y + c.y })) as [
+  // Offset the (possibly pad-expanded) quad to the element's (x,y).
+  const corners = quadCorners.map((c) => ({ x: x + c.x, y: y + c.y })) as [
     Vec2,
     Vec2,
     Vec2,
@@ -2439,8 +2485,16 @@ function projectScene3dPaint(
 /**
  * Bake bevel shading + edges into a body that is NOT camera-projected (identity
  * camera, e.g. orthographicFront). Renders the body to a device-px offscreen,
- * shades the bevel, paints the edges, then blits the offscreen back at (x,y).
- * Falls back to false (caller paints flat) when no offscreen is available.
+ * shades the bevel, paints the post-bevel edges (contour), then blits the
+ * offscreen back at (x,y). Falls back to false (caller paints flat) when no
+ * offscreen is available.
+ *
+ * `edgePadCss` grows the offscreen by a margin on every side (same rationale
+ * as Project3dOpts.edgePadCss): without it the box-sized offscreen clips the
+ * outer half of the centre-aligned border wherever the silhouette touches its
+ * bounding box, and the bevel's distance transform reads the offscreen border
+ * as the silhouette edge there — both showed up as the straight-cut rim on the
+ * slide-6 ellipse apices.
  */
 function paintBeveledFlat(
   target: CanvasRenderingContext2D,
@@ -2451,13 +2505,17 @@ function paintBeveledFlat(
   bevels: BevelInput[],
   paintBody: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void,
   paintEdges?: (octx: CanvasRenderingContext2D, ox: number, oy: number, ow: number, oh: number) => void,
+  edgePadCss = 0,
 ): boolean {
   if (w <= 0 || h <= 0 || bevels.length === 0) return false;
   const tf = target.getTransform();
   const det = Math.abs(tf.a * tf.d - tf.b * tf.c);
   const devScale = det > 0 ? Math.sqrt(det) : 1;
-  const ow = Math.max(1, Math.ceil(w * devScale));
-  const oh = Math.max(1, Math.ceil(h * devScale));
+  // Whole-device-px margin so the body stays on the unpadded pixel grid.
+  const padDev = Math.max(0, Math.ceil(edgePadCss * devScale));
+  const padCss = padDev / devScale;
+  const ow = Math.max(1, Math.ceil(w * devScale) + 2 * padDev);
+  const oh = Math.max(1, Math.ceil(h * devScale) + 2 * padDev);
   const aux = createAuxCanvas(ow, oh);
   if (!aux) return false;
   const octx = aux.getContext('2d') as CanvasRenderingContext2D | null;
@@ -2465,17 +2523,26 @@ function paintBeveledFlat(
 
   octx.save();
   octx.scale(devScale, devScale);
+  octx.translate(padCss, padCss);
   paintBody(octx, 0, 0, w, h);
   octx.restore();
   for (const bevel of bevels) applyBevelShading(octx, bevel);
   if (paintEdges) {
     octx.save();
     octx.scale(devScale, devScale);
+    octx.translate(padCss, padCss);
     paintEdges(octx, 0, 0, w, h);
     octx.restore();
   }
-  // Blit the device-px offscreen back into target's CSS-px space at (x,y).
-  target.drawImage(aux as unknown as CanvasImageSource, x, y, w, h);
+  // Blit the device-px offscreen back into target's CSS-px space, 1:1 in
+  // device pixels, with the margin hanging past (x,y) on every side.
+  target.drawImage(
+    aux as unknown as CanvasImageSource,
+    x - padCss,
+    y - padCss,
+    ow / devScale,
+    oh / devScale,
+  );
   return true;
 }
 
@@ -2619,16 +2686,24 @@ async function renderPicture(
     // homography and effectLst (reflection / soft edge) re-paints them too —
     // matching PowerPoint, which applies the 3D transform and effects to the
     // framed picture as a whole.
-    const strokePictureEdges = (
+    //
+    // The two edges are split because they sit on OPPOSITE sides of the bevel
+    // shading: the a:ln border is part of the FRONT FACE (PowerPoint's bevel
+    // lip lights the framed picture as one surface — sample-11.pdf p6 shows
+    // the lit shelf and dark rim crease ON the beige border), so it is painted
+    // before applyBevelShading; the contour approximates the extruded side
+    // edge OUTSIDE the front face and must stay out of the lip's distance
+    // transform, so it is painted after.
+    const strokeLnBorder = (
       target: CanvasRenderingContext2D,
       ox: number,
       oy: number,
       ow: number,
       oh: number,
     ): void => {
-      // 1) a:ln picture border (ECMA-376 §20.1.2.2.24). Centre-aligned stroke,
-      //    the Canvas default — PowerPoint draws the picture frame straddling
-      //    the silhouette edge.
+      // a:ln picture border (ECMA-376 §20.1.2.2.24). Centre-aligned stroke,
+      // the Canvas default — PowerPoint draws the picture frame straddling
+      // the silhouette edge.
       if (el.stroke) {
         target.save();
         applyStroke(target, el.stroke, scale);
@@ -2636,7 +2711,15 @@ async function renderPicture(
         target.stroke();
         target.restore();
       }
-      // 2) sp3d contour edge (ECMA-376 §20.1.5.12 `contourW` / `<a:contourClr>`).
+    };
+    const strokeContourEdge = (
+      target: CanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
+      // sp3d contour edge (ECMA-376 §20.1.5.12 `contourW` / `<a:contourClr>`).
       //    The spec's contour is the extruded 3D edge surface lit by the scene's
       //    light rig. We draw a FLAT approximation: a uniform-width outline in
       //    the contour colour, with no per-edge light-rig response. (The bevel
@@ -2674,7 +2757,7 @@ async function renderPicture(
     // camera actually transforms the shape; identity/front cameras fall through
     // to the normal flat draw (but sp3d bevel/extrusion still apply via the flat
     // path below). sp3d bevel/extrusion shading is wired in just after this; the
-    // contour edge is the flat approximation in strokePictureEdges.
+    // contour edge is the flat approximation in strokeContourEdge.
     const scene3d = el.scene3d && isScene3dNonIdentity(el.scene3d.camera) ? el.scene3d : null;
 
     // Paint JUST the (clipped, optionally cropped) bitmap body at a local rect —
@@ -2709,7 +2792,23 @@ async function renderPicture(
       oh: number,
     ): void => {
       paintBitmapBodyAt(target, ox, oy, ow, oh);
-      strokePictureEdges(target, ox, oy, ow, oh);
+      strokeLnBorder(target, ox, oy, ow, oh);
+      strokeContourEdge(target, ox, oy, ow, oh);
+    };
+
+    // Front face for the bevel paths: the clipped bitmap PLUS its a:ln border.
+    // The bevel's distance transform then starts at the border's outer edge and
+    // its lit/shadowed lip shades the border itself, matching PowerPoint (and
+    // the p:sp path, whose recursive body render also includes the stroke).
+    const paintFaceAt = (
+      target: CanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
+      paintBitmapBodyAt(target, ox, oy, ow, oh);
+      strokeLnBorder(target, ox, oy, ow, oh);
     };
 
     // ── sp3d bevel (ECMA-376 §20.1.5.12 bevelT/bevelB, Phase B). Device-px lip
@@ -2733,6 +2832,18 @@ async function renderPicture(
       ? buildExtrusion(el.sp3d as Sp3dLike | undefined, scene3d.camera, w, h, scale, ctxDevScale)
       : null;
 
+    // Offscreen edge margin (CSS px) for the bevel/scene3d paths: everything a
+    // picture legitimately paints OUTSIDE its w×h box. Half the centre-aligned
+    // border, the outside-aligned contour, the extrusion's screen sweep, plus
+    // 2 px so the silhouette's antialiasing never touches the offscreen border
+    // (the bevel EDT treats that border as background). See edgePadCss docs.
+    const strokeHalfCss = el.stroke ? (el.stroke.width * scale) / 2 : 0;
+    const contourCss = el.sp3d?.contourW ? el.sp3d.contourW * scale : 0;
+    const extrusionCss = extrusion
+      ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale
+      : 0;
+    const edgePadCss = strokeHalfCss + contourCss + extrusionCss + 2;
+
     // Draw the (clipped, optionally cropped) bitmap into a target context. This
     // is the picture "body" that the effect helpers re-paint onto aux canvases,
     // so reflections/soft edges mirror the real image rather than a flat shape.
@@ -2743,15 +2854,26 @@ async function renderPicture(
     // camera) so it tracks the silhouette and the projection.
     const paintImage = (target: CanvasRenderingContext2D): void => {
       if (scene3d) {
-        const ok = projectScene3dPaint(target, scene3d.camera, x, y, w, h, paintBitmapBodyAt, {
+        const ok = projectScene3dPaint(target, scene3d.camera, x, y, w, h, paintFaceAt, {
           bevels,
           extrusion: extrusion ?? undefined,
-          paintEdges: strokePictureEdges,
+          paintEdges: strokeContourEdge,
+          edgePadCss,
         });
         if (ok) return;
         // Headless fallback: draw flat (no bevel).
       } else if (bevels.length > 0) {
-        const ok = paintBeveledFlat(target, x, y, w, h, bevels, paintBitmapBodyAt, strokePictureEdges);
+        const ok = paintBeveledFlat(
+          target,
+          x,
+          y,
+          w,
+          h,
+          bevels,
+          paintFaceAt,
+          strokeContourEdge,
+          edgePadCss,
+        );
         if (ok) return;
       }
       paintImageAt(target, x, y, w, h);

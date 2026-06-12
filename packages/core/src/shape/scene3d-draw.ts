@@ -388,6 +388,46 @@ function affineScale(m: Affine): number {
   return Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
 }
 
+/**
+ * Extrapolate a projected quad outward through the SAME projective map that
+ * produced it. `corners` is the image of the unit square (TL,TR,BR,BL order, as
+ * returned by `computeScene3dQuad`); the result is the image of the rectangle
+ * [-fx, 1+fx] × [-fy, 1+fy] under that homography.
+ *
+ * Used to grow a shape's offscreen by an edge margin (for the centre-aligned
+ * border's outer half, the outside-aligned contour, and the extrusion sweep —
+ * all of which extend past the shape's bounding box) WITHOUT re-deriving the
+ * camera quad at the padded size: `computeScene3dQuad` re-fits its projection
+ * to the box it is given, so calling it with a padded box would change the
+ * geometry instead of just extending it. Extrapolating the existing quad keeps
+ * the body's projection bit-identical and maps the margin consistently.
+ *
+ * Returns null when the quad is degenerate or the extrapolated corner would
+ * cross the projection horizon (homography denominator ≤ 0) — callers should
+ * then fall back to the unpadded quad.
+ */
+export function expandProjectedQuad(
+  corners: [Vec2, Vec2, Vec2, Vec2],
+  fx: number,
+  fy: number,
+): [Vec2, Vec2, Vec2, Vec2] | null {
+  const h = unitSquareToQuad(corners[0], corners[1], corners[2], corners[3]);
+  if (!h) return null;
+  const uv: Array<[number, number]> = [
+    [-fx, -fy],
+    [1 + fx, -fy],
+    [1 + fx, 1 + fy],
+    [-fx, 1 + fy],
+  ];
+  const out: Vec2[] = [];
+  for (const [u, v] of uv) {
+    const w = h[6] * u + h[7] * v + h[8];
+    if (!(w > 1e-9)) return null;
+    out.push(applyH(h, u, v));
+  }
+  return out as [Vec2, Vec2, Vec2, Vec2];
+}
+
 let fallbackWarned = false;
 /**
  * Warn (once per process) that scene3d warp fell back to the non-supersampled
