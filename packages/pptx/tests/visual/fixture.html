@@ -26,10 +26,13 @@
     const params   = new URLSearchParams(location.search);
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
     const pptxName = params.get('pptx') ?? 'sample';
+    // Optional render width override (CSS px), e.g. ?width=960 — used by the
+    // scale-parameterised specs; the default matches the reference images.
+    const width    = Math.max(1, parseInt(params.get('width') ?? '1280', 10));
 
     const canvas = document.getElementById('canvas');
     const viewer = new PptxViewer(canvas, {
-      width: 1280,
+      width,
       onError: (err) => {
         document.body.dataset.status = 'error';
         document.body.dataset.errorMessage = err.message;
