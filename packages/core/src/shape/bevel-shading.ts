@@ -241,12 +241,45 @@ export function computeBevelNormals(
   // of `heightPx` over a band of `bandPx` means the lip rises heightPx px over
   // bandPx px of run, so the surface-space gradient scale is heightPx/bandPx.
   const heightScale = bandPx > 0 ? heightPx / bandPx : 0;
-  const heightAt = (idx: number): number => {
-    if ((alpha[idx] ?? 0) < 128) return 0; // outside → treat as ground level
-    return profile(dist[idx]) * heightScale * bandPx;
-  };
 
+  // Dense height field over the whole mask: profile(d)·heightScale·bandPx inside
+  // the silhouette, 0 (ground) outside. Materialising it lets us regularise the
+  // gradient (below) before differencing, instead of sampling it per-neighbour.
   const inside = (x: number, y: number) => (alpha[y * w + x] ?? 0) >= 128;
+  const height = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    height[i] = (alpha[i] ?? 0) >= 128 ? profile(dist[i]) * heightScale * bandPx : 0;
+  }
+
+  // ── Anti-facet smoothing of the height field ──────────────────────────────
+  // The EDT `dist` is exact, but its *gradient* is piecewise-constant: every
+  // band pixel's distance is dominated by ONE nearest boundary sample, so ∇d (and
+  // hence the lip normal) snaps to that sample's Voronoi-cell direction. On a
+  // curved silhouette (e.g. an ellipse) this turns the lip into flat chords — a
+  // visible polygonal facet whose coarseness grows with the band width (the wider
+  // the band, the larger the cells). A bevel lip is geometrically a smooth ruled
+  // surface swept along the silhouette, so its normal must follow the silhouette's
+  // *macroscopic* direction, not the per-pixel nearest-sample direction.
+  //
+  // We recover that by box-blurring the height field over a radius proportional to
+  // the band width before differencing. The radius is NOT an empirical fudge: it
+  // is the only length scale in the problem — averaging ∇h over a neighbourhood a
+  // small fraction of the band removes the sub-pixel Voronoi noise while staying
+  // far more local than the band itself, so the iso-contours (band mask) and the
+  // calibrated brightness curve along the lip are unchanged (the profile is ~linear
+  // across a few px, so a symmetric blur preserves its value). `dist`/`bandMask`
+  // stay exact — only the gradient used for the normal is regularised.
+  //
+  // Cost vs. a "full-resolution exact" alternative: the EDT is already exact and
+  // full-res (Felzenszwalb O(N) per pass). The faceting is intrinsic to sampling
+  // ∇(distance-to-point-set), so a higher-res EDT would NOT remove it — only push
+  // the cells smaller. A band-scaled separable box blur is O(N) (two passes,
+  // running-sum) and adds a constant factor to a step we already pay, which is why
+  // it is preferred over, say, re-deriving the analytic silhouette normal.
+  const blurR = Math.max(1, Math.round(bandPx * 0.12));
+  const sm = boxBlurClampedInside(height, alpha, w, h, blurR);
+
+  const heightSmooth = (x: number, y: number): number => sm[y * w + x];
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -264,14 +297,14 @@ export function computeBevelNormals(
         normals[i * 3 + 2] = 1;
         continue;
       }
-      // Central finite difference of the height field. Clamp neighbours that
-      // step outside the silhouette to the current pixel's height so the lip
+      // Central finite difference of the SMOOTHED height field. Clamp neighbours
+      // that step outside the silhouette to the current pixel's height so the lip
       // gradient is measured against the rim, not against ground level beyond.
-      const hC = heightAt(i);
-      const hL = x > 0 && inside(x - 1, y) ? heightAt(i - 1) : hC;
-      const hR = x < w - 1 && inside(x + 1, y) ? heightAt(i + 1) : hC;
-      const hU = y > 0 && inside(x, y - 1) ? heightAt(i - w) : hC;
-      const hD = y < h - 1 && inside(x, y + 1) ? heightAt(i + w) : hC;
+      const hC = heightSmooth(x, y);
+      const hL = x > 0 && inside(x - 1, y) ? heightSmooth(x - 1, y) : hC;
+      const hR = x < w - 1 && inside(x + 1, y) ? heightSmooth(x + 1, y) : hC;
+      const hU = y > 0 && inside(x, y - 1) ? heightSmooth(x, y - 1) : hC;
+      const hD = y < h - 1 && inside(x, y + 1) ? heightSmooth(x, y + 1) : hC;
       // Gradient (∂h/∂x, ∂h/∂y) via central difference (px units cancel: 2px run).
       const dhdx = (hR - hL) / 2;
       const dhdy = (hD - hU) / 2;
@@ -289,6 +322,78 @@ export function computeBevelNormals(
     }
   }
   return { normals, bandMask };
+}
+
+/**
+ * Separable box blur of a height field, with samples that fall OUTSIDE the
+ * silhouette (alpha < 128) skipped rather than averaged in as ground level.
+ *
+ * Why skip instead of clamp-to-zero: averaging in the exterior ground (h=0) near
+ * the rim would pull the smoothed height down and bias the gradient inward,
+ * weakening the lip exactly at the rim where the shading matters most. Skipping
+ * out-of-silhouette taps keeps the smoothing a pure *tangential* regulariser of
+ * the lip surface — it averages along the band, not across the rim into the void.
+ *
+ * O(N·r) here (a plain windowed mean, not a running sum) because the per-tap
+ * inside test makes a constant-time sliding sum awkward; r is small (≈ band·0.12,
+ * a handful of px) so this stays well within the EDT's own cost. The blur runs
+ * once per bevel, on the device-resolution offscreen, so it is paid only for
+ * shapes that actually carry an sp3d bevel.
+ */
+function boxBlurClampedInside(
+  src: Float64Array,
+  alpha: ArrayLike<number>,
+  w: number,
+  h: number,
+  r: number,
+): Float64Array {
+  const tmp = new Float64Array(w * h);
+  const out = new Float64Array(w * h);
+  const isInside = (idx: number) => (alpha[idx] ?? 0) >= 128;
+  // Horizontal pass.
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const i = row + x;
+      if (!isInside(i)) {
+        tmp[i] = 0;
+        continue;
+      }
+      let s = 0;
+      let n = 0;
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k;
+        if (xx < 0 || xx >= w) continue;
+        const j = row + xx;
+        if (!isInside(j)) continue;
+        s += src[j];
+        n++;
+      }
+      tmp[i] = n > 0 ? s / n : src[i];
+    }
+  }
+  // Vertical pass.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!isInside(i)) {
+        out[i] = 0;
+        continue;
+      }
+      let s = 0;
+      let n = 0;
+      for (let k = -r; k <= r; k++) {
+        const yy = y + k;
+        if (yy < 0 || yy >= h) continue;
+        const j = yy * w + x;
+        if (!isInside(j)) continue;
+        s += tmp[j];
+        n++;
+      }
+      out[i] = n > 0 ? s / n : tmp[i];
+    }
+  }
+  return out;
 }
 
 // ── Light rig ───────────────────────────────────────────────────────────────

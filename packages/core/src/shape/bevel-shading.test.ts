@@ -179,6 +179,106 @@ describe('computeBevelNormals (finite-difference of height field)', () => {
   });
 });
 
+/**
+ * Anti-aliased ellipse coverage mask (mimics a Canvas `clip()` rasterisation:
+ * interior 255, exterior 0, a 1-px fractional rim). Used to exercise the bevel
+ * lip on a curved silhouette with a wide band — the case that exposed the
+ * EDT-gradient faceting regression (PR #410 → this fix).
+ */
+function ellipseAlpha(W: number, H: number, ss = 4): Uint8ClampedArray {
+  const a = new Uint8ClampedArray(W * H);
+  const cx = W / 2;
+  const cy = H / 2;
+  const rx = W / 2 - 1;
+  const ry = H / 2 - 1;
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      let cnt = 0;
+      for (let sy = 0; sy < ss; sy++)
+        for (let sx = 0; sx < ss; sx++) {
+          const px = x + (sx + 0.5) / ss - 0.5;
+          const py = y + (sy + 0.5) / ss - 0.5;
+          if (((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 <= 1) cnt++;
+        }
+      a[y * W + x] = Math.round((255 * cnt) / (ss * ss));
+    }
+  return a;
+}
+
+describe('computeBevelNormals — smooth lip on a curved silhouette (anti-facet)', () => {
+  // REGRESSION (PR #410): a wide hardEdge bevel on an ellipse produced a faceted
+  // (polygonal) lip because the per-pixel finite-difference gradient of the EDT
+  // height field is piecewise-constant — each band pixel's distance is dominated
+  // by ONE nearest boundary sample, so ∇d snaps to the Voronoi-cell direction of
+  // the silhouette's sampled rim. The lip normal must instead track the
+  // *macroscopic* silhouette direction so a circle reads as a circle, not an
+  // N-gon. We assert that the in-plane normal azimuth varies MONOTONICALLY and
+  // SMOOTHLY around the ring, with no large angular jumps between neighbouring
+  // boundary samples (a facet shows up as a long run of identical azimuths broken
+  // by a sudden kink).
+  it('in-plane normal azimuth rotates smoothly around a wide-band ellipse', () => {
+    const W = 240;
+    const H = 320;
+    const band = 40; // wide band — the regime where faceting was visible
+    const alpha = ellipseAlpha(W, H);
+    const { normals, bandMask } = computeBevelNormals(alpha, W, H, band, 'hardEdge', band / 2);
+
+    // Walk a ring near the OUTER rim (just inside the silhouette) sampling the
+    // in-plane normal azimuth at many angles; it should rotate ~once around 2π.
+    const cx = W / 2;
+    const cy = H / 2;
+    const rx = W / 2 - 1;
+    const ry = H / 2 - 1;
+    // Sample along the band MIDLINE (~band/2 inside the rim) where the lip faces
+    // the camera at its steepest and where the facets were most visible. The very
+    // outermost 1-2 px are the anti-aliased rim fringe (sub-pixel coverage noise),
+    // which is not a facet, so we measure inside it.
+    const inset = band / 2;
+    const azimuths: number[] = [];
+    for (let deg = 0; deg < 360; deg += 1) {
+      const ang = (deg * Math.PI) / 180;
+      const ex = Math.cos(ang) * (rx - inset);
+      const ey = Math.sin(ang) * (ry - inset);
+      const x = Math.round(cx + ex);
+      const y = Math.round(cy + ey);
+      if (x < 0 || y < 0 || x >= W || y >= H) continue;
+      const i = y * W + x;
+      if (!bandMask[i]) continue;
+      const nx = normals[i * 3];
+      const ny = normals[i * 3 + 1];
+      if (Math.hypot(nx, ny) < 1e-3) continue;
+      azimuths.push(Math.atan2(ny, nx));
+    }
+    expect(azimuths.length).toBeGreaterThan(300);
+
+    // Unwrap and measure the largest jump between consecutive samples. For a
+    // smooth lip the azimuth advances by ~(2π / N) ≈ 0.017 rad per degree-step;
+    // a facet would hold one azimuth for many steps then jump by a big angle.
+    // Allow up to ~12° (0.21 rad) between adjacent 1° samples — generous enough
+    // for the rim discretisation yet far below the >30° jumps the facets caused.
+    let maxJump = 0;
+    for (let i = 1; i < azimuths.length; i++) {
+      let d = azimuths[i] - azimuths[i - 1];
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      maxJump = Math.max(maxJump, Math.abs(d));
+    }
+    expect(maxJump).toBeLessThan(0.21);
+
+    // And the azimuth must make ~one full turn (net rotation ≈ 2π), i.e. the lip
+    // faces radially outward all the way round — not collapse onto a few facet
+    // directions.
+    let net = 0;
+    for (let i = 1; i < azimuths.length; i++) {
+      let d = azimuths[i] - azimuths[i - 1];
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      net += d;
+    }
+    expect(Math.abs(Math.abs(net) - 2 * Math.PI)).toBeLessThan(0.5);
+  });
+});
+
 describe('applyExtrusion (side-wall sweep, §20.1.5.12)', () => {
   it('fills the swept band behind the front face with the wall colour', () => {
     // 20x20 with an opaque 8x8 block at (6,6)-(13,13). Push it right+down by
