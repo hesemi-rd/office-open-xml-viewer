@@ -7,7 +7,15 @@
  * for Office substitutes such as Calibri → Carlito). Names without a map
  * entry are skipped (the renderer falls back to the system font).
  *
- * Font load is forced via `face.load()` rather than `document.fonts.load()`
+ * Rather than inject a `<link rel="stylesheet">` and read `document.fonts`
+ * (which is impossible inside a Web Worker), this fetches the Google Fonts CSS
+ * directly, parses its `@font-face` rules, and registers `FontFace` objects
+ * into whichever FontFaceSet exists in the current JS context —
+ * `document.fonts` on the main thread, `self.fonts` in a worker. This keeps the
+ * loader FontFaceSet-agnostic so both the main-thread and worker rendering
+ * modes share one code path.
+ *
+ * Font load is forced via `face.load()` rather than `FontFaceSet.load()`
  * because canvas-only rendering does not put glyphs into the DOM, so the
  * unicode-range gating in modern Google Fonts CSS would otherwise leave the
  * `FontFace` entries in the `unloaded` state — the first paint would then
@@ -26,32 +34,15 @@ export interface FontPreloadEntry {
 }
 
 /**
- * Hard ceiling so a wedged network (the stylesheet `<link>` never firing
- * load/error, or a `FontFace.load()` that never settles) cannot hang the
- * caller forever. This is a SAFETY NET, not the normal exit: on a reachable
- * network every awaited promise settles well within it, so first paint is
- * deterministic. It is intentionally generous — the previous 3 s timeout RACED
- * the font loads and could resolve while faces were still downloading, which is
- * exactly the cold-cache flicker this function must prevent.
+ * Hard ceiling so a wedged network (a stylesheet fetch that never settles, or a
+ * `FontFace.load()` that never resolves) cannot hang the caller forever. This is
+ * a SAFETY NET, not the normal exit: on a reachable network every awaited
+ * promise settles well within it, so first paint is deterministic. It is
+ * intentionally generous — the previous 3 s timeout RACED the font loads and
+ * could resolve while faces were still downloading, which is exactly the
+ * cold-cache flicker this function must prevent.
  */
 const HARD_CEILING_MS = 15000;
-
-/** Resolve when the stylesheet `<link>` has finished loading (load or error),
- *  so the FontFace entries it defines are registered in `document.fonts`.
- *  Resolves immediately for a `<link>` that already loaded. */
-function linkLoaded(link: HTMLLinkElement): Promise<void> {
-  // A stylesheet that is already applied exposes its `sheet`; treat as loaded.
-  if (link.sheet) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    const done = () => {
-      link.removeEventListener('load', done);
-      link.removeEventListener('error', done);
-      resolve();
-    };
-    link.addEventListener('load', done);
-    link.addEventListener('error', done);
-  });
-}
 
 function withCeiling<T>(p: Promise<T>): Promise<T | void> {
   return Promise.race([
@@ -60,16 +51,83 @@ function withCeiling<T>(p: Promise<T>): Promise<T | void> {
   ]);
 }
 
+/** In-flight (or completed) fetch-and-register promise per CSS url, keyed by url.
+ *  Storing the PROMISE (not just a flag) lets a concurrent caller with the same
+ *  url JOIN the first registration instead of seeing a cache hit, skipping
+ *  registration, and resolving while the first fetch is still in flight (which
+ *  would defeat the first-paint determinism this function exists to provide).
+ *  The stored promise ALWAYS resolves: failure handling (recording the failed
+ *  families + deleting the entry so a later call can retry) happens inside the
+ *  producing call's own logic, so a cache-hit awaiter never throws. An awaiter
+ *  that joined a registration which then fails simply proceeds to step 2 and
+ *  finds no faces — no worse than the original failure path. */
+const cssRegistrations = new Map<string, Promise<void>>();
+
+/** Test hook — clears the per-context CSS registration cache. */
+export function _resetCssCacheForTests(): void {
+  cssRegistrations.clear();
+}
+
+export interface ParsedFontFace {
+  family: string;
+  src: string;
+  descriptors: FontFaceDescriptors;
+}
+
+/** Extract @font-face rules from a Google Fonts stylesheet. Deliberately
+ *  minimal: Google's CSS is machine-generated (one declaration per line, no
+ *  nesting), so a brace-block regex is sufficient and avoids a CSS parser. */
+export function parseFontFaceRules(css: string): ParsedFontFace[] {
+  const faces: ParsedFontFace[] = [];
+  const blockRe = /@font-face\s*\{([^}]*)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(css))) {
+    const body = m[1];
+    const prop = (name: string): string | undefined =>
+      body.match(new RegExp(`(?:^|;|\\n)\\s*${name}\\s*:\\s*([^;]+)`, 'i'))?.[1].trim();
+    const familyRaw = prop('font-family');
+    const src = prop('src');
+    if (!familyRaw || !src) continue;
+    const descriptors: FontFaceDescriptors = {};
+    const style = prop('font-style');
+    if (style) descriptors.style = style;
+    const weight = prop('font-weight');
+    if (weight) descriptors.weight = weight;
+    const stretch = prop('font-stretch');
+    if (stretch) descriptors.stretch = stretch;
+    const unicodeRange = prop('unicode-range');
+    if (unicodeRange) descriptors.unicodeRange = unicodeRange;
+    faces.push({ family: familyRaw.replace(/^['"]|['"]$/g, ''), src, descriptors });
+  }
+  return faces;
+}
+
+/** The FontFaceSet of the current context: `document.fonts` on the main
+ *  thread, `self.fonts` in a worker, null elsewhere (Node without a shim). */
+function activeFontSet(): FontFaceSet | null {
+  if (typeof document !== 'undefined' && document && document.fonts) return document.fonts;
+  if (typeof self !== 'undefined' && self && 'fonts' in self) {
+    return (self as unknown as { fonts: FontFaceSet }).fonts;
+  }
+  return null;
+}
+
 export async function preloadGoogleFonts(
   fontNames: Iterable<string | null | undefined>,
   map: Record<string, FontPreloadEntry>,
 ): Promise<void> {
-  if (typeof document === 'undefined') return;
+  const fonts = activeFontSet();
+  if (!fonts || typeof FontFace === 'undefined' || typeof fetch === 'undefined') return;
 
   const seen = new Set<string>();
   const targetFamilies = new Set<string>();
-  const linkPromises: Promise<void>[] = [];
-  // Families that could not be made available (link injection threw, or every
+  const cssUrls = new Set<string>();
+  // url → lower-cased target families requested from that stylesheet. Built in
+  // the main loop so the failure path can attribute a failed fetch to the
+  // families this call actually asked for, without re-scanning `map` under the
+  // implicit assumption that a map key equals the lower-cased requested name.
+  const urlTargets = new Map<string, Set<string>>();
+  // Families that could not be made available (stylesheet fetch failed, or every
   // matching FontFace.load() rejected). Surfaced once at the end via a single
   // console.warn so a failed web font no longer falls back to a system face
   // completely silently. The renderer still degrades gracefully — this is
@@ -83,51 +141,62 @@ export async function preloadGoogleFonts(
     seen.add(key);
     const entry = map[key];
     if (!entry) continue;
-
-    let link = document.querySelector<HTMLLinkElement>(`link[href="${entry.url}"]`);
-    if (!link) {
-      try {
-        link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = entry.url;
-        document.head.appendChild(link);
-      } catch {
-        // DOM error injecting the stylesheet — record so it is reported, then
-        // skip; renderer falls back to the system font for this family.
-        failedFamilies.add((entry.loadFamily ?? name).toLowerCase());
-        link = null;
-      }
+    cssUrls.add(entry.url);
+    const family = (entry.loadFamily ?? name).toLowerCase();
+    targetFamilies.add(family);
+    let targets = urlTargets.get(entry.url);
+    if (!targets) {
+      targets = new Set<string>();
+      urlTargets.set(entry.url, targets);
     }
-    // Wait for the stylesheet to actually parse so its FontFace entries are
-    // registered before we enumerate `document.fonts`. The previous version
-    // polled for ~500 ms and gave up loading NOTHING on a slow/cold network,
-    // so the next (warm) reload rendered with different fonts — the flicker.
-    if (link) linkPromises.push(linkLoaded(link));
-
-    targetFamilies.add((entry.loadFamily ?? name).toLowerCase());
+    targets.add(family);
   }
-
   if (targetFamilies.size === 0) return;
 
-  // 1) Wait for every stylesheet to register its FontFace entries.
-  await withCeiling(Promise.allSettled(linkPromises));
+  // 1) Fetch each stylesheet once per JS context and register its FontFace
+  //    entries into the active FontFaceSet. Canvas rendering never puts
+  //    glyphs into the DOM, so registration alone is not enough — see (2).
+  await withCeiling(
+    Promise.allSettled(
+      [...cssUrls].map((url) => {
+        // Cache hit: AWAIT the in-flight registration so concurrent callers join
+        // the first fetch rather than racing past it. The stored promise never
+        // rejects (see cssRegistrations), so a joined-then-failed registration
+        // just yields no faces in step 2.
+        const inFlight = cssRegistrations.get(url);
+        if (inFlight) return inFlight;
+        const registration = (async () => {
+          try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            for (const f of parseFontFaceRules(await res.text())) {
+              fonts.add(new FontFace(f.family, f.src, f.descriptors));
+            }
+          } catch {
+            cssRegistrations.delete(url); // free the slot so a later call retries
+            for (const family of urlTargets.get(url) ?? []) {
+              failedFamilies.add(family);
+            }
+          }
+        })();
+        cssRegistrations.set(url, registration);
+        return registration;
+      }),
+    ),
+  );
 
   // 2) Force-load every matching FontFace and AWAIT them all — no timeout race
   //    that could resolve mid-download. `face.load()` is required because
-  //    canvas rendering never puts glyphs in the DOM, so unicode-range gating
-  //    would otherwise leave the faces `unloaded` and the first paint would use
-  //    a system fallback, shifting once a later interaction re-rasterized.
-  const registered = [...document.fonts].filter((f) =>
-    targetFamilies.has(f.family.toLowerCase()),
-  );
+  //    unicode-range gating would otherwise leave the faces `unloaded` and the
+  //    first canvas paint would use a system fallback, shifting once a later
+  //    interaction re-rasterized.
+  const registered = [...fonts].filter((f) => targetFamilies.has(f.family.toLowerCase()));
   await withCeiling(
     Promise.allSettled(registered.map((f) => f.load())).then((results) => {
       results.forEach((res, i) => {
-        if (res.status === 'rejected') {
-          failedFamilies.add(registered[i].family.toLowerCase());
-        }
+        if (res.status === 'rejected') failedFamilies.add(registered[i].family.toLowerCase());
       });
-      return document.fonts.ready;
+      return fonts.ready;
     }),
   );
 
