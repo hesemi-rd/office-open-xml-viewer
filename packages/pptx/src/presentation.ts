@@ -5,6 +5,8 @@ import { selectNotes } from './notes';
 import {
   preloadGoogleFonts,
   WorkerBridge,
+  SCRIPT_GOOGLE_FONTS,
+  SCRIPT_PRELOAD_NAMES,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
@@ -53,6 +55,11 @@ const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // enabled — see `load`, which always queues these names.
   'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
+  // Noto faces, shared with docx/xlsx via @silurus/ooxml-core. The renderer
+  // appends these to the canvas font stack (CJK ordered by document language);
+  // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
+  ...SCRIPT_GOOGLE_FONTS,
 };
 
 /** Options for {@link PptxPresentation.load}. The shared load-options type
@@ -142,7 +149,16 @@ export class PptxPresentation {
       // a real web font even when its named family is unmapped (the renderer's
       // canvas font stack ends with these two Noto faces).
       await preloadGoogleFonts(
-        [parsed.majorFont, parsed.minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic'],
+        [
+          parsed.majorFont,
+          parsed.minorFont,
+          'Noto Naskh Arabic',
+          'Noto Sans Arabic',
+          // Always queue every script Noto face so a glyph falling through the
+          // stack (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to a
+          // real web font even when no slide font maps to it by name.
+          ...SCRIPT_PRELOAD_NAMES,
+        ],
         PPTX_GOOGLE_FONTS,
       );
     }

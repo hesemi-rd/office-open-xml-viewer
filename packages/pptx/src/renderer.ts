@@ -47,6 +47,10 @@ import {
   computeDepthOffset,
   lightDirFromRig,
   materialClass,
+  classifyCjkFont,
+  cjkFallbackChain,
+  NON_CJK_SANS_FALLBACKS,
+  NON_CJK_SERIF_FALLBACKS,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -430,8 +434,16 @@ const CSS_GENERIC_FAMILIES = new Set([
 function genericFallback(family: string): string {
   const l = family.toLowerCase();
   if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'monospace';
-  // Serif: mincho (Japanese serif), roman, times, garamond, georgia, palatino, etc.
-  if (/mincho|明朝|roman|times|garamond|georgia|palatino|century|didot/.test(l)) return 'serif';
+  // Serif: mincho (Japanese serif), roman, times, garamond, etc., plus CJK
+  // song/ming/kai (serif) faces — SimSun(宋)/Batang/PMingLiU(細明)/KaiTi(楷)/
+  // FangSong(仿宋) — so their Noto CJK fallback picks the serif variant.
+  if (
+    /mincho|明朝|roman|times|garamond|georgia|palatino|century|didot|song|sung|simsun|nsimsun|batang|gungsuh|mingliu|pmingliu|fangsong|kaiti|simkai|simfang|stsong|stkaiti|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝/.test(
+      l,
+    ) ||
+    /新細明體|細明體|宋体|楷体|楷體|仿宋|標楷體|游明朝/.test(family)
+  )
+    return 'serif';
   // Everything else (gothic, kaku, round, rounded, sans, grotesk, …) → sans-serif
   return 'sans-serif';
 }
@@ -486,6 +498,41 @@ function isArabicScriptFace(family: string): boolean {
   return /arabic|naskh|kufi|nastaliq|amiri|scheherazade|lateef|aldhabi|urdu|farsi|العرب|[؀-ۿ]/.test(l);
 }
 
+/** Quote each family for a CSS font-family list (no trailing comma). */
+function quoteAll(names: readonly string[]): string {
+  return names.map((n) => `"${n}"`).join(', ');
+}
+
+/**
+ * Build the CSS font-family LIST for a (already-normalized, non-generic) face:
+ * named face + metric-compatible Office substitute + script Noto fallbacks +
+ * inferred generic. The script fallbacks are:
+ *
+ * - Arabic-script faces: the Arabic Notos lead (Latin/digits share that face).
+ * - CJK faces (Noto KR/SC/TC/JP, ordered by the document's CJK language so
+ *   shared Han glyphs take the right shapes — see core/fonts/scripts.ts).
+ * - Non-CJK scripts (Cyrillic via Noto Sans/Serif, Thai, Devanagari, Hebrew)
+ *   appended unconditionally — no Han collision, browser picks per glyph.
+ *
+ * Exported for unit testing the fallback ordering.
+ */
+export function cssFontStack(normalized: string): string {
+  const generic = genericFallback(normalized);
+  const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
+  const subPart = sub ? `"${sub}", ` : '';
+  // Arabic faces keep the historical chain unchanged (Arabic leads; appending a
+  // CJK or non-CJK tail would let Latin/digits leak away from the Arabic face).
+  if (isArabicScriptFace(normalized)) {
+    return `"${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${generic}`;
+  }
+  const variant: 'sans' | 'serif' = generic === 'serif' ? 'serif' : 'sans';
+  const cjk = classifyCjkFont(normalized);
+  const cjkPart = cjk ? `${quoteAll(cjkFallbackChain(cjk, variant))}, ` : '';
+  const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
+  const nonCjkPart = `${quoteAll(nonCjk)}, `;
+  return `"${normalized}", ${subPart}${cjkPart}${nonCjkPart}${generic}`;
+}
+
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
   const weight = bold   ? 'bold '   : '';
@@ -493,14 +540,7 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  // Named font + (metric-compatible substitute, if an Office face) + Arabic web
-  // fonts (only for Arabic-script faces — see isArabicScriptFace) + inferred
-  // generic fallback, so browsers degrade consistently when the exact typeface
-  // is not installed.
-  const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
-  const subPart = sub ? `"${sub}", ` : '';
-  const arabicPart = isArabicScriptFace(normalized) ? `${ARABIC_FALLBACKS}, ` : '';
-  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${arabicPart}${genericFallback(normalized)}`;
+  return `${style}${weight}${sizePx}px ${cssFontStack(normalized)}`;
 }
 
 /**
