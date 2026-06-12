@@ -4,6 +4,7 @@ export { parseXlsx, parseSheet as parseXlsxSheet, parseXlsxAllSheets } from './x
 export {
   renderSlideNode,
   installImageBitmapShim,
+  installOffscreenCanvasShim,
   type NodeCanvasLike,
   type NodeCanvasFactory,
   type NodeImageLike,
