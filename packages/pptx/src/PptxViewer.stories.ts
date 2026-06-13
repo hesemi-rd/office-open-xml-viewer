@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { PptxViewer } from './viewer';
 import init, { parse_pptx } from './wasm/pptx_parser.js';
+import wasmUrl from './wasm/pptx_parser_bg.wasm?url';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
 // In the monorepo the stories build the same MathRenderer from the core engine.
 import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
@@ -158,7 +159,7 @@ export const DebugJson: Story = {
     // idempotent and cached, so the second await resolves instantly. This
     // closes the race where picking a file before init resolved would silently
     // return without ever updating the pre.
-    const wasmReady = init();
+    const wasmReady = init(wasmUrl);
 
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files?.[0];

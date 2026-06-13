@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
 import init, { parse_docx } from './wasm/docx_parser.js';
+import wasmUrl from './wasm/docx_parser_bg.wasm?url';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
 // In the monorepo the stories build the same MathRenderer from the core engine.
 import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
@@ -162,7 +163,7 @@ export const DebugJson: Story = {
     // idempotent and cached, so the second await resolves instantly. This
     // closes the race where picking a file before init resolved would silently
     // return and leave the placeholder visible.
-    const wasmReady = init();
+    const wasmReady = init(wasmUrl);
 
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files?.[0];

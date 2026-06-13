@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { XlsxViewer } from './viewer';
 import init, { parse_xlsx } from './wasm/xlsx_parser.js';
+import wasmUrl from './wasm/xlsx_parser_bg.wasm?url';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
 // In the monorepo the stories build the same MathRenderer from the core engine
 // so OMML equations in shapes/text boxes render in the demo.
@@ -105,7 +106,7 @@ export const DebugJson: Story = {
     // idempotent and cached, so the second await resolves instantly. This
     // closes the race where picking a file before init resolved would silently
     // return and leave the placeholder visible.
-    const wasmReady = init();
+    const wasmReady = init(wasmUrl);
 
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files?.[0];
