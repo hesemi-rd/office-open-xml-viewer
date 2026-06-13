@@ -17,7 +17,9 @@ const meta: Meta<DemoArgs> = {
       description: 'Canvas render width (px) — used by the Demo story',
     },
   },
-  args: { width: 700 },
+  // Match the pptx Examples width so the loading placeholder (and the rendered
+  // document) are the same size across the Demo / Offscreen stories.
+  args: { width: 960 },
 };
 export default meta;
 
