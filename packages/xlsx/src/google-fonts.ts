@@ -1,4 +1,5 @@
-import { SCRIPT_GOOGLE_FONTS, type FontPreloadEntry } from '@silurus/ooxml-core';
+import { SCRIPT_GOOGLE_FONTS, SCRIPT_PRELOAD_NAMES, type FontPreloadEntry } from '@silurus/ooxml-core';
+import type { Styles } from './types.js';
 
 /** Office font name → metric-compatible Google Fonts substitute. These are
  *  the well-known pairings Microsoft and Google both publish and ship on
@@ -42,3 +43,27 @@ export const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // appended to the default chain. Loaded only when useGoogleFonts is on.
   ...SCRIPT_GOOGLE_FONTS,
 };
+
+/**
+ * The font-family names to preload for a workbook: every styled cell font, the
+ * generic Arabic fallbacks, and every script Noto face. Office faces map to
+ * metric-compatible substitutes (Calibri → Carlito, Cambria → Caladea); the
+ * renderer's default chain ends with the Noto faces, so they must be loaded for
+ * any Arabic/CJK/Cyrillic/Thai/Devanagari/Hebrew glyph that falls through to
+ * resolve to a real web font instead of an OS face or tofu. A workbook using
+ * only system fonts (no map entries) still produces zero network requests.
+ *
+ * Single source of truth shared by the main-thread `_load()` and the render
+ * worker, so both modes preload an identical set — worker/main rendering must
+ * stay pixel-equivalent.
+ */
+export function xlsxFontPreloadNames(styles: Styles | undefined): Set<string> {
+  const names = new Set<string>();
+  for (const f of styles?.fonts ?? []) {
+    if (f.name) names.add(f.name);
+  }
+  names.add('Noto Naskh Arabic');
+  names.add('Noto Sans Arabic');
+  for (const n of SCRIPT_PRELOAD_NAMES) names.add(n);
+  return names;
+}

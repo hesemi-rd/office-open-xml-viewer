@@ -14,8 +14,8 @@ import init, { parse_pptx, extract_media } from './wasm/pptx_parser.js';
 import { renderSlide } from './renderer';
 import { selectNotes } from './notes';
 import { findMimeTypeForPath } from './media-mime';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
-import { preloadGoogleFonts, decodeDataUrl, SCRIPT_PRELOAD_NAMES } from '@silurus/ooxml-core';
+import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
+import { preloadGoogleFonts, decodeDataUrl } from '@silurus/ooxml-core';
 import type { RenderWorkerRequest, RenderWorkerResponse, PresentationMeta } from './worker-protocol';
 
 let ready = false;
@@ -73,7 +73,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // Kick the preload now so it overlaps with main-thread work; renders
         // await `fontsLoaded` so text never rasterizes with fallback metrics.
         fontsLoaded = preloadGoogleFonts(
-          [pres.majorFont, pres.minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic', ...SCRIPT_PRELOAD_NAMES],
+          pptxFontPreloadNames(pres.majorFont, pres.minorFont),
           PPTX_GOOGLE_FONTS,
         );
       }

@@ -1,4 +1,4 @@
-import { SCRIPT_GOOGLE_FONTS, type FontPreloadEntry } from '@silurus/ooxml-core';
+import { SCRIPT_GOOGLE_FONTS, SCRIPT_PRELOAD_NAMES, type FontPreloadEntry } from '@silurus/ooxml-core';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
  *  PPTX map — these are the well-known free webfont alternatives Microsoft
@@ -43,3 +43,22 @@ export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
   ...SCRIPT_GOOGLE_FONTS,
 };
+
+/**
+ * The font-family names to preload for a document: the theme major/minor fonts,
+ * the generic Arabic fallbacks, and every script Noto face. The renderer's font
+ * fallback chains end with those Noto faces, so they must be loaded for any
+ * Arabic/CJK/Cyrillic/Thai/Devanagari/Hebrew glyph that falls through the chain
+ * to resolve to a real web font instead of an OS face or tofu.
+ *
+ * Single source of truth shared by the main-thread `load()` and the render
+ * worker, so both modes preload an identical set — worker/main rendering must
+ * stay pixel-equivalent. (Fonts must also be loaded before pagination, which
+ * measures text; both callers await this before paginating.)
+ */
+export function docxFontPreloadNames(
+  majorFont: string | null | undefined,
+  minorFont: string | null | undefined,
+): (string | null | undefined)[] {
+  return [majorFont, minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic', ...SCRIPT_PRELOAD_NAMES];
+}

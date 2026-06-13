@@ -4,13 +4,12 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
-  SCRIPT_PRELOAD_NAMES,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
 import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument } from './renderer';
-import { DOCX_GOOGLE_FONTS } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
@@ -91,20 +90,8 @@ export class DocxDocument {
       mode === 'worker' ? !!opts.useGoogleFonts : false,
     );
     if (mode === 'main' && opts.useGoogleFonts && doc._document) {
-      // Always load the generic Arabic fallbacks so any Arabic-script run gets
-      // a real web font even when its named family is unmapped (the renderer's
-      // font fallback chains end with these two Noto faces).
       await preloadGoogleFonts(
-        [
-          doc._document.majorFont,
-          doc._document.minorFont,
-          'Noto Naskh Arabic',
-          'Noto Sans Arabic',
-          // Always queue every script Noto face so a glyph that falls through
-          // the chain (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to
-          // a real web font even when no document font maps to it by name.
-          ...SCRIPT_PRELOAD_NAMES,
-        ],
+        docxFontPreloadNames(doc._document.majorFont, doc._document.minorFont),
         DOCX_GOOGLE_FONTS,
       );
     }

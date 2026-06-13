@@ -10,9 +10,9 @@
  * stale sheets / images.
  */
 import init, { parse_xlsx, parse_sheet } from './wasm/xlsx_parser.js';
-import { decodeDataUrl, preloadGoogleFonts, SCRIPT_PRELOAD_NAMES } from '@silurus/ooxml-core';
+import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
-import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
+import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 
@@ -68,14 +68,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // every styled font name, plus the generic Arabic fallbacks. Fonts must
         // land before rendering (which measures text), so we keep the promise
         // and await it in the renderViewport handler.
-        const names = new Set<string>();
-        for (const f of workbook.styles?.fonts ?? []) {
-          if (f.name) names.add(f.name);
-        }
-        names.add('Noto Naskh Arabic');
-        names.add('Noto Sans Arabic');
-        for (const n of SCRIPT_PRELOAD_NAMES) names.add(n);
-        fontsLoaded = preloadGoogleFonts(names, XLSX_GOOGLE_FONTS);
+        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook.styles), XLSX_GOOGLE_FONTS);
       }
       post({ type: 'parsed', id, workbook });
       return;

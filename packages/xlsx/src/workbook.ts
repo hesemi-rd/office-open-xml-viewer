@@ -4,13 +4,12 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
-  SCRIPT_PRELOAD_NAMES,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell } from './types.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
-import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
+import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
 import {
   parseListFormula,
@@ -120,24 +119,10 @@ export class XlsxWorkbook {
     // sheetNames / tabColors / resolveValidationList keep working.
     this.parsedWorkbook = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).workbook;
     if (this._mode === 'main' && opts.useGoogleFonts) {
-      // Walk every styled font in the workbook and queue Google Fonts
-      // substitutes for any Office faces (Calibri → Carlito, Cambria →
-      // Caladea). Documents that use only system fonts produce zero
-      // network requests.
-      const names = new Set<string>();
-      for (const f of this.parsedWorkbook.styles?.fonts ?? []) {
-        if (f.name) names.add(f.name);
-      }
-      // Always load the generic Arabic fallbacks so any Arabic-script cell
-      // gets a real web font even when its named family is unmapped (the
-      // renderer's DEFAULT_FONT_FAMILY chain ends with these two Noto faces).
-      names.add('Noto Naskh Arabic');
-      names.add('Noto Sans Arabic');
-      // Always queue every script Noto face so a glyph falling through the
-      // chain (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to a real
-      // web font even when no cell font maps to it by name.
-      for (const n of SCRIPT_PRELOAD_NAMES) names.add(n);
-      await preloadGoogleFonts(names, XLSX_GOOGLE_FONTS);
+      await preloadGoogleFonts(
+        xlsxFontPreloadNames(this.parsedWorkbook.styles),
+        XLSX_GOOGLE_FONTS,
+      );
     }
   }
 

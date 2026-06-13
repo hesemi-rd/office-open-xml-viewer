@@ -1,4 +1,4 @@
-import { SCRIPT_GOOGLE_FONTS, type FontPreloadEntry } from '@silurus/ooxml-core';
+import { SCRIPT_GOOGLE_FONTS, SCRIPT_PRELOAD_NAMES, type FontPreloadEntry } from '@silurus/ooxml-core';
 
 /** Theme-referenced typefaces commonly used by PPTX templates. Keys are
  *  lower-cased family names. Entries that substitute a metric-compatible
@@ -47,3 +47,21 @@ export const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
   ...SCRIPT_GOOGLE_FONTS,
 };
+
+/**
+ * The font-family names to preload for a presentation: the theme major/minor
+ * fonts, the generic Arabic fallbacks, and every script Noto face. The renderer's
+ * canvas font stack ends with those fallbacks, so they must be loaded for any
+ * Arabic/CJK/Cyrillic/Thai/Devanagari/Hebrew glyph that falls through the stack
+ * to resolve to a real web font instead of an OS face or tofu.
+ *
+ * Single source of truth shared by the main-thread `load()` and the render
+ * worker, so both modes preload an identical set — worker/main rendering must
+ * stay pixel-equivalent.
+ */
+export function pptxFontPreloadNames(
+  majorFont: string | null | undefined,
+  minorFont: string | null | undefined,
+): (string | null | undefined)[] {
+  return [majorFont, minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic', ...SCRIPT_PRELOAD_NAMES];
+}
