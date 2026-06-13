@@ -6,7 +6,18 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   SCRIPT_GOOGLE_FONTS,
   SCRIPT_PRELOAD_NAMES,
+  scriptPreloadNamesForText,
 } from './scripts.js';
+
+/** Lower-case every name and assert it is resolvable in the preload URL map. */
+function assertResolvable(names: string[]): void {
+  for (const n of names) {
+    expect(
+      SCRIPT_GOOGLE_FONTS[n.toLowerCase()],
+      `${n} missing from SCRIPT_GOOGLE_FONTS`,
+    ).toBeDefined();
+  }
+}
 
 describe('classifyCjkFont — Office font name → CJK language', () => {
   it('classifies Korean faces (Malgun Gothic, Batang, Gulim, Dotum, 돋움)', () => {
@@ -116,5 +127,120 @@ describe('SCRIPT_GOOGLE_FONTS / SCRIPT_PRELOAD_NAMES', () => {
     expect(SCRIPT_GOOGLE_FONTS['noto sans devanagari']).toBeDefined();
     expect(SCRIPT_GOOGLE_FONTS['noto sans hebrew']).toBeDefined();
     expect(SCRIPT_GOOGLE_FONTS['noto serif hebrew']).toBeDefined();
+  });
+});
+
+describe('scriptPreloadNamesForText — script-aware preload set from document text', () => {
+  it('returns nothing for empty / no text', () => {
+    expect(scriptPreloadNamesForText([], null)).toEqual([]);
+    expect(scriptPreloadNamesForText([''], null)).toEqual([]);
+  });
+
+  it('returns ZERO CJK/script names for pure Latin (ASCII + Latin-1)', () => {
+    const out = scriptPreloadNamesForText(['Hello, World!', 'café résumé'], null);
+    expect(out).toEqual([]);
+  });
+
+  it('detects Japanese (Hiragana/Katakana) → Noto Sans/Serif JP', () => {
+    const out = scriptPreloadNamesForText(['こんにちは カタカナ'], null);
+    expect(out).toEqual(['Noto Sans JP', 'Noto Serif JP']);
+    assertResolvable(out);
+  });
+
+  it('detects Korean (Hangul) → Noto Sans/Serif KR', () => {
+    const out = scriptPreloadNamesForText(['안녕하세요'], null);
+    expect(out).toEqual(['Noto Sans KR', 'Noto Serif KR']);
+    assertResolvable(out);
+  });
+
+  it('Han only with cjkLang hint sc → uses the hint', () => {
+    const out = scriptPreloadNamesForText(['汉字测试'], 'sc');
+    expect(out).toEqual(['Noto Sans SC', 'Noto Serif SC']);
+  });
+
+  it('Han only with no hint → defaults to jp', () => {
+    const out = scriptPreloadNamesForText(['漢字'], null);
+    expect(out).toEqual(['Noto Sans JP', 'Noto Serif JP']);
+  });
+
+  it('Han + Hangul → Hangul sets kr; Han resolves to the kr face (no JP emitted)', () => {
+    const out = scriptPreloadNamesForText(['한국어 漢字'], 'jp');
+    expect(out).toEqual(['Noto Sans KR', 'Noto Serif KR']);
+  });
+
+  it('Han + Kana → Kana sets jp even with sc hint', () => {
+    const out = scriptPreloadNamesForText(['ひらがな 漢字'], 'sc');
+    expect(out).toEqual(['Noto Sans JP', 'Noto Serif JP']);
+  });
+
+  it('Hangul + Kana → both KR and JP faces', () => {
+    const out = scriptPreloadNamesForText(['한국 ひらがな'], null);
+    expect(out).toContain('Noto Sans KR');
+    expect(out).toContain('Noto Serif KR');
+    expect(out).toContain('Noto Sans JP');
+    expect(out).toContain('Noto Serif JP');
+    assertResolvable(out);
+  });
+
+  it('detects Arabic → Noto Naskh Arabic + Noto Sans Arabic', () => {
+    const out = scriptPreloadNamesForText(['مرحبا بالعالم'], null);
+    expect(out).toContain('Noto Naskh Arabic');
+    expect(out).toContain('Noto Sans Arabic');
+  });
+
+  it('detects Thai → Noto Sans Thai', () => {
+    const out = scriptPreloadNamesForText(['สวัสดี'], null);
+    expect(out).toEqual(['Noto Sans Thai']);
+    assertResolvable(out);
+  });
+
+  it('detects Hebrew → Noto Sans/Serif Hebrew', () => {
+    const out = scriptPreloadNamesForText(['שלום עולם'], null);
+    expect(out).toContain('Noto Sans Hebrew');
+    expect(out).toContain('Noto Serif Hebrew');
+    assertResolvable(out);
+  });
+
+  it('detects Devanagari → Noto Sans Devanagari', () => {
+    const out = scriptPreloadNamesForText(['नमस्ते'], null);
+    expect(out).toEqual(['Noto Sans Devanagari']);
+    assertResolvable(out);
+  });
+
+  it('detects Cyrillic → Noto Sans/Serif (which cover Cyrillic)', () => {
+    const out = scriptPreloadNamesForText(['Привет мир'], null);
+    expect(out).toEqual(['Noto Sans', 'Noto Serif']);
+    assertResolvable(out);
+  });
+
+  it('detects Greek → Noto Sans/Serif', () => {
+    const out = scriptPreloadNamesForText(['Γειά σου'], null);
+    expect(out).toEqual(['Noto Sans', 'Noto Serif']);
+  });
+
+  it('mixed CJK (Japanese) + Arabic + Cyrillic', () => {
+    const out = scriptPreloadNamesForText(['日本語 العربية Кириллица'], null);
+    expect(out).toContain('Noto Sans JP');
+    expect(out).toContain('Noto Serif JP');
+    expect(out).toContain('Noto Naskh Arabic');
+    expect(out).toContain('Noto Sans Arabic');
+    expect(out).toContain('Noto Sans');
+    expect(out).toContain('Noto Serif');
+  });
+
+  it('handles astral Han (U+20000+) via codePointAt', () => {
+    const out = scriptPreloadNamesForText(['\u{20089}'], null);
+    expect(out).toEqual(['Noto Sans JP', 'Noto Serif JP']);
+  });
+
+  it('is deterministic: same text yields the same set regardless of chunking', () => {
+    const a = scriptPreloadNamesForText(['日本語 العربية'], null);
+    const b = scriptPreloadNamesForText(['日本', '語 ', 'العربية'], null);
+    expect([...a].sort()).toEqual([...b].sort());
+  });
+
+  it('every returned name is resolvable in SCRIPT_GOOGLE_FONTS (CJK + Cyrillic + scripts)', () => {
+    const out = scriptPreloadNamesForText(['漢字 Привет สวัสดี नमस्ते שלום'], null);
+    assertResolvable(out);
   });
 });

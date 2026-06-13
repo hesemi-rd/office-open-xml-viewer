@@ -145,9 +145,8 @@ export class PptxPresentation {
       mode === 'worker' ? !!opts.useGoogleFonts : false,
     );
     if (mode === 'main' && opts.useGoogleFonts && pres._presentation) {
-      const parsed = pres._presentation;
       await preloadGoogleFonts(
-        pptxFontPreloadNames(parsed.majorFont, parsed.minorFont),
+        pptxFontPreloadNames(pres._presentation),
         PPTX_GOOGLE_FONTS,
       );
     }

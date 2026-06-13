@@ -42,7 +42,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // Pagination measures text, so fonts must land BEFORE computePages —
         // same ordering the main-mode load() guarantees.
         await preloadGoogleFonts(
-          docxFontPreloadNames(doc.majorFont, doc.minorFont),
+          docxFontPreloadNames(doc),
           DOCX_GOOGLE_FONTS,
         );
       }

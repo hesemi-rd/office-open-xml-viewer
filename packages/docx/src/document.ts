@@ -91,7 +91,7 @@ export class DocxDocument {
     );
     if (mode === 'main' && opts.useGoogleFonts && doc._document) {
       await preloadGoogleFonts(
-        docxFontPreloadNames(doc._document.majorFont, doc._document.minorFont),
+        docxFontPreloadNames(doc._document),
         DOCX_GOOGLE_FONTS,
       );
     }

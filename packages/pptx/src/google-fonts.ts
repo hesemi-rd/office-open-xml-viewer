@@ -1,4 +1,11 @@
-import { SCRIPT_GOOGLE_FONTS, SCRIPT_PRELOAD_NAMES, type FontPreloadEntry } from '@silurus/ooxml-core';
+import {
+  classifyCjkFont,
+  scriptPreloadNamesForText,
+  SCRIPT_GOOGLE_FONTS,
+  type FontPreloadEntry,
+  type TextBody,
+} from '@silurus/ooxml-core';
+import type { Presentation, SlideElement } from './types';
 
 /** Theme-referenced typefaces commonly used by PPTX templates. Keys are
  *  lower-cased family names. Entries that substitute a metric-compatible
@@ -48,20 +55,57 @@ export const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   ...SCRIPT_GOOGLE_FONTS,
 };
 
+/** Yield every painted text string in a text body (paragraph runs). */
+function* textBodyRuns(body: TextBody | null | undefined): Generator<string> {
+  for (const p of body?.paragraphs ?? []) {
+    for (const r of p.runs) {
+      if (r.type === 'text') yield r.text;
+    }
+  }
+}
+
+/** Yield every rendered text string in the presentation: shape text, table
+ *  cell text and chart labels across all slides. Speaker notes and comments are
+ *  not painted on the slide, so they are excluded (the renderer ignores them). */
+function* pptxTextRuns(pres: Presentation): Generator<string> {
+  for (const slide of pres.slides) {
+    for (const el of slide.elements as SlideElement[]) {
+      if (el.type === 'shape') {
+        yield* textBodyRuns(el.textBody);
+      } else if (el.type === 'table') {
+        for (const row of el.rows) {
+          for (const cell of row.cells) yield* textBodyRuns(cell.textBody);
+        }
+      } else if (el.type === 'chart') {
+        if (el.title) yield el.title;
+        for (const c of el.categories) yield c;
+        for (const s of el.series) if (s.name) yield s.name;
+      }
+    }
+  }
+}
+
 /**
  * The font-family names to preload for a presentation: the theme major/minor
- * fonts, the generic Arabic fallbacks, and every script Noto face. The renderer's
- * canvas font stack ends with those fallbacks, so they must be loaded for any
- * Arabic/CJK/Cyrillic/Thai/Devanagari/Hebrew glyph that falls through the stack
- * to resolve to a real web font instead of an OS face or tofu.
+ * fonts, plus only the script-fallback Noto faces whose script the slide TEXT
+ * actually contains ({@link scriptPreloadNamesForText}). The renderer's canvas
+ * font stack still ends with the full Noto set, but eagerly fetching the
+ * multi-MB CJK families for a deck with no CJK glyphs would block first paint
+ * for nothing; an un-preloaded face loads lazily if it ever proves needed.
  *
  * Single source of truth shared by the main-thread `load()` and the render
- * worker, so both modes preload an identical set — worker/main rendering must
- * stay pixel-equivalent.
+ * worker. Both derive the set from the SAME parsed {@link Presentation}, so both
+ * modes preload an identical set — worker/main rendering must stay
+ * pixel-equivalent.
  */
 export function pptxFontPreloadNames(
-  majorFont: string | null | undefined,
-  minorFont: string | null | undefined,
+  pres: Presentation,
 ): (string | null | undefined)[] {
-  return [majorFont, minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic', ...SCRIPT_PRELOAD_NAMES];
+  const cjkLang =
+    classifyCjkFont(pres.majorFont) ?? classifyCjkFont(pres.minorFont) ?? null;
+  return [
+    pres.majorFont,
+    pres.minorFont,
+    ...scriptPreloadNamesForText(pptxTextRuns(pres), cjkLang),
+  ];
 }

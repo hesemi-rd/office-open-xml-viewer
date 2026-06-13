@@ -47,6 +47,7 @@ export {
   NON_CJK_SERIF_FALLBACKS,
   SCRIPT_GOOGLE_FONTS,
   SCRIPT_PRELOAD_NAMES,
+  scriptPreloadNamesForText,
   type CjkLang,
   type FontVariant,
 } from './fonts/scripts';

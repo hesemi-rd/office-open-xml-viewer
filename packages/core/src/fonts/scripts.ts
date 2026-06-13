@@ -194,3 +194,152 @@ export const SCRIPT_PRELOAD_NAMES: string[] = [
   'Noto Sans Devanagari', 'Noto Sans Thai',
   'Noto Sans Hebrew', 'Noto Serif Hebrew',
 ];
+
+/**
+ * Decide WHICH of the script Noto families above actually need force-loading for
+ * a document, by scanning its rendered text for the Unicode scripts that require
+ * a script-specific web font.
+ *
+ * Why scan the text rather than always preload {@link SCRIPT_PRELOAD_NAMES}: the
+ * CJK Noto families have no `text=` subset (the full multi-MB family is fetched),
+ * so eagerly loading all eight CJK faces for a pure-Latin document blocks first
+ * paint on megabytes of fonts that will never paint a glyph. We force-load only
+ * the families whose script appears in the text. The renderer still APPENDS the
+ * full Noto fallback chain to the canvas font stack — preloading is purely about
+ * which faces are fetched up front before first paint; an un-preloaded face that
+ * later proves needed simply loads lazily via the FontFaceSet on its first use.
+ *
+ * Detection is by objective Unicode block membership (no name/heuristic guessing
+ * — see root CLAUDE.md). Ranges scanned per codepoint:
+ *   - Hangul     U+1100–11FF (Jamo), U+3130–318F (Compat Jamo), U+AC00–D7AF
+ *                (Syllables)                                   → CJK, lang 'kr'
+ *   - Hira/Kana  U+3040–30FF                                   → CJK, lang 'jp'
+ *   - Han        U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF,
+ *                U+20000–2FA1F (via codePointAt)               → CJK, shared
+ *   - Arabic     U+0600–06FF, U+0750–077F, U+08A0–08FF,
+ *                U+FB50–FDFF, U+FE70–FEFF      → 'Noto Naskh Arabic','Noto Sans Arabic'
+ *   - Thai       U+0E00–0E7F                  → 'Noto Sans Thai'
+ *   - Hebrew     U+0590–05FF, U+FB1D–FB4F      → 'Noto Sans Hebrew','Noto Serif Hebrew'
+ *   - Devanagari U+0900–097F                   → 'Noto Sans Devanagari'
+ *   - Cyrillic   U+0400–04FF / Greek U+0370–03FF → 'Noto Sans','Noto Serif'
+ *                (the un-suffixed Latin Notos embed these)
+ *   - Basic Latin / Latin-1 / everything else  → nothing
+ *
+ * CJK language resolution: a Hangul codepoint forces 'kr' and a Kana codepoint
+ * forces 'jp' (those scripts are language-exclusive); shared Han codepoints adopt
+ * the document's `cjkLang` hint (derived by the caller from the theme font via
+ * {@link classifyCjkFont}), defaulting to 'jp' when no hint and no Hangul/Kana is
+ * present. For each detected CJK language BOTH the Sans and Serif face are
+ * emitted (the renderer may pick either depending on the run's serif-ness). When
+ * multiple CJK languages appear (e.g. Hangul + Kana), each contributes its pair.
+ *
+ * Note the Arabic names are NOT keys of {@link SCRIPT_GOOGLE_FONTS} — they live
+ * in each package's own `*_GOOGLE_FONTS` map (which also spreads SCRIPT_GOOGLE_FONTS),
+ * mirroring the unconditional Arabic preload entries the callers already queue.
+ *
+ * The result is a deduplicated, deterministically-ordered array, so the
+ * main-thread `load()` and the render worker — given the same parsed model —
+ * derive an IDENTICAL preload set (required for worker/main pixel equivalence).
+ */
+export function scriptPreloadNamesForText(
+  text: Iterable<string>,
+  cjkLang: CjkLang | null,
+): string[] {
+  let hasHan = false;
+  let hasHangul = false;
+  let hasKana = false;
+  let hasArabic = false;
+  let hasThai = false;
+  let hasHebrew = false;
+  let hasDevanagari = false;
+  let hasCyrGreek = false;
+
+  // Every script category found → can stop scanning further codepoints.
+  const allFound = (): boolean =>
+    (hasHan && hasHangul && hasKana) &&
+    hasArabic &&
+    hasThai &&
+    hasHebrew &&
+    hasDevanagari &&
+    hasCyrGreek;
+
+  outer: for (const chunk of text) {
+    if (!chunk) continue;
+    for (const ch of chunk) {
+      const cp = ch.codePointAt(0);
+      if (cp === undefined) continue;
+
+      // Fast path: ASCII / Latin-1 / Latin Extended need no script font.
+      if (cp <= 0x024f) continue;
+
+      if (
+        (cp >= 0x1100 && cp <= 0x11ff) ||
+        (cp >= 0x3130 && cp <= 0x318f) ||
+        (cp >= 0xac00 && cp <= 0xd7af)
+      ) {
+        hasHangul = true;
+      } else if (cp >= 0x3040 && cp <= 0x30ff) {
+        hasKana = true;
+      } else if (
+        (cp >= 0x3400 && cp <= 0x4dbf) ||
+        (cp >= 0x4e00 && cp <= 0x9fff) ||
+        (cp >= 0xf900 && cp <= 0xfaff) ||
+        (cp >= 0x20000 && cp <= 0x2fa1f)
+      ) {
+        hasHan = true;
+      } else if (
+        (cp >= 0x0600 && cp <= 0x06ff) ||
+        (cp >= 0x0750 && cp <= 0x077f) ||
+        (cp >= 0x08a0 && cp <= 0x08ff) ||
+        (cp >= 0xfb50 && cp <= 0xfdff) ||
+        (cp >= 0xfe70 && cp <= 0xfeff)
+      ) {
+        hasArabic = true;
+      } else if (cp >= 0x0e00 && cp <= 0x0e7f) {
+        hasThai = true;
+      } else if (
+        (cp >= 0x0590 && cp <= 0x05ff) ||
+        (cp >= 0xfb1d && cp <= 0xfb4f)
+      ) {
+        hasHebrew = true;
+      } else if (cp >= 0x0900 && cp <= 0x097f) {
+        hasDevanagari = true;
+      } else if (
+        (cp >= 0x0400 && cp <= 0x04ff) ||
+        (cp >= 0x0370 && cp <= 0x03ff)
+      ) {
+        hasCyrGreek = true;
+      }
+
+      if (allFound()) break outer;
+    }
+  }
+
+  const names: string[] = [];
+
+  // CJK: each detected language contributes its Sans+Serif pair. Hangul → 'kr',
+  // Kana → 'jp', shared Han → the language hint (or 'jp' default) UNLESS Hangul
+  // or Kana already pinned a CJK language, in which case Han resolves to one of
+  // those faces and needs no extra family.
+  const cjkLangs = new Set<CjkLang>();
+  if (hasHangul) cjkLangs.add('kr');
+  if (hasKana) cjkLangs.add('jp');
+  if (hasHan && cjkLangs.size === 0) {
+    cjkLangs.add(cjkLang ?? 'jp');
+  }
+  // Stable order: kr, sc, tc, jp.
+  for (const lang of ['kr', 'sc', 'tc', 'jp'] as const) {
+    if (cjkLangs.has(lang)) {
+      const suffix = { kr: 'KR', sc: 'SC', tc: 'TC', jp: 'JP' }[lang];
+      names.push(`Noto Sans ${suffix}`, `Noto Serif ${suffix}`);
+    }
+  }
+
+  if (hasCyrGreek) names.push('Noto Sans', 'Noto Serif');
+  if (hasArabic) names.push('Noto Naskh Arabic', 'Noto Sans Arabic');
+  if (hasThai) names.push('Noto Sans Thai');
+  if (hasHebrew) names.push('Noto Sans Hebrew', 'Noto Serif Hebrew');
+  if (hasDevanagari) names.push('Noto Sans Devanagari');
+
+  return names;
+}

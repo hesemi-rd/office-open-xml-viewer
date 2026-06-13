@@ -120,7 +120,7 @@ export class XlsxWorkbook {
     this.parsedWorkbook = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).workbook;
     if (this._mode === 'main' && opts.useGoogleFonts) {
       await preloadGoogleFonts(
-        xlsxFontPreloadNames(this.parsedWorkbook.styles),
+        xlsxFontPreloadNames(this.parsedWorkbook),
         XLSX_GOOGLE_FONTS,
       );
     }

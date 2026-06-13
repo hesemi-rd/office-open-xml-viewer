@@ -1,4 +1,15 @@
-import { SCRIPT_GOOGLE_FONTS, SCRIPT_PRELOAD_NAMES, type FontPreloadEntry } from '@silurus/ooxml-core';
+import {
+  classifyCjkFont,
+  scriptPreloadNamesForText,
+  SCRIPT_GOOGLE_FONTS,
+  type FontPreloadEntry,
+} from '@silurus/ooxml-core';
+import type {
+  BodyElement,
+  DocParagraph,
+  DocTable,
+  DocxDocumentModel,
+} from './types.js';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
  *  PPTX map — these are the well-known free webfont alternatives Microsoft
@@ -44,21 +55,67 @@ export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   ...SCRIPT_GOOGLE_FONTS,
 };
 
+/** Yield every rendered text string in the document model so the preload step
+ *  can detect which scripts are actually present. Walks the body, headers /
+ *  footers, footnotes / endnotes and nested tables (text-only). Comments are
+ *  not painted on the page, so they are excluded. */
+function* docxTextRuns(doc: DocxDocumentModel): Generator<string> {
+  const fromRuns = function* (runs: DocParagraph['runs']): Generator<string> {
+    for (const r of runs) {
+      if (r.type === 'text') yield r.text;
+      else if (r.type === 'field') yield r.fallbackText;
+      else if (r.type === 'shape') {
+        for (const t of r.textBlocks ?? []) yield t.text;
+      }
+    }
+  };
+  const walk = function* (el: BodyElement): Generator<string> {
+    if ('runs' in el) yield* fromRuns((el as DocParagraph).runs);
+    if ('rows' in el) {
+      for (const row of (el as DocTable).rows) {
+        for (const cell of row.cells) {
+          for (const child of cell.content) yield* walk(child as BodyElement);
+        }
+      }
+    }
+  };
+  const walkBody = function* (body: BodyElement[] | undefined): Generator<string> {
+    for (const el of body ?? []) yield* walk(el);
+  };
+
+  yield* walkBody(doc.body);
+  for (const hf of [doc.headers, doc.footers]) {
+    for (const which of [hf?.default, hf?.first, hf?.even]) {
+      yield* walkBody(which?.body);
+    }
+  }
+  for (const note of [...(doc.footnotes ?? []), ...(doc.endnotes ?? [])]) {
+    yield* walkBody(note.content);
+  }
+}
+
 /**
  * The font-family names to preload for a document: the theme major/minor fonts,
- * the generic Arabic fallbacks, and every script Noto face. The renderer's font
- * fallback chains end with those Noto faces, so they must be loaded for any
- * Arabic/CJK/Cyrillic/Thai/Devanagari/Hebrew glyph that falls through the chain
- * to resolve to a real web font instead of an OS face or tofu.
+ * plus only the script-fallback Noto faces whose script the document's TEXT
+ * actually contains ({@link scriptPreloadNamesForText}). The renderer's font
+ * fallback chains still END with the full Noto set, but eagerly fetching the
+ * multi-MB CJK families for a document that has no CJK glyphs would block first
+ * paint for nothing; an un-preloaded face loads lazily if it ever proves needed.
  *
  * Single source of truth shared by the main-thread `load()` and the render
- * worker, so both modes preload an identical set — worker/main rendering must
- * stay pixel-equivalent. (Fonts must also be loaded before pagination, which
- * measures text; both callers await this before paginating.)
+ * worker. Both derive the set from the SAME parsed {@link DocxDocumentModel}, so
+ * they preload an identical set — worker/main rendering must stay
+ * pixel-equivalent. (Fonts must also be loaded before pagination, which measures
+ * text; both callers await this before paginating.)
  */
 export function docxFontPreloadNames(
-  majorFont: string | null | undefined,
-  minorFont: string | null | undefined,
+  doc: DocxDocumentModel,
 ): (string | null | undefined)[] {
-  return [majorFont, minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic', ...SCRIPT_PRELOAD_NAMES];
+  const cjkLang =
+    classifyCjkFont(doc.majorFont) ?? classifyCjkFont(doc.minorFont) ?? null;
+  return [
+    doc.majorFont,
+    doc.minorFont,
+    ...scriptPreloadNamesForText(docxTextRuns(doc), cjkLang),
+  ];
 }

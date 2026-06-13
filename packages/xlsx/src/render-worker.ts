@@ -68,7 +68,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // every styled font name, plus the generic Arabic fallbacks. Fonts must
         // land before rendering (which measures text), so we keep the promise
         // and await it in the renderViewport handler.
-        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook.styles), XLSX_GOOGLE_FONTS);
+        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
       }
       post({ type: 'parsed', id, workbook });
       return;

@@ -73,7 +73,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // Kick the preload now so it overlaps with main-thread work; renders
         // await `fontsLoaded` so text never rasterizes with fallback metrics.
         fontsLoaded = preloadGoogleFonts(
-          pptxFontPreloadNames(pres.majorFont, pres.minorFont),
+          pptxFontPreloadNames(pres),
           PPTX_GOOGLE_FONTS,
         );
       }
