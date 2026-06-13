@@ -5,6 +5,11 @@ type Args = { scale: number };
 
 const meta: Meta<Args> = {
   title: 'XlsxViewer/Examples',
+  // The viewer fills the viewport (height:100vh). Storybook's default story
+  // padding would push that past the fold, hiding the bottom sheet-tab bar
+  // behind a scroll. 'fullscreen' removes the padding so 100vh fits exactly and
+  // the tabs stay visible.
+  parameters: { layout: 'fullscreen' },
   argTypes: {
     scale: {
       control: { type: 'range', min: 0.25, max: 2, step: 0.05 },
