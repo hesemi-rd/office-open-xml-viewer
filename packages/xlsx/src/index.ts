@@ -1,4 +1,5 @@
 export { XlsxWorkbook, type LoadOptions } from './workbook.js';
+export type { WireRenderViewportOptions } from './worker-protocol.js';
 export { XlsxViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';

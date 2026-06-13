@@ -3,64 +3,42 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   WorkerBridge,
-  type FontPreloadEntry,
+  defaultDpr,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse, Cell } from './types.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell } from './types.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
+import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
 import {
   parseListFormula,
   resolveListValues,
   type ResolvedList,
 } from './validation-list.js';
+import type {
+  RenderWorkerRequest,
+  RenderWorkerResponse,
+  WireRenderViewportOptions,
+} from './worker-protocol.js';
 
-/** Office font name → metric-compatible Google Fonts substitute. These are
- *  the well-known pairings Microsoft and Google both publish and ship on
- *  Linux distributions: Calibri → Carlito, Cambria → Caladea (same advance
- *  widths and ascender / descender). Loading the substitute on a system
- *  that lacks the Office face keeps text width measurements close to
- *  Excel's. The substitute font-family differs from the requested name, so
- *  `loadFamily` redirects FontFaceSet loading appropriately. */
-const NOTO_NASKH_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
-const NOTO_SANS_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
-
-const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  'calibri': {
-    url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-    loadFamily: 'Carlito',
-  },
-  'cambria': {
-    url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-    loadFamily: 'Caladea',
-  },
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL workbooks (e.g. the LibreOffice-authored sample-29,
-  // which requests Sakkal Majalla / Univers Next Arabic) render with a real
-  // web font instead of an oversized OS fallback. "Naskh" covers traditional
-  // serif-like Arabic faces; "Sans" covers the modern geometric ones.
-  'sakkal majalla': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'traditional arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'simplified arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'arabic typesetting': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'univers next arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // Self-referencing entries so the generic Arabic fallback fonts (appended to
-  // the renderer's font chain) are themselves loaded whenever useGoogleFonts
-  // is enabled — see `_load`, which always queues these names.
-  'noto naskh arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'noto sans arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-};
-
-/** Options for {@link XlsxWorkbook.load}. The shared load-options type from
- *  `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
-export type LoadOptions = CoreLoadOptions;
+/** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`, `math`)
+ *  with the worker-rendering mode. */
+export interface LoadOptions extends CoreLoadOptions {
+  /**
+   * 'main' (default): parse in a worker, render on the main thread (current
+   * behaviour). 'worker': parse AND render inside the worker; use
+   * {@link XlsxWorkbook.renderViewportToBitmap} and paint the returned
+   * ImageBitmap via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas.
+   * The math engine is unavailable in this mode (equations are skipped).
+   */
+  mode?: 'main' | 'worker';
+}
 
 export class XlsxWorkbook {
   private worker: Worker;
-  private bridge: WorkerBridge<WorkerResponse>;
+  private bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
   /** Cache of decoded image bitmaps keyed by their data URL. Shared across sheets. */
@@ -71,20 +49,32 @@ export class XlsxWorkbook {
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private math: MathRenderer | undefined;
+  private _mode: 'main' | 'worker' = 'main';
 
-  private constructor() {
-    this.worker = new InlineWorker();
-    this.bridge = new WorkerBridge<WorkerResponse>(this.worker, {
+  private constructor(worker: Worker, mode: 'main' | 'worker') {
+    this.worker = worker;
+    this._mode = mode;
+    this.bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this.worker, {
       correlate: (res) => res.id,
       toError: (res) => (res.type === 'error' ? res.message : undefined),
     });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this.bridge.post({ type: 'init', wasmUrl });
+    this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
-    const wb = new XlsxWorkbook();
+    const mode = opts.mode ?? 'main';
+    if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
+      throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
+    }
+    // The render worker is reachable only through this dynamic import, so
+    // main-mode bundles never pull in its (renderer-bearing) chunk.
+    const worker =
+      mode === 'worker'
+        ? (await import('./render-worker-host')).createRenderWorker()
+        : new InlineWorker();
+    const wb = new XlsxWorkbook(worker, mode);
     await wb._load(source, opts);
     return wb;
   }
@@ -101,14 +91,34 @@ export class XlsxWorkbook {
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
     this.math = opts.math;
-    const parsed = await this.bridge.request((id) => ({
-      type: 'parse',
-      id,
-      data: data.slice(0),
-      maxZipEntryBytes: this.maxZipEntryBytes,
-    }));
+    if (opts.math && this._mode === 'worker') {
+      console.warn(
+        "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for workbooks with equations.",
+      );
+    }
+    // In worker mode the worker preloads fonts before its first render
+    // (rendering measures text), so the flag is forwarded; in main mode fonts
+    // are loaded here after parse.
+    const parsed = await this.bridge.request((id) =>
+      this._mode === 'worker'
+        ? ({
+            type: 'parse',
+            id,
+            data: data.slice(0),
+            maxZipEntryBytes: this.maxZipEntryBytes,
+            useGoogleFonts: !!opts.useGoogleFonts,
+          } satisfies RenderWorkerRequest)
+        : ({
+            type: 'parse',
+            id,
+            data: data.slice(0),
+            maxZipEntryBytes: this.maxZipEntryBytes,
+          } satisfies WorkerRequest),
+    );
+    // Both modes carry the light, workbook-level ParsedWorkbook back, so
+    // sheetNames / tabColors / resolveValidationList keep working.
     this.parsedWorkbook = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).workbook;
-    if (opts.useGoogleFonts) {
+    if (this._mode === 'main' && opts.useGoogleFonts) {
       // Walk every styled font in the workbook and queue Google Fonts
       // substitutes for any Office faces (Calibri → Carlito, Cambria →
       // Caladea). Documents that use only system fonts produce zero
@@ -225,6 +235,11 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: RenderViewportOptions = {},
   ): Promise<void> {
+    if (this._mode === 'worker') {
+      throw new Error(
+        "renderViewport(canvas) is unavailable in mode: 'worker'; use renderViewportToBitmap() and paint it via an ImageBitmapRenderingContext",
+      );
+    }
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     // Hot path: during scroll the worksheet is already cached. Skip the await
     // to keep the whole render in a single synchronous task so the browser
@@ -238,7 +253,42 @@ export class XlsxWorkbook {
     );
   }
 
+  /**
+   * Render a sheet viewport and return it as an ImageBitmap (both modes; in
+   * worker mode the render runs entirely off the main thread). `opts.width` /
+   * `opts.height` are required: there is no DOM element to measure in a worker
+   * or on an OffscreenCanvas. Paint with
+   * `canvas.getContext('bitmaprenderer').transferFromImageBitmap(bitmap)`.
+   *
+   * The returned ImageBitmap is owned by the caller: pass it to
+   * `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`
+   * when done, or its backing memory is held until GC.
+   */
+  async renderViewportToBitmap(
+    sheetIndex: number,
+    viewport: ViewportRange,
+    opts: WireRenderViewportOptions & { width: number; height: number },
+  ): Promise<ImageBitmap> {
+    const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    if (this._mode === 'worker') {
+      if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
+        throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
+      }
+      const res = await this.bridge.request(
+        (id) => ({ type: 'renderViewport', id, sheetIndex, viewport, opts: wireOpts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
+    }
+    const off = new OffscreenCanvas(1, 1);
+    await this.renderViewport(off, sheetIndex, viewport, wireOpts);
+    return off.transferToImageBitmap();
+  }
+
   destroy(): void {
     this.bridge.terminate();
+    this.parsedWorkbook = null;
+    this.sheetCache.clear();
+    this.imageCache.clear();
+    this.rawData = null;
   }
 }

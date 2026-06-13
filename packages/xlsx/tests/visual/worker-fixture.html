@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>* { margin: 0; padding: 0; } canvas { display: block; }</style>
+</head>
+<body>
+  <canvas id="main-canvas"></canvas>
+  <canvas id="worker-canvas"></canvas>
+  <script type="module">
+    import { XlsxWorkbook } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('xlsx') ?? 'demo/sample-1';
+    const sheet = Math.max(0, parseInt(params.get('sheet') ?? '0', 10));
+    const viewport = { row: 1, col: 1, rows: 40, cols: 12 };
+    const width = 1280;
+    const height = 720;
+    const dpr = 1;
+
+    try {
+      const resp = await fetch(`/${name}.xlsx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.xlsx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+
+      const paint = (id, bmp) => {
+        const c = document.getElementById(id);
+        c.width = bmp.width;
+        c.height = bmp.height;
+        c.getContext('2d').drawImage(bmp, 0, 0);
+        bmp.close();
+      };
+
+      const main = await XlsxWorkbook.load(buf.slice(0), { useGoogleFonts: true });
+      paint('main-canvas', await main.renderViewportToBitmap(sheet, viewport, { width, height, dpr }));
+      main.destroy();
+
+      const wk = await XlsxWorkbook.load(buf.slice(0), { mode: 'worker', useGoogleFonts: true });
+      paint('worker-canvas', await wk.renderViewportToBitmap(sheet, viewport, { width, height, dpr }));
+
+      // Exercises the worker `parseSheet` round-trip that getWorksheet /
+      // resolveValidationList depend on. Rendering uses the worker's internal
+      // sheet cache, so it never drives parseSheet across the worker boundary;
+      // without an explicit getWorksheet call a missing parseSheet arm would
+      // hang forever (no WorkerBridge timeout) and never be caught by VRT.
+      // Use a non-zero sheet so the worker can't accidentally serve the
+      // already-rendered sheet 0 from cache.
+      const probeSheet = wk.sheetCount > 1 ? 1 : 0;
+      const ws = await wk.getWorksheet(probeSheet);
+      document.body.dataset.worksheetOk = ws && Array.isArray(ws.rows) ? 'true' : 'false';
+
+      wk.destroy();
+
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[worker-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>
