@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # ── Rust toolchain (for building WASM parsers) ─────────────────────────
       - name: Install Rust toolchain
@@ -40,10 +40,10 @@ jobs:
 
       # ── Node / pnpm ────────────────────────────────────────────────────────
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -71,7 +71,7 @@ jobs:
         run: pnpm exec vsce package --no-dependencies --out ooxml-viewer.vsix
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ooxml-viewer-vsix
           path: packages/vscode-extension/ooxml-viewer.vsix
