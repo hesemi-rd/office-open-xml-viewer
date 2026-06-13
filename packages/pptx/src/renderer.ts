@@ -2628,6 +2628,30 @@ function getCachedBitmap(dataUrl: string): Promise<ImageBitmap> {
   return p;
 }
 
+/** Poster bitmaps decoded once per media element; renderSlide's prefetch pass
+ *  warms this so the sequential draw loop never waits on the network. Keyed by
+ *  element identity (not posterPath), so the bitmap releases when the slide
+ *  model is GC'd; the same poster on two elements decodes twice, which is
+ *  bounded and fine for the per-slide warm-up this serves. */
+const posterBitmapCache = new WeakMap<MediaElement, Promise<ImageBitmap>>();
+
+function getPosterBitmap(
+  el: MediaElement,
+  fetchMedia: (path: string) => Promise<Blob>,
+): Promise<ImageBitmap> {
+  const hit = posterBitmapCache.get(el);
+  if (hit) return hit;
+  const p = (async () => {
+    const blob = await fetchMedia(el.posterPath);
+    const typed = el.posterMimeType
+      ? new Blob([blob], { type: el.posterMimeType })
+      : blob;
+    return createImageBitmap(typed);
+  })();
+  posterBitmapCache.set(el, p);
+  return p;
+}
+
 async function renderPicture(
   ctx: CanvasRenderingContext2D,
   el: PictureElement,
@@ -3053,11 +3077,10 @@ async function renderMedia(
   let drewPoster = false;
   if (el.posterPath && fetchMedia) {
     try {
-      const blob = await fetchMedia(el.posterPath);
-      const typed = el.posterMimeType ? new Blob([blob], { type: el.posterMimeType }) : blob;
-      const bitmap = await createImageBitmap(typed);
+      // Poster is cached (and prefetched by renderSlide); do not close it here —
+      // it is reused across renders of the same slide.
+      const bitmap = await getPosterBitmap(el, fetchMedia);
       ctx.drawImage(bitmap, x, y, w, h);
-      bitmap.close();
       drewPoster = true;
     } catch {
       // fall through to plain fill
@@ -3498,6 +3521,22 @@ export async function renderSlide(
     : '#000000';
 
   const slideNumber = slide.slideNumber;
+
+  // Warm the bitmap caches for every image-bearing element concurrently.
+  // The draw loop below still awaits in element order (z-order), but each
+  // await now hits a settled/in-flight promise instead of starting a serial
+  // fetch+decode — first paint cost becomes max(decode) instead of sum.
+  for (const el of slide.elements) {
+    if (el.type === 'picture') {
+      void getCachedBitmap((el as PictureElement).dataUrl).catch(() => undefined);
+    } else if (el.type === 'media') {
+      const m = el as MediaElement;
+      if (m.posterPath && opts.fetchMedia) {
+        void getPosterBitmap(m, opts.fetchMedia).catch(() => undefined);
+      }
+    }
+  }
+
   for (const el of slide.elements) {
     // A newer render of this canvas started while we awaited an image/equation —
     // stop so we don't paint this (now stale) slide over the newer one.
