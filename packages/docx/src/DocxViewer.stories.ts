@@ -58,8 +58,11 @@ export function buildViewerUI(
 
   const container = document.createElement('div');
   container.style.cssText =
-    `width:${args.width}px;max-width:100%;border:1px solid #ccc;background:#f0f0f0;min-height:120px;`;
+    `position:relative;width:${args.width}px;max-width:100%;border:1px solid #ccc;background:#f0f0f0;min-height:120px;`;
   root.appendChild(container);
+
+  const spinner = createCanvasSpinner();
+  container.appendChild(spinner);
 
   const canvas = document.createElement('canvas');
   container.appendChild(canvas);
@@ -89,14 +92,47 @@ export function buildViewerUI(
       .then(() => {
         status.textContent = `Loaded — ${viewer.pageCount} page(s)`;
         updateNav();
+        spinner.remove();
       })
       .catch((e: Error) => {
         status.textContent = `Error: ${e.message}`;
         status.style.color = 'red';
+        spinner.remove();
       });
+  } else {
+    spinner.remove();
   }
 
   return { root, doc: null };
+}
+
+/**
+ * Absolutely-positioned spinner overlay (CSS-keyframe ring) centered in its
+ * parent — the parent must be positioned. Shown during the load (notably the
+ * worker-mode cold start) and removed once the first page renders.
+ */
+function createCanvasSpinner(): HTMLElement {
+  const el = document.createElement('div');
+  el.setAttribute('aria-label', 'Loading');
+  el.style.cssText = [
+    'position:absolute',
+    'top:50%', 'left:50%',
+    'width:40px', 'height:40px',
+    'margin:-20px 0 0 -20px',
+    'border:3px solid rgba(0,0,0,0.12)',
+    'border-top-color:rgba(0,0,0,0.55)',
+    'border-radius:50%',
+    'pointer-events:none',
+    'animation:ooxmlSpinnerRotate 0.9s linear infinite',
+  ].join(';');
+  const keyframesId = '__ooxml-spinner-keyframes';
+  if (!document.getElementById(keyframesId)) {
+    const style = document.createElement('style');
+    style.id = keyframesId;
+    style.textContent = '@keyframes ooxmlSpinnerRotate { to { transform: rotate(360deg); } }';
+    document.head.appendChild(style);
+  }
+  return el;
 }
 
 // ---------------------------------------------------------------------------
