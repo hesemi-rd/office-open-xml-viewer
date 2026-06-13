@@ -3362,7 +3362,18 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     }
     alignHeightPt = newSizePt;
   }
-  if (w <= 0 || h <= 0) return;
+  // Line/connector presets (ECMA-376 §20.1.9.18) are valid with a degenerate
+  // bounding box — a horizontal line has h==0, a vertical line w==0. Stroking
+  // such a path still draws a visible segment, so only bail when there is truly
+  // nothing to draw (both dimensions zero) or an inverted box (negative).
+  const preset = shape.presetGeometry?.toLowerCase() ?? '';
+  const isLineGeom =
+    preset === 'line' ||
+    preset.startsWith('straightconnector') ||
+    preset.startsWith('bentconnector') ||
+    preset.startsWith('curvedconnector');
+  if (w < 0 || h < 0) return;
+  if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
   const x = resolveAnchorX(
     shape.anchorXAlign, shape.anchorXFromMargin, offsetXPt, w, state,
     shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,

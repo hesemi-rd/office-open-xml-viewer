@@ -2534,7 +2534,30 @@ fn parse_wsp_shape(
     let oy = off.attribute("y").and_then(|v| v.parse::<f64>().ok())?;
     let cx = ext.attribute("cx").and_then(|v| v.parse::<f64>().ok())?;
     let cy = ext.attribute("cy").and_then(|v| v.parse::<f64>().ok())?;
-    if cx <= 0.0 || cy <= 0.0 {
+
+    // Line/connector presets (ECMA-376 §20.1.9.18 prstGeom; preset geometries
+    // `line`, `straightConnector1`, `bent*Connector*`, `curved*Connector*`)
+    // legitimately have a degenerate bounding box: an axis-aligned connector
+    // has cx==0 (vertical) or cy==0 (horizontal). Such a shape must NOT be
+    // discarded — it is the line itself. A genuine zero-area box on any other
+    // geometry (rect, ellipse, …) has nothing to draw, and a negative extent
+    // is always invalid, so both are still rejected.
+    let prst_lower = sp_pr
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "prstGeom")
+        .and_then(|n| n.attribute("prst"))
+        .map(|p| p.to_ascii_lowercase());
+    let is_line_geom = matches!(
+        prst_lower.as_deref(),
+        Some(p) if p == "line"
+            || p.starts_with("straightconnector")
+            || p.starts_with("bentconnector")
+            || p.starts_with("curvedconnector")
+    );
+    if cx < 0.0 || cy < 0.0 {
+        return None;
+    }
+    if !is_line_geom && (cx == 0.0 || cy == 0.0) {
         return None;
     }
     let rotation = xfrm
@@ -2590,18 +2613,23 @@ fn parse_wsp_shape(
     }
 
     // Direct fills on spPr take priority over wps:style/fillRef. ECMA-376
-    // §20.1.4.1.30: when no direct fill is set, the shape's appearance comes
+    // §20.1.4.1.30: when *no* direct fill is set, the shape's appearance comes
     // from the theme's fillStyleLst / bgFillStyleLst entry referenced by idx,
-    // recolored using the schemeClr embedded in the fillRef.
-    let fill = parse_shape_fill(sp_pr, theme).or_else(|| {
-        wsp.children()
+    // recolored using the schemeClr embedded in the fillRef. But §20.1.8.44:
+    // an explicit `<a:noFill/>` is itself a direct fill property and overrides
+    // the style reference, so only fall back to fillRef when the fill is Absent.
+    let fill = match parse_shape_fill(sp_pr, theme) {
+        FillSpec::Explicit(f) => Some(f),
+        FillSpec::NoFill => None,
+        FillSpec::Absent => wsp
+            .children()
             .find(|n| n.is_element() && n.tag_name().name() == "style")
             .and_then(|st| {
                 st.children()
                     .find(|n| n.is_element() && n.tag_name().name() == "fillRef")
             })
-            .and_then(|fr| resolve_fill_ref(fr, theme))
-    });
+            .and_then(|fr| resolve_fill_ref(fr, theme)),
+    };
     let (stroke, stroke_width) = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "ln")
@@ -2882,21 +2910,48 @@ fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun
     })
 }
 
-/// Parse a shape's fill (solidFill or gradFill). Returns None for noFill/missing.
-fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
+/// Result of inspecting a shape's spPr for a direct fill.
+///
+/// ECMA-376 §20.1.8.44 (noFill): an explicit `<a:noFill/>` is a direct fill
+/// property and therefore overrides the shape's style reference. We must
+/// distinguish it from "no fill element present" (where the wps:style/fillRef
+/// recipe applies). Collapsing both into `None` makes a no-fill shape pick up
+/// the theme gradient referenced by fillRef, which is wrong.
+enum FillSpec {
+    /// A direct solidFill/gradFill was present and resolved.
+    Explicit(ShapeFill),
+    /// An explicit `<a:noFill/>` — the shape is intentionally unfilled.
+    NoFill,
+    /// No direct fill element at all — defer to wps:style/fillRef.
+    Absent,
+}
+
+/// Parse a shape's direct fill (solidFill / gradFill / noFill), reporting which
+/// of the three states applies so the caller can decide whether to fall back to
+/// the style's fillRef.
+fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> FillSpec {
     for child in sp_pr.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "solidFill" => {
-                return resolve_color_element(child, theme).map(|c| ShapeFill::Solid { color: c });
+                return match resolve_color_element(child, theme) {
+                    Some(c) => FillSpec::Explicit(ShapeFill::Solid { color: c }),
+                    // A solidFill whose color failed to resolve is still an
+                    // explicit, direct fill declaration — do not fall back to
+                    // the style reference.
+                    None => FillSpec::NoFill,
+                };
             }
             "gradFill" => {
-                return parse_grad_fill(child, theme);
+                return match parse_grad_fill(child, theme) {
+                    Some(f) => FillSpec::Explicit(f),
+                    None => FillSpec::NoFill,
+                };
             }
-            "noFill" => return None,
+            "noFill" => return FillSpec::NoFill,
             _ => {}
         }
     }
-    None
+    FillSpec::Absent
 }
 
 /// Resolve a wps:style/a:fillRef into a concrete ShapeFill using the theme's
