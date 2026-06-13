@@ -1294,12 +1294,60 @@ function renderQuadrant(
     else if (alignH === 'center') { textX = aCx + cW / 2; ctx.textAlign = 'center'; }
     else { textX = aCx + leftPad; ctx.textAlign = 'left'; }
 
-    let textY: number;
-    if (alignV === 'top') { ctx.textBaseline = 'top'; textY = aCy + paddingY; }
-    else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = aCy + cH / 2; }
-    else { ctx.textBaseline = 'bottom'; textY = aCy + cH - paddingY; }
+    // Text layout mirrors the main loop's merged-anchor path (see the
+    // `xf.wrapText` branches below): wrapped cells split into lines via
+    // wrapTextLines / layoutRichTextLines and flow vertically per alignV.
+    // Using the same code keeps the off-screen-anchor pre-pass and the
+    // in-viewport-anchor path identical, so a merged cell renders the same
+    // text whether or not its top-left anchor cell is scrolled out of view.
+    const runs = cell.value.type === 'text' ? cell.value.runs : undefined;
+    const hasRichText = runs && runs.length > 0;
 
-    ctx.fillText(text, textX, textY);
+    if (xf.wrapText && hasRichText) {
+      const wrapW = cW - leftPad - paddingX;
+      const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
+      const totalH = rLines.reduce((s, l) => s + Math.round(l.maxFontSize * PT_TO_PX * 1.2), 0);
+      let yy: number;
+      if (alignV === 'top') yy = aCy + paddingY;
+      else if (alignV === 'center') yy = aCy + (cH - totalH) / 2;
+      else yy = aCy + cH - totalH - paddingY;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      for (const line of rLines) {
+        const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
+        const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
+        let xx: number;
+        if (alignH === 'right') xx = aCx + cW - paddingX - totalW;
+        else if (alignH === 'center') xx = aCx + cW / 2 - totalW / 2;
+        else xx = aCx + leftPad;
+        for (const seg of line.segments) {
+          ctx.font = buildFont(seg.font, cs);
+          const segColor = cf.fontColor ?? seg.font.color;
+          ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
+          ctx.fillText(seg.text, xx, yy);
+          xx += seg.width;
+        }
+        yy += lineH;
+      }
+    } else if (xf.wrapText) {
+      const lines = wrapTextLines(ctx, text, cW - leftPad - paddingX);
+      const lineH = Math.round(font.size * PT_TO_PX * 1.2);
+      const totalTextH = lines.length * lineH;
+      let startY: number;
+      if (alignV === 'top') startY = aCy + paddingY;
+      else if (alignV === 'center') startY = aCy + (cH - totalTextH) / 2;
+      else startY = aCy + cH - totalTextH - paddingY;
+      ctx.textBaseline = 'top';
+      for (let li = 0; li < lines.length; li++) {
+        ctx.fillText(lines[li], textX, startY + li * lineH);
+      }
+    } else {
+      let textY: number;
+      if (alignV === 'top') { ctx.textBaseline = 'top'; textY = aCy + paddingY; }
+      else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = aCy + cH / 2; }
+      else { ctx.textBaseline = 'bottom'; textY = aCy + cH - paddingY; }
+      ctx.fillText(text, textX, textY);
+    }
     ctx.restore();
   }
 
