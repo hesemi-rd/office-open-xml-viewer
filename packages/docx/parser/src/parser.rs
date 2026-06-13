@@ -14,6 +14,9 @@ use crate::xml_util::*;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
+/// OMML (math) namespace — ECMA-376 §22.
+const M_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+
 type Zip<'a> = ZipArchive<std::io::Cursor<&'a [u8]>>;
 
 /// Section-level header/footer references collected from sectPr.
@@ -587,13 +590,33 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let no_line_breaks_before = collect("noLineBreaksBefore");
     let no_line_breaks_after = collect("noLineBreaksAfter");
 
-    if kinsoku.is_none() && no_line_breaks_before.is_none() && no_line_breaks_after.is_none() {
+    // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
+    // justification (math namespace, bare `val` fallback).
+    let math_def_jc = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "mathPr")
+        .and_then(|mp| {
+            mp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "defJc")
+        })
+        .and_then(|jc| {
+            jc.attribute((M_NS, "val"))
+                .or_else(|| jc.attribute("val"))
+                .map(|s| s.to_string())
+        });
+
+    if kinsoku.is_none()
+        && no_line_breaks_before.is_none()
+        && no_line_breaks_after.is_none()
+        && math_def_jc.is_none()
+    {
         return None;
     }
     Some(crate::types::DocumentSettings {
         kinsoku,
         no_line_breaks_before,
         no_line_breaks_after,
+        math_def_jc,
     })
 }
 
@@ -1090,13 +1113,12 @@ fn parse_paragraph(
         }
     }
 
-    let mut alignment = base_para
+    let alignment = base_para
         .alignment
         .as_deref()
         .map(normalize_align)
         .unwrap_or("left")
         .to_string();
-    let alignment_explicit = base_para.alignment.is_some();
     let indent_right = base_para.indent_right.unwrap_or(0.0);
     let space_before = base_para.space_before.unwrap_or(0.0);
     let space_after = base_para.space_after.unwrap_or(0.0);
@@ -1163,16 +1185,12 @@ fn parse_paragraph(
         node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None,
     );
 
-    // OMML display equations (m:oMathPara) are center-justified by default (§22.1.2.88
-    // m:jc). When the paragraph has no explicit alignment, centering the block math
-    // matches Word.
-    if !alignment_explicit
-        && runs
-            .iter()
-            .any(|r| matches!(r, DocRun::Math { display: true, .. }))
-    {
-        alignment = "center".to_string();
-    }
+    // NOTE: We do NOT force display-math paragraphs to center here. The math
+    // block's justification (ECMA-376 §22.1.2.88 `m:jc` / §22.1.2.30 `m:defJc`)
+    // is a concept independent of the paragraph's text `w:jc`; it is resolved by
+    // the renderer from the per-instance `jc` on the Math run and the document
+    // default `mathDefJc` (spec default `centerGroup`). The paragraph alignment
+    // stays its natural text value (e.g. Tabletext = left).
 
     let tab_stops = base_para
         .tab_stops
@@ -1353,11 +1371,28 @@ fn parse_para_content(
                         nodes,
                         display: false,
                         font_size: base_run.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+                        jc: None,
                     });
                 }
             }
             "oMathPara" => {
                 // A block math paragraph wraps one or more m:oMath children.
+                // ECMA-376 §22.1.2.88 — `m:oMathParaPr/m:jc@m:val` (math namespace,
+                // bare `val` fallback) is the per-instance justification of the
+                // display equation. Document-default (`m:defJc`) resolution is the
+                // renderer's job; we only surface the explicit per-instance value.
+                let para_jc = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "oMathParaPr")
+                    .and_then(|pr| {
+                        pr.children()
+                            .find(|n| n.is_element() && n.tag_name().name() == "jc")
+                    })
+                    .and_then(|jc| {
+                        jc.attribute((M_NS, "val"))
+                            .or_else(|| jc.attribute("val"))
+                            .map(|s| s.to_string())
+                    });
                 for om in child
                     .children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "oMath")
@@ -1368,6 +1403,7 @@ fn parse_para_content(
                             nodes,
                             display: true,
                             font_size: base_run.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+                            jc: para_jc.clone(),
                         });
                     }
                 }
@@ -3869,6 +3905,104 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+}
+
+#[cfg(test)]
+mod math_jc_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    const M_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+
+    /// Build a `<w:p>` declaring both the w and m namespaces and run it through
+    /// `parse_paragraph`, analogous to `parse_tbl` above.
+    fn parse_p(inner: &str) -> DocParagraph {
+        let xml = format!(
+            r#"<w:p xmlns:w="{w}" xmlns:m="{m}">{inner}</w:p>"#,
+            w = W_NS,
+            m = M_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+            None,
+        )
+    }
+
+    fn first_math_jc(p: &DocParagraph) -> Option<&Option<String>> {
+        p.runs.iter().find_map(|r| match r {
+            DocRun::Math { jc, .. } => Some(jc),
+            _ => None,
+        })
+    }
+
+    // ECMA-376 §22.1.2.88 `m:jc` — the per-instance justification on
+    // `m:oMathPara/m:oMathParaPr` reaches the display Math run.
+    #[test]
+    fn omathpara_jc_left_sets_run_jc() {
+        let p = parse_p(
+            r#"<m:oMathPara><m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr>
+               <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#,
+        );
+        assert_eq!(first_math_jc(&p), Some(&Some("left".to_string())));
+    }
+
+    // ECMA-376 §22.1.2.88 — absent `m:oMathParaPr` ⇒ no per-instance jc; the
+    // document default (`m:defJc`) resolution is left to the renderer.
+    #[test]
+    fn omathpara_without_jc_is_none() {
+        let p = parse_p(r#"<m:oMathPara><m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#);
+        assert_eq!(first_math_jc(&p), Some(&None));
+    }
+
+    // ECMA-376 §22.1.2.77 `m:oMath` — inline math carries no oMathPara jc.
+    #[test]
+    fn inline_omath_jc_is_none() {
+        let p = parse_p(r#"<m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>"#);
+        assert_eq!(first_math_jc(&p), Some(&None));
+    }
+
+    // ECMA-376 §22.1.2.30 `m:defJc` — document-wide default math justification in
+    // `word/settings.xml` `m:mathPr` surfaces as `math_def_jc`; absent ⇒ None.
+    #[test]
+    fn settings_defjc_surfaces() {
+        let xml = format!(
+            r#"<w:settings xmlns:w="{w}" xmlns:m="{m}">
+                 <m:mathPr><m:defJc m:val="centerGroup"/></m:mathPr>
+               </w:settings>"#,
+            w = W_NS,
+            m = M_NS
+        );
+        let s = parse_document_settings(&xml).expect("settings present (defJc)");
+        assert_eq!(s.math_def_jc.as_deref(), Some("centerGroup"));
+
+        let empty = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        assert!(parse_document_settings(empty).is_none());
+    }
+
+    // ECMA-376 §22.1.2.88 + §17.3.1.13 `w:jc` — a display-math paragraph with no
+    // explicit text alignment must keep its natural text alignment ("left" for
+    // a Tabletext-styled cell). The math block's own justification is handled by
+    // the renderer via `m:jc`/`m:defJc`, NOT by force-centering the paragraph.
+    #[test]
+    fn display_math_para_alignment_not_forced_center() {
+        // No w:jc in pPr ⇒ natural default is "left"; oMathPara present.
+        let p = parse_p(
+            r#"<m:oMathPara><m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr>
+               <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#,
+        );
+        assert_eq!(p.alignment, "left");
     }
 }
 

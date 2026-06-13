@@ -25,6 +25,7 @@ import {
   segmentsHaveRtl,
   computeLineVisualOrder,
   resolveAlignEdge,
+  type AlignEdge,
   type LineVisualOrder,
 } from './bidi-line.js';
 
@@ -170,6 +171,11 @@ interface RenderState {
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
   kinsoku: KinsokuRules;
+  /** ECMA-376 §22.1.2.30 `m:mathPr/m:defJc` — document-wide default math
+   *  justification (ST_Jc math). `undefined` ⇒ spec default `centerGroup`.
+   *  Threaded from `doc.settings.mathDefJc` like `kinsoku`; consumed by the
+   *  per-line alignment step for single display-math lines. */
+  mathDefJc?: string;
   /** Callback for building a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
   /** When false, runs tagged with a `revision` render without the
@@ -404,6 +410,7 @@ export async function renderDocumentToCanvas(
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
+    mathDefJc: doc.settings?.mathDefJc,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
     noteNumbers,
@@ -1587,6 +1594,27 @@ function renderParaList(paras: DocParagraph[], state: RenderState): void {
 
 // ===== Paragraph rendering =====
 
+/**
+ * Map an ST_Jc (math) value to a physical alignment edge for a display
+ * equation. ECMA-376 §22.1.2.88: `left`→left, `right`→right, `center` and
+ * `centerGroup`→center (for a single equation centerGroup is identical to
+ * center; the group-block distinction is out of scope — see spec YAGNI). The
+ * math jc is an absolute position within the block, not a logical start/end, so
+ * it is NOT flipped by the paragraph base direction.
+ */
+function mathJcToEdge(jc: string): AlignEdge {
+  switch (jc) {
+    case 'left':
+      return 'left';
+    case 'right':
+      return 'right';
+    case 'center':
+    case 'centerGroup':
+    default:
+      return 'center';
+  }
+}
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -1775,11 +1803,26 @@ function renderParagraph(
     const lineSlack = effAvailW - (x - lineLeft) - lineWidth;
     const applyJustify = isJustified && (!isLastLine || stretchLastLine);
     let alignOffset = 0;
-    if (alignEdge === 'right') {
+    // ECMA-376 §22.1.2.88 `m:jc` / §22.1.2.30 `m:defJc` — a display equation's
+    // justification is independent of the paragraph's text alignment. When this
+    // line is exactly one display-math segment, resolve its effective math jc
+    // (per-instance → document default → spec default `centerGroup`) and use it
+    // for THIS line only, overriding the paragraph alignEdge.
+    const onlyMathSeg =
+      line.segments.length === 1 &&
+      'mathNodes' in line.segments[0] &&
+      (line.segments[0] as LayoutMathSeg).display
+        ? (line.segments[0] as LayoutMathSeg)
+        : null;
+    const mathEdge = onlyMathSeg
+      ? mathJcToEdge(onlyMathSeg.jc ?? state.mathDefJc ?? 'centerGroup')
+      : null;
+    const effEdge = mathEdge ?? alignEdge;
+    if (effEdge === 'right') {
       alignOffset = lineSlack;
-    } else if (alignEdge === 'center') {
+    } else if (effEdge === 'center') {
       alignOffset = lineSlack / 2;
-    } else if (alignEdge === 'justify' && baseRtl && !applyJustify) {
+    } else if (effEdge === 'justify' && baseRtl && !applyJustify) {
       // The unstretched (last) line of a justified RTL paragraph aligns to the
       // leading edge — the RIGHT margin (§17.18.44 `both`: last line is
       // start-aligned). LTR keeps alignOffset 0 as before.
@@ -2054,6 +2097,10 @@ interface LayoutMathSeg {
   /** px ascent/descent of the laid-out box at scale, cached during measurement. */
   mathAscent: number;
   mathDescent: number;
+  /** ECMA-376 §22.1.2.88 `m:oMathPara/m:jc` — per-instance justification of a
+   *  display equation (ST_Jc math). `undefined` for inline math; the renderer
+   *  resolves the document default (`mathDefJc`, spec default `centerGroup`). */
+  jc?: string;
 }
 
 /** Sentinel that forces a new line when encountered in layoutLines. */
@@ -2259,6 +2306,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         measuredWidth: 0,
         mathAscent: 0,
         mathDescent: 0,
+        jc: run.jc,
       });
     }
   }
