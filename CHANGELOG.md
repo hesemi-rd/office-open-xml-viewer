@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.59.3 — 2026-06-14
+
+Patch: shrink the published bundle ~36% by inlining each parser's WASM only once.
+
+- **build**: each parser's WASM was inlined as a base64 data URL twice per format
+  — once for the main thread (the canonical `?url` import, posted to the worker)
+  and again inside every worker bundle, because the wasm-bindgen glue's
+  `new URL('*_bg.wasm', import.meta.url)` fallback was inlined by vite-plugin-wasm
+  even though workers always init from the URL the main thread passes. Setting
+  `omit-default-module-path` in each parser's wasm-pack metadata regenerates the
+  glue without that fallback, so the duplicate copies disappear naturally in the
+  build. `dist` drops from 12.69 MB to 8.06 MB; the VS Code extension webview
+  shrinks too. No API or behavior change — WASM is still delivered as an inline
+  data URL (zero-config), and the glue `init()` is internal (never part of the
+  public API; every caller already passes an explicit module).
+
 ## 0.59.2 — 2026-06-14
 
 Patch: shrink the VS Code extension bundle.
