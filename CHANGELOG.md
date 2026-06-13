@@ -4,6 +4,19 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.59.2 — 2026-06-14
+
+Patch: shrink the VS Code extension bundle.
+
+- **vscode-extension**: the extension renders on the main thread only, but each
+  viewer package ships a render worker as a dynamically-imported chunk that
+  base64-inlines a second copy of the renderer + WASM. esbuild's `iife` webview
+  output cannot code-split that import into a lazy chunk (as the npm build does),
+  so it inlined ~2 MB of dead worker code. An esbuild plugin now stubs the
+  `render-worker-host` import to a no-op (never reached at runtime here), cutting
+  `webview.js` from 10.6 MB to 8.4 MB raw (4.1 MB → 3.2 MB gzip). No behavior
+  change — worker rendering was never used in the extension.
+
 ## 0.59.1 — 2026-06-14
 
 Patch: fix a first-paint regression introduced in 0.59.0. With `useGoogleFonts: true`,
