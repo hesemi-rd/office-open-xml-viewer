@@ -32,6 +32,75 @@ export const Demo: DemoStory = {
   },
 };
 
+export const Offscreen: DemoStory = {
+  name: 'Offscreen — Web Worker rendering (demo.docx)',
+  render(args) {
+    const root = document.createElement('div');
+    root.style.cssText = 'font-family:sans-serif;padding:16px;';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Offscreen — parsed and rendered in a Web Worker';
+    heading.style.cssText = 'margin:0 0 8px;font-size:14px;';
+    root.appendChild(heading);
+    const status = makeStatus(root);
+
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
+    const prev = document.createElement('button');
+    prev.textContent = '‹ Prev';
+    const next = document.createElement('button');
+    next.textContent = 'Next ›';
+    const label = document.createElement('span');
+    label.style.cssText = 'font-size:13px;color:#444;min-width:96px;text-align:center;';
+    bar.append(prev, label, next);
+    root.appendChild(bar);
+
+    // mode: 'worker' returns each page as an ImageBitmap; the main thread only
+    // paints it through a `bitmaprenderer` context (which consumes the bitmap).
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'display:block;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
+    root.appendChild(canvas);
+    const ctx = canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext;
+
+    const dpr = window.devicePixelRatio || 1;
+    let docu: DocxDocument | null = null;
+    let index = 0;
+    let busy = false;
+
+    const paint = async () => {
+      if (!docu || busy) return;
+      busy = true;
+      prev.disabled = next.disabled = true;
+      status.textContent = `Rendering page ${index + 1} in a Web Worker…`;
+      try {
+        const bmp = await docu.renderPageToBitmap(index, { width: args.width, dpr });
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
+        canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
+        ctx.transferFromImageBitmap(bmp);
+        label.textContent = `Page ${index + 1} / ${docu.pageCount}`;
+        status.textContent = 'Rendered off the main thread — the UI never blocked.';
+      } finally {
+        busy = false;
+        prev.disabled = index === 0;
+        next.disabled = !docu || index >= docu.pageCount - 1;
+      }
+    };
+
+    prev.addEventListener('click', () => { if (index > 0) { index--; void paint(); } });
+    next.addEventListener('click', () => { if (docu && index < docu.pageCount - 1) { index++; void paint(); } });
+
+    DocxDocument.load(SAMPLE_URL, { mode: 'worker', useGoogleFonts: true })
+      .then((d) => { docu = d; return paint(); })
+      .catch((e: Error) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      });
+
+    return root;
+  },
+};
+
 function makeStatus(root: HTMLElement): HTMLDivElement {
   const s = document.createElement('div');
   s.style.cssText = 'color:#666;font-size:13px;margin-bottom:8px;min-height:18px;';
