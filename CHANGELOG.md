@@ -4,7 +4,60 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
-## 0.58.0 — 2026-06-12
+## 0.59.0 — 2026-06-14
+
+The off-main-thread release: an opt-in `mode: 'worker'` that parses **and**
+renders pptx / docx / xlsx entirely inside a Web Worker, returning each frame as
+a transferable `ImageBitmap` so document rendering never blocks the UI thread.
+Plus a broader script→Noto font-fallback chain under `useGoogleFonts`, and a fix
+that makes that web-font preload actually load multi-word families.
+
+core:
+
+- `mode: 'worker'` plumbing shared across all three formats: worker-safe render
+  guards (`isHTMLCanvas` / `defaultDpr`), a FontFaceSet-agnostic Google Fonts
+  preloader that works off `self.fonts` in a worker, and per-format render
+  workers that keep the parsed model worker-side (#427).
+- Shared script→Noto fallback definitions — CJK (KR/SC/TC/JP, ordered by the
+  document's language), Cyrillic, Thai, Devanagari and Hebrew — appended to the
+  canvas font stack under `useGoogleFonts` so non-Latin runs resolve to a real
+  web font instead of tofu (#426).
+- Fix: `preloadGoogleFonts` loaded nothing for multi-word families. It
+  re-selected which faces to load by matching `FontFace.family`, but Chrome
+  serializes a multi-word family back with quotes (`"Nunito Sans"`), so the
+  match found nothing and the font silently never loaded (worker text then fell
+  back to a default face, changing line wrapping). It now loads the FontFace
+  objects it created by reference (#436).
+- Centralized each format's font-preload name collection so main-thread and
+  worker modes always preload an identical set (#428).
+
+pptx / docx / xlsx:
+
+- Headless `mode: 'worker'` with `renderSlideToBitmap` / `renderPageToBitmap` /
+  `renderViewportToBitmap` (both modes; worker mode runs off the main thread).
+  docx paginates worker-side; xlsx parses sheets on demand in the worker.
+  Equations require `mode: 'main'` (#427).
+- `mode: 'worker'` on the interactive `PptxViewer` / `DocxViewer` / `XlsxViewer`
+  too: the whole viewer — scroll, sheet tabs, frozen panes, zoom, sheet
+  switching, media playback — renders off the main thread, painting worker
+  bitmaps via a `bitmaprenderer` context. xlsx cell selection still works
+  (geometry-based); the pptx/docx text-selection overlay is unavailable in
+  worker mode (`onTextRun` can't cross the worker boundary) (#432).
+- pptx: worker-mode `presentSlide` composites main-thread video over a
+  worker-rendered base; concurrent picture/poster bitmap prefetch shaves the
+  serial-await latency off first paint (#427).
+- xlsx: anchored images decode via `createImageBitmap` and pattern-fill tiles
+  build on `OffscreenCanvas`, so the render path is worker-safe (#427).
+
+docx:
+
+- Honor `m:oMathParaPr/m:jc` for display-math cell layout (§22.1.2.88) (#431).
+
+pptx:
+
+- Don't draw bullet / number markers on empty paragraphs (#425).
+
+
 
 The sp3d release: full DrawingML 3-D shape shading — bevels, extrusion side
 walls, and a calibrated light rig — layered on the scene3d camera from 0.57.0.
