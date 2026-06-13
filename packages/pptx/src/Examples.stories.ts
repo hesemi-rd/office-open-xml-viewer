@@ -56,10 +56,10 @@ export const Offscreen: DemoStory = {
 
     // mode: 'worker' returns each slide as an ImageBitmap; the main thread only
     // paints it through a `bitmaprenderer` context (which consumes the bitmap).
-    const canvas = document.createElement('canvas');
-    canvas.style.cssText = 'display:block;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
-    root.appendChild(canvas);
-    const ctx = canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext;
+    // The canvas stays hidden until the first frame paints — worker init + WASM
+    // + font preload take a moment on cold load, and a pre-sized empty frame
+    // would show at the wrong dimensions and jump once the real bitmap arrives.
+    const { canvas, ctx, setBusy, reveal } = makeOffscreenStage(root);
 
     const dpr = window.devicePixelRatio || 1;
     let pres: PptxPresentation | null = null;
@@ -70,6 +70,7 @@ export const Offscreen: DemoStory = {
       if (!pres || busy) return;
       busy = true;
       prev.disabled = next.disabled = true;
+      setBusy(true);
       status.textContent = `Rendering slide ${index + 1} in a Web Worker…`;
       try {
         const bmp = await pres.renderSlideToBitmap(index, { width: args.width, dpr });
@@ -78,10 +79,12 @@ export const Offscreen: DemoStory = {
         canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
         canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
         ctx.transferFromImageBitmap(bmp);
+        reveal();
         label.textContent = `Slide ${index + 1} / ${pres.slideCount}`;
         status.textContent = 'Rendered off the main thread — the UI never blocked.';
       } finally {
         busy = false;
+        setBusy(false);
         prev.disabled = index === 0;
         next.disabled = !pres || index >= pres.slideCount - 1;
       }
@@ -107,6 +110,48 @@ function makeStatus(root: HTMLElement): HTMLDivElement {
   s.textContent = 'Loading…';
   root.appendChild(s);
   return s;
+}
+
+/** A render stage for the Offscreen story: a centred area with an indeterminate
+ *  spinner overlay and a `bitmaprenderer` canvas that stays hidden until the
+ *  first frame is painted (so no wrong-sized empty frame flashes during the
+ *  cold-load delay). `setBusy` toggles the spinner; `reveal` shows the canvas. */
+function makeOffscreenStage(root: HTMLElement): {
+  canvas: HTMLCanvasElement;
+  ctx: ImageBitmapRenderingContext;
+  setBusy: (busy: boolean) => void;
+  reveal: () => void;
+} {
+  if (!document.getElementById('ooxml-offscreen-spin-kf')) {
+    const style = document.createElement('style');
+    style.id = 'ooxml-offscreen-spin-kf';
+    style.textContent = '@keyframes ooxml-offscreen-spin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(style);
+  }
+  const stage = document.createElement('div');
+  stage.style.cssText =
+    'position:relative;min-height:200px;display:flex;align-items:flex-start;justify-content:center;';
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'display:none;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
+  const spinWrap = document.createElement('div');
+  // Visible from mount so the spinner covers the slow cold load (worker init +
+  // WASM + parse), not just the per-frame render; hidden after the first paint.
+  spinWrap.style.cssText =
+    'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;';
+  const spinner = document.createElement('div');
+  spinner.style.cssText =
+    'width:36px;height:36px;border:4px solid rgba(0,0,0,0.12);border-top-color:#0366d6;' +
+    'border-radius:50%;animation:ooxml-offscreen-spin 0.8s linear infinite;';
+  spinWrap.appendChild(spinner);
+  stage.append(canvas, spinWrap);
+  root.appendChild(stage);
+  const ctx = canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext;
+  return {
+    canvas,
+    ctx,
+    setBusy: (busy: boolean) => { spinWrap.style.display = busy ? 'flex' : 'none'; },
+    reveal: () => { canvas.style.display = 'block'; },
+  };
 }
 
 function buildPptxTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
