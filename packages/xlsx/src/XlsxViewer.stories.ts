@@ -41,7 +41,7 @@ export function buildViewerUI(
   root.appendChild(status);
 
   const viewerContainer = document.createElement('div');
-  viewerContainer.style.cssText = 'flex:1;min-height:0;';
+  viewerContainer.style.cssText = 'position:relative;flex:1;min-height:0;';
   root.appendChild(viewerContainer);
 
   let sheetNames: string[] = [];
@@ -61,10 +61,19 @@ export function buildViewerUI(
     ...extra,
   });
 
+  // Overlay a spinner during load (notably the worker-mode cold start); the
+  // viewer builds its own DOM inside viewerContainer, so append the spinner
+  // last so it sits on top.
+  const spinner = createCanvasSpinner();
+  viewerContainer.appendChild(spinner);
+
   if (autoLoadUrl) {
     status.textContent = 'Loading…';
     viewer.load(autoLoadUrl)
-      .catch((err) => { status.textContent = `Failed: ${err.message}`; });
+      .then(() => { spinner.remove(); })
+      .catch((err) => { status.textContent = `Failed: ${err.message}`; spinner.remove(); });
+  } else {
+    spinner.remove();
   }
 
   return { root, viewer };
@@ -172,3 +181,33 @@ export const FileUpload: Story = {
   },
 };
 
+
+/**
+ * Absolutely-positioned spinner overlay (CSS-keyframe ring) centered in its
+ * parent — the parent must be positioned. Shown during the load (notably the
+ * worker-mode cold start) and removed once the first sheet renders.
+ */
+function createCanvasSpinner(): HTMLElement {
+  const el = document.createElement('div');
+  el.setAttribute('aria-label', 'Loading');
+  el.style.cssText = [
+    'position:absolute',
+    'top:50%', 'left:50%',
+    'width:40px', 'height:40px',
+    'margin:-20px 0 0 -20px',
+    'border:3px solid rgba(0,0,0,0.12)',
+    'border-top-color:rgba(0,0,0,0.55)',
+    'border-radius:50%',
+    'pointer-events:none',
+    'z-index:5',
+    'animation:ooxmlSpinnerRotate 0.9s linear infinite',
+  ].join(';');
+  const keyframesId = '__ooxml-spinner-keyframes';
+  if (!document.getElementById(keyframesId)) {
+    const style = document.createElement('style');
+    style.id = keyframesId;
+    style.textContent = '@keyframes ooxmlSpinnerRotate { to { transform: rotate(360deg); } }';
+    document.head.appendChild(style);
+  }
+  return el;
+}

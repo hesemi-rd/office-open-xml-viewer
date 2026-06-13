@@ -122,6 +122,9 @@ Notes:
   variants instead.
 - OMML equations require `mode: 'main'`; in worker mode they are skipped (with a
   console warning).
+- Trade-off: worker mode keeps the main thread responsive, but each frame is
+  transferred back as an `ImageBitmap`, so a single render can be marginally
+  slower than `mode: 'main'`. Choose it for non-blocking UI, not raw speed.
 
 ---
 
