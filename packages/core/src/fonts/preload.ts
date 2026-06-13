@@ -52,16 +52,17 @@ function withCeiling<T>(p: Promise<T>): Promise<T | void> {
 }
 
 /** In-flight (or completed) fetch-and-register promise per CSS url, keyed by url.
- *  Storing the PROMISE (not just a flag) lets a concurrent caller with the same
- *  url JOIN the first registration instead of seeing a cache hit, skipping
- *  registration, and resolving while the first fetch is still in flight (which
- *  would defeat the first-paint determinism this function exists to provide).
- *  The stored promise ALWAYS resolves: failure handling (recording the failed
- *  families + deleting the entry so a later call can retry) happens inside the
- *  producing call's own logic, so a cache-hit awaiter never throws. An awaiter
- *  that joined a registration which then fails simply proceeds to step 2 and
- *  finds no faces — no worse than the original failure path. */
-const cssRegistrations = new Map<string, Promise<void>>();
+ *  Resolves with the `FontFace` objects this loader added for that stylesheet
+ *  (empty on fetch failure). Storing the PROMISE (not just a flag) lets a
+ *  concurrent caller with the same url JOIN the first registration instead of
+ *  seeing a cache hit, skipping registration, and resolving while the first
+ *  fetch is still in flight (which would defeat the first-paint determinism this
+ *  function exists to provide). It also hands step 2 the exact FontFace
+ *  references to load — see why that matters there. The stored promise ALWAYS
+ *  resolves: failure handling (recording the failed families + deleting the
+ *  entry so a later call can retry) happens inside the producing call's own
+ *  logic, so a cache-hit awaiter never throws. */
+const cssRegistrations = new Map<string, Promise<FontFace[]>>();
 
 /** Test hook — clears the per-context CSS registration cache. */
 export function _resetCssCacheForTests(): void {
@@ -154,10 +155,11 @@ export async function preloadGoogleFonts(
   if (targetFamilies.size === 0) return;
 
   // 1) Fetch each stylesheet once per JS context and register its FontFace
-  //    entries into the active FontFaceSet. Canvas rendering never puts
-  //    glyphs into the DOM, so registration alone is not enough — see (2).
-  await withCeiling(
-    Promise.allSettled(
+  //    entries into the active FontFaceSet, keeping references to the faces we
+  //    add. Canvas rendering never puts glyphs into the DOM, so registration
+  //    alone is not enough — see (2).
+  const faceGroups = await withCeiling(
+    Promise.all(
       [...cssUrls].map((url) => {
         // Cache hit: AWAIT the in-flight registration so concurrent callers join
         // the first fetch rather than racing past it. The stored promise never
@@ -165,18 +167,23 @@ export async function preloadGoogleFonts(
         // just yields no faces in step 2.
         const inFlight = cssRegistrations.get(url);
         if (inFlight) return inFlight;
-        const registration = (async () => {
+        const registration = (async (): Promise<FontFace[]> => {
           try {
             const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const added: FontFace[] = [];
             for (const f of parseFontFaceRules(await res.text())) {
-              fonts.add(new FontFace(f.family, f.src, f.descriptors));
+              const face = new FontFace(f.family, f.src, f.descriptors);
+              fonts.add(face);
+              added.push(face);
             }
+            return added;
           } catch {
             cssRegistrations.delete(url); // free the slot so a later call retries
             for (const family of urlTargets.get(url) ?? []) {
               failedFamilies.add(family);
             }
+            return [];
           }
         })();
         cssRegistrations.set(url, registration);
@@ -185,16 +192,22 @@ export async function preloadGoogleFonts(
     ),
   );
 
-  // 2) Force-load every matching FontFace and AWAIT them all — no timeout race
+  // 2) Force-load the FontFaces we added and AWAIT them all — no timeout race
   //    that could resolve mid-download. `face.load()` is required because
   //    unicode-range gating would otherwise leave the faces `unloaded` and the
   //    first canvas paint would use a system fallback, shifting once a later
-  //    interaction re-rasterized.
-  const registered = [...fonts].filter((f) => targetFamilies.has(f.family.toLowerCase()));
+  //    interaction re-rasterized. We load the FontFace objects WE created (held
+  //    via cssRegistrations) rather than re-selecting them from the set by
+  //    family name: `FontFace.family` serializes a multi-word name back WITH
+  //    quotes (e.g. `"Nunito Sans"`), so a `family`-string filter silently
+  //    matches nothing and the fonts never load — the bug this avoids.
+  const addedFaces = (Array.isArray(faceGroups) ? faceGroups : []).flat();
   await withCeiling(
-    Promise.allSettled(registered.map((f) => f.load())).then((results) => {
+    Promise.allSettled(addedFaces.map((f) => f.load())).then((results) => {
       results.forEach((res, i) => {
-        if (res.status === 'rejected') failedFamilies.add(registered[i].family.toLowerCase());
+        if (res.status === 'rejected') {
+          failedFamilies.add(addedFaces[i].family.replace(/['"]/g, '').toLowerCase());
+        }
       });
       return fonts.ready;
     }),

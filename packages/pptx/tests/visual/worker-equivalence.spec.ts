@@ -2,17 +2,14 @@ import { test, expect } from '@playwright/test';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 
-// Worker mode must produce (near-)identical pixels to main mode: same
-// renderer, same fonts, different thread. Slides 1 and 3 come out
-// bit-identical (0.000%). Slide 2 was observed at ~0.506% in this
-// configuration — sub-pixel text rasterization differing between the
-// main-thread <canvas> and the worker OffscreenCanvas, confined to the
-// smallest body text; the 0.7% bound leaves headroom for AA/font-hinting
-// variance. Per-slide tolerances grant that slack only to the slide that
-// needs it, so the bit-identical slides keep enough sensitivity that even
-// a single dropped small text element (a few tenths of a percent) fails.
+// Worker mode must produce identical pixels to main mode: same renderer, same
+// fonts (the worker loads the same web fonts into its OffscreenCanvas font set),
+// different thread. All three slides come out bit-identical (0.000%); the tiny
+// uniform tolerance only absorbs rare AA/hinting noise and still fails on a
+// dropped element or a font that didn't load in the worker (which would diverge
+// by whole tenths of a percent — that was the symptom before the preload fix).
 const SLIDES = [0, 1, 2];
-const MAX_DIFF_PCT = [0.2, 0.7, 0.2];
+const MAX_DIFF_PCT = [0.1, 0.1, 0.1];
 
 for (const slide of SLIDES) {
   test(`worker mode matches main mode › demo/sample-1 slide ${slide + 1}`, async ({ page }) => {

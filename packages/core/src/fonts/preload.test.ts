@@ -52,12 +52,16 @@ interface FakeFace {
   load: () => Promise<FakeFace>;
 }
 
-function installFakes(opts: { failLoad?: boolean } = {}) {
+function installFakes(opts: { failLoad?: boolean; quoteFamily?: boolean } = {}) {
   const added: FakeFace[] = [];
   class FakeFontFace implements FakeFace {
     family: string; source: string; loadCalls = 0;
     constructor(family: string, source: string, public descriptors?: object) {
-      this.family = family; this.source = source;
+      // Chrome serializes a multi-word FontFace.family back WITH quotes
+      // (e.g. `"Nunito Sans"`). quoteFamily reproduces that so the loader is
+      // verified NOT to depend on matching the set by family string.
+      this.family = opts.quoteFamily ? `"${family}"` : family;
+      this.source = source;
     }
     load(): Promise<FakeFace> {
       this.loadCalls++;
@@ -88,6 +92,19 @@ describe('preloadGoogleFonts', () => {
     expect((G.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
     expect(added.map((f) => f.family)).toEqual(['Carlito', 'Carlito']);
     expect(added.every((f) => f.loadCalls === 1)).toBe(true);
+  });
+
+  it('force-loads faces even when FontFace.family serializes with quotes (Chrome multi-word)', async () => {
+    // Regression: the loader must load the FontFace objects it created, not
+    // re-select them from the set by family string. Chrome returns a quoted
+    // `.family` for multi-word names, so a family-string filter matches nothing
+    // and the fonts silently never load (worker OffscreenCanvas falls back).
+    const { added } = installFakes({ quoteFamily: true });
+    G.document = { fonts: { faces: added, add: (f: FakeFace) => added.push(f), [Symbol.iterator]() { return added[Symbol.iterator](); }, ready: Promise.resolve() } };
+    delete G.self;
+    await preloadGoogleFonts(['Calibri'], MAP);
+    expect(added.length).toBe(2);
+    expect(added.every((f) => f.loadCalls === 1)).toBe(true); // loaded despite quoted .family
   });
 
   it('uses self.fonts when document is undefined (worker)', async () => {
