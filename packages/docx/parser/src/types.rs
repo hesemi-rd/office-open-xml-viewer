@@ -74,6 +74,11 @@ pub struct DocumentSettings {
     /// cannot end a line (行末禁則). Replaces the default when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_line_breaks_after: Option<String>,
+    /// §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
+    /// justification (ST_Jc math). `None` when absent; the renderer then falls
+    /// back to the spec default `centerGroup`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub math_def_jc: Option<String>,
 }
 
 /// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.
@@ -347,6 +352,12 @@ pub enum DocRun {
         display: bool,
         /// Resolved paragraph font size (pt) so the equation matches surrounding text.
         font_size: f64,
+        /// ECMA-376 §22.1.2.88 `m:oMathPara/m:oMathParaPr/m:jc` — per-instance
+        /// justification of a display equation (ST_Jc math: left|right|center|
+        /// centerGroup). Only set for display math; inline `m:oMath` is `None`.
+        /// Document-default (`m:defJc`) resolution is left to the renderer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        jc: Option<String>,
     },
 }
 

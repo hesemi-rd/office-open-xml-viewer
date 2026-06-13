@@ -52,6 +52,10 @@ export interface DocSettings {
   /** §17.15.1.59 `w:noLineBreaksAfter@w:val` — custom set of characters that
    *  cannot end a line (行末禁則). Replaces the default when present. */
   noLineBreaksAfter?: string;
+  /** §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
+   *  justification (ST_Jc math: left|right|center|centerGroup). `undefined`
+   *  ⇒ the renderer uses the spec default `centerGroup`. */
+  mathDefJc?: string;
 }
 
 export interface DocRevision {
@@ -254,7 +258,7 @@ export type DocRun =
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
   | { type: 'shape' } & ShapeRun
-  | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number };
+  | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number; jc?: string };
 
 export type PathCmd =
   | { cmd: 'moveTo'; x: number; y: number }
