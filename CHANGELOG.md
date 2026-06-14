@@ -4,6 +4,37 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.60.0 — 2026-06-14
+
+Minor: docx floating-object layout (overlap avoidance, below-float line flow)
+plus grouped-drawing and shape-fill fixes.
+
+### docx
+
+- Floating-object layout: reposition overlapping floats per `allowOverlap`
+  (ECMA-376 §20.4.2.3 mandates it for `allowOverlap="false"`; cross-paragraph
+  avoidance for the `"true"` default is Word-parity), flow captions/lines and
+  empty / anchor-only paragraph-mark rows (§17.3.1.29) below full-width floats
+  (§20.4.2.16/.17), and move a paragraph-anchored float that overflows the page
+  bottom to the next page — so side-by-side photos and their captions render
+  like Word.
+- Shape fidelity: honor an explicit `<a:noFill/>` over the shape style's
+  `fillRef` (§20.1.8.44), keep degenerate line connectors (`prstGeom="line"`
+  with a zero extent, §20.1.9.18), and compose nested `<wpg:grpSp>` group
+  transforms recursively for both shapes and grouped images (§20.1.7.5/.6).
+- Emit the paragraph-mark line for anchor-only paragraphs so consecutive
+  image-only paragraphs no longer collapse onto each other (fixes shifted
+  figure captions).
+
+### xlsx
+
+- Keep merged-cell text rendered when the cell's top-left anchor scrolls out of
+  view, by wrapping it in the off-screen-anchor pre-pass.
+
+### docs
+
+- Drop the retired shields.io VS Code Marketplace badges from the README.
+
 ## 0.59.3 — 2026-06-14
 
 Patch: shrink the published bundle ~36% by inlining each parser's WASM only once.
