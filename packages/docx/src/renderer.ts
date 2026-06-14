@@ -1048,6 +1048,7 @@ function estimateParagraphHeight(
       floats: state.floats,
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
+      markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
     if (lines.length === 0) {
@@ -1138,6 +1139,7 @@ function splitParagraphAcrossPages(
     floats: measureState.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
     pageH: measureState.pageH,
+    markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
   if (lines.length === 0) {
@@ -1768,7 +1770,7 @@ function renderParagraph(
     // Required width for an empty mark line: one em of the mark font (HEURISTIC,
     // see above — not a spec-defined threshold). A side gap narrower than this is
     // treated as unable to hold the line start, so the line flows below.
-    const markEm = getDefaultFontSize(para) * scale;
+    const markEm = paragraphMarkEmPx(para, scale);
     const probeH = 10 * scale;
     const win = resolveLineFloatWindow(
       textAreaTopY, markEm, probeH, paraX, paraW, state.floats,
@@ -1806,6 +1808,7 @@ function renderParagraph(
     floats: state.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0),
     pageH: state.pageH,
+    markEmPx: paragraphMarkEmPx(para, scale),
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
@@ -2289,6 +2292,11 @@ interface WrapLayoutCtx {
   lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
+  /** Paragraph-mark em width (px), from paragraphMarkEmPx(para). Shared with
+   *  resolveEmptyMarkTop so an empty / anchor-only mark line that has no
+   *  trailing-break font of its own falls below a float band on the SAME
+   *  threshold the empty-paragraph path uses. */
+  markEmPx: number;
 }
 
 /**
@@ -3094,10 +3102,15 @@ function layoutLines(
     // below the float.
     const q = queue.find((s) => !('lineBreak' in s) && !('dataUrl' in s && s.anchor));
     if (!q) {
-      // Empty/paragraph-mark line: reserve one em of the paragraph font so a
-      // sub-glyph gap is rejected and the mark line drops below the floats.
-      const fs = trailingBreakFontSize ?? (segs[0] && 'fontSize' in segs[0] ? segs[0].fontSize : 10);
-      return fs * scale;
+      // Empty/paragraph-mark line: reserve one em so a sub-glyph gap is rejected
+      // and the mark line drops below the floats. A trailing `<w:br/>` carries
+      // its own (line-local) font size; otherwise use the shared paragraph-mark
+      // em (paragraphMarkEmPx, threaded via wrapCtx) so this fallback agrees with
+      // resolveEmptyMarkTop. Outside a float context the result is unused
+      // (startLine no-ops), so fall back to the legacy estimate.
+      if (trailingBreakFontSize !== null) return trailingBreakFontSize * scale;
+      if (wrapCtx) return wrapCtx.markEmPx;
+      return (segs[0] && 'fontSize' in segs[0] ? segs[0].fontSize : 10) * scale;
     }
     if ('isTab' in q) return q.measuredWidth || 0;
     if ('dataUrl' in q) return q.widthPt * scale;
@@ -4604,6 +4617,16 @@ function getDefaultFontSize(para: DocParagraph): number {
   }
   if (typeof para.defaultFontSize === 'number') return para.defaultFontSize;
   return 10; // pt fallback
+}
+
+/** Width (px) of the paragraph-mark "em" — the smallest horizontal gap a
+ *  float-bordered empty / anchor-only paragraph-mark line is allowed to sit in
+ *  before it flows below the float band. Single source of truth shared by the
+ *  empty-mark float-window probe (resolveEmptyMarkTop) and the layoutLines
+ *  empty-line fallback, so the two paths agree on what "one em of the mark
+ *  font" means. HEURISTIC threshold (see resolveEmptyMarkTop), not spec. */
+function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
+  return getDefaultFontSize(para) * scale;
 }
 
 /** First text/field run's font family — used to size empty paragraphs whose
