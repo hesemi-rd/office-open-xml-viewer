@@ -456,7 +456,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Right-to-left table column order (`w:bidiVisual`, §17.4.1) | ✅ |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
-| | Text boxes / drawing shapes | ✅ |
+| | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)) | ✅ |
 | | WMF / EMF metafile images (legacy vector) | ❌ Not planned |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
 | | Endnotes — reference markers + bodies at document end (`w:endnoteReference`, §17.11) | ✅ |

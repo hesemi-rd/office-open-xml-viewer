@@ -4,6 +4,32 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.60.1 — 2026-06-15
+
+Patch: docx shape rendering now goes through the shared spec-driven preset
+engine, with connector arrow heads and dash patterns.
+
+### docx
+
+- Route `<a:prstGeom>` shapes through core's `renderPresetShape` engine
+  (presets.json, 186 ECMA-376 geometries) instead of the legacy
+  `buildShapePath` switch. This recovers 37 preset families that previously
+  fell back to a plain rectangle — actionButton (×18), callout2/3 and the
+  border/accent callout variants, gear6/9, leftCircularArrow,
+  leftRightCircularArrow, leftRightRibbon, lineInv, nonIsoscelesTrapezoid,
+  swooshArrow, corner/plaque/squareTabs, flowchartOfflineStorage/Or,
+  upDownArrowCallout, chartPlus/Star/X. `arc` keeps its bespoke fallback and
+  `custGeom` still uses `buildCustomPath` (PR #450).
+- Root cause of the rectangle fallback: core `buildShapePath` matched preset
+  names case-sensitively, but docx passed the raw camelCase `presetGeometry`
+  — now matched via `toLowerCase()`.
+- Connector line ends: parse and render `<a:ln>` `headEnd` / `tailEnd` arrow
+  decorations (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48); the
+  shared `drawArrowHead` helper moved from the pptx renderer into
+  `@silurus/ooxml-core`.
+- Export the `LineEnd` type from the docx public entry point (reachable from
+  `DocxDocument` via `ShapeRun.headEnd` / `tailEnd`).
+
 ## 0.60.0 — 2026-06-14
 
 Minor: docx floating-object layout (overlap avoidance, below-float line flow)
