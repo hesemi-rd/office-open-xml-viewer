@@ -343,6 +343,19 @@ export async function renderDocumentToCanvas(
   pageIndex: number,
   opts: RenderDocumentOptions = {},
 ): Promise<void> {
+  // Cancellation guard. renderDocumentToCanvas is async (it awaits image decode
+  // via preloadImages), so rapid page navigation can start a newer render of the
+  // SAME canvas before this one finishes. Both clear the canvas (`canvas.width =
+  // …` + a white fillRect) up front and then draw their page AFTER the await —
+  // so the clears run first and the draws accumulate, ghosting several pages on
+  // top of each other. Stamp a per-canvas token; once a newer render supersedes
+  // us, stop at the next await so only the latest render's output survives.
+  // (Mirrors the pptx renderSlide guard; the worker path renders each page on a
+  // fresh OffscreenCanvas, so the token is a no-op there.)
+  const tokenHost = canvas as unknown as { __docxRenderToken?: number };
+  const myToken = (tokenHost.__docxRenderToken = (tokenHost.__docxRenderToken ?? 0) + 1);
+  const superseded = () => tokenHost.__docxRenderToken !== myToken;
+
   const sec = doc.section;
   const dpr = opts.dpr ?? defaultDpr();
   const cssWidth = opts.width ?? sec.pageWidth * PT_TO_PX;
@@ -370,6 +383,9 @@ export async function renderDocumentToCanvas(
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
   const images = await preloadImages(doc);
+  // A newer render of this canvas started while we awaited image decode — stop
+  // so we don't paint this (now stale) page over the newer one.
+  if (superseded()) return;
 
   // ECMA-376 §17.11: map each note id to its 1-based display number so the
   // reference markers (and the in-note footnoteRef placeholder) show the
