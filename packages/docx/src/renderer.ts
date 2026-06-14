@@ -711,9 +711,12 @@ export function computePages(
   // registerAnchorFloats/WrapLayoutCtx anchor relative to where we actually
   // are on the page. Anchor floats are registered on the measureState as
   // paragraphs are processed and cleared when we flip to a new page, exactly
-  // like the real renderer does.
+  // like the real renderer does. floatParaSeq is reset together with floats so
+  // the paraId採番 matches the renderer, which starts each page at 0 (a fresh
+  // RenderState per page in renderDocumentToCanvas).
   measureState.y = section.marginTop;
   measureState.floats = [];
+  measureState.floatParaSeq = 0;
   // Footnote ids already reserved on the current page (so a paragraph that
   // references the same note twice doesn't double-count, and the renderer draws
   // each note once). Reset on every page flip.
@@ -733,6 +736,7 @@ export function computePages(
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
+      measureState.floatParaSeq = 0;
       startPageBookkeeping();
     }
   };
@@ -796,6 +800,7 @@ export function computePages(
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
+      measureState.floatParaSeq = 0;
       startPageBookkeeping();
       // ECMA-376 §17.18.79 ST_SectionMark: oddPage / evenPage breaks pad
       // with a blank page when the new section would otherwise start on the
@@ -884,9 +889,13 @@ export function computePages(
       const breakForFloat = y > 0 && floatOverflowsHere && floatFitsFresh;
       if ((y > 0 && y + needed > effContentH()) || breakForFloat) {
         newPage();
-        // newPage() cleared measureState.floats; re-register this paragraph's
-        // anchor floats against the new page's top so wrap-around estimates for
-        // this and later paragraphs see them at the correct (post-break) Y.
+        // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
+        // this is a REPLACE of the earlier register at the top of the loop (whose
+        // floats were just discarded), not an augment: this paragraph is now the
+        // first registrant on the fresh page and gets paraId 0 — exactly matching
+        // the renderer, which re-registers it from a fresh per-page state. The
+        // re-anchoring against the new page top keeps wrap-around estimates for
+        // this and later paragraphs at the correct (post-break) Y.
         registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
         // The references move to the new page; nothing was reserved there yet,
         // so the separator region still applies to the first footnote.
