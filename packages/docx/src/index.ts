@@ -41,5 +41,6 @@ export type {
   // Shape geometry / fill sub-types.
   PathCmd,
   GradientStop,
+  LineEnd,
 } from './types';
 export type { DocxTextRunInfo } from './renderer';

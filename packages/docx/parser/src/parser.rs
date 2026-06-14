@@ -1873,7 +1873,7 @@ fn parse_run_inner(
                 // shape's fill/stroke/size and its txbxContent as a ShapeRun so
                 // the existing shape renderer draws the panel + RTL body text.
                 if let Some(shp) = parse_vml_pict(child, theme) {
-                    runs.push(DocRun::Shape(shp));
+                    runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
             _ => {}
@@ -2006,7 +2006,7 @@ fn parse_inline_drawing(
         ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
-            out.push(DocRun::Shape(shp));
+            out.push(DocRun::Shape(Box::new(shp)));
         }
         return out;
     }
@@ -2032,7 +2032,7 @@ fn parse_inline_drawing(
         ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
-            return vec![DocRun::Shape(shp)];
+            return vec![DocRun::Shape(Box::new(shp))];
         }
     }
 
@@ -2847,9 +2847,10 @@ fn parse_wsp_shape(
             })
             .and_then(|fr| resolve_fill_ref(fr, theme)),
     };
-    let (stroke, stroke_width) = sp_pr
+    let ln_node = sp_pr
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "ln")
+        .find(|n| n.is_element() && n.tag_name().name() == "ln");
+    let (stroke, stroke_width) = ln_node
         .map(|ln| {
             let has_no_fill = ln
                 .children()
@@ -2868,6 +2869,32 @@ fn parse_wsp_shape(
             (color, w_emu / 12700.0)
         })
         .unwrap_or((None, 0.0));
+    // ECMA-376 §20.1.8.48 prstDash and §20.1.8.3 head/tail line-end decorations.
+    let stroke_dash = ln_node.and_then(|ln| {
+        ln.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "prstDash")
+            .and_then(|d| d.attribute("val"))
+            .map(|v| v.to_string())
+    });
+    let parse_line_end = |name: &str| -> Option<LineEnd> {
+        let ln = ln_node?;
+        let end = ln
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == name)?;
+        // CT_LineEndProperties: type defaults to "none"; w/len default to "med"
+        // (ECMA-376 §20.1.8.3 — absent w/len means the medium step).
+        let ty = end.attribute("type").unwrap_or("none");
+        if ty == "none" {
+            return None;
+        }
+        Some(LineEnd {
+            r#type: ty.to_string(),
+            w: end.attribute("w").unwrap_or("med").to_string(),
+            len: end.attribute("len").unwrap_or("med").to_string(),
+        })
+    };
+    let head_end = parse_line_end("headEnd");
+    let tail_end = parse_line_end("tailEnd");
 
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
@@ -2889,6 +2916,9 @@ fn parse_wsp_shape(
         fill,
         stroke,
         stroke_width,
+        stroke_dash,
+        head_end,
+        tail_end,
         rotation,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         text_blocks,

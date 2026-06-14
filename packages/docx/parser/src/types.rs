@@ -344,7 +344,10 @@ pub enum DocRun {
         break_type: BreakType,
     },
     Field(FieldRun),
-    Shape(ShapeRun),
+    // Boxed: ShapeRun is by far the largest Run variant; boxing keeps the
+    // enum compact (clippy::large_enum_variant). Serde flattens the Box, so
+    // the JSON tag/shape is unchanged.
+    Shape(Box<ShapeRun>),
     /// An OMML equation (`m:oMath`). `display` = block (`m:oMathPara`).
     #[serde(rename_all = "camelCase")]
     Math {
@@ -359,6 +362,20 @@ pub enum DocRun {
         #[serde(skip_serializing_if = "Option::is_none")]
         jc: Option<String>,
     },
+}
+
+/// A DrawingML line-end decoration (arrow head). ECMA-376 §20.1.8.3
+/// (CT_LineEndProperties): `type` ∈ none/triangle/stealth/diamond/oval/arrow,
+/// `w`/`len` ∈ sm/med/lg. Maps 1:1 to core's `ArrowEnd`.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LineEnd {
+    /// ST_LineEndType (§20.1.10.33).
+    pub r#type: String,
+    /// ST_LineEndWidth (§20.1.10.32). Absent in source ⇒ "med".
+    pub w: String,
+    /// ST_LineEndLength (§20.1.10.31). Absent in source ⇒ "med".
+    pub len: String,
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
@@ -455,6 +472,15 @@ pub struct ShapeRun {
     /// stroke width in pt.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub stroke_width: f64,
+    /// `<a:ln><a:prstDash val>` (ECMA-376 §20.1.8.48). None ⇒ solid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_dash: Option<String>,
+    /// `<a:ln><a:headEnd>` decoration (line start). None ⇒ no head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_end: Option<LineEnd>,
+    /// `<a:ln><a:tailEnd>` decoration (line end). None ⇒ no tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_end: Option<LineEnd>,
     /// rotation in degrees (clockwise).
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub rotation: f64,

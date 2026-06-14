@@ -3,11 +3,17 @@ import type {
   DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
 } from './types';
+import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
   buildCustomPath,
   buildShapePath,
+  renderPresetShape,
+  hasPreset,
   hexToRgba,
   resolveFill,
+  applyStroke,
+  drawArrowHead,
+  getConnectorAnchors,
   mathToMathML,
   recolorSvg,
   PT_TO_PX,
@@ -3510,6 +3516,15 @@ function resolveAnchorY(
   }
 }
 
+/** Convert a parsed docx LineEnd into core's ArrowEnd. Returns undefined when
+ *  absent so the Stroke field stays unset. */
+function lineEndToArrowEnd(
+  end: ShapeRun['headEnd'],
+): ArrowEnd | undefined {
+  if (!end) return undefined;
+  return { type: end.type, w: end.w, len: end.len };
+}
+
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
   const { ctx, scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
@@ -3579,33 +3594,90 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     ctx.rotate((rot * Math.PI) / 180);
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
-  ctx.beginPath();
-  if (shape.presetGeometry) {
-    // OOXML <a:prstGeom> — delegate to core's buildShapePath which has the
-    // full preset shape catalog (rect / ellipse / triangles / arrows /
-    // callouts / ribbons / flowchart / …) shared with the pptx renderer.
-    const adj = shape.adjValues ?? [];
-    buildShapePath(
+  // Dispatch to the shared spec-driven preset engine when the geometry is a
+  // known <a:prstGeom> preset, mirroring the pptx renderer. `arc` keeps its
+  // bespoke buildShapePath fallback (fill semantics differ); custGeom (no
+  // presetGeometry, subpaths only) likewise falls through to buildCustomPath.
+  const geom = shape.presetGeometry?.toLowerCase() ?? '';
+  const usePresetEngine =
+    !!shape.presetGeometry && geom !== 'arc' && hasPreset(geom);
+
+  const adj = shape.adjValues ?? [];
+  const fillStyle = resolveFill(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);
+
+  // Build a core Stroke so dash / line-end handling matches the pptx path.
+  // `width` is in pt and `scale` is px/pt, so `width * scale` is px — the
+  // same convention core's applyStroke / drawArrowHead expect.
+  const coreStroke: Stroke | null =
+    shape.stroke && (shape.strokeWidth ?? 0) > 0
+      ? {
+          color: shape.stroke,
+          width: shape.strokeWidth ?? 0,
+          dashStyle: shape.strokeDash ?? undefined,
+          headEnd: lineEndToArrowEnd(shape.headEnd),
+          tailEnd: lineEndToArrowEnd(shape.tailEnd),
+        }
+      : null;
+  const strokeCb = coreStroke
+    ? () => {
+        applyStroke(ctx as CanvasRenderingContext2D, coreStroke, scale);
+        ctx.stroke();
+      }
+    : null;
+
+  if (usePresetEngine) {
+    renderPresetShape(
       ctx as CanvasRenderingContext2D,
-      shape.presetGeometry,
-      x, y, w, h,
-      adj[0] ?? null,
-      adj[1] ?? null,
-      adj[2] ?? null,
-      adj[3] ?? null,
+      geom, x, y, w, h,
+      [
+        adj[0] ?? null, adj[1] ?? null, adj[2] ?? null, adj[3] ?? null,
+        adj[4] ?? null, adj[5] ?? null, adj[6] ?? null, adj[7] ?? null,
+      ],
+      fillStyle, strokeCb,
+      // docx shapes carry no shadow state, so the clear-shadow hook is a no-op.
+      () => {},
     );
   } else {
-    buildCustomPath(ctx as CanvasRenderingContext2D, shape.subpaths, x, y, w, h);
+    ctx.beginPath();
+    if (shape.presetGeometry) {
+      buildShapePath(
+        ctx as CanvasRenderingContext2D,
+        shape.presetGeometry,
+        x, y, w, h,
+        adj[0] ?? null,
+        adj[1] ?? null,
+        adj[2] ?? null,
+        adj[3] ?? null,
+      );
+    } else {
+      buildCustomPath(ctx as CanvasRenderingContext2D, shape.subpaths, x, y, w, h);
+    }
+    if (fillStyle) {
+      ctx.fillStyle = fillStyle;
+      ctx.fill();
+    }
+    if (strokeCb) strokeCb();
   }
-  const fillStyle = resolveFill(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);
-  if (fillStyle) {
-    ctx.fillStyle = fillStyle;
-    ctx.fill();
-  }
-  if (shape.stroke && (shape.strokeWidth ?? 0) > 0) {
-    ctx.strokeStyle = hexToRgba(shape.stroke);
-    ctx.lineWidth = Math.max(0.5, (shape.strokeWidth ?? 0) * scale);
-    ctx.stroke();
+
+  // Line-end decorations (ECMA-376 §20.1.8.3). Only connector/line presets
+  // expose head/tail tips with a well-defined tangent; for those we place the
+  // arrow heads at the path endpoints with the path's outgoing direction. The
+  // preset engine does not draw connector arrow heads, so this runs whether or
+  // not the body went through it.
+  if (coreStroke && (coreStroke.headEnd || coreStroke.tailEnd) && shape.presetGeometry) {
+    const anchors = getConnectorAnchors(
+      shape.presetGeometry, x, y, w, h,
+      shape.adjValues ?? [],
+    );
+    if (anchors) {
+      ctx.setLineDash([]);
+      if (coreStroke.tailEnd) {
+        drawArrowHead(ctx as CanvasRenderingContext2D, anchors.end.x, anchors.end.y, anchors.end.angle, coreStroke.tailEnd, coreStroke, scale);
+      }
+      if (coreStroke.headEnd) {
+        drawArrowHead(ctx as CanvasRenderingContext2D, anchors.start.x, anchors.start.y, anchors.start.angle, coreStroke.headEnd, coreStroke, scale);
+      }
+    }
   }
   ctx.restore();
 

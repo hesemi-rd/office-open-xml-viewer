@@ -37,6 +37,7 @@ import {
   hasPreset,
   buildPresetGeometryPath,
   getConnectorAnchors,
+  drawArrowHead,
   computeScene3dQuad,
   isScene3dNonIdentity,
   drawProjected,
@@ -3225,68 +3226,6 @@ function drawCompoundLine(
     ctx.moveTo(start.x + ox, start.y + oy);
     ctx.lineTo(end.x + ox, end.y + oy);
     ctx.stroke();
-  }
-  ctx.restore();
-}
-
-/** Draw an arrowhead at `tip` pointing in `angle` radians (0 = right). */
-function drawArrowHead(
-  ctx: CanvasRenderingContext2D,
-  tipX: number,
-  tipY: number,
-  angle: number,
-  arrowEnd: { type: string; w: string; len: string },
-  stroke: Stroke,
-  scale: number,
-): void {
-  if (arrowEnd.type === 'none') return;
-  const lw = Math.max(0.5, emuToPx(stroke.width, scale));
-  // Arrowhead size is implementation-defined: ECMA-376 §20.1.10.32/.33 only name
-  // the w/len steps (sm/med/lg) as "relative", not exact ratios. These multiples
-  // of line width are calibrated to PowerPoint's rendering (verified against the
-  // sample-9 SmartArt timeline PDF, a lg/lg triangle on a 1pt line ≈ 8× wide).
-  const wMul = arrowEnd.w   === 'sm' ? 4 : arrowEnd.w   === 'lg' ? 8 : 6;
-  const lMul = arrowEnd.len === 'sm' ? 4 : arrowEnd.len === 'lg' ? 8 : 6;
-  const halfW = lw * wMul / 2;
-  const len   = lw * lMul;
-  const color = hexToRgba(stroke.color);
-
-  ctx.save();
-  ctx.translate(tipX, tipY);
-  ctx.rotate(angle);
-  ctx.fillStyle   = color;
-  ctx.strokeStyle = color;
-  ctx.lineWidth   = lw;
-  ctx.setLineDash([]);
-  ctx.beginPath();
-  switch (arrowEnd.type) {
-    case 'triangle':
-    case 'stealth':
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-len, -halfW);
-      ctx.lineTo(-len,  halfW);
-      ctx.closePath();
-      ctx.fill();
-      break;
-    case 'arrow':
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-len, -halfW);
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-len,  halfW);
-      ctx.stroke();
-      break;
-    case 'diamond':
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-len / 2, -halfW);
-      ctx.lineTo(-len, 0);
-      ctx.lineTo(-len / 2,  halfW);
-      ctx.closePath();
-      ctx.fill();
-      break;
-    case 'oval':
-      ctx.ellipse(-len / 2, 0, len / 2, halfW, 0, 0, Math.PI * 2);
-      ctx.fill();
-      break;
   }
   ctx.restore();
 }

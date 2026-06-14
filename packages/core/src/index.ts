@@ -56,6 +56,7 @@ export { autoResize, type AutoResizeOptions } from './autoResize';
 export { buildCustomPath } from './shape/custGeom';
 export { hexToRgba, resolveFill, applyStroke } from './shape/paint';
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
+export { drawArrowHead } from './shape/arrow';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /

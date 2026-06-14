@@ -322,6 +322,12 @@ export interface ShapeRun {
   fill: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
+  /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
+  strokeDash?: string | null;
+  /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
+  headEnd?: LineEnd | null;
+  /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
+  tailEnd?: LineEnd | null;
   rotation?: number;
   wrapMode?: string | null;
   /** Text rendered INSIDE the shape's bounding box (`<wps:txbx><w:txbxContent>`). */
@@ -332,6 +338,17 @@ export interface ShapeRun {
   textInsetT?: number;  // pt
   textInsetR?: number;  // pt
   textInsetB?: number;  // pt
+}
+
+/** DrawingML line-end (arrow head). ECMA-376 §20.1.8.3 CT_LineEndProperties.
+ *  Maps 1:1 to core's `ArrowEnd`. */
+export interface LineEnd {
+  /** "triangle" | "stealth" | "diamond" | "oval" | "arrow" (never "none"). */
+  type: string;
+  /** Width step: "sm" | "med" | "lg". */
+  w: string;
+  /** Length step: "sm" | "med" | "lg". */
+  len: string;
 }
 
 export interface ShapeText {
