@@ -110,7 +110,13 @@ export function buildShapePath(
   const cx = x + w / 2;
   const cy = y + h / 2;
 
-  switch (geom) {
+  // OOXML preset names are camelCase (e.g. `straightConnector1`, `roundRect`,
+  // `rtTriangle`), but every `case` below is lowercase. Normalize here so the
+  // catalog is matched case-insensitively — otherwise camelCase presets fall
+  // through to the `default` plain-rect branch. (The pptx renderer already
+  // lower-cases at its call site; this makes the function correct for every
+  // caller, e.g. the docx renderer which passes the raw `prst` value.)
+  switch (geom.toLowerCase()) {
     // ── Ellipses ──────────────────────────────────────────────────────────────
     case 'ellipse':
     case 'oval':
