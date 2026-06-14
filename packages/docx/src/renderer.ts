@@ -719,6 +719,34 @@ export function computePages(
     }
   };
 
+  // A paragraph-anchored floating object (wp:anchor with positionV
+  // relativeFrom="paragraph"/"line", ECMA-376 §20.4.3.4) is positioned by its
+  // anchor paragraph's top. Word keeps such a float on its page: if the float
+  // would extend below the bottom margin, the layout engine relocates the
+  // anchor paragraph to the next page so the float fits, rather than letting the
+  // object spill past the page bottom. Return the largest distance from the
+  // paragraph's content-top down to the bottom edge of any paragraph-anchored
+  // float it carries, so the paginator can apply the same displacement. Returns
+  // 0 when the paragraph has no paragraph-anchored floats (page-absolute floats
+  // are pinned regardless of which page the anchor lands on, so they never
+  // trigger a break). Measured at scale 1 (pt), matching the paginator's `y`.
+  const anchoredFloatBottomOffset = (para: DocParagraph, spaceBeforePt: number): number => {
+    let maxBottom = 0;
+    for (const run of para.runs) {
+      if (run.type !== 'image') continue;
+      const img = run as unknown as ImageRun;
+      if (!img.anchor || !img.anchorYFromPara) continue;
+      // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
+      // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
+      // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
+      // each so the estimate matches the draw position exactly.
+      const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
+      const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
+      if (bottom > maxBottom) maxBottom = bottom;
+    }
+    return maxBottom;
+  };
+
   // ECMA-376 §17.3.1.15: keepNext means this paragraph must stay on the same
   // page as the next paragraph. The simplest interpretation, and what Word
   // appears to do in practice, is "treat the keepNext chain as a single unit
@@ -826,8 +854,22 @@ export function computePages(
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
       const fitHeight = h - para.spaceAfter;
       const needed = fitHeight + needNext + addReservePt;
-      if (y > 0 && y + needed > effContentH()) {
+      // A paragraph-anchored float must fit below the paragraph's top on the
+      // same page. If it overflows the bottom margin here but would fit when the
+      // paragraph starts a fresh page, displace the paragraph (Word's float
+      // keep-on-page behavior). When the float is taller than the page content
+      // area it can never fit — leave it on this page and allow the overflow
+      // (no break would help, and breaking unconditionally would loop forever).
+      const floatBottomOff = anchoredFloatBottomOffset(para, effectiveBefore);
+      const floatOverflowsHere = floatBottomOff > 0 && y + floatBottomOff > effContentH();
+      const floatFitsFresh = floatBottomOff > 0 && floatBottomOff <= effContentH();
+      const breakForFloat = y > 0 && floatOverflowsHere && floatFitsFresh;
+      if ((y > 0 && y + needed > effContentH()) || breakForFloat) {
         newPage();
+        // newPage() cleared measureState.floats; re-register this paragraph's
+        // anchor floats against the new page's top so wrap-around estimates for
+        // this and later paragraphs see them at the correct (post-break) Y.
+        registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
         // The references move to the new page; nothing was reserved there yet,
         // so the separator region still applies to the first footnote.
         if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
