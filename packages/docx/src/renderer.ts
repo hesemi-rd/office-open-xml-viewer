@@ -1697,6 +1697,69 @@ function mathJcToEdge(jc: string): AlignEdge {
   }
 }
 
+/**
+ * Render a paragraph that produces NO inline lines — either literally empty
+ * (no segments) or anchor-only (its only content is wrap floats, drawn
+ * separately). Per ECMA-376 §17.3.1.29 such a paragraph still emits ONE
+ * paragraph-mark line box; this advances `state.y` past it, draws its shading /
+ * borders, and lays its wrapNone anchor images at the (possibly float-flowed)
+ * paragraph base.
+ *
+ * Shared by renderParagraph's `segments.length === 0` and `lines.length === 0`
+ * branches (previously duplicated verbatim). The anchor-only branch's
+ * slice-boundary guards (spaceAfter only on the final slice, anchor images only
+ * on the first) are parameterized via `markCtx.totalLines` / `lineSlice`; for
+ * the literally-empty branch `lineSlice` is always undefined (empty paragraphs
+ * are never sliced), so those guards reduce to the unconditional behavior it had.
+ */
+function renderEmptyMarkParagraph(
+  para: DocParagraph,
+  state: RenderState,
+  markCtx: {
+    grid: DocGridCtx;
+    paraHasRuby: boolean;
+    contentX: number;
+    indLeft: number;
+    paraW: number;
+    textAreaTopY: number;
+    paragraphStartY: number;
+    /** Flowed top of the mark line (output of resolveEmptyMarkTop). */
+    markTop: number;
+    /** Total laid-out line count (0 here); used by the slice guards. */
+    totalLines: number;
+    lineSlice?: { start: number; end: number };
+  },
+): void {
+  const { ctx, scale, dryRun } = state;
+  const { grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY,
+    paragraphStartY, markTop, totalLines, lineSlice } = markCtx;
+  // Displacement applied by the float-flow (0 when the mark fits where it is).
+  const flowShift = Math.max(0, markTop - textAreaTopY);
+  if (markTop > state.y) state.y = markTop;
+  const markRectTop = state.y;
+  const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
+  if (para.shading && !dryRun) {
+    ctx.fillStyle = `#${para.shading}`;
+    ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
+  }
+  state.y += emptyH;
+  if (para.borders && !dryRun) {
+    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
+  }
+  // Only the slice covering the FINAL line emits spaceAfter. With no inline
+  // lines there is a single slice, so this is the whole paragraph.
+  const isFinalSlice = !lineSlice || lineSlice.end >= totalLines;
+  if (isFinalSlice) state.y += para.spaceAfter * scale;
+  // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
+  // the mark line flowed below a float band the paragraph (and its wrapNone
+  // image) drops by the same amount, so shift the anchor base by flowShift while
+  // keeping the un-flowed base (paragraphStartY) otherwise unchanged. Only the
+  // first slice draws them (a continuation slice already did on its page).
+  if (!lineSlice || lineSlice.start === 0) {
+    renderAnchorImages(para, state, paragraphStartY + flowShift);
+  }
+}
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -1779,26 +1842,12 @@ function renderParagraph(
   };
 
   if (segments.length === 0) {
-    const markTop = resolveEmptyMarkTop();
-    // Displacement applied by the float-flow (0 when the mark fits where it is).
-    const flowShift = Math.max(0, markTop - textAreaTopY);
-    if (markTop > state.y) state.y = markTop;
-    const markRectTop = state.y;
-    const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
-    if (para.shading && !dryRun) {
-      ctx.fillStyle = `#${para.shading}`;
-      ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
-    }
-    state.y += emptyH;
-    if (para.borders && !dryRun) {
-      drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
-    }
-    state.y += para.spaceAfter * scale;
-    // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
-    // the mark line flowed below a float band the paragraph (and its wrapNone
-    // image) drops by the same amount, so shift the anchor base by flowShift
-    // while keeping the un-flowed base (paragraphStartY) otherwise unchanged.
-    renderAnchorImages(para, state, paragraphStartY + flowShift);
+    // Literally-empty paragraph: one paragraph-mark line box, no inline content
+    // and (by construction in the paginator) never sliced.
+    renderEmptyMarkParagraph(para, state, {
+      grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
+      markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined,
+    });
     return;
   }
 
@@ -1823,27 +1872,14 @@ function renderParagraph(
   // renderAnchorImages on their own absolute-position path, so this only adds the
   // in-flow paragraph-mark advance (no double counting, no double draw).
   if (lines.length === 0) {
-    // Same float-flow as the literally-empty path: an anchor-only paragraph's
-    // mark line (and any wrapNone image it anchors) flows below a float band it
-    // cannot sit beside.
-    const markTop = resolveEmptyMarkTop();
-    const flowShift = Math.max(0, markTop - textAreaTopY);
-    if (markTop > state.y) state.y = markTop;
-    const markRectTop = state.y;
-    const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
-    if (para.shading && !dryRun) {
-      ctx.fillStyle = `#${para.shading}`;
-      ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
-    }
-    state.y += emptyH;
-    if (para.borders && !dryRun) {
-      drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
-    }
-    const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
-    if (isFinalSlice) state.y += para.spaceAfter * scale;
-    if (!lineSlice || lineSlice.start === 0) {
-      renderAnchorImages(para, state, paragraphStartY + flowShift);
-    }
+    // Anchor-only paragraph: same content-less mark line as the literally-empty
+    // path (the anchor floats themselves are drawn separately). Slice guards
+    // honor a paginator-split slice (spaceAfter on the final slice, anchor
+    // images on the first).
+    renderEmptyMarkParagraph(para, state, {
+      grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
+      markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice,
+    });
     return;
   }
 
