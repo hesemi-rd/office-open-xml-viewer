@@ -3491,19 +3491,16 @@ function renderAnchorImages(
     if (isWrapFloat(img.wrapMode)) continue;  // drawn as a float
     const bmp = state.images.get(imageKey(img.dataUrl, img.colorReplaceFrom));
     if (!bmp) continue;
-    const w = img.widthPt * state.scale;
-    const h = img.heightPt * state.scale;
 
-    // Resolve X: margin-relative offsets need section.marginLeft added
-    const pageX = img.anchorXFromMargin
-      ? (state.marginLeft + (img.anchorXPt ?? 0)) * state.scale
-      : (img.anchorXPt ?? 0) * state.scale;
-
-    // Resolve Y: paragraph-relative offsets use the paragraph's top Y in canvas px
-    const pageY = img.anchorYFromPara
-      ? paragraphTopPx + (img.anchorYPt ?? 0) * state.scale
-      : (img.anchorYPt ?? 0) * state.scale;
-
+    // wrapNone images anchor against the paragraph's pre-spaceBefore top
+    // (paragraphTopPx). Shared box resolution with the float path. By design the
+    // box-resolution is symmetric but the overlap handling is NOT: wrap floats
+    // (registerAnchorFloats) build an exclusion rect and run resolveFloatOverlap,
+    // whereas wrapNone images carry no exclusion rect — they are positioned
+    // directly in the paragraph flow (ECMA-376 wrapNone, §20.4.2.x: the object
+    // does not displace text and is not displaced by other floats), so dist* is
+    // unused here.
+    const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
     state.ctx.drawImage(bmp, pageX, pageY, w, h);
   }
 }
@@ -3898,6 +3895,41 @@ function resolveFloatOverlap(
   return { x, y };
 }
 
+/**
+ * Resolve an anchor image's page-space box origin and dist* padding (px), shared
+ * by registerAnchorFloats (wrap floats) and renderAnchorImages (wrapNone images).
+ *
+ * X: margin-relative offsets add section.marginLeft (ECMA-376 §20.4.3.4
+ * relativeFrom="margin"); otherwise anchorXPt is already page-absolute.
+ * Y: paragraph-relative offsets add `paraBaseY`; otherwise page-absolute. The
+ * caller supplies `paraBaseY` because the two consumers anchor against different
+ * paragraph references — wrap floats use the post-spaceBefore textAreaTop, while
+ * wrapNone images use the pre-spaceBefore paragraph top (see the
+ * anchoredFloatBottomOffset note in the paginator). This is the box origin BEFORE
+ * any overlap displacement; resolveFloatOverlap runs on top of it for floats.
+ */
+function resolveAnchorBox(
+  img: ImageRun,
+  state: RenderState,
+  paraBaseY: number,
+): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } {
+  const scale = state.scale;
+  return {
+    x: img.anchorXFromMargin
+      ? (state.marginLeft + (img.anchorXPt ?? 0)) * scale
+      : (img.anchorXPt ?? 0) * scale,
+    y: img.anchorYFromPara
+      ? paraBaseY + (img.anchorYPt ?? 0) * scale
+      : (img.anchorYPt ?? 0) * scale,
+    w: img.widthPt * scale,
+    h: img.heightPt * scale,
+    dl: (img.distLeft   ?? 0) * scale,
+    dr: (img.distRight  ?? 0) * scale,
+    dt: (img.distTop    ?? 0) * scale,
+    db: (img.distBottom ?? 0) * scale,
+  };
+}
+
 /** Register floats from a paragraph's anchor images and draw the image bitmap immediately. */
 function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
   // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
@@ -3913,19 +3945,11 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
     const mode: 'square' | 'topAndBottom' =
       img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
-    const scale = state.scale;
-    const w = img.widthPt * scale;
-    const h = img.heightPt * scale;
-    let pageX = img.anchorXFromMargin
-      ? (state.marginLeft + (img.anchorXPt ?? 0)) * scale
-      : (img.anchorXPt ?? 0) * scale;
-    let pageY = img.anchorYFromPara
-      ? paragraphAnchorY + (img.anchorYPt ?? 0) * scale
-      : (img.anchorYPt ?? 0) * scale;
-    const dt = (img.distTop    ?? 0) * scale;
-    const db = (img.distBottom ?? 0) * scale;
-    const dl = (img.distLeft   ?? 0) * scale;
-    const dr = (img.distRight  ?? 0) * scale;
+    // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
+    const box = resolveAnchorBox(img, state, paragraphAnchorY);
+    const { w, h, dl, dr, dt, db } = box;
+    let pageX = box.x;
+    let pageY = box.y;
 
     // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
     // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
