@@ -3554,6 +3554,12 @@ function adaptChartData(chart: ChartData): ChartModel {
     valMax: chart.valAxisMax ?? null,
     catAxisTitle: chart.catAxisTitle ?? null,
     valAxisTitle: chart.valAxisTitle ?? null,
+    catAxisTitleFontSizeHpt: chart.catAxisTitleSize ?? null,
+    catAxisTitleFontBold: chart.catAxisTitleBold ?? null,
+    catAxisTitleFontColor: chart.catAxisTitleColor ?? null,
+    valAxisTitleFontSizeHpt: chart.valAxisTitleSize ?? null,
+    valAxisTitleFontBold: chart.valAxisTitleBold ?? null,
+    valAxisTitleFontColor: chart.valAxisTitleColor ?? null,
     catAxisHidden: chart.catAxisHidden ?? false,
     valAxisHidden: chart.valAxisHidden ?? false,
     catAxisLineHidden: chart.catAxisLineHidden ?? false,
@@ -3596,6 +3602,8 @@ function adaptChartData(chart: ChartData): ChartModel {
     titleManualLayout: chart.titleManualLayout ?? null,
     plotAreaManualLayout: chart.plotAreaManualLayout ?? null,
     radarStyle: chart.radarStyle ?? null,
+    chartBorderColor: chart.chartBorderColor ?? null,
+    chartBorderWidthEmu: chart.chartBorderWidthEmu ?? null,
   };
 }
 

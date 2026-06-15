@@ -367,6 +367,19 @@ export interface ChartData {
   catAxisTitle?: string | null;
   /** Value axis title (c:valAx/c:title). */
   valAxisTitle?: string | null;
+  /** `<c:catAx><c:title>` run-prop font size (hpt), from the parser's
+   *  catAxisTitleSize. Distinct from `catAxisFontSizeHpt` (tick labels). */
+  catAxisTitleSize?: number | null;
+  /** `<c:catAx><c:title>` run-prop bold flag. */
+  catAxisTitleBold?: boolean | null;
+  /** `<c:catAx><c:title>` run-prop color (hex without '#'). */
+  catAxisTitleColor?: string | null;
+  /** `<c:valAx><c:title>` run-prop font size (hpt). */
+  valAxisTitleSize?: number | null;
+  /** `<c:valAx><c:title>` run-prop bold flag. */
+  valAxisTitleBold?: boolean | null;
+  /** `<c:valAx><c:title>` run-prop color (hex without '#'). */
+  valAxisTitleColor?: string | null;
   /** True when <c:legend> is present. Absence means the legend is hidden. */
   showLegend?: boolean;
   /** `<c:legendPos val>` — "r"|"l"|"t"|"b"|"tr". null/undefined = default ("r"). */
@@ -439,6 +452,12 @@ export interface ChartData {
   catAxisLineWidthEmu?: number;
   valAxisLineColor?: string;
   valAxisLineWidthEmu?: number;
+  /** Explicit chart border color (hex without '#') from
+   *  `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
+   *  XML explicitly declares a paintable line (no default border). */
+  chartBorderColor?: string | null;
+  /** `<c:chartSpace><c:spPr><a:ln@w>` border width in EMU. */
+  chartBorderWidthEmu?: number | null;
   /** `<c:catAx | valAx><c:majorTickMark val>` / `<c:minorTickMark val>` —
    *  one of `none`/`out`/`in`/`cross` (ECMA-376 §21.2.2.49). */
   catAxisMajorTickMark?: string;

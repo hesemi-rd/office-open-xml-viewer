@@ -274,6 +274,27 @@ export interface ChartModel {
   catAxisFontBold?: boolean | null;
   /** `<c:valAx><c:txPr>...defRPr@b>` Y-axis tick label bold flag. */
   valAxisFontBold?: boolean | null;
+  /** `<c:catAx><c:title>` run-prop font size (hpt). Distinct from
+   *  `catAxisFontSizeHpt` (tick labels). null = renderer default. */
+  catAxisTitleFontSizeHpt?: number | null;
+  /** `<c:catAx><c:title>` run-prop bold flag. null = not bold. */
+  catAxisTitleFontBold?: boolean | null;
+  /** `<c:catAx><c:title>` run-prop color (hex without '#'). null = default. */
+  catAxisTitleFontColor?: string | null;
+  /** `<c:valAx><c:title>` run-prop font size (hpt). null = renderer default. */
+  valAxisTitleFontSizeHpt?: number | null;
+  /** `<c:valAx><c:title>` run-prop bold flag. null = not bold. */
+  valAxisTitleFontBold?: boolean | null;
+  /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
+  valAxisTitleFontColor?: string | null;
+  /** Explicit chart border color (hex without '#') from
+   *  `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
+   *  XML explicitly declares a paintable line; null otherwise (no default
+   *  border is drawn). */
+  chartBorderColor?: string | null;
+  /** `<c:chartSpace><c:spPr><a:ln@w>` border width in EMU. null = 1px hairline
+   *  when a color is present. */
+  chartBorderWidthEmu?: number | null;
   /**
    * `<c:catAx><c:crosses val>` (`autoZero` | `min` | `max`). Drives the Y
    * coordinate where the X axis is drawn. Default `autoZero` puts the X
