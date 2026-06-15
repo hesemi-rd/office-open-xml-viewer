@@ -718,6 +718,40 @@ pub struct ChartData {
     /// Default per ECMA-376 §21.2.3.10 is "standard" — no area fill.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub radar_style: Option<String>,
+    /// `<c:catAx><c:title>` run-property font size in hundredths of a point
+    /// (first `a:defRPr@sz`/`a:rPr@sz` inside the axis title). None = not set;
+    /// renderer falls back to its proportional default. Distinct from
+    /// `cat_axis_font_size_hpt`, which is the tick-label size (`c:txPr`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_size: Option<i32>,
+    /// `<c:catAx><c:title>` run-property bold flag. None = inherit (not bold).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_bold: Option<bool>,
+    /// `<c:catAx><c:title>` run-property color (hex without `#`) from the first
+    /// `a:solidFill/a:srgbClr@val`. schemeClr is not resolved (theme not wired
+    /// to charts). None = renderer default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_color: Option<String>,
+    /// `<c:valAx><c:title>` run-property font size in hundredths of a point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_size: Option<i32>,
+    /// `<c:valAx><c:title>` run-property bold flag. None = inherit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_bold: Option<bool>,
+    /// `<c:valAx><c:title>` run-property color (hex without `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_color: Option<String>,
+    /// `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr@val>` — explicit
+    /// chart border color (hex without `#`). Only populated when the XML
+    /// explicitly declares a paintable line; `<a:noFill/>` or an absent `<a:ln>`
+    /// leaves this None (no default Excel-style border). schemeClr is not
+    /// resolved (theme not wired to charts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_border_color: Option<String>,
+    /// `<c:chartSpace><c:spPr><a:ln@w>` — explicit chart border width in EMU.
+    /// None = unset (renderer uses a 1px hairline when a color is present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_border_width_emu: Option<i64>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
