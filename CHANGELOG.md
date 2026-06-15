@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.60.2 — 2026-06-15
+
+Patch: docx connector arrow-head correctness.
+
+### docx
+
+- Honor shape `<a:xfrm flipH/flipV>` (§20.1.7.6). docx previously dropped flip
+  entirely, so a near-horizontal `straightConnector1` kept the right line but
+  swapped its start/end — drawing the arrow head on the wrong tip. Flip is now
+  parsed and applied as a canvas transform composed with rotation, mirroring
+  the pptx renderer (sample-9 figure 1 leader arrows now match Word).
+- Gate connector arrow-head drawing on line/connector geometry instead of any
+  preset. `getConnectorAnchors` resolves `path[0]` of any preset, so a filled
+  shape carrying an `<a:ln>` head/tail end could otherwise get spurious arrow
+  heads at its first subpath's endpoints.
+
 ## 0.60.1 — 2026-06-15
 
 Patch: docx shape rendering now goes through the shared spec-driven preset
