@@ -504,6 +504,19 @@ pub(crate) fn parse_chart_xml(
                     .unwrap_or("");
                 let is_x_axis = matches!(ax_pos, "b" | "t");
                 if is_x_axis {
+                    // A scatter chart's bottom `<c:valAx>` is the horizontal axis,
+                    // so its title is the cat-axis (X) title. Without this the
+                    // X-axis title of every scatter chart was dropped (the catAx
+                    // branch above never runs for scatter — there is no catAx).
+                    if cat_axis_title.is_none() {
+                        cat_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                        // Run props only when the axis actually carries a title.
+                        if cat_axis_title.is_some() {
+                            cat_axis_title_size = extract_chart_title_size(&child, c_ns, a_ns);
+                            cat_axis_title_bold = extract_chart_title_bold(&child, c_ns, a_ns);
+                            cat_axis_title_color = extract_chart_title_color(&child, c_ns, a_ns);
+                        }
+                    }
                     if cat_axis_format_code.is_none() {
                         cat_axis_format_code = extract_axis_format_code(&child, c_ns);
                     }
@@ -2434,5 +2447,72 @@ mod axis_title_and_border_tests {
         let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
         assert!(chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color, None);
+    }
+
+    /// A scatter chartSpace: two `<c:valAx>` (no `<c:catAx>`); the bottom one
+    /// (`axPos="b"`) is the horizontal/X axis. `x_title`/`y_title` are full
+    /// `<c:title>…` fragments (or empty).
+    fn scatter_chart_xml(x_title: &str, y_title: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea>
+      <c:layout/>
+      <c:scatterChart>
+        <c:scatterStyle val="lineMarker"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:xVal><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>1</c:v></c:pt>
+            <c:pt idx="1"><c:v>2</c:v></c:pt>
+          </c:numCache></c:numRef></c:xVal>
+          <c:yVal><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>3</c:v></c:pt>
+            <c:pt idx="1"><c:v>5</c:v></c:pt>
+          </c:numCache></c:numRef></c:yVal>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:scatterChart>
+      <c:valAx>
+        <c:axId val="1"/>
+        <c:axPos val="b"/>
+        {x}
+      </c:valAx>
+      <c:valAx>
+        <c:axId val="2"/>
+        <c:axPos val="l"/>
+        {y}
+      </c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+            x = x_title,
+            y = y_title,
+        )
+    }
+
+    /// Regression (sample-30) — a scatter chart's bottom (`axPos="b"`) `<c:valAx>`
+    /// title must map to the cat-axis (horizontal) title with its run props.
+    /// Before the fix the `is_x_axis` branch never called `extract_chart_title`,
+    /// so the X-axis title of every scatter chart silently vanished while the
+    /// Y-axis title rendered fine.
+    #[test]
+    fn scatter_bottom_valax_title_maps_to_cat_axis() {
+        let x_title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1800" b="1"/><a:t>Acid/Bromate</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let y_title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1800"/><a:t>Period</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = scatter_chart_xml(x_title, y_title);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("scatter parses");
+        // Bottom (X) valAx → cat-axis title, bold 18pt.
+        assert_eq!(chart.cat_axis_title.as_deref(), Some("Acid/Bromate"));
+        assert_eq!(chart.cat_axis_title_size, Some(1800));
+        assert_eq!(chart.cat_axis_title_bold, Some(true));
+        // Left (Y) valAx → val-axis title, 18pt not bold.
+        assert_eq!(chart.val_axis_title.as_deref(), Some("Period"));
+        assert_eq!(chart.val_axis_title_size, Some(1800));
+        assert_eq!(chart.val_axis_title_bold, None);
     }
 }
