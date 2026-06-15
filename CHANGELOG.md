@@ -4,6 +4,32 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.61.0 — 2026-06-15
+
+Minor: docx pagination fidelity — floating-object displacement, line-level page
+breaks with widow/orphan control, and document-grid line heights — plus shared
+arc shape rendering.
+
+### docx
+
+- Account for floating-object vertical displacement in pagination. Body text
+  pushed below a full-width anchor-float band (ECMA-376 §20.4.2.x) now consumes
+  page space in the paginator exactly as it does in the renderer, so a paragraph
+  no longer spills past the bottom margin and is clipped (sample-9 page 4). (#457)
+- Split an overflowing paragraph at a line boundary instead of relocating it
+  whole, honoring `keepLines` (§17.3.1.14) and `widowControl` (§17.3.1.44 — keep
+  ≥2 lines together across a page break). Replaces a `h > ½ page` heuristic that
+  suppressed ordinary line-level breaks. (#457)
+- Round document-grid line heights up to whole grid cells for East Asian lines
+  (§17.6.5 / §17.3.1.32): a CJK line taller than the pitch reserves two cells; a
+  Latin line keeps its natural height. Fixes compressed CJK title blocks that
+  cascaded every page boundary off Word. (#458)
+
+### shapes (docx + pptx)
+
+- Render the `arc` preset through the shared preset engine so docx and pptx draw
+  it identically, and gate connector arrow heads on line geometry. (#455)
+
 ## 0.60.2 — 2026-06-15
 
 Patch: docx connector arrow-head correctness.
