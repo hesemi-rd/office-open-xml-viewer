@@ -42,3 +42,36 @@ describe('lineBoxHeight — degenerate zero line spacing', () => {
     expect(lineBoxHeight(null, 12, 3, 1, undefined)).toBe(15);
   });
 });
+
+// ECMA-376 §17.6.5 / §17.3.1.32 only define docGrid line height for natural <=
+// pitch. Word's runtime behaviour for taller lines (verified via pdftotext -bbox
+// of the sample-9 Word PDF: a 20pt CJK title on a 20pt pitch is 40px = 2 cells)
+// rounds East Asian lines UP to whole grid cells, while Latin-only lines keep
+// their natural height above a one-cell floor (demo/sample-1's 18pt heading on
+// an 18pt pitch stays ~natural, not 2 cells). The `eastAsian` flag gates it.
+describe('lineBoxHeight — docGrid line-cell rounding (East Asian vs Latin)', () => {
+  const grid20 = { type: 'lines', linePitchPt: 20 } as const;
+
+  it('rounds an East Asian line taller than the pitch UP to whole cells', () => {
+    // glyph natural 22px > 20px pitch → ceil(22/20) = 2 cells = 40px.
+    expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20, false, 0, true)).toBe(40);
+  });
+  it('keeps a Latin line at natural height (one-cell floor), NOT rounded to 2 cells', () => {
+    // Same 22px natural, Latin → max(22, 20) = 22px (Word does not cell-round it).
+    expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20, false, 0, false)).toBe(22);
+  });
+  it('puts a short East Asian line in a single cell (natural <= pitch)', () => {
+    // glyph natural 13px <= 20px pitch → ceil(13/20) = 1 cell = 20px.
+    expect(lineBoxHeight(null, 10.4, 2.6, 1, grid20, false, 0, true)).toBe(20);
+  });
+  it('rounds an East Asian line over two pitches up to three cells', () => {
+    // glyph natural 41px → ceil(41/20) = 3 cells = 60px.
+    expect(lineBoxHeight(null, 32.8, 8.2, 1, grid20, false, 0, true)).toBe(60);
+  });
+  it('does not cell-round when no docGrid is active (East Asian, off grid)', () => {
+    expect(lineBoxHeight(null, 17.6, 4.4, 1, undefined, false, 0, true)).toBe(22);
+  });
+  it('defaults to Latin (no cell rounding) when the flag is omitted', () => {
+    expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20)).toBe(22);
+  });
+});

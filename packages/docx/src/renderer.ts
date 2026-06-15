@@ -161,6 +161,10 @@ interface RenderState {
   floatParaSeq: number;
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
+  /** True when the document body contains East Asian text. Gates docGrid line-
+   *  cell rounding of empty / anchor-only paragraph marks (see
+   *  paragraphMarkLineHeight), which carry no text to classify themselves. */
+  docEastAsian: boolean;
   /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
    *  resolveFontFamily as the authoritative source of serif/sans-serif classification. */
   fontFamilyClasses: Record<string, string>;
@@ -402,6 +406,7 @@ export async function renderDocumentToCanvas(
   for (const [id, n] of footnoteNums) noteNumbers.set(`footnote:${id}`, n);
   for (const [id, n] of endnoteNums) noteNumbers.set(`endnote:${id}`, n);
 
+  const docEA = documentHasEastAsian(doc.body);
   const baseState: RenderState = {
     ctx,
     scale,
@@ -422,6 +427,7 @@ export async function renderDocumentToCanvas(
     floats: [],
     floatParaSeq: 0,
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
+    docEastAsian: docEA,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
     mathDefJc: doc.settings?.mathDefJc,
@@ -469,8 +475,9 @@ function measureNoteBlockForDraw(
   sec: SectionProps,
   fontFamilyClasses: Record<string, string>,
   kinsoku: KinsokuRules,
+  docEastAsian: boolean,
 ): { total: number; trailingSpaceAfter: number } {
-  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku);
+  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku, docEastAsian);
   const contentWPt = sec.pageWidth - sec.marginLeft - sec.marginRight;
   return measureFootnoteBlockPt(note, measure, contentWPt);
 }
@@ -513,7 +520,7 @@ function drawPageFootnotes(
   for (const id of ids) {
     const note = noteById.get(id);
     if (!note) continue;
-    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku);
+    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku, baseState.docEastAsian);
     totalPt += m.total;
     lastTrailingPt = m.trailingSpaceAfter;
   }
@@ -688,7 +695,7 @@ export function computePages(
 ): PaginatedBodyElement[][] {
   const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
   const contentW = section.pageWidth - section.marginLeft - section.marginRight;
-  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku);
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -1007,6 +1014,7 @@ function buildMeasureState(
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
+  docEastAsian = false,
 ): RenderState {
   return {
     ctx,
@@ -1028,6 +1036,7 @@ function buildMeasureState(
     floats: [],
     floatParaSeq: 0,
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
+    docEastAsian,
     fontFamilyClasses,
     kinsoku,
     showTrackChanges: false,
@@ -1083,7 +1092,7 @@ function estimateParagraphHeight(
       const win = resolveLineFloatWindow(cursor, paragraphMarkEmPx(para, 1), 10, paraX, paraW, state.floats);
       if (win.topY > cursor) cursor = win.topY;
     }
-    cursor += paragraphMarkLineHeight(para, 1, grid, paraHasRuby);
+    cursor += paragraphMarkLineHeight(para, 1, grid, paraHasRuby, state.docEastAsian, state.ctx, state.fontFamilyClasses);
   };
   if (segs.length === 0) {
     flowMarkLine();
@@ -1095,7 +1104,7 @@ function estimateParagraphHeight(
       startPageY: cursor,
       paraX,
       floats: state.floats,
-      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0),
+      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
       pageH: state.pageH,
       markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
@@ -1108,7 +1117,7 @@ function estimateParagraphHeight(
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
       const uniform = snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, true, l.intendedSingle))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, true, l.intendedSingle, paragraphIsEastAsian(para)))),
         grid,
         1,
       );
@@ -1119,7 +1128,7 @@ function estimateParagraphHeight(
     } else {
       for (const l of lines) {
         if (l.topY !== undefined && l.topY > cursor) cursor = l.topY;
-        cursor += lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, false, l.intendedSingle);
+        cursor += lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, false, l.intendedSingle, paragraphIsEastAsian(para));
       }
     }
   }
@@ -1147,6 +1156,45 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
 function paragraphHasRuby(para: DocParagraph): boolean {
   for (const run of para.runs) {
     if (run.type === 'text' && (run as unknown as DocxTextRun).ruby) return true;
+  }
+  return false;
+}
+
+/** Code points whose presence marks a line as East Asian for docGrid line-cell
+ *  rounding: CJK symbols/punctuation, Hiragana, Katakana, CJK Unified +
+ *  Extension A, compatibility ideographs, Hangul, and fullwidth forms. Content
+ *  test only — not a font-name heuristic (cf. packages/docx/CLAUDE.md). */
+const EAST_ASIAN_RE =
+  /[ᄀ-ᇿ⺀-⿟　-〿぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]/u;
+
+/** ECMA-376 §17.6.5 docGrid line-cell rounding (see lineBoxHeight) applies to
+ *  East Asian lines. A paragraph counts as East Asian when any of its text runs
+ *  carries East Asian characters. (Empty / anchor-only paragraphs carry no text;
+ *  their mark line is handled separately by paragraphMarkLineHeight.) */
+function paragraphIsEastAsian(para: DocParagraph): boolean {
+  for (const run of para.runs) {
+    if (run.type === 'text' && EAST_ASIAN_RE.test((run as unknown as DocxTextRun).text)) return true;
+  }
+  return false;
+}
+
+/** Whether the document body contains any East Asian text. An empty / anchor-
+ *  only paragraph mark carries no text to classify, so its docGrid cell rounding
+ *  (paragraphMarkLineHeight) is gated on this document-level signal: in an East
+ *  Asian document the paragraph default is an East Asian font and its mark snaps
+ *  to whole grid cells; a purely Latin document (e.g. demo/sample-1) keeps the
+ *  natural single-cell mark. Recurses into table cells. */
+function documentHasEastAsian(body: BodyElement[]): boolean {
+  for (const el of body) {
+    if (el.type === 'paragraph') {
+      if (paragraphIsEastAsian(el as unknown as DocParagraph)) return true;
+    } else if (el.type === 'table') {
+      for (const row of (el as unknown as DocTable).rows) {
+        for (const cell of row.cells) {
+          if (documentHasEastAsian(cell.content)) return true;
+        }
+      }
+    }
   }
   return false;
 }
@@ -1214,7 +1262,7 @@ function splitParagraphAcrossPages(
     startPageY: measureState.y,
     paraX,
     floats: measureState.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0, paragraphIsEastAsian(para)),
     pageH: measureState.pageH,
     markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
@@ -1226,7 +1274,7 @@ function splitParagraphAcrossPages(
   }
   const paraHasRuby = paragraphHasRuby(para);
 
-  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle);
+  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para));
   const uniformH = paraHasRuby
     ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
     : 0;
@@ -1837,7 +1885,7 @@ function renderEmptyMarkParagraph(
   const flowShift = Math.max(0, markTop - textAreaTopY);
   if (markTop > state.y) state.y = markTop;
   const markRectTop = state.y;
-  const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
+  const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses);
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
     ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
@@ -1955,7 +2003,7 @@ function renderParagraph(
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
     pageH: state.pageH,
     markEmPx: paragraphMarkEmPx(para, scale),
   } : undefined;
@@ -1993,7 +2041,7 @@ function renderParagraph(
   // else just the max natural.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphIsEastAsian(para)))),
         grid,
         scale,
       )
@@ -2001,7 +2049,7 @@ function renderParagraph(
   const lineHForLine = (l: typeof lines[number]): number =>
     paraHasRuby
       ? uniformLineH
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle);
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphIsEastAsian(para));
 
   if (para.shading && !dryRun) {
     const totalTextH = lines.reduce((s, l) => s + lineHForLine(l), 0);
@@ -4168,10 +4216,10 @@ function measureParaHeight(
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
-    return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale));
+    return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), paragraphIsEastAsian(para));
   }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 
 /** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376
@@ -4719,6 +4767,7 @@ export function lineBoxHeight(
   grid?: DocGridCtx,
   hasRuby?: boolean,
   intendedSinglePx = 0,
+  eastAsian = false,
 ): number {
   const glyphNatural = ascentPx + descentPx;
   // For `auto`/single spacing the multiplier applies to the intended font's
@@ -4748,12 +4797,23 @@ export function lineBoxHeight(
   // the rt reserve in buildSegments is set generously enough. So the
   // ruby-aware logic now lives entirely in the segment-level ascent
   // reservation, and lineBoxHeight stays format-agnostic.
+  // A single-spaced line on a docGrid snaps to whole grid CELLS in East Asian
+  // text: Word rounds its height UP to the next pitch multiple, so a line taller
+  // than one pitch reserves two (or more). sample-9 (pdftotext -bbox of the Word
+  // PDF): a 20pt CJK title on a 20pt pitch is 40px = 2 cells; an 11pt body is
+  // 20px = 1 cell. A Latin-only line is NOT cell-rounded — it keeps its natural
+  // height above a one-cell floor (demo/sample-1: an 18pt heading on an 18pt
+  // pitch stays ~20.7px, not 36). ECMA-376 Part 1 only defines the natural ≤
+  // pitch case (§17.6.5 / §17.3.1.32); the East-Asian cell rounding for taller
+  // lines is Word runtime behaviour, so it is gated on the line's script.
+  const gridSingleCell = (): number => eastAsian
+    ? Math.max(pitchPx, Math.ceil(glyphNatural / pitchPx) * pitchPx)
+    : Math.max(glyphNatural, pitchPx);
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
     // No explicit spacing → single line. Use the intended single-line height
-    // (`natural`) off-grid; on-grid, snap to the pitch with the glyph extent
-    // as the overflow floor (the grid, not the font metric, governs height).
-    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
+    // (`natural`) off-grid; on-grid, snap per gridSingleCell.
+    return hasGrid ? gridSingleCell() : natural;
   }
   // A zero/negative `w:line` is degenerate input whose behavior ECMA-376
   // §17.3.1.33 does not define (read literally, an `exact` line of 0 would
@@ -4770,11 +4830,11 @@ export function lineBoxHeight(
   // mode; applying the same fallback to a degenerate auto multiplier <= 0 is
   // the analogous non-collapsing reading.)
   if ((ls.rule === 'exact' || ls.rule === 'auto') && ls.value <= 0) {
-    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
+    return hasGrid ? gridSingleCell() : natural;
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      if (inheritedOnly) return Math.max(glyphNatural, pitchPx);
+      if (inheritedOnly) return gridSingleCell();
       return Math.max(glyphNatural, pitchPx * ls.value);
     }
     return natural * ls.value;
@@ -4803,8 +4863,28 @@ function paragraphMarkLineHeight(
   scale: number,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
+  eastAsian = false,
+  ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string> = {},
 ): number {
   const fs = getDefaultFontSize(para);
-  const { asc, desc } = emptyLineNaturalPx(fs, scale);
-  return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale));
+  let asc: number;
+  let desc: number;
+  if (eastAsian && ctx) {
+    // East Asian document: the empty paragraph-mark line follows the real East
+    // Asian font box so docGrid cell rounding (lineBoxHeight) reserves whole
+    // cells — a 20pt mark on a 20pt pitch → 2 cells (40px), matching Word's title
+    // pages. The synthetic 0.8/0.2 ≈ 1em fallback measures exactly one pitch and
+    // would round down to a single cell. fontBoundingBox is font-wide, so any
+    // East Asian glyph probes it.
+    const prevFont = ctx.font;
+    ctx.font = buildFont(false, false, fs * scale, getDefaultFontFamily(para), fontFamilyClasses);
+    const m = ctx.measureText('あ');
+    asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fs * scale * 0.8;
+    desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fs * scale * 0.2;
+    ctx.font = prevFont;
+  } else {
+    ({ asc, desc } = emptyLineNaturalPx(fs, scale));
+  }
+  return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), eastAsian);
 }
