@@ -3603,12 +3603,18 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
   // Dispatch to the shared spec-driven preset engine when the geometry is a
-  // known <a:prstGeom> preset, mirroring the pptx renderer. `arc` keeps its
-  // bespoke buildShapePath fallback (fill semantics differ); custGeom (no
-  // presetGeometry, subpaths only) likewise falls through to buildCustomPath.
+  // known <a:prstGeom> preset, mirroring the pptx renderer. `arc` (ECMA-376
+  // §20.1.10.56 ST_ShapeType "arc") goes through the engine too: its
+  // presetShapeDefinitions geometry is two <path>s — path 0 (stroke="false")
+  // fills the pie wedge (arc + lnTo centre + close) and path 1 (fill="none")
+  // strokes the open arc edge — which the engine honours per-path. The legacy
+  // buildShapePath fallback could only draw the open arc, so filling it
+  // auto-closed into a chord; arc was excluded here to dodge that, but the
+  // engine renders it faithfully now. custGeom (no presetGeometry, subpaths
+  // only) still falls through to buildCustomPath.
   const geom = shape.presetGeometry?.toLowerCase() ?? '';
   const usePresetEngine =
-    !!shape.presetGeometry && geom !== 'arc' && hasPreset(geom);
+    !!shape.presetGeometry && hasPreset(geom);
 
   const adj = shape.adjValues ?? [];
   const fillStyle = resolveFill(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);

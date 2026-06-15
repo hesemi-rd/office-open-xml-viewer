@@ -180,4 +180,73 @@ describe('renderPresetShape (core preset-geometry engine)', () => {
     const large = slant(50000);
     expect(small).not.toEqual(large);
   });
+
+  // `arc` (ECMA-376 §20.1.10.56 ST_ShapeType "arc"; geometry in
+  // presetShapeDefinitions.xml referenced by §20.1.9.18 <a:prstGeom>) is a
+  // TWO-path shape and the engine must honour each path's own fill/stroke:
+  //   path 0  stroke="false"  → moveTo(x1,y1) arcTo lnTo(hc,vc) close  : FILLED
+  //           pie wedge (arc swept back to the centre), NEVER stroked.
+  //   path 1  fill="none"     → moveTo(x1,y1) arcTo                    : the
+  //           open arc OUTLINE, stroked only, never filled.
+  // This is why a filled arc shows a pie-wedge fill but only the curved edge is
+  // outlined — the two radii are not stroked. A renderer must not collapse this
+  // to a single open path (filling that would auto-close into a chord, not a
+  // pie wedge). These tests pin that behaviour so all three renderers can share
+  // the engine instead of bespoke arc fallbacks.
+  describe('arc — pie-wedge fill + open-arc stroke (§20.1.9.18)', () => {
+    function makeOpRecorder() {
+      const ops: string[] = [];
+      const lineTos: Array<{ x: number; y: number }> = [];
+      const ctx = {
+        beginPath() { ops.push('begin'); },
+        closePath() { ops.push('close'); },
+        moveTo() {},
+        lineTo(x: number, y: number) { ops.push('line'); lineTos.push({ x, y }); },
+        bezierCurveTo() {},
+        quadraticCurveTo() {},
+        ellipse() { ops.push('arc'); },
+        save() {},
+        restore() {},
+        fill() { ops.push('fill'); },
+        stroke() { ops.push('stroke'); },
+        set fillStyle(_v: unknown) {},
+      } as unknown as CanvasRenderingContext2D;
+      return { ctx, ops, lineTos };
+    }
+
+    it('fills exactly one path (the pie wedge, closed to the centre) and strokes exactly one (the open arc)', () => {
+      const { ctx, ops, lineTos } = makeOpRecorder();
+      // Default adjusts: stAng=270°, swAng=90°. Box 200×100 → centre (100,50).
+      const ok = renderPresetShape(
+        ctx, 'arc', 0, 0, 200, 100, [], '#abc', () => ctx.stroke(), () => {},
+      );
+      expect(ok).toBe(true);
+      // One fill (path 0) and one stroke (path 1) — not two of either.
+      expect(ops.filter((o) => o === 'fill')).toHaveLength(1);
+      expect(ops.filter((o) => o === 'stroke')).toHaveLength(1);
+      // The filled path closes back through the shape centre: a pie wedge has a
+      // lnTo the centre (100,50); an open/chord-filled arc never touches it.
+      const touchesCentre = lineTos.some(
+        (p) => Math.round(p.x) === 100 && Math.round(p.y) === 50,
+      );
+      expect(touchesCentre).toBe(true);
+      // That lnTo-to-centre belongs to the FILLED path, before the fill — and
+      // the stroked path (after) has no such lnTo (it is the bare arc).
+      const fillIdx = ops.indexOf('fill');
+      const strokeIdx = ops.indexOf('stroke');
+      expect(ops.slice(0, fillIdx)).toContain('line'); // wedge radius before fill
+      expect(ops.slice(fillIdx + 1)).not.toContain('line'); // open arc only after
+      expect(strokeIdx).toBeGreaterThan(fillIdx);
+    });
+
+    it('with no fill, strokes the open arc and fills nothing (a bare curved line)', () => {
+      const { ctx, ops } = makeOpRecorder();
+      const ok = renderPresetShape(
+        ctx, 'arc', 0, 0, 200, 100, [], null, () => ctx.stroke(), () => {},
+      );
+      expect(ok).toBe(true);
+      expect(ops).not.toContain('fill');
+      expect(ops.filter((o) => o === 'stroke')).toHaveLength(1);
+    });
+  });
 });
