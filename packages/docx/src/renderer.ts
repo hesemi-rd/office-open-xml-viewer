@@ -1044,6 +1044,13 @@ function estimateParagraphHeight(
   const indLeft = para.indentLeft;
   const indRight = para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
+  // Float-wrap windows are evaluated at the paragraph's content left edge =
+  // contentX + physical left indent, matching renderParagraph. The left/right
+  // indents swap to physical sides in a bidi paragraph (§17.3.1.12 / Part 4
+  // §14.11.2), so use the bidi-resolved left indent; otherwise an indented / RTL
+  // paragraph wrapping a square float would measure the gap at the wrong X and
+  // diverge from the paint pass.
+  const paraX = paraXPt + (para.bidi === true ? indRight : indLeft);
   const segs = buildSegments(para.runs, state);
   // Word renders ruby paragraphs with consistent line spacing — every line
   // in a paragraph that carries ANY furigana snaps to the same pitch
@@ -1073,7 +1080,7 @@ function estimateParagraphHeight(
     // Empty / anchor-only paragraph: one paragraph-mark line box, flowed below a
     // full-width float band exactly like renderEmptyMarkParagraph.
     if (hasFloats) {
-      const win = resolveLineFloatWindow(cursor, paragraphMarkEmPx(para, 1), 10, paraXPt, paraW, state.floats);
+      const win = resolveLineFloatWindow(cursor, paragraphMarkEmPx(para, 1), 10, paraX, paraW, state.floats);
       if (win.topY > cursor) cursor = win.topY;
     }
     cursor += paragraphMarkLineHeight(para, 1, grid, paraHasRuby);
@@ -1086,7 +1093,7 @@ function estimateParagraphHeight(
     // and line count agree with the paint pass.
     const wrapCtx: WrapLayoutCtx | undefined = hasFloats ? {
       startPageY: cursor,
-      paraX: paraXPt,
+      paraX,
       floats: state.floats,
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
@@ -1175,15 +1182,37 @@ function splitParagraphAcrossPages(
   const indLeft = para.indentLeft;
   const indRight = para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
+  // Mirror renderParagraph's paragraph-content left edge: contentX + the
+  // physical left indent (ECMA-376 §17.3.1.12; the left/right indents swap to
+  // physical sides in a bidi paragraph, Part 4 §14.11.2). Using the bare margin
+  // here would evaluate square-float wrap windows at the wrong X for indented /
+  // RTL paragraphs, re-introducing a paginate/render disagreement.
+  const physLeftInd = para.bidi === true ? indRight : indLeft;
+  const paraX = marginLeftPt + physLeftInd;
+  // A paragraph with no layoutable inline lines (literally empty, or only
+  // wrap-float anchors) is a single paragraph-mark line (§17.3.1.29) that cannot
+  // be split. If it doesn't fit in the space left on this page, relocate it
+  // whole to the next page — matching the wholesale break the paginator applies
+  // to unsplittable paragraphs — instead of letting the mark overflow the bottom
+  // margin (which the prior unconditional break never allowed).
+  const placeMarkOnly = (): { endY: number } => {
+    let markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
+    let top = initialY;
+    if (initialY > 0 && initialY + markH - para.spaceAfter > contentH) {
+      newPage();
+      top = 0;
+      markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
+    }
+    pages[pages.length - 1].push(para as PaginatedBodyElement);
+    return { endY: top + markH };
+  };
   const segs = buildSegments(para.runs, measureState);
   if (segs.length === 0) {
-    // No layoutable content — treat as a single empty line, fits or pushes.
-    pages[pages.length - 1].push(para as PaginatedBodyElement);
-    return { endY: initialY + estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt) };
+    return placeMarkOnly();
   }
   const wrapCtx: WrapLayoutCtx | undefined = measureState.floats.length > 0 ? {
     startPageY: measureState.y,
-    paraX: marginLeftPt,
+    paraX,
     floats: measureState.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
     pageH: measureState.pageH,
@@ -1191,11 +1220,9 @@ function splitParagraphAcrossPages(
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
   if (lines.length === 0) {
-    // Anchor-only paragraph: no inline lines to split, but the paragraph mark
-    // still occupies one line (§17.3.1.29). Emit it as a single unit, matching
-    // the literal-empty branch above so the renderer's one-line advance agrees.
-    pages[pages.length - 1].push(para as PaginatedBodyElement);
-    return { endY: initialY + estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt) };
+    // Anchor-only paragraph: no inline lines, but the paragraph mark still
+    // occupies one (possibly relocated) line (§17.3.1.29).
+    return placeMarkOnly();
   }
   const paraHasRuby = paragraphHasRuby(para);
 
@@ -1236,6 +1263,31 @@ function splitParagraphAcrossPages(
       // First page, first line doesn't fit — force-emit it and let it overflow.
       lastFitting = firstFitting + 1;
       usedH += lineHeights[firstFitting];
+    }
+    // ECMA-376 §17.3.1.44 widowControl (default ON): keep at least two lines of
+    // the paragraph together across a page break — never strand a single trailing
+    // line on a later page (widow) nor a single leading line at a page bottom
+    // (orphan). Skipped when w:widowControl is explicitly off
+    // (para.widowControl === false). Only applies when lines actually carry over
+    // (lastFitting < lines.length); the final slice can legally be one line.
+    if (para.widowControl !== false && lastFitting < lines.length) {
+      // Widow: this slice would leave exactly one line for a later page. Pull one
+      // line down with it so ≥2 carry over — provided this slice keeps ≥1 line.
+      if (lines.length - lastFitting === 1 && lastFitting - firstFitting >= 2) {
+        lastFitting--;
+        usedH -= lineHeights[lastFitting];
+      }
+      // Orphan: the paragraph's first line would sit alone at this page's bottom
+      // (more lines follow). Relocate the paragraph start to the next page so it
+      // begins with ≥2 lines — only when there is room above to break from
+      // (cursorY > 0); a lone line at a fresh page top cannot be helped. Also
+      // catches the case the widow pull above just reduced to a single line.
+      if (firstFitting === 0 && lastFitting - firstFitting === 1 && cursorY > 0) {
+        newPage();
+        cursorY = 0;
+        isFirstSliceOnPage = true;
+        continue;
+      }
     }
     const isFinalSlice = lastFitting === lines.length;
     if (isFinalSlice) usedH += spaceAfter;
