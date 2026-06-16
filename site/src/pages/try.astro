@@ -94,7 +94,16 @@ import Nav from '../components/Nav.astro';
       }
     }
 
-    input.addEventListener('change', () => { const f = input.files?.[0]; if (f) void handle(f); });
+    // Reset the value after capturing the file so re-selecting the SAME file
+    // fires `change` again. Returning to this page via browser back/forward
+    // reloads it but Chromium restores the file input's value to the previously
+    // chosen file; without this reset, re-picking that same file emits no
+    // `change` event and nothing renders.
+    input.addEventListener('change', () => {
+      const f = input.files?.[0];
+      input.value = '';
+      if (f) void handle(f);
+    });
     ['dragenter', 'dragover'].forEach((ev) =>
       dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('over'); }));
     ['dragleave', 'drop'].forEach((ev) =>
