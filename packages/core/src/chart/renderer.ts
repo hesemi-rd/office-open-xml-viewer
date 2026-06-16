@@ -105,12 +105,31 @@ function axisTitleColor(hex: string | null | undefined): string {
   return hex ? `#${hex}` : '#555';
 }
 
-/** Margin (px) Excel leaves between the chart's outer edge and an axis title —
- *  the title is inset from the chart border, not flush against it. Proportional
- *  to the chart dimension (`dim` = width for the left/val title, height for the
- *  bottom/cat title) with a floor so small charts still get a visible gap. */
+/** Margin (px) between the chart's outer edge and an axis title. ECMA-376
+ *  leaves axis-title position automatic when there is no `<c:layout>/<c:manualLayout>`
+ *  (§21.2.2.88 layout / §21.2.2.32 plotArea) — there is NO spec-defined inset, so
+ *  the `8px` floor and `2%` factor are empirical approximations of Excel's
+ *  auto-layout, not measured spec values. `dim` = width (left/val title) or
+ *  height (bottom/cat title). */
 function axisTitleMargin(dim: number): number {
   return Math.max(8, dim * 0.02);
+}
+
+interface AxisTitleLayout { catTitlePx: number; valTitlePx: number; catTitleH: number; valTitleW: number; }
+
+/** Axis-title font sizes (px) and the outer gutter bands to reserve for them
+ *  (`catTitleH` → bottom pad, `valTitleW` → left pad). Identical across all four
+ *  cartesian renderers; keeping reserve here and the draw anchors in
+ *  drawAxisTitles in sync via one source for the band size. The per-renderer
+ *  `pad` formula that consumes these differs and stays inline. */
+function axisTitleLayout(chart: ChartModel, w: number, h: number, ptToPx: number): AxisTitleLayout {
+  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
+  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  return {
+    catTitlePx, valTitlePx,
+    catTitleH: chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0,
+    valTitleW: chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0,
+  };
 }
 
 /** Draw both axis titles for a cartesian chart (bar/line/area/scatter),
@@ -119,10 +138,11 @@ function axisTitleMargin(dim: number): number {
  *  to size `catTitleH`/`valTitleW`; the anchor centers each title within its
  *  band. cat axis = bottom, val axis = left — the orientation each cartesian
  *  renderer already uses (horizontal bar keeps cat-bottom/val-left too).
- *  Axis titles default to BOLD — Excel's built-in chart-style default renders
- *  them bold (the chart title is likewise unconditionally bold above), and a
- *  run that should be regular carries an explicit `b="0"`. So only an explicit
- *  `false` un-bolds; an unspecified weight (most titles) renders bold. */
+ *  Axis titles default to BOLD — ECMA-376 Part 1 (ST_Style, chart-style
+ *  defaults) states "Axis titles and chart titles are bold by default, while
+ *  all other chart elements are normal" (same clause sets the default size to
+ *  10pt). So an unspecified weight renders bold; only an explicit `b="0"`
+ *  un-bolds. Consistent with drawChartTitle, which applies the same default. */
 function drawAxisTitles(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -387,7 +407,7 @@ function drawChartTitle(
 ): void {
   if (!chart.title) return;
   const face = chart.titleFontFace ? `"${chart.titleFontFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
-  ctx.font = `bold ${fontSize}px ${face}`;
+  ctx.font = `${(chart.titleFontBold ?? true) ? 'bold ' : ''}${fontSize}px ${face}`;
   ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -501,10 +521,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // Axis-title bands sized from the *actual* title font (honoring XML @sz, e.g.
   // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
   // and never collide with the tick labels.
-  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
+  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.03,
@@ -824,10 +841,7 @@ function renderLineChart(
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   // Axis-title bands use the real title font (XML @sz when set), independent of
   // the tick-label sizes above, so 18pt titles get a wide enough gutter.
-  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
+  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -974,10 +988,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
   const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
+  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.05,
@@ -1330,10 +1341,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
   const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
+  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
 
   // Title placement — manual layout overrides the auto position.
   if (chart.title) {
@@ -2137,6 +2145,9 @@ export function renderChart(
   if (chart.chartBorderColor) {
     ctx.save();
     ctx.strokeStyle = `#${chart.chartBorderColor}`;
+    // `<a:ln>` with no `@w` means width 0 per ECMA-376 §20.1.2.2.24, i.e. invisible;
+    // but Excel renders a fill-without-width line as a ~hairline, so we draw 1px to
+    // match the app rather than dropping a declared border.
     ctx.lineWidth = chart.chartBorderWidthEmu
       ? Math.max(0.5, chart.chartBorderWidthEmu / EMU_PER_PT) * ptToPx
       : 1;
