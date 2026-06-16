@@ -8297,20 +8297,30 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .unwrap_or_default();
     let theme = parse_theme_colors(&theme_xml);
 
-    // --- Presentation-level fallback master bundle ---
+    // --- Presentation-level fallback master ---
     // The first slide master referenced by the presentation. Used for slides
     // whose layout→master→theme chain can't be resolved (simple/old decks), so
     // their behavior is unchanged from before per-slide resolution existed.
     let pres_master_path: Option<String> =
         find_rel_target_by_type(&pres_rels_xml, "/slideMaster").map(|t| resolve_path("ppt", &t));
-    let fallback_bundle: MasterBundle = match pres_master_path.as_deref() {
-        Some(p) => build_master_bundle(p, &theme, &mut zip),
-        None => build_master_bundle("", &theme, &mut zip),
-    };
 
     // Cache of MasterBundle keyed by master ZIP path. Slides sharing a master
-    // reuse the bundle instead of recomputing every master-derived map.
+    // reuse the bundle instead of recomputing every master-derived map. Seed it
+    // with the presentation master so the slide loop reuses the fallback build
+    // instead of rebuilding it — for a single-master deck every slide resolves
+    // to this same master, and without seeding the fallback build and the first
+    // slide's cache-miss build would each compute the identical bundle twice.
     let mut master_cache: HashMap<String, MasterBundle> = HashMap::new();
+    // Bundle for the truly no-master / empty-path case (no /slideMaster rel on
+    // the presentation). Only built then; otherwise the fallback is the cached
+    // presentation-master bundle.
+    let no_master_bundle: Option<MasterBundle> = match pres_master_path.as_deref() {
+        Some(p) => {
+            master_cache.insert(p.to_owned(), build_master_bundle(p, &theme, &mut zip));
+            None
+        }
+        None => Some(build_master_bundle("", &theme, &mut zip)),
+    };
 
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
@@ -8405,7 +8415,14 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 }
                 &master_cache[mp]
             }
-            _ => &fallback_bundle,
+            // Unresolved chain → presentation-level fallback. The presentation
+            // master (when present) was seeded into the cache above, so reuse
+            // that entry; only a deck with no /slideMaster rel falls through to
+            // `no_master_bundle`.
+            _ => pres_master_path
+                .as_deref()
+                .map(|p| &master_cache[p])
+                .unwrap_or_else(|| no_master_bundle.as_ref().unwrap()),
         };
 
         let slide = parse_slide(
