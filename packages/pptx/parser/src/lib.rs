@@ -1986,6 +1986,65 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     map
 }
 
+/// Bake a slide master's `<p:clrMap>` (ECMA-376 §19.3.1.6) into a theme map so
+/// that logical scheme names (bg1/tx1/bg2/tx2/accent1..6/hlink/folHlink) can be
+/// resolved by a direct `theme.get(name)` lookup later.
+///
+/// `<p:clrMap>` maps each logical name to a theme color-scheme slot
+/// (dk1/lt1/dk2/lt2/accent1..6/hlink/folHlink). We resolve that indirection
+/// here and insert `theme[logical] = theme[slot]` for every logical name. This
+/// keeps `parse_color_node_tint`'s `schemeClr` handling a single map lookup.
+///
+/// When `<p:clrMap>` is absent (or an attribute is missing) the PowerPoint
+/// default mapping is applied: bg1=lt1, tx1=dk1, bg2=lt2, tx2=dk2, accentN
+/// identity, hlink/folHlink identity. The raw slot keys (dk1, lt1, …) added by
+/// `parse_theme_colors` are left untouched, so canonical lookups still work.
+fn bake_clr_map(theme: &mut HashMap<String, String>, master_xml: Option<&str>) {
+    // logical name → default scheme slot (used when clrMap is missing the attr).
+    const LOGICALS: &[(&str, &str)] = &[
+        ("bg1", "lt1"),
+        ("tx1", "dk1"),
+        ("bg2", "lt2"),
+        ("tx2", "dk2"),
+        ("accent1", "accent1"),
+        ("accent2", "accent2"),
+        ("accent3", "accent3"),
+        ("accent4", "accent4"),
+        ("accent5", "accent5"),
+        ("accent6", "accent6"),
+        ("hlink", "hlink"),
+        ("folHlink", "folHlink"),
+    ];
+
+    // Find the master's <p:clrMap> element (direct child of <p:sldMaster>).
+    let clr_map_node = master_xml.and_then(|xml| {
+        let doc = roxmltree::Document::parse(xml).ok()?;
+        // roxmltree borrows the doc; collect the attrs we need before it drops.
+        // We can't return the node (lifetime), so resolve into an owned map.
+        let node = child(doc.root_element(), "clrMap")?;
+        let mut m: HashMap<String, String> = HashMap::new();
+        for (logical, _) in LOGICALS {
+            if let Some(slot) = attr(&node, logical) {
+                m.insert((*logical).to_owned(), slot);
+            }
+        }
+        Some(m)
+    });
+
+    for (logical, default_slot) in LOGICALS {
+        // Resolve the slot this logical name points at (clrMap value, else default).
+        let slot = clr_map_node
+            .as_ref()
+            .and_then(|m| m.get(*logical).cloned())
+            .unwrap_or_else(|| (*default_slot).to_owned());
+        // theme[logical] = theme[slot] when the slot has a hex; otherwise skip
+        // (leaves any prior value, and the canonical fallback still applies).
+        if let Some(hex) = theme.get(&slot).cloned() {
+            theme.insert((*logical).to_owned(), hex);
+        }
+    }
+}
+
 /// Resolve a theme typeface reference (e.g. "+mj-lt") to the actual font family name.
 /// If the typeface starts with '+' and has a matching entry in the theme map (added by
 /// parse_theme_colors from the fontScheme), returns the resolved name; otherwise returns
@@ -2048,7 +2107,17 @@ fn parse_color_node_tint(
             "prstClr" => return preset_color(attr(&c, "val")?.as_str()),
             "schemeClr" => {
                 let scheme_name = attr(&c, "val")?;
-                // OOXML semantic aliases → canonical theme slot names
+                // Per ECMA-376 §19.3.1.6 the master's <p:clrMap> remaps logical
+                // names (bg1/tx1/bg2/tx2/accentN/hlink/folHlink) to theme slots.
+                // `bake_clr_map` pre-bakes those logical names into the theme
+                // map, so try a direct lookup FIRST — this honors clrMap (e.g.
+                // tx1="lt1"). Fall back to the canonical alias only when the
+                // logical name was not baked (no master / unmapped name), so a
+                // missing clrMap still resolves tx1→dk1, bg1→lt1, etc.
+                if let Some(hex) = theme.get(scheme_name.as_str()) {
+                    let hex = hex.clone();
+                    return Some(xform(&hex, c));
+                }
                 let canonical: &str = match scheme_name.as_str() {
                     "tx1" | "dk1" => "dk1",
                     "tx2" | "dk2" => "dk2",
@@ -6942,30 +7011,42 @@ fn parse_slide(
     layout_xml: Option<&str>,
     layout_rels: &HashMap<String, String>,
     layout_dir: &str,
-    master_xml: Option<&str>,
-    master_rels: &HashMap<String, String>,
-    master_dir: &str,
-    master_smartart_drawings: &HashMap<String, String>,
-    master_bg: Option<Fill>,
-    master_font_sizes: &HashMap<String, f64>,
-    master_level_font_sizes: &HashMap<String, LevelFontSizes>,
-    master_level_bullets: &HashMap<String, LevelBullets>,
-    master_anchors: &HashMap<String, String>,
-    master_transforms: &HashMap<String, Transform>,
-    master_alignments: &HashMap<String, String>,
-    master_space_before: &HashMap<String, i64>,
-    master_space_after: &HashMap<String, i64>,
-    master_line_spacing: &HashMap<String, f64>,
-    master_bold: &HashMap<String, bool>,
-    master_italic: &HashMap<String, bool>,
-    master_caps: &HashMap<String, String>,
-    master_color: &HashMap<String, String>,
+    bundle: &MasterBundle,
     index: usize,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
-    theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
+    // Destructure the per-slide master bundle into the local names the rest of
+    // this function uses. `theme` here is the slide's effective theme (the
+    // master's own theme with its <p:clrMap> baked in), so scheme colors
+    // resolve against the right palette per slide.
+    let MasterBundle {
+        theme,
+        master_xml,
+        master_rels,
+        master_dir,
+        master_smartart_drawings,
+        master_bg,
+        master_font_sizes,
+        master_level_font_sizes,
+        master_level_bullets,
+        master_anchors,
+        master_transforms,
+        master_alignments,
+        master_space_before,
+        master_space_after,
+        master_line_spacing,
+        master_bold,
+        master_italic,
+        master_caps,
+        master_color,
+    } = bundle;
+    let theme: &HashMap<String, String> = theme;
+    let master_xml: Option<&str> = master_xml.as_deref();
+    let master_dir: &str = master_dir.as_str();
+    let master_bg: Option<Fill> = master_bg.clone();
+
     let mut lph = match layout_xml {
         Some(x) => parse_layout_placeholders(
             x,
@@ -8023,6 +8104,162 @@ fn parse_connector(
 //  Presentation parser
 // ===========================
 
+/// All slide-master-derived data plus the master's effective theme, bundled so
+/// it can be computed once per master and reused across every slide that shares
+/// that master (ECMA-376 §19.3.1.42 — a deck may have multiple masters, each
+/// with its own theme/clrMap). Resolving theme/master per slide via the
+/// slide→slideLayout→slideMaster→theme rels chain is required so that scheme
+/// colors (e.g. `<a:schemeClr val="accent1">`) pick the right palette.
+struct MasterBundle {
+    /// The master's effective theme palette, with the master's `<p:clrMap>`
+    /// pre-baked (logical names → slot hex). Includes font/line/objectDefault
+    /// keys exactly as `parse_theme_colors` produced them.
+    theme: HashMap<String, String>,
+    master_xml: Option<String>,
+    master_rels: HashMap<String, String>,
+    master_dir: String,
+    master_smartart_drawings: HashMap<String, String>,
+    master_bg: Option<Fill>,
+    master_font_sizes: HashMap<String, f64>,
+    master_level_font_sizes: HashMap<String, LevelFontSizes>,
+    master_level_bullets: HashMap<String, LevelBullets>,
+    master_anchors: HashMap<String, String>,
+    master_transforms: HashMap<String, Transform>,
+    master_alignments: HashMap<String, String>,
+    master_space_before: HashMap<String, i64>,
+    master_space_after: HashMap<String, i64>,
+    master_line_spacing: HashMap<String, f64>,
+    master_bold: HashMap<String, bool>,
+    master_italic: HashMap<String, bool>,
+    master_caps: HashMap<String, String>,
+    master_color: HashMap<String, String>,
+}
+
+/// Build a `MasterBundle` for the master at `master_path` (a ZIP path such as
+/// `ppt/slideMasters/slideMaster2.xml`). Reads the master XML + its rels,
+/// resolves the master's own `/theme` relationship, parses the theme colors,
+/// bakes the master's `<p:clrMap>`, then computes every master-derived map.
+///
+/// `fallback_theme` is the presentation-level theme used only when the master
+/// has no `/theme` relationship of its own (keeps simple single-theme decks and
+/// malformed packages working).
+///
+/// TODO: themeOverride (slide/layout `/themeOverride`, ECMA-376 §14.2.7) is not
+/// yet honored — overrides on the layout or slide would replace parts of the
+/// master theme. Out of scope for per-slide master resolution.
+fn build_master_bundle(
+    master_path: &str,
+    fallback_theme: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+) -> MasterBundle {
+    let master_xml_opt: Option<String> = read_zip_str(zip, master_path).ok();
+
+    let master_dir: String = master_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_owned())
+        .unwrap_or_else(|| "ppt/slideMasters".to_owned());
+
+    // Master rels: `<master_dir>/_rels/<file>.rels`.
+    let master_file = master_path.split('/').next_back().unwrap_or("slideMaster1.xml");
+    let master_rels_xml: String = {
+        let rels_p = format!("{master_dir}/_rels/{master_file}.rels");
+        read_zip_str(zip, &rels_p).unwrap_or_default()
+    };
+    let master_rels: HashMap<String, String> = parse_rels(&master_rels_xml);
+
+    // The master's own theme (slide→…→slideMaster→theme). Fall back to the
+    // presentation theme when the master declares no /theme relationship.
+    let theme_path: Option<String> = find_rel_target_by_type(&master_rels_xml, "/theme")
+        .map(|t| resolve_path(&master_dir, &t));
+    let mut theme: HashMap<String, String> = match theme_path
+        .as_deref()
+        .and_then(|p| read_zip_str(zip, p).ok())
+    {
+        Some(theme_xml) => parse_theme_colors(&theme_xml),
+        None => fallback_theme.clone(),
+    };
+    // Bake the master's <p:clrMap> logical-name → slot mapping into the theme.
+    bake_clr_map(&mut theme, master_xml_opt.as_deref());
+
+    let master_smartart_drawings: HashMap<String, String> =
+        build_smartart_drawings(&master_rels_xml, zip);
+
+    let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
+        let doc = roxmltree::Document::parse(master_xml).ok()?;
+        let c_sld = child(doc.root_element(), "cSld")?;
+        let mut resolve = |rid: &str| -> Option<String> {
+            let target = master_rels.get(rid)?;
+            let path = resolve_path(&master_dir, target);
+            let bytes = read_zip_bytes(zip, &path)?;
+            Some(format!(
+                "data:{};base64,{}",
+                mime_from_ext(&path),
+                B64.encode(&bytes)
+            ))
+        };
+        parse_background(c_sld, &theme, &mut resolve)
+    });
+
+    let master_font_sizes = master_xml_opt
+        .as_deref()
+        .map(parse_master_font_sizes)
+        .unwrap_or_default();
+    let master_level_font_sizes = master_xml_opt
+        .as_deref()
+        .map(parse_master_level_font_sizes)
+        .unwrap_or_default();
+    let master_level_bullets = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_level_bullets(xml, &theme))
+        .unwrap_or_default();
+    let master_anchors = master_xml_opt
+        .as_deref()
+        .map(parse_master_anchors)
+        .unwrap_or_default();
+    let master_transforms = master_xml_opt
+        .as_deref()
+        .map(parse_master_transforms)
+        .unwrap_or_default();
+    let master_alignments = master_xml_opt
+        .as_deref()
+        .map(parse_master_alignments)
+        .unwrap_or_default();
+    let (master_space_before, master_space_after, master_line_spacing) = master_xml_opt
+        .as_deref()
+        .map(parse_master_txstyle_spacing)
+        .unwrap_or_default();
+    let (master_bold, master_italic, master_caps) = master_xml_opt
+        .as_deref()
+        .map(parse_master_txstyle_bold_italic)
+        .unwrap_or_default();
+    let master_color = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_txstyle_color(xml, &theme))
+        .unwrap_or_default();
+
+    MasterBundle {
+        theme,
+        master_xml: master_xml_opt,
+        master_rels,
+        master_dir,
+        master_smartart_drawings,
+        master_bg,
+        master_font_sizes,
+        master_level_font_sizes,
+        master_level_bullets,
+        master_anchors,
+        master_transforms,
+        master_alignments,
+        master_space_before,
+        master_space_after,
+        master_line_spacing,
+        master_bold,
+        master_italic,
+        master_caps,
+        master_color,
+    }
+}
+
 fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::Error>> {
     let cursor = Cursor::new(data);
     let mut zip = zip::ZipArchive::new(cursor)?;
@@ -8050,108 +8287,30 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     let pres_rels_xml = read_zip_str(&mut zip, "ppt/_rels/presentation.xml.rels")?;
     let pres_rels = parse_rels(&pres_rels_xml);
 
-    // --- Theme colors ---
+    // --- Presentation-level theme colors ---
+    // Used for the deck-wide defaults on `Presentation` (default text color,
+    // major/minor fonts, hyperlink colors) and as the fallback theme for any
+    // master that declares no /theme relationship of its own.
     let theme_xml = find_rel_target_by_type(&pres_rels_xml, "/theme")
         .map(|t| resolve_path("ppt", &t))
         .and_then(|path| read_zip_str(&mut zip, &path).ok())
         .unwrap_or_default();
     let theme = parse_theme_colors(&theme_xml);
 
-    // --- First slide master: background + font size defaults ---
-    let master_path: Option<String> =
+    // --- Presentation-level fallback master bundle ---
+    // The first slide master referenced by the presentation. Used for slides
+    // whose layout→master→theme chain can't be resolved (simple/old decks), so
+    // their behavior is unchanged from before per-slide resolution existed.
+    let pres_master_path: Option<String> =
         find_rel_target_by_type(&pres_rels_xml, "/slideMaster").map(|t| resolve_path("ppt", &t));
-    let master_xml_opt: Option<String> = master_path
-        .as_deref()
-        .and_then(|path| read_zip_str(&mut zip, path).ok());
+    let fallback_bundle: MasterBundle = match pres_master_path.as_deref() {
+        Some(p) => build_master_bundle(p, &theme, &mut zip),
+        None => build_master_bundle("", &theme, &mut zip),
+    };
 
-    // Master part directory + rels, for resolving an image background
-    // (§20.1.8.14) referenced from the master's bgPr blipFill.
-    let master_dir: String = master_path
-        .as_deref()
-        .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
-        .unwrap_or_else(|| "ppt/slideMasters".to_owned());
-    let master_rels_xml: String = master_path
-        .as_deref()
-        .and_then(|p| {
-            let file = p.split('/').next_back().unwrap_or("slideMaster1.xml");
-            let rels_p = format!("ppt/slideMasters/_rels/{file}.rels");
-            read_zip_str(&mut zip, &rels_p).ok()
-        })
-        .unwrap_or_default();
-    let master_rels: HashMap<String, String> = parse_rels(&master_rels_xml);
-    // SmartArt drawings referenced from the master's rels, so master spTree
-    // decorations can resolve <dgm:relIds> the same way slides/layouts do.
-    let master_smartart_drawings: HashMap<String, String> =
-        build_smartart_drawings(&master_rels_xml, &mut zip);
-
-    let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
-        let doc = roxmltree::Document::parse(master_xml).ok()?;
-        let c_sld = child(doc.root_element(), "cSld")?;
-        let mut resolve = |rid: &str| -> Option<String> {
-            let target = master_rels.get(rid)?;
-            let path = resolve_path(&master_dir, target);
-            let bytes = read_zip_bytes(&mut zip, &path)?;
-            Some(format!(
-                "data:{};base64,{}",
-                mime_from_ext(&path),
-                B64.encode(&bytes)
-            ))
-        };
-        parse_background(c_sld, &theme, &mut resolve)
-    });
-
-    let master_font_sizes: HashMap<String, f64> = master_xml_opt
-        .as_deref()
-        .map(parse_master_font_sizes)
-        .unwrap_or_default();
-
-    let master_level_font_sizes: HashMap<String, LevelFontSizes> = master_xml_opt
-        .as_deref()
-        .map(parse_master_level_font_sizes)
-        .unwrap_or_default();
-
-    let master_level_bullets: HashMap<String, LevelBullets> = master_xml_opt
-        .as_deref()
-        .map(|xml| parse_master_level_bullets(xml, &theme))
-        .unwrap_or_default();
-
-    let master_anchors: HashMap<String, String> = master_xml_opt
-        .as_deref()
-        .map(parse_master_anchors)
-        .unwrap_or_default();
-
-    let master_transforms: HashMap<String, Transform> = master_xml_opt
-        .as_deref()
-        .map(parse_master_transforms)
-        .unwrap_or_default();
-
-    let master_alignments: HashMap<String, String> = master_xml_opt
-        .as_deref()
-        .map(parse_master_alignments)
-        .unwrap_or_default();
-
-    let (master_space_before, master_space_after, master_line_spacing): (
-        HashMap<String, i64>,
-        HashMap<String, i64>,
-        HashMap<String, f64>,
-    ) = master_xml_opt
-        .as_deref()
-        .map(parse_master_txstyle_spacing)
-        .unwrap_or_default();
-
-    let (master_bold, master_italic, master_caps): (
-        HashMap<String, bool>,
-        HashMap<String, bool>,
-        HashMap<String, String>,
-    ) = master_xml_opt
-        .as_deref()
-        .map(parse_master_txstyle_bold_italic)
-        .unwrap_or_default();
-
-    let master_color: HashMap<String, String> = master_xml_opt
-        .as_deref()
-        .map(|xml| parse_master_txstyle_color(xml, &theme))
-        .unwrap_or_default();
+    // Cache of MasterBundle keyed by master ZIP path. Slides sharing a master
+    // reuse the bundle instead of recomputing every master-derived map.
+    let mut master_cache: HashMap<String, MasterBundle> = HashMap::new();
 
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
@@ -8162,6 +8321,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         layout_xml: Option<String>,
         layout_rels: HashMap<String, String>,
         layout_dir: String,
+        /// ZIP path of the slide's effective master, resolved through the
+        /// slide→slideLayout→slideMaster rels chain. `None` when the chain
+        /// can't be followed (no layout, or the layout has no /slideMaster
+        /// relationship); such slides fall back to the presentation master.
+        master_path: Option<String>,
     }
 
     let mut raw_slides: Vec<SlideRaw> = Vec::new();
@@ -8192,21 +8356,28 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             .as_deref()
             .and_then(|path| read_zip_str(&mut zip, path).ok());
 
-        // Layout rels (for resolving images inside the layout)
-        let layout_rels = layout_path
+        let layout_dir = layout_path
+            .as_deref()
+            .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
+            .unwrap_or_else(|| "ppt/slideLayouts".to_owned());
+
+        // Layout rels XML — needed both to resolve images inside the layout and
+        // to follow the layout→slideMaster relationship for per-slide master
+        // resolution (ECMA-376 §19.3.1.43).
+        let layout_rels_xml: String = layout_path
             .as_deref()
             .and_then(|path| {
                 let file = path.split('/').next_back().unwrap_or("layout.xml");
                 let rels_p = format!("ppt/slideLayouts/_rels/{file}.rels");
                 read_zip_str(&mut zip, &rels_p).ok()
             })
-            .map(|xml| parse_rels(&xml))
             .unwrap_or_default();
+        let layout_rels = parse_rels(&layout_rels_xml);
 
-        let layout_dir = layout_path
-            .as_deref()
-            .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
-            .unwrap_or_else(|| "ppt/slideLayouts".to_owned());
+        // Resolve this slide's master via the layout's /slideMaster rel.
+        let master_path: Option<String> =
+            find_rel_target_by_type(&layout_rels_xml, "/slideMaster")
+                .map(|t| resolve_path(&layout_dir, &t));
 
         raw_slides.push(SlideRaw {
             index: idx,
@@ -8216,39 +8387,37 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             layout_xml,
             layout_rels,
             layout_dir,
+            master_path,
         });
     }
 
     let mut slides = Vec::new();
     for raw in &raw_slides {
+        // Resolve this slide's MasterBundle: build (and cache) one for the
+        // slide's own master when the layout→master chain resolved; otherwise
+        // use the presentation-level fallback bundle. Building is keyed by
+        // master path so slides sharing a master don't recompute.
+        let bundle: &MasterBundle = match raw.master_path.as_deref() {
+            Some(mp) if !mp.is_empty() => {
+                if !master_cache.contains_key(mp) {
+                    let b = build_master_bundle(mp, &theme, &mut zip);
+                    master_cache.insert(mp.to_owned(), b);
+                }
+                &master_cache[mp]
+            }
+            _ => &fallback_bundle,
+        };
+
         let slide = parse_slide(
             &raw.slide_xml,
             raw.layout_xml.as_deref(),
             &raw.layout_rels,
             &raw.layout_dir,
-            master_xml_opt.as_deref(),
-            &master_rels,
-            &master_dir,
-            &master_smartart_drawings,
-            master_bg.clone(),
-            &master_font_sizes,
-            &master_level_font_sizes,
-            &master_level_bullets,
-            &master_anchors,
-            &master_transforms,
-            &master_alignments,
-            &master_space_before,
-            &master_space_after,
-            &master_line_spacing,
-            &master_bold,
-            &master_italic,
-            &master_caps,
-            &master_color,
+            bundle,
             raw.index,
             &raw.slide_rels,
             &raw.smartart_drawings,
             &mut zip,
-            &theme,
         )?;
         slides.push(slide);
     }
@@ -9808,6 +9977,427 @@ mod tests {
                 .any(|e| matches!(e, SlideElement::Picture(_))),
             "showMasterSp=\"1\" must keep master decorations"
         );
+    }
+
+    // ── Per-slide theme/master resolution (slide→layout→master→theme) ─────
+    //
+    // A deck with TWO masters, each carrying a DIFFERENT theme (different
+    // accent1). Two layouts (layoutA→masterA, layoutB→masterB) and two slides
+    // (slide1→layoutA, slide2→layoutB). Each slide has a shape whose fill comes
+    // from `<p:style><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>`
+    // with no explicit spPr fill. Before the fix the parser loaded the
+    // presentation's first theme/master once and applied it to every slide, so
+    // both shapes resolved to masterA's accent1. After the fix each slide must
+    // resolve accent1 from its own master's theme.
+    //
+    // `clr_map_a` lets the test optionally give masterA a non-default
+    // `<p:clrMap>` (e.g. bg1/tx1 swapped) so the clrMap-honoring assertion can
+    // reuse the same builder.
+    fn build_two_master_pptx(clr_map_a: &str) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+
+        let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst>
+    <p:sldMasterId id="2147483648" r:id="rIdMasterA"/>
+    <p:sldMasterId id="2147483649" r:id="rIdMasterB"/>
+  </p:sldMasterIdLst>
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rIdSlide1"/>
+    <p:sldId id="257" r:id="rIdSlide2"/>
+  </p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#;
+
+        // presentation rels intentionally lists masterA FIRST so the legacy
+        // "first master / first theme" path would pick masterA's accent1.
+        let pres_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMasterA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdMasterB" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster2.xml"/>
+  <Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rIdSlide2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+  <Relationship Id="rIdThemeA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>"#;
+
+        // Two themes that differ only in accent1 (and tx1/bg1 hex so the clrMap
+        // swap is observable).
+        let theme_a = |accent1: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+  <a:themeElements><a:clrScheme name="C">
+    <a:dk1><a:srgbClr val="222222"/></a:dk1><a:lt1><a:srgbClr val="FAFAFA"/></a:lt1>
+    <a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+    <a:accent1><a:srgbClr val="{accent1}"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2>
+    <a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4>
+    <a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6>
+    <a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink>
+  </a:clrScheme>
+  <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>
+    <a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+  <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+  </a:themeElements>
+</a:theme>"#
+            )
+        };
+        let theme1_xml = theme_a("72A376"); // masterA accent1
+        let theme2_xml = theme_a("4F81BD"); // masterB accent1
+
+        let master = |clr_map: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+  {clr_map}
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483650" r:id="rIdLayout"/></p:sldLayoutIdLst>
+</p:sldMaster>"#
+            )
+        };
+        let default_clr_map = r#"<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
+        let master1_xml = master(clr_map_a);
+        let master2_xml = master(default_clr_map);
+
+        // Each master's rels points at its OWN theme and its OWN layout.
+        let master1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"#;
+        let master2_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout2.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme2.xml"/>
+</Relationships>"#;
+
+        let layout = || {
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sldLayout>"#
+                .to_string()
+        };
+        let layout1_xml = layout();
+        let layout2_xml = layout();
+
+        // layoutA→masterA, layoutB→masterB.
+        let layout1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"#;
+        let layout2_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster2.xml"/>
+</Relationships>"#;
+
+        // Each slide: one rect with NO explicit fill, fill comes from
+        // `<p:style><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>`.
+        // slide2 additionally references tx1 on a second shape so the clrMap
+        // swap (tx1→lt1) is observable.
+        let slide = |extra_shape: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="2" name="StyledRect"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="500000" cy="500000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+      <p:style><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef></p:style>
+    </p:sp>
+    {extra_shape}
+  </p:spTree></p:cSld>
+</p:sld>"#
+            )
+        };
+        let tx1_shape = r#"<p:sp>
+      <p:nvSpPr><p:cNvPr id="3" name="Tx1Rect"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="700000" y="100000"/><a:ext cx="500000" cy="500000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+      <p:style><a:fillRef idx="1"><a:schemeClr val="tx1"/></a:fillRef></p:style>
+    </p:sp>"#;
+        let slide1_xml = slide("");
+        let slide2_xml = slide(tx1_shape);
+
+        let slide1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"#;
+        let slide2_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout2.xml"/>
+</Relationships>"#;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            let mut put = |path: &str, bytes: &[u8]| {
+                zw.start_file(path, opts).unwrap();
+                use std::io::Write;
+                zw.write_all(bytes).unwrap();
+            };
+            put("ppt/presentation.xml", presentation_xml.as_bytes());
+            put("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes());
+            put("ppt/theme/theme1.xml", theme1_xml.as_bytes());
+            put("ppt/theme/theme2.xml", theme2_xml.as_bytes());
+            put("ppt/slideMasters/slideMaster1.xml", master1_xml.as_bytes());
+            put("ppt/slideMasters/slideMaster2.xml", master2_xml.as_bytes());
+            put(
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                master1_rels.as_bytes(),
+            );
+            put(
+                "ppt/slideMasters/_rels/slideMaster2.xml.rels",
+                master2_rels.as_bytes(),
+            );
+            put("ppt/slideLayouts/slideLayout1.xml", layout1_xml.as_bytes());
+            put("ppt/slideLayouts/slideLayout2.xml", layout2_xml.as_bytes());
+            put(
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                layout1_rels.as_bytes(),
+            );
+            put(
+                "ppt/slideLayouts/_rels/slideLayout2.xml.rels",
+                layout2_rels.as_bytes(),
+            );
+            put("ppt/slides/slide1.xml", slide1_xml.as_bytes());
+            put("ppt/slides/slide2.xml", slide2_xml.as_bytes());
+            put("ppt/slides/_rels/slide1.xml.rels", slide1_rels.as_bytes());
+            put("ppt/slides/_rels/slide2.xml.rels", slide2_rels.as_bytes());
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn first_shape_fill_color(slide: &Slide) -> Option<String> {
+        slide.elements.iter().find_map(|e| match e {
+            SlideElement::Shape(s) => match &s.fill {
+                Some(Fill::Solid { color }) => Some(color.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn shape_fill_color_by_name(slide: &Slide, name: &str) -> Option<String> {
+        slide.elements.iter().find_map(|e| match e {
+            SlideElement::Shape(s) if s.name.as_deref() == Some(name) => match &s.fill {
+                Some(Fill::Solid { color }) => Some(color.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    /// Core regression: each slide must resolve scheme colors against its OWN
+    /// master's theme (slide→layout→master→theme), not the presentation's first
+    /// theme. slide1's accent1 = masterA theme (#72A376); slide2's accent1 =
+    /// masterB theme (#4F81BD).
+    #[test]
+    fn theme_resolved_per_slide_via_layout_master_chain() {
+        let default_clr_map = r#"<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
+        let data = build_two_master_pptx(default_clr_map);
+        let pres = parse_presentation(&data).expect("parse");
+        assert_eq!(pres.slides.len(), 2, "expected two slides");
+
+        let s1 = first_shape_fill_color(&pres.slides[0]);
+        let s2 = first_shape_fill_color(&pres.slides[1]);
+        assert_eq!(
+            s1.as_deref(),
+            Some("72A376"),
+            "slide1 accent1 must resolve from masterA theme"
+        );
+        assert_eq!(
+            s2.as_deref(),
+            Some("4F81BD"),
+            "slide2 accent1 must resolve from masterB theme"
+        );
+    }
+
+    /// §19.3.1.6 clrMap: a master with `bg1`/`tx1` swapped (bg1="dk1",
+    /// tx1="lt1") must remap logical scheme names. `<a:schemeClr val="tx1">`
+    /// then resolves to lt1's hex (#FAFAFA), not dk1's. masterB keeps the
+    /// default clrMap, so its tx1 stays dk1 (#222222).
+    #[test]
+    fn clr_map_remaps_logical_scheme_names() {
+        // Swap bg1<->tx1 on masterA only.
+        let swapped = r#"<p:clrMap bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
+        let data = build_two_master_pptx(swapped);
+        let pres = parse_presentation(&data).expect("parse");
+
+        // slide2 (masterB, default clrMap) has the Tx1Rect: tx1 -> dk1 (#222222).
+        let tx1_default = shape_fill_color_by_name(&pres.slides[1], "Tx1Rect");
+        assert_eq!(
+            tx1_default.as_deref(),
+            Some("222222"),
+            "default clrMap: tx1 must resolve to dk1"
+        );
+
+        // To observe the swap on masterA, place the same tx1 shape via a
+        // dedicated parse against masterA's theme. We reuse slide1 which uses
+        // masterA; assert that accent1 still resolves correctly under the swap
+        // (accent slots are identity-mapped) and that tx1 on a masterA slide
+        // would map to lt1. slide1 has no tx1 shape, so we assert via the
+        // builder variant below.
+        let s1_accent = first_shape_fill_color(&pres.slides[0]);
+        assert_eq!(
+            s1_accent.as_deref(),
+            Some("72A376"),
+            "accent1 is identity-mapped and unaffected by bg1/tx1 swap"
+        );
+    }
+
+    /// Dedicated clrMap assertion on the swapped master: a slide on masterA
+    /// (bg1<->tx1 swapped) resolves `<a:schemeClr val="tx1">` to lt1 (#FAFAFA).
+    #[test]
+    fn clr_map_tx1_resolves_to_lt1_on_swapped_master() {
+        let swapped = r#"<p:clrMap bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
+        let data = build_two_master_pptx_with_tx1_on_a(swapped);
+        let pres = parse_presentation(&data).expect("parse");
+        // slide1 (masterA, swapped) has the Tx1Rect: tx1 -> lt1 (#FAFAFA).
+        let tx1_swapped = shape_fill_color_by_name(&pres.slides[0], "Tx1Rect");
+        assert_eq!(
+            tx1_swapped.as_deref(),
+            Some("FAFAFA"),
+            "swapped clrMap: tx1 must resolve to lt1's hex"
+        );
+    }
+
+    // Variant of build_two_master_pptx where slide1 (masterA) carries the tx1
+    // shape, so the clrMap swap on masterA is directly observable.
+    fn build_two_master_pptx_with_tx1_on_a(clr_map_a: &str) -> Vec<u8> {
+        // Reuse the standard builder, then patch slide1 to include the tx1
+        // shape by rebuilding with the tx1 shape on slide1. Simplest: build a
+        // fresh deck inline mirroring build_two_master_pptx but swapping which
+        // slide gets the tx1 shape. To avoid duplication we shell out to the
+        // generic builder and post-process is not feasible on a zip, so we
+        // construct directly here with the minimum needed parts.
+        use zip::write::SimpleFileOptions;
+
+        let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMasterA"/></p:sldMasterIdLst>
+  <p:sldIdLst><p:sldId id="256" r:id="rIdSlide1"/></p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#;
+        let pres_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMasterA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rIdThemeA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>"#;
+        let theme1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+  <a:themeElements><a:clrScheme name="C">
+    <a:dk1><a:srgbClr val="222222"/></a:dk1><a:lt1><a:srgbClr val="FAFAFA"/></a:lt1>
+    <a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+    <a:accent1><a:srgbClr val="72A376"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2>
+    <a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4>
+    <a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6>
+    <a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink>
+  </a:clrScheme>
+  <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>
+    <a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+  <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+  </a:themeElements>
+</a:theme>"#;
+        let master1_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+  {clr_map_a}
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483650" r:id="rIdLayout"/></p:sldLayoutIdLst>
+</p:sldMaster>"#
+        );
+        let master1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"#;
+        let layout1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sldLayout>"#;
+        let layout1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"#;
+        let slide1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="3" name="Tx1Rect"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="700000" y="100000"/><a:ext cx="500000" cy="500000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+      <p:style><a:fillRef idx="1"><a:schemeClr val="tx1"/></a:fillRef></p:style>
+    </p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"#;
+        let slide1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"#;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            let mut put = |path: &str, bytes: &[u8]| {
+                zw.start_file(path, opts).unwrap();
+                use std::io::Write;
+                zw.write_all(bytes).unwrap();
+            };
+            put("ppt/presentation.xml", presentation_xml.as_bytes());
+            put("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes());
+            put("ppt/theme/theme1.xml", theme1_xml.as_bytes());
+            put("ppt/slideMasters/slideMaster1.xml", master1_xml.as_bytes());
+            put(
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                master1_rels.as_bytes(),
+            );
+            put("ppt/slideLayouts/slideLayout1.xml", layout1_xml.as_bytes());
+            put(
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                layout1_rels.as_bytes(),
+            );
+            put("ppt/slides/slide1.xml", slide1_xml.as_bytes());
+            put("ppt/slides/_rels/slide1.xml.rels", slide1_rels.as_bytes());
+            zw.finish().unwrap();
+        }
+        buf
     }
 
     // ── Chart axis titles + chartSpace border (parity with xlsx) ──────────
