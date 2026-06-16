@@ -4,10 +4,11 @@
   <img src="docs/images/icon.png" alt="office-open-xml-viewer" width="160" height="160">
 </p>
 
-# office-open-xml-viewer
+# Office Open XML Viewer
 
 [![npm version](https://img.shields.io/npm/v/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)
 [![npm downloads](https://img.shields.io/npm/dm/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)
+[![VS Code Marketplace](https://vsmarketplacebadges.dev/version/silurus.office-open-xml-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer)
 [![license](https://img.shields.io/npm/l/@silurus/ooxml.svg)](./LICENSE)
 
 **[Live demo](https://ooxml.silurus.dev)**
