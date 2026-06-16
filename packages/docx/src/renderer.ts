@@ -2008,7 +2008,16 @@ function renderParagraph(
     markEmPx: paragraphMarkEmPx(para, scale),
   } : undefined;
 
-  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
+  // ECMA-376 §17.9.6 (lvl/suff, default "tab") + §17.3.1.12 (hanging): in a
+  // hanging-indent list the number glyph sits at firstLineX (= indentLeft −
+  // hanging) and is followed by a tab that advances the body to the indentLeft
+  // tab stop, so the first line's TEXT region is identical to the continuation
+  // lines' ([paraX, paraX+paraW]). The negative first-line indent positions only
+  // the marker, never the body. For non-numbered paragraphs the first-line indent
+  // (positive firstLine, or a bare negative hanging without a marker) applies to
+  // the body as usual. RTL lists keep their existing start-edge handling.
+  const firstLineIndent = numPrefix && !baseRtl ? 0 : firstLineX - paraX;
+  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
 
   // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
   // inline content on any line, so layoutLines returns zero lines. Per ECMA-376
@@ -2115,7 +2124,10 @@ function renderParagraph(
     // First-line indent shifts the START edge: physical left for LTR; for RTL
     // the start is the right edge, so it narrows/widens the line's available
     // width instead of moving x (effAvailW below).
-    let x = firstLine && !baseRtl ? lineLeft + indFirst : lineLeft;
+    // For a numbered first line (LTR) the body sits at the indentLeft tab stop
+    // (lineLeft); indFirst only pulls the marker into the hanging margin (drawn
+    // below). Non-numbered first lines apply indFirst to the body directly.
+    let x = firstLine && !baseRtl ? (numPrefix ? lineLeft : lineLeft + indFirst) : lineLeft;
     const effAvailW = baseRtl && firstLine ? lineAvailW - indFirst : lineAvailW;
 
     // Visual draw order. Under bidi we reorder the line's segments per UAX#9
@@ -2185,7 +2197,9 @@ function renderParagraph(
         ctx.textAlign = prevAlign;
         ctx.direction = prevDir;
       } else {
-        ctx.fillText(para.numbering!.text, lineLeft + indFirst - numTab, baseline);
+        // Marker sits at firstLineX (= indentLeft − hanging); the body has been
+        // advanced to the indentLeft tab stop (lineLeft) above.
+        ctx.fillText(para.numbering!.text, lineLeft + indFirst, baseline);
       }
     }
 
