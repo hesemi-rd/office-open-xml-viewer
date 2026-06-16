@@ -105,6 +105,14 @@ function axisTitleColor(hex: string | null | undefined): string {
   return hex ? `#${hex}` : '#555';
 }
 
+/** Margin (px) Excel leaves between the chart's outer edge and an axis title —
+ *  the title is inset from the chart border, not flush against it. Proportional
+ *  to the chart dimension (`dim` = width for the left/val title, height for the
+ *  bottom/cat title) with a floor so small charts still get a visible gap. */
+function axisTitleMargin(dim: number): number {
+  return Math.max(8, dim * 0.02);
+}
+
 /** Draw both axis titles for a cartesian chart (bar/line/area/scatter),
  *  anchored in the reserved outer gutter bands so they sit OUTSIDE the tick
  *  labels. `catTitlePx`/`valTitlePx` are the title font sizes the caller used
@@ -120,7 +128,7 @@ function drawAxisTitles(
   catTitlePx: number, valTitlePx: number,
 ): void {
   if (chart.valAxisTitle) {
-    const anchorX = x + legLeftW + valTitlePx / 2 + 2;
+    const anchorX = x + legLeftW + axisTitleMargin(w) + valTitlePx / 2;
     const anchorY = py0 + ph / 2;
     drawAxisTitle(
       ctx, chart.valAxisTitle, anchorX, anchorY, 'val',
@@ -129,7 +137,7 @@ function drawAxisTitles(
   }
   if (chart.catAxisTitle) {
     const anchorX = px0 + pw / 2;
-    const anchorY = y + h - legBottomH - 2 - catTitlePx / 2;
+    const anchorY = y + h - legBottomH - axisTitleMargin(h) - catTitlePx / 2;
     drawAxisTitle(
       ctx, chart.catAxisTitle, anchorX, anchorY, 'cat',
       catTitlePx, !!chart.catAxisTitleFontBold, axisTitleColor(chart.catAxisTitleFontColor),
@@ -491,8 +499,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // and never collide with the tick labels.
   const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
   const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.03,
@@ -814,8 +822,8 @@ function renderLineChart(
   // the tick-label sizes above, so 18pt titles get a wide enough gutter.
   const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
   const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -964,8 +972,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
   const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.05,
@@ -1320,8 +1328,8 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
   const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
-  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0;
 
   // Title placement — manual layout overrides the auto position.
   if (chart.title) {
