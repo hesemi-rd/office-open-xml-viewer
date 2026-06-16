@@ -899,6 +899,14 @@ function layoutParagraph(
         // clean, e.g. "EC市場で…"), then place chars line-by-line with kinsoku
         // (ECMA-376 §17.15.1.58–.60) so 、。」 never start a line and 「（ never
         // end one. fitCjkLine reuses core's kinsokuAdjustedSplit.
+        //
+        // DEFAULT_KINSOKU_RULES is correct for pptx: PresentationML has no custom
+        // forbidden-set element (w:noLineBreaksBefore/After are WordprocessingML-only).
+        // Deferred (tracked): a:pPr@eaLnBrk (§21.1.2.2 "East Asian Line Break",
+        // default true) is not yet parsed; eaLnBrk="0" means an East-Asian word must
+        // not be broken at all — a separate feature from the forbidden-set rules.
+        // docx's analogous CJK path (renderer.ts, fitCJKPrefix) is intentionally
+        // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
         const measured: (MeasuredChar & { font: string })[] = [];
         for (const ch of token) {
           const chFont = CJK_RE.test(ch) ? fontEa : font;

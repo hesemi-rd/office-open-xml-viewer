@@ -45,4 +45,16 @@ describe('fitCjkLine — legal splits & progress', () => {
     const off = resolveKinsokuRules({ kinsoku: false });
     expect(fitCjkLine(mc('あい、う'), 0, 20, off)).toBe(2);
   });
+
+  it('treats an astral (surrogate-pair) grapheme as one unit', () => {
+    // [...'𠮷𠮷、'] yields 3 code-point graphemes; width fits 2 (𠮷𠮷), and
+    // kinsoku pulls the 2nd 𠮷 down so the line never begins with 、.
+    expect(fitCjkLine(mc('𠮷𠮷、'), 0, 20, DEFAULT_KINSOKU_RULES)).toBe(1);
+  });
+
+  it('falls back to the greedy split for a pathological all-forbidden run', () => {
+    // Every char is 行頭禁則; no legal split exists within minSplit, so the
+    // greedy split (2) is returned rather than hanging or emptying the line.
+    expect(fitCjkLine(mc('、。、。'), 0, 20, DEFAULT_KINSOKU_RULES)).toBe(2);
+  });
 });

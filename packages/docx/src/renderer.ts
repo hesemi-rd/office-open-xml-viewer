@@ -3275,7 +3275,10 @@ function layoutLines(
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
     } else if (hasCJKBreakOpportunity(s.text)) {
-      // CJK overflow: split at the maximum prefix that fits, re-queue the tail
+      // CJK overflow: split at the maximum prefix that fits, re-queue the tail.
+      // (pptx's analogous CJK fit is cjk-wrap.ts `fitCjkLine`, kept intentionally
+      //  separate: it sums per-char advances, whereas this path uses substring
+      //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
