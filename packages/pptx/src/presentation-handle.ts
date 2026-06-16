@@ -139,7 +139,23 @@ export async function createPresentationHandle(
       // (`seeking`), keep the hovered state latched to that element so the
       // bar doesn't disappear when the pointer strays off-element mid-drag.
       const isActive = s === hoveredState || seeking?.state === s;
-      if (isActive) drawControls(ctx, s, media);
+      if (isActive) {
+        // Full chrome (scrubber + time + video gradient). drawControls also
+        // draws the play/pause badge itself, so don't also draw the standalone
+        // badge below — that would double-stamp it.
+        drawControls(ctx, s, media);
+      } else if (media.paused) {
+        // Paused and not hovered: still advertise that this is playable by
+        // holding the play badge over the poster/icon, mirroring the static
+        // render (skipMediaControls draws the same badge). PowerPoint shows the
+        // play affordance on a stopped clip; we don't autoplay. Anchor to the
+        // poster bounds (not the enlarged audio control surface) so the circle
+        // sits on the thumbnail/speaker icon.
+        const { x, y, w, h } = s.posterRect;
+        drawPlayBadge(ctx, x + w / 2, y + h / 2, w, h, 'paused');
+      }
+      // Playing and not hovered: draw nothing extra — PowerPoint hides the
+      // controls during playback until the pointer returns.
     }
   };
 

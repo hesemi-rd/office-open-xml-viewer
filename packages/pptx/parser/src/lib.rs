@@ -6254,9 +6254,16 @@ fn mime_from_ext(path: &str) -> &'static str {
         "m4a" => "audio/mp4",
         "wav" => "audio/wav",
         "aac" => "audio/aac",
+        "wma" => "audio/x-ms-wma",
+        "flac" => "audio/flac",
         "ogg" | "oga" => "audio/ogg",
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" | "qt" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "mpg" | "mpeg" => "video/mpeg",
+        "3gp" => "video/3gpp",
+        "mkv" => "video/x-matroska",
         "webm" => "video/webm",
         "ogv" => "video/ogg",
         _ => "application/octet-stream",
@@ -6274,59 +6281,64 @@ fn parse_media(
     let nv_pic_pr = child(pic_node, "nvPicPr")?;
     let nv_pr = child(nv_pic_pr, "nvPr")?;
 
-    // Prefer a:videoFile/a:audioFile (r:link or r:embed), then fall back to
-    // the p14:media extension. All three resolve to the same media rel target.
-    let (media_kind, media_rid) = nv_pr
+    // A `<p:pic>` can carry several media references at once: the legacy
+    // `<a:videoFile>`/`<a:audioFile>` (r:embed or r:link) and the modern
+    // `<p14:media r:embed>` extension. PowerPoint sometimes writes the legacy
+    // `r:link` as a broken/External placeholder (empty Target) while the real
+    // bytes live in the embedded `<p14:media>`. So collect every reference and
+    // use the first that actually resolves, preferring an *embedded* ref over a
+    // *linked* one — otherwise a broken videoFile link would shadow the good
+    // p14:media embed and the pic would be demoted to a poster-only Picture.
+    // (ECMA-376 §19.3.1.17/18 a:videoFile/a:audioFile; p14:media is a Microsoft
+    // extension.)
+    let av = nv_pr
         .children()
-        .find_map(|n| {
-            if !n.is_element() {
-                return None;
+        .find(|n| n.is_element() && matches!(n.tag_name().name(), "videoFile" | "audioFile"));
+    let av_kind: Option<&str> =
+        av.map(|n| if n.tag_name().name() == "videoFile" { "video" } else { "audio" });
+    let av_embed = av.and_then(|n| attr_r(&n, "embed"));
+    let av_link = av.and_then(|n| attr_r(&n, "link"));
+
+    // `<p14:media>` lives in `nvPr > extLst > ext`.
+    let p14 = child(nv_pr, "extLst").and_then(|ext_lst| {
+        ext_lst
+            .children()
+            .filter(|c| c.is_element())
+            .find_map(|ext| {
+                ext.children()
+                    .find(|m| m.is_element() && m.tag_name().name() == "media")
+            })
+    });
+    let p14_embed = p14.and_then(|n| attr_r(&n, "embed"));
+    let p14_link = p14.and_then(|n| attr_r(&n, "link"));
+
+    // Preference: embedded refs (always internal) before linked refs (a link may
+    // be External / unresolved); within each, the kind-bearing
+    // videoFile/audioFile before the kind-less p14:media.
+    let candidates = [
+        (av_kind, av_embed),
+        (None, p14_embed),
+        (av_kind, av_link),
+        (None, p14_link),
+    ];
+    let (media_kind, media_path, mime) = candidates
+        .into_iter()
+        .find_map(|(kind_hint, rid)| {
+            let rid = rid?;
+            let target = rels.get(&rid)?;
+            if target.is_empty() {
+                return None; // broken/empty rel (e.g. an External placeholder)
             }
-            let name = n.tag_name().name();
-            if name == "videoFile" || name == "audioFile" {
-                let rid = attr_r(&n, "link").or_else(|| attr_r(&n, "embed"))?;
-                let kind = if name == "videoFile" {
-                    "video"
-                } else {
-                    "audio"
-                };
-                Some((kind, rid))
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            // p14:media lives inside p:extLst > p:ext
-            let ext_lst = child(nv_pr, "extLst")?;
-            ext_lst
-                .children()
-                .filter(|c| c.is_element())
-                .find_map(|ext| {
-                    ext.children().filter(|c| c.is_element()).find_map(|m| {
-                        if m.tag_name().name() != "media" {
-                            return None;
-                        }
-                        let rid = attr_r(&m, "link").or_else(|| attr_r(&m, "embed"))?;
-                        // ext has no way to say audio vs video by itself; decide from file ext
-                        Some(("", rid))
-                    })
-                })
+            let path = resolve_path(slide_dir, target);
+            let mime = mime_from_ext(&path);
+            let kind = match kind_hint {
+                Some(k) => k.to_string(),
+                None if mime.starts_with("video/") => "video".to_string(),
+                None if mime.starts_with("audio/") => "audio".to_string(),
+                None => return None, // p14:media with an unknown MIME — try the next ref
+            };
+            Some((kind, path, mime))
         })?;
-
-    let rel_target = rels.get(&media_rid)?;
-    let media_path = resolve_path(slide_dir, rel_target);
-    let mime = mime_from_ext(&media_path);
-
-    // Finalize media_kind once MIME is known (p14:media-only path).
-    let media_kind = if !media_kind.is_empty() {
-        media_kind.to_string()
-    } else if mime.starts_with("video/") {
-        "video".to_string()
-    } else if mime.starts_with("audio/") {
-        "audio".to_string()
-    } else {
-        return None;
-    };
 
     // Geometry
     let sp_pr = child(pic_node, "spPr")?;
@@ -9586,6 +9598,138 @@ mod tests {
         let theme: HashMap<String, String> = HashMap::new();
         let stroke = child(sppr, "ln").and_then(|n| parse_stroke(n, &theme));
         assert!(stroke.is_none());
+    }
+
+    // ===== p14:media-only embeds (ECMA-376 §19.3.1.17/18; the p14 extension
+    // carries no audio/video tag, so media_kind is decided from the MIME of the
+    // referenced part). A `<p:pic>` with no `a:videoFile`/`a:audioFile`, just a
+    // `<p14:media r:embed>`, must still parse as a MediaElement — not fall
+    // through to a poster-only Picture. =====
+
+    /// `<p:pic>` whose only media marker is `<p14:media r:embed>` pointing at a
+    /// `.m4v` (a MIME the table must recognise) parses as a video MediaElement.
+    /// rId1 → media/clip.m4v, with a poster blip so the renderer has a thumbnail.
+    #[test]
+    fn test_parse_media_p14_only_m4v_is_video() {
+        let xml = r#"<p:pic
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <p:nvPicPr>
+            <p:cNvPr id="5" name="Media"/>
+            <p:nvPr>
+              <p:extLst>
+                <p:ext uri="{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}">
+                  <p14:media r:embed="rId1"/>
+                </p:ext>
+              </p:extLst>
+            </p:nvPr>
+          </p:nvPicPr>
+          <p:blipFill>
+            <a:blip r:embed="rId2"/>
+          </p:blipFill>
+          <p:spPr>
+            <a:xfrm>
+              <a:off x="100" y="200"/>
+              <a:ext cx="3000" cy="4000"/>
+            </a:xfrm>
+          </p:spPr>
+        </p:pic>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let pic = doc.root_element();
+        let mut rels: HashMap<String, String> = HashMap::new();
+        rels.insert("rId1".to_string(), "../media/clip.m4v".to_string());
+        rels.insert("rId2".to_string(), "../media/image1.png".to_string());
+
+        let media = parse_media(pic, "ppt/slides", &rels)
+            .expect("p14:media-only .m4v should parse as a MediaElement");
+        assert_eq!(media.media_kind, "video");
+        assert_eq!(media.mime_type, "video/mp4");
+        assert_eq!(media.media_path, "ppt/media/clip.m4v");
+        assert_eq!(media.poster_path, "ppt/media/image1.png");
+    }
+
+    /// Same shape but the embed targets a `.wav` → audio MediaElement.
+    #[test]
+    fn test_parse_media_p14_only_wav_is_audio() {
+        let xml = r#"<p:pic
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <p:nvPicPr>
+            <p:cNvPr id="6" name="Audio"/>
+            <p:nvPr>
+              <p:extLst>
+                <p:ext uri="{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}">
+                  <p14:media r:embed="rId1"/>
+                </p:ext>
+              </p:extLst>
+            </p:nvPr>
+          </p:nvPicPr>
+          <p:spPr>
+            <a:xfrm>
+              <a:off x="0" y="0"/>
+              <a:ext cx="800" cy="800"/>
+            </a:xfrm>
+          </p:spPr>
+        </p:pic>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let pic = doc.root_element();
+        let mut rels: HashMap<String, String> = HashMap::new();
+        rels.insert("rId1".to_string(), "../media/sound.wav".to_string());
+
+        let media = parse_media(pic, "ppt/slides", &rels)
+            .expect("p14:media-only .wav should parse as a MediaElement");
+        assert_eq!(media.media_kind, "audio");
+        assert_eq!(media.mime_type, "audio/wav");
+    }
+
+    /// A `<p:pic>` whose legacy `<a:videoFile r:link>` is a broken/External
+    /// placeholder (the rId is absent from rels) but whose `<p14:media r:embed>`
+    /// points at the real embedded clip must still parse as a video — the good
+    /// embed must not be shadowed by the broken link. (Repro of a real deck
+    /// where one slide's videoFile link was External with an empty Target.)
+    #[test]
+    fn test_parse_media_prefers_p14_embed_over_broken_videofile_link() {
+        let xml = r#"<p:pic
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <p:nvPicPr>
+            <p:cNvPr id="7" name="Video"/>
+            <p:nvPr>
+              <a:videoFile r:link="rIdBroken"/>
+              <p:extLst>
+                <p:ext uri="{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}">
+                  <p14:media r:embed="rIdGood"/>
+                </p:ext>
+              </p:extLst>
+            </p:nvPr>
+          </p:nvPicPr>
+          <p:blipFill><a:blip r:embed="rIdPoster"/></p:blipFill>
+          <p:spPr>
+            <a:xfrm>
+              <a:off x="0" y="0"/>
+              <a:ext cx="1280" cy="720"/>
+            </a:xfrm>
+          </p:spPr>
+        </p:pic>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let pic = doc.root_element();
+        let mut rels: HashMap<String, String> = HashMap::new();
+        // rIdBroken intentionally absent — an External placeholder with no
+        // resolvable Target. Only the embedded p14:media resolves.
+        rels.insert("rIdGood".to_string(), "../media/clip.mp4".to_string());
+        rels.insert("rIdPoster".to_string(), "../media/image1.png".to_string());
+
+        let media = parse_media(pic, "ppt/slides", &rels)
+            .expect("a broken videoFile link must not shadow the good p14:media embed");
+        assert_eq!(media.media_kind, "video");
+        assert_eq!(media.media_path, "ppt/media/clip.mp4");
+        assert_eq!(media.mime_type, "video/mp4");
     }
 
     // ===== Master spTree decorative shapes (ECMA-376 §19.3.1.38 sld /
