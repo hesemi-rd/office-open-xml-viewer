@@ -1406,6 +1406,21 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (chart.valMin != null) yMin = chart.valMin;
   else if (yMin > 0) yMin = 0;
   if (chart.valMax != null) yMax = chart.valMax;
+  // Auto value (Y) axis: ONE major unit (the "nice" step) drives both the
+  // rounded maximum and the gridlines — identical to bar/line/area. niceAxisMax
+  // adds ~5% headroom above the data max and rounds up to that step, so the top
+  // point sits below the top gridline (data 3.5 → step 0.5, max 4 → 0,.5,…,4;
+  // 0.1129 → step 0.02, max 0.12). The step is taken from the DATA range and
+  // reused for the gridline loop below — recomputing it on the rounded range
+  // would wrongly coarsen it (niceStep(4)=1 vs the 0.5 Excel uses for 0–4).
+  // Explicit <c:valAx><c:scaling> wins. NB: the auto major unit is not specified
+  // by ECMA-376 (Excel-proprietary); niceStep approximates it and may differ
+  // from Excel by one step on some ranges.
+  const yAxisStep = niceStep(yMax - yMin);
+  if (yAxisStep > 0) {
+    if (chart.valMin == null) yMin = niceAxisMin(yMin, yAxisStep);
+    if (chart.valMax == null) yMax = niceAxisMax(yMax, yAxisStep, yMin);
+  }
   if (chart.catAxisMin != null) xMin = chart.catAxisMin;
   if (chart.catAxisMax != null) xMax = chart.catAxisMax;
   // Excel snaps auto-derived axis bounds outward to a multiple of the
@@ -1427,7 +1442,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (!chart.valAxisHidden) {
     const yTickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px sans-serif`;
-    const yStep = niceStep(yMax - yMin);
+    const yStep = yAxisStep;
     const ySteps = Math.round((yMax - yMin) / yStep) + 1;
     for (let si = 0; si < ySteps; si++) {
       const v = yMin + si * yStep; if (v > yMax + yStep * 0.01) break;
