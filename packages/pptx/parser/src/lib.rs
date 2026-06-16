@@ -2009,42 +2009,52 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
 /// default mapping is applied: bg1=lt1, tx1=dk1, bg2=lt2, tx2=dk2, accentN
 /// identity, hlink/folHlink identity. The raw slot keys (dk1, lt1, …) added by
 /// `parse_theme_colors` are left untouched, so canonical lookups still work.
-fn bake_clr_map(theme: &mut HashMap<String, String>, master_xml: Option<&str>) {
-    // logical name → default scheme slot (used when clrMap is missing the attr).
-    const LOGICALS: &[(&str, &str)] = &[
-        ("bg1", "lt1"),
-        ("tx1", "dk1"),
-        ("bg2", "lt2"),
-        ("tx2", "dk2"),
-        ("accent1", "accent1"),
-        ("accent2", "accent2"),
-        ("accent3", "accent3"),
-        ("accent4", "accent4"),
-        ("accent5", "accent5"),
-        ("accent6", "accent6"),
-        ("hlink", "hlink"),
-        ("folHlink", "folHlink"),
-    ];
+/// The 12 logical scheme names of a `CT_ColorMapping` (ECMA-376 §19.3.1.6),
+/// paired with the scheme slot each maps to by default when a `<p:clrMap>`
+/// attribute is absent: bg1=lt1, tx1=dk1, bg2=lt2, tx2=dk2, accentN identity,
+/// hlink/folHlink identity. Shared by `<p:clrMap>` (§19.3.1.6) and
+/// `<a:overrideClrMapping>` (§20.1.6.8), which carry the identical attribute set.
+const CLR_MAP_LOGICALS: &[(&str, &str)] = &[
+    ("bg1", "lt1"),
+    ("tx1", "dk1"),
+    ("bg2", "lt2"),
+    ("tx2", "dk2"),
+    ("accent1", "accent1"),
+    ("accent2", "accent2"),
+    ("accent3", "accent3"),
+    ("accent4", "accent4"),
+    ("accent5", "accent5"),
+    ("accent6", "accent6"),
+    ("hlink", "hlink"),
+    ("folHlink", "folHlink"),
+];
 
-    // Find the master's <p:clrMap> element (direct child of <p:sldMaster>).
-    let clr_map_node = master_xml.and_then(|xml| {
-        let doc = roxmltree::Document::parse(xml).ok()?;
-        // roxmltree borrows the doc; collect the attrs we need before it drops.
-        // We can't return the node (lifetime), so resolve into an owned map.
-        let node = child(doc.root_element(), "clrMap")?;
-        let mut m: HashMap<String, String> = HashMap::new();
-        for (logical, _) in LOGICALS {
-            if let Some(slot) = attr(&node, logical) {
-                m.insert((*logical).to_owned(), slot);
-            }
+/// Read the 12 `CT_ColorMapping` attributes (§19.3.1.6) from `node` into an owned
+/// `{logical → slot}` map. Works for both `<p:clrMap>` and
+/// `<a:overrideClrMapping>` (same attribute set). roxmltree borrows the doc, so
+/// we resolve into an owned map here rather than return the node.
+fn parse_clr_map_node(node: roxmltree::Node<'_, '_>) -> HashMap<String, String> {
+    let mut m: HashMap<String, String> = HashMap::new();
+    for (logical, _) in CLR_MAP_LOGICALS {
+        if let Some(slot) = attr(&node, logical) {
+            m.insert((*logical).to_owned(), slot);
         }
-        Some(m)
-    });
+    }
+    m
+}
 
-    for (logical, default_slot) in LOGICALS {
-        // Resolve the slot this logical name points at (clrMap value, else default).
-        let slot = clr_map_node
-            .as_ref()
+/// Apply a `{logical → slot}` color mapping to `theme`, inserting
+/// `theme[logical] = theme[slot]` for every logical name (falling back to the
+/// default slot from `CLR_MAP_LOGICALS` when the mapping omits an attr). Reads
+/// the raw scheme slot keys (dk1/lt1/dk2/lt2/accent1..6/hlink/folHlink) and
+/// writes the logical keys, leaving the raw slots untouched — so the same
+/// `theme` can be re-baked later with an override mapping that again resolves
+/// against the intact raw slots. `clr_map` = `None` applies the all-default
+/// PowerPoint mapping.
+fn apply_clr_map(theme: &mut HashMap<String, String>, clr_map: Option<&HashMap<String, String>>) {
+    for (logical, default_slot) in CLR_MAP_LOGICALS {
+        // Resolve the slot this logical name points at (mapping value, else default).
+        let slot = clr_map
             .and_then(|m| m.get(*logical).cloned())
             .unwrap_or_else(|| (*default_slot).to_owned());
         // theme[logical] = theme[slot] when the slot has a hex; otherwise skip
@@ -2053,6 +2063,32 @@ fn bake_clr_map(theme: &mut HashMap<String, String>, master_xml: Option<&str>) {
             theme.insert((*logical).to_owned(), hex);
         }
     }
+}
+
+fn bake_clr_map(theme: &mut HashMap<String, String>, master_xml: Option<&str>) {
+    // Find the master's <p:clrMap> element (direct child of <p:sldMaster>) and
+    // resolve its 12 logical→slot attrs, then apply.
+    let clr_map = master_xml.and_then(|xml| {
+        let doc = roxmltree::Document::parse(xml).ok()?;
+        let node = child(doc.root_element(), "clrMap")?;
+        Some(parse_clr_map_node(node))
+    });
+    apply_clr_map(theme, clr_map.as_ref());
+}
+
+/// Resolve a slide-or-layout's `<p:clrMapOvr>` color-mapping override
+/// (ECMA-376 §19.3.1.7 CT_ColorMappingOverride). Returns:
+/// - `Some(map)` when `<a:overrideClrMapping>` is present — its 12 logical→slot
+///   attrs replace the master's mapping for this slide/layout (§20.1.6.8).
+/// - `None` when `<a:masterClrMapping/>` is present (§20.1.6.6) or there is no
+///   `<p:clrMapOvr>` at all — both mean "inherit the master's clrMap".
+fn parse_clr_map_ovr(xml: &str) -> Option<HashMap<String, String>> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    // <p:clrMapOvr> is a direct child of <p:sld> / <p:sldLayout> (right after
+    // <p:cSld>); the choice inside is masterClrMapping XOR overrideClrMapping.
+    let ovr = child(doc.root_element(), "clrMapOvr")?;
+    let override_node = child(ovr, "overrideClrMapping")?;
+    Some(parse_clr_map_node(override_node))
 }
 
 /// Resolve a theme typeface reference (e.g. "+mj-lt") to the actual font family name.
@@ -7079,6 +7115,7 @@ fn parse_slide(
     layout_rels: &HashMap<String, String>,
     layout_dir: &str,
     bundle: &MasterBundle,
+    theme_override: Option<&HashMap<String, String>>,
     index: usize,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
@@ -7109,7 +7146,11 @@ fn parse_slide(
         master_caps,
         master_color,
     } = bundle;
-    let theme: &HashMap<String, String> = theme;
+    // When the slide/layout carries a `<p:clrMapOvr><a:overrideClrMapping>`
+    // (ECMA-376 §19.3.1.7), the caller pre-baked that override onto a clone of
+    // the master theme and passes it here; use it in place of `bundle.theme` so
+    // scheme colors resolve against the slide's effective mapping (§20.1.6.8).
+    let theme: &HashMap<String, String> = theme_override.unwrap_or(theme);
     let master_xml: Option<&str> = master_xml.as_deref();
     let master_dir: &str = master_dir.as_str();
     let master_bg: Option<Fill> = master_bg.clone();
@@ -8511,12 +8552,40 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 .unwrap_or_else(|| no_master_bundle.as_ref().unwrap()),
         };
 
+        // Per-slide color-mapping override (ECMA-376 §19.3.1.7 clrMapOvr).
+        // Precedence: the slide's own `<a:overrideClrMapping>` wins; else the
+        // layout's; else inherit the master (`None`). `<a:masterClrMapping/>`
+        // and an absent `<p:clrMapOvr>` both yield `None` at their level, so a
+        // slide that explicitly inherits still falls through to the layout's
+        // override — matching the slide→layout→master mapping chain.
+        let clr_map_ovr: Option<HashMap<String, String>> = parse_clr_map_ovr(&raw.slide_xml)
+            .or_else(|| raw.layout_xml.as_deref().and_then(parse_clr_map_ovr));
+        // Re-bake the override onto a clone of the master-baked theme. This is
+        // correct because `bake_clr_map` left the raw scheme slots
+        // (dk1/lt1/dk2/lt2/accent1..6/hlink/folHlink) intact, so the override's
+        // slot values resolve against the original palette (§20.1.6.8). The
+        // override REPLACES the master's logical→slot mapping, not the master's
+        // already-baked logical hexes (we re-apply over the raw slots).
+        //
+        // Documented limitation: if the master's clrMap non-identically remapped
+        // an accent SLOT (e.g. accent1="accent2") AND an override targets that
+        // same accent, the raw accent slot is still its own scheme value (bake
+        // only writes logical keys), so the override resolves it from the intact
+        // scheme — correct. The only unrecoverable case would be a master that
+        // *overwrote a raw slot key itself*, which `bake_clr_map` never does.
+        let effective_theme: Option<HashMap<String, String>> = clr_map_ovr.map(|ovr| {
+            let mut t = bundle.theme.clone();
+            apply_clr_map(&mut t, Some(&ovr));
+            t
+        });
+
         let slide = parse_slide(
             &raw.slide_xml,
             raw.layout_xml.as_deref(),
             &raw.layout_rels,
             &raw.layout_dir,
             bundle,
+            effective_theme.as_ref(),
             raw.index,
             &raw.slide_rels,
             &raw.smartart_drawings,
@@ -10784,6 +10853,148 @@ mod tests {
             zw.finish().unwrap();
         }
         buf
+    }
+
+    /// Single-master deck whose slide1 carries a `<p:clrMapOvr>` with the given
+    /// inner element (`<a:overrideClrMapping .../>` or `<a:masterClrMapping/>`).
+    /// The master keeps the DEFAULT clrMap (tx1→dk1). slide1 has the Tx1Rect
+    /// (`<a:schemeClr val="tx1">`), so the override's tx1→slot remap is directly
+    /// observable. Theme hex: dk1=#222222, lt1=#FAFAFA, accent1=#72A376.
+    fn build_clr_map_ovr_pptx(clr_map_ovr_inner: &str) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+
+        let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMasterA"/></p:sldMasterIdLst>
+  <p:sldIdLst><p:sldId id="256" r:id="rIdSlide1"/></p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#;
+        let pres_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMasterA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rIdThemeA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>"#;
+        let theme1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+  <a:themeElements><a:clrScheme name="C">
+    <a:dk1><a:srgbClr val="222222"/></a:dk1><a:lt1><a:srgbClr val="FAFAFA"/></a:lt1>
+    <a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+    <a:accent1><a:srgbClr val="72A376"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2>
+    <a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4>
+    <a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6>
+    <a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink>
+  </a:clrScheme>
+  <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>
+    <a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+  <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+  </a:themeElements>
+</a:theme>"#;
+        // Master keeps the DEFAULT clrMap (tx1→dk1) so the override is the ONLY
+        // thing that can remap tx1; the assertion is unambiguous.
+        let master1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483650" r:id="rIdLayout"/></p:sldLayoutIdLst>
+</p:sldMaster>"#;
+        let master1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"#;
+        let layout1_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sldLayout>"#;
+        let layout1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"#;
+        // CT_Slide: <p:clrMapOvr> comes right after </p:cSld> (ECMA-376 §19.3.1.7).
+        let slide1_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="3" name="Tx1Rect"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="700000" y="100000"/><a:ext cx="500000" cy="500000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+      <p:style><a:fillRef idx="1"><a:schemeClr val="tx1"/></a:fillRef></p:style>
+    </p:sp>
+  </p:spTree></p:cSld>
+  <p:clrMapOvr>{clr_map_ovr_inner}</p:clrMapOvr>
+</p:sld>"#
+        );
+        let slide1_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"#;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            let mut put = |path: &str, bytes: &[u8]| {
+                zw.start_file(path, opts).unwrap();
+                use std::io::Write;
+                zw.write_all(bytes).unwrap();
+            };
+            put("ppt/presentation.xml", presentation_xml.as_bytes());
+            put("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes());
+            put("ppt/theme/theme1.xml", theme1_xml.as_bytes());
+            put("ppt/slideMasters/slideMaster1.xml", master1_xml.as_bytes());
+            put(
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                master1_rels.as_bytes(),
+            );
+            put("ppt/slideLayouts/slideLayout1.xml", layout1_xml.as_bytes());
+            put(
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                layout1_rels.as_bytes(),
+            );
+            put("ppt/slides/slide1.xml", slide1_xml.as_bytes());
+            put("ppt/slides/_rels/slide1.xml.rels", slide1_rels.as_bytes());
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// §19.3.1.7 clrMapOvr / §20.1.6.8 overrideClrMapping: a slide whose
+    /// `<p:clrMapOvr>` carries `<a:overrideClrMapping>` with bg1/tx1 swapped
+    /// (bg1="dk1", tx1="lt1") must use that mapping IN PLACE OF the master's.
+    /// The master keeps the default clrMap (tx1→dk1, #222222), so the override
+    /// flips tx1 to lt1 (#FAFAFA). The other 10 attrs are default.
+    #[test]
+    fn clr_map_ovr_override_remaps_logical_scheme_names() {
+        let override_inner = r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
+        let data = build_clr_map_ovr_pptx(override_inner);
+        let pres = parse_presentation(&data).expect("parse");
+        assert_eq!(pres.slides.len(), 1, "expected one slide");
+
+        // tx1 under the override → lt1 (#FAFAFA), NOT the master's dk1 (#222222).
+        let tx1 = shape_fill_color_by_name(&pres.slides[0], "Tx1Rect");
+        assert_eq!(
+            tx1.as_deref(),
+            Some("FAFAFA"),
+            "overrideClrMapping (tx1=lt1) must replace the master clrMap (tx1=dk1)"
+        );
     }
 
     // ── Chart axis titles + chartSpace border (parity with xlsx) ──────────
