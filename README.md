@@ -567,6 +567,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Per-run underline colour (`uFill` / `uFillTx`) | ✅ |
 | | Font family, size, color | ✅ |
 | | East Asian font (`rPr > a:ea` — separate typeface for CJK glyphs) | ✅ |
+| | Symbol font runs (`a:sym` — e.g. Wingdings / Webdings glyphs) | ✅ |
 | | Caps transform (`all` / `small`) | ✅ |
 | | Letter spacing (`spc`) | ✅ |
 | | Superscript / subscript | ✅ |

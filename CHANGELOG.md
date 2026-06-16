@@ -4,6 +4,50 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.62.0 — 2026-06-16
+
+Minor: chart axis titles, borders and value-axis scaling across Excel and
+PowerPoint charts; PowerPoint symbol-font runs; plus soft-edge and
+embedded-media fixes.
+
+### charts (xlsx + pptx)
+
+- Render chart axis titles at their XML font size / weight / colour, anchored in
+  a reserved gutter so they no longer collide with the tick labels, and default
+  axis and chart titles to bold (ECMA-376 ST_Style). Extract the scatter
+  bottom-axis (X) title, which had been dropped for every scatter chart. (#460, #464)
+- Draw a chart-space border when `<c:chartSpace><c:spPr><a:ln>` specifies one,
+  and scale axis-line and border widths by `ptToPx`. (#460, #463)
+- Extend the value axis to Excel's "nice" maximum (a one major-unit margin above
+  the data) and share a single rounding rule for the axis bounds and gridline
+  step across bar / line / area / radar / scatter (`valueAxisScale()`). (#465, #467)
+- Hoist the chart title / axis-title / border extractors into `ooxml-common`,
+  shared by the xlsx and pptx parsers. (#464)
+
+### pptx
+
+- Render `a:sym` symbol-font runs (e.g. Wingdings arrows) instead of tofu. (#462)
+- Stop copying large embedded media a second time when building the playback
+  handle, so navigating to a slide with a ~200 MB embedded video no longer
+  duplicates it on the main thread. (#468)
+
+### core
+
+- Match PowerPoint's soft-edge feather (`softEdge`, §20.1.8.31): build an opaque
+  edge-clamped colour layer and replace its alpha with a blurred silhouette
+  (σ = rad/3), so the perimeter dissolves symmetrically instead of leaving a
+  hard outer step. (#469)
+
+### xlsx
+
+- Scale multi-line cell text line-height and decoration offsets by the cell
+  display scale, so they stay proportional at any zoom. (#466)
+
+### site
+
+- Reset the file input so re-selecting the same file on the “try yours” page
+  re-renders the preview. (#461)
+
 ## 0.61.0 — 2026-06-15
 
 Minor: docx pagination fidelity — floating-object displacement, line-level page
