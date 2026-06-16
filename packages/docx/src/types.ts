@@ -250,6 +250,9 @@ export interface NumberingInfo {
   text: string;       // resolved bullet text, e.g. "1." or "•"
   indentLeft: number; // pt
   tab: number;        // pt
+  /** ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
+   *  Where body text starts after the marker on the first line. */
+  suff: string;
 }
 
 export type DocRun =

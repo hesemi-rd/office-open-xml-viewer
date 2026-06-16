@@ -11,6 +11,10 @@ pub struct LevelDef {
     /// carry their indent here (the renderer maps it to the physical left side).
     pub indent_right: Option<f64>,
     pub tab: f64, // pt
+    /// ECMA-376 §17.9.28 `<w:suff>` — what follows the number text: "tab"
+    /// (default), "space", or "nothing". Controls where the body text starts
+    /// relative to the marker on the first line.
+    pub suff: String,
     pub start: u32,
 }
 
@@ -22,6 +26,7 @@ impl Default for LevelDef {
             indent_left: 36.0,
             indent_right: None,
             tab: 36.0,
+            suff: "tab".to_string(),
             start: 1,
         }
     }
@@ -86,12 +91,17 @@ impl NumberingMap {
                     .and_then(|i| attr_w(i, "hanging").or_else(|| attr_w(i, "firstLine")))
                     .map(|v| twips_to_pt(&v))
                     .unwrap_or(36.0);
+                // §17.9.28: absent <w:suff> means "tab".
+                let suff = child_w(lvl_node, "suff")
+                    .and_then(|n| attr_w(n, "val"))
+                    .unwrap_or_else(|| "tab".to_string());
                 levels.push(LevelDef {
                     format,
                     text,
                     indent_left,
                     indent_right,
                     tab,
+                    suff,
                     start,
                 });
             }

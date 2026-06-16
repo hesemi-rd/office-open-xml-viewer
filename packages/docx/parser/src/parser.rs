@@ -470,10 +470,14 @@ impl ThemeColors {
     }
 
     fn resolve(&self, scheme_name: &str) -> Option<String> {
-        // bg1/bg2/tx1/tx2 map onto lt1/lt2/dk1/dk2 per the default §19.3.1.6
-        // clrMap; raw slot names (and accents/hlink) pass through unchanged.
-        // Canonical table: ooxml_common::color::SCHEME_DEFAULT_SLOTS.
-        let key = ooxml_common::color::default_scheme_slot(scheme_name);
+        // "bg1"/"bg2"/"tx1"/"tx2" map onto lt1/lt2/dk1/dk2 per spec
+        let key = match scheme_name {
+            "bg1" => "lt1",
+            "bg2" => "lt2",
+            "tx1" => "dk1",
+            "tx2" => "dk2",
+            other => other,
+        };
         self.map.get(key).cloned()
     }
 
@@ -1131,10 +1135,10 @@ fn parse_paragraph(
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
     {
         if num_id != 0 {
-            let (format, ind_left, tab) = num_map
+            let (format, ind_left, tab, suff) = num_map
                 .get_level(num_id, num_level)
-                .map(|l| (l.format.clone(), l.indent_left, l.tab))
-                .unwrap_or_else(|| ("decimal".to_string(), 36.0, 18.0));
+                .map(|l| (l.format.clone(), l.indent_left, l.tab, l.suff.clone()))
+                .unwrap_or_else(|| ("decimal".to_string(), 36.0, 18.0, "tab".to_string()));
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
             Some(NumberingInfo {
@@ -1144,6 +1148,7 @@ fn parse_paragraph(
                 text,
                 indent_left: ind_left,
                 tab,
+                suff,
             })
         } else {
             None

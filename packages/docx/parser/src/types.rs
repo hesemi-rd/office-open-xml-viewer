@@ -328,6 +328,9 @@ pub struct NumberingInfo {
     pub indent_left: f64,
     /// tab stop after bullet/number (pt)
     pub tab: f64,
+    /// ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
+    /// Determines where body text starts after the marker on the first line.
+    pub suff: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
