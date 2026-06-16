@@ -910,7 +910,7 @@ function layoutParagraph(
         // DEFAULT_KINSOKU_RULES is correct for pptx: PresentationML has no custom
         // forbidden-set element (w:noLineBreaksBefore/After are WordprocessingML-only).
         // docx's analogous CJK path (renderer.ts, fitCJKPrefix) is intentionally
-        // separate: substring binary-search fit + cross-run carry-over. Do not unify them.
+        // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
         const measured: (MeasuredChar & { font: string })[] = [];
         for (const ch of token) {
           const chFont = CJK_RE.test(ch) ? fontEa : font;
