@@ -54,6 +54,7 @@ import {
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
+  DEFAULT_KINSOKU_RULES,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -63,6 +64,7 @@ import {
   computeLineVisualOrder,
   type LineVisualOrder,
 } from './bidi-line';
+import { fitCjkLine, type MeasuredChar } from './cjk-wrap.js';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -893,12 +895,29 @@ function layoutParagraph(
       const CJK_RE = /[\u3000-\u9FFF\uAC00-\uD7FF\uF900-\uFAFF\uFF00-\uFFEF]/;
       const hasCJK = CJK_RE.test(token);
       if (hasCJK) {
+        // Measure each grapheme with its per-char font (latin/ea boundary stays
+        // clean, e.g. "EC市場で…"), then place chars line-by-line with kinsoku
+        // (ECMA-376 §17.15.1.58–.60) so 、。」 never start a line and 「（ never
+        // end one. fitCjkLine reuses core's kinsokuAdjustedSplit.
+        const measured: (MeasuredChar & { font: string })[] = [];
         for (const ch of token) {
           const chFont = CJK_RE.test(ch) ? fontEa : font;
           ctx.font = chFont;
-          const chW = ctx.measureText(ch).width;
-          if (lineW + chW > maxWidthPx && lineW > 0) newLine();
-          push(ch, chFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+          measured.push({ ch, w: ctx.measureText(ch).width, font: chFont });
+        }
+        let rest = measured;
+        while (rest.length > 0) {
+          const n = fitCjkLine(rest, lineW, maxWidthPx, DEFAULT_KINSOKU_RULES);
+          if (n === 0) {
+            newLine(); // non-empty line can't take the run head → break, retry empty
+            continue;
+          }
+          for (let i = 0; i < n; i++) {
+            const m = rest[i];
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+          }
+          rest = rest.slice(n);
+          if (rest.length > 0) newLine();
         }
         continue;
       }
