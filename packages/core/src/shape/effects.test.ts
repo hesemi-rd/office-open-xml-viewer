@@ -15,15 +15,36 @@ import type { Shadow, SoftEdge, Reflection } from '../types/common';
  */
 class RecordingCtx {
   ops: Array<{ op: string; args?: unknown[] }> = [];
-  filter = 'none';
-  globalCompositeOperation = 'source-over';
   fillStyle: unknown = '#000';
+  // Every composite-op / filter assignment is recorded, not just the last value,
+  // so a multi-pass pipeline (e.g. set destination-in + blur, then reset) can be
+  // asserted by history rather than the final field value.
+  usedCompositeOps: string[] = [];
+  usedFilters: string[] = [];
+
+  #filter = 'none';
+  #gco = 'source-over';
+
+  get filter() { return this.#filter; }
+  set filter(v: string) { this.#filter = v; this.usedFilters.push(v); }
+  get globalCompositeOperation() { return this.#gco; }
+  set globalCompositeOperation(v: string) { this.#gco = v; this.usedCompositeOps.push(v); }
+
+  /** Filter strings that were a blur(...) (i.e. excluding the 'none' resets). */
+  get usedBlurFilters(): string[] {
+    return this.usedFilters.filter(f => f.startsWith('blur('));
+  }
 
   save() { this.ops.push({ op: 'save' }); }
   restore() { this.ops.push({ op: 'restore' }); }
   translate(x: number, y: number) { this.ops.push({ op: 'translate', args: [x, y] }); }
   scale(x: number, y: number) { this.ops.push({ op: 'scale', args: [x, y] }); }
+  setTransform(...a: number[]) { this.ops.push({ op: 'setTransform', args: a }); }
   fillRect(...a: number[]) { this.ops.push({ op: 'fillRect', args: a }); }
+  fill(...a: unknown[]) { this.ops.push({ op: 'fill', args: a }); }
+  clip(...a: unknown[]) { this.ops.push({ op: 'clip', args: a }); }
+  beginPath() { this.ops.push({ op: 'beginPath' }); }
+  rect(...a: number[]) { this.ops.push({ op: 'rect', args: a }); }
   drawImage(...a: unknown[]) { this.ops.push({ op: 'drawImage', args: a }); }
   createLinearGradient() {
     this.ops.push({ op: 'createLinearGradient' });
@@ -33,7 +54,6 @@ class RecordingCtx {
       addColorStop: (o: number, c: string) => { stops.push([o, c]); },
     } as unknown as CanvasGradient;
   }
-  // Setters that the effects toggle are plain fields, captured on read.
 }
 
 /** Install a fake OffscreenCanvas that hands back RecordingCtx instances. */
@@ -131,15 +151,50 @@ describe('applySoftEdge (ECMA-376 §20.1.8.53)', () => {
     expect(live.ops.some(o => o.op === 'drawImage')).toBe(false);
   });
 
-  it('feathers via a blurred destination-in mask then blits once', () => {
+  it('builds an edge-clamp colour layer, replaces alpha with a blurred silhouette, then blits once', () => {
     const live = new RecordingCtx();
     const paint = vi.fn((c: unknown) => { (c as RecordingCtx).ops.push({ op: 'paintShape' }); });
-    const se: SoftEdge = { radius: 28575 }; // 3 px
-    applySoftEdge(live as never, paint as never, BBOX, se, SCALE, DEVICE_W, DEVICE_H);
-    expect(fake.auxCtxs).toHaveLength(1);
-    const aux = fake.auxCtxs[0];
-    // Two silhouette paints on aux: full shape, then blurred mask.
-    expect(aux.ops.filter(o => o.op === 'paintShape')).toHaveLength(2);
+    const mask = vi.fn((c: unknown) => { (c as RecordingCtx).ops.push({ op: 'paintMask' }); });
+    const se: SoftEdge = { radius: 28575 }; // 3 px (radius/3 = 1px blur)
+    applySoftEdge(live as never, paint as never, BBOX, se, SCALE, DEVICE_W, DEVICE_H, mask as never);
+
+    // THREE aux canvases: the sharp image, the silhouette mask, and the compose
+    // layer. PowerPoint's soft edge feathers symmetrically (outward + inward), so
+    // we cannot just mask the hard-clipped image (that feathers inward only and
+    // leaves a hard outer step). Build an opaque colour layer that extends past
+    // the geometry, then replace its alpha with the blurred silhouette.
+    expect(fake.auxCtxs).toHaveLength(3);
+    const [imageAux, maskAux, composeAux] = fake.auxCtxs;
+
+    // Sharp image: one full-shape paint. Mask layer: one silhouette paint.
+    expect(imageAux.ops.filter(o => o.op === 'paintShape')).toHaveLength(1);
+    expect(maskAux.ops.filter(o => o.op === 'paintMask')).toHaveLength(1);
+    expect(maskAux.ops.some(o => o.op === 'paintShape')).toBe(false);
+
+    // Compose layer: the edge-clamp STRETCH is a 9-arg drawImage (src bbox →
+    // dst bbox expanded by radius on every side), followed by the sharp image
+    // drawn 1:1 (3-arg) to keep the interior crisp.
+    const composeDraws = composeAux.ops.filter(o => o.op === 'drawImage');
+    expect(composeDraws.length).toBeGreaterThanOrEqual(3); // 2 colour-layer draws + mask draw
+    const stretch = composeDraws[0];
+    expect(stretch.args).toHaveLength(9);
+    // dst rect is the bbox grown by `radius` (3px) on all sides.
+    expect(stretch.args?.[5]).toBeCloseTo(BBOX.x - 3, 6);   // dx
+    expect(stretch.args?.[6]).toBeCloseTo(BBOX.y - 3, 6);   // dy
+    expect(stretch.args?.[7]).toBeCloseTo(BBOX.w + 6, 6);   // dWidth
+    expect(stretch.args?.[8]).toBeCloseTo(BBOX.h + 6, 6);   // dHeight
+    const sharp = composeDraws[1];
+    expect(sharp.args).toHaveLength(3);
+
+    // Then the alpha is replaced by the blurred silhouette: a destination-in
+    // pass and a blur(...) filter were used on the compose layer.
+    expect(composeAux.usedCompositeOps).toContain('destination-in');
+    expect(composeAux.usedBlurFilters.length).toBeGreaterThan(0);
+    // Soft-edge `rad` spans ~3σ, so the blur std-dev is radius/3 = 1px.
+    expect(composeAux.usedBlurFilters[0]).toBe('blur(1px)');
+
+    // The compose layer is blitted onto live exactly once; the image/mask auxes
+    // are not blitted directly.
     expect(live.ops.filter(o => o.op === 'drawImage')).toHaveLength(1);
   });
 });

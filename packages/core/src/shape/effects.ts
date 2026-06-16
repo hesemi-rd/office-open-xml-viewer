@@ -140,16 +140,17 @@ export function applyInnerShadow(
 
 /**
  * softEdge — ECMA-376 §20.1.8.53. "The edges of the shape are blurred, while the
- * fill is not affected." We feather the shape's alpha by `rad` EMU: build a
- * blurred silhouette mask and `destination-in` it onto the already-painted shape
- * so the perimeter fades to transparent over the feather radius.
+ * fill is not affected." PowerPoint feathers the shape's alpha SYMMETRICALLY
+ * about the geometry by `rad` EMU: edge colours bleed OUTWARD past the rect and
+ * fade inward, so the perimeter dissolves smoothly into the background.
  *
- * This helper paints the shape onto an auxiliary canvas, then intersects it with
- * a blurred version of its FILLED SILHOUETTE (not the styled body), then blits
- * the feathered result back. The mask must be the filled silhouette — masking
- * with a stroked body would `destination-in` only the thin outline ring and
- * erase the interior. Because the silhouette interior stays alpha = 1 under
- * blur, only the edge band fades, matching the spec's "fill is not affected".
+ * Masking a hard-clipped image with a feathered silhouette would feather only
+ * inward and leave a hard outer step (the image has no pixels outside the rect).
+ * Instead this helper builds an OPAQUE colour layer that extends past the
+ * geometry via an edge-clamp stretch, then replaces its alpha with the blurred
+ * silhouette — yielding a clean, symmetric Gaussian falloff. The blur std-dev is
+ * `rad/3` (the soft-edge `rad` spans ~3σ), matching PowerPoint's rasterised
+ * falloff.
  *
  * `paintMask` paints a flat opaque silhouette (filled path, no stroke). When
  * omitted, `paintShape` is reused (correct only for unstroked shapes).
@@ -184,19 +185,54 @@ export function applySoftEdge(
 
   const mask = paintMask ?? paintShape;
 
-  // 1. Paint the full shape (fill + stroke) onto the aux canvas.
+  // 1. Sharp shape (fill + stroke) in device-pixel space.
   paintShape(c);
 
-  // 2. Intersect with a blurred FILLED silhouette to feather the perimeter.
-  //    ECMA gives `rad` as the blur radius directly.
-  c.save();
-  c.globalCompositeOperation = 'destination-in';
-  c.filter = `blur(${radius}px)`;
-  c.fillStyle = '#000';
-  mask(c);
-  c.restore();
+  // PowerPoint's soft edge (ECMA-376 §20.1.8.31) feathers the alpha
+  // SYMMETRICALLY about the geometry: edge colours bleed OUTWARD past the rect
+  // and fade inward, so the perimeter dissolves smoothly into the background.
+  // Masking a hard-clipped image with a feathered silhouette feathers only
+  // inward and leaves a hard outer step (the image has no pixels outside the
+  // rect). Compose three device-space layers at identity to get the outward
+  // bleed:
+  const maskAux = createAuxCanvas(deviceW, deviceH);
+  const composeAux = createAuxCanvas(deviceW, deviceH);
+  const mc = maskAux ? get2d(maskAux) : null;
+  const cc = composeAux ? get2d(composeAux) : null;
+  if (maskAux && mc && composeAux && cc) {
+    // a. Solid silhouette of the shape (device space; mask applies the live
+    //    transform itself). Blurred in step (c) into the alpha ramp.
+    mc.fillStyle = '#000';
+    mask(mc);
+    // b. Build an OPAQUE colour layer that extends past the geometry: draw the
+    //    image's bbox stretched outward by `radius` (edge-clamp → border colours
+    //    bleed out), then the sharp image on top to keep the interior crisp.
+    //    Because the layer is opaque across the whole feather band, step (c)'s
+    //    destination-in yields EXACTLY the blurred-silhouette alpha — a clean,
+    //    symmetric Gaussian falloff (PowerPoint's soft edge), not a hard outer
+    //    step (image-only) nor a doubly-faded halo (blurred-image bleed).
+    cc.drawImage(
+      aux as CanvasImageSource,
+      _bbox.x, _bbox.y, _bbox.w, _bbox.h,
+      _bbox.x - radius, _bbox.y - radius, _bbox.w + radius * 2, _bbox.h + radius * 2,
+    );
+    cc.drawImage(aux as CanvasImageSource, 0, 0);
+    // c. Replace alpha with the blurred silhouette → symmetric feather. The
+    //    soft-edge `rad` is a blur radius spanning ~3σ (the kernel extent), so
+    //    the Gaussian std-dev — which is what CSS blur() takes — is rad/3. This
+    //    matches PowerPoint's rasterised falloff (measured σ ≈ rad/3).
+    cc.globalCompositeOperation = 'destination-in';
+    cc.filter = `blur(${radius / 3}px)`;
+    cc.drawImage(maskAux as CanvasImageSource, 0, 0);
+    cc.filter = 'none';
+    cc.globalCompositeOperation = 'source-over';
+    liveCtx.save();
+    liveCtx.drawImage(composeAux as CanvasImageSource, 0, 0);
+    liveCtx.restore();
+    return;
+  }
 
-  // 3. Blit the feathered shape back to the live context.
+  // Fallback (e.g. no OffscreenCanvas): paint the shape un-feathered.
   liveCtx.save();
   liveCtx.drawImage(aux as CanvasImageSource, 0, 0);
   liveCtx.restore();
