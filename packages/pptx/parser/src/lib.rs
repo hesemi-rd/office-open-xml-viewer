@@ -4734,129 +4734,6 @@ fn parse_run(
 //  Chart parsing
 // ===========================
 
-/// Extract plain text from a node's direct-child `<c:title>` (works for the
-/// chart root or a `<c:catAx>`/`<c:valAx>`). Walks `a:t` (rich text) and `c:v`
-/// (string-ref cache) descendants — ECMA-376 §21.2.2.6 `CT_Title`. Returns
-/// None when there is no `<c:title>` or it carries no text. Mirrors the xlsx
-/// parser's `extract_chart_title`.
-fn chart_title_text(node: &roxmltree::Node<'_, '_>) -> Option<String> {
-    let title = node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
-    let mut text = String::new();
-    for d in title.descendants().filter(|n| n.is_element()) {
-        match d.tag_name().name() {
-            "t" | "v" => {
-                if let Some(t) = d.text() {
-                    text.push_str(t);
-                }
-            }
-            _ => {}
-        }
-    }
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-/// First `a:defRPr@sz` / `a:rPr@sz` (hundredths of a point) inside a node's
-/// direct-child `<c:title>`. None when absent. Mirrors xlsx
-/// `extract_chart_title_size`.
-fn chart_title_size_hpt(node: &roxmltree::Node<'_, '_>) -> Option<i32> {
-    let title = node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
-    title.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" {
-            return None;
-        }
-        attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
-    })
-}
-
-/// First `a:defRPr@b` / `a:rPr@b` bold flag inside a node's direct-child
-/// `<c:title>`. None when not specified. Mirrors xlsx `extract_chart_title_bold`.
-fn chart_title_bold(node: &roxmltree::Node<'_, '_>) -> Option<bool> {
-    let title = node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
-    title.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" {
-            return None;
-        }
-        attr(&n, "b").map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    })
-}
-
-/// First `a:solidFill/a:srgbClr@val` (hex without `#`) inside a node's
-/// direct-child `<c:title>`. Only srgb inside a solidFill is honored (skips
-/// gradient stops); schemeClr is left unresolved, matching the xlsx parser's
-/// `extract_chart_title_color`. None = renderer default.
-fn chart_title_color(node: &roxmltree::Node<'_, '_>) -> Option<String> {
-    let title = node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
-    title.descendants().find_map(|n| {
-        if !n.is_element() || n.tag_name().name() != "srgbClr" {
-            return None;
-        }
-        let parent_is_solid = n
-            .parent()
-            .map(|p| p.tag_name().name() == "solidFill")
-            .unwrap_or(false);
-        if !parent_is_solid {
-            return None;
-        }
-        attr(&n, "val")
-    })
-}
-
-/// Axis title text + run props from a `<c:catAx>`/`<c:valAx>` node. Reuses the
-/// chart-title helpers (scoped to the node's direct-child `<c:title>`); run
-/// props are resolved only when title text is present. Returns
-/// (text, size_hpt, bold, color_hex). Mirrors xlsx `extract_axis_title_with_props`.
-fn axis_title_with_props(
-    axis_node: &roxmltree::Node<'_, '_>,
-) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
-    match chart_title_text(axis_node) {
-        None => (None, None, None, None),
-        Some(text) => (
-            Some(text),
-            chart_title_size_hpt(axis_node),
-            chart_title_bold(axis_node),
-            chart_title_color(axis_node),
-        ),
-    }
-}
-
-/// `<c:catAx|valAx><c:txPr>…defRPr@b / rPr@b` — bold flag for axis tick labels.
-/// Scoped to the axis node's `<c:txPr>`. None when not specified.
-fn axis_tick_label_bold(axis_node: &roxmltree::Node<'_, '_>) -> Option<bool> {
-    let txpr = axis_node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "txPr")?;
-    txpr.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" {
-            return None;
-        }
-        attr(&n, "b").map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    })
-}
-
 /// Parse a legacy OOXML chart (c: namespace) — barChart / lineChart etc.
 fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElement> {
     let doc = roxmltree::Document::parse(xml).ok()?;
@@ -5446,7 +5323,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         };
         if is_cat {
             if cat_axis_title.is_none() {
-                let (t, sz, b, col) = axis_title_with_props(&ax);
+                let (t, sz, b, col) = ooxml_common::chart::extract_axis_title_with_props(ax);
                 if t.is_some() {
                     cat_axis_title = t;
                     cat_axis_title_size = sz;
@@ -5455,7 +5332,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                 }
             }
         } else if val_axis_title.is_none() {
-            let (t, sz, b, col) = axis_title_with_props(&ax);
+            let (t, sz, b, col) = ooxml_common::chart::extract_axis_title_with_props(ax);
             if t.is_some() {
                 val_axis_title = t;
                 val_axis_title_size = sz;
@@ -5468,55 +5345,24 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     // Axis tick-label bold flags (`<c:txPr>…defRPr@b`) and the chart-title bold
     // flag (`<c:title>…defRPr@b`). These were never serialized before; wiring
     // them through reaches parity with the xlsx parser so the renderer's
-    // ST_Style bold handling applies uniformly.
-    let cat_axis_font_bold = cat_ax.and_then(|n| axis_tick_label_bold(&n));
-    let val_axis_font_bold = val_ax.and_then(|n| axis_tick_label_bold(&n));
-    let title_font_bold = title_node_opt.and_then(|t| {
-        t.descendants().find_map(|n| {
-            if !n.is_element() {
-                return None;
-            }
-            let tag = n.tag_name().name();
-            if tag != "defRPr" && tag != "rPr" {
-                return None;
-            }
-            attr(&n, "b").map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        })
-    });
+    // ST_Style bold handling applies uniformly. All three come from the shared
+    // ooxml-common helpers so the two parsers stay in lockstep. The chart-title
+    // bold helper expects the `<c:title>`'s parent, so pass `title_node_opt`'s
+    // parent (the element that holds it as a direct child).
+    let cat_axis_font_bold = cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_bold);
+    let val_axis_font_bold = val_ax.and_then(ooxml_common::chart::extract_axis_tick_label_bold);
+    let title_font_bold = title_node_opt
+        .and_then(|t| t.parent())
+        .and_then(ooxml_common::chart::extract_chart_title_bold);
 
     // Explicit chartSpace border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
-    // §21.2.2.5 / DrawingML §20.1.2.2.24). Locked policy (same as xlsx): draw a
-    // border ONLY when the XML explicitly declares a paintable line:
-    //   - no `<a:ln>` → None (no default border);
-    //   - `<a:ln><a:noFill/>` → border explicitly off → color None;
-    //   - `<a:ln><a:solidFill><a:srgbClr@val>` → Some(hex).
-    // `@w` (EMU) is captured as u32 regardless. schemeClr is intentionally left
-    // unresolved here (kept in lockstep with the xlsx parser).
-    let chart_ln = root
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        .and_then(|sp| {
-            sp.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "ln")
-        });
-    let chart_border_width_emu =
-        chart_ln.and_then(|ln| attr(&ln, "w").and_then(|v| v.parse::<u32>().ok()));
-    let chart_border_color = chart_ln.and_then(|ln| {
-        // An explicit `<a:noFill/>` turns the border off → no color.
-        if ln
-            .children()
-            .any(|n| n.is_element() && n.tag_name().name() == "noFill")
-        {
-            return None;
-        }
-        let fill = ln
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")?;
-        let srgb = fill
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "srgbClr")?;
-        attr(&srgb, "val")
-    });
+    // §21.2.2.5 / DrawingML §20.1.2.2.24). Shared with the xlsx parser via
+    // `ooxml_common::chart::extract_chart_space_border` so the locked policy
+    // (border only on an explicit paintable line; `<a:noFill/>` → color None;
+    // srgb inside solidFill → hex; `@w` captured as u32; schemeClr unresolved)
+    // stays in lockstep. `root` is the `<c:chartSpace>` element here.
+    let (chart_border_color, chart_border_width_emu) =
+        ooxml_common::chart::extract_chart_space_border(root);
 
     Some(ChartElement {
         x: 0,
