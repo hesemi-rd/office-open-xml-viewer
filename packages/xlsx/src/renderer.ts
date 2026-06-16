@@ -565,6 +565,15 @@ function blendHex(fgHex: string, bgHex: string, fgCoverage: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
+/** Vertical pixel metric for cell text: point size → device px at the current
+ *  cell scale `cs`. `factor` is the line-height / char-height multiplier (1.2
+ *  for wrapped lines, 1.1 for stacked chars, 1.0 for decoration/baseline
+ *  offsets). Centralizes the `* cs` factor so a new vertical-metric draw site
+ *  can't silently omit it. (Glyph SIZE uses buildFont's floored variant.) */
+function vMetricPx(sizePt: number, cs: number, factor = 1): number {
+  return Math.round(sizePt * PT_TO_PX * factor * cs);
+}
+
 function buildFont(font: CellFont, cs = 1): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
@@ -1306,7 +1315,7 @@ function renderQuadrant(
     if (xf.wrapText && hasRichText) {
       const wrapW = cW - leftPad - paddingX;
       const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-      const totalH = rLines.reduce((s, l) => s + Math.round(l.maxFontSize * PT_TO_PX * 1.2), 0);
+      const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
       let yy: number;
       if (alignV === 'top') yy = aCy + paddingY;
       else if (alignV === 'center') yy = aCy + (cH - totalH) / 2;
@@ -1314,7 +1323,7 @@ function renderQuadrant(
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       for (const line of rLines) {
-        const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
+        const lineH = vMetricPx(line.maxFontSize, cs, 1.2);
         const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
         let xx: number;
         if (alignH === 'right') xx = aCx + cW - paddingX - totalW;
@@ -1331,7 +1340,7 @@ function renderQuadrant(
       }
     } else if (xf.wrapText) {
       const lines = wrapTextLines(ctx, text, cW - leftPad - paddingX);
-      const lineH = Math.round(font.size * PT_TO_PX * 1.2);
+      const lineH = vMetricPx(font.size, cs, 1.2);
       const totalTextH = lines.length * lineH;
       let startY: number;
       if (alignV === 'top') startY = aCy + paddingY;
@@ -1834,7 +1843,7 @@ function renderQuadrant(
 
       // Stacked text (textRotation=255): draw each character on its own line
       if (isStacked) {
-        const charH = Math.round(font.size * PT_TO_PX * 1.1);
+        const charH = vMetricPx(font.size, cs, 1.1);
         const totalH = text.length * charH;
         let charY = alignV === 'top' ? cy + paddingY
           : alignV === 'center' ? cy + (cellH - totalH) / 2
@@ -1902,7 +1911,7 @@ function renderQuadrant(
         // Rich text with wrapping: per-run fonts, break on spaces and CJK boundaries
         const wrapW = cellW - leftPad - paddingX;
         const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-        const totalH = rLines.reduce((s, l) => s + Math.round(l.maxFontSize * PT_TO_PX * 1.2), 0);
+        const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
         let yy: number;
         if (alignV === 'top') yy = cy + paddingY;
         else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
@@ -1915,7 +1924,7 @@ function renderQuadrant(
         const wrapBaseRtl = wrapNeedsBidi && cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
         const dctxW = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         for (const line of rLines) {
-          const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
+          const lineH = vMetricPx(line.maxFontSize, cs, 1.2);
           const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
           let xx: number;
           if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
@@ -1931,7 +1940,7 @@ function renderQuadrant(
             const segColor = cf.fontColor ?? seg.font.color;
             ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
             ctx.fillText(seg.text, xx, yy);
-            const rSizePx = Math.round(seg.font.size * PT_TO_PX);
+            const rSizePx = vMetricPx(seg.font.size, cs);
             if (seg.font.underline) {
               const stroke = segColor ? hexToRgba(segColor) : '#000000';
               const dbl = seg.font.underlineStyle === 'double' || seg.font.underlineStyle === 'doubleAccounting';
@@ -1953,7 +1962,7 @@ function renderQuadrant(
         if (wrapNeedsBidi) { try { dctxW.direction = 'ltr'; } catch { /* ignore */ } }
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
-        const lineH = Math.round(font.size * PT_TO_PX * 1.2);
+        const lineH = vMetricPx(font.size, cs, 1.2);
         const totalTextH = lines.length * lineH;
         let startY: number;
         if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
@@ -2013,12 +2022,12 @@ function renderQuadrant(
           // Baseline shift for super/subscript. With textBaseline 'bottom'
           // (the typical case) shift up for super and slightly down for sub
           // so each run sits at the right vertical band relative to the line.
-          const baseSizePx = Math.round(baseRf.size * PT_TO_PX);
+          const baseSizePx = vMetricPx(baseRf.size, cs);
           let yShift = 0;
           if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
           else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
           ctx.fillText(runs[i].text, runX, textY + yShift);
-          const rSizePx = Math.round(rf.size * PT_TO_PX);
+          const rSizePx = vMetricPx(rf.size, cs);
           if (rf.underline) {
             const uyBase = alignV === 'top'
               ? cy + paddingY + rSizePx + 1
@@ -2052,7 +2061,7 @@ function renderQuadrant(
         // right vertical band. Excel uses these defaults (size ratio is
         // implementation-defined; ratios match Office's visual output).
         const cellVertAlign = fontForDraw.vertAlign;
-        const baseSizePxOrig = Math.round(font.size * PT_TO_PX);
+        const baseSizePxOrig = vMetricPx(font.size, cs);
         let vaYShift = 0;
         if (cellVertAlign === 'superscript') vaYShift = -Math.round(baseSizePxOrig * 0.35);
         else if (cellVertAlign === 'subscript') vaYShift = Math.round(baseSizePxOrig * 0.10);
@@ -2075,7 +2084,7 @@ function renderQuadrant(
             width: tW,
           };
         };
-        const sizePx = Math.round(drawFont.size * PT_TO_PX);
+        const sizePx = vMetricPx(drawFont.size, cs);
 
         if (fontForDraw.underline || hyperlinkUrl) {
           const { x: ux, width: tW } = overlayX();
@@ -2106,7 +2115,7 @@ function renderQuadrant(
         // when wrapText is false — this matches Excel's behavior.
         if (text.includes('\n')) {
           const lines = text.split('\n');
-          const lineH = Math.round(font.size * PT_TO_PX * 1.2);
+          const lineH = vMetricPx(font.size, cs, 1.2);
           const totalTextH = lines.length * lineH;
           let startY: number;
           if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
