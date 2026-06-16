@@ -6283,12 +6283,15 @@ fn parse_media(
 
     // A `<p:pic>` can carry several media references at once: the legacy
     // `<a:videoFile>`/`<a:audioFile>` (r:embed or r:link) and the modern
-    // `<p14:media r:embed>` extension. PowerPoint sometimes writes the legacy
-    // `r:link` as a broken/External placeholder (empty Target) while the real
-    // bytes live in the embedded `<p14:media>`. So collect every reference and
-    // use the first that actually resolves, preferring an *embedded* ref over a
-    // *linked* one — otherwise a broken videoFile link would shadow the good
-    // p14:media embed and the pic would be demoted to a poster-only Picture.
+    // `<p14:media r:embed>` extension. We collect every reference and use the
+    // first that actually resolves, preferring an *embedded* ref over a
+    // *linked* one. Embedded refs always point at internal media we can read;
+    // a linked ref may target an External resource we cannot fetch, or its rId
+    // may be missing/unresolvable (caught below via `rels.get`). Trying embeds
+    // first means a present `<p14:media>` embed is used even when the deck also
+    // carries a videoFile link, instead of being shadowed and demoted to a
+    // poster-only Picture. (Note: parse_rels stores Id+Target and never reads
+    // TargetMode, so a real External link keeps its non-empty URL here.)
     // (ECMA-376 §19.3.1.17/18 a:videoFile/a:audioFile; p14:media is a Microsoft
     // extension.)
     let av = nv_pr
@@ -6327,7 +6330,7 @@ fn parse_media(
             let rid = rid?;
             let target = rels.get(&rid)?;
             if target.is_empty() {
-                return None; // broken/empty rel (e.g. an External placeholder)
+                return None; // malformed rel with an empty Target (External links carry a non-empty URL)
             }
             let path = resolve_path(slide_dir, target);
             let mime = mime_from_ext(&path);
@@ -9686,11 +9689,12 @@ mod tests {
         assert_eq!(media.mime_type, "audio/wav");
     }
 
-    /// A `<p:pic>` whose legacy `<a:videoFile r:link>` is a broken/External
-    /// placeholder (the rId is absent from rels) but whose `<p14:media r:embed>`
-    /// points at the real embedded clip must still parse as a video — the good
-    /// embed must not be shadowed by the broken link. (Repro of a real deck
-    /// where one slide's videoFile link was External with an empty Target.)
+    /// A `<p:pic>` whose legacy `<a:videoFile r:link>` is broken — here modeled
+    /// as a missing rId (`rIdBroken` is absent from rels, so `rels.get` is None)
+    /// — but whose `<p14:media r:embed>` points at the real embedded clip must
+    /// still parse as a video: the good embed must not be shadowed by the broken
+    /// link. This exercises the embed-before-link ordering, not the empty-Target
+    /// guard (a real External link would instead carry a non-empty URL).
     #[test]
     fn test_parse_media_prefers_p14_embed_over_broken_videofile_link() {
         let xml = r#"<p:pic
@@ -9720,8 +9724,8 @@ mod tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let pic = doc.root_element();
         let mut rels: HashMap<String, String> = HashMap::new();
-        // rIdBroken intentionally absent — an External placeholder with no
-        // resolvable Target. Only the embedded p14:media resolves.
+        // rIdBroken intentionally absent — the link's rId does not resolve
+        // (`rels.get` is None). Only the embedded p14:media resolves.
         rels.insert("rIdGood".to_string(), "../media/clip.mp4".to_string());
         rels.insert("rIdPoster".to_string(), "../media/image1.png".to_string());
 
