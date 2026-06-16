@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -657,12 +657,43 @@ function isCJKCodePoint(cp: number): boolean {
       || (cp >= 0xFF00 && cp <= 0xFFEF); // Halfwidth/Fullwidth
 }
 
+/**
+ * Apply Japanese line-breaking (kinsoku, 禁則処理) at a wrap boundary.
+ *
+ * When the wrapper decides to break, it has the code points already committed
+ * to the line being closed (`lineCps`) and the code points that will lead the
+ * next line (`nextCps`, the overflowing token). Excel — like Word and
+ * PowerPoint — forbids a wrapped line from STARTING with a 行頭禁則 char
+ * (、。」）…) or ENDING with a 行末禁則 char (「（…), per ECMA-376
+ * §17.15.1.58–.60. We delegate the retraction to the shared core engine
+ * `kinsokuAdjustedSplit`, which pulls the offending boundary's preceding code
+ * point(s) down onto the next line (追い出し).
+ *
+ * Returns the number of trailing code points of `lineCps` that must move down
+ * to lead the next line (ahead of `nextCps`). `0` means the greedy break was
+ * already legal — so plain CJK with no forbidden chars at the boundary is
+ * unchanged (no regression). `minSplit = 1` keeps ≥1 code point on the closed
+ * line; an all-forbidden run falls back to no retraction (never empties a line,
+ * never hangs).
+ */
+function kinsokuRetractCount(lineCps: string[], nextCps: string[]): number {
+  if (lineCps.length === 0 || nextCps.length === 0) return 0;
+  const combined = [...lineCps, ...nextCps];
+  const splitAt = lineCps.length;
+  const adj = kinsokuAdjustedSplit(combined, splitAt, DEFAULT_KINSOKU_RULES, 1);
+  return splitAt - adj;
+}
+
 /** Word-wrap a single paragraph (no embedded \n). Unlike a naive
  *  `split(' ')`, CJK characters are treated as individual break opportunities
  *  so that Japanese headings like "夏休みアクティビティ カレンダー 2026"
  *  actually wrap inside a merged cell. ECMA-376 doesn't spec the break
- *  algorithm but this matches what Excel renders on the same input. */
-function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: string, maxWidth: number): string[] {
+ *  algorithm but this matches what Excel renders on the same input.
+ *
+ *  At each break we additionally apply kinsoku (`kinsokuRetractCount`) so a
+ *  wrapped line never starts with 、。」 or ends with 「（ (ECMA-376
+ *  §17.15.1.58–.60), matching Excel's East-Asian wrapping. */
+export function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: string, maxWidth: number): string[] {
   const lines: string[] = [];
   // Tokenise: runs of non-space non-CJK, single ASCII-space runs, individual
   // CJK characters. Then greedy-fit each token onto the current line.
@@ -702,9 +733,21 @@ function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: string, ma
       // Leading spaces at the start of the next line are dropped (matches
       // Excel: wrapped-continuation lines don't preserve the space that
       // caused the break).
-      lines.push(current);
-      current = tok.replace(/^ +/, '');
-      if (current === '') current = tok; // all-space token (preserve width on its own line)
+      let nextLead = tok.replace(/^ +/, '');
+      if (nextLead === '') nextLead = tok; // all-space token (preserve width on its own line)
+      // Apply kinsoku at the boundary: retract trailing code points of the
+      // line being closed so it does not end with a 行末禁則 char and the
+      // next line does not start with a 行頭禁則 char.
+      const lineCps = [...current];
+      const retract = kinsokuRetractCount(lineCps, [...nextLead]);
+      if (retract > 0) {
+        const keep = lineCps.length - retract;
+        lines.push(lineCps.slice(0, keep).join(''));
+        current = lineCps.slice(keep).join('') + nextLead;
+      } else {
+        lines.push(current);
+        current = nextLead;
+      }
     }
   }
   lines.push(current);
@@ -731,7 +774,7 @@ interface RichLine {
  * paragraph width. wrapText breaks at word boundaries (ASCII spaces) and at any
  * CJK code point boundary.
  */
-function layoutRichTextLines(
+export function layoutRichTextLines(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
@@ -753,7 +796,45 @@ function layoutRichTextLines(
     if (!text) return;
     ctx.font = buildFont(font, cs);
     const w = ctx.measureText(text).width;
-    if (cur.length > 0 && curW + w > maxWidth) flush();
+    if (cur.length > 0 && curW + w > maxWidth) {
+      // Kinsoku at the wrap boundary (ECMA-376 §17.15.1.58–.60): retract
+      // trailing code points of the line being closed so it does not end with
+      // a 行末禁則 char and the next line (led by `text`) does not start with a
+      // 行頭禁則 char. The retracted code points live at the end of the last
+      // segment — split that segment (keeping its font), re-measure both parts
+      // with the segment's font, and carry the trailing part down to lead the
+      // next line.
+      const lineCps = cur.flatMap((s) => [...s.text]);
+      let retract = kinsokuRetractCount(lineCps, [...text]);
+      const last = cur[cur.length - 1];
+      const lastCps = [...last.text];
+      // Only retract within the last segment to preserve each run's font; the
+      // single-run CJK case (one segment per line region) is fully covered.
+      if (retract > lastCps.length) retract = lastCps.length;
+      let carry: RichSeg | null = null;
+      if (retract > 0) {
+        const keepCps = lastCps.slice(0, lastCps.length - retract);
+        const moveCps = lastCps.slice(lastCps.length - retract);
+        ctx.font = buildFont(last.font, cs);
+        if (keepCps.length === 0) {
+          // The whole last segment moves down — drop it from the closing line.
+          cur.pop();
+        } else {
+          const keepText = keepCps.join('');
+          last.text = keepText;
+          last.width = ctx.measureText(keepText).width;
+        }
+        const moveText = moveCps.join('');
+        carry = { text: moveText, font: last.font, width: ctx.measureText(moveText).width };
+      }
+      flush();
+      if (carry) {
+        cur.push(carry);
+        curW += carry.width;
+        if (carry.font.size > curMaxSize) curMaxSize = carry.font.size;
+      }
+      ctx.font = buildFont(font, cs); // restore for the incoming token below
+    }
     cur.push({ text, font, width: w });
     curW += w;
     if (font.size > curMaxSize) curMaxSize = font.size;
