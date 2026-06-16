@@ -470,14 +470,10 @@ impl ThemeColors {
     }
 
     fn resolve(&self, scheme_name: &str) -> Option<String> {
-        // "bg1"/"bg2"/"tx1"/"tx2" map onto lt1/lt2/dk1/dk2 per spec
-        let key = match scheme_name {
-            "bg1" => "lt1",
-            "bg2" => "lt2",
-            "tx1" => "dk1",
-            "tx2" => "dk2",
-            other => other,
-        };
+        // bg1/bg2/tx1/tx2 map onto lt1/lt2/dk1/dk2 per the default §19.3.1.6
+        // clrMap; raw slot names (and accents/hlink) pass through unchanged.
+        // Canonical table: ooxml_common::color::SCHEME_DEFAULT_SLOTS.
+        let key = ooxml_common::color::default_scheme_slot(scheme_name);
         self.map.get(key).cloned()
     }
 

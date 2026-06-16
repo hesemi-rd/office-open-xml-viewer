@@ -2014,20 +2014,9 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
 /// attribute is absent: bg1=lt1, tx1=dk1, bg2=lt2, tx2=dk2, accentN identity,
 /// hlink/folHlink identity. Shared by `<p:clrMap>` (§19.3.1.6) and
 /// `<a:overrideClrMapping>` (§20.1.6.8), which carry the identical attribute set.
-const CLR_MAP_LOGICALS: &[(&str, &str)] = &[
-    ("bg1", "lt1"),
-    ("tx1", "dk1"),
-    ("bg2", "lt2"),
-    ("tx2", "dk2"),
-    ("accent1", "accent1"),
-    ("accent2", "accent2"),
-    ("accent3", "accent3"),
-    ("accent4", "accent4"),
-    ("accent5", "accent5"),
-    ("accent6", "accent6"),
-    ("hlink", "hlink"),
-    ("folHlink", "folHlink"),
-];
+/// Aliases `ooxml_common::color::SCHEME_DEFAULT_SLOTS` so the default §19.3.1.6
+/// table lives in exactly one place across the workspace.
+const CLR_MAP_LOGICALS: &[(&str, &str)] = ooxml_common::color::SCHEME_DEFAULT_SLOTS;
 
 /// Read the 12 `CT_ColorMapping` attributes (§19.3.1.6) from `node` into an owned
 /// `{logical → slot}` map. Works for both `<p:clrMap>` and
@@ -2171,15 +2160,16 @@ fn parse_color_node_tint(
                     let hex = hex.clone();
                     return Some(xform(&hex, c));
                 }
+                // Canonical logical→slot fallback, per the default §19.3.1.6
+                // clrMap (shared table: ooxml_common::color::SCHEME_DEFAULT_SLOTS).
+                // The helper also passes raw slot names (dk1/lt1/…) and accents
+                // through unchanged.
                 let canonical: &str = match scheme_name.as_str() {
-                    "tx1" | "dk1" => "dk1",
-                    "tx2" | "dk2" => "dk2",
-                    "bg1" | "lt1" => "lt1",
-                    "bg2" | "lt2" => "lt2",
                     // phClr = "placeholder color" (inherits from layout).
-                    // Approximate as the primary dark text color.
+                    // Approximate as the primary dark text color. Not part of
+                    // §19.3.1.6, so it stays a local special case.
                     "phClr" => "dk1",
-                    other => other,
+                    other => ooxml_common::color::default_scheme_slot(other),
                 };
                 let base_hex = theme.get(canonical)?.clone();
                 return Some(xform(&base_hex, c));

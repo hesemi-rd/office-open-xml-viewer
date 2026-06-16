@@ -406,6 +406,9 @@ pub(crate) fn resolve_color_attrs(
     //   0=lt1, 1=dk1, 2=lt2, 3=dk2, 4..11 unchanged.
     // This is a well-known interoperability quirk (see Open-XML-SDK issue #46
     // and ECMA-376 §22.1.2.7 where "index values of 0 and 1 are swapped").
+    // This is an index→index remap, not a logical→slot-name mapping, so the
+    // shared ooxml_common::color::SCHEME_DEFAULT_SLOTS table (the canonical
+    // §19.3.1.6 logical→slot names) does not apply here; this stays local.
     if let Some(theme_str) = theme {
         if let Ok(idx) = theme_str.parse::<usize>() {
             let mapped = match idx {
@@ -1644,6 +1647,15 @@ pub(crate) fn resolve_fill_color(
         }
         if tag == "schemeClr" {
             if let Some(v) = n.attribute("val") {
+                // ooxml_common::color::SCHEME_DEFAULT_SLOTS is the canonical
+                // logical→slot-NAME table (§19.3.1.6). xlsx instead maps the
+                // logical/slot name straight to a numeric INDEX into the theme
+                // color Vec (raw clrScheme order: dk1=0, lt1=1, dk2=2, lt2=3,
+                // accent1..6=4..9, hlink=10, folHlink=11). Routing through the
+                // shared name→name table would add an indirection without
+                // changing the result, so this stays local. (Note: the cell
+                // @theme path below applies the §22.1.2.7 dk1↔lt1 / dk2↔lt2
+                // index swap; this drawing path indexes the array directly.)
                 let idx = match v {
                     "dk1" | "tx1" => Some(0),
                     "lt1" | "bg1" => Some(1),
