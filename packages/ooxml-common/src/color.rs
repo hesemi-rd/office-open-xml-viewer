@@ -13,6 +13,57 @@
 
 use roxmltree::Node;
 
+/// Default DrawingML logical-color → theme scheme-slot mapping
+/// (ECMA-376 §19.3.1.6 `clrMap` / CT_ColorMapping, with the standard
+/// PowerPoint default attribute values).
+///
+/// A theme's `<a:clrScheme>` stores twelve named slots — `dk1`, `lt1`, `dk2`,
+/// `lt2`, `accent1`..`accent6`, `hlink`, `folHlink`. Documents reference colors
+/// by *logical* name (`bg1`, `tx1`, `bg2`, `tx2`, the accents, and the two
+/// hyperlink names) and a `clrMap` indirection layer resolves each logical name
+/// to a slot. When no explicit `clrMap` override is present the default mapping
+/// applies:
+///
+/// - `bg1` → `lt1`, `tx1` → `dk1` (background 1 is the light slot, text 1 the
+///   dark slot)
+/// - `bg2` → `lt2`, `tx2` → `dk2`
+/// - `accent1`..`accent6`, `hlink`, `folHlink` map to the identically named slot
+///
+/// This is the single source of truth for that default table. Each parser keeps
+/// its own *resolution* (storage layout and per-app tint), but the logical→slot
+/// names live here. See also [`default_scheme_slot`] for a lookup that also
+/// accepts a raw slot name and returns it unchanged.
+pub const SCHEME_DEFAULT_SLOTS: &[(&str, &str)] = &[
+    ("bg1", "lt1"),
+    ("tx1", "dk1"),
+    ("bg2", "lt2"),
+    ("tx2", "dk2"),
+    ("accent1", "accent1"),
+    ("accent2", "accent2"),
+    ("accent3", "accent3"),
+    ("accent4", "accent4"),
+    ("accent5", "accent5"),
+    ("accent6", "accent6"),
+    ("hlink", "hlink"),
+    ("folHlink", "folHlink"),
+];
+
+/// Resolve a DrawingML color name to its default theme scheme slot
+/// (ECMA-376 §19.3.1.6, default `clrMap`).
+///
+/// Logical names listed in [`SCHEME_DEFAULT_SLOTS`] (`bg1`/`tx1`/`bg2`/`tx2`)
+/// map to their slot; every other input — including the raw slot names
+/// (`dk1`, `lt1`, …), the accents and the hyperlink names — is returned
+/// unchanged. This mirrors how a parser walks a `schemeClr@val` that may carry
+/// either a logical name *or* a slot name and wants the underlying slot.
+pub fn default_scheme_slot(name: &str) -> &str {
+    SCHEME_DEFAULT_SLOTS
+        .iter()
+        .find(|(logical, _)| *logical == name)
+        .map(|(_, slot)| *slot)
+        .unwrap_or(name)
+}
+
 /// Selects the formula applied to `<a:tint val>` modifiers. The OOXML spec
 /// is consistent (val = retained input), but the two desktop apps render
 /// templates differently in practice — see ECMA-376 §20.1.2.3.34 and the
@@ -248,4 +299,49 @@ pub fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
         hue2rgb(p, q, h),
         hue2rgb(p, q, h - 1.0 / 3.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the default §19.3.1.6 logical→slot table so the three parsers that
+    /// consume it can't drift. The twelve pairs are exactly the PowerPoint
+    /// default `clrMap`.
+    #[test]
+    fn scheme_default_slots_match_spec() {
+        assert_eq!(
+            SCHEME_DEFAULT_SLOTS,
+            &[
+                ("bg1", "lt1"),
+                ("tx1", "dk1"),
+                ("bg2", "lt2"),
+                ("tx2", "dk2"),
+                ("accent1", "accent1"),
+                ("accent2", "accent2"),
+                ("accent3", "accent3"),
+                ("accent4", "accent4"),
+                ("accent5", "accent5"),
+                ("accent6", "accent6"),
+                ("hlink", "hlink"),
+                ("folHlink", "folHlink"),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_scheme_slot_maps_logicals_and_passes_through_slots() {
+        // Logical names resolve to their slot.
+        assert_eq!(default_scheme_slot("bg1"), "lt1");
+        assert_eq!(default_scheme_slot("tx1"), "dk1");
+        assert_eq!(default_scheme_slot("bg2"), "lt2");
+        assert_eq!(default_scheme_slot("tx2"), "dk2");
+        // Raw slot names and accents/hyperlinks pass through unchanged.
+        assert_eq!(default_scheme_slot("dk1"), "dk1");
+        assert_eq!(default_scheme_slot("lt1"), "lt1");
+        assert_eq!(default_scheme_slot("accent3"), "accent3");
+        assert_eq!(default_scheme_slot("hlink"), "hlink");
+        // Unknown input is returned verbatim (caller decides what to do).
+        assert_eq!(default_scheme_slot("phClr"), "phClr");
+    }
 }
