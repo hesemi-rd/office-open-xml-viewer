@@ -6183,7 +6183,10 @@ fn svg_blip_data_url(
     let svg_target = rels.get(&svg_rid)?;
     let svg_path = resolve_path(slide_dir, svg_target);
     let svg_bytes = read_zip_bytes(zip, &svg_path)?;
-    Some(format!("data:image/svg+xml;base64,{}", B64.encode(&svg_bytes)))
+    Some(format!(
+        "data:image/svg+xml;base64,{}",
+        B64.encode(&svg_bytes)
+    ))
 }
 
 fn parse_picture(
@@ -9980,7 +9983,10 @@ mod tests {
         let decoded = B64
             .decode(svg_url.strip_prefix("data:image/svg+xml;base64,").unwrap())
             .expect("svg_data_url payload must be valid base64");
-        assert_eq!(decoded, SVG, "decoded svg_data_url must equal the .svg part");
+        assert_eq!(
+            decoded, SVG,
+            "decoded svg_data_url must equal the .svg part"
+        );
     }
 
     /// A plain `<p:pic>` with no svgBlip extension must leave `svg_data_url`
