@@ -2807,7 +2807,16 @@ async function renderPicture(
     // srcRect crop below) and both are valid `ctx.drawImage` sources, so every
     // downstream path stays unchanged.
     let bitmap: ImageBitmap | HTMLImageElement;
-    if (el.svgDataUrl != null) {
+    if (el.svgDataUrl != null && !el.srcRect) {
+      // No crop: prefer the vector original. With an a:srcRect crop, fall back
+      // to the PNG instead — the crop math below multiplies fractional srcRect
+      // edges by the source's pixel dims, and an SVG HTMLImageElement that
+      // declares only a viewBox (no intrinsic width/height) reports the
+      // 300×150 default rather than its logical size, so a 9-arg drawImage with
+      // a source rect samples the wrong basis (and Chromium draws nothing). The
+      // PNG fallback (el.dataUrl, always populated alongside svgDataUrl) has
+      // exact pixel dims that make the ECMA-376 §20.1.8.55 fractional crop
+      // well-defined and drawable.
       try {
         bitmap = await getCachedSvgImage(el.svgDataUrl);
       } catch {
@@ -3623,7 +3632,21 @@ export async function renderSlide(
   // fetch+decode — first paint cost becomes max(decode) instead of sum.
   for (const el of slide.elements) {
     if (el.type === 'picture') {
-      void getCachedBitmap((el as PictureElement).dataUrl).catch(() => undefined);
+      // Warm exactly the source the draw loop (renderPicture) will await: the
+      // SVG decode when the picture carries an svgDataUrl and no srcRect crop,
+      // otherwise the PNG bitmap. This mirrors the draw-path source selection
+      // above, so the await there hits a settled/in-flight promise instead of
+      // starting a serial fetch + decode. Warming the PNG for an uncropped
+      // SVG-bearing picture would instead leave the hot (SVG) cache cold and
+      // waste a fetch + createImageBitmap on a fallback that is never drawn.
+      // (The draw path still falls back to getCachedBitmap on SVG decode
+      // failure, so the PNG stays cold only in that rare case.)
+      const p = el as PictureElement;
+      if (p.svgDataUrl != null && !p.srcRect) {
+        void getCachedSvgImage(p.svgDataUrl).catch(() => undefined);
+      } else {
+        void getCachedBitmap(p.dataUrl).catch(() => undefined);
+      }
     } else if (el.type === 'media') {
       const m = el as MediaElement;
       if (m.posterPath && opts.fetchMedia) {
