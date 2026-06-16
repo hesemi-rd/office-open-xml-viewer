@@ -293,36 +293,13 @@ pub(crate) fn parse_chart_xml(
         resolved
     });
     // Explicit chart border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
-    // §21.2.2.5 / DrawingML §20.1.2.2.24). Per the locked policy we draw a
-    // border ONLY when the XML explicitly declares a paintable line:
-    //   - no `<a:ln>` → None (no default Excel-style border);
-    //   - `<a:ln><a:noFill/>` → border explicitly off → color None;
-    //   - `<a:ln><a:solidFill><a:srgbClr val=…>` → Some(hex).
-    // schemeClr is intentionally left unresolved here (the workbook theme is
-    // not wired through to chart border parsing yet — a known limitation).
-    let chart_ln = chart_sp_pr.and_then(|sp| {
-        sp.children()
-            .find(|n| n.tag_name().name() == "ln" && n.tag_name().namespace() == Some(a_ns))
-    });
-    let chart_border_width_emu =
-        chart_ln.and_then(|ln| ln.attribute("w").and_then(|v| v.parse::<u32>().ok()));
-    let chart_border_color = chart_ln.and_then(|ln| {
-        // An explicit `<a:noFill/>` turns the border off → no color.
-        if ln
-            .children()
-            .any(|n| n.is_element() && n.tag_name().name() == "noFill")
-        {
-            return None;
-        }
-        // Only srgbClr inside a direct `<a:solidFill>` is honored.
-        let fill = ln
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")?;
-        let srgb = fill
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "srgbClr")?;
-        srgb.attribute("val").map(|s| s.to_string())
-    });
+    // §21.2.2.5 / DrawingML §20.1.2.2.24). Shared with the pptx parser via
+    // `ooxml_common::chart::extract_chart_space_border` so the locked policy
+    // (border only on an explicit paintable line; noFill → color None; srgb
+    // inside solidFill → hex; schemeClr left unresolved) stays in lockstep.
+    let (chart_border_color, chart_border_width_emu) = chart_space_root
+        .map(ooxml_common::chart::extract_chart_space_border)
+        .unwrap_or((None, None));
 
     // `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27).
     let title_manual_layout = chart_root
@@ -905,24 +882,13 @@ pub(crate) fn axis_line_is_hidden(axis_node: &roxmltree::Node, c_ns: &str) -> bo
 }
 
 /// `<c:catAx|valAx><c:txPr>...defRPr@b>` — bold flag for axis tick labels.
+/// Thin wrapper around `ooxml_common::chart::extract_axis_tick_label_bold` so
+/// the pptx and xlsx parsers stay in lockstep.
 pub(crate) fn extract_axis_tick_label_bold(
     axis_node: &roxmltree::Node,
-    c_ns: &str,
+    _c_ns: &str,
 ) -> Option<bool> {
-    let txpr = axis_node
-        .children()
-        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))?;
-    txpr.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" {
-            return None;
-        }
-        n.attribute("b")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    })
+    ooxml_common::chart::extract_axis_tick_label_bold(*axis_node)
 }
 
 /// `<c:catAx|valAx><c:crosses>` and `<c:crossesAt>` — where the axis sits
@@ -1047,88 +1013,37 @@ pub(crate) fn extract_axis_tick_label_size(
 
 /// Extract the chart title's font size (hundredths of a point) from the first
 /// `a:defRPr@sz` or `a:rPr@sz` found under `c:title`. Returns None when absent.
+/// Thin wrapper around `ooxml_common::chart::extract_chart_title_size`.
 pub(crate) fn extract_chart_title_size(
     chart_root: &roxmltree::Node,
-    c_ns: &str,
-    a_ns: &str,
+    _c_ns: &str,
+    _a_ns: &str,
 ) -> Option<i32> {
-    let title_node = chart_root
-        .children()
-        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
-    title_node.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        if n.tag_name().namespace() != Some(a_ns) {
-            return None;
-        }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" {
-            return None;
-        }
-        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
-    })
+    ooxml_common::chart::extract_chart_title_size(*chart_root)
 }
 
 /// Extract chart title bold flag from the first `a:defRPr@b` / `a:rPr@b`
 /// inside `c:title`. Returns None when not specified (renderer treats as
-/// not bold).
+/// not bold). Thin wrapper around `ooxml_common::chart::extract_chart_title_bold`.
 pub(crate) fn extract_chart_title_bold(
     chart_root: &roxmltree::Node,
-    c_ns: &str,
-    a_ns: &str,
+    _c_ns: &str,
+    _a_ns: &str,
 ) -> Option<bool> {
-    let title_node = chart_root
-        .children()
-        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
-    title_node.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        if n.tag_name().namespace() != Some(a_ns) {
-            return None;
-        }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" {
-            return None;
-        }
-        n.attribute("b")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    })
+    ooxml_common::chart::extract_chart_title_bold(*chart_root)
 }
 
 /// Extract the chart title's font color (hex without '#') from the first
 /// `a:solidFill/a:srgbClr@val` inside `c:title`. Only srgb is resolved here —
 /// scheme colors would require the workbook theme, which isn't wired through
-/// to chart parsing yet.
+/// to chart parsing yet. Thin wrapper around
+/// `ooxml_common::chart::extract_chart_title_srgb`.
 pub(crate) fn extract_chart_title_color(
     chart_root: &roxmltree::Node,
-    c_ns: &str,
-    a_ns: &str,
+    _c_ns: &str,
+    _a_ns: &str,
 ) -> Option<String> {
-    let title_node = chart_root
-        .children()
-        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
-    title_node.descendants().find_map(|n| {
-        if !n.is_element() {
-            return None;
-        }
-        if n.tag_name().namespace() != Some(a_ns) {
-            return None;
-        }
-        if n.tag_name().name() != "srgbClr" {
-            return None;
-        }
-        // Skip srgbClr nodes that aren't inside a solidFill (e.g. a gradient stop).
-        let parent_is_solid = n
-            .parent()
-            .map(|p| p.tag_name().name() == "solidFill" && p.tag_name().namespace() == Some(a_ns))
-            .unwrap_or(false);
-        if !parent_is_solid {
-            return None;
-        }
-        n.attribute("val").map(|s| s.to_string())
-    })
+    ooxml_common::chart::extract_chart_title_srgb(*chart_root)
 }
 
 /// Extract the chart title's font family from the first `a:latin@typeface`
@@ -1155,54 +1070,27 @@ pub(crate) fn extract_chart_title_face(
     })
 }
 
-/// Extract plain text from `c:chart/c:title`.
+/// Extract plain text from `c:chart/c:title`. Thin wrapper around
+/// `ooxml_common::chart::extract_chart_title_text`.
 pub(crate) fn extract_chart_title(
     chart_root: &roxmltree::Node,
-    c_ns: &str,
-    a_ns: &str,
+    _c_ns: &str,
+    _a_ns: &str,
 ) -> Option<String> {
-    let title_node = chart_root
-        .children()
-        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
-    // c:title/c:tx/c:rich/a:p/a:r/a:t  or  c:title/c:tx/c:strRef/c:strCache/c:pt/c:v
-    let mut text = String::new();
-    for node in title_node.descendants() {
-        if node.tag_name().name() == "t" && node.tag_name().namespace() == Some(a_ns) {
-            if let Some(t) = node.text() {
-                text.push_str(t);
-            }
-        }
-        if node.tag_name().name() == "v" && node.tag_name().namespace() == Some(c_ns) {
-            if let Some(t) = node.text() {
-                text.push_str(t);
-            }
-        }
-    }
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    ooxml_common::chart::extract_chart_title_text(*chart_root)
 }
 
 /// Extract an axis title's text + run props from a `<c:catAx>`/`<c:valAx>` node.
 /// Reuses the chart-title helpers (which scope to the node's direct-child
 /// `<c:title>`); run props are resolved only when title text is present.
-/// Returns (text, size_hpt, bold, color_hex).
+/// Returns (text, size_hpt, bold, color_hex). Thin wrapper around
+/// `ooxml_common::chart::extract_axis_title_with_props`.
 fn extract_axis_title_with_props(
     axis_node: &roxmltree::Node,
-    c_ns: &str,
-    a_ns: &str,
+    _c_ns: &str,
+    _a_ns: &str,
 ) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
-    match extract_chart_title(axis_node, c_ns, a_ns) {
-        None => (None, None, None, None),
-        Some(text) => (
-            Some(text),
-            extract_chart_title_size(axis_node, c_ns, a_ns),
-            extract_chart_title_bold(axis_node, c_ns, a_ns),
-            extract_chart_title_color(axis_node, c_ns, a_ns),
-        ),
-    }
+    ooxml_common::chart::extract_axis_title_with_props(*axis_node)
 }
 
 /// Parse one `<c:ser>` element.
