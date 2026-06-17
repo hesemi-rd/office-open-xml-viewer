@@ -4,6 +4,61 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.63.0 — 2026-06-17
+
+Minor: Japanese line breaking (kinsoku) and justified-text alignment shared
+across PowerPoint, Word and Excel through new `@silurus/ooxml-core` text
+kernels; embedded SVG images and more faithful per-slide theme / colour-map
+resolution in PowerPoint.
+
+### pptx
+
+- Resolve each slide's theme and master through its own layout→master→theme
+  chain and honor the slide-master `<p:clrMap>`, so decks that reuse one master
+  across differently-themed slides pick up the right scheme colours. (#471)
+- Honor per-slide / per-layout `<p:clrMapOvr><a:overrideClrMapping>`
+  (§19.3.1.7), including for colours inherited from the master. (#474)
+- Render embedded SVG pictures from the `asvg:svgBlip` Microsoft-2016 blip
+  extension as vectors (with the PNG rasterisation as fallback), warming the SVG
+  decode cache and cropping against the PNG basis. (#472)
+- Recognise embedded video declared via `p14:media` and always draw a paused
+  play badge over the poster frame. (#473)
+- Justify text alignment (`a:pPr algn="just"` / `"dist"`, §20.1.10.59):
+  inter-word slack is distributed across the line and the decoration / text-
+  selection layers span the widened gaps; tab runs are guarded. (#481)
+- Apply kinsoku in the CJK wrap loop, honoring `a:pPr@eaLnBrk` (§21.1.2.2.7 —
+  行頭/行末禁則) via the shared core engine. (#479)
+
+### docx
+
+- Place a list item's first line at `indentLeft` instead of the hanging point,
+  and parse `<w:suff>` so the bullet-to-body gap is not hardcoded to a tab. (#476)
+- Keep the 字下げ (first-line) indent fixed under justification and apply
+  kinsoku across run boundaries when laying out a line. (#477)
+- Spread CJK `both` / `distribute` justification by inter-character pitch
+  (§17.18.44) rather than only at word gaps, and match the fixed segment exactly
+  (not `>=`) so RTL / bidi justified lines no longer drift. (#483)
+
+### xlsx
+
+- Apply kinsoku (行頭/行末禁則) when wrapping CJK text inside a cell, via the
+  shared core engine. (#479)
+
+### core
+
+- Hoist the default scheme-slot colour map (dk1/lt1/accent1–6 fallbacks) into
+  `ooxml-common` so every parser resolves unmapped scheme slots identically. (#475)
+- Extract the kinsoku line-breaking engine into a shared `text/kinsoku` module
+  and unify the duplicated CJK break-range predicates into one
+  `isCjkBreakChar`, consumed by docx / pptx / xlsx. (#479, #482)
+- Extract the justified-line slack kernel (`distributeLineSlack`) into core,
+  shared by the docx and pptx justifiers. (#484)
+
+### docs / site
+
+- Add the VS Code Marketplace badge to the README and use Title Case headings;
+  surface SVG images and kinsoku in the showcase-site capability columns. (#478)
+
 ## 0.62.0 — 2026-06-16
 
 Minor: chart axis titles, borders and value-axis scaling across Excel and

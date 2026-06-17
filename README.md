@@ -439,7 +439,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Hyperlinks | ✅ |
 | | Superscript / subscript (`w:vertAlign`) | ✅ |
 | | Ruby annotations / furigana (`w:ruby`) | ✅ |
-| **Formatting** | Paragraph alignment (left/center/right/justify) | ✅ |
+| **Formatting** | Paragraph alignment (left / center / right / justify / distribute — CJK `both`/`distribute` spread by inter-character pitch, §17.18.44) | ✅ |
 | | Line spacing (auto / atLeast / exact) | ✅ |
 | | Line grid (`w:docGrid`, §17.6.5) | ✅ |
 | | Margin collapsing between paragraphs | ✅ |
@@ -488,6 +488,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Diagonal borders (`diagonalUp` / `diagonalDown`, single + double) | ✅ |
 | | Horizontal / vertical alignment | ✅ |
 | | Text wrapping | ✅ |
+| | Japanese kinsoku line breaking in wrapped cells (行頭/行末禁則, shared core engine) | ✅ |
 | | Number formats (`0.00`, `%`, `#,##0`, custom date/time) | ✅ |
 | **Structure** | Merged cells | ✅ |
 | | Right-to-left sheets (`sheetView rightToLeft`, §18.3.1.87 — mirrored grid, headers, selection, scroll) | ✅ |
@@ -530,6 +531,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
+| | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, PNG fallback) | ✅ |
 | | Groups (`grpSp`) with nested transforms | ✅ |
 | | Connectors (`cxnSp`) | ✅ |
 | | Tables (`tbl` in `graphicFrame`) | ✅ |
@@ -589,6 +591,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | normAutoFit (shrink to fit) | ✅ |
 | | spAutoFit (expand box; suppresses wrap when text fits in one line) | ✅ |
 | | Word wrap / no wrap | ✅ |
+| | Japanese kinsoku line breaking (`a:pPr@eaLnBrk`, §21.1.2.2.7 — 行頭/行末禁則, shared core engine) | ✅ |
 | | Multi-column text body (`numCol` / `spcCol` — balanced flow) | ✅ |
 | | Theme object-default inheritance (`<a:objectDefaults><a:txDef\|spDef>` bodyPr fallback) | ✅ |
 | **Tables** | Cells, rows, columns | ✅ |
