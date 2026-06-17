@@ -353,26 +353,22 @@ pub fn extract_media(
     path: &str,
     max_zip_entry_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let max = ooxml_common::zip::current_max();
-    let cursor = Cursor::new(data);
-    let mut zip = zip::ZipArchive::new(cursor)
-        .map_err(|e| JsValue::from_str(&format!("zip open error: {e}")))?;
-    let mut entry = zip
-        .by_name(path)
-        .map_err(|e| JsValue::from_str(&format!("entry not found: {path}: {e}")))?;
-    if entry.size() > max {
-        return Err(JsValue::from_str(&format!(
-            "ZIP entry exceeds size limit: {path}"
-        )));
-    }
-    let mut buf = Vec::with_capacity(entry.size() as usize);
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_end(&mut buf)
-        .map_err(|e| JsValue::from_str(&format!("read error: {e}")))?;
-    Ok(buf)
+    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Extract raw bytes for a single embedded image entry (e.g.
+/// "ppt/media/image1.png") from a pptx zip archive. Thin `wasm_bindgen` wrapper
+/// over the shared [`ooxml_common::zip::extract_zip_entry`] reader; used by the
+/// main thread to lazily materialize image blobs on demand.
+#[wasm_bindgen]
+pub fn extract_image(
+    data: &[u8],
+    path: &str,
+    max_zip_entry_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
+    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 // ===========================
@@ -8797,6 +8793,20 @@ mod tests {
     // depend on it must skip gracefully on a clean checkout / in CI where the
     // file is absent. See packages/pptx/public/private/.
     const LOCAL_SAMPLE_2: &str = "../public/private/sample-2.pptx";
+
+    #[test]
+    fn extract_image_reads_entry() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            w.start_file("ppt/media/i.png", o).unwrap();
+            w.write_all(b"X").unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(extract_image(&buf, "ppt/media/i.png", None).unwrap(), b"X");
+    }
 
     #[test]
     fn test_parse_chartex() {
