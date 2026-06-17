@@ -566,6 +566,19 @@ pub enum PathCmd {
         x: f64,
         y: f64,
     },
+    /// Elliptical arc (all angles in degrees).
+    ///
+    /// The enum-level `#[serde(tag = ..., rename_all = "camelCase")]` renames the
+    /// variant *tag* (`ArcTo` → `arcTo`) but NOT the variant's struct fields, so
+    /// a per-variant `rename_all` is required for the multi-word fields. Without
+    /// it the JSON carried `st_ang`/`sw_ang`, while the TS `PathCmd`
+    /// (packages/docx/src/types.ts) and core's `buildCustomPath`
+    /// (packages/core/src/shape/custGeom.ts) read `stAng`/`swAng` — the mismatch
+    /// left the angles `undefined`, producing `NaN` coordinates and a missing
+    /// arc. (The degenerate-arc guard `wr<=0||hr<=0` short-circuits before the
+    /// angles are read, so only non-degenerate arcs surface this.) Mirrors the
+    /// pptx fix (#489) and the per-variant `rename_all` used by sibling enums.
+    #[serde(rename_all = "camelCase")]
     ArcTo {
         wr: f64,
         hr: f64,

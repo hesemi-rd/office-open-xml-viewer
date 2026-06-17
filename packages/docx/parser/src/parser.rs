@@ -5436,4 +5436,85 @@ mod svg_blip_tests {
             "svg_data_url must carry the vector original"
         );
     }
+
+    /// Regression for the `PathCmd::ArcTo` serde naming bug (mirrors pptx #489).
+    /// The enum-level `#[serde(tag = "cmd", rename_all = "camelCase")]` renames
+    /// only the variant tag, not the struct-variant fields, so `st_ang`/`sw_ang`
+    /// serialized in snake_case. The TS `PathCmd` (packages/docx/src/types.ts)
+    /// and core's `buildCustomPath` read `stAng`/`swAng`, so the angles came back
+    /// `undefined` → `NaN` coordinates and the arc (plus everything after it)
+    /// vanished. A non-degenerate arc (positive `wR`/`hR`) is essential: a
+    /// degenerate arc short-circuits before the angles are read, which is why the
+    /// existing degenerate-arc paths never surfaced this.
+    #[test]
+    fn arcto_serializes_angle_fields_as_camel_case() {
+        // 90° arc: swAng = 90 * 60000 = 5400000 in OOXML 60000ths of a degree.
+        let xml = r#"<a:custGeom xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:pathLst>
+    <a:path w="100" h="100">
+      <a:moveTo><a:pt x="100" y="50"/></a:moveTo>
+      <a:arcTo wR="50" hR="50" stAng="0" swAng="5400000"/>
+    </a:path>
+  </a:pathLst>
+</a:custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let subpaths = parse_custom_geometry(doc.root_element());
+        let json = serde_json::to_string(&subpaths).expect("custGeom should serialize");
+
+        // The two camelCase keys the TS renderer reads must be present…
+        assert!(
+            json.contains("\"stAng\""),
+            "ArcTo must serialize stAng (camelCase); got: {json}"
+        );
+        assert!(
+            json.contains("\"swAng\""),
+            "ArcTo must serialize swAng (camelCase); got: {json}"
+        );
+        // …and the buggy snake_case keys must be gone.
+        assert!(
+            !json.contains("\"st_ang\""),
+            "ArcTo must not emit snake_case st_ang; got: {json}"
+        );
+        assert!(
+            !json.contains("\"sw_ang\""),
+            "ArcTo must not emit snake_case sw_ang; got: {json}"
+        );
+    }
+
+    /// Value-level check that the parsed `ArcTo` carries the expected numbers:
+    /// `wR`/`hR` normalised by the path's w/h and the angles converted from
+    /// 60000ths of a degree. `PathCmd` derives `Serialize` only, so this asserts
+    /// against the in-memory model rather than round-tripping through JSON.
+    #[test]
+    fn arcto_normalises_radii_and_converts_angles() {
+        let xml = r#"<a:custGeom xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:pathLst>
+    <a:path w="200" h="100">
+      <a:moveTo><a:pt x="200" y="50"/></a:moveTo>
+      <a:arcTo wR="100" hR="50" stAng="2700000" swAng="-5400000"/>
+    </a:path>
+  </a:pathLst>
+</a:custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let subpaths = parse_custom_geometry(doc.root_element());
+        let arc = subpaths[0]
+            .iter()
+            .find(|c| matches!(c, PathCmd::ArcTo { .. }))
+            .expect("arc command should be present");
+        match arc {
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                // wR/hR normalised by path w/h; angles converted from 60000ths.
+                assert!((wr - 0.5).abs() < 1e-9, "wr = {wr}"); // 100/200
+                assert!((hr - 0.5).abs() < 1e-9, "hr = {hr}"); // 50/100
+                assert!((st_ang - 45.0).abs() < 1e-9, "st_ang = {st_ang}"); // 2700000/60000
+                assert!((sw_ang + 90.0).abs() < 1e-9, "sw_ang = {sw_ang}"); // -5400000/60000
+            }
+            _ => unreachable!(),
+        }
+    }
 }
