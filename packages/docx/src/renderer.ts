@@ -46,6 +46,10 @@ import {
   resolveFloatOverlap,
   skipPastTopAndBottom,
 } from './float-layout.js';
+import {
+  distributeLineSlack,
+  type SegStretch,
+} from './text-distribute.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -2098,12 +2102,6 @@ function renderParagraph(
     para.alignment === 'distribute';
   const stretchLastLine = para.alignment === 'distribute';
 
-  const countTrailingSpaces = (s: string) => {
-    let c = 0;
-    for (let i = s.length - 1; i >= 0 && s[i] === ' '; i--) c++;
-    return c;
-  };
-
   // Bidirectional text. The paragraph's base direction comes from w:bidi
   // (ECMA-376 §17.3.1.6). We engage the (exact) bidi pass only when the base is
   // RTL or the line actually contains strong-RTL characters, so pure-LTR
@@ -2227,19 +2225,24 @@ function renderParagraph(
       }
     }
 
-    // Inter-word adjustment per whitespace char on this line. Positive slack
-    // (lineWidth < availW) expands spaces to fill; negative slack (lineWidth >
-    // availW, typically from canvas measuring ~1 px wider than Word) compresses
-    // spaces so the final glyph lands on the right margin instead of overflowing.
-    // Compression is capped so we never eat more than the natural width of a
-    // space, and is only applied when the line is a candidate for justification
+    // Justified-line slack distribution (ECMA-376 §17.18.44). Positive slack
+    // (lineWidth < availW) expands the line to fill the margin; negative slack
+    // (lineWidth > availW, typically from canvas measuring ~1px wider than Word)
+    // compresses it so the final glyph lands on the right margin instead of
+    // overflowing. Gaps open at inter-word spaces AND — for expansion — inter-CJK
+    // boundaries, so a pure-CJK `both`/`distribute` line fills the margin too
+    // (Word fills CJK `both` lines by adding inter-character pitch; see
+    // text-distribute.ts). distributeLineSlack returns, per logical segment, the
+    // internal split points and a trailing-gap flag; the draw loop applies
+    // `perGap` at each. Only computed when the line is a justify candidate
     // (jc=both/distribute, not the last line unless distribute).
-    let extraPerSpace = 0;
+    let segStretch: Map<number, SegStretch> | null = null;
+    let distPerGap = 0;
     // First content segment in reading order. Leading-whitespace segments before
-    // it (a paragraph's 字下げ indent) are NOT stretched by justification — Word
-    // keeps the indent fixed and distributes slack only across the line content
-    // (§17.18.44). Only meaningful for LTR: under bidi the logical-leading
-    // segment is not the visually-leading one, so leave the skip off (0) there.
+    // it (a paragraph's 字下げ indent) are NOT stretched — Word keeps the indent
+    // fixed and distributes slack only across the line content (§17.18.44). Only
+    // meaningful for LTR: under bidi the logical-leading segment is not the
+    // visually-leading one, so leave the skip off (0) there.
     let firstContentSi = 0;
     if (applyJustify) {
       if (!paraNeedsBidi) {
@@ -2248,30 +2251,30 @@ function renderParagraph(
           if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
         }
       }
-      let totalTrailingSpaces = 0;
-      for (let si = 0; si < segCount; si++) {
-        const seg = line.segments[si];
-        // Trailing spaces on the visually-final segment don't stretch (they sit
-        // at the physical line end) — same domain as the draw-loop skip below.
-        if (si === lastDrawnSi) continue;
-        // Leading 字下げ whitespace is not an inter-word gap — don't stretch it.
-        if (si < firstContentSi) continue;
-        if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
-      }
       const slack = effAvailW - (x - lineLeft) - lineWidth;
-      if (totalTrailingSpaces > 0) {
-        extraPerSpace = slack / totalTrailingSpaces;
-        // Don't compress past zero-width spaces — limit compression to at most
-        // half the widest space on the line. Estimated from default font size.
-        const minExtra = -line.ascent * 0.25;
-        if (extraPerSpace < minExtra) extraPerSpace = minExtra;
-      }
+      // Compression cap (negative slack): never eat more than ~a quarter em per
+      // gap, estimated from the line ascent. For expansion this is unbounded.
+      const minPerGap = -line.ascent * 0.25;
+      // Expansion opens inter-CJK boundaries; compression touches only spaces
+      // (shrinking a space is fine, overlapping ideographs is not).
+      const distSegs = line.segments.map(seg =>
+        'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+      );
+      const dist = distributeLineSlack(
+        distSegs,
+        slack,
+        firstContentSi,
+        lastDrawnSi,
+        minPerGap,
+        slack > 0,
+      );
+      segStretch = dist ? dist.perSeg : null;
+      distPerGap = dist ? dist.perGap : 0;
     }
 
     for (let vi = 0; vi < segCount; vi++) {
       const si = visual ? visual.order[vi] : vi;
       const seg = line.segments[si];
-      const isLastSeg = vi === segCount - 1;
       if (visual) ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
       if ('isTab' in seg) {
         // Tabs render as blank space, optionally filled with a leader (TOC dots etc.).
@@ -2299,6 +2302,14 @@ function renderParagraph(
         continue;
       }
       const s = seg as LayoutTextSeg;
+      // Justification stretch for THIS segment (logical index si). `internalStretch`
+      // is the px added between the segment's own glyphs (inter-CJK boundaries);
+      // `splitBefore` lists the code-point offsets to advance `distPerGap` at while
+      // drawing. Decorations span the stretched width so a highlight / underline /
+      // ruby covers the widened glyphs. trailingGap (the inter-segment boundary)
+      // is added after the segment below.
+      const stretch = segStretch?.get(si);
+      const internalStretch = stretch?.internalStretch ?? 0;
       if (!dryRun) {
         const effSizePx = calcEffectiveFontPx(s, scale);
         const yOffset = s.vertAlign === 'super'
@@ -2308,9 +2319,13 @@ function renderParagraph(
             : 0;
         ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
 
+        // Width spanned by the glyphs after justification, for box-style
+        // decorations (highlight) and ruby centring / onTextRun reporting.
+        const spanW = s.measuredWidth + internalStretch;
+
         if (s.highlight) {
           ctx.fillStyle = HIGHLIGHT_COLORS[s.highlight] ?? '#FFFF00';
-          ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, s.measuredWidth, effSizePx * 1.1);
+          ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, spanW, effSizePx * 1.1);
         }
 
         // Track-changes overlay: paint insertions / deletions in the author's
@@ -2321,7 +2336,24 @@ function renderParagraph(
         const revActive = state.showTrackChanges && !!s.revision;
         const revColor = revActive ? authorColor(s.revision!.author) : null;
         ctx.fillStyle = revColor ?? (s.color ? `#${s.color}` : defaultColor);
-        ctx.fillText(s.text, x, baseline + yOffset);
+        // Draw the glyphs. With no internal gap this is a single fillText (the
+        // common path); with inter-CJK gaps the segment is sliced at the gap
+        // offsets and the pen advances `distPerGap` between pieces, so the pitch
+        // appears BETWEEN the ideographs rather than bunched at the segment end.
+        if (stretch && stretch.splitBefore.length > 0) {
+          const cps = [...s.text]; // code points (handles surrogate pairs)
+          let penX = x;
+          let from = 0;
+          for (const cut of stretch.splitBefore) {
+            const piece = cps.slice(from, cut).join('');
+            ctx.fillText(piece, penX, baseline + yOffset);
+            penX += ctx.measureText(piece).width + distPerGap;
+            from = cut;
+          }
+          ctx.fillText(cps.slice(from).join(''), penX, baseline + yOffset);
+        } else {
+          ctx.fillText(s.text, x, baseline + yOffset);
+        }
 
         // Ruby annotation: small text centered above the base glyphs.
         if (s.ruby) {
@@ -2330,7 +2362,7 @@ function renderParagraph(
           ctx.save();
           ctx.font = rubyFont;
           const rubyW = ctx.measureText(s.ruby.text).width;
-          const rubyX = x + (s.measuredWidth - rubyW) / 2;
+          const rubyX = x + (spanW - rubyW) / 2;
           // Sit the ruby's baseline a small gap above the base ascent so the
           // characters don't touch. fillText baseline is at the line of the
           // characters, so subtract the ruby descent + small gap from the
@@ -2346,7 +2378,7 @@ function renderParagraph(
             text: s.text,
             x,
             y: state.y,
-            w: s.measuredWidth,
+            w: spanW,
             h: lineH,
             fontSize: effSizePx,
             font: ctx.font,
@@ -2355,7 +2387,9 @@ function renderParagraph(
 
         const lineColor = revColor ?? (s.color ? `#${s.color}` : defaultColor);
         const lineW = Math.max(0.5, effSizePx * 0.05);
-        const textW = ctx.measureText(s.text).width;
+        // Underline / strike run the full stretched glyph span (natural glyph
+        // width + the internal justification pitch).
+        const textW = ctx.measureText(s.text).width + internalStretch;
 
         const isInsertion = revActive && s.revision?.kind === 'insertion';
         const isDeletion = revActive && s.revision?.kind === 'deletion';
@@ -2384,15 +2418,15 @@ function renderParagraph(
         }
       }
 
-      x += s.measuredWidth;
-      // Inter-word justification slack (applied AFTER the segment so the next
-      // segment starts at a shifted baseline). Skip on the final segment —
-      // trailing spaces at line end don't participate in stretching — and on the
-      // leading 字下げ whitespace (si < firstContentSi), which stays fixed.
-      if (extraPerSpace > 0 && !isLastSeg && si >= firstContentSi) {
-        const trailing = countTrailingSpaces(s.text);
-        if (trailing > 0) x += trailing * extraPerSpace;
-      }
+      // Advance the pen past the segment's glyphs plus any internal justification
+      // pitch added between them.
+      x += s.measuredWidth + internalStretch;
+      // Trailing inter-segment gap (an inter-word space or inter-CJK boundary at
+      // this segment's edge), applied AFTER the segment so the next one starts
+      // shifted. distributeLineSlack only sets trailingGap on gap-opening
+      // segments — never the visually-final segment or a leading-indent segment —
+      // so the final glyph still lands on the margin (Σgaps == slack).
+      if (stretch?.trailingGap) x += distPerGap;
     }
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
