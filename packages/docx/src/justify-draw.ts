@@ -10,14 +10,12 @@
 // contextual CJK metrics — most visibly 約物半角, the half-width collapse of
 // punctuation like （「」。） when adjacent to kana/kanji. Measuring the sliced
 // pieces in ISOLATION loses that collapse, so `Σ measureText(piece)` runs WIDER
-// than `measureText(whole)` (empirically ~24 px for a punctuation-heavy 19-char
-// line at 44 px). The segment's box on the line is `measuredWidth` =
+// than `measureText(whole)`. The segment's box on the line is `measuredWidth` =
 // `measureText(whole)` (+ the internal pitch), and the NEXT segment is drawn at
 // that box edge. If we positioned each piece by summing the isolated advances
 // (`penX += measureText(piece) + perGap`) the drawn glyphs would overrun the box
-// by that ~24 px, and the following run — a CJK→Latin boundary like
-// 「…依頼した|MaxFog」 shows it worst — would be painted ON TOP of this segment's
-// tail.
+// by that drift, and the following run — especially visible at a CJK→Latin
+// boundary — would be painted ON TOP of this segment's tail.
 //
 // Anchoring each piece to the whole-string cumulative advance
 // (`measure(prefix)`) instead reproduces exactly the positions `fillText(whole)`

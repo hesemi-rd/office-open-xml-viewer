@@ -2441,8 +2441,8 @@ function renderParagraph(
           // half-width collapse of （「」。） — are honoured) plus the accumulated
           // pitch, instead of summing the isolated pieces' advances. That sum
           // drifts wider than the segment's box and would paint the next run over
-          // this segment's tail (a CJK→Latin boundary like 「依頼した|MaxFog」 shows
-          // it worst). See justify-draw.ts.
+          // this segment's tail (most visible at a CJK→Latin boundary).
+          // See justify-draw.ts.
           const cps = [...s.text]; // code points (handles surrogate pairs)
           const measure = (str: string): number => ctx.measureText(str).width;
           for (const { text: piece, dx } of justifiedPiecePositions(
