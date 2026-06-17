@@ -643,10 +643,12 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number };
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | { type: 'extractImage'; id: number; path: string };
 
 export type WorkerResponse =
   | { type: 'parsed'; id: number; document: DocxDocumentModel }
+  | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'error'; id: number; message: string };
 
 // ===== Public API types =====

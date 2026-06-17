@@ -44,6 +44,7 @@ export class DocxDocument {
   private _mode: 'main' | 'worker' = 'main';
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
+  private _imageCache = new Map<string, Promise<Blob>>();
 
   private constructor(worker: Worker, mode: 'main' | 'worker') {
     this._worker = worker;
@@ -129,6 +130,28 @@ export class DocxDocument {
     this._document = null;
     this._meta = null;
     this._pages = null;
+    this._imageCache.clear();
+  }
+
+  /**
+   * Extract raw bytes for an embedded image by zip path (e.g.
+   * `word/media/image1.png`), wrapped in a Blob of the given MIME type. Routes
+   * through the persistent worker via the `extractImage` message (twin of
+   * pptx's `getImage`/`getMedia`); results are cached by path for the lifetime
+   * of this instance. The renderer's `fetchImage` option points here so images
+   * are decoded lazily rather than inlined as base64 at parse time.
+   */
+  async getImage(imagePath: string, mimeType: string): Promise<Blob> {
+    const hit = this._imageCache.get(imagePath);
+    if (hit) return hit;
+    const p = this._bridge
+      .request((id) => ({ type: 'extractImage', id, path: imagePath }) satisfies WorkerRequest)
+      .then((res) => {
+        const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
+        return new Blob([bytes], { type: mimeType });
+      });
+    this._imageCache.set(imagePath, p);
+    return p;
   }
 
   get pageCount(): number {
