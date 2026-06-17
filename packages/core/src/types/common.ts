@@ -96,6 +96,14 @@ export interface ImageFill {
   /** `data:<mime>;base64,…` of the embedded blip. */
   dataUrl: string;
   /**
+   * Embedded zip path of the blip (e.g. "word/media/image1.png"), for the lazy
+   * byte-on-demand pipeline. When present, the renderer can fetch the bytes via
+   * a path-keyed loader instead of inlining `dataUrl`.
+   */
+  imagePath?: string;
+  /** MIME type of the blip at {@link ImageFill.imagePath} (e.g. `image/png`). */
+  mimeType?: string;
+  /**
    * `<a:stretch><a:fillRect>` insets. Absent → fills the whole box (or the
    * fill is tiled — see {@link ImageFill.tile}).
    */
