@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ooxml_common::blip::{mime_from_ext, svg_blip_rid};
 use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
 use serde::{Deserialize, Serialize};
@@ -947,21 +946,39 @@ struct PictureElement {
     rotation: f64,
     flip_h: bool,
     flip_v: bool,
-    /// The raster image from the blip's own `r:embed` (PNG/JPEG). When the
-    /// picture is a pure SVG with no raster `r:embed` (only the svgBlip
-    /// extension below), this falls back to the SVG data URL so the element is
-    /// always drawable; `svg_data_url` then holds the same vector source.
-    data_url: String,
+    /// Embedded zip path of the raster image from the blip's own `r:embed`
+    /// (e.g. "ppt/media/image1.png"). The renderer fetches the bytes lazily by
+    /// path (see `extract_image`) instead of inlining base64. When the picture
+    /// is a pure SVG with no raster `r:embed` (only the svgBlip extension
+    /// below), this falls back to the SVG part's path so the element is always
+    /// drawable; `mime_type` is then `image/svg+xml` and `svg_image_path` holds
+    /// the same path.
+    image_path: String,
+    /// MIME type of the blip at `image_path` (e.g. `image/png`), derived from
+    /// the part extension via `ooxml_common::blip::mime_from_ext`.
+    mime_type: String,
     /// Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
     /// uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip r:embed>`):
     /// the `r:embed` points at the `.svg` part that is the *original* vector
-    /// image, while `data_url` (the blip's own `r:embed`) is the PNG fallback
-    /// PowerPoint rasterizes for compatibility. Serialized as a
-    /// `data:image/svg+xml;base64,…` URL so the renderer can prefer the vector
-    /// original and fall back to `data_url` on a decode failure. None when the
-    /// picture has no svgBlip extension (the common case).
+    /// image, while `image_path` (the blip's own `r:embed`) is the PNG fallback
+    /// PowerPoint rasterizes for compatibility. The zip path of that `.svg`
+    /// part; the renderer prefers the vector original and falls back to the
+    /// raster on a decode failure. None when the picture has no svgBlip
+    /// extension (the common case).
     #[serde(skip_serializing_if = "Option::is_none")]
-    svg_data_url: Option<String>,
+    svg_image_path: Option<String>,
+    /// MIME of the SVG part at `svg_image_path` — always `image/svg+xml` when
+    /// present. None when there is no svgBlip extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    svg_mime_type: Option<String>,
+    /// Intrinsic pixel width of the raster blip, read from the PNG IHDR at parse
+    /// time. None for non-PNG payloads (unchanged from the prior
+    /// `png_size_from_data_url` semantics). Consumed by the ink-fallback sizing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intrinsic_width_px: Option<u32>,
+    /// Intrinsic pixel height of the raster blip (PNG IHDR). None for non-PNG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intrinsic_height_px: Option<u32>,
     /// Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24
     /// CT_LineProperties; §19.3.1.37 routes a `p:pic`'s spPr through
     /// CT_ShapeProperties, so a picture carries the same line as a shape). Same
@@ -1284,14 +1301,17 @@ enum Fill {
         preset: String,
     },
     /// Image fill — ECMA-376 §20.1.8.14 `a:blipFill`. The referenced blip is
-    /// resolved to a base64 data URL at parse time. Both fill-modes are
-    /// modelled and mutually exclusive: `stretch` (§20.1.8.56) carries a
-    /// `fill_rect`; `tile` (§20.1.8.58) carries a `tile` descriptor (see
-    /// `parse_blip_fill`).
+    /// resolved to its embedded zip path + mime at parse time; the renderer
+    /// fetches the bytes lazily by path (see `extract_image`) instead of
+    /// inlining base64. Both fill-modes are modelled and mutually exclusive:
+    /// `stretch` (§20.1.8.56) carries a `fill_rect`; `tile` (§20.1.8.58)
+    /// carries a `tile` descriptor (see `parse_blip_fill`).
     #[serde(rename_all = "camelCase")]
     Image {
-        /// `data:<mime>;base64,…` of the embedded blip.
-        data_url: String,
+        /// Embedded zip path of the blip (e.g. "ppt/media/image1.png").
+        image_path: String,
+        /// MIME type of the blip at `image_path` (e.g. `image/png`).
+        mime_type: String,
         /// `<a:stretch><a:fillRect>` (§20.1.8.30 CT_RelativeRect). Edge insets
         /// as fractions of the fill region; negative values overscan past the
         /// bounding box. `None` when stretch has no fillRect (= full box) or
@@ -2280,8 +2300,10 @@ fn parse_fill(node: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) ->
 }
 
 /// ECMA-376 §20.1.8.14 `a:blipFill` → `Fill::Image`. The `resolve_blip`
-/// closure maps the `<a:blip r:embed>` rId to a base64 data URL using the
-/// caller's rels + zip (each inheritance level resolves against its own part).
+/// closure maps the `<a:blip r:embed>` rId to the blip's embedded **zip path**
+/// using the caller's rels (each inheritance level resolves against its own
+/// part); the mime is derived from that path. The renderer fetches the bytes
+/// lazily by path rather than from an inlined data URL.
 ///
 /// Both fill-modes are honoured and mutually exclusive:
 /// - `stretch` (§20.1.8.56): the `fillRect` (§20.1.8.30) is captured so the
@@ -2296,13 +2318,15 @@ fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     resolve_blip: &mut F,
 ) -> Option<Fill> {
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
-    let data_url = resolve_blip(&r_id)?;
+    let image_path = resolve_blip(&r_id)?;
+    let mime_type = mime_from_ext(&image_path).to_owned();
     let alpha = parse_blip_alpha(blip_fill);
     // §20.1.8.58 tile takes precedence when present (stretch/tile are an
     // either-or choice in CT_BlipFillProperties).
     if let Some(tile_node) = child(blip_fill, "tile") {
         return Some(Fill::Image {
-            data_url,
+            image_path,
+            mime_type,
             fill_rect: None,
             tile: Some(parse_tile(tile_node)),
             alpha,
@@ -2310,7 +2334,8 @@ fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     }
     let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
     Some(Fill::Image {
-        data_url,
+        image_path,
+        mime_type,
         fill_rect,
         tile: None,
         alpha,
@@ -2968,7 +2993,10 @@ struct LayoutPlaceholders {
 
 #[derive(Debug, Clone)]
 struct InheritedBlipFill {
-    data_url: String,
+    /// Embedded zip path of the inherited picture-placeholder blip.
+    image_path: String,
+    /// MIME of the blip at `image_path`.
+    mime_type: String,
     src_rect: Option<SrcRect>,
     alpha: Option<f64>,
 }
@@ -4011,11 +4039,13 @@ fn parse_layout_placeholders(
             let rid = child(bf, "blip").and_then(|b| attr_r(&b, "embed"))?;
             let rel_target = layout_rels.get(&rid)?;
             let image_path = resolve_path(layout_dir, rel_target);
-            let bytes = read_zip_bytes(zip, &image_path)?;
-            let mime = mime_from_ext(&image_path);
-            let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+            // Verify the part exists so a dangling rId yields None (no inherited
+            // fill), preserving the prior data-URL behaviour.
+            read_zip_bytes(zip, &image_path)?;
+            let mime_type = mime_from_ext(&image_path).to_owned();
             Some(InheritedBlipFill {
-                data_url,
+                image_path,
+                mime_type,
                 src_rect: parse_src_rect(bf),
                 alpha: parse_blip_alpha(bf),
             })
@@ -6371,7 +6401,11 @@ fn parse_pic_prst_geom(sp_pr: roxmltree::Node<'_, '_>) -> (Option<String>, Optio
 ///
 /// Matching is by namespace-local element name (`svgBlip`), so the `asvg:`
 /// prefix (or any other) is irrelevant.
-fn svg_blip_data_url(
+/// Resolve the Microsoft 2016 `asvg:svgBlip` extension on a `<a:blip>` to the
+/// embedded **zip path** of the `.svg` part (e.g. "ppt/media/image2.svg"). The
+/// renderer fetches the bytes lazily by path. The part's existence is verified
+/// so a dangling rId yields None (no SVG twin), matching the prior behaviour.
+fn svg_blip_path(
     blip: roxmltree::Node<'_, '_>,
     slide_dir: &str,
     rels: &HashMap<String, String>,
@@ -6380,11 +6414,8 @@ fn svg_blip_data_url(
     let svg_rid = svg_blip_rid(blip)?;
     let svg_target = rels.get(&svg_rid)?;
     let svg_path = resolve_path(slide_dir, svg_target);
-    let svg_bytes = read_zip_bytes(zip, &svg_path)?;
-    Some(format!(
-        "data:image/svg+xml;base64,{}",
-        B64.encode(&svg_bytes)
-    ))
+    read_zip_bytes(zip, &svg_path)?;
+    Some(svg_path)
 }
 
 fn parse_picture(
@@ -6412,27 +6443,40 @@ fn parse_picture(
     // inserted as a pure SVG — still parses instead of being dropped. Surfaced
     // separately so the renderer can prefer the vector original and fall back to
     // the raster on decode error.
-    let svg_data_url = svg_blip_data_url(blip, slide_dir, rels, zip);
+    let svg_image_path = svg_blip_path(blip, slide_dir, rels, zip);
 
-    // Raster blip (`<a:blip r:embed>` → PNG/JPEG data URL). Optional: a pure-SVG
-    // picture omits it, so this is no longer a hard requirement for the element.
-    let raster_data_url = (|| -> Option<String> {
+    // Raster blip (`<a:blip r:embed>` → zip path + intrinsic PNG size). Optional:
+    // a pure-SVG picture omits it, so this is no longer a hard requirement for
+    // the element.
+    let raster: Option<(String, Option<(u32, u32)>)> = (|| {
         let r_id = attr_r(&blip, "embed")?;
         let rel_target = rels.get(&r_id)?;
-        let image_path = resolve_path(slide_dir, rel_target);
-        let image_bytes = read_zip_bytes(zip, &image_path)?;
-        let mime = mime_from_ext(&image_path);
-        Some(format!("data:{mime};base64,{}", B64.encode(&image_bytes)))
+        let path = resolve_path(slide_dir, rel_target);
+        let image_bytes = read_zip_bytes(zip, &path)?;
+        // Intrinsic PNG size for the ink-fallback centering (None for non-PNG,
+        // unchanged from the former png_size_from_data_url semantics).
+        let size = png_size_from_bytes(&image_bytes);
+        Some((path, size))
     })();
 
-    // A picture needs at least one drawable source. Keep the raster as `data_url`
-    // (the renderer's srcRect / SVG-decode-failure fallback path); when no raster
-    // is embedded, fall back to the SVG itself so the element is always drawable.
-    let data_url = match (raster_data_url, svg_data_url.as_ref()) {
-        (Some(raster), _) => raster,
-        (None, Some(svg)) => svg.clone(),
-        (None, None) => return None,
-    };
+    // A picture needs at least one drawable source. Prefer the raster as
+    // `image_path` (the renderer's srcRect / SVG-decode-failure fallback path);
+    // when no raster is embedded, fall back to the SVG part itself so the
+    // element is always drawable. `mime_type` matches whichever source wins.
+    let (image_path, mime_type, intrinsic_width_px, intrinsic_height_px) =
+        match (raster, svg_image_path.as_ref()) {
+            (Some((path, size)), _) => {
+                let mime = mime_from_ext(&path).to_owned();
+                let (w, h) = match size {
+                    Some((w, h)) => (Some(w), Some(h)),
+                    None => (None, None),
+                };
+                (path, mime, w, h)
+            }
+            (None, Some(svg)) => (svg.clone(), "image/svg+xml".to_owned(), None, None),
+            (None, None) => return None,
+        };
+    let svg_mime_type = svg_image_path.as_ref().map(|_| "image/svg+xml".to_owned());
 
     // ECMA-376 §20.1.9.8 — `<p:pic>` may carry `<a:custGeom>` inside `<p:spPr>`,
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
@@ -6464,8 +6508,12 @@ fn parse_picture(
         rotation: t.rot,
         flip_h: t.flip_h,
         flip_v: t.flip_v,
-        data_url,
-        svg_data_url,
+        image_path,
+        mime_type,
+        svg_image_path,
+        svg_mime_type,
+        intrinsic_width_px,
+        intrinsic_height_px,
         stroke,
         prst_geom,
         prst_adjust,
@@ -6482,12 +6530,11 @@ fn parse_picture(
     })
 }
 
-/// Decode (width, height) from a base64-encoded PNG data URL by reading the
-/// IHDR chunk. Returns None for non-PNG payloads or malformed data.
-fn png_size_from_data_url(data_url: &str) -> Option<(u32, u32)> {
-    let prefix = "data:image/png;base64,";
-    let b64 = data_url.strip_prefix(prefix)?;
-    let bytes = B64.decode(b64).ok()?;
+/// Decode (width, height) from raw PNG bytes by reading the IHDR chunk. Returns
+/// None for non-PNG payloads or malformed data (unchanged semantics from the
+/// former `png_size_from_data_url`, only the input is now raw bytes instead of
+/// a base64 data URL).
+fn png_size_from_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
         return None;
     }
@@ -7295,12 +7342,11 @@ fn parse_slide(
         let mut resolve = |rid: &str| -> Option<String> {
             let target = rels.get(rid)?;
             let path = resolve_path("ppt/slides", target);
-            let bytes = read_zip_bytes(zip, &path)?;
-            Some(format!(
-                "data:{};base64,{}",
-                mime_from_ext(&path),
-                B64.encode(&bytes)
-            ))
+            // Resolve to the zip path; verify the part exists so a dangling
+            // rId still yields None (the bg chain then falls through to the
+            // next level), preserving the prior data-URL behaviour.
+            read_zip_bytes(zip, &path)?;
+            Some(path)
         };
         background = parse_background(n, theme, &mut resolve);
     }
@@ -7313,12 +7359,8 @@ fn parse_slide(
                     let mut resolve = |rid: &str| -> Option<String> {
                         let target = layout_rels.get(rid)?;
                         let path = resolve_path(layout_dir, target);
-                        let bytes = read_zip_bytes(zip, &path)?;
-                        Some(format!(
-                            "data:{};base64,{}",
-                            mime_from_ext(&path),
-                            B64.encode(&bytes)
-                        ))
+                        read_zip_bytes(zip, &path)?;
+                        Some(path)
                     };
                     background = parse_background(n, theme, &mut resolve);
                 }
@@ -7577,14 +7619,20 @@ fn parse_sp_tree_node(
                         if let Some(target) = rels.get(rid) {
                             let image_path = resolve_path(slide_dir, target);
                             if let Some(bytes) = read_zip_bytes(zip, &image_path) {
-                                let mime = mime_from_ext(&image_path);
-                                let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+                                let mime_type = mime_from_ext(&image_path).to_owned();
+                                let (intrinsic_width_px, intrinsic_height_px) =
+                                    match png_size_from_bytes(&bytes) {
+                                        Some((w, h)) => (Some(w), Some(h)),
+                                        None => (None, None),
+                                    };
                                 // Microsoft 2016 SVG extension — a blipFill-painted
                                 // sp can carry the same svgBlip vector original as a
                                 // real p:pic; surface it so the renderer prefers it.
-                                let svg_data_url = blip_fill_node
+                                let svg_image_path = blip_fill_node
                                     .and_then(|bf| child(bf, "blip"))
-                                    .and_then(|b| svg_blip_data_url(b, slide_dir, rels, zip));
+                                    .and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
+                                let svg_mime_type =
+                                    svg_image_path.as_ref().map(|_| "image/svg+xml".to_owned());
                                 // §20.1.9.18 — the sp's prstGeom (any preset, not
                                 // just roundRect) is the picture's clip silhouette.
                                 let (prst_geom, prst_adjust) =
@@ -7617,8 +7665,12 @@ fn parse_sp_tree_node(
                                     rotation: t.rot,
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
-                                    data_url,
-                                    svg_data_url,
+                                    image_path,
+                                    mime_type,
+                                    svg_image_path,
+                                    svg_mime_type,
+                                    intrinsic_width_px,
+                                    intrinsic_height_px,
                                     stroke,
                                     prst_geom,
                                     prst_adjust,
@@ -7669,13 +7721,21 @@ fn parse_sp_tree_node(
                                     rotation: t.rot,
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
-                                    data_url: bf.data_url,
+                                    image_path: bf.image_path,
+                                    mime_type: bf.mime_type,
                                     // TODO: an inherited layout-placeholder blipFill
                                     // (LayoutPlaceholders::lookup_blip_fill) does not
                                     // yet carry the svgBlip extension. Picture
                                     // placeholders pointing at an SVG are rare; thread
-                                    // the svg URL through BlipFill if a sample needs it.
-                                    svg_data_url: None,
+                                    // the svg path through BlipFill if a sample needs it.
+                                    svg_image_path: None,
+                                    svg_mime_type: None,
+                                    // Intrinsic size is only consumed by the ink
+                                    // fallback (PNG-IHDR centering); inherited
+                                    // placeholder pictures stretch to the box, so
+                                    // None matches the prior behaviour.
+                                    intrinsic_width_px: None,
+                                    intrinsic_height_px: None,
                                     stroke,
                                     prst_geom: None,
                                     prst_adjust: None,
@@ -7721,13 +7781,19 @@ fn parse_sp_tree_node(
                             if let Some(rel_target) = rels.get(&rid) {
                                 let image_path = resolve_path(slide_dir, rel_target);
                                 if let Some(image_bytes) = read_zip_bytes(zip, &image_path) {
-                                    let mime = mime_from_ext(&image_path);
-                                    let data_url =
-                                        format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+                                    let mime_type = mime_from_ext(&image_path).to_owned();
+                                    let (intrinsic_width_px, intrinsic_height_px) =
+                                        match png_size_from_bytes(&image_bytes) {
+                                            Some((w, h)) => (Some(w), Some(h)),
+                                            None => (None, None),
+                                        };
                                     // Microsoft 2016 SVG extension on the placeholder
                                     // p:pic's blip — prefer the vector original.
-                                    let svg_data_url = blip
-                                        .and_then(|b| svg_blip_data_url(b, slide_dir, rels, zip));
+                                    let svg_image_path =
+                                        blip.and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
+                                    let svg_mime_type = svg_image_path
+                                        .as_ref()
+                                        .map(|_| "image/svg+xml".to_owned());
                                     // §20.1.2.2.24 — placeholder pic border: the
                                     // p:pic's own `<a:ln>`, else the inherited
                                     // layout placeholder stroke.
@@ -7744,8 +7810,12 @@ fn parse_sp_tree_node(
                                         rotation: t.rot,
                                         flip_h: t.flip_h,
                                         flip_v: t.flip_v,
-                                        data_url,
-                                        svg_data_url,
+                                        image_path,
+                                        mime_type,
+                                        svg_image_path,
+                                        svg_mime_type,
+                                        intrinsic_width_px,
+                                        intrinsic_height_px,
                                         stroke,
                                         prst_geom: None,
                                         prst_adjust: None,
@@ -7828,7 +7898,8 @@ fn parse_sp_tree_node(
                     // matches the box keep their existing extent.
                     for el in &mut out[before..] {
                         if let SlideElement::Picture(p) = el {
-                            if let Some((nat_w_px, nat_h_px)) = png_size_from_data_url(&p.data_url)
+                            if let (Some(nat_w_px), Some(nat_h_px)) =
+                                (p.intrinsic_width_px, p.intrinsic_height_px)
                             {
                                 let nat_w = (nat_w_px as i64) * EMU_PER_PX_96DPI;
                                 let nat_h = (nat_h_px as i64) * EMU_PER_PX_96DPI;
@@ -8427,12 +8498,8 @@ fn build_master_bundle(
         let mut resolve = |rid: &str| -> Option<String> {
             let target = master_rels.get(rid)?;
             let path = resolve_path(&master_dir, target);
-            let bytes = read_zip_bytes(zip, &path)?;
-            Some(format!(
-                "data:{};base64,{}",
-                mime_from_ext(&path),
-                B64.encode(&bytes)
-            ))
+            read_zip_bytes(zip, &path)?;
+            Some(path)
         };
         parse_background(c_sld, &theme, &mut resolve)
     });
@@ -8726,12 +8793,8 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 let mut resolve = |rid: &str| -> Option<String> {
                     let target = bundle.master_rels.get(rid)?;
                     let path = resolve_path(&bundle.master_dir, target);
-                    let bytes = read_zip_bytes(&mut zip, &path)?;
-                    Some(format!(
-                        "data:{};base64,{}",
-                        mime_from_ext(&path),
-                        B64.encode(&bytes)
-                    ))
+                    read_zip_bytes(&mut zip, &path)?;
+                    Some(path)
                 };
                 parse_background(c_sld, &theme, &mut resolve)
             });
@@ -8806,6 +8869,80 @@ mod tests {
             w.finish().unwrap();
         }
         assert_eq!(extract_image(&buf, "ppt/media/i.png", None).unwrap(), b"X");
+    }
+
+    /// A `PictureElement` serializes its blip as a zip path + mime, never as an
+    /// inlined base64 `data:` URL (lazy image-bytes pipeline, Stage 2.1).
+    #[test]
+    fn picture_element_serializes_path_not_data_url() {
+        let pic = PictureElement {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
+            image_path: "ppt/media/image1.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            svg_image_path: None,
+            svg_mime_type: None,
+            intrinsic_width_px: Some(64),
+            intrinsic_height_px: Some(48),
+            stroke: None,
+            prst_geom: None,
+            prst_adjust: None,
+            src_rect: None,
+            alpha: None,
+            cust_geom: None,
+            shadow: None,
+            inner_shadow: None,
+            glow: None,
+            soft_edge: None,
+            reflection: None,
+            scene3d: None,
+            sp3d: None,
+        };
+        let json = serde_json::to_string(&pic).unwrap();
+        assert!(
+            json.contains("\"imagePath\":\"ppt/media/image1.png\""),
+            "expected camelCase imagePath; got {json}"
+        );
+        assert!(
+            json.contains("\"mimeType\":\"image/png\""),
+            "expected camelCase mimeType; got {json}"
+        );
+        assert!(
+            json.contains("\"intrinsicWidthPx\":64") && json.contains("\"intrinsicHeightPx\":48"),
+            "expected intrinsic size keys; got {json}"
+        );
+        assert!(!json.contains("\"dataUrl\""), "must not emit dataUrl; got {json}");
+        assert!(!json.contains(";base64,"), "must not inline base64; got {json}");
+    }
+
+    /// A blip `Fill::Image` (the serialized core `ImageFill`) serializes a zip
+    /// path + mime, never an inlined base64 `data:` URL (Stage 2.2).
+    #[test]
+    fn image_fill_serializes_path_not_data_url() {
+        let fill = Fill::Image {
+            image_path: "ppt/media/image2.jpeg".to_owned(),
+            mime_type: "image/jpeg".to_owned(),
+            fill_rect: None,
+            tile: None,
+            alpha: None,
+        };
+        let json = serde_json::to_string(&fill).unwrap();
+        assert!(
+            json.contains("\"imagePath\":\"ppt/media/image2.jpeg\""),
+            "expected camelCase imagePath; got {json}"
+        );
+        assert!(
+            json.contains("\"mimeType\":\"image/jpeg\""),
+            "expected camelCase mimeType; got {json}"
+        );
+        assert!(json.contains("\"fillType\":\"image\""), "tag preserved; got {json}");
+        assert!(!json.contains("\"dataUrl\""), "must not emit dataUrl; got {json}");
+        assert!(!json.contains(";base64,"), "must not inline base64; got {json}");
     }
 
     #[test]
@@ -9104,8 +9241,8 @@ mod tests {
 
     /// ECMA-376 §20.1.8.14 + §20.1.8.58 + §20.1.8.30 — a `bgPr > blipFill`
     /// with a `stretch > fillRect` (incl. negative overscan edges) parses into
-    /// `Fill::Image` carrying the resolved data URL, the fractional fillRect,
-    /// and the alphaModFix alpha. Mirrors sample-12 slide1's background.
+    /// `Fill::Image` carrying the resolved zip path + mime, the fractional
+    /// fillRect, and the alphaModFix alpha. Mirrors sample-12 slide1's background.
     #[test]
     fn test_parse_background_blip_fill_stretch() {
         let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -9123,18 +9260,20 @@ mod tests {
         let theme = HashMap::new();
         let mut resolve = |rid: &str| -> Option<String> {
             assert_eq!(rid, "rId2");
-            Some("data:image/jpeg;base64,QUJD".to_owned())
+            Some("ppt/media/image1.jpeg".to_owned())
         };
         let fill = parse_background(doc.root_element(), &theme, &mut resolve)
             .expect("blip background should resolve to Fill::Image");
         match fill {
             Fill::Image {
-                data_url,
+                image_path,
+                mime_type,
                 fill_rect,
                 tile,
                 alpha,
             } => {
-                assert_eq!(data_url, "data:image/jpeg;base64,QUJD");
+                assert_eq!(image_path, "ppt/media/image1.jpeg");
+                assert_eq!(mime_type, "image/jpeg");
                 let fr = fill_rect.expect("fillRect should be present");
                 assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
                 assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
@@ -9165,7 +9304,7 @@ mod tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let theme = HashMap::new();
         let mut resolve =
-            |_: &str| -> Option<String> { Some("data:image/png;base64,QQ==".to_owned()) };
+            |_: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
         let fill = parse_background(doc.root_element(), &theme, &mut resolve)
             .expect("tiled blip background should resolve to Fill::Image");
         match fill {
@@ -9199,7 +9338,7 @@ mod tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let theme = HashMap::new();
         let mut resolve =
-            |_: &str| -> Option<String> { Some("data:image/png;base64,QQ==".to_owned()) };
+            |_: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
         let fill = parse_background(doc.root_element(), &theme, &mut resolve)
             .expect("bare tile should still resolve to Fill::Image");
         match fill {
@@ -10504,10 +10643,11 @@ mod tests {
         assert_eq!(pic.x, 600000, "master pic x");
         assert_eq!(pic.y, 400000, "master pic y");
         assert!(
-            pic.data_url.starts_with("data:image/png;base64,"),
+            pic.image_path.ends_with("media/image1.png"),
             "master pic should resolve image1.png via master rels; got {}",
-            &pic.data_url[..pic.data_url.len().min(40)]
+            pic.image_path
         );
+        assert_eq!(pic.mime_type, "image/png", "master pic mime");
 
         // The decorative rectangle also shows up.
         let has_band = slide
@@ -10562,9 +10702,10 @@ mod tests {
     // at a PNG *fallback* (r:embed) and carries the real .svg part inside an
     // `<a:extLst><a:ext uri="{96DAC541-…}"><asvg:svgBlip r:embed="…"/>`
     // extension (Microsoft 2016 SVG extension; the core blip fill is
-    // ECMA-376 §20.1.8.14). The parser must keep emitting the PNG fallback as
-    // `data_url` (regression-safe) while additionally surfacing the SVG body in
-    // `svg_data_url` so the renderer can prefer the vector original.
+    // ECMA-376 §20.1.8.14). The parser must keep emitting the PNG fallback's
+    // zip path as `image_path` (regression-safe) while additionally surfacing
+    // the SVG part's path on `svg_image_path` so the renderer can prefer the
+    // vector original.
 
     /// Build a tiny zip containing only the two media parts a `<p:pic>` blip
     /// references (a PNG fallback and an SVG body), so `parse_picture` can be
@@ -10592,7 +10733,8 @@ mod tests {
     }
 
     /// A `<p:pic>` carrying a PNG fallback blip plus an `asvg:svgBlip`
-    /// extension must yield both the PNG `data_url` and the SVG `svg_data_url`.
+    /// extension must yield both the PNG `image_path` and the SVG
+    /// `svg_image_path` (with mimes), never inlined base64.
     #[test]
     fn picture_with_svg_blip_extension_emits_both_urls() {
         // 1×1 transparent PNG (smallest valid PNG).
@@ -10642,36 +10784,36 @@ mod tests {
         let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
             .expect("parse_picture should succeed for an SVG-blip picture");
 
-        // PNG fallback is preserved on data_url (regression-safe).
+        // PNG fallback is preserved as the raster image_path (regression-safe);
+        // never an inlined data URL.
+        assert_eq!(pic.image_path, "ppt/media/image1.png", "raster path");
+        assert_eq!(pic.mime_type, "image/png", "raster mime");
         assert!(
-            pic.data_url.starts_with("data:image/png;base64,"),
-            "data_url must remain the PNG fallback; got {}",
-            &pic.data_url[..pic.data_url.len().min(40)]
+            !pic.image_path.contains(";base64,"),
+            "image_path must not inline base64; got {}",
+            pic.image_path
         );
 
-        // The SVG body is surfaced separately as an image/svg+xml data URL.
-        let svg_url = pic
-            .svg_data_url
-            .as_deref()
-            .expect("svg_data_url must be Some when an svgBlip extension is present");
-        assert!(
-            svg_url.starts_with("data:image/svg+xml;base64,"),
-            "svg_data_url must be a base64 image/svg+xml data URL; got {}",
-            &svg_url[..svg_url.len().min(40)]
-        );
-        // And it must decode back to the original SVG bytes.
-        let decoded = B64
-            .decode(svg_url.strip_prefix("data:image/svg+xml;base64,").unwrap())
-            .expect("svg_data_url payload must be valid base64");
+        // The SVG original is surfaced separately as a zip path + mime.
         assert_eq!(
-            decoded, SVG,
-            "decoded svg_data_url must equal the .svg part"
+            pic.svg_image_path.as_deref(),
+            Some("ppt/media/image2.svg"),
+            "svg_image_path must point at the .svg part",
         );
+        assert_eq!(
+            pic.svg_mime_type.as_deref(),
+            Some("image/svg+xml"),
+            "svg_mime_type",
+        );
+        // And the resolved path must hold the original SVG bytes.
+        let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
+            .expect("svg part must be readable by its resolved path");
+        assert_eq!(svg_bytes, SVG, "bytes at svg_image_path must equal the .svg part");
     }
 
-    /// A plain `<p:pic>` with no svgBlip extension must leave `svg_data_url`
-    /// as None (and still emit the PNG data_url) — guards against the new
-    /// branch firing spuriously.
+    /// A plain `<p:pic>` with no svgBlip extension must leave `svg_image_path`
+    /// as None (and still emit the PNG `image_path` + intrinsic size) — guards
+    /// against the new branch firing spuriously.
     #[test]
     fn picture_without_svg_blip_has_no_svg_url() {
         const PNG_1X1: &[u8] = &[
@@ -10699,11 +10841,16 @@ mod tests {
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
             .expect("parse_picture should succeed");
-        assert!(pic.data_url.starts_with("data:image/png;base64,"));
+        assert_eq!(pic.image_path, "ppt/media/image1.png");
+        assert_eq!(pic.mime_type, "image/png");
+        // 1×1 PNG → intrinsic size read from the IHDR.
+        assert_eq!(pic.intrinsic_width_px, Some(1), "intrinsic width");
+        assert_eq!(pic.intrinsic_height_px, Some(1), "intrinsic height");
         assert!(
-            pic.svg_data_url.is_none(),
-            "svg_data_url must be None without an svgBlip extension"
+            pic.svg_image_path.is_none(),
+            "svg_image_path must be None without an svgBlip extension"
         );
+        assert!(pic.svg_mime_type.is_none(), "svg_mime_type must be None");
     }
 
     /// A `<p:pic>` whose `<a:blip>` carries ONLY the `asvg:svgBlip` extension —
@@ -10751,31 +10898,28 @@ mod tests {
         let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
             .expect("parse_picture must succeed for an svgBlip-only picture (sample-12 case)");
 
-        // The SVG body is surfaced on svg_data_url so the renderer prefers it.
-        let svg_url = pic
-            .svg_data_url
-            .as_deref()
-            .expect("svg_data_url must be Some for an svgBlip-only picture");
-        assert!(
-            svg_url.starts_with("data:image/svg+xml;base64,"),
-            "svg_data_url must be a base64 image/svg+xml data URL; got {}",
-            &svg_url[..svg_url.len().min(40)]
-        );
-
-        // With no raster blip, data_url falls back to the SVG itself so the
-        // element is always drawable (rather than being dropped or empty).
-        assert!(
-            pic.data_url.starts_with("data:image/svg+xml;base64,"),
-            "data_url must fall back to the SVG when no raster blip is embedded; got {}",
-            &pic.data_url[..pic.data_url.len().min(40)]
-        );
-        let decoded = B64
-            .decode(svg_url.strip_prefix("data:image/svg+xml;base64,").unwrap())
-            .expect("svg_data_url payload must be valid base64");
+        // The SVG original is surfaced on svg_image_path so the renderer prefers it.
         assert_eq!(
-            decoded, SVG,
-            "decoded svg_data_url must equal the .svg part"
+            pic.svg_image_path.as_deref(),
+            Some("ppt/media/image2.svg"),
+            "svg_image_path must point at the .svg part",
         );
+        assert_eq!(pic.svg_mime_type.as_deref(), Some("image/svg+xml"));
+
+        // With no raster blip, image_path falls back to the SVG part itself so
+        // the element is always drawable (rather than being dropped or empty);
+        // its mime is image/svg+xml and no PNG intrinsic size is recorded.
+        assert_eq!(
+            pic.image_path, "ppt/media/image2.svg",
+            "image_path must fall back to the SVG when no raster blip is embedded",
+        );
+        assert_eq!(pic.mime_type, "image/svg+xml");
+        assert_eq!(pic.intrinsic_width_px, None, "no PNG intrinsic for SVG");
+        assert_eq!(pic.intrinsic_height_px, None);
+        // The resolved SVG path must hold the original SVG bytes.
+        let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
+            .expect("svg part must be readable by its resolved path");
+        assert_eq!(svg_bytes, SVG, "bytes at svg_image_path must equal the .svg part");
     }
 
     // ── Per-slide theme/master resolution (slide→layout→master→theme) ─────
