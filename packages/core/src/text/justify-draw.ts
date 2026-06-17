@@ -1,9 +1,10 @@
 // Glyph placement for a justified segment that carries inter-CJK pitch.
 //
-// ECMA-376 §17.18.44 `both`/`distribute` fills a CJK line by adding pitch at
-// inter-ideograph boundaries (see text-distribute.ts). The renderer therefore
-// slices a justified segment at those boundaries and draws the pieces with the
-// pitch inserted between them. The SUBTLE part is *where* each piece is drawn.
+// Both docx (ECMA-376 §17.18.44 `both`/`distribute`) and pptx (§20.1.10.59
+// `just`/`dist`) fill a CJK line by adding pitch at inter-ideograph boundaries.
+// The renderer slices a justified segment at those boundaries and draws the
+// pieces with the pitch inserted between them. The SUBTLE part is *where* each
+// piece is drawn.
 //
 // ── Why pieces must be anchored to the WHOLE-string advance ──────────────────
 // A canvas `measureText`/`fillText` over the WHOLE segment applies the browser's
@@ -14,8 +15,7 @@
 // `measureText(whole)` (+ the internal pitch), and the NEXT segment is drawn at
 // that box edge. If we positioned each piece by summing the isolated advances
 // (`penX += measureText(piece) + perGap`) the drawn glyphs would overrun the box
-// by that drift, and the following run — especially visible at a CJK→Latin
-// boundary — would be painted ON TOP of this segment's tail.
+// and the following run would be painted ON TOP of this segment's tail.
 //
 // Anchoring each piece to the whole-string cumulative advance
 // (`measure(prefix)`) instead reproduces exactly the positions `fillText(whole)`
@@ -45,8 +45,8 @@ export interface JustifiedPiece {
  * metrics baked into `measure`.
  *
  * @param cps        The segment's code points (e.g. `[...seg.text]`).
- * @param splitBefore Ascending code-point offsets (1..len-1) after which an
- *                    internal gap falls; from the distribute kernel.
+ * @param splitBefore Ascending code-point offsets (1..len-1) at which internal
+ *                    gaps fall; from the distribute kernel.
  * @param perGap     px added at each gap.
  * @param measure    Contextual width of a string — `ctx.measureText(s).width`
  *                   with the segment's font already selected on `ctx`.
@@ -61,15 +61,20 @@ export function justifiedPiecePositions(
   const pieces: JustifiedPiece[] = [];
   let from = 0;
   let gapsSeen = 0;
-  const emit = (cut: number): void => {
+  for (const cut of splitBefore) {
     // Anchor to the whole-string advance up to this piece's first code point,
     // NOT the running sum of isolated piece advances — see the module header.
-    const dx = measure(cps.slice(0, from).join('')) + gapsSeen * perGap;
-    pieces.push({ text: cps.slice(from, cut).join(''), dx });
+    pieces.push({
+      text: cps.slice(from, cut).join(''),
+      dx: measure(cps.slice(0, from).join('')) + gapsSeen * perGap,
+    });
     from = cut;
     gapsSeen++;
-  };
-  for (const cut of splitBefore) emit(cut);
-  emit(cps.length); // final piece (no trailing gap of its own)
+  }
+  // Final piece: no trailing gap of its own — gapsSeen is not incremented.
+  pieces.push({
+    text: cps.slice(from).join(''),
+    dx: measure(cps.slice(0, from).join('')) + gapsSeen * perGap,
+  });
   return pieces;
 }

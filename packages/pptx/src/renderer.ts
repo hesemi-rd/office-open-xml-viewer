@@ -69,7 +69,7 @@ import {
   type LineVisualOrder,
 } from './bidi-line';
 import { fitCjkLine, type MeasuredChar } from './cjk-wrap.js';
-import { justifyLine } from './text-justify';
+import { justifyLine, type SplitAnchor } from './text-justify';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -2325,7 +2325,8 @@ function renderTextBody(
     const drawSegs = justifyMode && !paraNeedsBidi && !hasTabStop
       ? justifyLine(line.segments, textMaxW - textXOffset, lineWidth, justifyMode, isLastLine)
       : null;
-    const segs: (LayoutSegment & { jext?: number })[] = drawSegs ?? line.segments;
+    const segs: (LayoutSegment & { jext?: number } & Partial<SplitAnchor>)[] =
+      drawSegs ?? line.segments;
 
     // Visual draw order: under bidi, reorder segments per UAX#9 (rule L2) and
     // draw each with ctx.direction matching its resolved direction. textAlign
@@ -2334,6 +2335,9 @@ function renderTextBody(
       ? computeLineVisualOrder(line.segments, baseRtl)
       : null;
     const segCount = segs.length;
+    // Tracks the pen position at the start of the current split segment's first
+    // piece. Used by the anchored-positioning path below to absorb 約物半角 drift.
+    let segOriginX = penX;
     for (let vi = 0; vi < segCount; vi++) {
       const li = visual ? visual.order[vi] : vi;
       const seg = segs[li];
@@ -2345,6 +2349,27 @@ function renderTextBody(
       // the widened gap instead of leaving a hole. The last content piece always
       // has jext 0 (justifyLine never stretches after the final glyph).
       const jext = seg.jext ?? 0;
+
+      // ── Anchored positioning for split CJK segments ───────────────────────
+      // When `justifyLine` splits a segment at inter-CJK gaps, punctuation at
+      // the start of a piece loses its contextual 約物半角 half-width in an
+      // isolated `measureText`, so Σ measure(piece) > measure(whole). We anchor
+      // each piece to `segOriginX + measureText(prefix) + gapsSeen·perGap` to
+      // reproduce the whole-string metrics and avoid drift past `availWidth`.
+      // See `packages/core/src/text/justify-draw.ts` for the invariant proof.
+      const origText = seg._origText;
+      let effectivePenX = penX;
+      if (origText !== undefined) {
+        if (seg._from === 0) segOriginX = penX; // first piece of this segment
+        const ls0 = seg.letterSpacingPx ?? 0;
+        const prefix = [...origText].slice(0, seg._from).join('');
+        effectivePenX =
+          segOriginX +
+          ctx.measureText(prefix).width +
+          (ls0 > 0 ? ls0 * (seg._from ?? 0) : 0) +
+          (seg._gapsSeen ?? 0) * (seg._perGap ?? 0);
+      }
+
       // ── Equation segment: draw the cached image instead of text ──────────
       if (seg.math) {
         const render = mathRenders.get(seg.math.nodes);
@@ -2372,7 +2397,7 @@ function renderTextBody(
         const hlW = ctx.measureText(seg.text).width
           + (ls > 0 ? ls * seg.text.length : 0)
           + (seg.jext ?? 0);
-        paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
+        paintHighlight(ctx, effectivePenX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
       }
 
       // Run-level text shadow (rPr > effectLst > outerShdw). Set on the
@@ -2395,7 +2420,7 @@ function renderTextBody(
         // Draw glyph-by-glyph so each character advance is `measure + ls`.
         // Matches OOXML rPr @spc semantics — extra space added to each
         // character's advance, including after the last one.
-        let cx = penX;
+        let cx = effectivePenX;
         for (const ch of seg.text) {
           ctx.fillText(ch, cx, segBaseline);
           cx += ctx.measureText(ch).width + ls;
@@ -2407,10 +2432,10 @@ function renderTextBody(
         // then matches the segW advance below (baseW + ls per character).
         const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
         try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
-        ctx.fillText(seg.text, penX, segBaseline);
+        ctx.fillText(seg.text, effectivePenX, segBaseline);
         try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
       } else {
-        ctx.fillText(seg.text, penX, segBaseline);
+        ctx.fillText(seg.text, effectivePenX, segBaseline);
       }
 
       if (segShadow) ctx.restore();
@@ -2428,7 +2453,7 @@ function renderTextBody(
         ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
         ctx.lineJoin = 'round';
         if (ls > 0 && seg.text.length > 1 && !segRtl) {
-          let cx = penX;
+          let cx = effectivePenX;
           for (const ch of seg.text) {
             ctx.strokeText(ch, cx, segBaseline);
             cx += ctx.measureText(ch).width + ls;
@@ -2436,10 +2461,10 @@ function renderTextBody(
         } else if (ls > 0 && seg.text.length > 1) {
           const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
           try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
-          ctx.strokeText(seg.text, penX, segBaseline);
+          ctx.strokeText(seg.text, effectivePenX, segBaseline);
           try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
         } else {
-          ctx.strokeText(seg.text, penX, segBaseline);
+          ctx.strokeText(seg.text, effectivePenX, segBaseline);
         }
         ctx.restore();
       }
@@ -2451,7 +2476,7 @@ function renderTextBody(
       if (onTextRun && seg.text) {
         onTextRun({
           text: seg.text,
-          inShapeX: penX - bx,
+          inShapeX: effectivePenX - bx,
           inShapeY: cursorY - by,
           w: segW + jext,
           h: lineHeight,
@@ -2466,7 +2491,7 @@ function renderTextBody(
       }
 
       if (seg.underline) {
-        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle);
+        drawUnderline(ctx, effectivePenX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle);
       }
 
       if (seg.strikethrough) {
@@ -2481,21 +2506,32 @@ function renderTextBody(
           const offset = lineW * 0.9;
           const yMid = segBaseline - seg.sizePx * 0.32;
           ctx.beginPath();
-          ctx.moveTo(penX, yMid - offset);
-          ctx.lineTo(penX + segW + jext, yMid - offset);
-          ctx.moveTo(penX, yMid + offset);
-          ctx.lineTo(penX + segW + jext, yMid + offset);
+          ctx.moveTo(effectivePenX, yMid - offset);
+          ctx.lineTo(effectivePenX + segW + jext, yMid - offset);
+          ctx.moveTo(effectivePenX, yMid + offset);
+          ctx.lineTo(effectivePenX + segW + jext, yMid + offset);
           ctx.stroke();
         } else {
           ctx.beginPath();
-          ctx.moveTo(penX, segBaseline - seg.sizePx * 0.32);
-          ctx.lineTo(penX + segW + jext, segBaseline - seg.sizePx * 0.32);
+          ctx.moveTo(effectivePenX, segBaseline - seg.sizePx * 0.32);
+          ctx.lineTo(effectivePenX + segW + jext, segBaseline - seg.sizePx * 0.32);
           ctx.stroke();
         }
       }
 
-      penX += segW;
-      penX += jext;
+      if (origText !== undefined) {
+        // Split segment: advance penX only at the last piece, using the whole
+        // original segment's measure to absorb 約物半角 drift.
+        if (seg._isLastInSeg) {
+          const origCps = [...origText];
+          const wholeW = ctx.measureText(origText).width + (ls > 0 ? ls * origCps.length : 0);
+          penX = segOriginX + wholeW + (seg._gapsSeen ?? 0) * (seg._perGap ?? 0) + jext;
+        }
+        // Non-final pieces: penX stays at segOriginX until the last piece sets it.
+      } else {
+        penX += segW;
+        penX += jext;
+      }
     }
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset before tab-stop / next line
 

@@ -39,15 +39,18 @@
 //
 // `justifyLine` returns the line re-expressed as draw pieces: each input
 // segment is split at the gap positions, and every piece carries `jext`, the
-// px to advance AFTER drawing it. The renderer simply draws each piece and adds
-// its `jext` — the existing glyph paths are untouched. The sum of all `jext`
-// equals the slack, so the painted line reaches `availWidth`.
+// px to advance AFTER drawing it. The sum of all `jext` equals the slack, so
+// the painted line reaches `availWidth`.
 //
-// Splits land only at gap positions (inter-word spaces and inter-CJK
-// boundaries), never inside a Latin word, so a split never cuts a kerning pair
-// or ligature. The per-piece advance widths the renderer re-measures therefore
-// sum to the whole-line `naturalWidth` passed in, and the painted line lands on
-// `availWidth` without measurement drift.
+// IMPORTANT — measurement drift at split boundaries: splitting at an inter-CJK
+// gap can place punctuation (。、）etc.) at the START of a new piece. Measured in
+// isolation that character loses its contextual half-width collapse (約物半角),
+// so `Σ measureText(piece)` runs WIDER than `measureText(whole_segment)`. The
+// renderer therefore uses `justifiedPiecePositions` (from `@silurus/ooxml-core`)
+// for split segments, anchoring each piece to the whole-string prefix advance to
+// avoid the drift that would otherwise push subsequent content past `availWidth`.
+// Split pieces carry `_origText`, `_from`, `_gapsSeen`, `_perGap`, and
+// `_isLastInSeg` to support this anchoring.
 
 import { distributeLineSlack, isCjkBreakChar, type DistributeSeg } from '@silurus/ooxml-core';
 
@@ -60,6 +63,25 @@ import { distributeLineSlack, isCjkBreakChar, type DistributeSeg } from '@siluru
 export type JustifySeg = DistributeSeg;
 
 export type JustifyMode = 'just' | 'dist';
+
+/**
+ * Metadata attached to pieces that came from splitting a CJK segment. The
+ * renderer uses these to anchor each piece to the whole-string prefix advance
+ * (via `justifiedPiecePositions`) instead of summing isolated piece advances,
+ * which would lose the contextual 約物半角 collapse and drift past `availWidth`.
+ */
+export type SplitAnchor = {
+  /** The original segment's full text (code points joined). */
+  _origText: string;
+  /** Code-point index in `_origText` where this piece starts. */
+  _from: number;
+  /** Number of gap positions before this piece within this segment. */
+  _gapsSeen: number;
+  /** px per gap for this segment (= `jext` of non-final pieces). */
+  _perGap: number;
+  /** True for the last piece of the segment; false for all preceding pieces. */
+  _isLastInSeg: boolean;
+};
 
 /** PowerPoint counts EVERY JS-`\s` code point as an inter-word space (\t, \n, the
  *  ideographic space U+3000, …), wider than Word's U+0020/U+3000 set. Injected
@@ -88,7 +110,7 @@ export function justifyLine<T extends JustifySeg>(
   naturalWidth: number,
   mode: JustifyMode,
   isLastLine: boolean,
-): (T & { jext: number })[] | null {
+): (T & { jext: number } & Partial<SplitAnchor>)[] | null {
   // `just`/`justLow` leave the paragraph's last line natural.
   if (mode === 'just' && isLastLine) return null;
 
@@ -119,9 +141,13 @@ export function justifyLine<T extends JustifySeg>(
   // segment: an inline object is one piece (a trailing gap → jext = perGap);
   // a text segment is sliced at the kernel's interior split offsets, each piece
   // before a split advancing perGap, and the final piece advancing perGap iff
-  // the boundary AFTER the segment is a gap (trailingGap). This matches the old
-  // code-point walk exactly — Σ jext == slack, final glyph reaches availWidth.
-  const out: (T & { jext: number })[] = [];
+  // the boundary AFTER the segment is a gap (trailingGap). Σ jext == slack,
+  // final glyph reaches availWidth.
+  //
+  // Split pieces additionally carry SplitAnchor metadata (_origText, _from,
+  // _gapsSeen, _perGap, _isLastInSeg) so the renderer can use anchored
+  // positioning to avoid the 約物半角 measurement drift described above.
+  const out: (T & { jext: number } & Partial<SplitAnchor>)[] = [];
   for (let si = 0; si < segments.length; si++) {
     const seg = segments[si];
     const s = perSeg.get(si);
@@ -131,13 +157,33 @@ export function justifyLine<T extends JustifySeg>(
     }
     const cps = [...seg.text]; // code points (handles surrogate pairs)
     const splits = s?.splitBefore ?? [];
+    const nSplits = splits.length;
     let from = 0;
+    let gapsSeen = 0;
     for (const cut of splits) {
-      out.push({ ...seg, text: cps.slice(from, cut).join(''), jext: perGap });
+      out.push({
+        ...seg,
+        text: cps.slice(from, cut).join(''),
+        jext: perGap,
+        _origText: seg.text,
+        _from: from,
+        _gapsSeen: gapsSeen,
+        _perGap: perGap,
+        _isLastInSeg: false,
+      });
       from = cut;
+      gapsSeen++;
     }
     // Final piece of this segment: trailingGap → perGap, else 0.
-    out.push({ ...seg, text: cps.slice(from).join(''), jext: s?.trailingGap ? perGap : 0 });
+    const finalJext = s?.trailingGap ? perGap : 0;
+    out.push({
+      ...seg,
+      text: cps.slice(from).join(''),
+      jext: finalJext,
+      ...(nSplits > 0
+        ? { _origText: seg.text, _from: from, _gapsSeen: gapsSeen, _perGap: perGap, _isLastInSeg: true }
+        : {}),
+    });
   }
   return out;
 }

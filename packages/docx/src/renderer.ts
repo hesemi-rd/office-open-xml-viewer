@@ -51,7 +51,7 @@ import {
   distributeLineSlack,
   type SegStretch,
 } from './text-distribute.js';
-import { justifiedPiecePositions } from './justify-draw.js';
+import { justifiedPiecePositions } from '@silurus/ooxml-core';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
