@@ -943,17 +943,21 @@ pub enum ShapeGeom {
     /// Freeform path geometry (ECMA-376 §20.1.9.2 `a:custGeom`).
     Custom { paths: Vec<PathInfo> },
     /// Bitmap (or vector) image leaf inside a `<xdr:grpSp>` tree (ECMA-376
-    /// §20.5.2.17). `data_url` is a `data:<mime>;base64,…` URL produced from the
-    /// drawing's relationship target (png/jpg/gif/svg/…) — the blip's raster
-    /// `r:embed` fallback, or the SVG itself when no raster is embedded.
-    /// `svg_data_url` carries the Microsoft svgBlip extension's vector original
-    /// (`data:image/svg+xml;base64,…`) when present, so the renderer can prefer
-    /// it and fall back to `data_url` on a decode failure. `None` otherwise.
+    /// §20.5.2.17). `image_path` is the zip path of the drawing's relationship
+    /// target (png/jpg/gif/svg/…) — the blip's raster `r:embed` fallback, or the
+    /// SVG itself when no raster is embedded — and `mime_type` its MIME via the
+    /// shared `mime_from_ext`. `svg_image_path`/`svg_mime_type` carry the
+    /// Microsoft svgBlip extension's vector original when present, so the
+    /// renderer can prefer it and fall back to `image_path` on a decode failure.
+    /// `None` otherwise. The renderer fetches bytes lazily via `extract_image`.
     #[serde(rename_all = "camelCase")]
     Image {
-        data_url: String,
+        image_path: String,
+        mime_type: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        svg_data_url: Option<String>,
+        svg_image_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        svg_mime_type: Option<String>,
     },
 }
 
@@ -1062,18 +1066,28 @@ pub struct ImageAnchor {
     /// `editAs == "oneCell"`. 0 = absent / use from/to rect.
     pub native_ext_cx: i64,
     pub native_ext_cy: i64,
-    /// Raster data URL ("data:image/png;base64,…"). The blip's own `r:embed`
-    /// fallback when an svgBlip extension is present; otherwise the only source.
-    /// Falls back to the SVG itself when the picture has no raster `r:embed`
-    /// (an icon inserted as a pure SVG), so the element is always drawable.
-    pub data_url: String,
+    /// Zip path of the blip inside the package (e.g. `xl/media/image1.png`).
+    /// The blip's own `r:embed` raster fallback when an svgBlip extension is
+    /// present; otherwise the only source. Falls back to the SVG part itself
+    /// when the picture has no raster `r:embed` (an icon inserted as a pure
+    /// SVG), so the element is always drawable. The renderer fetches the bytes
+    /// lazily via `extract_image` rather than receiving an inlined base64 URL.
+    pub image_path: String,
+    /// MIME of the blip at `image_path`, derived from its extension via the
+    /// shared `mime_from_ext` (e.g. `image/png`, or `image/svg+xml` for the
+    /// SVG-only fallback).
+    pub mime_type: String,
     /// Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
-    /// uri="{96DAC541-…}"><asvg:svgBlip r:embed>`, MS-ODRAWXML): the vector
-    /// *original*, serialized as a `data:image/svg+xml;base64,…` URL so the
-    /// renderer can prefer it and fall back to `data_url` on a decode failure.
-    /// `None` when the picture carries no svgBlip extension (the common case).
+    /// uri="{96DAC541-…}"><asvg:svgBlip r:embed>`, MS-ODRAWXML): the zip path of
+    /// the vector *original*, so the renderer can prefer it and fall back to
+    /// `image_path` on a decode failure. `None` when the picture carries no
+    /// svgBlip extension (the common case).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub svg_data_url: Option<String>,
+    pub svg_image_path: Option<String>,
+    /// MIME of the SVG part at `svg_image_path` — always `image/svg+xml` when
+    /// present. `None` when there is no svgBlip extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg_mime_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
