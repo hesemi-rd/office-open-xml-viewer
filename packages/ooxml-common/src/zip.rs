@@ -54,3 +54,49 @@ pub fn scoped_max(value: Option<u64>) -> Guard {
 pub fn current_max() -> u64 {
     MAX_ZIP_ENTRY_BYTES.with(Cell::get)
 }
+
+/// Read one zip entry's bytes by path. Honors the scoped max-entry guard.
+pub fn extract_zip_entry(
+    data: &[u8],
+    path: &str,
+    max_zip_entry_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Cursor, Read};
+    let _guard = scoped_max(max_zip_entry_bytes);
+    let cursor = Cursor::new(data);
+    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("zip open error: {e}"))?;
+    let mut entry = zip
+        .by_name(path)
+        .map_err(|e| format!("entry not found: {path}: {e}"))?;
+    let max = max_zip_entry_bytes.unwrap_or(u64::MAX);
+    let mut buf = Vec::with_capacity(entry.size().min(max) as usize);
+    entry
+        .by_ref()
+        .take(max)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read error: {e}"))?;
+    Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_zip_entry_reads_by_path() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("ppt/media/image1.png", opts).unwrap();
+            w.write_all(b"\x89PNGdata").unwrap();
+            w.finish().unwrap();
+        }
+        let bytes = extract_zip_entry(&buf, "ppt/media/image1.png", None).unwrap();
+        assert_eq!(bytes, b"\x89PNGdata");
+        assert!(extract_zip_entry(&buf, "ppt/media/missing.png", None)
+            .unwrap_err()
+            .contains("not found"));
+    }
+}
