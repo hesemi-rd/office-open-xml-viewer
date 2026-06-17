@@ -1,5 +1,3 @@
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, svg_blip_rid};
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
@@ -901,6 +899,12 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
         .find_map(|n| attr_w(n, "val"))
 }
 
+/// Build a map of rId → embedded **zip path** (e.g. `word/media/image1.png`) for
+/// every relationship targeting a media/image part. The bytes are NOT read here:
+/// images are fetched lazily by path at render time (via the `extract_image`
+/// worker message), so parse only resolves and validates the path. An entry is
+/// emitted only when the part actually exists in the archive, preserving the
+/// previous "drop unresolvable blips" behavior.
 fn load_media_map(
     zip: &mut Zip,
     rel_map: &HashMap<String, String>,
@@ -914,14 +918,11 @@ fn load_media_map(
             } else {
                 format!("{}{}", base_dir, target)
             };
-            if let Ok(bytes) = read_zip_bytes(zip, &path) {
-                // Shared mime table (the single source of truth) — notably the
-                // only place `.svg` ⇒ `image/svg+xml` is decided. The previous
-                // inline map defaulted every non-png/jpg/gif part (including
-                // `.svg`) to `image/png`, so embedded SVG icons were mislabeled.
-                let mime = mime_from_ext(&path);
-                let b64 = B64.encode(&bytes);
-                media_map.insert(rid.clone(), format!("data:{};base64,{}", mime, b64));
+            // Confirm the part exists before mapping the rId (keeps the lazy
+            // pipeline honest: a path in the map is always extractable). The
+            // bytes are discarded — only the path is retained.
+            if read_zip_bytes(zip, &path).is_ok() {
+                media_map.insert(rid.clone(), path);
             }
         }
     }
@@ -1880,29 +1881,37 @@ fn parse_run_inner(
 }
 
 /// Resolve a DrawingML `<a:blip>`'s drawable source(s) against the document's
-/// media map (rId → `data:<mime>;base64,…`). Returns `(data_url, svg_data_url)`:
+/// media map (rId → embedded **zip path**). Returns
+/// `(image_path, mime, svg_image_path, svg_mime)`:
 ///
-/// - `svg_data_url` is the Microsoft 2016 SVG extension target
+/// - `svg_image_path`/`svg_mime` are the Microsoft 2016 SVG extension target
 ///   (`<a:extLst><asvg:svgBlip r:embed>`, MS-ODRAWXML) when present, else `None`.
-/// - `data_url` is the raster fallback (`<a:blip r:embed>`) when present, else it
-///   falls back to the SVG itself so an svg-only picture (no raster `r:embed`,
-///   e.g. an icon inserted as a pure SVG) is still drawable.
+/// - `image_path`/`mime` is the raster fallback (`<a:blip r:embed>`) when
+///   present, else it falls back to the SVG part itself so an svg-only picture
+///   (no raster `r:embed`, e.g. an icon inserted as a pure SVG) is still
+///   drawable.
 ///
-/// Returns `None` only when NEITHER source resolves (the element is then
-/// dropped, matching the previous raster-only behavior). `blip_embed_rid` /
-/// `svg_blip_rid` come from `ooxml_common::blip`, shared with pptx/xlsx.
+/// MIME is derived from each path's extension via `mime_from_ext` (the single
+/// source of truth — `.svg` ⇒ `image/svg+xml`). Returns `None` only when NEITHER
+/// source resolves (the element is then dropped, matching the previous
+/// raster-only behavior). `blip_embed_rid` / `svg_blip_rid` come from
+/// `ooxml_common::blip`, shared with pptx/xlsx.
 fn resolve_blip_urls(
     blip: roxmltree::Node,
     media_map: &HashMap<String, String>,
-) -> Option<(String, Option<String>)> {
-    let svg_data_url = svg_blip_rid(blip).and_then(|rid| media_map.get(&rid).cloned());
-    let raster_data_url = blip_embed_rid(&blip).and_then(|rid| media_map.get(&rid).cloned());
-    let data_url = match (raster_data_url, svg_data_url.as_ref()) {
+) -> Option<(String, String, Option<String>, Option<String>)> {
+    let svg_image_path = svg_blip_rid(blip).and_then(|rid| media_map.get(&rid).cloned());
+    let raster_path = blip_embed_rid(&blip).and_then(|rid| media_map.get(&rid).cloned());
+    let image_path = match (raster_path, svg_image_path.as_ref()) {
         (Some(raster), _) => raster,
         (None, Some(svg)) => svg.clone(),
         (None, None) => return None,
     };
-    Some((data_url, svg_data_url))
+    let mime = mime_from_ext(&image_path).to_string();
+    let svg_mime = svg_image_path
+        .as_ref()
+        .map(|p| mime_from_ext(p).to_string());
+    Some((image_path, mime, svg_image_path, svg_mime))
 }
 
 fn parse_inline_drawing(
@@ -1941,15 +1950,18 @@ fn parse_inline_drawing(
         // inside `<a:blip><a:extLst><asvg:svgBlip r:embed>`, while `<a:blip
         // r:embed>` carries a raster (PNG/JPEG) *fallback* for SVG-incapable
         // clients. Prefer the vector; fall back to the raster so an svg-only
-        // picture is never dropped. `data_url` keeps the raster when present,
+        // picture is never dropped. `image_path` keeps the raster when present,
         // else the SVG itself; drop the element only if NEITHER resolves.
-        let (data_url, svg_data_url) = match resolve_blip_urls(blip, media_map) {
-            Some(urls) => urls,
-            None => return vec![],
-        };
+        let (image_path, mime_type, svg_image_path, svg_mime_type) =
+            match resolve_blip_urls(blip, media_map) {
+                Some(urls) => urls,
+                None => return vec![],
+            };
         return vec![DocRun::Image(ImageRun {
-            data_url,
-            svg_data_url,
+            image_path,
+            mime_type,
+            svg_image_path,
+            svg_mime_type,
             width_pt: cx / 12700.0,
             height_pt: cy / 12700.0,
             anchor: false,
@@ -2081,15 +2093,18 @@ fn parse_inline_drawing(
         None => return vec![],
     };
     // Microsoft 2016 SVG extension (see parse_inline_drawing): prefer the vector
-    // original, keep the raster as the `data_url` fallback, and never drop an
+    // original, keep the raster as the `image_path` fallback, and never drop an
     // svg-only picture.
-    let (data_url, svg_data_url) = match resolve_blip_urls(blip, media_map) {
-        Some(urls) => urls,
-        None => return vec![],
-    };
+    let (image_path, mime_type, svg_image_path, svg_mime_type) =
+        match resolve_blip_urls(blip, media_map) {
+            Some(urls) => urls,
+            None => return vec![],
+        };
     vec![DocRun::Image(ImageRun {
-        data_url,
-        svg_data_url,
+        image_path,
+        mime_type,
+        svg_image_path,
+        svg_mime_type,
         width_pt: cx / 12700.0,
         height_pt: cy / 12700.0,
         anchor: true,
@@ -2478,9 +2493,10 @@ fn parse_group_pic(
     // Find the blip inside this pic.
     let blip = pic.descendants().find(|n| n.tag_name().name() == "blip")?;
     // Microsoft 2016 SVG extension (see parse_inline_drawing): prefer the vector
-    // original, keep the raster as the `data_url` fallback, and never drop an
+    // original, keep the raster as the `image_path` fallback, and never drop an
     // svg-only picture.
-    let (data_url, svg_data_url) = resolve_blip_urls(blip, media_map)?;
+    let (image_path, mime_type, svg_image_path, svg_mime_type) =
+        resolve_blip_urls(blip, media_map)?;
 
     // Parse a:clrChange if present — used to make a specific color transparent.
     // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
@@ -2492,8 +2508,10 @@ fn parse_group_pic(
         .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
 
     Some(ImageRun {
-        data_url,
-        svg_data_url,
+        image_path,
+        mime_type,
+        svg_image_path,
+        svg_mime_type,
         width_pt: cx * xform.scale_x / 12700.0,
         height_pt: cy * xform.scale_y / 12700.0,
         anchor: true,
@@ -4275,7 +4293,7 @@ mod wgp_image_tests {
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let mut media = HashMap::new();
-        media.insert("rId1".to_string(), "data:image/png;base64,AAAA".to_string());
+        media.insert("rId1".to_string(), "word/media/image1.png".to_string());
         let meta = AnchorMeta::default();
         let imgs = parse_wgp_images(
             doc.root_element(),
@@ -5157,10 +5175,10 @@ mod footnote_tests {
 // ── Microsoft `asvg:svgBlip` extension (MS-ODRAWXML) ──────────────────────
 //
 // Mirrors pptx's svg-blip parser tests, adapted to docx's blip resolution
-// (`resolve_blip_urls` against a media map of rId → data URL) and to the
+// (`resolve_blip_urls` against a media map of rId → zip path) and to the
 // inline-drawing parse entry. Covers: raster + svgBlip both present, svgBlip
 // only (no raster `r:embed`, must still parse), and a plain raster blip
-// (svg_data_url stays None). The end-to-end test also exercises the
+// (svg_image_path stays None). The end-to-end test also exercises the
 // `load_media_map` mime fix (`.svg` ⇒ image/svg+xml, previously image/png).
 #[cfg(test)]
 mod svg_blip_tests {
@@ -5185,9 +5203,10 @@ mod svg_blip_tests {
     }
 
     /// A blip carrying a PNG fallback plus an `asvg:svgBlip` extension must
-    /// surface the SVG on `svg_data_url` while keeping the PNG as `data_url`.
+    /// surface the SVG on `svg_image_path` while keeping the PNG as `image_path`.
     /// The svgBlip uses a different prefix (asvg:) on purpose — matching is by
-    /// namespace-local name, so the prefix must not matter.
+    /// namespace-local name, so the prefix must not matter. The media map now
+    /// holds zip paths (not data URLs); mime is derived from the extension.
     #[test]
     fn resolve_blip_urls_prefers_svg_keeps_raster_fallback() {
         let doc = blip_doc(
@@ -5200,45 +5219,29 @@ mod svg_blip_tests {
                </a:blip>"#,
         );
         let mut media_map = HashMap::new();
-        media_map.insert(
-            "rIdPng".to_string(),
-            format!("data:image/png;base64,{}", B64.encode(PNG_1X1)),
-        );
-        media_map.insert(
-            "rIdSvg".to_string(),
-            format!("data:image/svg+xml;base64,{}", B64.encode(SVG)),
-        );
+        media_map.insert("rIdPng".to_string(), "word/media/image1.png".to_string());
+        media_map.insert("rIdSvg".to_string(), "word/media/image2.svg".to_string());
 
-        let (data_url, svg_data_url) =
-            resolve_blip_urls(doc.root_element(), &media_map).expect("both URLs resolve");
-        // PNG fallback preserved on data_url (regression-safe).
+        let (image_path, mime, svg_image_path, svg_mime) =
+            resolve_blip_urls(doc.root_element(), &media_map).expect("both paths resolve");
+        // PNG fallback preserved on image_path (regression-safe). No base64.
+        assert_eq!(image_path, "word/media/image1.png");
+        assert_eq!(mime, "image/png");
         assert!(
-            data_url.starts_with("data:image/png;base64,"),
-            "data_url must remain the PNG fallback; got {}",
-            &data_url[..data_url.len().min(40)]
+            !image_path.contains(";base64,"),
+            "image_path must be a zip path, not a data URL"
         );
-        // The SVG body is surfaced separately as an image/svg+xml data URL.
-        let svg_url = svg_data_url.expect("svg_data_url must be Some when an svgBlip is present");
-        assert!(
-            svg_url.starts_with("data:image/svg+xml;base64,"),
-            "svg_data_url must be a base64 image/svg+xml data URL; got {}",
-            &svg_url[..svg_url.len().min(40)]
-        );
-        let decoded = B64
-            .decode(svg_url.strip_prefix("data:image/svg+xml;base64,").unwrap())
-            .expect("svg_data_url payload must be valid base64");
-        assert_eq!(
-            decoded, SVG,
-            "decoded svg_data_url must equal the .svg part"
-        );
+        // The SVG part is surfaced separately as a zip path + image/svg+xml mime.
+        assert_eq!(svg_image_path.as_deref(), Some("word/media/image2.svg"));
+        assert_eq!(svg_mime.as_deref(), Some("image/svg+xml"));
     }
 
     /// A blip whose only image is the `asvg:svgBlip` extension — no raster
     /// `r:embed` fallback at all (an icon inserted as a pure SVG, as in pptx
-    /// sample-12) — must still resolve: `svg_data_url` carries the SVG and
-    /// `data_url` falls back to the same SVG so the element is never dropped.
+    /// sample-12) — must still resolve: `svg_image_path` carries the SVG path and
+    /// `image_path` falls back to the same SVG so the element is never dropped.
     #[test]
-    fn resolve_blip_urls_svg_only_falls_back_data_url_to_svg() {
+    fn resolve_blip_urls_svg_only_falls_back_image_path_to_svg() {
         let doc = blip_doc(
             r#"<a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -5248,25 +5251,30 @@ mod svg_blip_tests {
                  </a:extLst>
                </a:blip>"#,
         );
-        let svg_url = format!("data:image/svg+xml;base64,{}", B64.encode(SVG));
         let mut media_map = HashMap::new();
-        media_map.insert("rIdSvg".to_string(), svg_url.clone());
+        media_map.insert("rIdSvg".to_string(), "word/media/image2.svg".to_string());
 
-        let (data_url, svg_data_url) = resolve_blip_urls(doc.root_element(), &media_map)
-            .expect("svgBlip-only blip must still resolve");
+        let (image_path, mime, svg_image_path, svg_mime) =
+            resolve_blip_urls(doc.root_element(), &media_map)
+                .expect("svgBlip-only blip must still resolve");
         assert_eq!(
-            svg_data_url.as_deref(),
-            Some(svg_url.as_str()),
-            "svg_data_url must be the SVG"
+            svg_image_path.as_deref(),
+            Some("word/media/image2.svg"),
+            "svg_image_path must be the SVG path"
+        );
+        assert_eq!(svg_mime.as_deref(), Some("image/svg+xml"));
+        assert_eq!(
+            image_path, "word/media/image2.svg",
+            "image_path must fall back to the SVG path when no raster blip is embedded"
         );
         assert_eq!(
-            data_url, svg_url,
-            "data_url must fall back to the SVG when no raster blip is embedded"
+            mime, "image/svg+xml",
+            "mime must follow the fallback SVG path's extension"
         );
     }
 
-    /// A plain raster blip (no svgBlip extension) must leave `svg_data_url`
-    /// None and keep the raster on `data_url` — guards the new branch against
+    /// A plain raster blip (no svgBlip extension) must leave `svg_image_path`
+    /// None and keep the raster on `image_path` — guards the new branch against
     /// firing spuriously.
     #[test]
     fn resolve_blip_urls_plain_raster_has_no_svg() {
@@ -5275,16 +5283,18 @@ mod svg_blip_tests {
                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdPng"/>"#,
         );
         let mut media_map = HashMap::new();
-        media_map.insert(
-            "rIdPng".to_string(),
-            format!("data:image/png;base64,{}", B64.encode(PNG_1X1)),
-        );
-        let (data_url, svg_data_url) =
+        media_map.insert("rIdPng".to_string(), "word/media/image1.png".to_string());
+        let (image_path, mime, svg_image_path, svg_mime) =
             resolve_blip_urls(doc.root_element(), &media_map).expect("raster resolves");
-        assert!(data_url.starts_with("data:image/png;base64,"));
+        assert_eq!(image_path, "word/media/image1.png");
+        assert_eq!(mime, "image/png");
         assert!(
-            svg_data_url.is_none(),
-            "svg_data_url must be None without an svgBlip extension"
+            svg_image_path.is_none(),
+            "svg_image_path must be None without an svgBlip extension"
+        );
+        assert!(
+            svg_mime.is_none(),
+            "svg_mime must be None without an svgBlip"
         );
     }
 
@@ -5297,6 +5307,47 @@ mod svg_blip_tests {
                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdMissing"/>"#,
         );
         assert!(resolve_blip_urls(doc.root_element(), &HashMap::new()).is_none());
+    }
+
+    /// Struct-serialize contract: `ImageRun` emits camelCase `imagePath` /
+    /// `mimeType` / `svgImagePath` / `svgMimeType` and NEVER a `dataUrl` or a
+    /// `;base64,` payload. This is the CI-meaningful assertion for the path swap.
+    #[test]
+    fn image_run_serializes_path_fields_not_data_url() {
+        let run = ImageRun {
+            image_path: "word/media/image1.png".to_string(),
+            mime_type: "image/png".to_string(),
+            svg_image_path: Some("word/media/image2.svg".to_string()),
+            svg_mime_type: Some("image/svg+xml".to_string()),
+            width_pt: 24.0,
+            height_pt: 24.0,
+            anchor: false,
+            anchor_x_pt: 0.0,
+            anchor_y_pt: 0.0,
+            anchor_x_from_margin: false,
+            anchor_y_from_para: false,
+            color_replace_from: None,
+            wrap_mode: None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            wrap_side: None,
+            allow_overlap: true,
+        };
+        let json = serde_json::to_string(&run).expect("serialize");
+        assert!(
+            json.contains("\"imagePath\":\"word/media/image1.png\""),
+            "{json}"
+        );
+        assert!(json.contains("\"mimeType\":\"image/png\""), "{json}");
+        assert!(
+            json.contains("\"svgImagePath\":\"word/media/image2.svg\""),
+            "{json}"
+        );
+        assert!(json.contains("\"svgMimeType\":\"image/svg+xml\""), "{json}");
+        assert!(!json.contains("dataUrl"), "must not emit dataUrl: {json}");
+        assert!(!json.contains(";base64,"), "must not inline base64: {json}");
     }
 
     /// Build a minimal `.docx` zip with the given `word/document.xml` body, a
@@ -5331,9 +5382,9 @@ mod svg_blip_tests {
 
     /// End-to-end through `parse()`: an inline `<w:drawing>` whose `<a:blip>`
     /// carries ONLY an `asvg:svgBlip` (no raster `r:embed`) must still produce
-    /// an `ImageRun`, with the SVG on both `svg_data_url` and (as the fallback)
-    /// `data_url`. Also pins the `load_media_map` mime fix: the `.svg` part is
-    /// labeled `image/svg+xml`, not `image/png`.
+    /// an `ImageRun`, with the SVG path on both `svg_image_path` and (as the
+    /// fallback) `image_path`. Also pins the `load_media_map` mime fix: the
+    /// `.svg` part is labeled `image/svg+xml`, not `image/png`.
     #[test]
     fn inline_drawing_with_svg_blip_and_no_raster_still_parses() {
         let body = r#"<w:p><w:r><w:drawing>
@@ -5369,27 +5420,28 @@ mod svg_blip_tests {
             })
             .expect("an inline svg-only image must parse");
 
-        let svg_url = img
-            .svg_data_url
+        let svg_path = img
+            .svg_image_path
             .as_deref()
-            .expect("svg_data_url must be Some for an svgBlip-only picture");
-        assert!(
-            svg_url.starts_with("data:image/svg+xml;base64,"),
-            "svg part must be labeled image/svg+xml (load_media_map mime fix); got {}",
-            &svg_url[..svg_url.len().min(40)]
+            .expect("svg_image_path must be Some for an svgBlip-only picture");
+        assert_eq!(svg_path, "word/media/image2.svg");
+        assert_eq!(
+            img.svg_mime_type.as_deref(),
+            Some("image/svg+xml"),
+            "svg part must be labeled image/svg+xml (load_media_map mime fix)"
         );
-        assert!(
-            img.data_url.starts_with("data:image/svg+xml;base64,"),
-            "data_url must fall back to the SVG when no raster blip is embedded; got {}",
-            &img.data_url[..img.data_url.len().min(40)]
+        assert_eq!(
+            img.image_path, "word/media/image2.svg",
+            "image_path must fall back to the SVG path when no raster blip is embedded"
         );
+        assert_eq!(img.mime_type, "image/svg+xml");
         // 304800 EMU / 12700 = 24pt.
         assert!((img.width_pt - 24.0).abs() < 1e-6);
     }
 
     /// End-to-end: an inline `<a:blip r:embed>` with a raster fallback AND an
-    /// svgBlip extension keeps the PNG on `data_url` and the SVG on
-    /// `svg_data_url` (the renderer prefers the vector, falling back on decode
+    /// svgBlip extension keeps the PNG path on `image_path` and the SVG path on
+    /// `svg_image_path` (the renderer prefers the vector, falling back on decode
     /// failure).
     #[test]
     fn inline_drawing_with_raster_and_svg_blip_emits_both() {
@@ -5425,15 +5477,16 @@ mod svg_blip_tests {
                 _ => None,
             })
             .expect("an inline image must parse");
-        assert!(
-            img.data_url.starts_with("data:image/png;base64,"),
-            "data_url must be the PNG fallback when a raster r:embed is present"
+        assert_eq!(
+            img.image_path, "word/media/image1.png",
+            "image_path must be the PNG fallback when a raster r:embed is present"
         );
-        assert!(
-            img.svg_data_url
-                .as_deref()
-                .is_some_and(|u| u.starts_with("data:image/svg+xml;base64,")),
-            "svg_data_url must carry the vector original"
+        assert_eq!(img.mime_type, "image/png");
+        assert_eq!(
+            img.svg_image_path.as_deref(),
+            Some("word/media/image2.svg"),
+            "svg_image_path must carry the vector original"
         );
+        assert_eq!(img.svg_mime_type.as_deref(), Some("image/svg+xml"));
     }
 }

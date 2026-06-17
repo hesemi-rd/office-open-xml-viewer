@@ -749,14 +749,23 @@ pub struct ShapeText {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
-    /// data:<mime>;base64,... — the raster fallback (PNG/JPEG) of the blip, or
-    /// the SVG itself when the blip embeds no raster `r:embed`. Always drawable.
-    pub data_url: String,
-    /// Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
-    /// as a `data:image/svg+xml;base64,…` URL. When present the renderer prefers
-    /// it over `data_url` (the raster fallback). `None` for a plain raster blip.
+    /// Embedded zip path of the raster blip (e.g. `word/media/image1.png`), the
+    /// raster fallback (PNG/JPEG), or the SVG part itself when the blip embeds no
+    /// raster `r:embed`. The renderer fetches the bytes lazily by path rather
+    /// than inlining base64.
+    pub image_path: String,
+    /// MIME type of the blip at `image_path` (e.g. `image/png`, or
+    /// `image/svg+xml` for an svg-only picture).
+    pub mime_type: String,
+    /// Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML)
+    /// — the zip path of the `.svg` part. When present the renderer prefers it
+    /// over `image_path` (the raster fallback). `None` for a plain raster blip.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub svg_data_url: Option<String>,
+    pub svg_image_path: Option<String>,
+    /// MIME of the SVG part at `svg_image_path` — always `image/svg+xml` when
+    /// present. `None` without an svgBlip extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg_mime_type: Option<String>,
     /// pt
     pub width_pt: f64,
     /// pt
