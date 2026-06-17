@@ -898,6 +898,14 @@ pub struct ShapeParagraph {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ShapeTextRun {
+    /// The enum-level `rename_all = "camelCase"` (tag = "type") renames only the
+    /// variant tags, not the fields, so the multi-word `font_face` needs a
+    /// per-variant `rename_all` to serialize as the camelCase key the TS
+    /// renderer reads (`renderer.ts`: `run.fontFace`). Without it the key lands
+    /// as snake_case, the renderer reads `undefined`, and the shape text's font
+    /// face is silently ignored (falls back to the default stack). Same root
+    /// cause as the pptx fix in PR #489 / the xlsx ArcTo fix in PR #491.
+    #[serde(rename_all = "camelCase")]
     Text {
         text: String,
         bold: bool,
@@ -914,6 +922,13 @@ pub enum ShapeTextRun {
     /// Soft line break (`<a:br>`).
     Break,
     /// Inline (`display:false`) or block (`display:true`) OMML equation.
+    ///
+    /// Like `Text`, the multi-word `font_size` needs a per-variant
+    /// `rename_all = "camelCase"` so it serializes as `fontSize` (the key the
+    /// renderer reads at `renderer.ts`: `run.fontSize`). Without it the
+    /// snake_case key is read as `undefined` and the equation always falls back
+    /// to the inherited/default size instead of its explicit `rPr@sz`.
+    #[serde(rename_all = "camelCase")]
     Math {
         nodes: Vec<ooxml_common::math::MathNode>,
         display: bool,

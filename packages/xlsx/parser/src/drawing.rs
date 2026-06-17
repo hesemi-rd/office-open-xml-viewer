@@ -1552,6 +1552,81 @@ mod math_tests {
         assert_eq!(text.paragraphs.len(), 1);
         assert!(!text.paragraphs[0].rtl, "absent @rtl → rtl false");
     }
+
+    /// `ShapeTextRun` uses an enum-level `#[serde(tag = "type", rename_all =
+    /// "camelCase")]`, which renames only the variant tags — not the fields. The
+    /// `Text` variant's `font_face` and the `Math` variant's `font_size`
+    /// therefore need per-variant `rename_all` to serialize as the camelCase
+    /// keys the TS renderer reads (`run.fontFace` / `run.fontSize`). This locks
+    /// the JSON contract so the keys never regress to snake_case (which the
+    /// renderer reads as `undefined`). Same bug class as the pptx serde fix
+    /// (PR #489) and the xlsx ArcTo fix (PR #491).
+    #[test]
+    fn serializes_text_run_font_face_as_camel_case() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r>
+                  <a:rPr sz="1400"><a:latin typeface="Calibri"/></a:rPr>
+                  <a:t>hi</a:t>
+                </a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let run = &text.paragraphs[0].runs[0];
+        assert!(
+            matches!(run, ShapeTextRun::Text { .. }),
+            "expected Text run"
+        );
+
+        let v: serde_json::Value = serde_json::to_value(run).unwrap();
+        assert_eq!(v["type"], "text", "tag key is `type`");
+        assert_eq!(
+            v["fontFace"], "Calibri",
+            "font_face must serialize as camelCase `fontFace` (renderer reads run.fontFace)"
+        );
+        assert!(
+            v.get("font_face").is_none(),
+            "snake_case `font_face` must not appear"
+        );
+    }
+
+    /// Companion to the Text-run case: the `Math` variant's `font_size` must
+    /// serialize as `fontSize` (renderer reads `run.fontSize`). Without the
+    /// per-variant `rename_all` the equation falls back to the inherited size.
+    #[test]
+    fn serializes_math_run_font_size_as_camel_case() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a14:m><m:oMath><m:r>
+                  <a:rPr sz="2800"/>
+                  <m:t>n</m:t>
+                </m:r></m:oMath></a14:m>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let run = &text.paragraphs[0].runs[0];
+        assert!(
+            matches!(run, ShapeTextRun::Math { .. }),
+            "expected Math run"
+        );
+
+        let v: serde_json::Value = serde_json::to_value(run).unwrap();
+        assert_eq!(v["type"], "math", "tag key is `type`");
+        assert_eq!(
+            v["fontSize"], 28.0,
+            "font_size must serialize as camelCase `fontSize` (renderer reads run.fontSize)"
+        );
+        assert!(
+            v.get("font_size").is_none(),
+            "snake_case `font_size` must not appear"
+        );
+    }
 }
 
 #[cfg(test)]
