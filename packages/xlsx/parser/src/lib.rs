@@ -2040,6 +2040,20 @@ pub fn xlsx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
     to_markdown_impl(data).map_err(|e| JsValue::from_str(&e))
 }
 
+/// Extract raw bytes for a single embedded image entry (e.g.
+/// "xl/media/image1.png") from an xlsx zip archive. Thin `wasm_bindgen` wrapper
+/// over the shared [`ooxml_common::zip::extract_zip_entry`] reader; used by the
+/// main thread to lazily materialize image blobs on demand.
+#[wasm_bindgen]
+pub fn extract_image(
+    data: &[u8],
+    path: &str,
+    max_zip_entry_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
+    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 /// cached `<v>` so formula formulas show their results, not the formula text.
 /// Designed for AI agents that need to read the spreadsheet content
 /// efficiently — drops styling, formatting, charts, sparklines, drawings.
@@ -2504,5 +2518,24 @@ mod threaded_comment_tests {
         let cs = parse_threaded_comments_xml(&xml, &HashMap::new());
         assert_eq!(cs[0].author, None);
         assert_eq!(cs[0].text, "hi");
+    }
+}
+
+#[cfg(test)]
+mod extract_image_tests {
+    use super::extract_image;
+
+    #[test]
+    fn extract_image_reads_entry() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            w.start_file("xl/media/i.png", o).unwrap();
+            w.write_all(b"X").unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(extract_image(&buf, "xl/media/i.png", None).unwrap(), b"X");
     }
 }

@@ -31,6 +31,20 @@ pub fn docx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
     Ok(markdown::render_document(&doc))
 }
 
+/// Extract raw bytes for a single embedded image entry (e.g.
+/// "word/media/image1.png") from a docx zip archive. Thin `wasm_bindgen`
+/// wrapper over the shared [`ooxml_common::zip::extract_zip_entry`] reader; used
+/// by the main thread to lazily materialize image blobs on demand.
+#[wasm_bindgen]
+pub fn extract_image(
+    data: &[u8],
+    path: &str,
+    max_zip_entry_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
+    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 /// Native equivalent of `parse_docx` for use from the MCP server.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
@@ -47,4 +61,23 @@ pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     let doc = parser::parse(data)?;
     Ok(markdown::render_document(&doc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_image_reads_entry() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            w.start_file("word/media/i.png", o).unwrap();
+            w.write_all(b"X").unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(extract_image(&buf, "word/media/i.png", None).unwrap(), b"X");
+    }
 }
