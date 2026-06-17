@@ -1,6 +1,38 @@
-import { defaultDpr, isHTMLCanvas, type MathRenderer } from '@silurus/ooxml-core';
+import { defaultDpr, isHTMLCanvas, getCachedSvgImage, type MathRenderer } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
+
+/** Decode one image element to a drawable `CanvasImageSource`, preferring the
+ *  Microsoft svgBlip vector original (MS-ODRAWXML). Unified across the top-level
+ *  twoCellAnchor picture (`ImageAnchor`) and the `<xdr:grpSp>` leaf
+ *  (`ShapeGeom` image) — both carry a raster `dataUrl` fallback plus an optional
+ *  `svgDataUrl`. xlsx images have no `a:srcRect` crop, so the vector branch
+ *  always applies when an svgBlip is present (cf. the contract's `!srcRect`
+ *  gate). SVG decodes through `getCachedSvgImage` (an `<img>`) because
+ *  `createImageBitmap` cannot rasterize SVG in every browser. */
+async function decodeImageSource(
+  dataUrl: string,
+  svgDataUrl?: string,
+): Promise<CanvasImageSource> {
+  const decodeRaster = async (url: string): Promise<CanvasImageSource> =>
+    createImageBitmap(await (await fetch(url)).blob());
+  const dataIsSvg = dataUrl.startsWith('data:image/svg+xml');
+  if (svgDataUrl != null) {
+    // Prefer the vector original; fall back to the raster fallback on decode
+    // failure (or, when `dataUrl` is itself the SVG, the SVG decoder again).
+    try {
+      return await getCachedSvgImage(svgDataUrl);
+    } catch {
+      return dataIsSvg ? getCachedSvgImage(dataUrl) : decodeRaster(dataUrl);
+    }
+  }
+  if (dataIsSvg) {
+    // svg-only picture with no separate `svgDataUrl` field (defensive): the
+    // raster decoder (createImageBitmap) can't rasterize SVG.
+    return getCachedSvgImage(dataUrl);
+  }
+  return decodeRaster(dataUrl);
+}
 
 export interface RenderDeps {
   ws: Worksheet;
@@ -34,29 +66,32 @@ export async function renderWorksheetViewport(
   // every scroll frame. By awaiting first (and only when there's something
   // uncached), the whole resize+draw runs synchronously in a single tick and
   // the old frame stays visible until the new one is ready.
-  const uncached: string[] = [];
+  // The cache is keyed by `dataUrl` (the renderer's lookup key); the decoded
+  // source may come from `svgDataUrl` (preferred) instead. De-dup by `dataUrl`.
+  const uncached = new Map<string, string | undefined>();
   if (ws.images) {
     for (const img of ws.images) {
-      if (!imageCache.has(img.dataUrl)) uncached.push(img.dataUrl);
+      if (!imageCache.has(img.dataUrl)) uncached.set(img.dataUrl, img.svgDataUrl);
     }
   }
   if (ws.shapeGroups) {
     for (const grp of ws.shapeGroups) {
       for (const shape of grp.shapes) {
         if (shape.geom.type === 'image' && !imageCache.has(shape.geom.dataUrl)) {
-          uncached.push(shape.geom.dataUrl);
+          uncached.set(shape.geom.dataUrl, shape.geom.svgDataUrl);
         }
       }
     }
   }
-  if (uncached.length > 0) {
+  if (uncached.size > 0) {
     await Promise.all(
-      uncached.map(async (url) => {
-        const blob = await (await fetch(url)).blob();
-        const bmp = await createImageBitmap(blob);
-        imageCache.set(url, bmp);
+      [...uncached].map(async ([dataUrl, svgDataUrl]) => {
+        // Swallow per-image failures so one broken picture doesn't sink the grid.
+        try {
+          imageCache.set(dataUrl, await decodeImageSource(dataUrl, svgDataUrl));
+        } catch { /* leave uncached; renderer skips a missing source */ }
       }),
-    ).catch(() => { /* swallow image failures so the grid still renders */ });
+    );
   }
 
   // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,

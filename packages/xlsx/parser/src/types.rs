@@ -942,11 +942,19 @@ pub enum ShapeGeom {
     },
     /// Freeform path geometry (ECMA-376 §20.1.9.2 `a:custGeom`).
     Custom { paths: Vec<PathInfo> },
-    /// Bitmap image leaf inside a `<xdr:grpSp>` tree (ECMA-376 §20.5.2.17).
-    /// `data_url` is a `data:<mime>;base64,…` URL produced from the drawing's
-    /// relationship target (png/jpg/gif/…).
+    /// Bitmap (or vector) image leaf inside a `<xdr:grpSp>` tree (ECMA-376
+    /// §20.5.2.17). `data_url` is a `data:<mime>;base64,…` URL produced from the
+    /// drawing's relationship target (png/jpg/gif/svg/…) — the blip's raster
+    /// `r:embed` fallback, or the SVG itself when no raster is embedded.
+    /// `svg_data_url` carries the Microsoft svgBlip extension's vector original
+    /// (`data:image/svg+xml;base64,…`) when present, so the renderer can prefer
+    /// it and fall back to `data_url` on a decode failure. `None` otherwise.
     #[serde(rename_all = "camelCase")]
-    Image { data_url: String },
+    Image {
+        data_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        svg_data_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -1054,8 +1062,18 @@ pub struct ImageAnchor {
     /// `editAs == "oneCell"`. 0 = absent / use from/to rect.
     pub native_ext_cx: i64,
     pub native_ext_cy: i64,
-    /// Data URL: "data:image/png;base64,..."
+    /// Raster data URL ("data:image/png;base64,…"). The blip's own `r:embed`
+    /// fallback when an svgBlip extension is present; otherwise the only source.
+    /// Falls back to the SVG itself when the picture has no raster `r:embed`
+    /// (an icon inserted as a pure SVG), so the element is always drawable.
     pub data_url: String,
+    /// Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
+    /// uri="{96DAC541-…}"><asvg:svgBlip r:embed>`, MS-ODRAWXML): the vector
+    /// *original*, serialized as a `data:image/svg+xml;base64,…` URL so the
+    /// renderer can prefer it and fall back to `data_url` on a decode failure.
+    /// `None` when the picture carries no svgBlip extension (the common case).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg_data_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

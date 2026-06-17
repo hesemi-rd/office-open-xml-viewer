@@ -1606,23 +1606,6 @@ pub(crate) fn resolve_zip_path(base_dir: &str, target: &str) -> String {
     parts.join("/")
 }
 
-pub(crate) fn mime_from_ext(path: &str) -> &'static str {
-    match path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "webp" => "image/webp",
-        _ => "application/octet-stream",
-    }
-}
-
 pub(crate) fn resolve_fill_color(
     fill_node: &roxmltree::Node,
     theme_colors: &[String],

@@ -595,10 +595,19 @@ export type ShapeGeom =
       adj?: (number | null)[];
     }
   | { type: 'custom'; paths: PathInfo[] }
-  /** Bitmap picture leaf inside a `<xdr:grpSp>`. `dataUrl` is a pre-encoded
-   *  `data:<mime>;base64,…` produced by the Rust parser from the drawing's
-   *  relationship target. */
-  | { type: 'image'; dataUrl: string };
+  /** Bitmap (or vector) picture leaf inside a `<xdr:grpSp>`. `dataUrl` is a
+   *  pre-encoded `data:<mime>;base64,…` produced by the Rust parser from the
+   *  drawing's relationship target — the blip's raster `r:embed` fallback, or
+   *  the SVG itself when no raster is embedded. */
+  | {
+      type: 'image';
+      dataUrl: string;
+      /** Vector original from the Microsoft `asvg:svgBlip` extension
+       *  (MS-ODRAWXML), as a `data:image/svg+xml;base64,…` URL. Prefer this over
+       *  `dataUrl` (the raster fallback, or the SVG itself when no raster blip is
+       *  embedded). Absent when the picture carries no svgBlip extension. */
+      svgDataUrl?: string;
+    };
 
 export interface PathInfo {
   w: number;
@@ -638,8 +647,15 @@ export interface ImageAnchor {
    *  size. Authoritative when `editAs === "oneCell"`. 0 = unavailable. */
   nativeExtCx: number;
   nativeExtCy: number;
-  /** Data URL (data:image/png;base64,...) */
+  /** Raster data URL (data:image/png;base64,...). The blip's own `r:embed`
+   *  fallback when an svgBlip extension is present; otherwise the only source.
+   *  Falls back to the SVG itself when the picture has no raster `r:embed`. */
   dataUrl: string;
+  /** Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
+   *  as a `data:image/svg+xml;base64,…` URL. `dataUrl` is the raster fallback,
+   *  or the SVG itself when no raster blip is embedded. Absent when the picture
+   *  carries no svgBlip extension. */
+  svgDataUrl?: string;
 }
 
 export interface CellRange {
