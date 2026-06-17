@@ -229,6 +229,9 @@ export class DocxDocument {
       ...opts,
       totalPages: pages.length,
       prebuiltPages: pages,
+      // Lazy image bytes: the renderer fetches each embedded blip on demand by
+      // zip path (decoded only when drawn) instead of reading inlined base64.
+      fetchImage: (path, mime) => this.getImage(path, mime),
     });
   }
 

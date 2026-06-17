@@ -9,7 +9,7 @@ import {
   buildShapePath,
   renderPresetShape,
   hasPreset,
-  getCachedSvgImage,
+  getCachedSvgImageByPath,
   hexToRgba,
   resolveFill,
   applyStroke,
@@ -148,8 +148,9 @@ interface RenderState {
   pageIndex: number;
   /** total page count in the document */
   totalPages: number;
-  /** preloaded drawable images keyed by dataUrl (raster ImageBitmap or, for an
-   *  `asvg:svgBlip` vector original, an HTMLImageElement) */
+  /** preloaded drawable images keyed by `imageKey(imagePath, colorReplaceFrom)`
+   *  (raster ImageBitmap or, for an `asvg:svgBlip` vector original, an
+   *  HTMLImageElement) */
   images: Map<string, DecodedImage>;
   /** when true, layout is performed but nothing is drawn (used for header/footer height measurement) */
   dryRun: boolean;
@@ -230,6 +231,14 @@ export interface RenderDocumentOptions {
   totalPages?: number;
   /** Pre-computed page splits (from computePages). When provided, skips internal pagination. */
   prebuiltPages?: PaginatedBodyElement[][];
+  /**
+   * Lazy image-byte loader: fetch the raw bytes for an embedded image by zip
+   * path, wrapped in a Blob of the given MIME (twin of pptx's `fetchImage`).
+   * Supplied by {@link DocxDocument} (routing to its `getImage`), so the
+   * renderer decodes images on demand instead of from inlined base64. When
+   * omitted, images are skipped (no byte source).
+   */
+  fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
   /** Default `true`. When false, runs tagged with a `revision` (insertion or
@@ -244,7 +253,7 @@ export interface RenderDocumentOptions {
 /**
  * A decoded, drawable image. Raster blips decode to an `ImageBitmap`
  * (createImageBitmap); the Microsoft `asvg:svgBlip` vector original decodes to
- * an `HTMLImageElement` (via core's `getCachedSvgImage`, since
+ * an `HTMLImageElement` (via core's path-keyed `getCachedSvgImageByPath`, since
  * `createImageBitmap` cannot rasterize SVG in every browser). Both are valid
  * `ctx.drawImage` sources with numeric `.width`/`.height`, so every draw site is
  * identical regardless of which kind was decoded.
@@ -252,20 +261,24 @@ export interface RenderDocumentOptions {
 type DecodedImage = ImageBitmap | HTMLImageElement;
 
 interface ImagePair {
-  /** Raster fallback (or the SVG itself when no raster blip is embedded). */
-  url: string;
+  /** Zip path of the raster fallback (or the SVG part itself when no raster
+   *  blip is embedded). The cache key + the byte-fetch path. */
+  imagePath: string;
+  /** MIME type of the blip at {@link ImagePair.imagePath}. */
+  mimeType: string;
   /**
-   * Vector original from the `asvg:svgBlip` extension, when present. Preferred
-   * over `url`; the decoded image is still stored under `url`'s key so draw
-   * sites (which look up by `dataUrl`) find it unchanged.
+   * Zip path of the vector original from the `asvg:svgBlip` extension, when
+   * present. Preferred over `imagePath`; the decoded image is still stored
+   * under `imagePath`'s key so draw sites (which look up by `imagePath`) find
+   * it unchanged.
    */
-  svgUrl?: string;
+  svgImagePath?: string;
   colorReplaceFrom?: string;
 }
 
-/** Returns a stable map key for a (url, colorReplaceFrom) pair. */
-function imageKey(url: string, colorReplaceFrom?: string): string {
-  return colorReplaceFrom ? `${url}|clr:${colorReplaceFrom}` : url;
+/** Returns a stable map key for an (imagePath, colorReplaceFrom) pair. */
+function imageKey(imagePath: string, colorReplaceFrom?: string): string {
+  return colorReplaceFrom ? `${imagePath}|clr:${colorReplaceFrom}` : imagePath;
 }
 
 /** Picks a stable colour for a track-changes author. Mirrors Word's behaviour
@@ -298,11 +311,12 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
     for (const run of runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
-        const key = imageKey(img.dataUrl, img.colorReplaceFrom);
+        const key = imageKey(img.imagePath, img.colorReplaceFrom);
         if (!seen.has(key))
           seen.set(key, {
-            url: img.dataUrl,
-            svgUrl: img.svgDataUrl,
+            imagePath: img.imagePath,
+            mimeType: img.mimeType,
+            svgImagePath: img.svgImagePath,
             colorReplaceFrom: img.colorReplaceFrom,
           });
       }
@@ -359,15 +373,21 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
 }
 
 /**
- * Decode a raster blip URL to an `ImageBitmap`, applying an `a:clrChange`
- * (`colorReplaceFrom`) make-transparent pass when requested.
+ * Decode a raster blip to an `ImageBitmap`, pulling the bytes lazily by zip path
+ * via `fetchImage(imagePath, mimeType)` (twin of pptx's `fetchImage`) rather
+ * than `fetch`-ing an inlined data URL. Applies an `a:clrChange`
+ * (`colorReplaceFrom`) make-transparent pass when requested — unchanged
+ * post-decode behavior.
+ *
+ * Exported for unit testing of the lazy-bytes contract.
  */
-async function decodeRaster(
-  url: string,
-  colorReplaceFrom?: string,
+export async function decodeRaster(
+  imagePath: string,
+  mimeType: string,
+  colorReplaceFrom: string | undefined,
+  fetchImage: (path: string, mime: string) => Promise<Blob>,
 ): Promise<ImageBitmap> {
-  const res = await fetch(url);
-  const blob = await res.blob();
+  const blob = await fetchImage(imagePath, mimeType);
   let bmp = await createImageBitmap(blob);
   if (colorReplaceFrom) {
     bmp = await applyColorReplacement(bmp, colorReplaceFrom);
@@ -375,37 +395,50 @@ async function decodeRaster(
   return bmp;
 }
 
-async function preloadImages(doc: DocxDocumentModel): Promise<Map<string, DecodedImage>> {
+/**
+ * Decode every embedded image referenced by the document into a drawable map
+ * keyed by `imageKey(imagePath, colorReplaceFrom)`. Bytes are fetched lazily by
+ * zip path via `fetchImage`; SVG vector originals decode through the path-keyed
+ * `<img>` helper. Returns an empty map when `fetchImage` is absent (no byte
+ * source) — draw sites then simply skip.
+ *
+ * Exported for unit testing of the keying + single-decode-per-key contract.
+ */
+export async function preloadImages(
+  doc: DocxDocumentModel,
+  fetchImage: ((path: string, mime: string) => Promise<Blob>) | undefined,
+): Promise<Map<string, DecodedImage>> {
+  if (!fetchImage) return new Map();
+  const fetch = fetchImage;
   const pairs = collectImagePairs(doc);
   const entries = await Promise.all(
     pairs.map(async (pair): Promise<[string, DecodedImage] | null> => {
       // Unified svgBlip selection (shared with pptx/xlsx). The decoded image is
-      // keyed by the raster `url` (== element `dataUrl`) regardless of which
-      // source we picked, so every draw site finds it via imageKey(dataUrl, …)
-      // unchanged.
-      const dataIsSvg = pair.url.startsWith('data:image/svg+xml');
+      // keyed by the raster `imagePath` regardless of which source we picked, so
+      // every draw site finds it via imageKey(imagePath, …) unchanged.
+      const dataIsSvg = pair.mimeType === 'image/svg+xml';
       try {
         let img: DecodedImage;
-        if (pair.svgUrl != null) {
+        if (pair.svgImagePath != null) {
           // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
           // fall back to the raster on any SVG decode failure. docx images have
           // no srcRect crop, so the vector is always preferred when present.
           try {
-            img = await getCachedSvgImage(pair.svgUrl);
+            img = await getCachedSvgImageByPath(pair.svgImagePath, fetch);
           } catch {
             img = dataIsSvg
-              ? await getCachedSvgImage(pair.url)
-              : await decodeRaster(pair.url, pair.colorReplaceFrom);
+              ? await getCachedSvgImageByPath(pair.imagePath, fetch)
+              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch);
           }
         } else if (dataIsSvg) {
-          // svg-only picture (no svgDataUrl surfaced — e.g. a non-svgBlip `.svg`
-          // part): `createImageBitmap` can't rasterize SVG, so decode through
-          // the <img>-based SVG path.
-          img = await getCachedSvgImage(pair.url);
+          // svg-only picture (no svgImagePath surfaced — e.g. a non-svgBlip
+          // `.svg` part): `createImageBitmap` can't rasterize SVG, so decode
+          // through the path-keyed <img>-based SVG path.
+          img = await getCachedSvgImageByPath(pair.imagePath, fetch);
         } else {
-          img = await decodeRaster(pair.url, pair.colorReplaceFrom);
+          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch);
         }
-        return [imageKey(pair.url, pair.colorReplaceFrom), img];
+        return [imageKey(pair.imagePath, pair.colorReplaceFrom), img];
       } catch {
         return null;
       }
@@ -461,7 +494,7 @@ export async function renderDocumentToCanvas(
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
-  const images = await preloadImages(doc);
+  const images = await preloadImages(doc, opts.fetchImage);
   // A newer render of this canvas started while we awaited image decode — stop
   // so we don't paint this (now stale) page over the newer one.
   if (superseded()) return;
@@ -2344,7 +2377,7 @@ function renderParagraph(
         x += seg.measuredWidth;
         continue;
       }
-      if ('dataUrl' in seg) {
+      if ('imagePath' in seg) {
         if (!dryRun) renderInlineImage(ctx, seg as LayoutImageSeg, x, baseline, scale, state.images);
         x += seg.measuredWidth;
         continue;
@@ -2555,7 +2588,11 @@ interface LayoutTabSeg {
 }
 
 interface LayoutImageSeg {
-  dataUrl: string;
+  /** Zip path of the blip — also the `'imagePath' in seg` discriminant that
+   *  distinguishes an image segment from text/math/tab segments. */
+  imagePath: string;
+  /** MIME type of the blip at {@link LayoutImageSeg.imagePath}. */
+  mimeType: string;
   widthPt: number;
   heightPt: number;
   /** true = wp:anchor: skip inline flow, draw at absolute page coords */
@@ -2759,7 +2796,8 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     } else if (run.type === 'image') {
       const img = run as unknown as ImageRun & { type: 'image' };
       segs.push({
-        dataUrl: img.dataUrl,
+        imagePath: img.imagePath,
+        mimeType: img.mimeType,
         widthPt: img.widthPt,
         heightPt: img.heightPt,
         anchor: img.anchor ?? false,
@@ -3115,7 +3153,7 @@ function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
-    if (!('isTab' in s) && !('dataUrl' in s) && !('mathNodes' in s)) {
+    if (!('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
@@ -3135,7 +3173,7 @@ function layoutLines(
   // Width of a queued segment, for right/center tab look-ahead.
   const tabFollowWidth = (q: LayoutSeg): number => {
     if ('isTab' in q) return q.measuredWidth || 0;
-    if ('dataUrl' in q) return q.widthPt * scale;
+    if ('imagePath' in q) return q.widthPt * scale;
     if ('mathNodes' in q) return q.measuredWidth || 0;
     if ('lineBreak' in q) return 0;
     return measureText(q).width;
@@ -3157,7 +3195,7 @@ function layoutLines(
     // carry no width, so skip them — otherwise the float's own width would be
     // mistaken for the line's required width and wrongly push every wrap line
     // below the float.
-    const q = queue.find((s) => !('lineBreak' in s) && !('dataUrl' in s && s.anchor));
+    const q = queue.find((s) => !('lineBreak' in s) && !('imagePath' in s && s.anchor));
     if (!q) {
       // Empty/paragraph-mark line: reserve one em so a sub-glyph gap is rejected
       // and the mark line drops below the floats. A trailing `<w:br/>` carries
@@ -3170,7 +3208,7 @@ function layoutLines(
       return (segs[0] && 'fontSize' in segs[0] ? segs[0].fontSize : 10) * scale;
     }
     if ('isTab' in q) return q.measuredWidth || 0;
-    if ('dataUrl' in q) return q.widthPt * scale;
+    if ('imagePath' in q) return q.widthPt * scale;
     if ('mathNodes' in q) return q.measuredWidth || 0;
     const ts = q as LayoutTextSeg;
     // First wrap unit: leading run up to the first space (Latin word) or the
@@ -3233,7 +3271,7 @@ function layoutLines(
           const q = queue[0];
           if ('isTab' in q || 'lineBreak' in q) break;
           queue.shift();
-          if ('dataUrl' in q) {
+          if ('imagePath' in q) {
             const w = q.widthPt * scale;
             q.measuredWidth = w;
             addToLine(q, w, q.heightPt, q.heightPt * scale, 0);
@@ -3276,7 +3314,7 @@ function layoutLines(
     }
 
     // ── Image segment ────────────────────────────────────
-    if ('dataUrl' in seg) {
+    if ('imagePath' in seg) {
       if (seg.anchor) { seg.measuredWidth = 0; continue; }
       const w = seg.widthPt * scale;
       const h = seg.heightPt;
@@ -3504,7 +3542,7 @@ function renderInlineImage(
   // Anchor images are skipped during layout (measuredWidth=0, not added to line.segments)
   // and are drawn later by renderAnchorImages — so this function only handles inline images.
   if (seg.anchor) return;
-  const bmp = images.get(imageKey(seg.dataUrl, seg.colorReplaceFrom));
+  const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom));
   if (!bmp) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
@@ -3544,7 +3582,7 @@ function renderAnchorImages(
     const img = run as unknown as ImageRun;
     if (!img.anchor) continue;
     if (isWrapFloat(img.wrapMode)) continue;  // drawn as a float
-    const bmp = state.images.get(imageKey(img.dataUrl, img.colorReplaceFrom));
+    const bmp = state.images.get(imageKey(img.imagePath, img.colorReplaceFrom));
     if (!bmp) continue;
 
     // wrapNone images anchor against the paragraph's pre-spaceBefore top
@@ -4018,7 +4056,7 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
     pageX = resolved.x;
     pageY = resolved.y;
 
-    const key = imageKey(img.dataUrl, img.colorReplaceFrom);
+    const key = imageKey(img.imagePath, img.colorReplaceFrom);
     const rect: FloatRect = {
       mode,
       imageKey: key,

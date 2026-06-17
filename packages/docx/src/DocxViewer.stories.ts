@@ -174,13 +174,9 @@ export const DebugJson: Story = {
         const buf = await file.arrayBuffer();
         const json = parse_docx(new Uint8Array(buf));
         const parsed = JSON.parse(json);
-        // Strip out base64 image data to keep the output readable
-        const sanitized = JSON.parse(JSON.stringify(parsed, (key, val) =>
-          key === 'dataUrl' && typeof val === 'string' && val.startsWith('data:')
-            ? `[base64 ${(val.length / 1.33 / 1024).toFixed(0)} KB]`
-            : val,
-        ));
-        pre.textContent = JSON.stringify(sanitized, null, 2);
+        // Images now carry a short `imagePath` (zip path) + `mimeType` rather
+        // than inlined base64, so the JSON is already readable as-is.
+        pre.textContent = JSON.stringify(parsed, null, 2);
         console.log('[docx debug] full JSON:', parsed);
       } catch (err) {
         pre.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
