@@ -194,4 +194,117 @@ describe('getCustGeomEndpoints', () => {
       expect(end?.y).toBe(1);
     });
   });
+
+  describe('degenerate arc (wr<=0 || hr<=0) matches buildCustomPath skip', () => {
+    // buildCustomPath skips a degenerate arc entirely (`if (rw<=0||rh<=0) break;`)
+    // WITHOUT advancing the pen — so the next drawn command starts from the pen
+    // position *before* the arc, and a degenerate arc never contributes geometry.
+    // The endpoint extractor must follow the same pen traversal, otherwise the
+    // computed end point / closed-judgment diverge from what is actually drawn.
+
+    /**
+     * Reference pen walk mirroring buildCustomPath (in normalised space): a
+     * degenerate arc is a no-op. Returns the final pen point, or null if the
+     * sub-path never started.
+     */
+    function refTerminal(cmds: PathCmd[]): { x: number; y: number } | null {
+      let px = 0;
+      let py = 0;
+      let started = false;
+      for (const cmd of cmds) {
+        switch (cmd.cmd) {
+          case 'moveTo':
+            px = cmd.x; py = cmd.y; started = true;
+            break;
+          case 'lineTo':
+          case 'cubicBezTo':
+            px = cmd.x; py = cmd.y;
+            break;
+          case 'arcTo': {
+            if (cmd.wr <= 0 || cmd.hr <= 0) break; // degenerate: pen unchanged
+            const stRad = (cmd.stAng * Math.PI) / 180;
+            const endRad = stRad + (cmd.swAng * Math.PI) / 180;
+            const cx = px - cmd.wr * Math.cos(stRad);
+            const cy = py - cmd.hr * Math.sin(stRad);
+            px = cx + cmd.wr * Math.cos(endRad);
+            py = cy + cmd.hr * Math.sin(endRad);
+            break;
+          }
+          case 'close':
+            break;
+        }
+      }
+      return started ? { x: px, y: py } : null;
+    }
+
+    it('degenerate arc before the final segment does not shift the end point or tangent', () => {
+      // moveTo(0,0) -> arcTo(wr=0,...) [skipped] -> lineTo(0.5,0.5).
+      // The line is drawn from (0,0) (pen unchanged by the no-op arc), so the
+      // end point is (0.5,0.5) and the outward tangent is (0.5,0.5)-(0,0).
+      const cmds: PathCmd[] = [
+        { cmd: 'moveTo', x: 0, y: 0 },
+        { cmd: 'arcTo', wr: 0, hr: 0.3, stAng: 0, swAng: 90 },
+        { cmd: 'lineTo', x: 0.5, y: 0.5 },
+      ];
+      const { end } = getCustGeomEndpoints([cmds]);
+      const ref = refTerminal(cmds);
+      expect(end?.x).toBeCloseTo(ref!.x, 12);
+      expect(end?.y).toBeCloseTo(ref!.y, 12);
+      // If the arc had (buggily) advanced the pen to (0,0.3), the tangent would
+      // be (0.5,0.2); the correct skip yields (0.5,0.5).
+      expect(angleNear(angleOf(end), Math.atan2(0.5, 0.5))).toBe(true);
+    });
+
+    it('hr<=0 degenerate arc is also a no-op (skip uses wr<=0 || hr<=0)', () => {
+      // Same shape but the *width* radius is valid and the *height* radius is 0.
+      const cmds: PathCmd[] = [
+        { cmd: 'moveTo', x: 0.1, y: 0.1 },
+        { cmd: 'arcTo', wr: 0.4, hr: 0, stAng: 0, swAng: 90 },
+        { cmd: 'lineTo', x: 0.7, y: 0.5 },
+      ];
+      const { end } = getCustGeomEndpoints([cmds]);
+      const ref = refTerminal(cmds);
+      expect(end?.x).toBeCloseTo(ref!.x, 12);
+      expect(end?.y).toBeCloseTo(ref!.y, 12);
+      // Tangent of the line drawn from the unchanged pen (0.1,0.1) to (0.7,0.5).
+      expect(angleNear(angleOf(end), Math.atan2(0.5 - 0.1, 0.7 - 0.1))).toBe(true);
+    });
+
+    it('implicit closure is preserved across a degenerate arc (terminal == start)', () => {
+      // The no-op arc must not move the pen, so the path still returns exactly to
+      // its start and is detected as closed -> both arrowheads suppressed. With a
+      // buggy traversal the arc would shift the terminal and break the closure.
+      const cmds: PathCmd[] = [
+        { cmd: 'moveTo', x: 0.2, y: 0.2 },
+        { cmd: 'lineTo', x: 0.8, y: 0.2 },
+        { cmd: 'lineTo', x: 0.8, y: 0.8 },
+        { cmd: 'arcTo', wr: 0, hr: 0, stAng: 45, swAng: 120 },
+        { cmd: 'lineTo', x: 0.2, y: 0.2 },
+      ];
+      const ref = refTerminal(cmds);
+      expect(ref).not.toBeNull();
+      expect(near(ref!.x, 0.2, 1e-12)).toBe(true);
+      expect(near(ref!.y, 0.2, 1e-12)).toBe(true);
+      const { start, end } = getCustGeomEndpoints([cmds]);
+      expect(start).toBeNull();
+      expect(end).toBeNull();
+    });
+
+    it('a degenerate arc as the last drawn command contributes no movement (null end)', () => {
+      // moveTo -> lineTo -> arcTo(degenerate). buildCustomPath draws only the
+      // line and the arc adds nothing, so the no-op arc yields no outward tangent
+      // and therefore no end decoration (consistent with the skip semantics).
+      const cmds: PathCmd[] = [
+        { cmd: 'moveTo', x: 0.2, y: 0.2 },
+        { cmd: 'lineTo', x: 0.6, y: 0.4 },
+        { cmd: 'arcTo', wr: 0.3, hr: 0, stAng: 0, swAng: 90 },
+      ];
+      // The visible path still terminates where the line ended (pen unchanged).
+      const ref = refTerminal(cmds);
+      expect(near(ref!.x, 0.6, 1e-12)).toBe(true);
+      expect(near(ref!.y, 0.4, 1e-12)).toBe(true);
+      const { end } = getCustGeomEndpoints([cmds]);
+      expect(end).toBeNull();
+    });
+  });
 });
