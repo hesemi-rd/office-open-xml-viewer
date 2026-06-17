@@ -40,3 +40,32 @@ export function extractMedia(buffer: ArrayBuffer | Uint8Array | Buffer, path: st
       : new Uint8Array(buffer as ArrayBuffer);
   return (pptxWasm as unknown as { extract_media: (b: Uint8Array, p: string) => Uint8Array }).extract_media(bytes, path);
 }
+
+/** Extract raw bytes for a single embedded image entry (e.g.
+ *  `ppt/media/image1.png`) from the source archive. Mirrors `extract_image`
+ *  on the browser worker (twin of {@link extractMedia}); pictures and blip
+ *  fills now carry only zip paths, so the render path reads image bytes lazily
+ *  through this. `maxZipEntryBytes` mirrors the worker's per-entry guard and is
+ *  optional (no cap when omitted). */
+export function extractImage(
+  buffer: ArrayBuffer | Uint8Array | Buffer,
+  path: string,
+  maxZipEntryBytes?: number,
+): Uint8Array {
+  ensureInit();
+  const bytes =
+    buffer instanceof Uint8Array
+      ? buffer
+      : new Uint8Array(buffer as ArrayBuffer);
+  return (
+    pptxWasm as unknown as {
+      extract_image: (b: Uint8Array, p: string, max?: bigint) => Uint8Array;
+    }
+  ).extract_image(
+    bytes,
+    path,
+    typeof maxZipEntryBytes === 'number' && maxZipEntryBytes > 0
+      ? BigInt(maxZipEntryBytes)
+      : undefined,
+  );
+}
