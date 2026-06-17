@@ -41,13 +41,15 @@
 // sum to the whole-line `naturalWidth` passed in, and the painted line lands on
 // `availWidth` without measurement drift.
 
-/** Mirrors the CJK ranges the layout uses to allow a break between adjacent
- *  characters (CJK punctuation & Unified incl. Ext-A, Hangul syllables, CJK
- *  Compatibility Ideographs, and the Halfwidth/Fullwidth forms). A boundary is
- *  a stretch opportunity when either side is one of these glyphs. U+3000
+import { isCjkBreakChar } from '@silurus/ooxml-core';
+
+/** A boundary is a stretch opportunity when either side is a CJK / ideographic
+ *  glyph (see core's `isCjkBreakChar` for the canonical ranges). U+3000
  *  (ideographic space) is classified as whitespace below, so it never reaches
- *  this test. */
-const CJK_RE = /[、-鿿가-퟿豈-﫿＀-￯]/;
+ *  this test — which is why sharing the wrap-side predicate (it includes U+3000)
+ *  is safe here: a U+3000 unit is stretched as an inter-word gap, never reaching
+ *  the CJK test, so it is never double-counted. */
+const isCjk = (ch: string): boolean => isCjkBreakChar(ch.codePointAt(0) ?? 0);
 
 /** A laid-out segment as seen by the justifier. Only the optional text matters;
  *  an undefined `text` marks an inline object (math / image), which is one
@@ -131,7 +133,7 @@ export function justifyLine<T extends JustifySeg>(
       if (!nx.ws) {
         const lc = u.ch;
         const rc = nx.ch;
-        if ((lc !== undefined && CJK_RE.test(lc)) || (rc !== undefined && CJK_RE.test(rc))) {
+        if ((lc !== undefined && isCjk(lc)) || (rc !== undefined && isCjk(rc))) {
           gapAfter[k] = true;
           total++;
         }

@@ -120,4 +120,30 @@ describe('justifyLine', () => {
     const r = justifyLine<Seg>([{ text: '日本語', tag: 'x' }], 120, 60, 'just', false);
     expect(r!.every((p) => p.tag === 'x')).toBe(true);
   });
+
+  // Regression for the CJK-range dedup (isCjkBreakChar now includes U+3000).
+  // U+3000 (ideographic space) is whitespace per /\s/, so it is stretched as a
+  // single inter-word gap and never reaches the CJK predicate. Including U+3000
+  // in the shared predicate must NOT add a second (inter-CJK) gap around it: the
+  // 日→U+3000 boundary takes the boundary-into-whitespace path and contributes
+  // no gap of its own. Output stays exactly one gap on the space.
+  it('U+3000 stretches as one inter-word gap, not double-counted as a CJK gap', () => {
+    const r = justifyLine<Seg>([{ text: '日　本' }], 120, 60, 'just', false);
+    expect(pieces(r)).toEqual([
+      ['日　', 60],
+      ['本', 0],
+    ]);
+  });
+
+  it('U+3000 between CJK glyphs: single stretch point even with neighbours', () => {
+    // 日 本 で  → units: 日, U+3000, 本, で. Only two gaps: the U+3000 space and
+    // the 本|で inter-CJK boundary (the 日|U+3000 boundary adds none). slack 80,
+    // 2 gaps → perGap 40.
+    const r = justifyLine<Seg>([{ text: '日　本で' }], 140, 60, 'just', false);
+    expect(pieces(r)).toEqual([
+      ['日　', 40],
+      ['本', 40],
+      ['で', 0],
+    ]);
+  });
 });

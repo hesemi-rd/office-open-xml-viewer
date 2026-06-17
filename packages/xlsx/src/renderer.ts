@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -648,15 +648,6 @@ function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
   return lines;
 }
 
-/** Codepoints in the CJK ranges get broken per-character (Excel / JIS X 4051
- *  behaviour). This mirrors the tokenizer in `layoutRichTextLines`. */
-function isCJKCodePoint(cp: number): boolean {
-  return (cp >= 0x3000 && cp <= 0x9FFF)  // CJK punctuation + CJK Unified Ideographs
-      || (cp >= 0xF900 && cp <= 0xFAFF)  // CJK Compatibility Ideographs
-      || (cp >= 0xAC00 && cp <= 0xD7AF)  // Hangul Syllables
-      || (cp >= 0xFF00 && cp <= 0xFFEF); // Halfwidth/Fullwidth
-}
-
 /**
  * Apply Japanese line-breaking (kinsoku, 禁則処理) at a wrap boundary.
  *
@@ -702,7 +693,7 @@ export function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: str
   while (i < paragraph.length) {
     const ch = paragraph[i];
     const cp = ch.codePointAt(0) ?? 0;
-    if (isCJKCodePoint(cp)) {
+    if (isCjkBreakChar(cp)) {
       tokens.push(ch);
       i += cp > 0xFFFF ? 2 : 1;
     } else if (ch === ' ') {
@@ -715,7 +706,7 @@ export function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: str
       while (j < paragraph.length) {
         const c = paragraph[j];
         const p = c.codePointAt(0) ?? 0;
-        if (c === ' ' || isCJKCodePoint(p)) break;
+        if (c === ' ' || isCjkBreakChar(p)) break;
         j += p > 0xFFFF ? 2 : 1;
       }
       tokens.push(paragraph.slice(i, j));
@@ -840,12 +831,6 @@ export function layoutRichTextLines(
     if (font.size > curMaxSize) curMaxSize = font.size;
   };
 
-  const isCJK = (cp: number) =>
-    (cp >= 0x3000 && cp <= 0x9FFF) ||
-    (cp >= 0xF900 && cp <= 0xFAFF) ||
-    (cp >= 0xAC00 && cp <= 0xD7AF) ||
-    (cp >= 0xFF00 && cp <= 0xFFEF);
-
   for (const run of runs) {
     const font = applyRunFont(baseFont, run);
     // Tokenize: runs of non-space latin, spaces, or individual CJK chars
@@ -857,7 +842,7 @@ export function layoutRichTextLines(
       if (cp === 0x000A) {
         // Explicit newline: force break
         tokens.push('\n'); i += 1;
-      } else if (isCJK(cp)) {
+      } else if (isCjkBreakChar(cp)) {
         tokens.push(ch);
         i += cp > 0xFFFF ? 2 : 1;
       } else if (ch === ' ') {
@@ -870,7 +855,7 @@ export function layoutRichTextLines(
         while (j < run.text.length) {
           const c = run.text[j];
           const p = c.codePointAt(0) ?? 0;
-          if (c === ' ' || c === '\n' || isCJK(p)) break;
+          if (c === ' ' || c === '\n' || isCjkBreakChar(p)) break;
           j += p > 0xFFFF ? 2 : 1;
         }
         tokens.push(run.text.slice(i, j));

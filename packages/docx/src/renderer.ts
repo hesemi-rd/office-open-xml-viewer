@@ -28,6 +28,7 @@ import {
   DEFAULT_KINSOKU_RULES,
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
+  isCjkBreakChar,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -2726,17 +2727,14 @@ function resolveFieldText(f: FieldRun, state: RenderState): string {
   return f.fallbackText;
 }
 
-/** Returns true for code-points that permit line-break between adjacent characters (CJK). */
+/** Returns true when any code point of `text` permits a line break between
+ *  adjacent characters (CJK / ideographic). The canonical ranges live in core's
+ *  {@link isCjkBreakChar} (single source of truth across all renderers). */
 function hasCJKBreakOpportunity(text: string): boolean {
   for (let i = 0; i < text.length; ) {
     const cp = text.codePointAt(i)!;
-    if (
-      (cp >= 0x3000 && cp <= 0x9FFF)  ||
-      (cp >= 0xF900 && cp <= 0xFAFF)  ||
-      (cp >= 0xAC00 && cp <= 0xD7AF)  ||
-      (cp >= 0xFF00 && cp <= 0xFFEF)
-    ) return true;
-    i += cp > 0xFFFF ? 2 : 1;
+    if (isCjkBreakChar(cp)) return true;
+    i += cp > 0xffff ? 2 : 1;
   }
   return false;
 }

@@ -154,3 +154,4 @@ export {
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
 } from './text/kinsoku';
+export { isCjkBreakChar } from './text/cjk-ranges';

@@ -55,6 +55,7 @@ import {
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
+  isCjkBreakChar,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -617,6 +618,15 @@ function naturalWidthExceedsBbox(
   return false;
 }
 
+/** True when any character of `s` is a CJK / ideographic glyph that allows a
+ *  per-character line break (see core's `isCjkBreakChar` for the ranges). */
+function tokenHasCjk(s: string): boolean {
+  for (const ch of s) {
+    if (isCjkBreakChar(ch.codePointAt(0) ?? 0)) return true;
+  }
+  return false;
+}
+
 function layoutParagraph(
   ctx: CanvasRenderingContext2D,
   para: Paragraph,
@@ -893,8 +903,7 @@ function layoutParagraph(
       // Per-character font dispatch picks `fontEa` for CJK glyphs when the run
       // declared an explicit East Asian typeface (rPr > ea); other characters
       // keep the Latin font so the latin/ea boundary mid-token stays clean.
-      const CJK_RE = /[\u3000-\u9FFF\uAC00-\uD7FF\uF900-\uFAFF\uFF00-\uFFEF]/;
-      const hasCJK = CJK_RE.test(token);
+      const hasCJK = tokenHasCjk(token);
       if (hasCJK) {
         // Measure each grapheme with its per-char font (latin/ea boundary stays
         // clean), then place chars according to a:pPr@eaLnBrk (ECMA-376
@@ -914,7 +923,7 @@ function layoutParagraph(
         // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
         const measured: (MeasuredChar & { font: string })[] = [];
         for (const ch of token) {
-          const chFont = CJK_RE.test(ch) ? fontEa : font;
+          const chFont = isCjkBreakChar(ch.codePointAt(0) ?? 0) ? fontEa : font;
           ctx.font = chFont;
           measured.push({ ch, w: ctx.measureText(ch).width, font: chFont });
         }
