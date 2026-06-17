@@ -9,6 +9,7 @@ import {
   buildShapePath,
   renderPresetShape,
   hasPreset,
+  getCachedSvgImage,
   hexToRgba,
   resolveFill,
   applyStroke,
@@ -147,8 +148,9 @@ interface RenderState {
   pageIndex: number;
   /** total page count in the document */
   totalPages: number;
-  /** preloaded image bitmaps keyed by dataUrl */
-  images: Map<string, ImageBitmap>;
+  /** preloaded drawable images keyed by dataUrl (raster ImageBitmap or, for an
+   *  `asvg:svgBlip` vector original, an HTMLImageElement) */
+  images: Map<string, DecodedImage>;
   /** when true, layout is performed but nothing is drawn (used for header/footer height measurement) */
   dryRun: boolean;
   /** section left margin in pt — used to convert margin-relative anchor X to page-absolute */
@@ -239,8 +241,25 @@ export interface RenderDocumentOptions {
 
 // ===== Image preloading =====
 
+/**
+ * A decoded, drawable image. Raster blips decode to an `ImageBitmap`
+ * (createImageBitmap); the Microsoft `asvg:svgBlip` vector original decodes to
+ * an `HTMLImageElement` (via core's `getCachedSvgImage`, since
+ * `createImageBitmap` cannot rasterize SVG in every browser). Both are valid
+ * `ctx.drawImage` sources with numeric `.width`/`.height`, so every draw site is
+ * identical regardless of which kind was decoded.
+ */
+type DecodedImage = ImageBitmap | HTMLImageElement;
+
 interface ImagePair {
+  /** Raster fallback (or the SVG itself when no raster blip is embedded). */
   url: string;
+  /**
+   * Vector original from the `asvg:svgBlip` extension, when present. Preferred
+   * over `url`; the decoded image is still stored under `url`'s key so draw
+   * sites (which look up by `dataUrl`) find it unchanged.
+   */
+  svgUrl?: string;
   colorReplaceFrom?: string;
 }
 
@@ -280,7 +299,12 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
         const key = imageKey(img.dataUrl, img.colorReplaceFrom);
-        if (!seen.has(key)) seen.set(key, { url: img.dataUrl, colorReplaceFrom: img.colorReplaceFrom });
+        if (!seen.has(key))
+          seen.set(key, {
+            url: img.dataUrl,
+            svgUrl: img.svgDataUrl,
+            colorReplaceFrom: img.colorReplaceFrom,
+          });
       }
     }
   };
@@ -334,24 +358,60 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
   return createImageBitmap(offscreen);
 }
 
-async function preloadImages(doc: DocxDocumentModel): Promise<Map<string, ImageBitmap>> {
+/**
+ * Decode a raster blip URL to an `ImageBitmap`, applying an `a:clrChange`
+ * (`colorReplaceFrom`) make-transparent pass when requested.
+ */
+async function decodeRaster(
+  url: string,
+  colorReplaceFrom?: string,
+): Promise<ImageBitmap> {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  let bmp = await createImageBitmap(blob);
+  if (colorReplaceFrom) {
+    bmp = await applyColorReplacement(bmp, colorReplaceFrom);
+  }
+  return bmp;
+}
+
+async function preloadImages(doc: DocxDocumentModel): Promise<Map<string, DecodedImage>> {
   const pairs = collectImagePairs(doc);
   const entries = await Promise.all(
-    pairs.map(async (pair): Promise<[string, ImageBitmap] | null> => {
+    pairs.map(async (pair): Promise<[string, DecodedImage] | null> => {
+      // Unified svgBlip selection (shared with pptx/xlsx). The decoded image is
+      // keyed by the raster `url` (== element `dataUrl`) regardless of which
+      // source we picked, so every draw site finds it via imageKey(dataUrl, …)
+      // unchanged.
+      const dataIsSvg = pair.url.startsWith('data:image/svg+xml');
       try {
-        const res = await fetch(pair.url);
-        const blob = await res.blob();
-        let bmp = await createImageBitmap(blob);
-        if (pair.colorReplaceFrom) {
-          bmp = await applyColorReplacement(bmp, pair.colorReplaceFrom);
+        let img: DecodedImage;
+        if (pair.svgUrl != null) {
+          // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
+          // fall back to the raster on any SVG decode failure. docx images have
+          // no srcRect crop, so the vector is always preferred when present.
+          try {
+            img = await getCachedSvgImage(pair.svgUrl);
+          } catch {
+            img = dataIsSvg
+              ? await getCachedSvgImage(pair.url)
+              : await decodeRaster(pair.url, pair.colorReplaceFrom);
+          }
+        } else if (dataIsSvg) {
+          // svg-only picture (no svgDataUrl surfaced — e.g. a non-svgBlip `.svg`
+          // part): `createImageBitmap` can't rasterize SVG, so decode through
+          // the <img>-based SVG path.
+          img = await getCachedSvgImage(pair.url);
+        } else {
+          img = await decodeRaster(pair.url, pair.colorReplaceFrom);
         }
-        return [imageKey(pair.url, pair.colorReplaceFrom), bmp];
+        return [imageKey(pair.url, pair.colorReplaceFrom), img];
       } catch {
         return null;
       }
     }),
   );
-  return new Map(entries.filter((e): e is [string, ImageBitmap] => e !== null));
+  return new Map(entries.filter((e): e is [string, DecodedImage] => e !== null));
 }
 
 // ===== Main entry =====
@@ -3439,7 +3499,7 @@ function renderInlineImage(
   x: number,
   baseline: number,
   scale: number,
-  images: Map<string, ImageBitmap>,
+  images: Map<string, DecodedImage>,
 ): void {
   // Anchor images are skipped during layout (measuredWidth=0, not added to line.segments)
   // and are drawn later by renderAnchorImages — so this function only handles inline images.

@@ -481,7 +481,18 @@ export interface RubyAnnotation {
 }
 
 export interface ImageRun {
+  /**
+   * `data:<mime>;base64,…` — the raster fallback (PNG/JPEG), or the SVG itself
+   * when no raster blip is embedded. Always drawable.
+   */
   dataUrl: string;
+  /**
+   * Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
+   * as a `data:image/svg+xml;base64,…` URL. When present the renderer prefers it
+   * over `dataUrl` (the raster fallback); `dataUrl` is the SVG itself when no
+   * raster blip is embedded. Absent for a plain raster image.
+   */
+  svgDataUrl?: string;
   widthPt: number;
   heightPt: number;
   /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */

@@ -749,8 +749,14 @@ pub struct ShapeText {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
-    /// data:<mime>;base64,...
+    /// data:<mime>;base64,... — the raster fallback (PNG/JPEG) of the blip, or
+    /// the SVG itself when the blip embeds no raster `r:embed`. Always drawable.
     pub data_url: String,
+    /// Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
+    /// as a `data:image/svg+xml;base64,…` URL. When present the renderer prefers
+    /// it over `data_url` (the raster fallback). `None` for a plain raster blip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg_data_url: Option<String>,
     /// pt
     pub width_pt: f64,
     /// pt
