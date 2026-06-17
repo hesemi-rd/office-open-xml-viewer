@@ -55,7 +55,10 @@ pub fn current_max() -> u64 {
     MAX_ZIP_ENTRY_BYTES.with(Cell::get)
 }
 
-/// Read one zip entry's bytes by path. Honors the scoped max-entry guard.
+/// Read one zip entry's bytes by path. Honors the scoped max-entry guard:
+/// entries whose declared size exceeds the cap (default 512 MiB, or the
+/// per-call override) are rejected rather than truncated — the zip-bomb DoS
+/// guard shared with the per-parser `extract_*` WASM entry points.
 pub fn extract_zip_entry(
     data: &[u8],
     path: &str,
@@ -63,13 +66,16 @@ pub fn extract_zip_entry(
 ) -> Result<Vec<u8>, String> {
     use std::io::{Cursor, Read};
     let _guard = scoped_max(max_zip_entry_bytes);
+    let max = current_max();
     let cursor = Cursor::new(data);
     let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("zip open error: {e}"))?;
     let mut entry = zip
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    let max = max_zip_entry_bytes.unwrap_or(u64::MAX);
-    let mut buf = Vec::with_capacity(entry.size().min(max) as usize);
+    if entry.size() > max {
+        return Err(format!("ZIP entry exceeds size limit: {path}"));
+    }
+    let mut buf = Vec::with_capacity(entry.size() as usize);
     entry
         .by_ref()
         .take(max)
@@ -98,5 +104,27 @@ mod tests {
         assert!(extract_zip_entry(&buf, "ppt/media/missing.png", None)
             .unwrap_err()
             .contains("not found"));
+    }
+
+    #[test]
+    fn extract_zip_entry_rejects_oversized_entry() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("ppt/media/big.bin", opts).unwrap();
+            w.write_all(b"12345678").unwrap(); // 8 bytes uncompressed
+            w.finish().unwrap();
+        }
+        // A cap below the declared size must be REJECTED, never silently
+        // truncated — this is the zip-bomb DoS guard (default 512 MiB).
+        let err = extract_zip_entry(&buf, "ppt/media/big.bin", Some(4)).unwrap_err();
+        assert!(err.contains("exceeds size limit"), "got: {err}");
+        // A cap above the size reads the entry in full.
+        assert_eq!(
+            extract_zip_entry(&buf, "ppt/media/big.bin", Some(64)).unwrap(),
+            b"12345678"
+        );
     }
 }
