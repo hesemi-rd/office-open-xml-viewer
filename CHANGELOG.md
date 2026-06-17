@@ -4,6 +4,41 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.64.0 — 2026-06-17
+
+Minor: embedded SVG images (Microsoft `asvg:svgBlip` extension, MS-ODRAWXML) now
+render across Word and Excel as well as PowerPoint, through shared blip helpers
+in `@silurus/ooxml-core` and the common Rust crate. PowerPoint additionally
+renders pictures that carry *only* the svgBlip (no raster fallback).
+
+### Shared
+
+- New `ooxml_common::blip` Rust helpers (`svg_blip_rid`, `blip_embed_rid`,
+  `mime_from_ext`) and a shared `getCachedSvgImage` decoder in
+  `@silurus/ooxml-core`, replacing three divergent `mime_from_ext` copies and the
+  previously pptx-only svgBlip logic. `.svg` parts map to `image/svg+xml`
+  everywhere; all three renderers prefer the vector original and fall back to the
+  raster on decode failure.
+
+### pptx
+
+- Render pictures whose `<a:blip>` carries only the `asvg:svgBlip` extension with
+  no raster `r:embed` (e.g. icons inserted as pure SVG) instead of dropping them.
+- An SVG picture with an `a:srcRect` crop no longer routes the SVG through
+  `createImageBitmap` (which cannot rasterize SVG in every browser); it decodes
+  via the shared `<img>` path.
+
+### docx
+
+- Honor the `asvg:svgBlip` extension on inline, anchored and grouped pictures:
+  draw the vector original, fall back to the raster. `.svg` parts are no longer
+  mislabeled `image/png`. (§20.1.8.13 + MS-ODRAWXML SVG extension)
+
+### xlsx
+
+- Honor the `asvg:svgBlip` extension on `xdr:twoCellAnchor` and grouped pictures;
+  `.svg` media parts are no longer excluded from collection.
+
 ## 0.63.0 — 2026-06-17
 
 Minor: Japanese line breaking (kinsoku) and justified-text alignment shared

@@ -457,6 +457,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Right-to-left table column order (`w:bidiVisual`, §17.4.1) | ✅ |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
+| | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)) | ✅ |
 | | WMF / EMF metafile images (legacy vector) | ❌ Not planned |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
@@ -496,6 +497,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
+| | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody` — 186 preset geometries via the shared engine, with `avLst` adjust handles) | ✅ |
 | | Math equations in shapes (OMML `m:oMath` / `m:oMathPara` in `xdr:txBody`, incl. `a14:m` / `mc:AlternateContent`; rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Charts (bar, line, area, pie, doughnut, radar, scatter / bubble) | ✅ |
