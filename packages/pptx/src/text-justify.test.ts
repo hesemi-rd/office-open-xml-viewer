@@ -87,6 +87,32 @@ describe('justifyLine', () => {
     ]);
   });
 
+  it('opens gaps INSIDE the final segment too (CJK boundary inside the last run)', () => {
+    // [日本][語学], 4 glyphs. PowerPoint widens every inter-CJK boundary except
+    // after the last glyph — INCLUDING 語|学, which lives inside the final
+    // segment. Only the final glyph's gap is suppressed (the content-span trim),
+    // not the whole final segment. Pins that the adapter excludes no segment by
+    // index (lastDrawnSi sentinel = segments.length), so the second run is still
+    // split at 語|学; a `length-1` exclusion would wrongly leave 語学 unsplit.
+    const r = justifyLine<Seg>(
+      [
+        { text: '日本', tag: 'a' },
+        { text: '語学', tag: 'b' },
+      ],
+      150,
+      60,
+      'just',
+      false,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.map((p) => [p.text, +p.jext.toFixed(3), p.tag])).toEqual([
+      ['日', 30, 'a'],
+      ['本', 30, 'a'],
+      ['語', 30, 'b'],
+      ['学', 0, 'b'],
+    ]);
+  });
+
   it('an inline object (text===undefined) is one unit and can take a gap', () => {
     const r = justifyLine<Seg>([{ text: '日' }, {}, { text: '本' }], 100, 60, 'just', false);
     // gaps after 日 and after the object → perGap = 40/2 = 20
@@ -95,6 +121,34 @@ describe('justifyLine', () => {
       ['日', 20],
       [undefined, 20],
       ['本', 0],
+    ]);
+  });
+
+  it('emits an empty-text segment (inline OMML equation) so it is still drawn', () => {
+    // In pptx an inline equation is a segment with text==='' (plus a `math`
+    // field), NOT text===undefined. The pre-extraction justifyLine accumulated
+    // glyphs into a buffer and pushed only NON-empty buffers, so it silently
+    // DROPPED the equation from a justified line (not drawn, pen not advanced →
+    // trailing text overlapped the gap). The shared-kernel adapter emits every
+    // text-bearing segment, so the equation survives with jext 0 and all fields
+    // (here `tag`, in production `math`) preserved; the gap distribution among
+    // the real glyphs is unchanged (the empty segment contributes no units).
+    const r = justifyLine<Seg>(
+      [
+        { text: '日', tag: 'a' },
+        { text: '', tag: 'math' },
+        { text: '本', tag: 'b' },
+      ],
+      120,
+      60,
+      'just',
+      false,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.map((p) => [p.text, +p.jext.toFixed(3), p.tag])).toEqual([
+      ['日', 60, 'a'],
+      ['', 0, 'math'],
+      ['本', 0, 'b'],
     ]);
   });
 

@@ -21,6 +21,14 @@
 // only; no length threshold is invented for other short lines (the spec gives
 // no metric, and a guess would be a heuristic).
 //
+// The gap geometry itself lives in the shared kernel
+// `@silurus/ooxml-core` → `distributeLineSlack` (packages/core/src/text/
+// line-distribute.ts), shared with the docx justifier. This module is a thin
+// pptx adapter: it owns the DrawingML last-line policy and the slack threshold,
+// injects PowerPoint's whitespace predicate (every JS `\s` char is an inter-word
+// space — wider than Word's U+0020/U+3000 set), and re-expresses the kernel's
+// per-segment result as the renderer's draw pieces.
+//
 // Why character-level, not segment-level: the layout merges adjacent
 // same-style tokens into ONE segment (see layoutParagraph's `push`/`sameMeta`),
 // so a plain paragraph line is usually a single segment holding the whole
@@ -41,28 +49,24 @@
 // sum to the whole-line `naturalWidth` passed in, and the painted line lands on
 // `availWidth` without measurement drift.
 
-import { isCjkBreakChar } from '@silurus/ooxml-core';
+import { distributeLineSlack, isCjkBreakChar, type DistributeSeg } from '@silurus/ooxml-core';
 
-/** A boundary is a stretch opportunity when either side is a CJK / ideographic
- *  glyph (see core's `isCjkBreakChar` for the canonical ranges). U+3000
- *  (ideographic space) is classified as whitespace below, so it never reaches
- *  this test — which is why sharing the wrap-side predicate (it includes U+3000)
- *  is safe here: a U+3000 unit is stretched as an inter-word gap, never reaching
- *  the CJK test, so it is never double-counted. */
-const isCjk = (ch: string): boolean => isCjkBreakChar(ch.codePointAt(0) ?? 0);
-
-/** A laid-out segment as seen by the justifier. Only the optional text matters;
- *  an undefined `text` marks an inline object (math / image), which is one
- *  opaque unit that bears no stretch of its own (a CJK neighbour can still open
- *  a gap against it). The generic `T` lets the renderer pass its full LayoutSeg
- *  and get pieces that keep every style field, plus `jext`. */
-export interface JustifySeg {
-  text?: string;
-}
+/** A laid-out segment as seen by the justifier: structurally the shared core
+ *  `DistributeSeg`, aliased (not re-declared) so there is a single structural
+ *  source. Only the optional `text` matters; an undefined `text` marks an inline
+ *  object that bears no stretch of its own (a CJK neighbour can still open a gap
+ *  against it). The generic `T` lets the renderer pass its full LayoutSeg and
+ *  get pieces that keep every style field, plus `jext`. */
+export type JustifySeg = DistributeSeg;
 
 export type JustifyMode = 'just' | 'dist';
 
-const isWsChar = (ch: string): boolean => /\s/.test(ch);
+/** PowerPoint counts EVERY JS-`\s` code point as an inter-word space (\t, \n, the
+ *  ideographic space U+3000, …), wider than Word's U+0020/U+3000 set. Injected
+ *  into the shared kernel so the pptx gap selection is unchanged by the
+ *  extraction. (U+3000 is whitespace here, so it is stretched as one inter-word
+ *  gap and never reaches the CJK predicate — never double-counted.) */
+const isWsCp = (cp: number): boolean => /\s/.test(String.fromCodePoint(cp));
 
 /**
  * Split one laid-out line into draw pieces that fill `availWidth` when each
@@ -92,78 +96,48 @@ export function justifyLine<T extends JustifySeg>(
   const slack = availWidth - naturalWidth;
   if (slack <= 0.5) return null;
 
-  // Flatten to a unit stream: each code point of a text segment is a unit; an
-  // inline object is a single (non-char, non-ws) unit.
-  type Unit = { ch?: string; ws: boolean };
-  const units: Unit[] = [];
-  for (const seg of segments) {
-    if (seg.text === undefined) {
-      units.push({ ws: false });
-    } else {
-      for (const ch of seg.text) units.push({ ch, ws: isWsChar(ch) });
-    }
-  }
+  // Shared gap selection. pptx justifies from the line start (no leading-indent
+  // skip), opens inter-CJK boundaries (expansion), and uses PowerPoint's wide
+  // whitespace predicate. It does NOT exclude any segment by index: the final
+  // glyph's gap is already suppressed by the kernel's content-span trim (the
+  // boundary AFTER the last non-whitespace unit opens no gap), so unlike docx —
+  // which draws its final segment separately and excludes it — pptx must let
+  // gaps open across EVERY segment boundary, including inside the last segment.
+  // `lastDrawnSi = segments.length` is therefore a sentinel that matches no real
+  // segment, reproducing the original code-point walk exactly.
+  const dist = distributeLineSlack(segments, slack, {
+    firstContentSi: 0,
+    lastDrawnSi: segments.length,
+    isGapChar: isCjkBreakChar,
+    isWhitespace: isWsCp,
+  });
+  if (!dist) return null;
 
-  // Content span: leading/trailing whitespace must not stretch, and a single
-  // content unit (one word / one glyph) has no inner gap.
-  let first = -1;
-  let last = -1;
-  for (let k = 0; k < units.length; k++) {
-    if (!units[k].ws) {
-      if (first === -1) first = k;
-      last = k;
-    }
-  }
-  if (first === -1 || first === last) return null;
+  const { perGap, perSeg } = dist;
 
-  // Mark the gap AFTER each qualifying unit. Whitespace → inter-word (one gap
-  // per space, Word stretches each). Non-whitespace → an inter-CJK gap only
-  // when the boundary to the next NON-whitespace unit touches a CJK glyph; a
-  // boundary into whitespace is already counted by that whitespace, so it is
-  // never double-counted here.
-  const gapAfter = new Array<boolean>(units.length).fill(false);
-  let total = 0;
-  for (let k = first; k < last; k++) {
-    const u = units[k];
-    if (u.ws) {
-      gapAfter[k] = true;
-      total++;
-    } else {
-      const nx = units[k + 1];
-      if (!nx.ws) {
-        const lc = u.ch;
-        const rc = nx.ch;
-        if ((lc !== undefined && isCjk(lc)) || (rc !== undefined && isCjk(rc))) {
-          gapAfter[k] = true;
-          total++;
-        }
-      }
-    }
-  }
-  if (total === 0) return null; // e.g. a single long Latin word that wrapped alone
-
-  const perGap = slack / total;
-
-  // Re-walk the SAME unit order, splitting each segment at gap positions.
+  // Re-express the per-segment stretch as the renderer's draw pieces. For each
+  // segment: an inline object is one piece (a trailing gap → jext = perGap);
+  // a text segment is sliced at the kernel's interior split offsets, each piece
+  // before a split advancing perGap, and the final piece advancing perGap iff
+  // the boundary AFTER the segment is a gap (trailingGap). This matches the old
+  // code-point walk exactly — Σ jext == slack, final glyph reaches availWidth.
   const out: (T & { jext: number })[] = [];
-  let k = 0;
-  for (const seg of segments) {
+  for (let si = 0; si < segments.length; si++) {
+    const seg = segments[si];
+    const s = perSeg.get(si);
     if (seg.text === undefined) {
-      out.push({ ...seg, jext: gapAfter[k] ? perGap : 0 });
-      k++;
+      out.push({ ...seg, jext: s?.trailingGap ? perGap : 0 });
       continue;
     }
-    let buf = '';
-    for (const ch of seg.text) {
-      buf += ch;
-      const g = gapAfter[k];
-      k++;
-      if (g) {
-        out.push({ ...seg, text: buf, jext: perGap });
-        buf = '';
-      }
+    const cps = [...seg.text]; // code points (handles surrogate pairs)
+    const splits = s?.splitBefore ?? [];
+    let from = 0;
+    for (const cut of splits) {
+      out.push({ ...seg, text: cps.slice(from, cut).join(''), jext: perGap });
+      from = cut;
     }
-    if (buf !== '') out.push({ ...seg, text: buf, jext: 0 });
+    // Final piece of this segment: trailingGap → perGap, else 0.
+    out.push({ ...seg, text: cps.slice(from).join(''), jext: s?.trailingGap ? perGap : 0 });
   }
   return out;
 }

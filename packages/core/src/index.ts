@@ -155,3 +155,10 @@ export {
   crossRunKinsokuRetract,
 } from './text/kinsoku';
 export { isCjkBreakChar } from './text/cjk-ranges';
+export {
+  distributeLineSlack,
+  type DistributeSeg,
+  type DistributeResult,
+  type DistributeOptions,
+  type SegStretch,
+} from './text/line-distribute';
