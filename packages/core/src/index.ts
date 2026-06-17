@@ -66,7 +66,7 @@ export { drawArrowHead } from './shape/arrow';
 // three renderers to prefer the vector original over the raster fallback.
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
 // caller-supplied fetchImage(path, mimeType) and owns the object-URL lifecycle.
-export { getCachedSvgImageByPath } from './image/svg-image-by-path';
+export { getCachedSvgImageByPath, dropSvgImageCache } from './image/svg-image-by-path';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /

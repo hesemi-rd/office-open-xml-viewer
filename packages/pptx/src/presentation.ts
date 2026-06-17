@@ -1,5 +1,5 @@
 import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
-import { renderSlide, type TextRunCallback } from './renderer';
+import { renderSlide, dropImageBitmapCache, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import { selectNotes } from './notes';
 import {
@@ -7,6 +7,7 @@ import {
   WorkerBridge,
   defaultDpr,
   isHTMLCanvas,
+  dropSvgImageCache,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -84,6 +85,12 @@ export class PptxPresentation {
   private _meta: PresentationMeta | null = null;
   private _mediaCache = new Map<string, Promise<Blob>>();
   private _imageCache = new Map<string, Promise<Blob>>();
+  /** One stable closure per instance: the decoded-bitmap and SVG caches key on
+   *  this identity to scope decodes per deck (so two open decks never swap
+   *  images for a shared zip path like ppt/media/image1.png). Reusing the same
+   *  reference across every render also lets those caches hit across slides. */
+  private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
+    this.getImage(path, mime);
   private _workerReady = false;
   private _workerReadyCallbacks: Array<() => void> = [];
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
@@ -245,7 +252,7 @@ export class PptxPresentation {
         minorFont: this._presentation.minorFont,
         hlinkColor: this._presentation.hlinkColor ?? null,
         fetchMedia: (path) => this.getMedia(path),
-        fetchImage: (path, mime) => this.getImage(path, mime),
+        fetchImage: this._fetchImage,
         skipMediaControls: opts.skipMediaControls,
         math: this._math,
       },
@@ -397,7 +404,7 @@ export class PptxPresentation {
       dpr,
       slideWidthEmu: this.slideWidth,
       fetchMedia: (path) => this.getMedia(path),
-      fetchImage: (path, mime) => this.getImage(path, mime),
+      fetchImage: this._fetchImage,
       drawBase,
     });
   }
@@ -409,5 +416,9 @@ export class PptxPresentation {
     this._meta = null;
     this._mediaCache.clear();
     this._imageCache.clear();
+    // Release this deck's decoded raster bitmaps (GPU-backed) and SVG object
+    // URLs promptly; both caches are keyed by `_fetchImage`.
+    dropImageBitmapCache(this._fetchImage);
+    dropSvgImageCache(this._fetchImage);
   }
 }

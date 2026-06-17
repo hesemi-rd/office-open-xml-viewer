@@ -2568,9 +2568,26 @@ function renderTextBody(
 // ImageBitmap is expensive, and the same picture is re-decoded on every render
 // (each scroll / resize / interaction). Cache the decode — the Promise, so
 // concurrent first-renders dedupe — and reuse it. Bounded FIFO so a long
-// session or many decks can't grow without limit.
+// session can't grow without limit.
+//
+// Keyed FIRST by the deck's `fetchImage` closure, then by zip path. Different
+// .pptx files reuse the same internal paths (ppt/media/image1.png), so a
+// module-global path→bitmap map would paint deck A's image for deck B's
+// identically-named blip when both are open on the main thread. The WeakMap
+// scopes the cache per byte source (one stable closure per Presentation) and
+// lets a deck's bitmaps be reclaimed with it.
+type FetchImage = (path: string, mime: string) => Promise<Blob>;
 const IMAGE_BITMAP_CACHE_MAX = 256;
-const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
+const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, Promise<ImageBitmap>>>();
+
+function bitmapCacheFor(fetchImage: FetchImage): Map<string, Promise<ImageBitmap>> {
+  let cache = bitmapCacheByFetch.get(fetchImage);
+  if (!cache) {
+    cache = new Map();
+    bitmapCacheByFetch.set(fetchImage, cache);
+  }
+  return cache;
+}
 
 
 /** Local view of the parsed `<a:sp3d>` (1:1 with the Sp3d TS type). */
@@ -2879,26 +2896,41 @@ function paintBeveledFlat(
 export function getCachedBitmap(
   imagePath: string,
   mimeType: string,
-  fetchImage: (path: string, mime: string) => Promise<Blob>,
+  fetchImage: FetchImage,
 ): Promise<ImageBitmap> {
-  const existing = imageBitmapCache.get(imagePath);
+  const cache = bitmapCacheFor(fetchImage);
+  const existing = cache.get(imagePath);
   if (existing) {
     // Refresh LRU position.
-    imageBitmapCache.delete(imagePath);
-    imageBitmapCache.set(imagePath, existing);
+    cache.delete(imagePath);
+    cache.set(imagePath, existing);
     return existing;
   }
   const p = fetchImage(imagePath, mimeType).then((b) => createImageBitmap(b));
   // Don't poison the cache on a transient decode failure.
-  p.catch(() => imageBitmapCache.delete(imagePath));
-  imageBitmapCache.set(imagePath, p);
-  if (imageBitmapCache.size > IMAGE_BITMAP_CACHE_MAX) {
-    const oldestKey = imageBitmapCache.keys().next().value as string;
-    const oldest = imageBitmapCache.get(oldestKey);
-    imageBitmapCache.delete(oldestKey);
+  p.catch(() => cache.delete(imagePath));
+  cache.set(imagePath, p);
+  if (cache.size > IMAGE_BITMAP_CACHE_MAX) {
+    const oldestKey = cache.keys().next().value as string;
+    const oldest = cache.get(oldestKey);
+    cache.delete(oldestKey);
     oldest?.then((b) => b.close()).catch(() => {});
   }
   return p;
+}
+
+/**
+ * Close every decoded bitmap for one deck's `fetchImage` and forget the deck.
+ * Call from {@link PptxPresentation.destroy} so GPU-backed ImageBitmaps are
+ * released promptly rather than waiting for GC. A no-op when the deck decoded no
+ * raster blips.
+ */
+export function dropImageBitmapCache(fetchImage: FetchImage): void {
+  const cache = bitmapCacheByFetch.get(fetchImage);
+  if (!cache) return;
+  for (const p of cache.values()) p.then((b) => b.close()).catch(() => {});
+  cache.clear();
+  bitmapCacheByFetch.delete(fetchImage);
 }
 
 /** Poster bitmaps decoded once per media element; renderSlide's prefetch pass

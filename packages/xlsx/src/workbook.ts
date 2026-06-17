@@ -4,6 +4,7 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
+  dropSvgImageCache,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -49,6 +50,12 @@ export class XlsxWorkbook {
    *  `_imageCache`; kept separate from {@link XlsxWorkbook.imageCache} (decoded
    *  sources) so each layer dedupes independently. */
   private imageBlobCache = new Map<string, Promise<Blob>>();
+  /** One stable closure per instance: core's path-keyed SVG cache namespaces on
+   *  this identity, so two open workbooks never swap a shared zip path (e.g.
+   *  xl/media/image1.svg). Reusing one reference also lets the SVG cache hit
+   *  across viewport renders. */
+  private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
+    this.getImage(path, mime);
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
@@ -272,7 +279,7 @@ export class XlsxWorkbook {
       viewport,
       // Supply the lazy byte loader so the orchestrator can decode embedded
       // images on demand; an explicit caller-provided fetchImage still wins.
-      { fetchImage: (path, mime) => this.getImage(path, mime), ...opts },
+      { fetchImage: this._fetchImage, ...opts },
     );
   }
 
@@ -313,6 +320,9 @@ export class XlsxWorkbook {
     this.sheetCache.clear();
     this.imageCache.clear();
     this.imageBlobCache.clear();
+    // Revoke this workbook's decoded-SVG object URLs (raster sources live in the
+    // per-instance imageCache cleared above).
+    dropSvgImageCache(this._fetchImage);
     this.rawData = null;
   }
 }

@@ -4,6 +4,7 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
+  dropSvgImageCache,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -45,6 +46,12 @@ export class DocxDocument {
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private _imageCache = new Map<string, Promise<Blob>>();
+  /** One stable closure per instance: core's path-keyed SVG cache namespaces on
+   *  this identity, so two open documents never swap a shared zip path (e.g.
+   *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
+   *  across page renders. */
+  private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
+    this.getImage(path, mime);
 
   private constructor(worker: Worker, mode: 'main' | 'worker') {
     this._worker = worker;
@@ -131,6 +138,9 @@ export class DocxDocument {
     this._meta = null;
     this._pages = null;
     this._imageCache.clear();
+    // Revoke this document's decoded-SVG object URLs (raster bitmaps are decoded
+    // into a per-render-local map, so they have no module cache to drop).
+    dropSvgImageCache(this._fetchImage);
   }
 
   /**
@@ -231,7 +241,7 @@ export class DocxDocument {
       prebuiltPages: pages,
       // Lazy image bytes: the renderer fetches each embedded blip on demand by
       // zip path (decoded only when drawn) instead of reading inlined base64.
-      fetchImage: (path, mime) => this.getImage(path, mime),
+      fetchImage: this._fetchImage,
     });
   }
 
