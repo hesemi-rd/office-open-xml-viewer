@@ -595,18 +595,24 @@ export type ShapeGeom =
       adj?: (number | null)[];
     }
   | { type: 'custom'; paths: PathInfo[] }
-  /** Bitmap (or vector) picture leaf inside a `<xdr:grpSp>`. `dataUrl` is a
-   *  pre-encoded `data:<mime>;base64,…` produced by the Rust parser from the
-   *  drawing's relationship target — the blip's raster `r:embed` fallback, or
-   *  the SVG itself when no raster is embedded. */
+  /** Bitmap (or vector) picture leaf inside a `<xdr:grpSp>`. `imagePath` is the
+   *  zip path of the drawing's relationship target — the blip's raster `r:embed`
+   *  fallback, or the SVG itself when no raster is embedded — and `mimeType` its
+   *  MIME. Bytes are fetched lazily by path; nothing is inlined as base64. */
   | {
       type: 'image';
-      dataUrl: string;
+      imagePath: string;
+      /** MIME type of the blip at {@link imagePath} (e.g. `image/png`, or
+       *  `image/svg+xml` for the SVG-only fallback). */
+      mimeType: string;
       /** Vector original from the Microsoft `asvg:svgBlip` extension
-       *  (MS-ODRAWXML), as a `data:image/svg+xml;base64,…` URL. Prefer this over
-       *  `dataUrl` (the raster fallback, or the SVG itself when no raster blip is
-       *  embedded). Absent when the picture carries no svgBlip extension. */
-      svgDataUrl?: string;
+       *  (MS-ODRAWXML), as a zip path. Prefer this over `imagePath` (the raster
+       *  fallback, or the SVG itself when no raster blip is embedded). Absent
+       *  when the picture carries no svgBlip extension. */
+      svgImagePath?: string;
+      /** MIME of the SVG part at {@link svgImagePath} — always `image/svg+xml`
+       *  when present. Absent without an svgBlip extension. */
+      svgMimeType?: string;
     };
 
 export interface PathInfo {
@@ -647,15 +653,22 @@ export interface ImageAnchor {
    *  size. Authoritative when `editAs === "oneCell"`. 0 = unavailable. */
   nativeExtCx: number;
   nativeExtCy: number;
-  /** Raster data URL (data:image/png;base64,...). The blip's own `r:embed`
-   *  fallback when an svgBlip extension is present; otherwise the only source.
-   *  Falls back to the SVG itself when the picture has no raster `r:embed`. */
-  dataUrl: string;
+  /** Zip path of the blip inside the package (e.g. `xl/media/image1.png`). The
+   *  blip's own `r:embed` raster fallback when an svgBlip extension is present;
+   *  otherwise the only source. Falls back to the SVG part itself when the
+   *  picture has no raster `r:embed`. Bytes are fetched lazily by path. */
+  imagePath: string;
+  /** MIME type of the blip at {@link ImageAnchor.imagePath} (e.g. `image/png`,
+   *  or `image/svg+xml` for the SVG-only fallback). */
+  mimeType: string;
   /** Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
-   *  as a `data:image/svg+xml;base64,…` URL. `dataUrl` is the raster fallback,
-   *  or the SVG itself when no raster blip is embedded. Absent when the picture
-   *  carries no svgBlip extension. */
-  svgDataUrl?: string;
+   *  as a zip path. Preferred over `imagePath` (the raster fallback, or the SVG
+   *  itself when no raster blip is embedded). Absent when the picture carries no
+   *  svgBlip extension. */
+  svgImagePath?: string;
+  /** MIME of the SVG part at {@link ImageAnchor.svgImagePath} — always
+   *  `image/svg+xml` when present. Absent without an svgBlip extension. */
+  svgMimeType?: string;
 }
 
 export interface CellRange {
@@ -897,8 +910,15 @@ export interface RenderViewportOptions {
   freezeCols?: number;
   /** Scale factor applied to all cell/header dimensions (default 1). */
   cellScale?: number;
-  /** Pre-decoded image sources keyed by their dataUrl (for ImageAnchor rendering). */
+  /** Pre-decoded image sources keyed by their zip `imagePath` (for ImageAnchor
+   *  and group-leaf image rendering). */
   loadedImages?: Map<string, CanvasImageSource>;
+  /** Fetch an embedded image's bytes by zip path, wrapped in a Blob of the given
+   *  MIME (twin of pptx/docx `fetchImage`). The orchestrator decodes these into
+   *  {@link loadedImages} before the synchronous draw. Supplied by
+   *  {@link XlsxWorkbook} (routing through the worker) or the render worker
+   *  (reading its retained buffer). Absent ⇒ no images are decoded. */
+  fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
   onTextRun?: (info: XlsxTextRunInfo) => void;
   /** Highlighted row range for selected row headers (1-indexed inclusive).
@@ -919,9 +939,14 @@ export type WorkerRequest =
       sheetIndex: number;
       sheetName: string;
       maxZipEntryBytes?: number;
-    };
+    }
+  /** Pull one embedded image's raw bytes by zip path from the buffer the worker
+   *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the
+   *  `type` discriminant. */
+  | { type: 'extractImage'; id: number; path: string };
 
 export type WorkerResponse =
   | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
   | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
+  | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'error'; id: number; message: string };
