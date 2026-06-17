@@ -1386,6 +1386,16 @@ enum PathCmd {
         y: f64,
     },
     /// Elliptical arc (all angles in degrees)
+    ///
+    /// The enum-level `#[serde(tag = ..., rename_all = "camelCase")]` renames the
+    /// variant *tag* (`ArcTo` → `arcTo`) but NOT the variant's struct fields, so
+    /// a per-variant `rename_all` is required for the multi-word fields. Without
+    /// it the JSON carried `st_ang`/`sw_ang`, while the TS `PathCmd`
+    /// (core/src/types/common.ts) reads `stAng`/`swAng` — the mismatch left the
+    /// angles `undefined`, producing `NaN` coordinates and a missing arc. This
+    /// mirrors the per-variant `rename_all` already used by `Fill`, `Bullet`,
+    /// and `TextRun`.
+    #[serde(rename_all = "camelCase")]
     ArcTo {
         wr: f64,
         hr: f64,
@@ -11932,5 +11942,89 @@ mod tests {
         assert_eq!(c.title_font_bold, Some(true));
         assert_eq!(c.cat_axis_font_bold, Some(true));
         assert_eq!(c.val_axis_font_bold, Some(false));
+    }
+
+    /// Regression for the `PathCmd::ArcTo` serde naming bug: the enum-level
+    /// `#[serde(tag = "cmd", rename_all = "camelCase")]` renames only the variant
+    /// tag, not the struct-variant fields, so `st_ang`/`sw_ang` serialized in
+    /// snake_case. The TS `PathCmd` (core/src/types/common.ts) reads `stAng`/
+    /// `swAng`, so the angles came back `undefined` → `NaN` coordinates and the
+    /// arc (plus everything after it) vanished. A non-degenerate arc (positive
+    /// `wR`/`hR`) is essential: a degenerate arc short-circuits before the
+    /// angles are read, which is why the original arrow sample (degenerate arcs
+    /// only) never surfaced this.
+    #[test]
+    fn arcto_serializes_angle_fields_as_camel_case() {
+        // 90° arc: swAng = 90 * 60000 = 5400000 in OOXML 60000ths of a degree.
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <pathLst>
+    <path w="100" h="100">
+      <moveTo><pt x="100" y="50"/></moveTo>
+      <arcTo wR="50" hR="50" stAng="0" swAng="5400000"/>
+    </path>
+  </pathLst>
+</custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let subpaths = parse_cust_geom(doc.root_element());
+        let json = serde_json::to_string(&subpaths).expect("custGeom should serialize");
+
+        // The two camelCase keys the TS renderer reads must be present…
+        assert!(
+            json.contains("\"stAng\""),
+            "ArcTo must serialize stAng (camelCase); got: {json}"
+        );
+        assert!(
+            json.contains("\"swAng\""),
+            "ArcTo must serialize swAng (camelCase); got: {json}"
+        );
+        // …and the buggy snake_case keys must be gone.
+        assert!(
+            !json.contains("\"st_ang\""),
+            "ArcTo must not emit snake_case st_ang; got: {json}"
+        );
+        assert!(
+            !json.contains("\"sw_ang\""),
+            "ArcTo must not emit snake_case sw_ang; got: {json}"
+        );
+    }
+
+    /// Full value-level round-trip through the serde tag + camelCase fields:
+    /// re-deserializing the serialized JSON must reproduce the angle values,
+    /// proving the rename is symmetric (Serialize + Deserialize both use the
+    /// camelCase keys) and the 60000ths→degrees conversion is intact.
+    #[test]
+    fn arcto_round_trips_angles_through_camel_case_json() {
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <pathLst>
+    <path w="200" h="100">
+      <moveTo><pt x="200" y="50"/></moveTo>
+      <arcTo wR="100" hR="50" stAng="2700000" swAng="-5400000"/>
+    </path>
+  </pathLst>
+</custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let subpaths = parse_cust_geom(doc.root_element());
+        let json = serde_json::to_string(&subpaths).unwrap();
+        let back: Vec<Vec<PathCmd>> =
+            serde_json::from_str(&json).expect("camelCase JSON must deserialize back");
+        let arc = back[0]
+            .iter()
+            .find(|c| matches!(c, PathCmd::ArcTo { .. }))
+            .expect("arc command should be present");
+        match arc {
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                // wR/hR normalised by path w/h; angles converted from 60000ths.
+                assert!((wr - 0.5).abs() < 1e-9, "wr = {wr}"); // 100/200
+                assert!((hr - 0.5).abs() < 1e-9, "hr = {hr}"); // 50/100
+                assert!((st_ang - 45.0).abs() < 1e-9, "st_ang = {st_ang}"); // 2700000/60000
+                assert!((sw_ang + 90.0).abs() < 1e-9, "sw_ang = {sw_ang}"); // -5400000/60000
+            }
+            _ => unreachable!(),
+        }
     }
 }
