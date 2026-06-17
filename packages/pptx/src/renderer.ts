@@ -37,6 +37,7 @@ import {
   hasPreset,
   buildPresetGeometryPath,
   getConnectorAnchors,
+  getCustGeomEndpoints,
   drawArrowHead,
   computeScene3dQuad,
   isScene3dNonIdentity,
@@ -1567,6 +1568,35 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     }
     if (el.stroke.headEnd) {
       drawArrowHead(ctx, attX, attY, headAngle, el.stroke.headEnd, el.stroke, scale);
+    }
+  } else if (
+    el.stroke &&
+    el.custGeom &&
+    el.custGeom.length > 0 &&
+    ((el.stroke.headEnd && el.stroke.headEnd.type !== 'none') ||
+      (el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none'))
+  ) {
+    // Freeform / curve (custGeom) lines also carry `<a:ln><a:headEnd|tailEnd>`.
+    // The connector/callout branches above only cover preset geometries, so a
+    // custGeom path's arrow heads were dropped. Extract the open path's two
+    // terminal points + outward tangents and decorate them like a connector.
+    // Endpoints on a *closed* sub-path are returned as null (PowerPoint draws no
+    // line-end decoration on a closed contour).
+    const { start, end } = getCustGeomEndpoints(el.custGeom);
+    // The endpoint tangent is expressed in normalised (0..1) space; convert to
+    // device space accounting for anisotropic scaling (w ≠ h) before atan2 so
+    // the arrow head orientation is correct on non-square boxes.
+    if (start && el.stroke.headEnd && el.stroke.headEnd.type !== 'none') {
+      const sx = x + start.x * w;
+      const sy = y + start.y * h;
+      const sAngle = Math.atan2(start.dy * h, start.dx * w);
+      drawArrowHead(ctx, sx, sy, sAngle, el.stroke.headEnd, el.stroke, scale);
+    }
+    if (end && el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none') {
+      const ex = x + end.x * w;
+      const ey = y + end.y * h;
+      const eAngle = Math.atan2(end.dy * h, end.dx * w);
+      drawArrowHead(ctx, ex, ey, eAngle, el.stroke.tailEnd, el.stroke, scale);
     }
   }
 
