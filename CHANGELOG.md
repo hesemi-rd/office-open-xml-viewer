@@ -4,6 +4,13 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.64.1 — 2026-06-18
+
+Patch. Fixes glyph overlap on justified CJK lines containing punctuation adjacent to Latin text in both docx and pptx.
+
+- **docx / pptx**: `both`/`distribute` (docx §17.18.44) and `just`/`dist` (pptx §20.1.10.59) justification now anchor each sliced CJK piece to the whole-string cumulative advance, preserving the browser's contextual 約物半角 half-width collapse. Previously, summing isolated piece advances overran the segment box and painted the following run on top of the trailing CJK glyph. (PR #497)
+- **core**: `justifiedPiecePositions` / `JustifiedPiece` promoted to `@silurus/ooxml-core` so both docx and pptx renderers share the same helper.
+
 ## 0.64.0 — 2026-06-17
 
 Minor. Two headline changes plus several rendering features. **(1)** Embedded SVG
