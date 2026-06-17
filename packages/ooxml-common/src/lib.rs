@@ -6,6 +6,7 @@
 //! schema-specific (DocParagraph, ShapeRun, Slide, etc.) stays in the
 //! consuming crate.
 
+pub mod blip;
 pub mod chart;
 pub mod color;
 pub mod math;
