@@ -2752,7 +2752,7 @@ function renderImages(
   ctx.clip();
 
   for (const anchor of ws.images) {
-    const img = loadedImages.get(anchor.dataUrl);
+    const img = loadedImages.get(anchor.imagePath);
     if (!img) continue;
 
     // xdr col/row are 0-indexed; our widths map is 1-indexed.
@@ -2986,11 +2986,12 @@ function drawShape(
     }
   } else if (shape.geom.type === 'image') {
     // Image leaf inside a group (e.g. a sun-emoji clip-art nested in the
-    // calendar header). The caller pre-decodes every data URL seen in
+    // calendar header). The caller pre-decodes every image path seen in
     // `ws.shapeGroups[*].shapes[*].geom` via XlsxWorkbook.renderViewport,
-    // so we should normally have it in `loadedImages`. If not, fall back
-    // to a silent skip — drawing an empty rect would look worse.
-    const img = loadedImages?.get(shape.geom.dataUrl);
+    // so we should normally have it in `loadedImages` (keyed by imagePath).
+    // If not, fall back to a silent skip — drawing an empty rect would look
+    // worse.
+    const img = loadedImages?.get(shape.geom.imagePath);
     if (img) {
       ctx.drawImage(img, 0, 0, sw, sh);
     }
