@@ -4,6 +4,15 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.64.2 — 2026-06-18
+
+Patch. PowerPoint text-rendering fidelity fixes — placeholder alignment now resolves through the slide master, letter spacing counts whole code points, and CJK justification shares the docx code path.
+
+- **pptx**: Placeholder paragraph alignment now inherits through the slide master's `<p:txStyles>` (`titleStyle`/`bodyStyle`/`otherStyle` `@algn`) and matches the layout placeholder by `idx`, so a master-defined alignment is no longer dropped to the `"l"` default nor overridden by an unrelated typeless placeholder's centering. Adds an idx-aware `lookup_alignment` and folds the master `txStyles` alignment into the inheritance chain (ECMA-376 §19.3.1.36 idx matching; §19.3.1.52 → §19.3.1.49/.5/.35). (PR #501)
+- **pptx**: Letter spacing (`spc`) is applied per Unicode code point instead of per UTF-16 code unit, so runs containing astral characters (emoji, rare CJK) are spaced correctly. (PR #500)
+- **pptx / core**: pptx CJK justification (`just`/`dist`, §20.1.10.59) now runs through the same shared `@silurus/ooxml-core` helper as docx, eliminating the last divergent justify path. (PR #499)
+- **site**: The showcase "Try yours" page prewarms the docx/xlsx/pptx WASM engines on an idle tick for a faster first parse, and the homepage browser-tab title now reads "Office Open XML Viewer". (PR #502)
+
 ## 0.64.1 — 2026-06-18
 
 Patch. Fixes glyph overlap on justified CJK lines containing punctuation adjacent to Latin text in both docx and pptx.
