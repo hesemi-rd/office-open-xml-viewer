@@ -111,4 +111,29 @@ describe('justifiedPiecePositions', () => {
     const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
     expect(lastEnd).toBe(box); // 44 + 10 + 1·4 = 58, box = 36 + 16 + 6 = 58
   });
+
+  it('counts letter-spacing per CODE POINT, not UTF-16 code unit (surrogate pair)', () => {
+    // 𠮟 (U+20B9F, CJK Ext-B) is ONE glyph but TWO code units. Letter spacing is
+    // per glyph, so a surrogate-bearing segment must add `ls` once for it, not
+    // twice. The helper is code-point based ([...cps]), so this is the invariant
+    // the pptx renderer's width math must mirror — `[...text].length`, never
+    // `text.length`. A code-unit count here would shift the final landing by ls.
+    const cps = [...'あ𠮟い']; // 3 code points; the JS string .length is 4
+    expect(cps.length).toBe(3);
+    expect('あ𠮟い'.length).toBe(4); // the trap: code units ≠ code points
+    const splitBefore = [1, 2];
+    const perGap = 2;
+    const ls = 4;
+    const pieces = justifiedPiecePositions(cps, splitBefore, perGap, measure, ls);
+    expect(pieces.map((p) => p.text)).toEqual(['あ', '𠮟', 'い']);
+    //   あ: measure('')=0          + 0·4 + 0·2 = 0
+    //   𠮟: measure('あ')=10        + 1·4 + 1·2 = 16
+    //   い: measure('あ𠮟')=20      + 2·4 + 2·2 = 32
+    expect(pieces.map((p) => p.dx)).toEqual([0, 16, 32]);
+    // Final glyph lands on the code-point box: measure(whole) + cpLen·ls + nGaps·perGap.
+    const last = pieces[pieces.length - 1];
+    const box = measure('あ𠮟い') + cps.length * ls + splitBefore.length * perGap;
+    const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
+    expect(lastEnd).toBe(box); // 32 + 10 + 4 = 46; box = 30 + 12 + 4 = 46
+  });
 });

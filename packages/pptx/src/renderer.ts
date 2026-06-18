@@ -661,6 +661,19 @@ function tokenHasCjk(s: string): boolean {
   return false;
 }
 
+/** Number of Unicode code points in `s` (NOT UTF-16 code units). OOXML letter
+ *  spacing (rPr @spc) adds advance per GLYPH, and a supplementary-plane CJK
+ *  ideograph (e.g. 𠮟 U+20B9F) is one glyph encoded as a surrogate pair. The
+ *  per-glyph draw loops (`for (const ch of text)`) and core's
+ *  `justifiedPiecePositions` both iterate code points, so the letter-spacing
+ *  width math must count code points too — using `text.length` (code units)
+ *  would over-count by one per surrogate pair and drift the pen. */
+function codePointCount(s: string): number {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
+}
+
 export function layoutParagraph(
   ctx: CanvasRenderingContext2D,
   para: Paragraph,
@@ -725,7 +738,7 @@ export function layoutParagraph(
     // after the last one — matches the "advance width" semantics of OOXML
     // spc (each glyph's advance grows by spc points). Tab stops measure the
     // same way so this stays consistent with measureText below.
-    const w = baseW + lsPx * text.length;
+    const w = baseW + lsPx * codePointCount(text);
     const strikeDouble = extras?.strikeDouble;
     const underlineStyle = extras?.underlineStyle;
     const underlineColor = extras?.underlineColor;
@@ -2274,7 +2287,7 @@ function renderTextBody(
       ctx.font = seg.font;
       const m = ctx.measureText(seg.text || 'M');
       const ls = seg.letterSpacingPx ?? 0;
-      lineWidth += seg.text ? m.width + ls * seg.text.length : 0;
+      lineWidth += seg.text ? m.width + ls * codePointCount(seg.text) : 0;
       if (m.actualBoundingBoxAscent > 0) {
         maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
       }
@@ -2377,7 +2390,7 @@ function renderTextBody(
       // (internal CJK pitch + trailing `jext`).
       if (seg.highlight && seg.text) {
         const hlW = ctx.measureText(seg.text).width
-          + (ls > 0 ? ls * seg.text.length : 0)
+          + (ls > 0 ? ls * codePointCount(seg.text) : 0)
           + internalStretch
           + jext;
         paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
@@ -2469,7 +2482,7 @@ function renderTextBody(
 
       ctx.font = seg.font;
       const baseW = ctx.measureText(seg.text).width;
-      const segW = baseW + (ls > 0 ? ls * seg.text.length : 0) + internalStretch;
+      const segW = baseW + (ls > 0 ? ls * codePointCount(seg.text) : 0) + internalStretch;
 
       if (onTextRun && seg.text) {
         onTextRun({
@@ -2529,7 +2542,7 @@ function renderTextBody(
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
         const ls = seg.letterSpacingPx ?? 0;
-        totalTabW += ctx.measureText(seg.text).width + ls * seg.text.length;
+        totalTabW += ctx.measureText(seg.text).width + ls * codePointCount(seg.text);
       }
       let tabPenX: number;
       if (line.tabStop.algn === 'r') {
@@ -2547,7 +2560,7 @@ function renderTextBody(
         // No justification stretch on tab-stop runs, so the advance is just
         // glyph measure + letter spacing.
         if (seg.highlight && seg.text) {
-          const hlW = ctx.measureText(seg.text).width + tabLs * seg.text.length;
+          const hlW = ctx.measureText(seg.text).width + tabLs * codePointCount(seg.text);
           paintHighlight(ctx, tabPenX, baseline, hlW, seg.sizePx, seg.highlight, seg.color);
         }
         if (tabLs > 0 && seg.text.length > 1) {
@@ -2560,7 +2573,7 @@ function renderTextBody(
           ctx.fillText(seg.text, tabPenX, baseline);
         }
         ctx.font = seg.font;
-        const tabSegW = ctx.measureText(seg.text).width + tabLs * seg.text.length;
+        const tabSegW = ctx.measureText(seg.text).width + tabLs * codePointCount(seg.text);
         if (onTextRun && seg.text) {
           onTextRun({
             text: seg.text,
