@@ -2435,14 +2435,15 @@ function renderParagraph(
         // offsets and the pen advances `distPerGap` between pieces, so the pitch
         // appears BETWEEN the ideographs rather than bunched at the segment end.
         if (stretch && stretch.splitBefore.length > 0) {
-          // Inter-CJK justification pitch. Anchor each sliced piece to the
-          // WHOLE-string cumulative advance (so the contextual CJK metrics baked
-          // into measureText(whole) = measuredWidth — most visibly 約物半角, the
-          // half-width collapse of （「」。） — are honoured) plus the accumulated
-          // pitch, instead of summing the isolated pieces' advances. That sum
-          // drifts wider than the segment's box and would paint the next run over
-          // this segment's tail (most visible at a CJK→Latin boundary).
-          // See justify-draw.ts.
+          // ECMA-376 §17.18.44 `both`/`distribute` inter-CJK justification pitch.
+          // Anchor each sliced piece to the WHOLE-string cumulative advance (so
+          // the contextual CJK metrics baked into measureText(whole) =
+          // measuredWidth — most visibly 約物半角, the half-width collapse of
+          // （「」。） — are honoured) plus the accumulated pitch, instead of
+          // summing the isolated pieces' advances. That sum drifts wider than
+          // the segment's box and would paint the next run over this segment's
+          // tail (most visible at a CJK→Latin boundary).
+          // See `@silurus/ooxml-core` → text/justify-positions.ts.
           const cps = [...s.text]; // code points (handles surrogate pairs)
           const measure = (str: string): number => ctx.measureText(str).width;
           for (const { text: piece, dx } of justifiedPiecePositions(

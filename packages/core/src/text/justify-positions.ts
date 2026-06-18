@@ -38,18 +38,22 @@ export interface JustifiedPiece {
  * The segment's code points are sliced at `splitBefore` (the same code-point
  * offsets the distribute kernel reported as internal gaps). Each resulting piece
  * is anchored to the whole-string cumulative advance up to its start — via
- * `measure` on the prefix — plus `perGap` for every gap that precedes it. This
- * keeps the drawn glyphs aligned with the segment's `measureText(whole)`-based
- * box (so the final glyph reaches `measure(whole) + splitBefore.length·perGap`
+ * `measure` on the prefix — plus `perGap` for every gap that precedes it, plus
+ * `letterSpacingPx` for every code point that precedes it. This keeps the drawn
+ * glyphs aligned with the segment's `measureText(whole) + ls·n`-based box (so
+ * the final glyph reaches `measure(whole) + ls·n + splitBefore.length·perGap`
  * and the next segment never overlaps), while honouring the contextual CJK
  * metrics baked into `measure`.
  *
- * @param cps        The segment's code points (e.g. `[...seg.text]`).
- * @param splitBefore Ascending code-point offsets (1..len-1) at which internal
- *                    gaps fall; from the distribute kernel.
- * @param perGap     px added at each gap.
- * @param measure    Contextual width of a string — `ctx.measureText(s).width`
- *                   with the segment's font already selected on `ctx`.
+ * @param cps             The segment's code points (e.g. `[...seg.text]`).
+ * @param splitBefore     Ascending code-point offsets (1..len-1) at which
+ *                        internal gaps fall; from the distribute kernel.
+ * @param perGap          px added at each gap.
+ * @param measure         Contextual width of a string — `ctx.measureText(s).width`
+ *                        with the segment's font already selected on `ctx`. Must
+ *                        NOT include letter-spacing (pass that via `letterSpacingPx`).
+ * @param letterSpacingPx px added after each code point's glyph advance
+ *                        (OOXML `rPr @spc` / `w:spacing` semantics). Default 0.
  * @returns One {@link JustifiedPiece} per slice, in draw order.
  */
 export function justifiedPiecePositions(
@@ -57,6 +61,7 @@ export function justifiedPiecePositions(
   splitBefore: readonly number[],
   perGap: number,
   measure: (s: string) => number,
+  letterSpacingPx: number = 0,
 ): JustifiedPiece[] {
   const pieces: JustifiedPiece[] = [];
   let from = 0;
@@ -66,7 +71,10 @@ export function justifiedPiecePositions(
     // NOT the running sum of isolated piece advances — see the module header.
     pieces.push({
       text: cps.slice(from, cut).join(''),
-      dx: measure(cps.slice(0, from).join('')) + gapsSeen * perGap,
+      dx:
+        measure(cps.slice(0, from).join('')) +
+        from * letterSpacingPx +
+        gapsSeen * perGap,
     });
     from = cut;
     gapsSeen++;
@@ -74,7 +82,10 @@ export function justifiedPiecePositions(
   // Final piece: no trailing gap of its own — gapsSeen is not incremented.
   pieces.push({
     text: cps.slice(from).join(''),
-    dx: measure(cps.slice(0, from).join('')) + gapsSeen * perGap,
+    dx:
+      measure(cps.slice(0, from).join('')) +
+      from * letterSpacingPx +
+      gapsSeen * perGap,
   });
   return pieces;
 }

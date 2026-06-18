@@ -173,4 +173,4 @@ export {
   type DistributeOptions,
   type SegStretch,
 } from './text/line-distribute';
-export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-draw';
+export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-positions';

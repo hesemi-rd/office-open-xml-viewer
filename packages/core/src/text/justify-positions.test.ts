@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { justifiedPiecePositions } from './justify-draw.js';
+import { justifiedPiecePositions } from './justify-positions.js';
 
 // A stub `measure` that models 約物半角: a '.' (stand-in for collapsing
 // punctuation like 。）) advances 6 when it is NOT the first code point of the
@@ -74,5 +74,41 @@ describe('justifiedPiecePositions', () => {
       { text: '観', dx: 0 },
       { text: '察', dx: 15 }, // measure('観')=10 + 1·5
     ]);
+  });
+
+  it('adds letter-spacing × prefix-codepoint-count to each piece offset', () => {
+    // OOXML rPr @spc (§17.3.2.35 docx, §21.1.2.3.7 pptx) widens every code
+    // point's advance by `letterSpacingPx`, including the final one. A split
+    // piece's dx therefore needs `from · letterSpacingPx` on top of the prefix
+    // measure to land on the same x that `fillText(whole)` would draw it at.
+    const cps = [...'a.bc'];
+    const splitBefore = [1, 2, 3];
+    const perGap = 2;
+    const ls = 4;
+    const pieces = justifiedPiecePositions(cps, splitBefore, perGap, measure, ls);
+    expect(pieces.map((p) => p.text)).toEqual(['a', '.', 'b', 'c']);
+    // dx = measure(prefix) + from·ls + gapsSeen·perGap:
+    //   a: 0           + 0·4=0  + 0·2=0  = 0
+    //   .: measure('a')=10  + 1·4=4  + 1·2=2 = 16
+    //   b: measure('a.')=16 + 2·4=8  + 2·2=4 = 28
+    //   c: measure('a.b')=26 + 3·4=12 + 3·2=6 = 44
+    expect(pieces.map((p) => p.dx)).toEqual([0, 16, 28, 44]);
+  });
+
+  it('lands the final glyph exactly on the box including letter-spacing', () => {
+    // box = measure(whole) + cps.length·ls + nGaps·perGap, and the last piece's
+    // own advance also adds the trailing letter-spacing (rPr @spc is per glyph,
+    // including after the last). So the final piece's drawn end must equal
+    // measure(whole) + cps.length·ls + nGaps·perGap.
+    const cps = [...'a.bc'];
+    const splitBefore = [1, 2, 3];
+    const perGap = 2;
+    const ls = 4;
+    const pieces = justifiedPiecePositions(cps, splitBefore, perGap, measure, ls);
+    const last = pieces[pieces.length - 1];
+    const box = measure('a.bc') + cps.length * ls + splitBefore.length * perGap;
+    // Drawn end of the last piece: dx + measure(text) + text.length·ls.
+    const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
+    expect(lastEnd).toBe(box); // 44 + 10 + 1·4 = 58, box = 36 + 16 + 6 = 58
   });
 });
