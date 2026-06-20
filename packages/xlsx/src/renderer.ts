@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -3518,16 +3518,6 @@ function renderBorder(
     ctx.stroke();
     ctx.setLineDash([]);
   }
-}
-
-/** Half-device-pixel nudge that keeps an axis-aligned stroke of `logicalWidth`
- *  logical px crisp. ctx.scale(dpr,dpr) maps the width to round(logicalWidth*dpr)
- *  device px; an ODD device width must sit on a pixel *midpoint* (offset 0.5/dpr)
- *  to render as a single sharp row, while an EVEN device width is already crisp
- *  on the integer coordinate (offset 0 — nudging it would straddle two rows and
- *  blur). Returns the coordinate offset to add to an integer-aligned edge. */
-function crispOffset(logicalWidth: number, dpr: number): number {
-  return Math.round(logicalWidth * dpr) % 2 === 1 ? 0.5 / dpr : 0;
 }
 
 function borderStyleWidth(style: string): number {
