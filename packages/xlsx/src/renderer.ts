@@ -2488,6 +2488,10 @@ export function renderViewport(
   // band (which now anchors at the right). The horizontal divider is
   // unaffected by the x-mirror but its row-header end moves to the right.
   const rtl = worksheet.rightToLeft === true;
+  // Half-device-pixel offset so the 0.5-px divider lands crisp on the device
+  // grid (same convention as gridlines/headers). At dpr=1 this is +0.5; the
+  // previous hardcoded +0.5 was a *logical* px and blurred at dpr>1.
+  const hp = 0.5 / dpr;
   if (freezeRows > 0) {
     ctx.save();
     ctx.strokeStyle = FREEZE_LINE_COLOR;
@@ -2495,11 +2499,11 @@ export function renderViewport(
     ctx.beginPath();
     if (rtl) {
       // cell area is [0, canvasW - hw]
-      ctx.moveTo(0, scrollAreaY + 0.5);
-      ctx.lineTo(canvasW - hw, scrollAreaY + 0.5);
+      ctx.moveTo(0, scrollAreaY + hp);
+      ctx.lineTo(canvasW - hw, scrollAreaY + hp);
     } else {
-      ctx.moveTo(hw, scrollAreaY + 0.5);
-      ctx.lineTo(canvasW, scrollAreaY + 0.5);
+      ctx.moveTo(hw, scrollAreaY + hp);
+      ctx.lineTo(canvasW, scrollAreaY + hp);
     }
     ctx.stroke();
     ctx.restore();
@@ -2512,7 +2516,7 @@ export function renderViewport(
     // Divider sits between the frozen band and the scroll band. In LTR that
     // is at scrollAreaX = hw + frozenW; mirrored that becomes
     // canvasW - scrollAreaX.
-    const dividerX = rtl ? canvasW - scrollAreaX + 0.5 : scrollAreaX + 0.5;
+    const dividerX = rtl ? canvasW - scrollAreaX + hp : scrollAreaX + hp;
     ctx.moveTo(dividerX, hh);
     ctx.lineTo(dividerX, canvasH);
     ctx.stroke();
@@ -3418,12 +3422,6 @@ function renderBorder(
   invertedLeft = false,
   dpr = 1,
 ): void {
-  // Half-device-pixel offset used to center odd-device-width strokes on a pixel
-  // midpoint so they render crisp instead of bleeding across two rows. Border
-  // widths themselves stay in *logical* px (NOT divided by dpr): ctx.scale(dpr,
-  // dpr) scales them to device px so a thin border reads as 2 device px at
-  // dpr=2, matching Excel's measured weight. Same offset technique as grid lines.
-  const hp = 0.5 / dpr;
   type EdgeRef = {
     edge: BorderEdge | null | undefined;
     x1: number; y1: number; x2: number; y2: number;
@@ -3504,23 +3502,32 @@ function renderBorder(
     // Logical-px width (thin=1, medium=2, thick=3). ctx.scale(dpr,dpr) scales it
     // to device px, so a thin border is 2 device px at dpr=2 — matching Excel's
     // measured on-screen weight. Do NOT divide by dpr (that halved it to 1 px).
-    ctx.lineWidth = borderStyleWidth(edge.style);
+    const lw = borderStyleWidth(edge.style);
+    ctx.lineWidth = lw;
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
-    // Crispness nudge: only a stroke whose *device* width is odd (thin/thick at
-    // dpr=1) needs centering on a pixel midpoint; cell edges sit on integer
-    // device coords so add hp=0.5/dpr. Even device widths (thin → 2 px at dpr=2)
-    // are already crisp on the integer edge and must NOT be nudged, or they
-    // straddle and blur. Diagonals can't be pixel-aligned, so no offset.
-    const deviceW = Math.round(borderStyleWidth(edge.style) * dpr);
-    const off = kind !== 'd' && deviceW % 2 === 1 ? hp : 0;
-    const dpx = kind === 'v' ? off : 0;
-    const dpy = kind === 'h' ? off : 0;
+    // Crispness nudge (see crispOffset): an odd device-width stroke is centered
+    // on a pixel midpoint so it renders crisp instead of bleeding across two
+    // rows; an even device width is already crisp on the integer cell edge and
+    // gets 0. Diagonals can't be pixel-aligned, so no offset.
+    const crispNudge = kind !== 'd' ? crispOffset(lw, dpr) : 0;
+    const dpx = kind === 'v' ? crispNudge : 0;
+    const dpy = kind === 'h' ? crispNudge : 0;
     ctx.moveTo(x1 + dpx, y1 + dpy);
     ctx.lineTo(x2 + dpx, y2 + dpy);
     ctx.stroke();
     ctx.setLineDash([]);
   }
+}
+
+/** Half-device-pixel nudge that keeps an axis-aligned stroke of `logicalWidth`
+ *  logical px crisp. ctx.scale(dpr,dpr) maps the width to round(logicalWidth*dpr)
+ *  device px; an ODD device width must sit on a pixel *midpoint* (offset 0.5/dpr)
+ *  to render as a single sharp row, while an EVEN device width is already crisp
+ *  on the integer coordinate (offset 0 — nudging it would straddle two rows and
+ *  blur). Returns the coordinate offset to add to an integer-aligned edge. */
+function crispOffset(logicalWidth: number, dpr: number): number {
+  return Math.round(logicalWidth * dpr) % 2 === 1 ? 0.5 / dpr : 0;
 }
 
 function borderStyleWidth(style: string): number {
