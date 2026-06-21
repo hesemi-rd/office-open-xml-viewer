@@ -19,6 +19,7 @@ import type {
 } from './types';
 import {
   renderChart,
+  crispOffset,
   buildCustomPath as buildCustomPathCore,
   hexToRgba as hexToRgbaCore,
   resolveFill as resolveFillCore,
@@ -78,6 +79,14 @@ export interface RenderContext {
   themeMinorFont: string | null;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
+  /**
+   * Device-pixel ratio the slide is being drawn at (the `dpr` passed to
+   * `ctx.scale(dpr, dpr)` in the top render fn). Threaded so axis-aligned
+   * thin line strokes (table grid borders, text underline / strike-through)
+   * can apply {@link crispOffset} and render crisp on a DPR=1 display.
+   * Defaults to 1 (no nudge) when unset.
+   */
+  dpr?: number;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -190,11 +199,18 @@ function drawUnderline(
   sizePx: number,
   color: string,
   style: string | undefined,
+  dpr = 1,
 ): void {
   const baseLineW = Math.max(1, sizePx * 0.05);
   const heavy = style?.endsWith('Heavy') ?? false;
   const lineW = heavy ? baseLineW * 1.8 : baseLineW;
   const y = baseline + Math.max(2, lineW);
+  // Crispness nudge (see crispOffset): a horizontal underline whose device-pixel
+  // width is odd straddles two device rows on a DPR=1 display (blurry). Shifting
+  // the line's y by half a device px centers an odd-width stroke on one device
+  // row → crisp. Applied to the straight / dbl / dashed branches only; the wavy
+  // variant is not axis-aligned per pixel, so it deliberately omits the offset.
+  const crispY = crispOffset(lineW, dpr);
   ctx.strokeStyle = color;
   ctx.lineWidth = lineW;
   ctx.setLineDash([]);
@@ -246,18 +262,18 @@ function drawUnderline(
   if (style === 'dbl') {
     const offset = lineW * 1.4;
     ctx.beginPath();
-    ctx.moveTo(x, y - offset / 2);
-    ctx.lineTo(x + width, y - offset / 2);
-    ctx.moveTo(x, y + offset / 2);
-    ctx.lineTo(x + width, y + offset / 2);
+    ctx.moveTo(x, y - offset / 2 + crispY);
+    ctx.lineTo(x + width, y - offset / 2 + crispY);
+    ctx.moveTo(x, y + offset / 2 + crispY);
+    ctx.lineTo(x + width, y + offset / 2 + crispY);
     ctx.stroke();
     return;
   }
 
   ctx.setLineDash(dashFor(style ?? 'sng').map((v) => v * lineW));
   ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.lineTo(x + width, y);
+  ctx.moveTo(x, y + crispY);
+  ctx.lineTo(x + width, y + crispY);
   ctx.stroke();
   ctx.setLineDash([]);
 }
@@ -2502,7 +2518,7 @@ function renderTextBody(
       }
 
       if (seg.underline) {
-        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle);
+        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle, rc.dpr ?? 1);
       }
 
       if (seg.strikethrough) {
@@ -2510,12 +2526,16 @@ function renderTextBody(
         ctx.strokeStyle = seg.color;
         ctx.lineWidth = lineW;
         ctx.setLineDash([]);
+        // Crispness nudge (see crispOffset): the strike is a horizontal stroke,
+        // so an odd device-pixel width is centered on one device row by shifting
+        // y half a device px at DPR=1 (otherwise it straddles two rows → blurry).
+        const crispY = crispOffset(lineW, rc.dpr ?? 1);
         if (seg.strikeDouble) {
           // Two parallel lines straddling the standard strike position,
           // separated by ~ 1.5× the line weight (visually distinct yet
           // staying inside the glyph's central band).
           const offset = lineW * 0.9;
-          const yMid = segBaseline - seg.sizePx * 0.32;
+          const yMid = segBaseline - seg.sizePx * 0.32 + crispY;
           ctx.beginPath();
           ctx.moveTo(penX, yMid - offset);
           ctx.lineTo(penX + segW + jext, yMid - offset);
@@ -2523,9 +2543,10 @@ function renderTextBody(
           ctx.lineTo(penX + segW + jext, yMid + offset);
           ctx.stroke();
         } else {
+          const yMid = segBaseline - seg.sizePx * 0.32 + crispY;
           ctx.beginPath();
-          ctx.moveTo(penX, segBaseline - seg.sizePx * 0.32);
-          ctx.lineTo(penX + segW + jext, segBaseline - seg.sizePx * 0.32);
+          ctx.moveTo(penX, yMid);
+          ctx.lineTo(penX + segW + jext, yMid);
           ctx.stroke();
         }
       }
@@ -3714,33 +3735,46 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
       }
 
       // Borders
+      // Crispness nudge (see crispOffset): an axis-aligned thin grid line whose
+      // device-pixel width is odd straddles two device rows/cols on a DPR=1
+      // display (each ~50% ink → blurry). Offsetting the integer cell edge by
+      // half a device pixel perpendicular to the line centers an odd-width
+      // stroke on one device row/col → crisp. `applyStroke` sets ctx.lineWidth
+      // to the logical width, so we read it back to pick the right offset.
+      // Horizontal edges (T/B) shift Y; vertical edges (L/R) shift X. Diagonals
+      // can't be pixel-aligned this way, so they are left untouched.
+      const dpr = rc.dpr ?? 1;
       ctx.save();
       if (cell.borderT) {
         applyStroke(ctx, cell.borderT, scale);
+        const dy = crispOffset(ctx.lineWidth, dpr);
         ctx.beginPath();
-        ctx.moveTo(colX, rowY);
-        ctx.lineTo(colX + cellW, rowY);
+        ctx.moveTo(colX, rowY + dy);
+        ctx.lineTo(colX + cellW, rowY + dy);
         ctx.stroke();
       }
       if (cell.borderB) {
         applyStroke(ctx, cell.borderB, scale);
+        const dy = crispOffset(ctx.lineWidth, dpr);
         ctx.beginPath();
-        ctx.moveTo(colX, rowY + cellH);
-        ctx.lineTo(colX + cellW, rowY + cellH);
+        ctx.moveTo(colX, rowY + cellH + dy);
+        ctx.lineTo(colX + cellW, rowY + cellH + dy);
         ctx.stroke();
       }
       if (cell.borderL) {
         applyStroke(ctx, cell.borderL, scale);
+        const dx = crispOffset(ctx.lineWidth, dpr);
         ctx.beginPath();
-        ctx.moveTo(colX, rowY);
-        ctx.lineTo(colX, rowY + cellH);
+        ctx.moveTo(colX + dx, rowY);
+        ctx.lineTo(colX + dx, rowY + cellH);
         ctx.stroke();
       }
       if (cell.borderR) {
         applyStroke(ctx, cell.borderR, scale);
+        const dx = crispOffset(ctx.lineWidth, dpr);
         ctx.beginPath();
-        ctx.moveTo(colX + cellW, rowY);
-        ctx.lineTo(colX + cellW, rowY + cellH);
+        ctx.moveTo(colX + cellW + dx, rowY);
+        ctx.lineTo(colX + cellW + dx, rowY + cellH);
         ctx.stroke();
       }
       // Diagonal borders: top-left→bottom-right and bottom-left→top-right
@@ -3823,6 +3857,7 @@ export async function renderSlide(
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
     themeHlinkColor: opts.hlinkColor ?? null,
+    dpr,
   };
 
   await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);
