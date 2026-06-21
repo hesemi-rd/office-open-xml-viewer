@@ -1813,28 +1813,24 @@ fn parse_run_inner(
         return;
     }
 
-    // External links (URL) vs internal-document links (anchor: TOC entries,
-    // cross-references). Word renders internal links as plain body text — NOT with
-    // the Hyperlink style's blue/underline — so strip that styling here.
+    // ECMA-376 §17.16.22 (<w:hyperlink>) defines link *structure* only — the
+    // r:id / w:anchor targets and click behaviour. It carries no visual styling.
+    // A link's blue/underline appearance comes entirely from the run's character
+    // style (typically `rStyle="Hyperlink"`, §17.7.5) plus any direct rPr, which
+    // are already resolved into `fmt` above. So both external (URL) and internal
+    // (anchor: TOC entries, cross-references) links honour the resolved `fmt`
+    // identically; we do not strip styling from internal links nor synthesize
+    // blue/underline for external ones. `is_link` still records link presence so
+    // the renderer can hit-test, and `hyperlink` carries the resolved href.
     let is_link = link_href.is_some();
-    let is_external = matches!(link_href, Some(Some(_)));
-    let is_internal = matches!(link_href, Some(None));
     let hyperlink = link_href.clone().flatten();
-    if is_internal {
-        fmt.color = base_run.color.clone();
-        fmt.underline = base_run.underline;
-    }
 
     let bold = fmt.bold.unwrap_or(false);
     let italic = fmt.italic.unwrap_or(false);
-    let underline = fmt.underline.unwrap_or(false) || is_external;
+    let underline = fmt.underline.unwrap_or(false);
     let strikethrough = fmt.strikethrough.unwrap_or(false);
     let font_size = fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let color = if is_external && fmt.color.is_none() {
-        Some("0563c1".to_string())
-    } else {
-        fmt.color.clone()
-    };
+    let color = fmt.color.clone();
     let font_family = theme
         .resolve_font_ref(fmt.font_family_ascii.clone())
         .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
