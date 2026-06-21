@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote, NumberingInfo, ColumnGeom,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -321,6 +321,30 @@ function authorColor(author?: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
+}
+
+/**
+ * Automatic text color: pick black or white for legible contrast against the
+ * effective background. This black/white resolution is implementation-defined —
+ * ECMA-376 specifies no normative algorithm; the `auto` value itself is defined
+ * by §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39. Uses Rec.601 luma; a
+ * mid-gray threshold (128) splits light vs dark. `bg=null` ⇒ page white ⇒
+ * black text.
+ *
+ * TODO: the fully-conformant effective background also folds in
+ * paragraph-level shading (`<w:pPr><w:shd>`) and table cell shading. The draw
+ * loop currently only has the run shading at this point, which covers the
+ * inverse-video case (run `w:shd w:fill="000000"`). Paragraph/cell shading
+ * should be threaded into `LayoutTextSeg.background` when those backgrounds
+ * are dark enough to flip automatic text to white.
+ */
+export function autoContrastColor(bgHex: string | null): string {
+  if (!bgHex) return '#000000';
+  const r = parseInt(bgHex.slice(0, 2), 16);
+  const g = parseInt(bgHex.slice(2, 4), 16);
+  const b = parseInt(bgHex.slice(4, 6), 16);
+  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luma < 128 ? '#FFFFFF' : '#000000';
 }
 
 function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
@@ -2870,6 +2894,32 @@ function renderParagraph(
           ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, spanW, effSizePx * 1.1);
         }
 
+        // ECMA-376 §17.3.2.32 run shading fill (`<w:shd w:fill>`): a solid
+        // background rect behind the glyphs. Used for inverse video (black fill
+        // + automatic = white text). Same rect geometry as the highlight box.
+        if (s.background) {
+          ctx.fillStyle = `#${s.background}`;
+          ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, spanW, effSizePx * 1.1);
+        }
+
+        // ECMA-376 §17.3.2.4 run border (`<w:bdr>`, "box"): stroke a rectangle
+        // around the run, inflated by w:space (pt → px). Drawn after the
+        // background so the box outlines the filled area. The box is drawn per
+        // layout segment; we do not merge consecutive runs that share an
+        // identical bdr into a single frame (Word merges them).
+        if (s.border && s.border.style !== 'none' && s.border.style !== 'nil') {
+          const bw = Math.max(1, s.border.width * scale); // w:sz/8 is in pt
+          const sp = (s.border.space ?? 0) * scale;
+          ctx.strokeStyle = s.border.color ? `#${s.border.color}` : defaultColor;
+          ctx.lineWidth = bw;
+          ctx.strokeRect(
+            x - sp,
+            baseline + yOffset - effSizePx * 0.85 - sp,
+            spanW + 2 * sp,
+            effSizePx * 1.1 + 2 * sp,
+          );
+        }
+
         // Track-changes overlay: paint insertions / deletions in the author's
         // colour with the canonical Word markup (underline for insertions,
         // strikethrough for deletions). The author hash gives stable colours
@@ -2877,7 +2927,20 @@ function renderParagraph(
         // `showTrackChanges: false` (the "Final / No Markup" view).
         const revActive = state.showTrackChanges && !!s.revision;
         const revColor = revActive ? authorColor(s.revision!.author) : null;
-        ctx.fillStyle = revColor ?? (s.color ? `#${s.color}` : defaultColor);
+        let glyphColor: string;
+        if (revColor) {
+          glyphColor = revColor;
+        } else if (s.color) {
+          glyphColor = `#${s.color}`;
+        } else if (s.colorAuto) {
+          // Automatic color picks black/white for contrast against the
+          // effective background (run shading > default page white). The
+          // black/white pick is implementation-defined (no normative algorithm).
+          glyphColor = autoContrastColor(s.background ?? null);
+        } else {
+          glyphColor = defaultColor;
+        }
+        ctx.fillStyle = glyphColor;
         // Draw the glyphs. Three cases, all anchored to the WHOLE-string
         // cumulative advance so the browser's contextual CJK metrics (most
         // visibly 約物半角, the half-width collapse of （「」。）) are honoured and
@@ -2936,7 +2999,10 @@ function renderParagraph(
           // characters, so subtract the ruby descent + small gap from the
           // base's ascent line to position correctly.
           const rubyBaseline = baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
-          ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
+          // Ruby shares glyphColor, so a track-changes run's ruby inherits the
+          // author revision color (a behavior change from previously ignoring
+          // revColor for ruby).
+          ctx.fillStyle = glyphColor;
           ctx.fillText(s.ruby.text, rubyX, rubyBaseline);
           ctx.restore();
         }
@@ -2953,7 +3019,9 @@ function renderParagraph(
           });
         }
 
-        const lineColor = revColor ?? (s.color ? `#${s.color}` : defaultColor);
+        // Underline / strike share the glyph colour, so an inverse-video run
+        // (automatic colour on a dark background) draws a white rule too.
+        const lineColor = glyphColor;
         const lineW = Math.max(0.5, effSizePx * 0.05);
         // Crispness nudge (see crispOffset): underline / strike-through are
         // horizontal strokes; each snaps onto the nearest crisp device row from
@@ -3046,6 +3114,16 @@ interface LayoutTextSeg {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** ECMA-376 §17.3.2.32 `<w:shd w:fill>` — run shading fill (hex 6). Painted as
+   *  a solid rect behind the glyphs; also the effective background that an
+   *  automatic text color resolves against. */
+  background?: string | null;
+  /** ECMA-376 §17.3.2.6 — run carries `<w:color w:val="auto"/>`. The glyph
+   *  color is resolved from {@link LayoutTextSeg.background} for contrast
+   *  (implementation-defined black/white pick; no normative algorithm). */
+  colorAuto?: boolean;
+  /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) around the text. */
+  border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
   ruby?: { text: string; fontSizePt: number };
   /** Track-changes revision attached to this run (insertion / deletion). */
@@ -3239,6 +3317,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         smallCaps: base.smallCaps ?? false,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
+        background: base.background ?? null,
+        colorAuto: r.colorAuto ?? false,
+        border: r.border ?? null,
         ruby: firstSeg ? ruby : undefined,
         revision,
         rtl,

@@ -35,6 +35,7 @@ export type {
   TabStop,
   ParagraphBorders,
   ParaBorderEdge,
+  DocxRunBorder,
   // Table model (reachable via BodyElement table variant).
   DocTable,
   DocTableRow,
