@@ -1918,7 +1918,15 @@ function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt:
       rowHs.push(row.rowHeight);
       continue;
     }
-    let rowH = row.rowHeight != null ? row.rowHeight : 10;
+    // ECMA-376 §17.4.80 / §17.18.37 (ST_HeightRule):
+    //   auto (default)  — height is content-driven; the trHeight val is ignored
+    //                     ("with no predetermined minimum or maximum size"). val
+    //                     is only an advisory layout cache Word may emit.
+    //   atLeast         — val is a lower bound the content can exceed.
+    // So only atLeast uses val as a floor; auto falls back to the minimum row
+    // height (10pt) like a row with no trHeight at all.
+    let rowH =
+      row.rowHeight != null && row.rowHeightRule === 'atLeast' ? row.rowHeight : 10;
     let ci = 0;
     for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
@@ -6015,26 +6023,28 @@ function renderTable(table: DocTable, state: RenderState): void {
   state.y = y;
 }
 
-function calculateRowHeight(
+export function calculateRowHeight(
   row: DocTableRow,
   table: DocTable,
   colWidths: number[],
   scale: number,
   state: RenderState,
 ): number {
-  // ECMA-376 §17.4.80:
-  //   exact   — honor w:trHeight verbatim, clip overflow.
-  //   atLeast / auto (default) — w:trHeight is a lower bound that content
-  //                               can exceed. In practice Word treats the
-  //                               default `auto` like `atLeast` when a value
-  //                               is present: it preserves the saved layout
-  //                               height even though the spec text describes
-  //                               auto as content-driven. Resume / cover
-  //                               templates rely on this — their row heights
-  //                               (trHeight=1872, 2448, 1152 …) shape the
-  //                               whole page composition.
+  // ECMA-376 §17.4.80 / §17.18.37 (ST_HeightRule):
+  //   exact   — height is exactly w:trHeight/@val; overflow is clipped.
+  //   atLeast — w:trHeight/@val is a lower bound; content can expand the row.
+  //   auto    — height is determined entirely by the content; the @val is
+  //             ignored ("with no predetermined minimum or maximum size").
+  //             @val on an auto row is only an advisory layout cache Word may
+  //             write back, never a floor. (auto is also the default when
+  //             @hRule is omitted.)
+  // Only atLeast contributes a val-derived floor; auto and the no-trHeight case
+  // fall back to the minimum row height.
   if (row.rowHeight != null && row.rowHeightRule === 'exact') return row.rowHeight * scale;
-  const minH = row.rowHeight != null ? row.rowHeight * scale : 10 * scale;
+  const minH =
+    row.rowHeight != null && row.rowHeightRule === 'atLeast'
+      ? row.rowHeight * scale
+      : 10 * scale;
 
   let maxH = minH;
   let ci = 0;
