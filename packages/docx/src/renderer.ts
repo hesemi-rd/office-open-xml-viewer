@@ -5067,7 +5067,7 @@ function resolveAnchorX(
   }
 }
 
-function resolveAnchorY(
+export function resolveAnchorY(
   align: string | null | undefined,
   fromPara: boolean,
   offsetPt: number,
@@ -5091,9 +5091,15 @@ function resolveAnchorY(
   const ah = alignHeightPt != null ? alignHeightPt * scale : heightPx;
   switch (align) {
     case 'center': return c.start + (containerH - ah) / 2 + offsetPx;
-    case 'bottom': return c.end - ah + offsetPx;
+    // ECMA-376 §20.4.3.1 ST_AlignV: "inside"/"outside" are page-binding-
+    // relative. Mirroring resolveAnchorX (and the insideMargin/outsideMargin
+    // approximation in yContainer/xContainer): on an odd page the binding edge
+    // is the top, so inside→top edge and outside→bottom edge.
+    case 'bottom':
+    case 'outside': return c.end - ah + offsetPx;
     case 'top':
-    default:       return c.start + offsetPx;
+    case 'inside':
+    default:        return c.start + offsetPx;
   }
 }
 
