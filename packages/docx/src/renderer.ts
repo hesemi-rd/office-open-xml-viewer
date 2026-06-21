@@ -34,6 +34,7 @@ import {
   classifyFontGeneric,
   isComplexScriptCodePoint,
   decodeRasterOrMetafile,
+  symbolFontToUnicode,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -2957,7 +2958,7 @@ function renderParagraph(
       // hardcoded generic — the width must match the draw below so the body
       // offset is exact for a serif (Times) vs sans (Gothic) marker alike.
       ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
-      const markerW = ctx.measureText(para.numbering.text).width;
+      const markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
       // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
       numBodyOffset = indFirst + markerW + spaceW;
@@ -3214,8 +3215,9 @@ function renderParagraph(
         const prevDir = ctx.direction;
         ctx.textAlign = 'left';
         ctx.direction = 'rtl';
-        const markerW = ctx.measureText(para.numbering!.text).width;
-        ctx.fillText(para.numbering!.text, x + lineWidth + numTab - markerW, baseline);
+        const markerText = markerDisplayText(para.numbering!);
+        const markerW = ctx.measureText(markerText).width;
+        ctx.fillText(markerText, x + lineWidth + numTab - markerW, baseline);
         ctx.textAlign = prevAlign;
         ctx.direction = prevDir;
       } else {
@@ -3223,7 +3225,7 @@ function renderParagraph(
         // when the line isn't shifted by a float; lineLeft already includes any
         // float xOffset, so the marker tracks the body that hangs off it). The
         // body was advanced past the marker above (numBodyOffset).
-        ctx.fillText(para.numbering!.text, lineLeft + indFirst, baseline);
+        ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst, baseline);
       }
     }
 
@@ -6028,6 +6030,17 @@ function markerFontFamily(num: NumberingInfo): string | null {
   const cp = num.text.codePointAt(0) ?? 0;
   const ascii = num.fontFamily ?? null;
   return isCjkBreakChar(cp) ? (num.fontFamilyEastAsia ?? ascii) : ascii;
+}
+
+/** Marker glyph as it should be drawn/measured. Symbol/Wingdings markers
+ *  (§17.9.x `w:lvlText` + §17.3.2.26 `w:rFonts`) store the glyph as the FONT's
+ *  own code point (e.g. Symbol U+F0B7 = "•", Wingdings U+F0A7 = "▪"). Those
+ *  private-encoding code points render as tofu in any fallback face, so we
+ *  normalize them to the Unicode equivalent up front — keyed on the marker's
+ *  requested ascii family, not on the sample. Non-symbol markers (decimals,
+ *  roman, CJK bullets) pass through unchanged. */
+function markerDisplayText(num: NumberingInfo): string {
+  return symbolFontToUnicode(num.text, num.fontFamily ?? null);
 }
 
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
