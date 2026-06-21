@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   classifyCjkFont,
+  classifyFontGeneric,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
@@ -71,6 +72,60 @@ describe('classifyCjkFont — Office font name → CJK language', () => {
   it('is case-insensitive for Latin transliterations', () => {
     expect(classifyCjkFont('simsun')).toBe('sc');
     expect(classifyCjkFont('MALGUN GOTHIC')).toBe('kr');
+  });
+});
+
+describe('classifyFontGeneric — font name → CSS generic class', () => {
+  it('classifies Latin serif faces as serif', () => {
+    expect(classifyFontGeneric('Century')).toBe('serif');
+    expect(classifyFontGeneric('Garamond')).toBe('serif');
+    expect(classifyFontGeneric('Times New Roman')).toBe('serif');
+    expect(classifyFontGeneric('Cambria')).toBe('serif');
+    expect(classifyFontGeneric('Georgia')).toBe('serif');
+    expect(classifyFontGeneric('Palatino')).toBe('serif');
+    expect(classifyFontGeneric('Didot')).toBe('serif');
+    expect(classifyFontGeneric('Bodoni')).toBe('serif');
+    expect(classifyFontGeneric('Playfair Display')).toBe('serif');
+    expect(classifyFontGeneric('Source Serif Pro')).toBe('serif');
+    expect(classifyFontGeneric('Noto Serif')).toBe('serif');
+  });
+
+  it('classifies CJK serif (song/ming/kai/fangsong) faces as serif', () => {
+    expect(classifyFontGeneric('SimSun')).toBe('serif');
+    expect(classifyFontGeneric('PMingLiU')).toBe('serif');
+    expect(classifyFontGeneric('MS Mincho')).toBe('serif');
+    expect(classifyFontGeneric('游明朝')).toBe('serif');
+    expect(classifyFontGeneric('Batang')).toBe('serif');
+    expect(classifyFontGeneric('KaiTi')).toBe('serif');
+    expect(classifyFontGeneric('FangSong')).toBe('serif');
+    expect(classifyFontGeneric('宋体')).toBe('serif');
+  });
+
+  it('classifies sans faces as sans', () => {
+    expect(classifyFontGeneric('Calibri')).toBe('sans');
+    expect(classifyFontGeneric('Arial')).toBe('sans');
+    expect(classifyFontGeneric('Verdana')).toBe('sans');
+    expect(classifyFontGeneric('Yu Gothic')).toBe('sans');
+    expect(classifyFontGeneric('Meiryo')).toBe('sans');
+    expect(classifyFontGeneric('Microsoft YaHei')).toBe('sans');
+    expect(classifyFontGeneric('Malgun Gothic')).toBe('sans');
+    expect(classifyFontGeneric('SimHei')).toBe('sans');
+  });
+
+  it('classifies monospace faces as mono', () => {
+    expect(classifyFontGeneric('Consolas')).toBe('mono');
+    expect(classifyFontGeneric('Courier New')).toBe('mono');
+    expect(classifyFontGeneric('Cascadia Mono')).toBe('mono');
+  });
+
+  it('returns sans for nullish / empty input', () => {
+    expect(classifyFontGeneric(null)).toBe('sans');
+    expect(classifyFontGeneric(undefined)).toBe('sans');
+    expect(classifyFontGeneric('')).toBe('sans');
+  });
+
+  it('regression guard: Century is serif (was misclassified as sans)', () => {
+    expect(classifyFontGeneric('Century')).toBe('serif');
   });
 });
 

@@ -104,6 +104,43 @@ export function classifyCjkFont(family: string | null | undefined): CjkLang | nu
   return null;
 }
 
+/** CSS generic class of a font face, inferred from its name. */
+export type FontGenericClass = 'serif' | 'sans' | 'mono';
+
+/**
+ * Classify a font *name* into a CSS generic class (serif / sans / monospace).
+ * SINGLE SOURCE OF TRUTH for the serif/sans name heuristic shared by the docx,
+ * pptx and xlsx renderers (collapsing three previously-duplicated regexes).
+ *
+ * This is the NAME-pattern fallback only. A caller that has authoritative class
+ * data — Word's word/fontTable.xml `<w:family>` §17.8.3.10 (roman/swiss/modern)
+ * — MUST consult that first and use this only for faces absent from the table or
+ * marked "auto". The token set is the union of the renderers' prior regexes; no
+ * new name guessing is introduced.
+ *
+ * - mono : mono / courier / consolas / 等幅 …
+ * - serif: Latin serifs (Times, Cambria/Caladea, Georgia, Garamond, Century,
+ *          Palatino, Didot, Bodoni, Playfair, "… Serif", roman) AND CJK
+ *          song/ming/kai/fangsong faces (SimSun 宋 / Batang / PMingLiU 細明 /
+ *          KaiTi 楷 / FangSong 仿宋 / *Mincho 明朝) — so the per-language Noto CJK
+ *          fallback picks its serif variant.
+ * - sans : everything else (gothic, hei, kaku, round, grotesk, …).
+ */
+export function classifyFontGeneric(family: string | null | undefined): FontGenericClass {
+  if (!family) return 'sans';
+  const l = family.toLowerCase();
+  if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'mono';
+  if (
+    /roman|times|cambria|caladea|georgia|garamond|century|palatino|didot|bodoni|playfair|source serif|noto serif|min\s*cho|明朝体|明朝|song|sung|simsun|nsimsun|batang|gungsuh|ming\s*liu|mingliu|pmingliu|fang\s*song|fangsong|kai\s*ti|kaiti|simkai|simfang|stsong|stkaiti|stfangsong|stzhongsong|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝|ms mincho|yu mincho|hiragino mincho|ヒラギノ明朝/.test(
+      l,
+    ) ||
+    /新細明體|細明體|宋体|明朝|楷体|楷體|仿宋|標楷體|游明朝|ＭＳ 明朝/.test(family)
+  ) {
+    return 'serif';
+  }
+  return 'sans';
+}
+
 /**
  * Ordered Noto CJK family names for a given language, primary face first so the
  * browser resolves shared Han glyphs to that language's shapes. The other three

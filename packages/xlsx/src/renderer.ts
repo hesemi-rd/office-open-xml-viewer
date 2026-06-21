@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -37,33 +37,45 @@ const NON_CJK_SANS_TAIL = NON_CJK_SANS_FALLBACKS.map((n) => `"${n}"`).join(', ')
 const NON_CJK_SERIF_TAIL = NON_CJK_SERIF_FALLBACKS.map((n) => `"${n}"`).join(', ');
 const DEFAULT_FONT_FAMILY =
   `"Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${NON_CJK_SANS_TAIL}, sans-serif`;
-
-/** Markers of a CJK *serif* (song/ming/kai/fangsong) cell face — Noto CJK then
- *  uses its serif variant. Verified against the Office default font set. */
-function isCjkSerifName(l: string): boolean {
-  return /song|sung|simsun|nsimsun|batang|gungsuh|mincho|mingliu|pmingliu|fangsong|kaiti|simkai|simfang|stsong|stkaiti|新細明|細明|宋体|明朝|楷体|楷體|仿宋|標楷|游明朝/.test(
-    l,
-  );
-}
+// Serif counterpart of DEFAULT_FONT_FAMILY. A Latin *serif* cell font the host
+// lacks (Century, Garamond, …) must degrade to a serif — Excel renders such a
+// cell with a serif, not the sans default. Cambria is Office's serif; Caladea is
+// its metric-compatible clone (loaded opt-in via useGoogleFonts), then web-safe
+// serifs, ending in the `serif` generic.
+const DEFAULT_SERIF_FONT_FAMILY =
+  `"Cambria", "Caladea", "Times New Roman", "Liberation Serif", "Noto Naskh Arabic", "Noto Sans Arabic", ${NON_CJK_SERIF_TAIL}, serif`;
+// Monospace counterpart: a monospaced cell font the host lacks degrades to a
+// monospace generic rather than the proportional sans default.
+const DEFAULT_MONO_FONT_FAMILY = `"Courier New", "Liberation Mono", monospace`;
 
 /**
  * CSS font-family TAIL (everything after the cell's named face) for an xlsx
  * cell. For a CJK cell font the matching Noto CJK leads (so shared Han glyphs
  * take the document language's shapes; see core/fonts/scripts.ts), followed by
- * the standard Latin/Arabic/non-CJK fallbacks. Non-CJK or unnamed cells get the
- * historical {@link DEFAULT_FONT_FAMILY}. Exported for unit testing.
+ * the standard Latin/Arabic/non-CJK fallbacks. A non-CJK cell font picks the
+ * default chain by its generic class ({@link classifyFontGeneric}) so a Latin
+ * serif/mono face the host lacks degrades to the matching generic. Exported for
+ * unit testing.
  */
 export function cssTailFor(name: string | null | undefined): string {
   const cjk = name ? classifyCjkFont(name) : null;
-  if (!cjk) return DEFAULT_FONT_FAMILY;
-  const serif = isCjkSerifName((name ?? '').toLowerCase());
+  const generic = classifyFontGeneric(name); // 'serif' | 'sans' | 'mono'
+  if (!cjk) {
+    // Non-CJK (Latin) cell font: choose the default chain by generic class so a
+    // Latin serif/mono face the host lacks degrades to the matching generic
+    // (Excel renders serif/mono, not the sans default).
+    if (generic === 'serif') return DEFAULT_SERIF_FONT_FAMILY;
+    if (generic === 'mono') return DEFAULT_MONO_FONT_FAMILY;
+    return DEFAULT_FONT_FAMILY;
+  }
+  const serif = generic === 'serif';
   const cjkPart = cjkFallbackChain(cjk, serif ? 'serif' : 'sans')
     .map((n) => `"${n}"`)
     .join(', ');
   const tail = serif ? NON_CJK_SERIF_TAIL : NON_CJK_SANS_TAIL;
-  const generic = serif ? 'serif' : 'sans-serif';
+  const genericKeyword = serif ? 'serif' : 'sans-serif';
   // CJK Noto leads, then Latin/metric substitutes, Arabic, non-CJK scripts.
-  return `${cjkPart}, "Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${tail}, ${generic}`;
+  return `${cjkPart}, "Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${tail}, ${genericKeyword}`;
 }
 
 /** Full CSS font-family list for a cell font name (named face first). */
