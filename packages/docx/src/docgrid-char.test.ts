@@ -174,6 +174,47 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     expect(lastCellEdge).toBeCloseTo(seg!.x + seg!.w, 6);
   });
 
+  // A space-free MIXED CJK+Latin token (no U+0020, so `splitTextForLayout` keeps
+  // it as one word). The §17.3.2.26 ascii/eastAsia split sub-divides it into
+  // per-script segments [あ][A][本]; under an active grid the pure-EA segments
+  // get the cell delta while the Latin segment keeps its natural advance. This
+  // guards two things at once: (1) measure==draw still holds across the mixed
+  // token (each single-font segment's box abuts the next — no overlap), and
+  // (2) the EA glyphs ARE gridded even when sandwiching Latin (the behaviour
+  // that changed: before the split, the whole mixed token was one non-pure-EA
+  // segment and its CJK chars were NOT snapped). It also pins the load-bearing
+  // interaction between `splitByEastAsia` (isCjkBreakChar) and the grid's own
+  // `EAST_ASIAN_RE` purity test, so a future predicate edit can't silently break it.
+  it('mixed CJK+Latin token: EA sub-segments grid, Latin keeps natural width, boxes abut', async () => {
+    const charSpace = -1161;
+    const cell = FONT_PX + charSpace / 4096; // per-CJK-glyph cell
+    const { runs, fillTextCalls } = await renderRun([para('あA本')], section(charGrid(charSpace)));
+
+    const segA1 = runs.find((r) => r.text === 'あ');
+    const segLat = runs.find((r) => r.text === 'A');
+    const segA2 = runs.find((r) => r.text === '本');
+    expect(segA1, 'EA segment あ').toBeDefined();
+    expect(segLat, 'Latin segment A').toBeDefined();
+    expect(segA2, 'EA segment 本').toBeDefined();
+
+    // MEASURE: EA segments are one grid cell; the Latin segment is its natural
+    // advance (NOT gridded).
+    expect(segA1!.w).toBeCloseTo(cell, 6);
+    expect(segA2!.w).toBeCloseTo(cell, 6);
+    expect(segLat!.w).toBeCloseTo(FONT_PX, 6);
+
+    // measure==draw + abutment: each segment's box starts exactly where the prior
+    // one ends, so glyphs never overlap and the line width is the sum of cells.
+    expect(segLat!.x).toBeCloseTo(segA1!.x + segA1!.w, 6);
+    expect(segA2!.x).toBeCloseTo(segLat!.x + segLat!.w, 6);
+
+    // DRAW lands at each segment's measured origin (EA glyphs at their cell start,
+    // the Latin glyph at its segment x).
+    expect(fillTextCalls.find((c) => c.text === 'あ')!.x).toBeCloseTo(segA1!.x, 6);
+    expect(fillTextCalls.find((c) => c.text === 'A')!.x).toBeCloseTo(segLat!.x, 6);
+    expect(fillTextCalls.find((c) => c.text === '本')!.x).toBeCloseTo(segA2!.x, 6);
+  });
+
   it('a negative charSpace tightens the box (< natural); positive loosens it', async () => {
     const text = 'あいうえお';
     const n = [...text].length;

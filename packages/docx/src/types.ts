@@ -295,6 +295,17 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
    *  Where body text starts after the marker on the first line. */
   suff: string;
+  /** ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
+   *  level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
+   *  renderer draws Latin marker chars (e.g. a decimal "1") with this family, so
+   *  a heading whose ascii=Times renders its auto-number in Times (serif) even
+   *  when eastAsia=Gothic. Absent ⇒ the renderer falls back to its default. */
+  fontFamily?: string | null;
+  /** ECMA-376 §17.3.2.26 eastAsia axis for the marker glyph (same resolution as
+   *  {@link NumberingInfo.fontFamily}). The renderer draws CJK marker chars with
+   *  this family. Absent ⇒ the renderer falls back to
+   *  {@link NumberingInfo.fontFamily}. */
+  fontFamilyEastAsia?: string | null;
 }
 
 export type DocRun =
@@ -499,6 +510,15 @@ export interface DocxTextRun {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+   *  through the style chain + docDefaults. CJK code points in this run render
+   *  with this family; {@link DocxTextRun.fontFamily} keeps the conflated single-
+   *  font fallback (ascii → eastAsia) for paths that do not split per character.
+   *  The renderer routes consecutive CJK code points to this axis (the same per-
+   *  script rule {@link ShapeTextRun.fontFamilyEastAsia} uses), so a Gothic
+   *  eastAsia title sits beside a serif ascii number with no name heuristics.
+   *  Absent ⇒ the renderer falls back to {@link DocxTextRun.fontFamily}. */
+  fontFamilyEastAsia?: string | null;
   isLink: boolean;
   background: string | null;
   vertAlign: 'super' | 'sub' | null;

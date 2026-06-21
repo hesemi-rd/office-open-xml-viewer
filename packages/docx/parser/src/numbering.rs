@@ -1,3 +1,4 @@
+use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
@@ -16,6 +17,13 @@ pub struct LevelDef {
     /// relative to the marker on the first line.
     pub suff: String,
     pub start: u32,
+    /// ECMA-376 §17.9.6 `<w:lvl><w:rPr>` — the level's run (character) properties
+    /// for the number/bullet glyph itself. Merged OVER the paragraph's resolved
+    /// run formatting at use-site so the marker's font axes (ascii/eastAsia)
+    /// resolve through the same chain a body run uses. Often only carries a bare
+    /// `<w:rFonts w:hint="eastAsia"/>` (no explicit typeface), in which case every
+    /// axis is `None` and the marker simply inherits the paragraph's fonts.
+    pub rpr: RunFmt,
 }
 
 impl Default for LevelDef {
@@ -28,6 +36,7 @@ impl Default for LevelDef {
             tab: 36.0,
             suff: "tab".to_string(),
             start: 1,
+            rpr: RunFmt::default(),
         }
     }
 }
@@ -95,6 +104,13 @@ impl NumberingMap {
                 let suff = child_w(lvl_node, "suff")
                     .and_then(|n| attr_w(n, "val"))
                     .unwrap_or_else(|| "tab".to_string());
+                // §17.9.6 — the level's run properties for the marker glyph.
+                // Parsed with the SAME `parse_run_fmt` body runs use; theme refs
+                // stay as "@theme:<ref>" markers and are resolved at use-site once
+                // merged over the paragraph's run formatting.
+                let rpr = child_w(lvl_node, "rPr")
+                    .map(parse_run_fmt)
+                    .unwrap_or_default();
                 levels.push(LevelDef {
                     format,
                     text,
@@ -103,6 +119,7 @@ impl NumberingMap {
                     tab,
                     suff,
                     start,
+                    rpr,
                 });
             }
             map.abstract_nums.insert(abs_id, levels);

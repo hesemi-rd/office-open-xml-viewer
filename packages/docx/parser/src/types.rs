@@ -254,7 +254,11 @@ pub struct DocParagraph {
     pub space_after: f64,
     /// None = single (1.0), Some(LineSpacing)
     pub line_spacing: Option<LineSpacing>,
-    pub numbering: Option<NumberingInfo>,
+    /// Boxed: `NumberingInfo` carries several resolved strings (text + marker
+    /// font axes); boxing keeps `DocParagraph` small enough that the
+    /// `BodyElement`/`CellElement` enums stay balanced (clippy::large_enum_variant).
+    /// Serde flattens the Box, so the JSON shape is unchanged.
+    pub numbering: Option<Box<NumberingInfo>>,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
@@ -383,12 +387,28 @@ pub struct NumberingInfo {
     /// ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
     /// Determines where body text starts after the marker on the first line.
     pub suff: String,
+    /// ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
+    /// level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
+    /// renderer draws Latin marker chars (e.g. a decimal "1") with this family,
+    /// so a heading whose ascii=Times renders its auto-number in Times (serif)
+    /// even when eastAsia=Gothic. `None` ⇒ renderer falls back to its default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 eastAsia axis for the marker glyph (same resolution as
+    /// `font_family`). The renderer draws CJK marker chars (e.g. an ideographic
+    /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DocRun {
-    Text(TextRun),
+    // Boxed: TextRun is the largest non-Shape Run variant (it carries the full
+    // run-format axis incl. the eastAsia font + complex-script fields); boxing
+    // keeps the enum compact (clippy::large_enum_variant). Serde flattens the
+    // Box, so the JSON tag/shape is unchanged.
+    Text(Box<TextRun>),
     Image(ImageRun),
     /// `rename_all` on the enum only renames variant tags; the field
     /// `break_type` would otherwise serialize as snake_case while the TS
@@ -700,6 +720,16 @@ pub struct TextRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+    /// through the style chain + docDefaults. CJK characters in this run render
+    /// with this family; `font_family` keeps the conflated single-font fallback
+    /// (ascii → eastAsia) for any path that does not split per character. The
+    /// renderer routes consecutive CJK code points to this axis (the same per-
+    /// script rule `ShapeTextRun` already uses), so a Gothic eastAsia title sits
+    /// alongside a serif ascii number with no name heuristics. `None` ⇒ renderer
+    /// falls back to `font_family`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
     /// "super" | "sub" | None

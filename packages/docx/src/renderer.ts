@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
+  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote, NumberingInfo,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -2388,7 +2388,10 @@ function renderParagraph(
     numTab = para.numbering.tab * scale;
     const suff = para.numbering.suff || 'tab';
     if (suff !== 'tab') {
-      ctx.font = `${getDefaultFontSize(para) * scale}px sans-serif`;
+      // Measure with the marker's RESOLVED font (§17.3.2.26 + §17.9.6), not a
+      // hardcoded generic — the width must match the draw below so the body
+      // offset is exact for a serif (Times) vs sans (Gothic) marker alike.
+      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
       const markerW = ctx.measureText(para.numbering.text).width;
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
       // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
@@ -2630,7 +2633,11 @@ function renderParagraph(
 
     if (firstLine && numMarker && !dryRun) {
       const numFontSize = getDefaultFontSize(para) * scale;
-      ctx.font = `${numFontSize}px sans-serif`;
+      // Draw the marker with its RESOLVED font (§17.3.2.26 + §17.9.6): the
+      // ascii axis for a Latin number (a decimal "1" → Times → serif), the
+      // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
+      // which forced every number/bullet sans regardless of the heading's font.
+      ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
       ctx.fillStyle = defaultColor;
       if (baseRtl) {
         // The RTL list marker is laid out INLINE at the line's start (right)
@@ -3090,6 +3097,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     const csBold = r.boldCs ?? base.bold;
     const csItalic = r.italicCs ?? base.italic;
 
+    // ECMA-376 §17.3.2.26 eastAsia axis. Within a non-complex-script slice, CJK
+    // code points take the eastAsia face while Latin/digits keep the ascii face
+    // (`base.fontFamily`). Only `DocxTextRun` carries the axis; absent (field
+    // runs / single-axis parser output) ⇒ fall back to ascii, exactly like
+    // `shapeTokenFamily`. Bold/italic/size are NOT axis-specific here — eastAsia
+    // shares the Latin (non-cs) toggles, so only the family differs.
+    const eaFontFamily = (base as DocxTextRun).fontFamilyEastAsia ?? base.fontFamily;
+
     // Word classifies European digits in an Arabic/Hebrew complex-script run as
     // AN (§17.3.2.20 w:lang w:bidi): use the bidi language's primary subtag when
     // present, else fall back to the run being rtl-marked.
@@ -3097,7 +3112,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       (forceCs || r.rtl === true) && isRtlBidiLang(r.langBidi, r.rtl === true);
 
     let firstSeg = true;
-    const emit = (word: string, cs: boolean) => {
+    // Script slot for an emitted segment (§17.3.2.26): 'cs' = complex-script
+    // (Arabic/Hebrew/...), 'ea' = East-Asian (CJK → eastAsia face), 'latin' =
+    // Latin/digits/neutral (ascii face). Each segment stays SINGLE-FONT — one
+    // family for its whole `.text` — so the measure==draw / docGrid char-grid
+    // invariant holds and the draw loop needs no per-segment font switching.
+    const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
+      const cs = slot === 'cs';
+      const fontFamily = slot === 'cs' ? csFontFamily : slot === 'ea' ? eaFontFamily : base.fontFamily;
       segs.push({
         text: word,
         bold: cs ? csBold : base.bold,
@@ -3106,7 +3128,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: cs ? csFontFamily : base.fontFamily,
+        fontFamily,
         vertAlign,
         measuredWidth: 0,
         smallCaps: base.smallCaps ?? false,
@@ -3120,6 +3142,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       firstSeg = false;
     };
 
+    // A non-complex-script slice still mixes scripts at the CJK boundary: emit
+    // its maximal CJK runs on the 'ea' (eastAsia) slot and the rest on 'latin'
+    // (ascii). Keeps each emitted segment single-font (so a serif ascii digit
+    // sits next to a gothic eastAsia title) without changing the cs path.
+    const emitNonCs = (slice: string) => {
+      for (const part of splitByEastAsia(slice)) emit(part.text, part.ea ? 'ea' : 'latin');
+    };
+
     for (const word of splitTextForLayout(displayText)) {
       if (forceCs) {
         // When the run's digits are AN-classified, split a token into maximal
@@ -3129,14 +3159,18 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
         // so a single-segment date would otherwise stay 28-02-2026.
         if (digitsAsAN) {
-          for (const slice of splitDigitGroups(word)) emit(slice, true);
+          for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
         } else {
-          emit(word, true);
+          emit(word, 'cs');
         }
       } else {
         // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
-        // so each side gets its own (cs vs Latin) size and typeface.
-        for (const slice of splitByComplexScript(word)) emit(slice.text, slice.cs);
+        // so each side gets its own (cs vs Latin) size and typeface; the non-cs
+        // side then sub-splits at CJK boundaries for the eastAsia face.
+        for (const slice of splitByComplexScript(word)) {
+          if (slice.cs) emit(slice.text, 'cs');
+          else emitNonCs(slice.text);
+        }
       }
     }
   };
@@ -3372,6 +3406,51 @@ function splitByComplexScript(text: string): { text: string; cs: boolean }[] {
     }
   }
   if (buf.length > 0) out.push({ text: buf, cs: curCs ?? false });
+  return out;
+}
+
+/**
+ * Split a (non-complex-script) string into maximal runs that are uniformly
+ * East-Asian (CJK) or not, per the §17.3.2.26 ascii/eastAsia axis split. Returns
+ * `[{text, ea}]` in logical order. CJK classification uses the canonical
+ * {@link isCjkBreakChar} from `@silurus/ooxml-core` — the SAME predicate the
+ * shape-text path ({@link shapeTokenFamily}) and the body wrap/justify paths
+ * use, so the eastAsia face is picked consistently across renderers with no name
+ * heuristics. Each returned slice stays single-font when emitted, preserving the
+ * measure==draw / docGrid char-grid invariant.
+ *
+ * Boundary rule: classification is purely per code point (every CJK code point
+ * opens/continues an `ea` run; every other code point a `latin` run). This is
+ * intentionally simpler than {@link splitByComplexScript}'s neutral-attachment —
+ * a digit between two ideographs is Latin/ascii either way (Word renders ASCII
+ * digits with the ascii face), and a single fillText anchors to the cumulative
+ * whole-string advance, so the visible spacing is unchanged.
+ *
+ * NOTE: this split decides the FONT slot only. Whether a resulting segment is
+ * snapped to the §17.6.5 character grid is decided SEPARATELY by the grid's own
+ * `EAST_ASIAN_RE` purity test (see `gridSegDeltaPx`/`eaGlyphCount`), not by the
+ * `ea` flag here. The two CJK predicates classify slightly different code-point
+ * sets; correctness of the grid total relies on `eaGlyphCount` being additive
+ * over this partition (covered by docgrid-char.test.ts's mixed-token case). Keep
+ * them independent — do not "unify" the predicates without re-checking that test.
+ */
+function splitByEastAsia(text: string): { text: string; ea: boolean }[] {
+  const out: { text: string; ea: boolean }[] = [];
+  let curEa: boolean | null = null;
+  let buf = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    const ea = isCjkBreakChar(cp);
+    if (curEa === null || ea === curEa) {
+      curEa = ea;
+      buf += ch;
+    } else {
+      out.push({ text: buf, ea: curEa });
+      curEa = ea;
+      buf = ch;
+    }
+  }
+  if (buf.length > 0) out.push({ text: buf, ea: curEa ?? false });
   return out;
 }
 
@@ -5324,6 +5403,23 @@ function buildFont(
   const s = italic ? 'italic' : 'normal';
   const f = normalizeFontFamily(family, fontFamilyClasses);
   return `${s} ${w} ${sizePx}px ${f}`;
+}
+
+/** Resolve the list-marker glyph's font family (ECMA-376 §17.3.2.26 + §17.9.6).
+ *  The marker is drawn/measured as a single `fillText`/`measureText`, so it must
+ *  be one family. Pick it per the marker's leading code point, exactly like the
+ *  body's per-character split and {@link shapeTokenFamily}: a CJK marker (e.g. an
+ *  ideographic bullet) → the eastAsia axis, anything else (a decimal "1", roman
+ *  "i", letter, or "•") → the ascii axis. Realistic markers are single-script, so
+ *  the leading code point classifies the whole glyph string. eastAsia falls back
+ *  to ascii when absent (older parser output / no eastAsia font). The font CLASS
+ *  (serif/sans) is then resolved by `fontFamilyClasses` (fontTable §17.8.3.10),
+ *  so e.g. a serif ascii (Times) number renders serif even when the heading's
+ *  eastAsia axis is a Gothic (sans). */
+function markerFontFamily(num: NumberingInfo): string | null {
+  const cp = num.text.codePointAt(0) ?? 0;
+  const ascii = num.fontFamily ?? null;
+  return isCjkBreakChar(cp) ? (num.fontFamilyEastAsia ?? ascii) : ascii;
 }
 
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto

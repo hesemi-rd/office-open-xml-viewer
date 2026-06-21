@@ -1307,13 +1307,40 @@ fn parse_paragraph(
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
     {
         if num_id != 0 {
-            let (format, ind_left, tab, suff) = num_map
+            // Resolve the marker's font axes (ECMA-376 §17.9.6 + §17.3.2.26): take
+            // the level's own run properties (`rPr`) MERGED OVER the paragraph's
+            // resolved run formatting via the SAME `apply_direct_run` body runs
+            // use, then resolve the ascii and eastAsia axes INDEPENDENTLY through
+            // theme refs. A bare `<w:rFonts w:hint="eastAsia"/>` carries no
+            // typeface, so the marker simply inherits the paragraph's ascii (e.g.
+            // Times → the auto-number renders serif) and eastAsia (e.g. MS Gothic).
+            let (format, ind_left, tab, suff, marker_ascii, marker_ea) = num_map
                 .get_level(num_id, num_level)
-                .map(|l| (l.format.clone(), l.indent_left, l.tab, l.suff.clone()))
-                .unwrap_or_else(|| ("decimal".to_string(), 36.0, 18.0, "tab".to_string()));
+                .map(|l| {
+                    let mut marker_fmt = base_run.clone();
+                    apply_direct_run(&mut marker_fmt, &l.rpr);
+                    (
+                        l.format.clone(),
+                        l.indent_left,
+                        l.tab,
+                        l.suff.clone(),
+                        theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
+                        theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        "decimal".to_string(),
+                        36.0,
+                        18.0,
+                        "tab".to_string(),
+                        theme.resolve_font_ref(base_run.font_family_ascii.clone()),
+                        theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                    )
+                });
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
-            Some(NumberingInfo {
+            Some(Box::new(NumberingInfo {
                 num_id,
                 level: num_level,
                 format,
@@ -1321,7 +1348,9 @@ fn parse_paragraph(
                 indent_left: ind_left,
                 tab,
                 suff,
-            })
+                font_family: marker_ascii,
+                font_family_east_asia: marker_ea,
+            }))
         } else {
             None
         }
@@ -1798,6 +1827,10 @@ fn parse_run_inner(
     let font_family = theme
         .resolve_font_ref(fmt.font_family_ascii.clone())
         .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
+    // ECMA-376 §17.3.2.26 eastAsia axis, resolved INDEPENDENTLY of ascii so the
+    // renderer can pick per character (CJK glyphs → eastAsia face). `font_family`
+    // above keeps the conflated single-font fallback for non-per-char paths.
+    let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     let vert_align = fmt.vert_align.clone();
     let all_caps = fmt.all_caps.unwrap_or(false);
     let small_caps = fmt.small_caps.unwrap_or(false);
@@ -1827,7 +1860,7 @@ fn parse_run_inner(
                 // same content. Accept both and attach the revision below.
                 let text = child.text().unwrap_or("").to_string();
                 if !text.is_empty() {
-                    runs.push(DocRun::Text(TextRun {
+                    runs.push(DocRun::Text(Box::new(TextRun {
                         text,
                         bold,
                         italic,
@@ -1836,6 +1869,7 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: font_family.clone(),
+                        font_family_east_asia: font_family_east_asia.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         vert_align: vert_align.clone(),
@@ -1854,12 +1888,12 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         note_ref: None,
-                    }));
+                    })));
                 }
             }
             "tab" => {
                 // w:tab emits a horizontal tab character; layout handles tab stop alignment.
-                runs.push(DocRun::Text(TextRun {
+                runs.push(DocRun::Text(Box::new(TextRun {
                     text: "\t".to_string(),
                     bold,
                     italic,
@@ -1868,6 +1902,7 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_east_asia: font_family_east_asia.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     vert_align: vert_align.clone(),
@@ -1886,7 +1921,7 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     note_ref: None,
-                }));
+                })));
             }
             "br" => {
                 let break_type = attr_w(child, "type")
@@ -1990,7 +2025,7 @@ fn parse_run_inner(
                     "endnote"
                 };
                 let id_str = attr_w(child, "id").unwrap_or_default();
-                runs.push(DocRun::Text(TextRun {
+                runs.push(DocRun::Text(Box::new(TextRun {
                     text: id_str.clone(),
                     bold,
                     italic,
@@ -1999,6 +2034,7 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_east_asia: font_family_east_asia.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     // Force superscript regardless of the run's original
@@ -2025,7 +2061,7 @@ fn parse_run_inner(
                         kind: kind.to_string(),
                         id: id_str,
                     }),
-                }));
+                })));
             }
             "AlternateContent" => {
                 // mc:AlternateContent/mc:Choice may contain w:drawing
@@ -4828,7 +4864,7 @@ mod cs_toggle_tests {
             if let BodyElement::Paragraph(p) = e {
                 for r in p.runs {
                     if let DocRun::Text(t) = r {
-                        return t;
+                        return *t;
                     }
                 }
             }
@@ -6406,5 +6442,192 @@ mod txbx_inline_image_tests {
             .is_none(),
             "empty paragraph (no text, no image) is dropped"
         );
+    }
+}
+
+#[cfg(test)]
+mod numbering_marker_font_tests {
+    //! ECMA-376 §17.3.2.26 (rFonts ascii/eastAsia axes) + §17.9.6 (numbering
+    //! level rPr). Models the sample-10 academic-paper heading "1 原稿の体裁":
+    //! docDefaults ascii=Century, the default paragraph style ("a") sets
+    //! ascii=Times New Roman, and 見出し1 (Heading1, basedOn "a") overrides only
+    //! eastAsia=MS Gothic. The numbering level carries a bare
+    //! `<w:rFonts w:hint="eastAsia"/>` (no explicit typeface), so the marker
+    //! inherits ascii=Times (serif) and eastAsia=MS Gothic (sans).
+    use super::*;
+
+    const NS: &str = " xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+
+    fn styles_xml() -> String {
+        format!(
+            r#"<w:styles{NS}>
+              <w:docDefaults><w:rPrDefault><w:rPr>
+                <w:rFonts w:ascii="Century" w:hAnsi="Century"/>
+              </w:rPr></w:rPrDefault></w:docDefaults>
+              <w:style w:type="paragraph" w:default="1" w:styleId="a">
+                <w:name w:val="Normal"/>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/></w:rPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="見出し1">
+                <w:name w:val="heading 1"/>
+                <w:basedOn w:val="a"/>
+                <w:rPr><w:rFonts w:eastAsia="ＭＳ ゴシック"/></w:rPr>
+              </w:style>
+            </w:styles>"#
+        )
+    }
+
+    fn numbering_xml() -> String {
+        // Level 0: bare `<w:rFonts w:hint="eastAsia"/>` (no typeface) — the
+        // marker must inherit its fonts from the paragraph/style chain.
+        format!(
+            r#"<w:numbering{NS}>
+              <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="decimal"/>
+                  <w:lvlText w:val="%1"/>
+                  <w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            </w:numbering>"#
+        )
+    }
+
+    /// Parse a body whose single paragraph is the numbered Heading1 "原稿の体裁".
+    fn heading_para() -> DocParagraph {
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body>
+              <w:p>
+                <w:pPr>
+                  <w:pStyle w:val="見出し1"/>
+                  <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+                </w:pPr>
+                <w:r><w:t>原稿の体裁</w:t></w:r>
+              </w:p>
+            </w:body></w:document>"#
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse(&styles_xml());
+        let mut num_map = NumberingMap::parse(&numbering_xml());
+        let elems = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
+        elems
+            .into_iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("heading paragraph present")
+    }
+
+    /// §17.3.2.26 — the CJK body run carries BOTH axes: the conflated single
+    /// `font_family` (ascii → Times, the fallback for non-per-char paths) AND the
+    /// independent `font_family_east_asia` (MS Gothic) the renderer routes CJK
+    /// glyphs to. Before the fix the eastAsia axis was dropped, so the CJK title
+    /// fell back to Times' serif-mincho and rendered serif instead of gothic.
+    #[test]
+    fn body_run_carries_independent_east_asia_axis() {
+        let para = heading_para();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .expect("text run present");
+        assert_eq!(
+            run.font_family.as_deref(),
+            Some("Times New Roman"),
+            "conflated single font keeps ascii-first fallback"
+        );
+        assert_eq!(
+            run.font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック"),
+            "eastAsia axis (§17.3.2.26) surfaces MS Gothic for CJK glyphs"
+        );
+    }
+
+    /// §17.9.6 — the marker's resolved fonts come from the level rPr (bare hint,
+    /// no typeface) merged OVER the paragraph's run formatting: ascii inherits
+    /// the default style's Times (a decimal "1" → serif) and eastAsia inherits
+    /// 見出し1's MS Gothic. Before the fix the marker had no font and the renderer
+    /// hardcoded sans-serif, drawing every number sans.
+    #[test]
+    fn numbering_marker_inherits_ascii_and_east_asia_fonts() {
+        let para = heading_para();
+        let num = para.numbering.as_ref().expect("numbered paragraph");
+        assert_eq!(num.text, "1", "decimal marker resolves to \"1\"");
+        assert_eq!(
+            num.font_family.as_deref(),
+            Some("Times New Roman"),
+            "marker ascii axis inherits the default style's Times (serif number)"
+        );
+        assert_eq!(
+            num.font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック"),
+            "marker eastAsia axis inherits Heading1's MS Gothic"
+        );
+    }
+
+    /// No-regression: the COMMON Japanese case (eastAsia = a mincho, no Gothic
+    /// override) still resolves the eastAsia axis to the mincho — identical to
+    /// the ascii fallback class, so the rendered output is unchanged.
+    #[test]
+    fn common_mincho_case_resolves_east_asia_to_mincho() {
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body>
+              <w:p><w:r>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="ＭＳ 明朝"/></w:rPr>
+                <w:t>本文テキスト</w:t>
+              </w:r></w:p>
+            </w:body></w:document>"#
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let elems = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
+        let para = elems
+            .into_iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(run.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(run.font_family_east_asia.as_deref(), Some("ＭＳ 明朝"));
     }
 }
