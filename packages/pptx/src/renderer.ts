@@ -63,6 +63,7 @@ import {
   getCachedSvgImageByPath,
   decodeRasterOrMetafile,
   highlightBox,
+  symbolFontToUnicode,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -457,30 +458,6 @@ interface LayoutLine {
  * Canvas will silently ignore an invalid CSS font string, keeping whatever font was set before —
  * leading to wrong text size. Map theme references to generic families as a safe fallback.
  */
-const WINGDINGS_MAP: Record<number, string> = {
-  0x21: '✏', 0x22: '✂', 0x23: '✁', 0x24: '👁',
-  0x4A: '☺', 0x4B: '☻', 0x4C: '☹',
-  0x76: '✔', 0xFC: '✓', 0xFB: '✗', 0xFE: '■',
-  0xA7: '▪', 0xB7: '•', 0xB8: '◦', 0xB9: '–',
-  0xF0A7: '▪', 0xF0B7: '•',
-  // Wingdings barb2 arrow block — glyph names verified against the Wingdings
-  // cmap (0xDF=barb2left … 0xE6=barb2se). Mapped to Unicode arrows so they
-  // render in any font even when Wingdings is unavailable.
-  0xDF: '←', 0xE0: '→', 0xE1: '↑', 0xE2: '↓',
-  0xE3: '↖', 0xE4: '↗', 0xE5: '↙', 0xE6: '↘',
-  0xF0DF: '←', 0xF0E0: '→', 0xF0E1: '↑', 0xF0E2: '↓',
-  0xF0E3: '↖', 0xF0E4: '↗', 0xF0E5: '↙', 0xF0E6: '↘',
-};
-
-function applySymbolFont(char: string, fontFamily: string): string {
-  const lower = fontFamily.toLowerCase();
-  if (lower.includes('wingdings') || lower === 'symbol') {
-    const code = char.charCodeAt(0);
-    return WINGDINGS_MAP[code] ?? char;
-  }
-  return char;
-}
-
 function normalizeFontFamily(family: string | null, rc: RenderContext): string {
   if (!family) return rc.themeMinorFont ?? 'sans-serif';
   if (family.startsWith('+')) {
@@ -950,7 +927,7 @@ export function layoutParagraph(
           let drawCh = ch;
           let chFont = font;
           if (SYMBOL_PUA_RE.test(ch)) {
-            const mapped = applySymbolFont(ch, symName);
+            const mapped = symbolFontToUnicode(ch, symName);
             if (mapped !== ch) {
               drawCh = mapped;
               chFont = buildFont(isBold, isItalic, sizePx, 'sans-serif', rc);
@@ -1843,7 +1820,7 @@ export function resolveBulletLabel(
   if (para.bullet.type === 'char') {
     // Reset counters when switching to char bullets.
     autoNumCounters.clear();
-    return hasContent ? applySymbolFont(para.bullet.char, para.bullet.fontFamily ?? '') : '';
+    return hasContent ? symbolFontToUnicode(para.bullet.char, para.bullet.fontFamily ?? '') : '';
   }
   if (para.bullet.type === 'autoNum') {
     if (!hasContent) return '';
