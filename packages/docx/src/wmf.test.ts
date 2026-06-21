@@ -346,24 +346,24 @@ describe('playWmf — polygon / polypolygon fill', () => {
   });
 });
 
-// ── playWmf: GDI half-open device-surface clip (frame-rectangle suppression) ──
+// ── playWmf: window/device-boundary cosmetic-stroke suppression (heuristic) ──
 
-describe('playWmf — half-open device clip (boundary-coincident edges)', () => {
-  // GDI clips metafile playback to the output surface, whose region is half-open
-  // [0,W)×[0,H). An outline edge that lies exactly on a surface-boundary line
-  // (x∈{0,W} or y∈{0,H}) is on the clip boundary and paints nothing. This is the
-  // standard reason a full-window "frame rectangle" drawn with a 1px cosmetic pen
-  // (image1.emf in sample-10: a META_RECTANGLE at the window bounds with a
-  // width-0 solid black pen) shows NO visible border in GDI / Word.
+describe('playWmf — window/device-boundary stroke suppression', () => {
+  // HEURISTIC (see deviceInteriorEdges in wmf.ts): a cosmetic stroke whose edge
+  // coincides with the metafile window/device boundary (x∈{0,W} or y∈{0,H}) is
+  // suppressed, because Word renders no visible frame there. This is NOT GDI's
+  // actual clip (which excludes only the right/bottom edges); we drop all four
+  // boundary lines to remove the common full-window "frame rectangle" drawn with
+  // a 1px cosmetic pen.
 
   it('a RECTANGLE coincident with the device bounds paints NO outline (frame suppressed)', () => {
     // window org (0,0) ext (100,100), device 100×100 ⇒ logical==device. The rect
-    // spans the full window, so all four edges land on the surface boundary.
+    // spans the full window, so all four edges land on the boundary.
     const file = concat(
       wmfHeader(),
       record(FN.SETWINDOWORG, (w) => w.i16(0).i16(0)),
       record(FN.SETWINDOWEXT, (w) => w.i16(100).i16(100)),
-      // cosmetic (width 0) PS_SOLID black pen — exactly sample-10's frame pen.
+      // cosmetic (width 0) PS_SOLID black pen — a typical full-window frame pen.
       record(FN.CREATEPENINDIRECT, (w) => w.u16(0).i16(0).i16(0).u32(0x00000000)),
       record(FN.SELECTOBJECT, (w) => w.u16(0)),
       // RECTANGLE params: bottom, right, top, left (full window).

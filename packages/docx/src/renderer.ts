@@ -4355,16 +4355,16 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
  *  inter-word spaces). `ctx.font` must already be the block's font. A single
  *  token wider than `maxWidth` is left to overflow its own line (no
  *  hyphenation). Always returns at least one line. */
-/** Ideographic / CJK code points that may break between any two characters
- *  (they carry no inter-word spaces). Shared by the shape-text tokenizers. */
-function isCjkCp(cp: number): boolean {
-  return (
-    (cp >= 0x3000 && cp <= 0x9fff) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xff00 && cp <= 0xffef) ||
-    (cp >= 0x20000 && cp <= 0x2fa1f)
-  );
-}
+// Ideographic / CJK classification for the shape-text tokenizers uses the
+// canonical `isCjkBreakChar` from @silurus/ooxml-core (imported above), the same
+// predicate the body's wrap/justify paths use. It covers U+3000–U+9FFF, the
+// Hangul Syllables block U+AC00–U+D7A3, U+F900–U+FAFF and U+FF00–U+FFEF — so
+// Korean text-box text is classified as CJK (and takes the eastAsia face), which
+// the previous local `isCjkCp` dropped. NOTE: that local predicate also covered
+// the SIP Ext-B range U+20000–U+2FA1F; `isCjkBreakChar` does not, so it is
+// intentionally dropped here. If Ext-B ideographs ever need CJK treatment, the
+// fix belongs in the core predicate (shared by pptx/docx/xlsx), not a docx-local
+// re-fork.
 
 /** Per-token font family for a shape-text run, picked by the token's script
  *  (ECMA-376 §17.3.2.26): a CJK token (its first code point is East-Asian) uses
@@ -4378,7 +4378,7 @@ function isCjkCp(cp: number): boolean {
  *  with no name heuristics. */
 function shapeTokenFamily(token: string, run: ShapeTextRun): string | null {
   const cp = token.codePointAt(0) ?? 0;
-  return isCjkCp(cp) ? (run.fontFamilyEastAsia ?? run.fontFamily ?? null) : (run.fontFamily ?? null);
+  return isCjkBreakChar(cp) ? (run.fontFamilyEastAsia ?? run.fontFamily ?? null) : (run.fontFamily ?? null);
 }
 
 /** Split a string into atomic wrap units: each CJK char alone, or a run of
@@ -4390,7 +4390,7 @@ function tokenizeShapeText(text: string): string[] {
   let buf = '';
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
-    if (isCjkCp(cp)) {
+    if (isCjkBreakChar(cp)) {
       if (buf) {
         tokens.push(buf);
         buf = '';
@@ -5606,22 +5606,24 @@ interface DocGridCtx {
   /** Grid pitch in pt (already converted from twips in the parser). */
   linePitchPt: number | null | undefined;
   /** ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` divided by 4096 — the per-EA-
-   *  glyph character-grid spacing in EM units (so the cell width is
-   *  `fontSizePt + charSpacePt` pt). Negative tightens. `null`/`undefined` when
-   *  the section declares no charSpace; the character grid is then inactive even
-   *  if `type` is linesAndChars/snapToChars. See {@link gridCharDeltaPx}. */
+   *  glyph character-grid delta = charSpace/4096 in FLAT POINTS (independent of
+   *  font size), added to the measured glyph advance (≈1em for full-width EA
+   *  glyphs). Negative tightens. `null`/`undefined` when the section declares no
+   *  charSpace; the character grid is then inactive even if `type` is
+   *  linesAndChars/snapToChars. See {@link gridCharDeltaPx}. */
   charSpacePt?: number | null;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // ECMA-376 §17.6.5 docGrid CHARACTER grid (字詰め). When the section's docGrid
 // `type` is "linesAndChars" or "snapToChars" AND a `charSpace` is declared,
-// every full-width East-Asian glyph occupies a fixed cell whose width is
-// `fontSizePt + charSpace/4096` pt. A full-width EA glyph's NATURAL advance is
-// its em (≈ fontSizePt), so the cell is reached by adding a per-EA-glyph delta
-//   Δpt = charSpace / 4096   (NEGATIVE = tighter)
-// to its natural advance. Latin / digits are NOT snapped (they keep natural
-// advance and span cells), so the grid delta applies only to EA code points.
+// every full-width East-Asian glyph gains a fixed per-EA-glyph spacing delta
+//   Δpt = charSpace / 4096   in FLAT POINTS (NEGATIVE = tighter)
+// that is INDEPENDENT of font size — it is added to the glyph's MEASURED advance
+// (≈1em for full-width EA glyphs), NOT scaled by it. (`gridCharDeltaPx` returns
+// exactly `charSpacePt * scale` = charSpace/4096 pt in px; it does not multiply
+// by the font size.) Latin / digits are NOT snapped (they keep their natural
+// advance), so the grid delta applies only to EA code points.
 //
 // ── The single advance model (measure == draw) ──────────────────────────────
 // To make line-break MEASUREMENT and the draw ADVANCE provably identical, the

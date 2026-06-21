@@ -1207,11 +1207,13 @@ fn parse_section(
             // w: unit attributes. twips_to_pt divides by 20.
             props.doc_grid_line_pitch = Some(twips_to_pt(&lp));
         }
-        // charSpace is ST_DecimalNumber — a raw SIGNED integer in 1/4096ths of
-        // an em (NOT twips). The renderer divides by 4096 to obtain the per-EA-
-        // glyph cell delta in em, then multiplies by the font size. Keep the raw
-        // value here so the conversion (and the em-relative meaning) lives in one
-        // place. parse::<f64> tolerates a leading '-' (the common, tightening case).
+        // charSpace is ST_DecimalNumber — a raw SIGNED integer in 1/4096ths of a
+        // POINT (NOT twips, NOT an em fraction). The renderer divides by 4096 to
+        // obtain the per-EA-glyph cell delta = charSpace/4096 in FLAT POINTS,
+        // independent of font size (§17.6.5); see `gridCharDeltaPx` in
+        // renderer.ts. Keep the raw value here so the /4096 conversion lives in
+        // one place. parse::<f64> tolerates a leading '-' (the common,
+        // tightening case).
         if let Some(cs) = attr_w(dg, "charSpace") {
             if let Ok(v) = cs.parse::<f64>() {
                 props.doc_grid_char_space = Some(v);
@@ -2085,6 +2087,52 @@ fn resolve_blip_urls(
     Some((image_path, mime, svg_image_path))
 }
 
+/// A resolved inline/anchored picture: the drawable source(s) plus the natural
+/// draw size read from `<wp:extent>` (ECMA-376 §20.4.2.7), in points.
+struct InlineBlip {
+    image_path: String,
+    mime_type: String,
+    svg_image_path: Option<String>,
+    width_pt: f64,
+    height_pt: f64,
+}
+
+/// Resolve a single picture under `node`: the first `<a:blip>` descendant (via
+/// [`resolve_blip_urls`]) together with the first `<wp:extent>` descendant's
+/// `cx`/`cy` (EMU → pt at 12700 EMU/pt). `node` is the element enclosing one
+/// drawing — the `<wp:inline>` / `<wp:anchor>` container for the body image
+/// paths, or the text-box `<w:p>` for the txbx image path.
+///
+/// Returns `None` unless BOTH a drawable blip AND a parseable extent (cx and cy
+/// present) are found — the strict "drawable image with a known size" contract
+/// the body inline/anchor paths have always required (they previously dropped a
+/// picture lacking either). The txbx path is held to the same contract (it
+/// formerly defaulted a missing extent to 0pt, which never occurs in practice —
+/// `<wp:extent>` is schema-required — and produced an invisible image).
+///
+/// Single-blip only: callers that handle composite drawings (`wgp`/`wsp`) must
+/// branch on those FIRST and reach this helper only for a regular single picture
+/// (so the first blip/extent descendant unambiguously belongs to that picture).
+fn resolve_inline_blip(
+    node: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+) -> Option<InlineBlip> {
+    let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
+    let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
+    let extent = node
+        .descendants()
+        .find(|n| n.tag_name().name() == "extent")?;
+    let cx: f64 = extent.attribute("cx").and_then(|v| v.parse().ok())?;
+    let cy: f64 = extent.attribute("cy").and_then(|v| v.parse().ok())?;
+    Some(InlineBlip {
+        image_path,
+        mime_type,
+        svg_image_path,
+        width_pt: cx / 12700.0,
+        height_pt: cy / 12700.0,
+    })
+}
+
 fn parse_inline_drawing(
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -2098,41 +2146,27 @@ fn parse_inline_drawing(
             Some(c) => c,
             None => return vec![],
         };
-        let extent = match container
-            .children()
-            .find(|n| n.tag_name().name() == "extent")
-        {
-            Some(e) => e,
-            None => return vec![],
-        };
-        let cx: f64 = match extent.attribute("cx").and_then(|v| v.parse().ok()) {
-            Some(v) => v,
-            None => return vec![],
-        };
-        let cy: f64 = match extent.attribute("cy").and_then(|v| v.parse().ok()) {
-            Some(v) => v,
-            None => return vec![],
-        };
-        let blip = match node.descendants().find(|n| n.tag_name().name() == "blip") {
+        // Resolve the picture's blip + `<wp:extent>` natural size. The Microsoft
+        // 2016 SVG extension is handled inside `resolve_inline_blip` →
+        // `resolve_blip_urls` (prefer the vector original, keep the raster as a
+        // fallback so an svg-only picture is never dropped). The whole element is
+        // dropped only if NEITHER a blip nor a parseable extent resolves.
+        let InlineBlip {
+            image_path,
+            mime_type,
+            svg_image_path,
+            width_pt,
+            height_pt,
+        } = match resolve_inline_blip(container, media_map) {
             Some(b) => b,
-            None => return vec![],
-        };
-        // Microsoft 2016 SVG extension (MS-ODRAWXML): the vector original rides
-        // inside `<a:blip><a:extLst><asvg:svgBlip r:embed>`, while `<a:blip
-        // r:embed>` carries a raster (PNG/JPEG) *fallback* for SVG-incapable
-        // clients. Prefer the vector; fall back to the raster so an svg-only
-        // picture is never dropped. `image_path` keeps the raster when present,
-        // else the SVG itself; drop the element only if NEITHER resolves.
-        let (image_path, mime_type, svg_image_path) = match resolve_blip_urls(blip, media_map) {
-            Some(urls) => urls,
             None => return vec![],
         };
         return vec![DocRun::Image(ImageRun {
             image_path,
             mime_type,
             svg_image_path,
-            width_pt: cx / 12700.0,
-            height_pt: cy / 12700.0,
+            width_pt,
+            height_pt,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -2254,39 +2288,26 @@ fn parse_inline_drawing(
         }
     }
 
-    // Regular single-blip anchor
-    let extent = match container
-        .children()
-        .find(|n| n.tag_name().name() == "extent")
-    {
-        Some(e) => e,
-        None => return vec![],
-    };
-    let cx: f64 = match extent.attribute("cx").and_then(|v| v.parse().ok()) {
-        Some(v) => v,
-        None => return vec![],
-    };
-    let cy: f64 = match extent.attribute("cy").and_then(|v| v.parse().ok()) {
-        Some(v) => v,
-        None => return vec![],
-    };
-    let blip = match node.descendants().find(|n| n.tag_name().name() == "blip") {
+    // Regular single-blip anchor. The wgp/wsp branches above returned early, so
+    // the anchor holds exactly one picture; resolve its blip + `<wp:extent>`
+    // natural size (SVG-extension handling and the drop-if-unresolvable contract
+    // live in `resolve_inline_blip`).
+    let InlineBlip {
+        image_path,
+        mime_type,
+        svg_image_path,
+        width_pt,
+        height_pt,
+    } = match resolve_inline_blip(container, media_map) {
         Some(b) => b,
-        None => return vec![],
-    };
-    // Microsoft 2016 SVG extension (see parse_inline_drawing): prefer the vector
-    // original, keep the raster as the `image_path` fallback, and never drop an
-    // svg-only picture.
-    let (image_path, mime_type, svg_image_path) = match resolve_blip_urls(blip, media_map) {
-        Some(urls) => urls,
         None => return vec![],
     };
     vec![DocRun::Image(ImageRun {
         image_path,
         mime_type,
         svg_image_path,
-        width_pt: cx / 12700.0,
-        height_pt: cy / 12700.0,
+        width_pt,
+        height_pt,
         anchor: true,
         anchor_x_pt: pos_x,
         anchor_y_pt: pos_y,
@@ -3319,36 +3340,23 @@ fn extract_simple_paragraph_text(
         }
     }
 
-    // Inline image inside the text-box paragraph. Use the SAME blip resolution
-    // body images use. The `<wp:extent>` is a child of the `<wp:inline>`
-    // container (ECMA-376 §20.4.2.8); read it for the natural draw size.
-    let (image_path, mime_type, svg_image_path, image_width_pt, image_height_pt) = {
-        let blip = p
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "drawing")
-            .and_then(|drawing| {
-                drawing
-                    .descendants()
-                    .find(|n| n.is_element() && n.tag_name().name() == "blip")
-            });
-        match blip.and_then(|b| resolve_blip_urls(b, media_map)) {
-            Some((ip, mime, svg)) => {
-                let extent = p
-                    .descendants()
-                    .find(|n| n.is_element() && n.tag_name().name() == "extent");
-                let cx = extent
-                    .and_then(|e| e.attribute("cx"))
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                let cy = extent
-                    .and_then(|e| e.attribute("cy"))
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                (Some(ip), Some(mime), svg, cx / 12700.0, cy / 12700.0)
-            }
+    // Inline image inside the text-box paragraph (ECMA-376 §20.4.2.8). Use the
+    // SAME picture resolution the body inline/anchor paths use, so the blip +
+    // `<wp:extent>` natural size (and the SVG-extension handling) stay in one
+    // place. `resolve_inline_blip` yields None unless both a drawable blip and a
+    // parseable extent are present, which simply leaves this an image-less
+    // paragraph (the drop-if-no-text-and-no-image check below still applies).
+    let (image_path, mime_type, svg_image_path, image_width_pt, image_height_pt) =
+        match resolve_inline_blip(p, media_map) {
+            Some(b) => (
+                Some(b.image_path),
+                Some(b.mime_type),
+                b.svg_image_path,
+                b.width_pt,
+                b.height_pt,
+            ),
             None => (None, None, None, 0.0, 0.0),
-        }
-    };
+        };
 
     // Drop a paragraph that is neither text nor image; keep image-only ones.
     if text.is_empty() && image_path.is_none() {
