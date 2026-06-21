@@ -697,26 +697,41 @@ fn parse_body_elements(
             "p" => {
                 let result =
                     parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, None);
-                let is_page_break_only = result.runs.len() == 1
-                    && matches!(
-                        result.runs[0],
+                let lone_break = if result.runs.len() == 1 {
+                    match &result.runs[0] {
                         DocRun::Break {
-                            break_type: BreakType::Page
-                        }
-                    );
-                if is_page_break_only {
-                    body.push(BodyElement::PageBreak { parity: None });
-                    continue;
+                            break_type: BreakType::Page,
+                        } => Some(BreakType::Page),
+                        DocRun::Break {
+                            break_type: BreakType::Column,
+                        } => Some(BreakType::Column),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                match lone_break {
+                    Some(BreakType::Page) => {
+                        body.push(BodyElement::PageBreak { parity: None });
+                        continue;
+                    }
+                    Some(BreakType::Column) => {
+                        body.push(BodyElement::ColumnBreak);
+                        continue;
+                    }
+                    _ => {}
                 }
-                // Mid-paragraph page breaks come from <w:br w:type="page"/>
-                // and from <w:lastRenderedPageBreak/>. Split the paragraph
-                // around them and emit BodyElement::PageBreak between the
-                // pieces — each piece keeps the same pPr so layout
-                // continues correctly on the next page.
+                // Mid-paragraph page / column breaks come from
+                // `<w:br w:type="page"/>` / `<w:br w:type="column"/>` (and the
+                // ignored `<w:lastRenderedPageBreak/>`). Split the paragraph
+                // around them and emit BodyElement::PageBreak / ColumnBreak
+                // between the pieces — each piece keeps the same pPr so layout
+                // continues correctly after the break.
                 for piece in split_para_on_page_breaks(result) {
                     match piece {
                         ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
                         ParaPiece::PageBreak => body.push(BodyElement::PageBreak { parity: None }),
+                        ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
                     }
                 }
                 // ECMA-376 §17.6.1: a section break inside pPr defines the
@@ -770,16 +785,19 @@ fn parse_body_elements(
 enum ParaPiece {
     Para(DocParagraph),
     PageBreak,
+    ColumnBreak,
 }
 
-/// Split a parsed paragraph at every internal page-break run. The split
-/// pieces all share the source paragraph's pPr, so layout (alignment,
-/// indents, line spacing, …) is preserved across the page boundary. The
-/// page-break run itself is consumed; downstream code emits
-/// BodyElement::PageBreak instead.
+/// Split a parsed paragraph at every internal page-break OR column-break run.
+/// The split pieces all share the source paragraph's pPr, so layout (alignment,
+/// indents, line spacing, …) is preserved across the boundary. The break run
+/// itself is consumed; downstream code emits BodyElement::PageBreak /
+/// BodyElement::ColumnBreak instead.
 ///
-/// Two break flavors are recognized:
+/// Three break flavors are recognized:
 ///   - `BreakType::Page`         — hard `<w:br w:type="page"/>`, always honored.
+///   - `BreakType::Column`       — `<w:br w:type="column"/>` (ECMA-376
+///     §17.3.1.20), force the next newspaper column. Always honored.
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
 ///     (ECMA-376 §17.3.1.20), a layout cache that is NOT authoritative. We
 ///     paginate ourselves, so it is ignored uniformly and stripped (never
@@ -808,7 +826,7 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         matches!(
             r,
             DocRun::Break {
-                break_type: BreakType::Page
+                break_type: BreakType::Page | BreakType::Column
             }
         )
     };
@@ -827,13 +845,25 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         return vec![ParaPiece::Para(p)];
     }
 
-    // Split run chunks on hard page breaks; RenderedPage runs are dropped.
+    // Split run chunks on hard page / column breaks; RenderedPage runs are
+    // dropped. `seps` records the break kind that separates chunk[i] from
+    // chunk[i+1] so we can interleave the matching ParaPiece below.
     let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
+    let mut seps: Vec<ParaPiece> = Vec::new();
     for run in para.runs.iter().cloned() {
         match &run {
             DocRun::Break {
                 break_type: BreakType::Page,
-            } => chunks.push(Vec::new()),
+            } => {
+                chunks.push(Vec::new());
+                seps.push(ParaPiece::PageBreak);
+            }
+            DocRun::Break {
+                break_type: BreakType::Column,
+            } => {
+                chunks.push(Vec::new());
+                seps.push(ParaPiece::ColumnBreak);
+            }
             DocRun::Break {
                 break_type: BreakType::RenderedPage,
             } => { /* ignored hint */ }
@@ -854,15 +884,16 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let chunks: Vec<Vec<DocRun>> = {
+    let (chunks, seps): (Vec<Vec<DocRun>>, Vec<ParaPiece>) = {
         let mut c = chunks;
+        let mut s = seps;
         while c.last().map(|r| !has_visible(r)).unwrap_or(false) && c.len() > 1 {
             c.pop();
-            // Each pop also drops the preceding break that produced this
-            // empty trailing chunk — modelled here by NOT emitting a break
-            // before the (now removed) chunk.
+            // Each pop also drops the break that produced this empty trailing
+            // chunk (seps[k] is the break BEFORE chunk[k+1]).
+            s.pop();
         }
-        c
+        (c, s)
     };
 
     let mut out: Vec<ParaPiece> = Vec::new();
@@ -876,7 +907,12 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
             continue;
         }
         if emitted_para {
-            out.push(ParaPiece::PageBreak);
+            // seps[i-1] separates chunk[i-1] from chunk[i]; emit its kind
+            // (page vs column) so the boundary type is preserved.
+            out.push(match seps.get(i - 1) {
+                Some(ParaPiece::ColumnBreak) => ParaPiece::ColumnBreak,
+                _ => ParaPiece::PageBreak,
+            });
         }
         let mut chunk = para.clone();
         chunk.runs = runs;
@@ -982,6 +1018,83 @@ fn load_header_footer_set(
     out
 }
 
+/// ECMA-376 §17.6.4 `<w:cols>` (child of `<w:sectPr>`). Returns a `ColumnsSpec`
+/// only for genuine multi-column sections; `None` when `<w:cols>` is absent or
+/// resolves to a single column (so single-column sections keep the unchanged
+/// full-width path).
+///
+/// Attributes (§17.6.4):
+/// - `@w:num` — column count. Default 1.
+/// - `@w:space` — inter-column gap for equal-width columns. Default 720 twips
+///   (36 pt).
+/// - `@w:equalWidth` — when true (the default), all columns share one width and
+///   `@w:space`. When false, the `<w:col>` children (§17.6.3) give each column
+///   an explicit width + space.
+/// - `@w:sep` — draw separator rules between columns.
+///
+/// Per the spec, `equalWidth` defaults to true; explicit per-column geometry is
+/// taken from the `<w:col>` children only when `equalWidth` is false. If
+/// `equalWidth` is false but no `<w:col>` children are present we fall back to
+/// equal widths (there is nothing else to honor).
+fn parse_columns(sp: roxmltree::Node) -> Option<ColumnsSpec> {
+    let cols_el = child_w(sp, "cols")?;
+
+    let num = attr_w(cols_el, "num")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+
+    // §17.6.4: @w:space default is 720 twips (36 pt).
+    let space_pt = attr_w(cols_el, "space")
+        .map(|s| twips_to_pt(&s))
+        .unwrap_or(36.0);
+
+    // ST_OnOff toggle, default true when the attribute is omitted.
+    let equal_width = attr_w(cols_el, "equalWidth")
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "off"))
+        .unwrap_or(true);
+
+    let sep = attr_w(cols_el, "sep")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
+        .unwrap_or(false);
+
+    let col_children: Vec<ColSpec> = children_w(cols_el, "col")
+        .into_iter()
+        .filter_map(|c| {
+            let width_pt = attr_w(c, "w").map(|s| twips_to_pt(&s))?;
+            let col_space = attr_w(c, "space").map(|s| twips_to_pt(&s)).unwrap_or(0.0);
+            Some(ColSpec {
+                width_pt,
+                space_pt: col_space,
+            })
+        })
+        .collect();
+
+    let use_explicit = !equal_width && !col_children.is_empty();
+
+    // Effective column count: explicit columns count their entries; otherwise
+    // @w:num. A single resulting column is not multi-column → None.
+    let count = if use_explicit {
+        col_children.len()
+    } else {
+        num
+    };
+    if count < 2 {
+        return None;
+    }
+
+    Some(ColumnsSpec {
+        count,
+        space_pt,
+        equal_width: !use_explicit,
+        sep,
+        cols: if use_explicit {
+            col_children
+        } else {
+            Vec::new()
+        },
+    })
+}
+
 fn parse_section(
     sect_pr: Option<roxmltree::Node>,
     rel_map: &HashMap<String, String>,
@@ -999,6 +1112,7 @@ fn parse_section(
         even_and_odd_headers: false,
         doc_grid_type: None,
         doc_grid_line_pitch: None,
+        columns: None,
     };
 
     let Some(sp) = sect_pr else {
@@ -1052,6 +1166,12 @@ fn parse_section(
             props.doc_grid_line_pitch = Some(twips_to_pt(&lp));
         }
     }
+
+    // ECMA-376 §17.6.4 w:cols — newspaper-style multi-column layout. We only
+    // emit a ColumnsSpec for genuine multi-column sections (num >= 2); a single
+    // column leaves `columns` None so the renderer keeps its full-width column
+    // (unchanged behavior).
+    props.columns = parse_columns(sp);
 
     // Collect header/footer references
     let mut refs = SectionRefs::default();
@@ -5558,5 +5678,203 @@ mod svg_blip_tests {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+// ===== ECMA-376 §17.6.4 w:cols — multi-column sections =====
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    /// Parse a `<w:cols .../>` fragment (inside a sectPr) through `parse_columns`.
+    fn parse_cols(cols_xml: &str) -> Option<ColumnsSpec> {
+        let xml = format!(
+            r#"<w:sectPr xmlns:w="{ns}">{cols_xml}</w:sectPr>"#,
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        parse_columns(doc.root_element())
+    }
+
+    /// Parse a minimal `<w:body>` document through the real body-parse path so we
+    /// can assert how `<w:br w:type="column"/>` is hoisted to BodyElements.
+    fn body_from(body_inner: &str) -> Vec<BodyElement> {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media_map: HashMap<String, String> = HashMap::new();
+        let rel_map: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_body_elements(
+            body_node,
+            &style_map,
+            &mut num_map,
+            &media_map,
+            &rel_map,
+            &theme,
+        )
+    }
+
+    #[test]
+    fn cols_num2_equal_width_with_space() {
+        // sample-10's <w:cols w:num="2" w:space="309"/>: 309 twips = 15.45 pt.
+        let c = parse_cols(r#"<w:cols w:num="2" w:space="309"/>"#).expect("num=2 ⇒ multi-column");
+        assert_eq!(c.count, 2);
+        assert!(
+            (c.space_pt - 15.45).abs() < 1e-9,
+            "space_pt = {}",
+            c.space_pt
+        );
+        assert!(c.equal_width);
+        assert!(!c.sep);
+        assert!(c.cols.is_empty());
+    }
+
+    #[test]
+    fn cols_space_defaults_to_720_twips() {
+        // §17.6.4: @w:space default = 720 twips = 36 pt.
+        let c = parse_cols(r#"<w:cols w:num="3"/>"#).expect("num=3 ⇒ multi-column");
+        assert_eq!(c.count, 3);
+        assert!(
+            (c.space_pt - 36.0).abs() < 1e-9,
+            "space_pt = {}",
+            c.space_pt
+        );
+        assert!(c.equal_width);
+    }
+
+    #[test]
+    fn cols_num1_or_absent_is_none() {
+        // num<=1 ⇒ single column ⇒ None (unchanged full-width behavior).
+        assert!(parse_cols(r#"<w:cols w:num="1"/>"#).is_none());
+        assert!(parse_cols(r#"<w:cols/>"#).is_none());
+        // No <w:cols> at all.
+        let xml = format!(r#"<w:sectPr xmlns:w="{ns}"/>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        assert!(parse_columns(doc.root_element()).is_none());
+    }
+
+    #[test]
+    fn cols_explicit_unequal_widths_used_verbatim() {
+        // equalWidth=0 with explicit <w:col> children ⇒ per-column geometry.
+        // 4320 twips = 216 pt, 360 twips = 18 pt, 5040 twips = 252 pt.
+        let c = parse_cols(
+            r#"<w:cols w:num="2" w:equalWidth="0">
+                 <w:col w:w="4320" w:space="360"/>
+                 <w:col w:w="5040"/>
+               </w:cols>"#,
+        )
+        .expect("explicit cols ⇒ multi-column");
+        assert_eq!(c.count, 2);
+        assert!(!c.equal_width);
+        assert_eq!(c.cols.len(), 2);
+        assert!((c.cols[0].width_pt - 216.0).abs() < 1e-9);
+        assert!((c.cols[0].space_pt - 18.0).abs() < 1e-9);
+        assert!((c.cols[1].width_pt - 252.0).abs() < 1e-9);
+        assert!((c.cols[1].space_pt - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cols_count_from_explicit_children_when_num_mismatches() {
+        // count follows the number of <w:col> children when explicit.
+        let c = parse_cols(
+            r#"<w:cols w:num="2" w:equalWidth="false">
+                 <w:col w:w="2000"/>
+                 <w:col w:w="2000"/>
+                 <w:col w:w="2000"/>
+               </w:cols>"#,
+        )
+        .expect("3 explicit cols");
+        assert_eq!(c.count, 3);
+        assert_eq!(c.cols.len(), 3);
+    }
+
+    #[test]
+    fn cols_equalwidth_false_but_no_children_falls_back_to_equal() {
+        // equalWidth=0 with no <w:col> children ⇒ nothing to honor ⇒ equal.
+        let c =
+            parse_cols(r#"<w:cols w:num="2" w:equalWidth="0"/>"#).expect("num=2 ⇒ multi-column");
+        assert_eq!(c.count, 2);
+        assert!(c.equal_width);
+        assert!(c.cols.is_empty());
+    }
+
+    #[test]
+    fn cols_sep_flag_parsed() {
+        let c = parse_cols(r#"<w:cols w:num="2" w:sep="1"/>"#).unwrap();
+        assert!(c.sep);
+        let c = parse_cols(r#"<w:cols w:num="2" w:sep="0"/>"#).unwrap();
+        assert!(!c.sep);
+    }
+
+    /// `parse_columns` is wired into `parse_section` ⇒ SectionProps.columns.
+    #[test]
+    fn section_props_carries_columns() {
+        let xml = format!(
+            r#"<w:sectPr xmlns:w="{ns}"><w:cols w:num="2" w:space="309"/></w:sectPr>"#,
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let rel_map: HashMap<String, String> = HashMap::new();
+        let (props, _) = parse_section(Some(doc.root_element()), &rel_map);
+        let cols = props.columns.expect("columns surfaced on SectionProps");
+        assert_eq!(cols.count, 2);
+    }
+
+    /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` is hoisted to a body-level
+    /// BodyElement::ColumnBreak (mirroring page breaks), so the paginator can act
+    /// on it without inspecting runs mid-paragraph.
+    #[test]
+    fn column_break_only_paragraph_becomes_body_column_break() {
+        let body = body_from(r#"<w:p><w:r><w:br w:type="column"/></w:r></w:p>"#);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(body[0], BodyElement::ColumnBreak));
+    }
+
+    #[test]
+    fn mid_paragraph_column_break_splits_into_para_columnbreak_para() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:t>before</w:t></w:r>
+                 <w:r><w:br w:type="column"/></w:r>
+                 <w:r><w:t>after</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para("before"), ColumnBreak, Para("after").
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    #[test]
+    fn mixed_page_and_column_breaks_keep_their_kinds() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:t>a</w:t></w:r>
+                 <w:r><w:br w:type="page"/></w:r>
+                 <w:r><w:t>b</w:t></w:r>
+                 <w:r><w:br w:type="column"/></w:r>
+                 <w:r><w:t>c</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para(a), PageBreak, Para(b), ColumnBreak, Para(c).
+        assert_eq!(body.len(), 5);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+        assert!(matches!(body[3], BodyElement::ColumnBreak));
+        assert!(matches!(body[4], BodyElement::Paragraph(_)));
     }
 }

@@ -131,20 +131,55 @@ export interface SectionProps {
    *  "linesAndChars", auto line spacing multiplies against this pitch instead of
    *  the font's natural line height. */
   docGridLinePitch?: number | null;
+  /** ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout. `null`
+   *  (or absent) ⇒ single full-width column (unchanged behavior). When present,
+   *  body text flows top-to-bottom through `count` columns (newspaper fill);
+   *  see {@link computeColumns}. */
+  columns?: ColumnsSpec | null;
+}
+
+/** ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration. */
+export interface ColumnsSpec {
+  /** `@w:num` — number of columns (>= 2 when emitted). */
+  count: number;
+  /** `@w:space` in pt — inter-column gap for equal-width columns (default 36pt
+   *  = 720 twips per the spec). */
+  spacePt: number;
+  /** `@w:equalWidth` (default true) — all columns share one width + `spacePt`.
+   *  When false, `cols` carries explicit per-column geometry. */
+  equalWidth: boolean;
+  /** `@w:sep` — draw vertical separator rules between columns. */
+  sep: boolean;
+  /** Per-column `<w:col>` entries (width + trailing space, pt). Empty when
+   *  `equalWidth` is true. */
+  cols: ColSpec[];
+}
+
+/** ECMA-376 §17.6.3 `<w:col>` — one column's width and trailing space (pt). */
+export interface ColSpec {
+  widthPt: number;
+  spacePt: number;
 }
 
 export type BodyElement =
   | { type: 'paragraph' } & DocParagraph
   | { type: 'table' } & DocTable
-  | { type: 'pageBreak'; parity?: 'odd' | 'even' };
+  | { type: 'pageBreak'; parity?: 'odd' | 'even' }
+  /** ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following content
+   *  into the next newspaper column (or the next page's first column when
+   *  already in the last column). Hoisted to the body level by the parser. */
+  | { type: 'columnBreak' };
 
 /** A BodyElement annotated with a line range to render. Set when the
  *  paginator splits a paragraph that doesn't fit on a single page —
  *  `lineSlice` constrains which laid-out line indices the renderer paints,
  *  and the renderer adjusts the starting Y so the slice's first line begins
- *  at the page's content top. */
+ *  at the page's content top. `colIndex` records which newspaper column (0-based)
+ *  the element was placed in (ECMA-376 §17.6.4); absent / 0 for single-column
+ *  sections. */
 export type PaginatedBodyElement = BodyElement & {
   lineSlice?: { start: number; end: number };
+  colIndex?: number;
 };
 
 export interface DocParagraph {

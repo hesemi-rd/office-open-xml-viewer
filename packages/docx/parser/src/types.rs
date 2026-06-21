@@ -168,6 +168,42 @@ pub struct SectionProps {
     /// this instead of the font's natural line height.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_line_pitch: Option<f64>,
+    /// ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout for the
+    /// section. `None` when the section is single-column (`<w:cols>` absent or
+    /// `@w:num` <= 1), in which case the renderer keeps its single full-width
+    /// content column (unchanged behavior).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<ColumnsSpec>,
+}
+
+/// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnsSpec {
+    /// `@w:num` — number of columns (>= 2 when this struct is emitted).
+    pub count: usize,
+    /// `@w:space` in pt (converted from twips) — the inter-column gap used when
+    /// `equal_width` is true. Default 720 twips (36 pt) per the spec.
+    pub space_pt: f64,
+    /// `@w:equalWidth` — when true (the default), every column has the same
+    /// width and `space_pt` is the uniform gap; `cols` is empty. When false the
+    /// per-column `cols` entries define the geometry verbatim.
+    pub equal_width: bool,
+    /// `@w:sep` — draw vertical separator rules between columns.
+    pub sep: bool,
+    /// Per-column `<w:col>` entries (width + trailing space, pt). Empty when
+    /// `equal_width` is true.
+    pub cols: Vec<ColSpec>,
+}
+
+/// ECMA-376 §17.6.3 `<w:col>` — one column's width and trailing space.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColSpec {
+    /// `@w:w` — the column's width in pt (converted from twips).
+    pub width_pt: f64,
+    /// `@w:space` — space after this column in pt (converted from twips).
+    pub space_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -183,6 +219,13 @@ pub enum BodyElement {
         #[serde(skip_serializing_if = "Option::is_none")]
         parity: Option<String>,
     },
+    /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
+    /// content into the next newspaper column of the current section (or the
+    /// first column of the next page when already in the last column). Hoisted
+    /// to the body level (mirroring `PageBreak`) so the paginator can act on it
+    /// without inspecting runs mid-paragraph. In a single-column section it
+    /// behaves like a page break.
+    ColumnBreak,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

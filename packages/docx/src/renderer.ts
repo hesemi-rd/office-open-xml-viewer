@@ -559,9 +559,17 @@ export async function renderDocumentToCanvas(
     renderHeaderFooter(footer, footerTopY, baseState);
   }
 
-  // Body
+  // Body. ECMA-376 §17.6.4: lay out body text in the section's newspaper columns
+  // (one full-width column for a single-column section ⇒ unchanged path).
+  const columns = computeColumns(sec);
   const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale };
-  renderBodyElements(elements, bodyState);
+  // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
+  // so glyphs sit on top. A thin rule is centred in each inter-column gap and
+  // spans the content height.
+  if (sec.columns?.sep && columns.length > 1) {
+    drawColumnSeparators(ctx, columns, sec, scale);
+  }
+  renderBodyElements(elements, bodyState, columns);
 
   // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
   // the text column, above a short separator rule. The page area was already
@@ -806,6 +814,59 @@ function footnoteReserveHeightPt(
  * (ECMA-376 §17.11): the footnote bodies occupy the bottom of the text column,
  * so the body must stop short of them.
  */
+/** One newspaper column's page-absolute horizontal geometry (pt). `xPt` is the
+ *  column's left edge measured from the page's left edge (i.e. it already
+ *  includes `marginLeft`); `wPt` is the column's text width. */
+export interface ColumnGeom {
+  xPt: number;
+  wPt: number;
+}
+
+/**
+ * ECMA-376 §17.6.4 — resolve a section's newspaper columns to page-absolute
+ * left-x / width pairs (pt). The content band is `[marginLeft, pageWidth -
+ * marginRight]`; columns tile it left-to-right.
+ *
+ * - No columns (or count <= 1): one full-width column spanning the content band
+ *   (unchanged single-column behavior).
+ * - Equal width (`equalWidth`): `colW = (contentW - (count-1)*space) / count`;
+ *   column i sits at `marginLeft + i*(colW + space)`.
+ * - Explicit `<w:col>` widths: walk the columns, advancing x by each column's
+ *   own width + trailing space. The per-column widths/spaces are used verbatim
+ *   (Word writes them to sum to the content band).
+ *
+ * `colW` is clamped to a positive minimum so a malformed/over-wide spec never
+ * yields a zero/negative text width that would wedge line layout.
+ */
+export function computeColumns(section: SectionProps): ColumnGeom[] {
+  const contentW = section.pageWidth - section.marginLeft - section.marginRight;
+  const cols = section.columns;
+  if (!cols || cols.count <= 1) {
+    return [{ xPt: section.marginLeft, wPt: Math.max(1, contentW) }];
+  }
+
+  // Explicit per-column geometry (unequal widths).
+  if (!cols.equalWidth && cols.cols.length > 0) {
+    const out: ColumnGeom[] = [];
+    let x = section.marginLeft;
+    for (const c of cols.cols) {
+      out.push({ xPt: x, wPt: Math.max(1, c.widthPt) });
+      x += c.widthPt + c.spacePt;
+    }
+    return out;
+  }
+
+  // Equal-width columns separated by `space`.
+  const count = cols.count;
+  const space = cols.spacePt;
+  const colW = Math.max(1, (contentW - (count - 1) * space) / count);
+  const out: ColumnGeom[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push({ xPt: section.marginLeft + i * (colW + space), wPt: colW });
+  }
+  return out;
+}
+
 export function computePages(
   body: BodyElement[],
   section: SectionProps,
@@ -815,13 +876,23 @@ export function computePages(
   footnotes: DocNote[] = [],
 ): PaginatedBodyElement[][] {
   const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
-  const contentW = section.pageWidth - section.marginLeft - section.marginRight;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
   // footnote references are placed on the current page.
   const footnoteReservePt: number[] = [0];
+
+  // ECMA-376 §17.6.4 newspaper columns. For a single-column section this is one
+  // full-width column, so the loop below behaves exactly as before. `colIndex`
+  // tracks which column we are filling; `colX()`/`colW()` give its page-absolute
+  // left edge and text width (pt). Measurement uses the column width (not the
+  // full content band) and the column's left x as the float-window paraX, so
+  // square floats only constrain the column(s) their x-range intersects.
+  const columns = computeColumns(section);
+  let colIndex = 0;
+  const colX = () => columns[colIndex].xPt;
+  const colW = () => columns[colIndex].wPt;
 
   const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
@@ -856,13 +927,34 @@ export function computePages(
     if (pages[pages.length - 1].length > 0) {
       pages.push([]);
       y = 0;
+      colIndex = 0;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
+      // Floats are PAGE-scoped (ECMA-376 §20.4.2.x): a new page starts with a
+      // clean float set. Columns of the SAME page share floats (see nextColumn).
       measureState.floats = [];
       measureState.floatParaSeq = 0;
       startPageBookkeeping();
     }
+  };
+  // Advance to the next newspaper column of the CURRENT page: reset the vertical
+  // cursor to the column top but KEEP the page's floats (they are page-scoped, so
+  // a full-width wrapTopAndBottom band still pushes down every column's first
+  // line, and a square float keeps constraining the columns its x-range covers).
+  // No new page is pushed and footnote reserve is untouched (same page).
+  const nextColumn = () => {
+    colIndex++;
+    y = 0;
+    prevPara = null;
+    prevSpaceAfter = 0;
+    measureState.y = section.marginTop;
+  };
+  // Overflow handler shared by element placement and paragraph/table splitting:
+  // move to the next column if one remains on this page, otherwise to a new page.
+  const nextColumnOrPage = () => {
+    if (colIndex < columns.length - 1) nextColumn();
+    else newPage();
   };
 
   // A paragraph-anchored floating object (wp:anchor with positionV
@@ -924,16 +1016,32 @@ export function computePages(
       // next begins on a new page. Using the full paragraph is safer for a
       // single-line next; for multi-line we rely on that paragraph's own
       // break logic after placing.
-      return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, contentW, false);
+      return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, colW(), false);
     }
     if (nxt.type === 'table') {
-      return estimateTableHeight(measureState, nxt as unknown as DocTable, contentW);
+      return estimateTableHeight(measureState, nxt as unknown as DocTable, colW());
     }
     return 0;
   };
 
+  // Stamp the active newspaper column on an element and push it onto the current
+  // page. For single-column sections colIndex is always 0 (the renderer treats
+  // 0/absent identically), so this is behaviour-neutral there.
+  const pushTagged = (el: PaginatedBodyElement) => {
+    el.colIndex = colIndex;
+    pages[pages.length - 1].push(el);
+  };
+
   for (let i = 0; i < body.length; i++) {
     const el = body[i];
+    if (el.type === 'columnBreak') {
+      // ECMA-376 §17.3.1.20 <w:br w:type="column"/>: force the next column (or a
+      // new page's first column when already in the last column — newPage() no-ops
+      // on an empty page, so a column break in the last column of an as-yet-empty
+      // page simply stays put).
+      nextColumnOrPage();
+      continue;
+    }
     if (el.type === 'pageBreak') {
       pages.push([]);
       y = 0;
@@ -973,10 +1081,17 @@ export function computePages(
       // which caused page 2 of demo/sample-1 to spill past the bottom
       // margin). The renderer runs the same registerAnchorFloats call; by
       // mirroring it here the paginator sees the same layout.
+      // Snapshot the float set + paraSeq BEFORE this paragraph registers, so a
+      // relocation to the NEXT COLUMN (which keeps page floats) can roll back this
+      // paragraph's own floats and re-register them at the new column position
+      // without leaving stale duplicates. (A relocation to a new PAGE clears
+      // floats wholesale via newPage(), so this snapshot is unused there.)
+      const floatsBefore = measureState.floats.length;
+      const floatSeqBefore = measureState.floatParaSeq;
       const paragraphAnchorY = measureState.y + effectiveBefore;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
-      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
+      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX());
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
       // body must stop short of the footnote area. Measure the footnotes this
@@ -994,7 +1109,7 @@ export function computePages(
           const note = noteById.get(ids[k]);
           if (!note) continue;
           const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
-          sum += footnoteReserveHeightPt(note, measureState, contentW, firstOnPage);
+          sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
         }
         return sum;
       };
@@ -1041,18 +1156,28 @@ export function computePages(
       // (Word's default behaviour). A keep-on-page float forces relocation too.
       const keepIntact = para.keepLines || needNext > 0 || addReservePt > 0;
       if (breakForFloat || (overflowsHere && keepIntact && needed <= effContentH())) {
-        newPage();
-        // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
-        // this is a REPLACE of the earlier register at the top of the loop (whose
-        // floats were just discarded), not an augment: this paragraph is now the
-        // first registrant on the fresh page and gets paraId 0 — exactly matching
-        // the renderer, which re-registers it from a fresh per-page state. The
-        // re-anchoring against the new page top keeps wrap-around estimates for
-        // this and later paragraphs at the correct (post-break) Y.
-        registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
-        // The references move to the new page; nothing was reserved there yet,
-        // so the separator region still applies to the first footnote.
-        if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
+        const pagesBeforeRelocate = pages.length;
+        nextColumnOrPage();
+        const movedToNewPage = pages.length > pagesBeforeRelocate;
+        if (movedToNewPage) {
+          // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
+          // this is a REPLACE of the earlier register at the top of the loop (whose
+          // floats were just discarded): this paragraph is now the first registrant
+          // on the fresh page and gets paraId 0 — matching the renderer, which
+          // re-registers from a fresh per-page state.
+          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+          // The references move to the new page; nothing was reserved there yet,
+          // so the separator region still applies to the first footnote.
+          if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
+        } else {
+          // Moved to the NEXT COLUMN of the same page. Page floats persist, but
+          // this paragraph's own floats were anchored at the previous column's Y —
+          // roll them back and re-register against the new column top so wrap
+          // estimates for this paragraph (and later ones) use the right band.
+          measureState.floats.length = floatsBefore;
+          measureState.floatParaSeq = floatSeqBefore;
+          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+        }
       }
 
       // ECMA-376 places no "a paragraph must fit on one page" requirement — Word
@@ -1070,13 +1195,18 @@ export function computePages(
       const splittable = !para.keepLines || h > pageContentH;
       if (fitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
-          measureState, para, contentW, suppressBefore, section.marginLeft,
+          measureState, para, colW(), suppressBefore, colX(),
           y, pageContentH, pages,
-          () => { newPage(); },
+          // Overflow during the split advances to the next column first, then a
+          // new page (newspaper fill). Each slice is tagged with the column it
+          // landed in via the colIndex thunk.
+          () => { nextColumnOrPage(); },
+          () => colIndex,
         );
-        // After splitting, `y` is the bottom of the last slice on the
-        // current page (continues for the LAST slice; intermediate slices
-        // filled their pages exactly, so newPage was called between them).
+        // After splitting, `y` is the bottom of the last slice in the
+        // current column (continues for the LAST slice; intermediate slices
+        // filled their column/page exactly, so the break callback ran between
+        // them).
         y = placed.endY;
         measureState.y = section.marginTop + placed.endY;
         // A split footnote-bearing paragraph reserves on the page where it
@@ -1086,7 +1216,7 @@ export function computePages(
           addReservePt = sumReserve(newRefIds);
         }
       } else {
-        pages[pages.length - 1].push(el as PaginatedBodyElement);
+        pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
       }
@@ -1102,7 +1232,9 @@ export function computePages(
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
-      const rowHs = computeTableRowHeights(measureState, tbl, contentW);
+      // Tables in a multi-column section are sized to the column width, not the
+      // full content band.
+      const rowHs = computeTableRowHeights(measureState, tbl, colW());
       const h = rowHs.reduce((s, x) => s + x, 0);
       // Footnote references inside table cells are not folded into the reserve
       // (the per-page reserve is driven by body paragraphs); they still draw at
@@ -1110,16 +1242,19 @@ export function computePages(
       // reserve already accumulated on this page.
       const tableContentH = effContentH();
       if (h > tableContentH) {
-        // Taller than a full page: split row-by-row so the overflow continues
-        // onto the next page instead of being clipped (ECMA-376 table
-        // pagination). Tables that fit on a page keep the simple place-whole
-        // path below.
-        const endY = splitTableAcrossPages(tbl, rowHs, y, tableContentH, pages, () => newPage());
+        // Taller than a full column: split row-by-row so the overflow continues
+        // into the next column / page instead of being clipped (ECMA-376 table
+        // pagination). Tables that fit keep the simple place-whole path below.
+        const endY = splitTableAcrossPages(
+          tbl, rowHs, y, tableContentH, pages,
+          () => { nextColumnOrPage(); },
+          () => colIndex,
+        );
         y = endY;
         measureState.y = section.marginTop + endY;
       } else {
-        if (y + h > tableContentH) newPage();
-        pages[pages.length - 1].push(el);
+        if (y + h > tableContentH) nextColumnOrPage();
+        pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
       }
@@ -1365,7 +1500,16 @@ function splitParagraphAcrossPages(
   contentH: number,
   pages: PaginatedBodyElement[][],
   newPage: () => void,
+  /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
+   *  `newPage()` (which may advance the column). When provided, every emitted
+   *  slice is tagged with the column it landed in so the renderer flows it in the
+   *  right column. Omitted (single-column / direct unit tests) ⇒ no tag. */
+  tagColIndex?: () => number,
 ): { endY: number } {
+  const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
+    if (tagColIndex) el.colIndex = tagColIndex();
+    return el;
+  };
   const indLeft = para.indentLeft;
   const indRight = para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
@@ -1390,7 +1534,7 @@ function splitParagraphAcrossPages(
       top = 0;
       markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     }
-    pages[pages.length - 1].push(para as PaginatedBodyElement);
+    pages[pages.length - 1].push(stamp(para as PaginatedBodyElement));
     return { endY: top + markH };
   };
   const segs = buildSegments(para.runs, measureState);
@@ -1478,11 +1622,11 @@ function splitParagraphAcrossPages(
     }
     const isFinalSlice = lastFitting === lines.length;
     if (isFinalSlice) usedH += spaceAfter;
-    pages[pages.length - 1].push({
+    pages[pages.length - 1].push(stamp({
       ...(para as object),
       type: 'paragraph',
       lineSlice: { start: firstFitting, end: lastFitting },
-    } as PaginatedBodyElement);
+    } as PaginatedBodyElement));
     lineIdx = lastFitting;
     cursorY += usedH;
     if (!isFinalSlice) {
@@ -1819,6 +1963,10 @@ export function splitTableAcrossPages(
   contentH: number,
   pages: PaginatedBodyElement[][],
   newPage: () => void,
+  /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
+   *  `newPage()`. When provided, each table slice is tagged with its column.
+   *  Omitted (single-column / direct unit tests) ⇒ no tag. */
+  tagColIndex?: () => number,
 ): number {
   const n = table.rows.length;
   // Leading tblHeader rows repeat on each continuation page.
@@ -1846,7 +1994,9 @@ export function splitTableAcrossPages(
 
     const bodyRows = table.rows.slice(start, end);
     const sliceRows = isContinuation ? [...headerRows, ...bodyRows] : bodyRows;
-    pages[pages.length - 1].push({ ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement);
+    const sliceEl = { ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement;
+    if (tagColIndex) sliceEl.colIndex = tagColIndex();
+    pages[pages.length - 1].push(sliceEl);
 
     y += used;
     start = end;
@@ -1919,10 +2069,64 @@ function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): bo
   return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
 }
 
-function renderBodyElements(elements: PaginatedBodyElement[], state: RenderState): void {
+/** ECMA-376 §17.6.4 `<w:cols w:sep="1">` — draw a thin vertical rule centred in
+ *  each inter-column gap, spanning the section's content height. The spec does
+ *  not prescribe a width/colour; Word draws a hairline, so we use ~0.5pt in the
+ *  default text colour (matching the footnote separator convention). */
+function drawColumnSeparators(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  columns: ColumnGeom[],
+  sec: SectionProps,
+  scale: number,
+): void {
+  const topY = sec.marginTop * scale;
+  const botY = (sec.pageHeight - sec.marginBottom) * scale;
+  ctx.save();
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
+  for (let i = 0; i < columns.length - 1; i++) {
+    const gapStart = columns[i].xPt + columns[i].wPt;
+    const gapEnd = columns[i + 1].xPt;
+    const midX = Math.round(((gapStart + gapEnd) / 2) * scale) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(midX, topY);
+    ctx.lineTo(midX, botY);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function renderBodyElements(
+  elements: PaginatedBodyElement[],
+  state: RenderState,
+  /** ECMA-376 §17.6.4 — page-absolute column geometry (pt). When provided and
+   *  the page spans multiple columns, the flow is reset to each element's tagged
+   *  column. Omitted (header/footer, single-column) ⇒ the state's existing
+   *  full-width contentX/contentW is used unchanged. */
+  columns?: ColumnGeom[],
+): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
+  // The column whose flow `state` is currently set to. Starts at -1 so the first
+  // element always seeds the column (when `columns` drives multi-column layout).
+  let activeCol = -1;
+  const multiCol = !!columns && columns.length > 1;
   for (const el of elements) {
+    // Reset the flow when this element belongs to a different newspaper column
+    // than the one currently set up (also seeds the first element). Floats are
+    // NOT cleared here — they are page-scoped and the per-page fresh bodyState
+    // already gave a clean set, so a full-width wrapTopAndBottom band still
+    // pushes down every column and square floats keep constraining their columns.
+    const elCol = el.colIndex ?? 0;
+    if (multiCol && elCol !== activeCol) {
+      const col = columns[Math.min(elCol, columns.length - 1)];
+      state.contentX = col.xPt * state.scale;
+      state.contentW = col.wPt * state.scale;
+      state.y = state.marginTop * state.scale;
+      prevPara = null;
+      prevSpaceAfter = 0;
+      activeCol = elCol;
+    }
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
       const slice = (el as PaginatedBodyElement).lineSlice;

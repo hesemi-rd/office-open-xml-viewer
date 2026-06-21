@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computePages } from './renderer.js';
+import { computePages, computeColumns } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement } from './types';
 
 // Unit tests for computePages pagination behaviour that the renderer-path VRT
@@ -118,6 +118,20 @@ function paraWith(runs: DocRun[], opts: { fontSize?: number } = {}): BodyElement
 const sliceOf = (el: PaginatedBodyElement) =>
   (el as { lineSlice?: { start: number; end: number } }).lineSlice;
 
+const colOf = (el: PaginatedBodyElement) => el.colIndex;
+
+/** A body-level column break (ECMA-376 §17.3.1.20, hoisted by the parser). */
+const colBreak = (): BodyElement => ({ type: 'columnBreak' } as BodyElement);
+
+/** Text of a paragraph element (joins its text runs). */
+const textOf = (el: PaginatedBodyElement): string =>
+  el.type === 'paragraph'
+    ? (el as unknown as DocParagraph).runs
+        .filter((r) => r.type === 'text')
+        .map((r) => (r as DocxTextRun).text)
+        .join('')
+    : '';
+
 describe('computePages — empty-paragraph relocation (C2: §17.3.1.29)', () => {
   it('moves an unsplittable mark-only paragraph to the next page instead of overflowing the bottom margin', () => {
     // content height = 140 - 40 = 100; each empty mark = 20px → exactly 5 per page.
@@ -190,5 +204,196 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
     ];
     const pages = computePages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
+  });
+});
+
+// ===== ECMA-376 §17.6.4 multi-column sections =====
+
+describe('computeColumns — geometry (§17.6.4)', () => {
+  it('count<=1 / no columns → one full-width column', () => {
+    const cols = computeColumns(section());
+    // contentW = 200 - 20 - 20 = 160; left = marginLeft = 20.
+    expect(cols).toEqual([{ xPt: 20, wPt: 160 }]);
+    // Explicit count:1 behaves the same.
+    expect(computeColumns(section({ columns: { count: 1, spacePt: 36, equalWidth: true, sep: false, cols: [] } })))
+      .toEqual([{ xPt: 20, wPt: 160 }]);
+  });
+
+  it('2 equal columns with a given space → correct x/w', () => {
+    const cols = computeColumns(section({
+      columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] },
+    }));
+    // colW = (160 - 1*20)/2 = 70. col0 at 20, col1 at 20 + 70 + 20 = 110.
+    expect(cols).toEqual([
+      { xPt: 20, wPt: 70 },
+      { xPt: 110, wPt: 70 },
+    ]);
+  });
+
+  it('3 equal columns tile the content band', () => {
+    const cols = computeColumns(section({
+      columns: { count: 3, spacePt: 10, equalWidth: true, sep: false, cols: [] },
+    }));
+    // colW = (160 - 2*10)/3 = 46.6667. Starts: 20, 76.6667, 133.3333.
+    expect(cols).toHaveLength(3);
+    expect(cols[0].xPt).toBeCloseTo(20, 6);
+    expect(cols[0].wPt).toBeCloseTo(140 / 3, 6);
+    expect(cols[1].xPt).toBeCloseTo(20 + 140 / 3 + 10, 6);
+    expect(cols[2].xPt).toBeCloseTo(20 + 2 * (140 / 3 + 10), 6);
+  });
+
+  it('explicit <w:col> widths are used verbatim', () => {
+    const cols = computeColumns(section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    }));
+    // col0 at marginLeft=20, w=100; col1 at 20 + 100 + 12 = 132, w=48.
+    expect(cols).toEqual([
+      { xPt: 20, wPt: 100 },
+      { xPt: 132, wPt: 48 },
+    ]);
+  });
+});
+
+describe('computePages — newspaper column flow (§17.6.4)', () => {
+  const twoCol = (): SectionProps =>
+    section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
+
+  // Geometry: page content height = 140 - 40 = 100; each single-line para = 20px
+  // ⇒ 5 lines fill a column. colW = (160-20)/2 = 70.
+
+  it('overflowing paragraphs flow into column 1 on the SAME page (pages.length unchanged)', () => {
+    // 7 single-line paragraphs: 5 fill column 0, 2 spill into column 1 — still 1 page.
+    const body = Array.from({ length: 7 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(1);
+    expect(pages[0]).toHaveLength(7);
+    // First 5 in column 0, last 2 in column 1.
+    expect(pages[0].slice(0, 5).map(colOf)).toEqual([0, 0, 0, 0, 0]);
+    expect(pages[0].slice(5).map(colOf)).toEqual([1, 1]);
+  });
+
+  it('fills both columns before starting a new page', () => {
+    // 11 single-line paras: col0=5, col1=5, then the 11th starts page 2 col0.
+    const body = Array.from({ length: 11 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(2);
+    expect(pages[0]).toHaveLength(10);
+    expect(pages[0].slice(0, 5).every((el) => colOf(el) === 0)).toBe(true);
+    expect(pages[0].slice(5).every((el) => colOf(el) === 1)).toBe(true);
+    expect(pages[1]).toHaveLength(1);
+    expect(colOf(pages[1][0])).toBe(0); // new page resets to column 0
+  });
+
+  it('measures at the column width: a paragraph wraps to MORE lines than at full width', () => {
+    // 6 CJK chars. Full width (160 → 8/line) = 1 line. Column width (70 → 3/line) = 2 lines.
+    const sixChars = 'あ'.repeat(6);
+    // Single-column baseline: one line, easily 1 page.
+    const single = computePages([para({ text: sixChars, fontSize: 20 })], section(), makeCtx());
+    expect(single.length).toBe(1);
+    expect(sliceOf(single[0][0])).toBeUndefined(); // not split — fits on one line
+
+    // Two-column: 70/20 = 3 chars/line ⇒ the same paragraph needs 2 lines. Fill
+    // column 0 with 4 single-line paras (4 lines), so only 1 line is left in
+    // column 0; the 2-line paragraph cannot fit there and is pushed to column 1.
+    const body = [
+      ...Array.from({ length: 4 }, (_, i) => para({ text: `p${i}`, fontSize: 20 })),
+      para({ text: sixChars, fontSize: 20 }),
+    ];
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(1);
+    // The 2-line paragraph (proof it wrapped to >1 line at column width) moved to
+    // column 1 because only one line of room remained in column 0.
+    const wrapped = pages[0].find((el) => textOf(el) === sixChars);
+    expect(wrapped).toBeDefined();
+    expect(colOf(wrapped as PaginatedBodyElement)).toBe(1);
+  });
+
+  it('a long paragraph splits across columns of the same page', () => {
+    // 18 CJK chars at column width (3/line) = 6 lines. Column holds 5 lines, so it
+    // splits: 5 lines in column 0, 1 line in column 1 (widowControl off to keep the
+    // greedy split deterministic) — both on page 1.
+    const body = [para({ text: 'あ'.repeat(18), fontSize: 20, widowControl: false })];
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(1);
+    expect(pages[0]).toHaveLength(2);
+    expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 5 });
+    expect(colOf(pages[0][0])).toBe(0);
+    expect(sliceOf(pages[0][1])).toEqual({ start: 5, end: 6 });
+    expect(colOf(pages[0][1])).toBe(1);
+  });
+});
+
+describe('computePages — explicit column break (§17.3.1.20)', () => {
+  const twoCol = (): SectionProps =>
+    section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
+
+  it('a column break forces the next paragraph into column 1 (same page)', () => {
+    const body = [
+      para({ text: 'a', fontSize: 20 }),
+      colBreak(),
+      para({ text: 'b', fontSize: 20 }),
+    ];
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(1);
+    // The break is consumed (not emitted as a body element); two paragraphs remain.
+    const paras = pages[0].filter((el) => el.type === 'paragraph');
+    expect(paras).toHaveLength(2);
+    expect(colOf(paras[0])).toBe(0);
+    expect(colOf(paras[1])).toBe(1);
+  });
+
+  it('a column break in the LAST column moves to the next page (column 0)', () => {
+    const body = [
+      para({ text: 'a', fontSize: 20 }),
+      colBreak(), // → column 1
+      para({ text: 'b', fontSize: 20 }),
+      colBreak(), // last column → page 2, column 0
+      para({ text: 'c', fontSize: 20 }),
+    ];
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(2);
+    expect(colOf(pages[0].filter((e) => e.type === 'paragraph')[0])).toBe(0); // a
+    expect(colOf(pages[0].filter((e) => e.type === 'paragraph')[1])).toBe(1); // b
+    expect(textOf(pages[1][0])).toBe('c');
+    expect(colOf(pages[1][0])).toBe(0); // c on page 2, column 0
+  });
+});
+
+describe('computePages — single-column regression (§17.6.4 absent)', () => {
+  it('a single-column section paginates identically (no colIndex > 0, full width)', () => {
+    // Reuse the empty-paragraph relocation scenario: 7 empty paras, 5/page.
+    const body = Array.from({ length: 7 }, () => para());
+    const withCols = computePages(body, section(), makeCtx());
+    expect(withCols.length).toBe(2);
+    expect(withCols[0].length).toBe(5);
+    expect(withCols[1].length).toBe(2);
+    // Every placed element is column 0 (or untagged) — never a higher column.
+    for (const page of withCols) {
+      for (const el of page) expect(colOf(el) ?? 0).toBe(0);
+    }
+  });
+
+  it('a wrapping paragraph splits the same way single-column as before', () => {
+    // 48 CJK chars at full width (8/line) = 6 lines; 5 fit per page; widowControl
+    // off ⇒ greedy 5 + 1. Identical to the pre-column behavior (guards no regression).
+    const pages = computePages(
+      [para({ text: 'あ'.repeat(48), fontSize: 20, widowControl: false })],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(2);
+    expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 5 });
+    expect(sliceOf(pages[1][0])).toEqual({ start: 5, end: 6 });
+    expect(colOf(pages[0][0]) ?? 0).toBe(0);
+    expect(colOf(pages[1][0]) ?? 0).toBe(0);
   });
 });

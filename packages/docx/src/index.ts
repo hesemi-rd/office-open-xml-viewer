@@ -7,6 +7,9 @@ export type {
   DocxDocumentModel,
   DocSettings,
   SectionProps,
+  // Multi-column section sub-types (reachable via SectionProps.columns).
+  ColumnsSpec,
+  ColSpec,
   HeadersFooters,
   HeaderFooter,
   NumberingInfo,
