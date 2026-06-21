@@ -2246,6 +2246,9 @@ fn parse_inline_drawing(
             // Inline image: not a float, so the overlap constraint is moot.
             // Carry the spec no-constraint value (true).
             allow_overlap: true,
+            // Inline images have no wp:align (positionH/V is anchor-only).
+            anchor_x_align: None,
+            anchor_y_align: None,
         })];
     }
 
@@ -2385,6 +2388,12 @@ fn parse_inline_drawing(
         dist_right: anchor_meta.dist_right,
         wrap_side: anchor_meta.wrap_side.clone(),
         allow_overlap: anchor_meta.allow_overlap,
+        // ECMA-376 §20.4.3.1 wp:align (positionH/V). Mirrors the ShapeRun
+        // `apply_pos_meta` path so a `<wp:align>center</wp:align>` anchor image
+        // is centered within its relativeFrom container instead of pinned to
+        // the discarded posOffset. `None` falls back to the offset path.
+        anchor_x_align: x_align.clone(),
+        anchor_y_align: y_align.clone(),
     })]
 }
 
@@ -2792,6 +2801,16 @@ fn parse_group_pic(
         dist_right: anchor_meta.dist_right,
         wrap_side: anchor_meta.wrap_side.clone(),
         allow_overlap: anchor_meta.allow_overlap,
+        // wgp child images are positioned by the group transform chain:
+        // anchor_x_pt / anchor_y_pt already carry the full page-absolute
+        // position (group page offset + the child's scaled in-group offset).
+        // The wgp ShapeRun path differs — it leaves the within-group offset in
+        // anchor_x_pt and lets resolveShapeBox center the GROUP via
+        // groupWidthPt — but ImageRun carries no group dimensions, so honoring
+        // align here would double-count the offset. Leave align unset; group
+        // align (if any) is already baked into anchor_x_pt by parse_wgp_images.
+        anchor_x_align: None,
+        anchor_y_align: None,
     })
 }
 
@@ -5795,6 +5814,8 @@ mod svg_blip_tests {
             dist_right: 0.0,
             wrap_side: None,
             allow_overlap: true,
+            anchor_x_align: None,
+            anchor_y_align: None,
         };
         let json = serde_json::to_string(&run).expect("serialize");
         assert!(

@@ -1037,6 +1037,18 @@ pub struct ImageRun {
     /// `false` mandates the renderer reposition the object to prevent any overlap.
     /// Inline images carry true (the no-constraint value).
     pub allow_overlap: bool,
+    /// ECMA-376 §20.4.3.1 wp:align (positionH/wp:align). When present the
+    /// renderer centers / left-aligns / right-aligns the image within the
+    /// container indicated by `anchor_x_from_margin`. Values: "left",
+    /// "center", "right" (others fall back to "left"). Mirrors
+    /// `ShapeRun::anchor_x_align`. `None` for inline images and offset-based
+    /// anchors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_align: Option<String>,
+    /// Vertical equivalent of anchor_x_align (positionV/wp:align).
+    /// Values: "top", "center", "bottom".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_align: Option<String>,
 }
 
 fn is_zero_f64(v: &f64) -> bool {

@@ -705,6 +705,14 @@ export interface ImageRun {
    * reposition the object to prevent any overlap.
    */
   allowOverlap?: boolean;
+  /** ECMA-376 §20.4.3.1 wp:align horizontal: "left" | "center" | "right" |
+   *  "inside" | "outside". When set the renderer aligns the image inside the
+   *  container indicated by `anchorXFromMargin` and ignores `anchorXPt`.
+   *  Mirrors {@link ShapeRun.anchorXAlign}. Absent for inline images and
+   *  offset-based anchors. */
+  anchorXAlign?: string | null;
+  /** Vertical equivalent of anchorXAlign: "top" | "center" | "bottom". */
+  anchorYAlign?: string | null;
 }
 
 // ===== Table =====
