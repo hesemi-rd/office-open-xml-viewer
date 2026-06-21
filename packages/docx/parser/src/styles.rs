@@ -31,8 +31,16 @@ pub struct RunFmt {
     pub small_caps: Option<bool>,
     /// Double strikethrough (w:dstrike)
     pub dstrike: Option<bool>,
-    /// Hidden text — run should not be rendered (w:vanish / w:webHidden)
+    /// ECMA-376 §17.3.2.41 w:vanish — "Hidden Text". Hidden in the normal
+    /// (print/page) view this renderer produces, so the parser skips the run.
+    /// This is NOT `webHidden`: vanish hides in all non-web views.
     pub vanish: Option<bool>,
+    /// ECMA-376 §17.3.2.44 w:webHidden — text hidden ONLY when the document is
+    /// shown in *web page view* (§17.18.102). In the normal/print layout we
+    /// render, webHidden text is visible, so it must NOT set `vanish` (doing so
+    /// dropped TOC dot-leader tabs and PAGEREF page numbers, which Word marks
+    /// `<w:webHidden/>`). Preserved here so a future web-view mode can honor it.
+    pub web_hidden: Option<bool>,
     /// Highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     pub highlight: Option<String>,
     /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border drawn as a box around
@@ -594,6 +602,9 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.vanish.is_some() {
         dst.vanish = src.vanish;
     }
+    if src.web_hidden.is_some() {
+        dst.web_hidden = src.web_hidden;
+    }
     if src.highlight.is_some() {
         dst.highlight = src.highlight.clone();
     }
@@ -1006,8 +1017,13 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // Double strikethrough
     fmt.dstrike = bool_prop(rpr, "dstrike");
 
-    // Hidden text (vanish or webHidden)
-    fmt.vanish = bool_prop(rpr, "vanish").or_else(|| bool_prop(rpr, "webHidden"));
+    // Hidden text. §17.3.2.41 w:vanish hides the run in the normal/print view we
+    // render. §17.3.2.44 w:webHidden hides ONLY in web page view (§17.18.102),
+    // so it is recorded separately and must NOT feed `vanish` — otherwise TOC
+    // dot-leader tabs and PAGEREF page numbers (marked `<w:webHidden/>` by Word)
+    // would be dropped from the rendered page.
+    fmt.vanish = bool_prop(rpr, "vanish");
+    fmt.web_hidden = bool_prop(rpr, "webHidden");
 
     // Highlight
     if let Some(hl) = child_w(rpr, "highlight") {
@@ -1254,6 +1270,72 @@ mod tests {
     fn absent_color_element_stays_none_to_inherit() {
         let fmt = run_fmt_from(r#"<w:b/>"#);
         assert_eq!(fmt.color, None);
+    }
+
+    #[test]
+    fn vanish_hides_run_in_print_layout() {
+        // ECMA-376 §17.3.2.41 w:vanish — "Hidden Text". Hidden in the normal
+        // (print/page) view we render, so it sets the `vanish` flag the parser
+        // uses to skip the run.
+        let fmt = run_fmt_from(r#"<w:vanish/>"#);
+        assert_eq!(fmt.vanish, Some(true));
+        assert_eq!(fmt.web_hidden, None);
+    }
+
+    #[test]
+    fn web_hidden_does_not_vanish_in_print_layout() {
+        // ECMA-376 §17.3.2.44 w:webHidden — text hidden ONLY in *web page view*
+        // (§17.18.102), NOT in the normal/print layout this renderer produces.
+        // Conflating it with §17.3.2.41 w:vanish wrongly dropped TOC page numbers
+        // and dot-leader tab runs (which Word marks `<w:webHidden/>`) from the
+        // rendered page. webHidden must leave `vanish` unset so the run renders;
+        // the flag is preserved separately for a future web-view mode.
+        let fmt = run_fmt_from(r#"<w:webHidden/>"#);
+        assert_eq!(fmt.vanish, None);
+        assert_eq!(fmt.web_hidden, Some(true));
+    }
+
+    /// Minimal styles.xml mirroring sample-11's TOC1 (bold) / TOC2 (italic)
+    /// paragraph styles: both basedOn Normal with the toggle in the style's
+    /// direct `<w:rPr>`.
+    fn toc_style_map() -> StyleMap {
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="TOC1">
+                <w:name w:val="toc 1"/><w:basedOn w:val="Normal"/>
+                <w:rPr><w:b/><w:bCs/><w:sz w:val="20"/></w:rPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="TOC2">
+                <w:name w:val="toc 2"/><w:basedOn w:val="Normal"/>
+                <w:rPr><w:i/><w:iCs/><w:sz w:val="20"/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        StyleMap::parse(&xml)
+    }
+
+    #[test]
+    fn toc1_style_run_base_is_bold() {
+        // ECMA-376 §17.7.4 / §17.7.2: a paragraph style's direct `<w:rPr><w:b/>`
+        // resolves onto the run BASE for every run in a TOC1 paragraph, so the
+        // entry text, dot leader and page number all inherit bold unless a run
+        // overrides it directly. (sample-11 p6 ToC, report #5.)
+        let sm = toc_style_map();
+        let (_para, run) = sm.resolve_para(Some("TOC1"), None);
+        assert_eq!(run.bold, Some(true));
+    }
+
+    #[test]
+    fn toc2_style_run_base_is_italic() {
+        // §17.7.4 / §17.7.2: TOC2's `<w:rPr><w:i/>` resolves onto the run base —
+        // "Inline formatting" etc. inherit italic. (sample-11 p6 ToC, report #6.)
+        let sm = toc_style_map();
+        let (_para, run) = sm.resolve_para(Some("TOC2"), None);
+        assert_eq!(run.italic, Some(true));
     }
 
     // ===== Table style conditional rPr/pPr (§17.7.6 / §17.7.2) =====

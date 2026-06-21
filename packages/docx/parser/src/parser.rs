@@ -1328,17 +1328,31 @@ fn parse_paragraph_cond(
         .and_then(|s| attr_w(s, "val"));
 
     // Resolve base formatting from style (incl. table-style conditional rPr/pPr).
-    let (mut base_para, mut base_run) =
+    let (mut base_para, base_run) =
         style_map.resolve_para_cond(explicit_style_id.as_deref(), table_style_id, cond);
 
-    // Apply direct paragraph formatting overrides
+    // Apply direct paragraph formatting overrides.
+    //
+    // ECMA-376 §17.3.1.29: a paragraph's *direct* `pPr/rPr` is the run formatting
+    // of the PARAGRAPH MARK GLYPH only ("there is no run saved for the paragraph
+    // mark itself"). It is NOT a run default for the paragraph's content — content
+    // runs inherit their formatting from the paragraph style's rPr (§17.7.2), the
+    // character style, and their own direct rPr. So we must NOT fold the direct
+    // pPr/rPr into the content-inheritance `base_run`: doing so let a TOC entry's
+    // paragraph-mark `<w:b w:val="0"/>` / `<w:i w:val="0"/>` strip the TOC1/TOC2
+    // style's bold/italic from the visible entry text, dot leader and page number
+    // (sample-11 p6 ToC, reports #5/#6).
+    //
+    // The mark rPr still matters for an EMPTY paragraph, whose height comes from
+    // the mark glyph. We keep it in a separate `mark_run` used only for the
+    // `default_font_*` (empty-paragraph) metrics below.
+    let mut mark_run = base_run.clone();
     if let Some(ppr) = ppr_node {
         let direct = parse_para_fmt(ppr);
         apply_direct_para(&mut base_para, &direct);
-        // Also merge direct rPr
         if let Some(rpr) = child_w(ppr, "rPr") {
             let direct_run = parse_run_fmt(rpr);
-            apply_direct_run(&mut base_run, &direct_run);
+            apply_direct_run(&mut mark_run, &direct_run);
         }
     }
 
@@ -1516,13 +1530,16 @@ fn parse_paragraph_cond(
             .clone()
             .or_else(|| style_map.default_para_style_id().map(str::to_string))
             .or_else(|| Some("Normal".to_string())),
-        default_font_size: base_run.font_size,
+        // Empty-paragraph metrics come from the paragraph-mark glyph, whose
+        // formatting is the direct `pPr/rPr` (§17.3.1.29) layered over the style
+        // chain — i.e. `mark_run`, not the content `base_run`.
+        default_font_size: mark_run.font_size,
         // Resolve the paragraph's default font the same way runs do (ascii
         // first, then eastAsia, through theme refs) so empty paragraphs can be
         // sized with the intended font's line metrics.
         default_font_family: theme
-            .resolve_font_ref(base_run.font_family_ascii.clone())
-            .or_else(|| theme.resolve_font_ref(base_run.font_family_east_asia.clone())),
+            .resolve_font_ref(mark_run.font_family_ascii.clone())
+            .or_else(|| theme.resolve_font_ref(mark_run.font_family_east_asia.clone())),
         outline_level: base_para.outline_level,
         // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
         // chain + direct pPr. The renderer reads it as the paragraph base
@@ -4684,6 +4701,9 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.vanish.is_some() {
         base.vanish = direct.vanish;
     }
+    if direct.web_hidden.is_some() {
+        base.web_hidden = direct.web_hidden;
+    }
     if direct.highlight.is_some() {
         base.highlight = direct.highlight.clone();
     }
@@ -5114,6 +5134,127 @@ mod math_jc_tests {
                <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#,
         );
         assert_eq!(p.alignment, "left");
+    }
+}
+
+#[cfg(test)]
+mod para_mark_rpr_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    /// Style map with a paragraph style `Bolded` (basedOn Normal) whose direct
+    /// `<w:rPr>` turns bold on, and `Italicized` whose `<w:rPr>` turns italic on
+    /// — mirroring sample-11's TOC1/TOC2.
+    fn style_map() -> StyleMap {
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="Bolded">
+                <w:name w:val="Bolded"/><w:basedOn w:val="Normal"/>
+                <w:rPr><w:b/></w:rPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="Italicized">
+                <w:name w:val="Italicized"/><w:basedOn w:val="Normal"/>
+                <w:rPr><w:i/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        StyleMap::parse(&xml)
+    }
+
+    fn parse_p(inner: &str, sm: &StyleMap) -> DocParagraph {
+        let xml = format!(r#"<w:p xmlns:w="{w}">{inner}</w:p>"#, w = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_paragraph(
+            doc.root_element(),
+            sm,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+            None,
+        )
+    }
+
+    fn first_text(p: &DocParagraph) -> &TextRun {
+        p.runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .expect("a text run")
+    }
+
+    // ECMA-376 §17.3.1.29 + §17.7.2: a paragraph's *direct* `pPr/rPr` formats the
+    // PARAGRAPH MARK GLYPH only — it is NOT a run default for content. A content
+    // run with no own bold toggle must inherit the paragraph style's `<w:b/>`,
+    // even though the paragraph-mark rPr explicitly turns bold OFF. (sample-11 p6
+    // TOC1 report #5: the entry text/leader/page number stay bold.)
+    #[test]
+    fn para_mark_bold_off_does_not_strip_style_bold_from_content() {
+        let sm = style_map();
+        let p = parse_p(
+            r#"<w:pPr><w:pStyle w:val="Bolded"/><w:rPr><w:b w:val="0"/></w:rPr></w:pPr>
+               <w:r><w:t>entry</w:t></w:r>"#,
+            &sm,
+        );
+        assert!(first_text(&p).bold, "content inherits TOC-style bold");
+    }
+
+    // §17.3.1.29 + §17.7.2: same for italic (sample-11 p6 TOC2 report #6).
+    #[test]
+    fn para_mark_italic_off_does_not_strip_style_italic_from_content() {
+        let sm = style_map();
+        let p = parse_p(
+            r#"<w:pPr><w:pStyle w:val="Italicized"/><w:rPr><w:i w:val="0"/></w:rPr></w:pPr>
+               <w:r><w:t>entry</w:t></w:r>"#,
+            &sm,
+        );
+        assert!(first_text(&p).italic, "content inherits TOC-style italic");
+    }
+
+    // §17.3.2.30 — a content run that DIRECTLY sets a toggle still wins; the
+    // paragraph-mark change is irrelevant either way. Guards against a fix that
+    // would instead ignore direct run rPr.
+    #[test]
+    fn direct_run_bold_off_still_wins_over_style() {
+        let sm = style_map();
+        let p = parse_p(
+            r#"<w:pPr><w:pStyle w:val="Bolded"/></w:pPr>
+               <w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>entry</w:t></w:r>"#,
+            &sm,
+        );
+        assert!(
+            !first_text(&p).bold,
+            "a direct run b=0 overrides the paragraph style bold"
+        );
+    }
+
+    // §17.3.2.44 — a webHidden run (TOC page numbers, dot-leader tabs) renders in
+    // the normal/print view. It must NOT be dropped as if it were §17.3.2.41
+    // vanish. Here the page-number-like run survives parsing.
+    #[test]
+    fn web_hidden_run_survives_in_print_layout() {
+        let sm = style_map();
+        let p = parse_p(
+            r#"<w:pPr><w:pStyle w:val="Bolded"/></w:pPr>
+               <w:r><w:rPr><w:webHidden/></w:rPr><w:t>7</w:t></w:r>"#,
+            &sm,
+        );
+        let t = first_text(&p);
+        assert_eq!(t.text, "7");
+        assert!(
+            t.bold,
+            "the webHidden page number still inherits style bold"
+        );
     }
 }
 

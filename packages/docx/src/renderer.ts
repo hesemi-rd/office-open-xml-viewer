@@ -3565,7 +3565,7 @@ function renderParagraph(
       if ('isTab' in seg) {
         // Tabs render as blank space, optionally filled with a leader (TOC dots etc.).
         if (!dryRun && seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
-          drawTabLeader(ctx, seg.leader, x, baseline, seg.measuredWidth, seg.fontSize * scale, defaultColor);
+          drawTabLeader(ctx, seg.leader, x, baseline, seg.measuredWidth, seg.fontSize * scale, defaultColor, seg.bold, seg.italic);
         }
         x += seg.measuredWidth;
         continue;
@@ -3869,6 +3869,11 @@ interface LayoutTabSeg {
   measuredWidth: number;
   /** tab leader to fill the gap (e.g. TOC dot leaders); set during layout. */
   leader?: TabStop['leader'];
+  /** Bold/italic of the run carrying the tab (ECMA-376 §17.3.1.37 — the leader
+   *  characters take the formatting of the tab's run, e.g. a bold TOC1 entry's
+   *  dot leader is bold). Threaded so {@link drawTabLeader} can match the font. */
+  bold?: boolean;
+  italic?: boolean;
 }
 
 interface LayoutImageSeg {
@@ -4104,7 +4109,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       for (let i = 0; i < parts.length; i++) {
         if (parts[i].length > 0) pushTextPiece(parts[i], t, t.vertAlign);
         if (i < parts.length - 1) {
-          segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0 });
+          segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0, bold: t.bold, italic: t.italic });
         }
       }
     } else if (run.type === 'image') {
@@ -4863,6 +4868,8 @@ function drawTabLeader(
   width: number,
   fontPx: number,
   color: string,
+  bold?: boolean,
+  italic?: boolean,
 ): void {
   const ch =
     leader === 'hyphen'
@@ -4873,7 +4880,10 @@ function drawTabLeader(
           ? '·'
           : '.';
   ctx.save();
-  ctx.font = `${fontPx}px serif`;
+  // ECMA-376 §17.3.1.37: the leader fill takes the formatting of the tab's run,
+  // so a bold/italic TOC entry draws a bold/italic dot leader.
+  const style = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}`;
+  ctx.font = `${style}${fontPx}px serif`;
   ctx.fillStyle = color;
   const chW = ctx.measureText(ch).width;
   if (chW > 0) {
