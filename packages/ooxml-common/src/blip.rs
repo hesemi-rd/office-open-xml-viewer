@@ -64,6 +64,11 @@ pub fn mime_from_ext(path: &str) -> &'static str {
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
+        // Windows Metafile / Enhanced Metafile. Office embeds these for charts
+        // and diagrams; the renderer rasterizes WMF via a minimal player and
+        // skips EMF (a follow-up). The conventional MIME types per IANA / Windows.
+        "wmf" => "image/wmf",
+        "emf" => "image/emf",
         "mp3" => "audio/mpeg",
         "m4a" => "audio/mp4",
         "wav" => "audio/wav",
@@ -141,5 +146,17 @@ mod tests {
         assert_eq!(mime_from_ext("x.jpeg"), "image/jpeg");
         assert_eq!(mime_from_ext("x.webp"), "image/webp");
         assert_eq!(mime_from_ext("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn mime_table_covers_metafiles() {
+        // WMF/EMF blips (charts, diagrams) get the conventional metafile MIMEs,
+        // not the application/octet-stream fallback, so the renderer's content
+        // sniff has a sensible MIME to pair with each part.
+        assert_eq!(mime_from_ext("word/media/image1.wmf"), "image/wmf");
+        assert_eq!(mime_from_ext("ppt/media/image3.emf"), "image/emf");
+        // Case-insensitive, like the raster entries.
+        assert_eq!(mime_from_ext("a/b/CHART.WMF"), "image/wmf");
+        assert_eq!(mime_from_ext("x.EMF"), "image/emf");
     }
 }

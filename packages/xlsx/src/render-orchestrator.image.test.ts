@@ -18,6 +18,53 @@ class FakeBitmap {
   constructor(public readonly tag: string) {}
 }
 
+/** Build a minimal standard (non-placeable) WMF that draws one polyline, so the
+ *  shared core player produces non-empty geometry (→ a non-null bitmap). */
+function buildMinimalWmf(): Uint8Array {
+  const b: number[] = [];
+  const u16 = (v: number) => b.push(v & 0xff, (v >>> 8) & 0xff);
+  const i16 = (v: number) => u16(v & 0xffff);
+  const u32 = (v: number) => b.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+  u16(1); u16(9); u16(0x0300); u32(0); u16(8); u32(0); u16(0); // 18-byte header
+  const rec = (fn: number, params: number[]) => { u32(3 + params.length); u16(fn); for (const p of params) i16(p); };
+  rec(0x020b, [0, 0]);             // SETWINDOWORG
+  rec(0x020c, [100, 100]);         // SETWINDOWEXT
+  rec(0x02fa, [0, 1, 0, 0, 0]);    // CREATEPENINDIRECT (color as low/high words)
+  rec(0x012d, [0]);                // SELECTOBJECT
+  rec(0x0325, [2, 0, 0, 50, 50]);  // POLYLINE
+  u32(3); u16(0x0000);             // EOF
+  return new Uint8Array(b);
+}
+
+/** Build a true EMF (ENHMETAHEADER) header so isEmf detects it. */
+function buildEmfHeader(): Uint8Array {
+  const buf = new Uint8Array(48);
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(0, 1, true); // EMR_HEADER iType
+  dv.setUint32(40, 0x464d4520, true); // " EMF"
+  return buf;
+}
+
+/** Stub OffscreenCanvas (the WMF player's target) for the node test env. */
+function stubOffscreenCanvas(): void {
+  vi.stubGlobal(
+    'OffscreenCanvas',
+    class {
+      width: number;
+      height: number;
+      constructor(w: number, h: number) { this.width = w; this.height = h; }
+      getContext() {
+        return {
+          fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+          lineJoin: 'miter', lineCap: 'butt',
+          save() {}, restore() {}, beginPath() {}, closePath() {},
+          moveTo() {}, lineTo() {}, rect() {}, stroke() {}, fill() {},
+        };
+      }
+    },
+  );
+}
+
 /** Build a Worksheet with one top-level image and one group-leaf image, each at
  *  a distinct zip path, plus enough required fields to satisfy the type. */
 function worksheetWithImages(): Worksheet {
@@ -119,5 +166,51 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(src).toBe(bmp);
     expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.png', 'image/png');
     expect(createImageBitmap).toHaveBeenCalledTimes(1);
+  });
+
+  it('decodeImageSource rasterizes a WMF blip (no throw) instead of vanishing', async () => {
+    // A WMF blob used to throw in createImageBitmap; now decodeImageSource routes
+    // through core's decodeRasterOrMetafile, which sniffs + rasterizes it.
+    stubOffscreenCanvas();
+    vi.stubGlobal('createImageBitmap', vi.fn(async (s: { width: number; height: number }) =>
+      ({ width: s.width, height: s.height, close() {} }) as unknown as ImageBitmap));
+    const fetchImage = vi.fn(async (_p: string, _m: string) => new Blob([buildMinimalWmf() as BlobPart], { type: 'image/wmf' }));
+
+    const src = await decodeImageSource('xl/media/chart1.wmf', 'image/wmf', undefined, fetchImage, 100, 100);
+
+    expect(src).not.toBeNull();
+    expect((src as ImageBitmap).width).toBe(200); // wmfRasterTarget(100,100) → 200×200
+  });
+
+  it('decodeImageSource returns null for an unsupported metafile (true EMF), not a throw', async () => {
+    const cib = vi.fn(async () => ({ width: 1, height: 1, close() {} }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', cib);
+    const fetchImage = vi.fn(async (_p: string, _m: string) => new Blob([buildEmfHeader() as BlobPart], { type: 'image/emf' }));
+
+    const src = await decodeImageSource('xl/media/diagram.emf', 'image/emf', undefined, fetchImage, 100, 100);
+
+    expect(src).toBeNull();
+    expect(cib).not.toHaveBeenCalled(); // EMF branch never touches createImageBitmap
+  });
+
+  it('prefetchImages leaves an EMF-only image uncached (renderer skips a missing source)', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 1, height: 1, close() {} }) as unknown as ImageBitmap));
+    const ws = worksheetWithImages();
+    // Point the top-level image at an EMF; the group leaf stays a PNG.
+    ws.images[0].imagePath = 'xl/media/image1.emf';
+    ws.images[0].mimeType = 'image/emf';
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      path.endsWith('.emf')
+        ? new Blob([buildEmfHeader() as BlobPart], { type: mime })
+        : new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const cache = new Map<string, CanvasImageSource>();
+
+    await prefetchImages(ws, cache, fetchImage);
+
+    // EMF decoded to null → not cached; the PNG group leaf is cached.
+    expect(cache.has('xl/media/image1.emf')).toBe(false);
+    expect(cache.has('xl/media/image2.png')).toBe(true);
+    expect(cache.size).toBe(1);
   });
 });

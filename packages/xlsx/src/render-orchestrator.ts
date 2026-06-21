@@ -1,13 +1,24 @@
-import { defaultDpr, isHTMLCanvas, getCachedSvgImageByPath, type MathRenderer } from '@silurus/ooxml-core';
+import {
+  defaultDpr,
+  isHTMLCanvas,
+  getCachedSvgImageByPath,
+  decodeRasterOrMetafile,
+  EMU_PER_PT,
+  type MathRenderer,
+} from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
 
 /** What `prefetchImages` needs to decode one picture: the raster `imagePath`
- *  (also the cache key), its `mimeType`, and the optional svgBlip vector path. */
+ *  (also the cache key), its `mimeType`, the optional svgBlip vector path, and
+ *  the picture's intended draw size in points (sizes a metafile raster; 0 ⇒
+ *  decoder fallback). */
 interface ImageRef {
   imagePath: string;
   mimeType: string;
   svgImagePath?: string;
+  widthPt?: number;
+  heightPt?: number;
 }
 
 /** Fetch one image's bytes by zip path and decode them to a drawable
@@ -18,19 +29,29 @@ interface ImageRef {
  *  no `a:srcRect` crop, so the vector branch always applies when an svgBlip is
  *  present (cf. the contract's `!srcRect` gate).
  *
- *  Raster decodes to an `ImageBitmap` via `createImageBitmap`; the SVG vector
- *  original decodes to an `HTMLImageElement` via core's path-keyed
- *  `getCachedSvgImageByPath`, because `createImageBitmap` cannot rasterize SVG
- *  in every browser. Bytes are fetched lazily by zip path through `fetchImage`
- *  (twin of pptx/docx's `fetchImage`) instead of being inlined as base64. */
+ *  Raster decodes to an `ImageBitmap` through core's
+ *  {@link decodeRasterOrMetafile} (which content-sniffs the bytes: a WMF, which
+ *  `createImageBitmap` can't decode, is rasterized by the shared minimal player
+ *  at a size derived from `widthPt`/`heightPt`; a true EMF — or a WMF with no
+ *  geometry — resolves to `null`, so the picture is skipped rather than
+ *  crashing). The SVG vector original decodes to an `HTMLImageElement` via
+ *  core's path-keyed `getCachedSvgImageByPath`, because `createImageBitmap`
+ *  cannot rasterize SVG in every browser. Bytes are fetched lazily by zip path
+ *  through `fetchImage` (twin of pptx/docx's `fetchImage`) instead of being
+ *  inlined as base64.
+ *
+ *  Returns `null` for an unsupported metafile so the caller leaves the path
+ *  uncached and the renderer skips a missing source. */
 export async function decodeImageSource(
   imagePath: string,
   mimeType: string,
   svgImagePath: string | undefined,
   fetchImage: (path: string, mime: string) => Promise<Blob>,
-): Promise<CanvasImageSource> {
-  const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource> =>
-    createImageBitmap(await fetchImage(path, mime));
+  widthPt = 0,
+  heightPt = 0,
+): Promise<CanvasImageSource | null> {
+  const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource | null> =>
+    decodeRasterOrMetafile(await fetchImage(path, mime), { widthPt, heightPt });
   const dataIsSvg = mimeType === 'image/svg+xml';
   if (svgImagePath != null) {
     // Prefer the vector original; fall back to the raster fallback on decode
@@ -75,6 +96,9 @@ export async function prefetchImages(
           imagePath: img.imagePath,
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
+          // Saved EMU extent → pt sizes a metafile raster (0 ⇒ decoder fallback).
+          widthPt: img.nativeExtCx > 0 ? img.nativeExtCx / EMU_PER_PT : 0,
+          heightPt: img.nativeExtCy > 0 ? img.nativeExtCy / EMU_PER_PT : 0,
         });
       }
     }
@@ -87,6 +111,9 @@ export async function prefetchImages(
             imagePath: shape.geom.imagePath,
             mimeType: shape.geom.mimeType,
             svgImagePath: shape.geom.svgImagePath,
+            // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
+            widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
+            heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
           });
         }
       }
@@ -96,10 +123,17 @@ export async function prefetchImages(
   await Promise.all(
     [...uncached.values()].map(async (ref) => {
       try {
-        imageCache.set(
+        const src = await decodeImageSource(
           ref.imagePath,
-          await decodeImageSource(ref.imagePath, ref.mimeType, ref.svgImagePath, fetch),
+          ref.mimeType,
+          ref.svgImagePath,
+          fetch,
+          ref.widthPt,
+          ref.heightPt,
         );
+        // An unsupported metafile (e.g. true EMF) decodes to null — leave the
+        // path uncached so the renderer skips a missing source, like a failure.
+        if (src) imageCache.set(ref.imagePath, src);
       } catch {
         /* leave uncached; renderer skips a missing source */
       }

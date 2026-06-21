@@ -67,6 +67,20 @@ export { drawArrowHead } from './shape/arrow';
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
 // caller-supplied fetchImage(path, mimeType) and owns the object-URL lifecycle.
 export { getCachedSvgImageByPath, dropSvgImageCache } from './image/svg-image-by-path';
+// Shared WMF (Windows Metafile) player + the raster/metafile decoder all three
+// renderers route through, so a WMF/EMF blip (which `createImageBitmap` cannot
+// decode) rasterizes or is skipped gracefully instead of throwing and vanishing.
+// The docx-specific cosmetic window/device-frame suppression is gated behind
+// `suppressBoundaryFrame` (default off = spec-clean).
+export {
+  isWmf,
+  isEmf,
+  playWmf,
+  renderWmfToBitmap,
+  wmfRasterTarget,
+  decodeRasterOrMetafile,
+  type DecodeRasterOptions,
+} from './image/wmf';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /
