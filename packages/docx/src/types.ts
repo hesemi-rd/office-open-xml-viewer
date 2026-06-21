@@ -131,20 +131,62 @@ export interface SectionProps {
    *  "linesAndChars", auto line spacing multiplies against this pitch instead of
    *  the font's natural line height. */
   docGridLinePitch?: number | null;
+  /** ECMA-376 §17.6.5 w:docGrid/@w:charSpace (ST_DecimalNumber, signed). The
+   *  raw character-grid spacing in 1/4096ths of an em (NOT twips). When
+   *  docGridType is "linesAndChars" or "snapToChars", every full-width East-
+   *  Asian glyph occupies a fixed cell of width `fontSizePt + charSpace/4096` pt
+   *  (negative = tighter). Absent ⇒ East-Asian glyphs keep their natural em
+   *  advance. */
+  docGridCharSpace?: number | null;
+  /** ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout. `null`
+   *  (or absent) ⇒ single full-width column (unchanged behavior). When present,
+   *  body text flows top-to-bottom through `count` columns (newspaper fill);
+   *  see {@link computeColumns}. */
+  columns?: ColumnsSpec | null;
+}
+
+/** ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration. */
+export interface ColumnsSpec {
+  /** `@w:num` — number of columns (>= 2 when emitted). */
+  count: number;
+  /** `@w:space` in pt — inter-column gap for equal-width columns (default 36pt
+   *  = 720 twips per the spec). */
+  spacePt: number;
+  /** `@w:equalWidth` (default true) — all columns share one width + `spacePt`.
+   *  When false, `cols` carries explicit per-column geometry. */
+  equalWidth: boolean;
+  /** `@w:sep` — draw vertical separator rules between columns. */
+  sep: boolean;
+  /** Per-column `<w:col>` entries (width + trailing space, pt). Empty when
+   *  `equalWidth` is true. */
+  cols: ColSpec[];
+}
+
+/** ECMA-376 §17.6.3 `<w:col>` — one column's width and trailing space (pt). */
+export interface ColSpec {
+  widthPt: number;
+  spacePt: number;
 }
 
 export type BodyElement =
   | { type: 'paragraph' } & DocParagraph
   | { type: 'table' } & DocTable
-  | { type: 'pageBreak'; parity?: 'odd' | 'even' };
+  | { type: 'pageBreak'; parity?: 'odd' | 'even' }
+  /** ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following content
+   *  into the next newspaper column (or the next page's first column when
+   *  already in the last column). Hoisted to the body level by the parser. */
+  | { type: 'columnBreak' };
 
 /** A BodyElement annotated with a line range to render. Set when the
  *  paginator splits a paragraph that doesn't fit on a single page —
  *  `lineSlice` constrains which laid-out line indices the renderer paints,
  *  and the renderer adjusts the starting Y so the slice's first line begins
- *  at the page's content top. */
+ *  at the page's content top. `colIndex` records which newspaper column (0-based)
+ *  the element was placed in (ECMA-376 §17.6.4); absent / 0 for single-column
+ *  sections. */
 export type PaginatedBodyElement = BodyElement & {
   lineSlice?: { start: number; end: number };
+  colIndex?: number;
 };
 
 export interface DocParagraph {
@@ -253,6 +295,17 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
    *  Where body text starts after the marker on the first line. */
   suff: string;
+  /** ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
+   *  level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
+   *  renderer draws Latin marker chars (e.g. a decimal "1") with this family, so
+   *  a heading whose ascii=Times renders its auto-number in Times (serif) even
+   *  when eastAsia=Gothic. Absent ⇒ the renderer falls back to its default. */
+  fontFamily?: string | null;
+  /** ECMA-376 §17.3.2.26 eastAsia axis for the marker glyph (same resolution as
+   *  {@link NumberingInfo.fontFamily}). The renderer draws CJK marker chars with
+   *  this family. Absent ⇒ the renderer falls back to
+   *  {@link NumberingInfo.fontFamily}. */
+  fontFamilyEastAsia?: string | null;
 }
 
 export type DocRun =
@@ -337,6 +390,17 @@ export interface ShapeRun {
   /** `<a:xfrm flipV>` (§20.1.7.6) — mirror about the horizontal centre line. */
   flipV?: boolean;
   wrapMode?: string | null;
+  /** Padding top (pt). Anchor-only. Mirrors {@link ImageRun.distTop}; an anchored
+   *  wrap-shape uses these to size its float-exclusion band (ECMA-376 §20.4.2.x). */
+  distTop?: number;
+  /** Padding bottom (pt). Anchor-only. */
+  distBottom?: number;
+  /** Padding left (pt). Anchor-only. */
+  distLeft?: number;
+  /** Padding right (pt). Anchor-only. */
+  distRight?: number;
+  /** wrapText attribute: "bothSides" | "left" | "right" | "largest". */
+  wrapSide?: string | null;
   /** Text rendered INSIDE the shape's bounding box (`<wps:txbx><w:txbxContent>`). */
   textBlocks?: ShapeText[];
   /** "t" | "ctr" | "b" — vertical anchor for the shape's text body (`<wps:bodyPr @anchor>`). */
@@ -358,6 +422,25 @@ export interface LineEnd {
   len: string;
 }
 
+/** One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the
+ *  character-formatting fields of {@link ShapeText}; the renderer lays a
+ *  paragraph's {@link ShapeText.runs} out as rich text so mixed bold/non-bold
+ *  runs each keep their own font. */
+export interface ShapeTextRun {
+  text: string;
+  fontSizePt: number;
+  color?: string | null;
+  /** ECMA-376 §17.3.2.26 ascii axis (`<w:rFonts w:ascii>`), resolved through
+   *  docDefaults. Latin letters/digits in this run render with this family. */
+  fontFamily?: string | null;
+  /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+   *  through docDefaults. CJK characters in this run render with this family;
+   *  the renderer falls back to {@link ShapeTextRun.fontFamily} when absent. */
+  fontFamilyEastAsia?: string | null;
+  bold?: boolean;
+  italic?: boolean;
+}
+
 export interface ShapeText {
   text: string;
   fontSizePt: number;
@@ -365,7 +448,26 @@ export interface ShapeText {
   fontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** Per-run formatting for this paragraph (one entry per `<w:r>` with text).
+   *  When non-empty the renderer draws the block as rich text (each run's
+   *  font); otherwise it uses the single block-level format fields above
+   *  (image blocks / legacy single-format paragraphs). Absent for image-only
+   *  paragraphs. */
+  runs?: ShapeTextRun[];
   alignment: string;
+  /** Zip path of an inline image inside this text-box paragraph
+   *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
+   *  Absent for a text-only paragraph. */
+  imagePath?: string;
+  /** MIME type of the blip at {@link ShapeText.imagePath}. */
+  mimeType?: string;
+  /** Zip path of the vector original (`asvg:svgBlip` extension), preferred over
+   *  `imagePath` when present. */
+  svgImagePath?: string;
+  /** Inline image natural width in pt (from `<wp:extent cx>`). */
+  imageWidthPt?: number;
+  /** Inline image natural height in pt (from `<wp:extent cy>`). */
+  imageHeightPt?: number;
 }
 
 export type ShapeFill =
@@ -408,6 +510,15 @@ export interface DocxTextRun {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+   *  through the style chain + docDefaults. CJK code points in this run render
+   *  with this family; {@link DocxTextRun.fontFamily} keeps the conflated single-
+   *  font fallback (ascii → eastAsia) for paths that do not split per character.
+   *  The renderer routes consecutive CJK code points to this axis (the same per-
+   *  script rule {@link ShapeTextRun.fontFamilyEastAsia} uses), so a Gothic
+   *  eastAsia title sits beside a serif ascii number with no name heuristics.
+   *  Absent ⇒ the renderer falls back to {@link DocxTextRun.fontFamily}. */
+  fontFamilyEastAsia?: string | null;
   isLink: boolean;
   background: string | null;
   vertAlign: 'super' | 'sub' | null;

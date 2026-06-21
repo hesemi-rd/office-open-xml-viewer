@@ -94,6 +94,16 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         }
         document_settings = parse_document_settings(&settings_xml);
     }
+
+    // ECMA-376 §17.7.2 — record the document default run fonts on the theme so
+    // text-box paragraphs (extract_simple_paragraph_text) can inherit them when a
+    // run sets no explicit ascii/eastAsia typeface, exactly like body runs do via
+    // their base_run. `resolve_para(None, None)` is the docDefaults + default
+    // paragraph style ("Normal") chain — the same baseline the body resolves.
+    {
+        let (_def_para, def_run) = style_map.resolve_para(None, None);
+        theme.set_default_run_fonts(def_run.font_family_ascii, def_run.font_family_east_asia);
+    }
     let theme = theme;
 
     let media_map = load_media_map(&mut zip, &rel_map, "word/");
@@ -393,6 +403,14 @@ pub struct ThemeColors {
     /// Re-parsing per shape is fine — the cover usually has only a handful of
     /// shapes that take a fillRef, and theme XML is small.
     theme_xml: Option<String>,
+    /// ECMA-376 §17.7.2 `docDefaults`/`rPrDefault` (folded with the default
+    /// paragraph style) — the document's default run fonts, kept as RAW refs
+    /// (may be `@theme:…`, resolved via [`resolve_font_ref`]). Threaded onto the
+    /// theme so text-box paragraphs (`extract_simple_paragraph_text`) can inherit
+    /// them when a run sets no explicit ascii/eastAsia typeface — the SAME default
+    /// chain the body resolves, instead of falling back to None (→ sans-serif).
+    default_ascii_font: Option<String>,
+    default_east_asia_font: Option<String>,
 }
 
 impl ThemeColors {
@@ -407,6 +425,7 @@ impl ThemeColors {
                     map,
                     fonts,
                     theme_xml,
+                    ..Default::default()
                 }
             }
         };
@@ -465,6 +484,7 @@ impl ThemeColors {
             map,
             fonts,
             theme_xml,
+            ..Default::default()
         }
     }
 
@@ -490,6 +510,27 @@ impl ThemeColors {
             return self.resolve_font(r);
         }
         Some(s)
+    }
+
+    /// Record the document's default run fonts (ECMA-376 §17.7.2 docDefaults
+    /// folded with the default paragraph style), kept RAW (may be `@theme:…`).
+    /// Threaded onto the theme by the document loader so text-box paragraphs can
+    /// inherit them via [`default_ascii_font_ref`] / [`default_east_asia_font_ref`].
+    pub fn set_default_run_fonts(&mut self, ascii: Option<String>, east_asia: Option<String>) {
+        self.default_ascii_font = ascii;
+        self.default_east_asia_font = east_asia;
+    }
+
+    /// The document default ascii (Latin) run font, RESOLVED through any theme
+    /// reference. `None` when docDefaults set no ascii/hAnsi typeface.
+    pub fn default_ascii_font_ref(&self) -> Option<String> {
+        self.resolve_font_ref(self.default_ascii_font.clone())
+    }
+
+    /// The document default East Asian run font, RESOLVED through any theme
+    /// reference. `None` when docDefaults set no eastAsia typeface.
+    pub fn default_east_asia_font_ref(&self) -> Option<String> {
+        self.resolve_font_ref(self.default_east_asia_font.clone())
     }
 
     /// Read a theme typeface directly by group ("major" / "minor") and axis
@@ -697,26 +738,41 @@ fn parse_body_elements(
             "p" => {
                 let result =
                     parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, None);
-                let is_page_break_only = result.runs.len() == 1
-                    && matches!(
-                        result.runs[0],
+                let lone_break = if result.runs.len() == 1 {
+                    match &result.runs[0] {
                         DocRun::Break {
-                            break_type: BreakType::Page
-                        }
-                    );
-                if is_page_break_only {
-                    body.push(BodyElement::PageBreak { parity: None });
-                    continue;
+                            break_type: BreakType::Page,
+                        } => Some(BreakType::Page),
+                        DocRun::Break {
+                            break_type: BreakType::Column,
+                        } => Some(BreakType::Column),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                match lone_break {
+                    Some(BreakType::Page) => {
+                        body.push(BodyElement::PageBreak { parity: None });
+                        continue;
+                    }
+                    Some(BreakType::Column) => {
+                        body.push(BodyElement::ColumnBreak);
+                        continue;
+                    }
+                    _ => {}
                 }
-                // Mid-paragraph page breaks come from <w:br w:type="page"/>
-                // and from <w:lastRenderedPageBreak/>. Split the paragraph
-                // around them and emit BodyElement::PageBreak between the
-                // pieces — each piece keeps the same pPr so layout
-                // continues correctly on the next page.
+                // Mid-paragraph page / column breaks come from
+                // `<w:br w:type="page"/>` / `<w:br w:type="column"/>` (and the
+                // ignored `<w:lastRenderedPageBreak/>`). Split the paragraph
+                // around them and emit BodyElement::PageBreak / ColumnBreak
+                // between the pieces — each piece keeps the same pPr so layout
+                // continues correctly after the break.
                 for piece in split_para_on_page_breaks(result) {
                     match piece {
                         ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
                         ParaPiece::PageBreak => body.push(BodyElement::PageBreak { parity: None }),
+                        ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
                     }
                 }
                 // ECMA-376 §17.6.1: a section break inside pPr defines the
@@ -770,16 +826,19 @@ fn parse_body_elements(
 enum ParaPiece {
     Para(DocParagraph),
     PageBreak,
+    ColumnBreak,
 }
 
-/// Split a parsed paragraph at every internal page-break run. The split
-/// pieces all share the source paragraph's pPr, so layout (alignment,
-/// indents, line spacing, …) is preserved across the page boundary. The
-/// page-break run itself is consumed; downstream code emits
-/// BodyElement::PageBreak instead.
+/// Split a parsed paragraph at every internal page-break OR column-break run.
+/// The split pieces all share the source paragraph's pPr, so layout (alignment,
+/// indents, line spacing, …) is preserved across the boundary. The break run
+/// itself is consumed; downstream code emits BodyElement::PageBreak /
+/// BodyElement::ColumnBreak instead.
 ///
-/// Two break flavors are recognized:
+/// Three break flavors are recognized:
 ///   - `BreakType::Page`         — hard `<w:br w:type="page"/>`, always honored.
+///   - `BreakType::Column`       — `<w:br w:type="column"/>` (ECMA-376
+///     §17.3.1.20), force the next newspaper column. Always honored.
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
 ///     (ECMA-376 §17.3.1.20), a layout cache that is NOT authoritative. We
 ///     paginate ourselves, so it is ignored uniformly and stripped (never
@@ -808,7 +867,7 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         matches!(
             r,
             DocRun::Break {
-                break_type: BreakType::Page
+                break_type: BreakType::Page | BreakType::Column
             }
         )
     };
@@ -827,13 +886,25 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         return vec![ParaPiece::Para(p)];
     }
 
-    // Split run chunks on hard page breaks; RenderedPage runs are dropped.
+    // Split run chunks on hard page / column breaks; RenderedPage runs are
+    // dropped. `seps` records the break kind that separates chunk[i] from
+    // chunk[i+1] so we can interleave the matching ParaPiece below.
     let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
+    let mut seps: Vec<ParaPiece> = Vec::new();
     for run in para.runs.iter().cloned() {
         match &run {
             DocRun::Break {
                 break_type: BreakType::Page,
-            } => chunks.push(Vec::new()),
+            } => {
+                chunks.push(Vec::new());
+                seps.push(ParaPiece::PageBreak);
+            }
+            DocRun::Break {
+                break_type: BreakType::Column,
+            } => {
+                chunks.push(Vec::new());
+                seps.push(ParaPiece::ColumnBreak);
+            }
             DocRun::Break {
                 break_type: BreakType::RenderedPage,
             } => { /* ignored hint */ }
@@ -854,15 +925,16 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let chunks: Vec<Vec<DocRun>> = {
+    let (chunks, seps): (Vec<Vec<DocRun>>, Vec<ParaPiece>) = {
         let mut c = chunks;
+        let mut s = seps;
         while c.last().map(|r| !has_visible(r)).unwrap_or(false) && c.len() > 1 {
             c.pop();
-            // Each pop also drops the preceding break that produced this
-            // empty trailing chunk — modelled here by NOT emitting a break
-            // before the (now removed) chunk.
+            // Each pop also drops the break that produced this empty trailing
+            // chunk (seps[k] is the break BEFORE chunk[k+1]).
+            s.pop();
         }
-        c
+        (c, s)
     };
 
     let mut out: Vec<ParaPiece> = Vec::new();
@@ -876,7 +948,12 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
             continue;
         }
         if emitted_para {
-            out.push(ParaPiece::PageBreak);
+            // seps[i-1] separates chunk[i-1] from chunk[i]; emit its kind
+            // (page vs column) so the boundary type is preserved.
+            out.push(match seps.get(i - 1) {
+                Some(ParaPiece::ColumnBreak) => ParaPiece::ColumnBreak,
+                _ => ParaPiece::PageBreak,
+            });
         }
         let mut chunk = para.clone();
         chunk.runs = runs;
@@ -982,6 +1059,83 @@ fn load_header_footer_set(
     out
 }
 
+/// ECMA-376 §17.6.4 `<w:cols>` (child of `<w:sectPr>`). Returns a `ColumnsSpec`
+/// only for genuine multi-column sections; `None` when `<w:cols>` is absent or
+/// resolves to a single column (so single-column sections keep the unchanged
+/// full-width path).
+///
+/// Attributes (§17.6.4):
+/// - `@w:num` — column count. Default 1.
+/// - `@w:space` — inter-column gap for equal-width columns. Default 720 twips
+///   (36 pt).
+/// - `@w:equalWidth` — when true (the default), all columns share one width and
+///   `@w:space`. When false, the `<w:col>` children (§17.6.3) give each column
+///   an explicit width + space.
+/// - `@w:sep` — draw separator rules between columns.
+///
+/// Per the spec, `equalWidth` defaults to true; explicit per-column geometry is
+/// taken from the `<w:col>` children only when `equalWidth` is false. If
+/// `equalWidth` is false but no `<w:col>` children are present we fall back to
+/// equal widths (there is nothing else to honor).
+fn parse_columns(sp: roxmltree::Node) -> Option<ColumnsSpec> {
+    let cols_el = child_w(sp, "cols")?;
+
+    let num = attr_w(cols_el, "num")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+
+    // §17.6.4: @w:space default is 720 twips (36 pt).
+    let space_pt = attr_w(cols_el, "space")
+        .map(|s| twips_to_pt(&s))
+        .unwrap_or(36.0);
+
+    // ST_OnOff toggle, default true when the attribute is omitted.
+    let equal_width = attr_w(cols_el, "equalWidth")
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "off"))
+        .unwrap_or(true);
+
+    let sep = attr_w(cols_el, "sep")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
+        .unwrap_or(false);
+
+    let col_children: Vec<ColSpec> = children_w(cols_el, "col")
+        .into_iter()
+        .filter_map(|c| {
+            let width_pt = attr_w(c, "w").map(|s| twips_to_pt(&s))?;
+            let col_space = attr_w(c, "space").map(|s| twips_to_pt(&s)).unwrap_or(0.0);
+            Some(ColSpec {
+                width_pt,
+                space_pt: col_space,
+            })
+        })
+        .collect();
+
+    let use_explicit = !equal_width && !col_children.is_empty();
+
+    // Effective column count: explicit columns count their entries; otherwise
+    // @w:num. A single resulting column is not multi-column → None.
+    let count = if use_explicit {
+        col_children.len()
+    } else {
+        num
+    };
+    if count < 2 {
+        return None;
+    }
+
+    Some(ColumnsSpec {
+        count,
+        space_pt,
+        equal_width: !use_explicit,
+        sep,
+        cols: if use_explicit {
+            col_children
+        } else {
+            Vec::new()
+        },
+    })
+}
+
 fn parse_section(
     sect_pr: Option<roxmltree::Node>,
     rel_map: &HashMap<String, String>,
@@ -999,6 +1153,8 @@ fn parse_section(
         even_and_odd_headers: false,
         doc_grid_type: None,
         doc_grid_line_pitch: None,
+        doc_grid_char_space: None,
+        columns: None,
     };
 
     let Some(sp) = sect_pr else {
@@ -1051,7 +1207,25 @@ fn parse_section(
             // w: unit attributes. twips_to_pt divides by 20.
             props.doc_grid_line_pitch = Some(twips_to_pt(&lp));
         }
+        // charSpace is ST_DecimalNumber — a raw SIGNED integer in 1/4096ths of a
+        // POINT (NOT twips, NOT an em fraction). The renderer divides by 4096 to
+        // obtain the per-EA-glyph cell delta = charSpace/4096 in FLAT POINTS,
+        // independent of font size (§17.6.5); see `gridCharDeltaPx` in
+        // renderer.ts. Keep the raw value here so the /4096 conversion lives in
+        // one place. parse::<f64> tolerates a leading '-' (the common,
+        // tightening case).
+        if let Some(cs) = attr_w(dg, "charSpace") {
+            if let Ok(v) = cs.parse::<f64>() {
+                props.doc_grid_char_space = Some(v);
+            }
+        }
     }
+
+    // ECMA-376 §17.6.4 w:cols — newspaper-style multi-column layout. We only
+    // emit a ColumnsSpec for genuine multi-column sections (num >= 2); a single
+    // column leaves `columns` None so the renderer keeps its full-width column
+    // (unchanged behavior).
+    props.columns = parse_columns(sp);
 
     // Collect header/footer references
     let mut refs = SectionRefs::default();
@@ -1133,13 +1307,40 @@ fn parse_paragraph(
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
     {
         if num_id != 0 {
-            let (format, ind_left, tab, suff) = num_map
+            // Resolve the marker's font axes (ECMA-376 §17.9.6 + §17.3.2.26): take
+            // the level's own run properties (`rPr`) MERGED OVER the paragraph's
+            // resolved run formatting via the SAME `apply_direct_run` body runs
+            // use, then resolve the ascii and eastAsia axes INDEPENDENTLY through
+            // theme refs. A bare `<w:rFonts w:hint="eastAsia"/>` carries no
+            // typeface, so the marker simply inherits the paragraph's ascii (e.g.
+            // Times → the auto-number renders serif) and eastAsia (e.g. MS Gothic).
+            let (format, ind_left, tab, suff, marker_ascii, marker_ea) = num_map
                 .get_level(num_id, num_level)
-                .map(|l| (l.format.clone(), l.indent_left, l.tab, l.suff.clone()))
-                .unwrap_or_else(|| ("decimal".to_string(), 36.0, 18.0, "tab".to_string()));
+                .map(|l| {
+                    let mut marker_fmt = base_run.clone();
+                    apply_direct_run(&mut marker_fmt, &l.rpr);
+                    (
+                        l.format.clone(),
+                        l.indent_left,
+                        l.tab,
+                        l.suff.clone(),
+                        theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
+                        theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        "decimal".to_string(),
+                        36.0,
+                        18.0,
+                        "tab".to_string(),
+                        theme.resolve_font_ref(base_run.font_family_ascii.clone()),
+                        theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                    )
+                });
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
-            Some(NumberingInfo {
+            Some(Box::new(NumberingInfo {
                 num_id,
                 level: num_level,
                 format,
@@ -1147,7 +1348,9 @@ fn parse_paragraph(
                 indent_left: ind_left,
                 tab,
                 suff,
-            })
+                font_family: marker_ascii,
+                font_family_east_asia: marker_ea,
+            }))
         } else {
             None
         }
@@ -1624,6 +1827,10 @@ fn parse_run_inner(
     let font_family = theme
         .resolve_font_ref(fmt.font_family_ascii.clone())
         .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
+    // ECMA-376 §17.3.2.26 eastAsia axis, resolved INDEPENDENTLY of ascii so the
+    // renderer can pick per character (CJK glyphs → eastAsia face). `font_family`
+    // above keeps the conflated single-font fallback for non-per-char paths.
+    let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     let vert_align = fmt.vert_align.clone();
     let all_caps = fmt.all_caps.unwrap_or(false);
     let small_caps = fmt.small_caps.unwrap_or(false);
@@ -1653,7 +1860,7 @@ fn parse_run_inner(
                 // same content. Accept both and attach the revision below.
                 let text = child.text().unwrap_or("").to_string();
                 if !text.is_empty() {
-                    runs.push(DocRun::Text(TextRun {
+                    runs.push(DocRun::Text(Box::new(TextRun {
                         text,
                         bold,
                         italic,
@@ -1662,6 +1869,7 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: font_family.clone(),
+                        font_family_east_asia: font_family_east_asia.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         vert_align: vert_align.clone(),
@@ -1680,12 +1888,12 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         note_ref: None,
-                    }));
+                    })));
                 }
             }
             "tab" => {
                 // w:tab emits a horizontal tab character; layout handles tab stop alignment.
-                runs.push(DocRun::Text(TextRun {
+                runs.push(DocRun::Text(Box::new(TextRun {
                     text: "\t".to_string(),
                     bold,
                     italic,
@@ -1694,6 +1902,7 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_east_asia: font_family_east_asia.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     vert_align: vert_align.clone(),
@@ -1712,7 +1921,7 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     note_ref: None,
-                }));
+                })));
             }
             "br" => {
                 let break_type = attr_w(child, "type")
@@ -1816,7 +2025,7 @@ fn parse_run_inner(
                     "endnote"
                 };
                 let id_str = attr_w(child, "id").unwrap_or_default();
-                runs.push(DocRun::Text(TextRun {
+                runs.push(DocRun::Text(Box::new(TextRun {
                     text: id_str.clone(),
                     bold,
                     italic,
@@ -1825,6 +2034,7 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_east_asia: font_family_east_asia.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     // Force superscript regardless of the run's original
@@ -1851,7 +2061,7 @@ fn parse_run_inner(
                         kind: kind.to_string(),
                         id: id_str,
                     }),
-                }));
+                })));
             }
             "AlternateContent" => {
                 // mc:AlternateContent/mc:Choice may contain w:drawing
@@ -1871,7 +2081,7 @@ fn parse_run_inner(
                 // Word still emits these for simple text boxes. We surface the
                 // shape's fill/stroke/size and its txbxContent as a ShapeRun so
                 // the existing shape renderer draws the panel + RTL body text.
-                if let Some(shp) = parse_vml_pict(child, theme) {
+                if let Some(shp) = parse_vml_pict(child, theme, media_map) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -1913,6 +2123,52 @@ fn resolve_blip_urls(
     Some((image_path, mime, svg_image_path))
 }
 
+/// A resolved inline/anchored picture: the drawable source(s) plus the natural
+/// draw size read from `<wp:extent>` (ECMA-376 §20.4.2.7), in points.
+struct InlineBlip {
+    image_path: String,
+    mime_type: String,
+    svg_image_path: Option<String>,
+    width_pt: f64,
+    height_pt: f64,
+}
+
+/// Resolve a single picture under `node`: the first `<a:blip>` descendant (via
+/// [`resolve_blip_urls`]) together with the first `<wp:extent>` descendant's
+/// `cx`/`cy` (EMU → pt at 12700 EMU/pt). `node` is the element enclosing one
+/// drawing — the `<wp:inline>` / `<wp:anchor>` container for the body image
+/// paths, or the text-box `<w:p>` for the txbx image path.
+///
+/// Returns `None` unless BOTH a drawable blip AND a parseable extent (cx and cy
+/// present) are found — the strict "drawable image with a known size" contract
+/// the body inline/anchor paths have always required (they previously dropped a
+/// picture lacking either). The txbx path is held to the same contract (it
+/// formerly defaulted a missing extent to 0pt, which never occurs in practice —
+/// `<wp:extent>` is schema-required — and produced an invisible image).
+///
+/// Single-blip only: callers that handle composite drawings (`wgp`/`wsp`) must
+/// branch on those FIRST and reach this helper only for a regular single picture
+/// (so the first blip/extent descendant unambiguously belongs to that picture).
+fn resolve_inline_blip(
+    node: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+) -> Option<InlineBlip> {
+    let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
+    let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
+    let extent = node
+        .descendants()
+        .find(|n| n.tag_name().name() == "extent")?;
+    let cx: f64 = extent.attribute("cx").and_then(|v| v.parse().ok())?;
+    let cy: f64 = extent.attribute("cy").and_then(|v| v.parse().ok())?;
+    Some(InlineBlip {
+        image_path,
+        mime_type,
+        svg_image_path,
+        width_pt: cx / 12700.0,
+        height_pt: cy / 12700.0,
+    })
+}
+
 fn parse_inline_drawing(
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -1926,41 +2182,27 @@ fn parse_inline_drawing(
             Some(c) => c,
             None => return vec![],
         };
-        let extent = match container
-            .children()
-            .find(|n| n.tag_name().name() == "extent")
-        {
-            Some(e) => e,
-            None => return vec![],
-        };
-        let cx: f64 = match extent.attribute("cx").and_then(|v| v.parse().ok()) {
-            Some(v) => v,
-            None => return vec![],
-        };
-        let cy: f64 = match extent.attribute("cy").and_then(|v| v.parse().ok()) {
-            Some(v) => v,
-            None => return vec![],
-        };
-        let blip = match node.descendants().find(|n| n.tag_name().name() == "blip") {
+        // Resolve the picture's blip + `<wp:extent>` natural size. The Microsoft
+        // 2016 SVG extension is handled inside `resolve_inline_blip` →
+        // `resolve_blip_urls` (prefer the vector original, keep the raster as a
+        // fallback so an svg-only picture is never dropped). The whole element is
+        // dropped only if NEITHER a blip nor a parseable extent resolves.
+        let InlineBlip {
+            image_path,
+            mime_type,
+            svg_image_path,
+            width_pt,
+            height_pt,
+        } = match resolve_inline_blip(container, media_map) {
             Some(b) => b,
-            None => return vec![],
-        };
-        // Microsoft 2016 SVG extension (MS-ODRAWXML): the vector original rides
-        // inside `<a:blip><a:extLst><asvg:svgBlip r:embed>`, while `<a:blip
-        // r:embed>` carries a raster (PNG/JPEG) *fallback* for SVG-incapable
-        // clients. Prefer the vector; fall back to the raster so an svg-only
-        // picture is never dropped. `image_path` keeps the raster when present,
-        // else the SVG itself; drop the element only if NEITHER resolves.
-        let (image_path, mime_type, svg_image_path) = match resolve_blip_urls(blip, media_map) {
-            Some(urls) => urls,
             None => return vec![],
         };
         return vec![DocRun::Image(ImageRun {
             image_path,
             mime_type,
             svg_image_path,
-            width_pt: cx / 12700.0,
-            height_pt: cy / 12700.0,
+            width_pt,
+            height_pt,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -2009,6 +2251,17 @@ fn parse_inline_drawing(
         shp.height_pct = size_h_pct;
         shp.width_relative_from = size_w_rel.clone();
         shp.height_relative_from = size_h_rel.clone();
+        // Float-wrap metadata so an anchored wrap-shape reserves the same
+        // exclusion band an anchored image would (ECMA-376 §20.4.2.16/.17). The
+        // wrap_mode itself is already set from `anchor_meta` inside
+        // parse_wsp_shape; here we carry the dist* padding and wrapText side that
+        // the renderer needs to build the FloatRect (and to displace the shape
+        // around blocking floats), exactly mirroring the ImageRun path.
+        shp.dist_top = anchor_meta.dist_top;
+        shp.dist_bottom = anchor_meta.dist_bottom;
+        shp.dist_left = anchor_meta.dist_left;
+        shp.dist_right = anchor_meta.dist_right;
+        shp.wrap_side = anchor_meta.wrap_side.clone();
     };
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries
@@ -2031,6 +2284,7 @@ fn parse_inline_drawing(
         for mut shp in parse_wgp_shapes(
             wgp,
             theme,
+            media_map,
             pos_x,
             x_from_margin,
             pos_y,
@@ -2052,6 +2306,7 @@ fn parse_inline_drawing(
         if let Some(mut shp) = parse_wsp_shape(
             wsp,
             theme,
+            media_map,
             pos_x,
             x_from_margin,
             pos_y,
@@ -2069,39 +2324,26 @@ fn parse_inline_drawing(
         }
     }
 
-    // Regular single-blip anchor
-    let extent = match container
-        .children()
-        .find(|n| n.tag_name().name() == "extent")
-    {
-        Some(e) => e,
-        None => return vec![],
-    };
-    let cx: f64 = match extent.attribute("cx").and_then(|v| v.parse().ok()) {
-        Some(v) => v,
-        None => return vec![],
-    };
-    let cy: f64 = match extent.attribute("cy").and_then(|v| v.parse().ok()) {
-        Some(v) => v,
-        None => return vec![],
-    };
-    let blip = match node.descendants().find(|n| n.tag_name().name() == "blip") {
+    // Regular single-blip anchor. The wgp/wsp branches above returned early, so
+    // the anchor holds exactly one picture; resolve its blip + `<wp:extent>`
+    // natural size (SVG-extension handling and the drop-if-unresolvable contract
+    // live in `resolve_inline_blip`).
+    let InlineBlip {
+        image_path,
+        mime_type,
+        svg_image_path,
+        width_pt,
+        height_pt,
+    } = match resolve_inline_blip(container, media_map) {
         Some(b) => b,
-        None => return vec![],
-    };
-    // Microsoft 2016 SVG extension (see parse_inline_drawing): prefer the vector
-    // original, keep the raster as the `image_path` fallback, and never drop an
-    // svg-only picture.
-    let (image_path, mime_type, svg_image_path) = match resolve_blip_urls(blip, media_map) {
-        Some(urls) => urls,
         None => return vec![],
     };
     vec![DocRun::Image(ImageRun {
         image_path,
         mime_type,
         svg_image_path,
-        width_pt: cx / 12700.0,
-        height_pt: cy / 12700.0,
+        width_pt,
+        height_pt,
         anchor: true,
         anchor_x_pt: pos_x,
         anchor_y_pt: pos_y,
@@ -2626,9 +2868,11 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
 /// Each grpSp scales and offsets its children relative to its parent group, so
 /// the cumulative child→page transform must be the product of every group on
 /// the path from the wgp down to the wsp — not just the outermost grpSpPr.
+#[allow(clippy::too_many_arguments)]
 fn parse_wgp_shapes(
     wgp: roxmltree::Node,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -2663,6 +2907,7 @@ fn parse_wgp_shapes(
         wgp,
         base,
         theme,
+        media_map,
         anchor_pos_x,
         x_from_margin,
         anchor_pos_y,
@@ -2686,6 +2931,7 @@ fn walk_group_children(
     group: roxmltree::Node,
     xform: GroupTransform,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -2704,6 +2950,7 @@ fn walk_group_children(
                 if let Some(mut shape) = parse_wsp_shape(
                     child,
                     theme,
+                    media_map,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -2730,6 +2977,7 @@ fn walk_group_children(
                     child,
                     child_xform,
                     theme,
+                    media_map,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -2757,6 +3005,7 @@ fn walk_group_children(
 fn parse_wsp_shape(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -2935,7 +3184,7 @@ fn parse_wsp_shape(
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
     let (text_blocks, text_anchor, text_inset_l, text_inset_t, text_inset_r, text_inset_b) =
-        parse_shape_text_body(wsp, theme);
+        parse_shape_text_body(wsp, theme, media_map);
 
     Some(ShapeRun {
         width_pt,
@@ -2982,6 +3231,7 @@ fn parse_wsp_shape(
 fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
 ) -> (Vec<ShapeText>, Option<String>, f64, f64, f64, f64) {
     let txbx = wsp
         .children()
@@ -3020,7 +3270,7 @@ fn parse_shape_text_body(
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .filter_map(|p| extract_simple_paragraph_text(p, theme, media_map))
                 .collect()
         })
         .unwrap_or_default();
@@ -3030,26 +3280,122 @@ fn parse_shape_text_body(
 
 /// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
 /// formatting from the FIRST run encountered; ignores mixed-format runs.
-fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeText> {
+///
+/// In addition to run text, the paragraph is scanned for an inline image
+/// (`<w:drawing><wp:inline>…<a:blip r:embed>`). Word legitimately wraps a
+/// chart/picture as the sole content of a text-box paragraph (e.g. a figure
+/// with its caption in the following paragraph). When such an image is found,
+/// the block carries `image_path`/`mime_type`/`svg_image_path` and the
+/// `<wp:extent cx= cy=>` size (EMU→pt) so the renderer can draw it.
+///
+/// A paragraph with neither text nor an image yields `None`; an image-only
+/// paragraph (empty text) still yields a block so the picture is not dropped.
+fn extract_simple_paragraph_text(
+    p: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+) -> Option<ShapeText> {
+    // Resolve a run's effective font through the SAME default chain the body
+    // uses (ECMA-376 §17.7.2 docDefaults). A text-box run with `<w:rFonts
+    // w:hint="eastAsia"/>` and no explicit ascii/eastAsia would otherwise resolve
+    // to None and the renderer would fall back to sans-serif; instead inherit the
+    // document default ascii (Latin-first text, e.g. an English title/abstract) /
+    // eastAsia typeface. Order: run-ascii → run-eastAsia → default-ascii →
+    // default-eastAsia (an explicit eastAsia run still wins over the default
+    // ascii, while a font-less run lands on the default ascii — Century in
+    // sample-10, a serif).
+    // ECMA-376 §17.3.2.26 resolves the ascii and eastAsia font axes
+    // INDEPENDENTLY: within one run, Latin letters/digits take the ascii face and
+    // CJK characters take the eastAsia face. Each axis falls through the
+    // docDefaults for its OWN slot (§17.7.2) — the ascii axis to the default ascii
+    // (Century, a serif, in sample-10), the eastAsia axis to the default eastAsia
+    // (ＭＳ 明朝). Keeping them separate is what lets the renderer pick per character
+    // (so serif digits sit inside a gothic Japanese title).
+    let resolve_ascii_axis = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| theme.default_ascii_font_ref())
+    };
+    let resolve_east_asia_axis = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_east_asia.clone())
+            .or_else(|| theme.default_east_asia_font_ref())
+    };
+    // Block-level single `font_family` keeps the ORIGINAL conflated resolution
+    // (run-ascii → run-eastAsia → default-ascii → default-eastAsia). It feeds the
+    // single-format fallback path / image-block consumers and the legacy
+    // ShapeText tests; the per-run axes above are what the rich renderer uses.
+    let resolve_font_with_default = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()))
+            .or_else(|| theme.default_ascii_font_ref())
+            .or_else(|| theme.default_east_asia_font_ref())
+    };
+
     let mut text = String::new();
-    let mut first_rpr: Option<roxmltree::Node> = None;
+    // Per-run formatting (one entry per `<w:r>` carrying text). Preserves mixed
+    // bold/non-bold runs so the renderer can lay the paragraph out as rich text;
+    // the single block-level fields below still come from the first text run for
+    // backward compatibility.
+    let mut runs: Vec<ShapeTextRun> = Vec::new();
+    // The FIRST text run's effective format, kept to derive the block-level
+    // single fields (resolved through the conflated chain — independent of the
+    // per-run ascii axis so the legacy single-`font_family` behaviour is
+    // unchanged).
+    let mut first_run_fmt: Option<RunFmt> = None;
     for r in p
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "r")
     {
-        if first_rpr.is_none() {
-            first_rpr = child_w(r, "rPr");
-        }
+        let mut run_text = String::new();
         for t in r
             .descendants()
             .filter(|n| n.is_element() && n.tag_name().name() == "t")
         {
             if let Some(text_node) = t.text() {
-                text.push_str(text_node);
+                run_text.push_str(text_node);
             }
         }
+        if run_text.is_empty() {
+            continue;
+        }
+        text.push_str(&run_text);
+        let fmt = child_w(r, "rPr").map(parse_run_fmt).unwrap_or_default();
+        runs.push(ShapeTextRun {
+            text: run_text,
+            font_size_pt: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+            color: fmt.color.clone(),
+            font_family: resolve_ascii_axis(&fmt),
+            font_family_east_asia: resolve_east_asia_axis(&fmt),
+            bold: fmt.bold.unwrap_or(false),
+            italic: fmt.italic.unwrap_or(false),
+        });
+        if first_run_fmt.is_none() {
+            first_run_fmt = Some(fmt);
+        }
     }
-    if text.is_empty() {
+
+    // Inline image inside the text-box paragraph (ECMA-376 §20.4.2.8). Use the
+    // SAME picture resolution the body inline/anchor paths use, so the blip +
+    // `<wp:extent>` natural size (and the SVG-extension handling) stay in one
+    // place. `resolve_inline_blip` yields None unless both a drawable blip and a
+    // parseable extent are present, which simply leaves this an image-less
+    // paragraph (the drop-if-no-text-and-no-image check below still applies).
+    let (image_path, mime_type, svg_image_path, image_width_pt, image_height_pt) =
+        match resolve_inline_blip(p, media_map) {
+            Some(b) => (
+                Some(b.image_path),
+                Some(b.mime_type),
+                b.svg_image_path,
+                b.width_pt,
+                b.height_pt,
+            ),
+            None => (None, None, None, 0.0, 0.0),
+        };
+
+    // Drop a paragraph that is neither text nor image; keep image-only ones.
+    if text.is_empty() && image_path.is_none() {
         return None;
     }
 
@@ -3058,19 +3404,30 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
         .and_then(|jc| attr_w(jc, "val"))
         .unwrap_or_else(|| "left".to_string());
 
-    let (font_size_pt, color, font_family, bold, italic) = if let Some(rpr) = first_rpr {
-        let fmt = parse_run_fmt(rpr);
-        (
+    // Single block-level format fields come from the FIRST text run (kept for
+    // backward compatibility with existing consumers and the image-block path).
+    // The block-level `font_family` uses the conflated resolution captured above
+    // (NOT the per-run ascii axis), so the legacy single-font behaviour — and the
+    // ShapeText tests pinned to it — are unchanged. For an image-only paragraph
+    // (no text run) fall back to the document default font, the same result the
+    // previous no-rPr branch produced.
+    let (font_size_pt, color, font_family, bold, italic) = match first_run_fmt {
+        Some(fmt) => (
             fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
             fmt.color.clone(),
-            theme
-                .resolve_font_ref(fmt.font_family_ascii.clone())
-                .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+            resolve_font_with_default(&fmt),
             fmt.bold.unwrap_or(false),
             fmt.italic.unwrap_or(false),
-        )
-    } else {
-        (DEFAULT_FONT_SIZE, None, None, false, false)
+        ),
+        None => (
+            DEFAULT_FONT_SIZE,
+            None,
+            theme
+                .default_ascii_font_ref()
+                .or_else(|| theme.default_east_asia_font_ref()),
+            false,
+            false,
+        ),
     };
 
     Some(ShapeText {
@@ -3080,7 +3437,13 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
         font_family,
         bold,
         italic,
+        runs,
         alignment: normalize_align(&alignment).to_string(),
+        image_path,
+        mime_type,
+        svg_image_path,
+        image_width_pt,
+        image_height_pt,
     })
 }
 
@@ -3096,7 +3459,11 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
 /// paragraph's leading (top-left) corner — VML `position:relative` text boxes
 /// flow with their anchor paragraph, which Word places at the left margin just
 /// below the preceding content.
-fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun> {
+fn parse_vml_pict(
+    pict: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+) -> Option<ShapeRun> {
     // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
     let shape = pict.descendants().find(|n| {
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
@@ -3163,7 +3530,7 @@ fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .filter_map(|p| extract_simple_paragraph_text(p, theme, media_map))
                 .collect()
         })
         .unwrap_or_default();
@@ -4497,7 +4864,7 @@ mod cs_toggle_tests {
             if let BodyElement::Paragraph(p) = e {
                 for r in p.runs {
                     if let DocRun::Text(t) = r {
-                        return t;
+                        return *t;
                     }
                 }
             }
@@ -5547,5 +5914,720 @@ mod svg_blip_tests {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+// ===== ECMA-376 §17.6.4 w:cols — multi-column sections =====
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    /// Parse a `<w:cols .../>` fragment (inside a sectPr) through `parse_columns`.
+    fn parse_cols(cols_xml: &str) -> Option<ColumnsSpec> {
+        let xml = format!(
+            r#"<w:sectPr xmlns:w="{ns}">{cols_xml}</w:sectPr>"#,
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        parse_columns(doc.root_element())
+    }
+
+    /// Parse a minimal `<w:body>` document through the real body-parse path so we
+    /// can assert how `<w:br w:type="column"/>` is hoisted to BodyElements.
+    fn body_from(body_inner: &str) -> Vec<BodyElement> {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media_map: HashMap<String, String> = HashMap::new();
+        let rel_map: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_body_elements(
+            body_node,
+            &style_map,
+            &mut num_map,
+            &media_map,
+            &rel_map,
+            &theme,
+        )
+    }
+
+    #[test]
+    fn cols_num2_equal_width_with_space() {
+        // sample-10's <w:cols w:num="2" w:space="309"/>: 309 twips = 15.45 pt.
+        let c = parse_cols(r#"<w:cols w:num="2" w:space="309"/>"#).expect("num=2 ⇒ multi-column");
+        assert_eq!(c.count, 2);
+        assert!(
+            (c.space_pt - 15.45).abs() < 1e-9,
+            "space_pt = {}",
+            c.space_pt
+        );
+        assert!(c.equal_width);
+        assert!(!c.sep);
+        assert!(c.cols.is_empty());
+    }
+
+    #[test]
+    fn cols_space_defaults_to_720_twips() {
+        // §17.6.4: @w:space default = 720 twips = 36 pt.
+        let c = parse_cols(r#"<w:cols w:num="3"/>"#).expect("num=3 ⇒ multi-column");
+        assert_eq!(c.count, 3);
+        assert!(
+            (c.space_pt - 36.0).abs() < 1e-9,
+            "space_pt = {}",
+            c.space_pt
+        );
+        assert!(c.equal_width);
+    }
+
+    #[test]
+    fn cols_num1_or_absent_is_none() {
+        // num<=1 ⇒ single column ⇒ None (unchanged full-width behavior).
+        assert!(parse_cols(r#"<w:cols w:num="1"/>"#).is_none());
+        assert!(parse_cols(r#"<w:cols/>"#).is_none());
+        // No <w:cols> at all.
+        let xml = format!(r#"<w:sectPr xmlns:w="{ns}"/>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        assert!(parse_columns(doc.root_element()).is_none());
+    }
+
+    #[test]
+    fn cols_explicit_unequal_widths_used_verbatim() {
+        // equalWidth=0 with explicit <w:col> children ⇒ per-column geometry.
+        // 4320 twips = 216 pt, 360 twips = 18 pt, 5040 twips = 252 pt.
+        let c = parse_cols(
+            r#"<w:cols w:num="2" w:equalWidth="0">
+                 <w:col w:w="4320" w:space="360"/>
+                 <w:col w:w="5040"/>
+               </w:cols>"#,
+        )
+        .expect("explicit cols ⇒ multi-column");
+        assert_eq!(c.count, 2);
+        assert!(!c.equal_width);
+        assert_eq!(c.cols.len(), 2);
+        assert!((c.cols[0].width_pt - 216.0).abs() < 1e-9);
+        assert!((c.cols[0].space_pt - 18.0).abs() < 1e-9);
+        assert!((c.cols[1].width_pt - 252.0).abs() < 1e-9);
+        assert!((c.cols[1].space_pt - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cols_count_from_explicit_children_when_num_mismatches() {
+        // count follows the number of <w:col> children when explicit.
+        let c = parse_cols(
+            r#"<w:cols w:num="2" w:equalWidth="false">
+                 <w:col w:w="2000"/>
+                 <w:col w:w="2000"/>
+                 <w:col w:w="2000"/>
+               </w:cols>"#,
+        )
+        .expect("3 explicit cols");
+        assert_eq!(c.count, 3);
+        assert_eq!(c.cols.len(), 3);
+    }
+
+    #[test]
+    fn cols_equalwidth_false_but_no_children_falls_back_to_equal() {
+        // equalWidth=0 with no <w:col> children ⇒ nothing to honor ⇒ equal.
+        let c =
+            parse_cols(r#"<w:cols w:num="2" w:equalWidth="0"/>"#).expect("num=2 ⇒ multi-column");
+        assert_eq!(c.count, 2);
+        assert!(c.equal_width);
+        assert!(c.cols.is_empty());
+    }
+
+    #[test]
+    fn cols_sep_flag_parsed() {
+        let c = parse_cols(r#"<w:cols w:num="2" w:sep="1"/>"#).unwrap();
+        assert!(c.sep);
+        let c = parse_cols(r#"<w:cols w:num="2" w:sep="0"/>"#).unwrap();
+        assert!(!c.sep);
+    }
+
+    /// `parse_columns` is wired into `parse_section` ⇒ SectionProps.columns.
+    #[test]
+    fn section_props_carries_columns() {
+        let xml = format!(
+            r#"<w:sectPr xmlns:w="{ns}"><w:cols w:num="2" w:space="309"/></w:sectPr>"#,
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let rel_map: HashMap<String, String> = HashMap::new();
+        let (props, _) = parse_section(Some(doc.root_element()), &rel_map);
+        let cols = props.columns.expect("columns surfaced on SectionProps");
+        assert_eq!(cols.count, 2);
+    }
+
+    /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` surfaces on SectionProps as a
+    /// raw signed integer (1/4096ths of an em), threaded into the renderer's
+    /// character-grid cell width.
+    #[test]
+    fn section_props_carries_doc_grid_char_space() {
+        let parse = |grid: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{grid}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+
+        // Negative charSpace (the common, tightening case) — sample-10's value.
+        let p =
+            parse(r#"<w:docGrid w:type="linesAndChars" w:charSpace="-1161" w:linePitch="280"/>"#);
+        assert_eq!(p.doc_grid_char_space, Some(-1161.0));
+        assert_eq!(p.doc_grid_type.as_deref(), Some("linesAndChars"));
+        assert_eq!(p.doc_grid_line_pitch, Some(14.0)); // 280 twips / 20
+
+        // Positive charSpace (loosening) is preserved as-is.
+        let p = parse(r#"<w:docGrid w:type="snapToChars" w:charSpace="200"/>"#);
+        assert_eq!(p.doc_grid_char_space, Some(200.0));
+
+        // Absent attribute ⇒ None (renderer leaves EA glyphs at natural advance).
+        let p = parse(r#"<w:docGrid w:type="lines" w:linePitch="360"/>"#);
+        assert_eq!(p.doc_grid_char_space, None);
+
+        // No docGrid element at all ⇒ None.
+        let p = parse(r#"<w:pgSz w:w="11906" w:h="16838"/>"#);
+        assert_eq!(p.doc_grid_char_space, None);
+    }
+
+    /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` is hoisted to a body-level
+    /// BodyElement::ColumnBreak (mirroring page breaks), so the paginator can act
+    /// on it without inspecting runs mid-paragraph.
+    #[test]
+    fn column_break_only_paragraph_becomes_body_column_break() {
+        let body = body_from(r#"<w:p><w:r><w:br w:type="column"/></w:r></w:p>"#);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(body[0], BodyElement::ColumnBreak));
+    }
+
+    #[test]
+    fn mid_paragraph_column_break_splits_into_para_columnbreak_para() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:t>before</w:t></w:r>
+                 <w:r><w:br w:type="column"/></w:r>
+                 <w:r><w:t>after</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para("before"), ColumnBreak, Para("after").
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    #[test]
+    fn mixed_page_and_column_breaks_keep_their_kinds() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:t>a</w:t></w:r>
+                 <w:r><w:br w:type="page"/></w:r>
+                 <w:r><w:t>b</w:t></w:r>
+                 <w:r><w:br w:type="column"/></w:r>
+                 <w:r><w:t>c</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para(a), PageBreak, Para(b), ColumnBreak, Para(c).
+        assert_eq!(body.len(), 5);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+        assert!(matches!(body[3], BodyElement::ColumnBreak));
+        assert!(matches!(body[4], BodyElement::Paragraph(_)));
+    }
+}
+
+// Inline images living INSIDE a DrawingML text box (`<wps:txbx>`): Word wraps a
+// chart/picture as a `<w:drawing><wp:inline>…<a:blip r:embed>` paragraph,
+// usually followed by a caption paragraph ("Fig. 1: …"). The parser must
+// surface the image on the ShapeText block (image_path + extent→pt size) and
+// must NOT drop an image-only paragraph (the prior behaviour reduced each
+// paragraph to text only and dropped empty-text ones).
+#[cfg(test)]
+mod txbx_inline_image_tests {
+    use super::*;
+
+    /// A `<wps:wsp>` whose `<w:txbx><w:txbxContent>` holds (a) a paragraph that
+    /// is just an inline `<w:drawing>` (a WMF chart) and (b) a caption
+    /// paragraph. `parse_shape_text_body` must return 2 blocks: block0 carries
+    /// the resolved image path + the `<wp:extent>` size in pt and no caption
+    /// text; block1 carries the caption text and no image.
+    #[test]
+    fn parse_shape_text_body_surfaces_inline_image_and_caption() {
+        // extent cx=2540000 EMU = 200pt, cy=1270000 EMU = 100pt.
+        let xml = r#"<wps:wsp
+              xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1905000"/></a:xfrm>
+                <a:prstGeom prst="rect"/></wps:spPr>
+              <wps:txbx><w:txbxContent>
+                <w:p>
+                  <w:r><w:drawing>
+                    <wp:inline>
+                      <wp:extent cx="2540000" cy="1270000"/>
+                      <a:graphic><a:graphicData>
+                        <a:blip r:embed="rIdImg"/>
+                      </a:graphicData></a:graphic>
+                    </wp:inline>
+                  </w:drawing></w:r>
+                </w:p>
+                <w:p><w:pPr><w:jc w:val="center"/></w:pPr>
+                  <w:r><w:t>Fig. 1: A sample figure.</w:t></w:r>
+                </w:p>
+              </w:txbxContent></wps:txbx>
+            </wps:wsp>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
+
+        let (blocks, _anchor, _l, _t, _r, _b) =
+            parse_shape_text_body(doc.root_element(), &ThemeColors::default(), &media);
+
+        assert_eq!(blocks.len(), 2, "image paragraph + caption paragraph");
+
+        // block0 = the inline image (no caption text on it).
+        assert_eq!(
+            blocks[0].image_path.as_deref(),
+            Some("word/media/image1.emf"),
+            "image_path resolved through the media map"
+        );
+        assert!(blocks[0].text.is_empty(), "image paragraph carries no text");
+        assert!(
+            (blocks[0].image_width_pt - 200.0).abs() < 1e-6,
+            "extent cx 2540000 EMU → 200pt, got {}",
+            blocks[0].image_width_pt
+        );
+        assert!(
+            (blocks[0].image_height_pt - 100.0).abs() < 1e-6,
+            "extent cy 1270000 EMU → 100pt, got {}",
+            blocks[0].image_height_pt
+        );
+        assert!(
+            blocks[0].svg_image_path.is_none(),
+            "no svgBlip extension ⇒ svg_image_path None"
+        );
+
+        // block1 = the caption (no image).
+        assert_eq!(blocks[1].text, "Fig. 1: A sample figure.");
+        assert!(
+            blocks[1].image_path.is_none(),
+            "caption paragraph carries no image"
+        );
+        assert_eq!(blocks[1].alignment, "center");
+    }
+
+    /// An image-only paragraph (empty text) must NOT be dropped — the prior
+    /// `extract_simple_paragraph_text` returned None for empty text, which is
+    /// exactly why the chart never reached the image pipeline.
+    #[test]
+    fn extract_simple_paragraph_text_keeps_image_only_paragraph() {
+        let xml = r#"<w:p
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <w:r><w:drawing><wp:inline>
+                <wp:extent cx="1270000" cy="635000"/>
+                <a:graphic><a:graphicData><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
+
+        let block =
+            extract_simple_paragraph_text(doc.root_element(), &ThemeColors::default(), &media)
+                .expect("image-only paragraph must still yield a block");
+        assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
+        assert!(block.text.is_empty());
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box run whose `<w:rFonts>` carries only a
+    /// `w:hint` (no explicit ascii/eastAsia typeface) inherits the document
+    /// default ascii font instead of resolving to None (which the renderer would
+    /// draw sans-serif). Mirrors sample-10's English title/abstract blocks, which
+    /// must come out as the docDefault Century (a serif).
+    #[test]
+    fn extract_simple_paragraph_text_inherits_default_ascii_font() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>Abstract</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("MS Mincho".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.text, "Abstract");
+        // Latin-first run with no explicit face → the default ascii font, NOT None.
+        assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// A text-box run with NO `<w:rPr>` at all still inherits the document default
+    /// ascii font (§17.7.2) rather than leaving font_family None.
+    #[test]
+    fn extract_simple_paragraph_text_no_rpr_inherits_default_font() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:t>Index Terms</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), None);
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// ECMA-376 §17.3.2.26 — a text-box run resolves the ascii and eastAsia
+    /// font axes INDEPENDENTLY so the renderer can pick per character. sample-10's
+    /// Japanese title run carries `<w:rFonts w:eastAsia="ＭＳ ゴシック"/>` (a gothic)
+    /// with NO ascii face; the eastAsia axis takes the gothic while the ascii axis
+    /// (used by the embedded digits "11") falls through to the docDefault ascii
+    /// "Century" (a serif). Splitting the two axes is what lets Word's serif "11"
+    /// inside a gothic CJK title render correctly.
+    #[test]
+    fn extract_simple_paragraph_text_splits_ascii_and_east_asia_axes() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:eastAsia="ＭＳ ゴシック"/></w:rPr><w:t>第11回</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("ＭＳ 明朝".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.runs.len(), 1);
+        // ascii axis: no run ascii face → docDefault ascii "Century" (serif).
+        assert_eq!(block.runs[0].font_family.as_deref(), Some("Century"));
+        // eastAsia axis: the explicit run eastAsia face wins.
+        assert_eq!(
+            block.runs[0].font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック")
+        );
+    }
+
+    /// The Abstract/English regression guard at the run level: a run with
+    /// `<w:rFonts w:hint="eastAsia"/>` and no explicit ascii/eastAsia face resolves
+    /// the ascii axis to the docDefault ascii (Century, serif — English stays
+    /// serif) and the eastAsia axis to the docDefault eastAsia (ＭＳ 明朝).
+    #[test]
+    fn extract_simple_paragraph_text_run_axes_fall_to_defaults() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>Abstract</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("ＭＳ 明朝".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.runs.len(), 1);
+        assert_eq!(block.runs[0].font_family.as_deref(), Some("Century"));
+        assert_eq!(
+            block.runs[0].font_family_east_asia.as_deref(),
+            Some("ＭＳ 明朝")
+        );
+    }
+
+    /// An EXPLICIT eastAsia typeface on the run still wins over the document
+    /// default ascii (the fallback only applies when the run sets no face).
+    #[test]
+    fn extract_simple_paragraph_text_explicit_font_overrides_default() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:eastAsia="Yu Mincho"/></w:rPr><w:t>本文</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("MS Mincho".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.font_family.as_deref(), Some("Yu Mincho"));
+    }
+
+    /// With NO document defaults recorded (e.g. a styles-less document), a
+    /// face-less run resolves to None exactly as before — no regression.
+    #[test]
+    fn extract_simple_paragraph_text_no_default_stays_none() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>x</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
+        assert_eq!(block.font_family, None);
+    }
+
+    /// ECMA-376 §17.3.2 — a text-box paragraph with a BOLD label run followed by
+    /// a NON-bold body run must preserve each run's formatting in `runs` (the
+    /// sample-10 Abstract: "Abstract－ " bold, the body not). The single
+    /// block-level fields still come from the first run (bold) for backward
+    /// compat, while `runs` carries the per-run bold flags.
+    #[test]
+    fn extract_simple_paragraph_text_preserves_per_run_bold() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Abstract－ </w:t></w:r>
+              <w:r><w:t>This document describes.</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
+        // Concatenated text unchanged.
+        assert_eq!(block.text, "Abstract－ This document describes.");
+        // Single fields from the first (bold) run — backward compat.
+        assert!(block.bold);
+        // Two runs, each with its own bold flag.
+        assert_eq!(block.runs.len(), 2);
+        assert_eq!(block.runs[0].text, "Abstract－ ");
+        assert!(block.runs[0].bold);
+        assert_eq!(block.runs[1].text, "This document describes.");
+        assert!(!block.runs[1].bold);
+    }
+
+    /// A run carrying no text (e.g. a `<w:r>` holding only a `<w:tab/>`) is not
+    /// emitted as a run, so an image-only paragraph keeps `runs` empty and the
+    /// image path / single-field fallback is unchanged.
+    #[test]
+    fn extract_simple_paragraph_text_image_only_has_empty_runs() {
+        let xml = r#"<w:p
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <w:r><w:drawing><wp:inline>
+                <wp:extent cx="1270000" cy="635000"/>
+                <a:graphic><a:graphicData><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
+        let block =
+            extract_simple_paragraph_text(doc.root_element(), &ThemeColors::default(), &media)
+                .expect("image-only paragraph must still yield a block");
+        assert!(block.runs.is_empty());
+        assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
+    }
+
+    /// A paragraph with neither text nor an image still yields None (unchanged).
+    #[test]
+    fn extract_simple_paragraph_text_drops_empty_paragraph() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr/>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert!(
+            extract_simple_paragraph_text(
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .is_none(),
+            "empty paragraph (no text, no image) is dropped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod numbering_marker_font_tests {
+    //! ECMA-376 §17.3.2.26 (rFonts ascii/eastAsia axes) + §17.9.6 (numbering
+    //! level rPr). Models the sample-10 academic-paper heading "1 原稿の体裁":
+    //! docDefaults ascii=Century, the default paragraph style ("a") sets
+    //! ascii=Times New Roman, and 見出し1 (Heading1, basedOn "a") overrides only
+    //! eastAsia=MS Gothic. The numbering level carries a bare
+    //! `<w:rFonts w:hint="eastAsia"/>` (no explicit typeface), so the marker
+    //! inherits ascii=Times (serif) and eastAsia=MS Gothic (sans).
+    use super::*;
+
+    const NS: &str = " xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+
+    fn styles_xml() -> String {
+        format!(
+            r#"<w:styles{NS}>
+              <w:docDefaults><w:rPrDefault><w:rPr>
+                <w:rFonts w:ascii="Century" w:hAnsi="Century"/>
+              </w:rPr></w:rPrDefault></w:docDefaults>
+              <w:style w:type="paragraph" w:default="1" w:styleId="a">
+                <w:name w:val="Normal"/>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/></w:rPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="見出し1">
+                <w:name w:val="heading 1"/>
+                <w:basedOn w:val="a"/>
+                <w:rPr><w:rFonts w:eastAsia="ＭＳ ゴシック"/></w:rPr>
+              </w:style>
+            </w:styles>"#
+        )
+    }
+
+    fn numbering_xml() -> String {
+        // Level 0: bare `<w:rFonts w:hint="eastAsia"/>` (no typeface) — the
+        // marker must inherit its fonts from the paragraph/style chain.
+        format!(
+            r#"<w:numbering{NS}>
+              <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="decimal"/>
+                  <w:lvlText w:val="%1"/>
+                  <w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            </w:numbering>"#
+        )
+    }
+
+    /// Parse a body whose single paragraph is the numbered Heading1 "原稿の体裁".
+    fn heading_para() -> DocParagraph {
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body>
+              <w:p>
+                <w:pPr>
+                  <w:pStyle w:val="見出し1"/>
+                  <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+                </w:pPr>
+                <w:r><w:t>原稿の体裁</w:t></w:r>
+              </w:p>
+            </w:body></w:document>"#
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse(&styles_xml());
+        let mut num_map = NumberingMap::parse(&numbering_xml());
+        let elems = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
+        elems
+            .into_iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("heading paragraph present")
+    }
+
+    /// §17.3.2.26 — the CJK body run carries BOTH axes: the conflated single
+    /// `font_family` (ascii → Times, the fallback for non-per-char paths) AND the
+    /// independent `font_family_east_asia` (MS Gothic) the renderer routes CJK
+    /// glyphs to. Before the fix the eastAsia axis was dropped, so the CJK title
+    /// fell back to Times' serif-mincho and rendered serif instead of gothic.
+    #[test]
+    fn body_run_carries_independent_east_asia_axis() {
+        let para = heading_para();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .expect("text run present");
+        assert_eq!(
+            run.font_family.as_deref(),
+            Some("Times New Roman"),
+            "conflated single font keeps ascii-first fallback"
+        );
+        assert_eq!(
+            run.font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック"),
+            "eastAsia axis (§17.3.2.26) surfaces MS Gothic for CJK glyphs"
+        );
+    }
+
+    /// §17.9.6 — the marker's resolved fonts come from the level rPr (bare hint,
+    /// no typeface) merged OVER the paragraph's run formatting: ascii inherits
+    /// the default style's Times (a decimal "1" → serif) and eastAsia inherits
+    /// 見出し1's MS Gothic. Before the fix the marker had no font and the renderer
+    /// hardcoded sans-serif, drawing every number sans.
+    #[test]
+    fn numbering_marker_inherits_ascii_and_east_asia_fonts() {
+        let para = heading_para();
+        let num = para.numbering.as_ref().expect("numbered paragraph");
+        assert_eq!(num.text, "1", "decimal marker resolves to \"1\"");
+        assert_eq!(
+            num.font_family.as_deref(),
+            Some("Times New Roman"),
+            "marker ascii axis inherits the default style's Times (serif number)"
+        );
+        assert_eq!(
+            num.font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック"),
+            "marker eastAsia axis inherits Heading1's MS Gothic"
+        );
+    }
+
+    /// No-regression: the COMMON Japanese case (eastAsia = a mincho, no Gothic
+    /// override) still resolves the eastAsia axis to the mincho — identical to
+    /// the ascii fallback class, so the rendered output is unchanged.
+    #[test]
+    fn common_mincho_case_resolves_east_asia_to_mincho() {
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body>
+              <w:p><w:r>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="ＭＳ 明朝"/></w:rPr>
+                <w:t>本文テキスト</w:t>
+              </w:r></w:p>
+            </w:body></w:document>"#
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let elems = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
+        let para = elems
+            .into_iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(run.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(run.font_family_east_asia.as_deref(), Some("ＭＳ 明朝"));
     }
 }

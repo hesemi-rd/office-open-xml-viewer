@@ -441,10 +441,11 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Ruby annotations / furigana (`w:ruby`) | ✅ |
 | **Formatting** | Paragraph alignment (left / center / right / justify / distribute — CJK `both`/`distribute` spread by inter-character pitch, §17.18.44) | ✅ |
 | | Line spacing (auto / atLeast / exact) | ✅ |
-| | Line grid (`w:docGrid`, §17.6.5) | ✅ |
+| | Document grid (`w:docGrid`, §17.6.5 — line pitch + East Asian character grid / 字詰め) | ✅ |
 | | Margin collapsing between paragraphs | ✅ |
 | | Indents and tab stops | ✅ |
-| | Lists (bullet and numbered) | ✅ |
+| | Multi-column section layout (`w:cols`, §17.6.4 — newspaper-flow columns; full-width floats span all columns) | ✅ |
+| | Lists (bullet and numbered, multi-level `%N` markers §17.9.11) | ✅ |
 | | Paragraph styles (Heading 1–9, Normal, custom) | ✅ |
 | | Table style `w:pPr` cascade (§17.7.6) | ✅ |
 | | Table style borders / shading / banding (`tblStylePr`, `cnfStyle`, §17.4.7) | ✅ |
@@ -459,7 +460,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)) | ✅ |
-| | WMF / EMF metafile images (legacy vector) | ❌ Not planned |
+| | WMF metafile images (legacy vector, incl. inside text boxes) — rasterized via a built-in player (window mapping, pens/brushes, poly/rect); true EMF detected but not yet rendered | ✅ |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
 | | Endnotes — reference markers + bodies at document end (`w:endnoteReference`, §17.11) | ✅ |
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |

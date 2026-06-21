@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
+  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote, NumberingInfo,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -34,6 +34,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
+import { isWmf, isEmf, renderWmfToBitmap } from './wmf.js';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
@@ -280,6 +281,15 @@ interface ImagePair {
    */
   svgImagePath?: string;
   colorReplaceFrom?: string;
+  /**
+   * Largest intended draw size (pt) over every reference to this key. Only used
+   * to pick a raster target resolution for vector metafiles (WMF/EMF), which
+   * have no intrinsic pixel size — the player must rasterize at a chosen size.
+   * Raster (PNG/JPEG) and SVG paths ignore it (they carry/scale their own
+   * resolution). Defaults to 0 when no size is known.
+   */
+  widthPt: number;
+  heightPt: number;
 }
 
 /** Returns a stable map key for an (imagePath, colorReplaceFrom) pair. */
@@ -313,18 +323,47 @@ function authorColor(author?: string): string {
 
 function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   const seen = new Map<string, ImagePair>();
+  // Record one image reference (collapsing duplicate keys, tracking the max
+  // intended draw size so a vector metafile is rasterized sharply enough for its
+  // largest occurrence — only meaningful for WMF/EMF).
+  const record = (pair: ImagePair) => {
+    const key = imageKey(pair.imagePath, pair.colorReplaceFrom);
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, pair);
+    } else {
+      existing.widthPt = Math.max(existing.widthPt, pair.widthPt);
+      existing.heightPt = Math.max(existing.heightPt, pair.heightPt);
+    }
+  };
   const walk = (runs: DocRun[]) => {
     for (const run of runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
-        const key = imageKey(img.imagePath, img.colorReplaceFrom);
-        if (!seen.has(key))
-          seen.set(key, {
-            imagePath: img.imagePath,
-            mimeType: img.mimeType,
-            svgImagePath: img.svgImagePath,
-            colorReplaceFrom: img.colorReplaceFrom,
-          });
+        record({
+          imagePath: img.imagePath,
+          mimeType: img.mimeType,
+          svgImagePath: img.svgImagePath,
+          colorReplaceFrom: img.colorReplaceFrom,
+          widthPt: img.widthPt ?? 0,
+          heightPt: img.heightPt ?? 0,
+        });
+      } else if (run.type === 'shape') {
+        // Inline images living inside a text box (<wps:txbx>) ride on the
+        // shape's text blocks. Feed them into the same decode pipeline so the
+        // WMF/EMF/raster/SVG decoders see their bytes (no colorReplace here).
+        const shp = run as unknown as ShapeRun;
+        for (const block of shp.textBlocks ?? []) {
+          if (block.imagePath) {
+            record({
+              imagePath: block.imagePath,
+              mimeType: block.mimeType ?? '',
+              svgImagePath: block.svgImagePath,
+              widthPt: block.imageWidthPt ?? 0,
+              heightPt: block.imageHeightPt ?? 0,
+            });
+          }
+        }
       }
     }
   };
@@ -378,12 +417,38 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
   return createImageBitmap(offscreen);
 }
 
+/** Upper bound for a metafile raster dimension (px). Keeps memory bounded for
+ *  large intended draw sizes while staying sharp at typical chart sizes. */
+const WMF_RASTER_MAX_PX = 2000;
+/** Supersampling factor for metafile rasterization (≈retina). The draw site
+ *  scales the bitmap to the resolved box via `drawImage`, so a higher intrinsic
+ *  resolution just buys sharper vector edges. */
+const WMF_RASTER_SCALE = 2;
+
+/** Pick a raster target size (px) for a vector metafile from its intended draw
+ *  size (pt), supersampled and capped. Falls back to a sane square when the
+ *  intended size is unknown (0). */
+function wmfRasterTarget(widthPt: number, heightPt: number): { w: number; h: number } {
+  const fallbackPt = 300; // ~4 inch — only used when no size is surfaced
+  const wPt = widthPt > 0 ? widthPt : fallbackPt;
+  const hPt = heightPt > 0 ? heightPt : fallbackPt;
+  const clamp = (n: number) => Math.max(1, Math.min(WMF_RASTER_MAX_PX, Math.round(n)));
+  return { w: clamp(wPt * WMF_RASTER_SCALE), h: clamp(hPt * WMF_RASTER_SCALE) };
+}
+
 /**
  * Decode a raster blip to an `ImageBitmap`, pulling the bytes lazily by zip path
  * via `fetchImage(imagePath, mimeType)` (twin of pptx's `fetchImage`) rather
  * than `fetch`-ing an inlined data URL. Applies an `a:clrChange`
  * (`colorReplaceFrom`) make-transparent pass when requested — unchanged
  * post-decode behavior.
+ *
+ * Browsers can't decode WMF/EMF via `createImageBitmap`, so the bytes are
+ * content-sniffed first (extension/MIME are unreliable — sample-10's chart is a
+ * standard WMF mislabeled `.emf`). A WMF is rasterized by our minimal player
+ * ({@link renderWmfToBitmap}) at a size derived from `widthPt`/`heightPt`. A
+ * true EMF is detected but not yet interpreted; it throws so `preloadImages`
+ * drops it (the existing "missing image" behavior, no crash).
  *
  * Exported for unit testing of the lazy-bytes contract.
  */
@@ -392,8 +457,24 @@ export async function decodeRaster(
   mimeType: string,
   colorReplaceFrom: string | undefined,
   fetchImage: (path: string, mime: string) => Promise<Blob>,
+  widthPt = 0,
+  heightPt = 0,
 ): Promise<ImageBitmap> {
   const blob = await fetchImage(imagePath, mimeType);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+
+  if (isWmf(bytes)) {
+    const { w, h } = wmfRasterTarget(widthPt, heightPt);
+    const wmfBmp = await renderWmfToBitmap(bytes, w, h);
+    if (!wmfBmp) throw new Error(`WMF ${imagePath} produced no drawable output`);
+    return colorReplaceFrom ? applyColorReplacement(wmfBmp, colorReplaceFrom) : wmfBmp;
+  }
+  if (isEmf(bytes)) {
+    // TODO: EMF is a separate, larger format than WMF — follow-up. For now,
+    // skip gracefully (drop → current "missing image" behavior).
+    throw new Error(`EMF ${imagePath} is not yet supported`);
+  }
+
   let bmp = await createImageBitmap(blob);
   if (colorReplaceFrom) {
     bmp = await applyColorReplacement(bmp, colorReplaceFrom);
@@ -434,7 +515,7 @@ export async function preloadImages(
           } catch {
             img = dataIsSvg
               ? await getCachedSvgImageByPath(pair.imagePath, fetch)
-              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch);
+              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
           }
         } else if (dataIsSvg) {
           // svg-only picture (no svgImagePath surfaced — e.g. a non-svgBlip
@@ -442,7 +523,7 @@ export async function preloadImages(
           // through the path-keyed <img>-based SVG path.
           img = await getCachedSvgImageByPath(pair.imagePath, fetch);
         } else {
-          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch);
+          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
         }
         return [imageKey(pair.imagePath, pair.colorReplaceFrom), img];
       } catch {
@@ -535,7 +616,11 @@ export async function renderDocumentToCanvas(
     pageWidth: sec.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
+    docGrid: {
+      type: sec.docGridType ?? null,
+      linePitchPt: sec.docGridLinePitch ?? null,
+      charSpacePt: sec.docGridCharSpace != null ? sec.docGridCharSpace / 4096 : null,
+    },
     docEastAsian: docEA,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
@@ -559,9 +644,17 @@ export async function renderDocumentToCanvas(
     renderHeaderFooter(footer, footerTopY, baseState);
   }
 
-  // Body
+  // Body. ECMA-376 §17.6.4: lay out body text in the section's newspaper columns
+  // (one full-width column for a single-column section ⇒ unchanged path).
+  const columns = computeColumns(sec);
   const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale };
-  renderBodyElements(elements, bodyState);
+  // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
+  // so glyphs sit on top. A thin rule is centred in each inter-column gap and
+  // spans the content height.
+  if (sec.columns?.sep && columns.length > 1) {
+    drawColumnSeparators(ctx, columns, sec, scale);
+  }
+  renderBodyElements(elements, bodyState, columns);
 
   // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
   // the text column, above a short separator rule. The page area was already
@@ -806,6 +899,59 @@ function footnoteReserveHeightPt(
  * (ECMA-376 §17.11): the footnote bodies occupy the bottom of the text column,
  * so the body must stop short of them.
  */
+/** One newspaper column's page-absolute horizontal geometry (pt). `xPt` is the
+ *  column's left edge measured from the page's left edge (i.e. it already
+ *  includes `marginLeft`); `wPt` is the column's text width. */
+export interface ColumnGeom {
+  xPt: number;
+  wPt: number;
+}
+
+/**
+ * ECMA-376 §17.6.4 — resolve a section's newspaper columns to page-absolute
+ * left-x / width pairs (pt). The content band is `[marginLeft, pageWidth -
+ * marginRight]`; columns tile it left-to-right.
+ *
+ * - No columns (or count <= 1): one full-width column spanning the content band
+ *   (unchanged single-column behavior).
+ * - Equal width (`equalWidth`): `colW = (contentW - (count-1)*space) / count`;
+ *   column i sits at `marginLeft + i*(colW + space)`.
+ * - Explicit `<w:col>` widths: walk the columns, advancing x by each column's
+ *   own width + trailing space. The per-column widths/spaces are used verbatim
+ *   (Word writes them to sum to the content band).
+ *
+ * `colW` is clamped to a positive minimum so a malformed/over-wide spec never
+ * yields a zero/negative text width that would wedge line layout.
+ */
+export function computeColumns(section: SectionProps): ColumnGeom[] {
+  const contentW = section.pageWidth - section.marginLeft - section.marginRight;
+  const cols = section.columns;
+  if (!cols || cols.count <= 1) {
+    return [{ xPt: section.marginLeft, wPt: Math.max(1, contentW) }];
+  }
+
+  // Explicit per-column geometry (unequal widths).
+  if (!cols.equalWidth && cols.cols.length > 0) {
+    const out: ColumnGeom[] = [];
+    let x = section.marginLeft;
+    for (const c of cols.cols) {
+      out.push({ xPt: x, wPt: Math.max(1, c.widthPt) });
+      x += c.widthPt + c.spacePt;
+    }
+    return out;
+  }
+
+  // Equal-width columns separated by `space`.
+  const count = cols.count;
+  const space = cols.spacePt;
+  const colW = Math.max(1, (contentW - (count - 1) * space) / count);
+  const out: ColumnGeom[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push({ xPt: section.marginLeft + i * (colW + space), wPt: colW });
+  }
+  return out;
+}
+
 export function computePages(
   body: BodyElement[],
   section: SectionProps,
@@ -815,13 +961,23 @@ export function computePages(
   footnotes: DocNote[] = [],
 ): PaginatedBodyElement[][] {
   const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
-  const contentW = section.pageWidth - section.marginLeft - section.marginRight;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
   // footnote references are placed on the current page.
   const footnoteReservePt: number[] = [0];
+
+  // ECMA-376 §17.6.4 newspaper columns. For a single-column section this is one
+  // full-width column, so the loop below behaves exactly as before. `colIndex`
+  // tracks which column we are filling; `colX()`/`colW()` give its page-absolute
+  // left edge and text width (pt). Measurement uses the column width (not the
+  // full content band) and the column's left x as the float-window paraX, so
+  // square floats only constrain the column(s) their x-range intersects.
+  const columns = computeColumns(section);
+  let colIndex = 0;
+  const colX = () => columns[colIndex].xPt;
+  const colW = () => columns[colIndex].wPt;
 
   const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
@@ -856,13 +1012,34 @@ export function computePages(
     if (pages[pages.length - 1].length > 0) {
       pages.push([]);
       y = 0;
+      colIndex = 0;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
+      // Floats are PAGE-scoped (ECMA-376 §20.4.2.x): a new page starts with a
+      // clean float set. Columns of the SAME page share floats (see nextColumn).
       measureState.floats = [];
       measureState.floatParaSeq = 0;
       startPageBookkeeping();
     }
+  };
+  // Advance to the next newspaper column of the CURRENT page: reset the vertical
+  // cursor to the column top but KEEP the page's floats (they are page-scoped, so
+  // a full-width wrapTopAndBottom band still pushes down every column's first
+  // line, and a square float keeps constraining the columns its x-range covers).
+  // No new page is pushed and footnote reserve is untouched (same page).
+  const nextColumn = () => {
+    colIndex++;
+    y = 0;
+    prevPara = null;
+    prevSpaceAfter = 0;
+    measureState.y = section.marginTop;
+  };
+  // Overflow handler shared by element placement and paragraph/table splitting:
+  // move to the next column if one remains on this page, otherwise to a new page.
+  const nextColumnOrPage = () => {
+    if (colIndex < columns.length - 1) nextColumn();
+    else newPage();
   };
 
   // A paragraph-anchored floating object (wp:anchor with positionV
@@ -879,16 +1056,33 @@ export function computePages(
   const anchoredFloatBottomOffset = (para: DocParagraph, spaceBeforePt: number): number => {
     let maxBottom = 0;
     for (const run of para.runs) {
-      if (run.type !== 'image') continue;
-      const img = run as unknown as ImageRun;
-      if (!img.anchor || !img.anchorYFromPara) continue;
-      // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
-      // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
-      // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
-      // each so the estimate matches the draw position exactly.
-      const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
-      const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
-      if (bottom > maxBottom) maxBottom = bottom;
+      if (run.type === 'image') {
+        const img = run as unknown as ImageRun;
+        if (!img.anchor || !img.anchorYFromPara) continue;
+        // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
+        // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
+        // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
+        // each so the estimate matches the draw position exactly.
+        const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
+        const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
+        if (bottom > maxBottom) maxBottom = bottom;
+      } else if (run.type === 'shape') {
+        // An anchored shape with positionV relativeFrom="paragraph"/"line" is
+        // kept on its anchor's page the same way an image is. Mirror the image
+        // formula exactly — bottom = anchorBase + anchorYPt + height — but take
+        // the height from resolveShapeBox so sizeRelV / wgp-group scaling is
+        // honored. measureState is scale 1 (pt), so box.h is already in pt.
+        // (paragraphTopPx is passed through for shapes whose height depends on a
+        // paragraph/line container via sizeRelV; it does not affect the height
+        // for the common static-extent case.)
+        const shp = run as unknown as ShapeRun;
+        if (!shp.anchorYFromPara) continue;
+        const anchorBase = isWrapFloat(shp.wrapMode) ? spaceBeforePt : 0;
+        const box = resolveShapeBox(shp, measureState, measureState.y + anchorBase);
+        if (box.h <= 0) continue;
+        const bottom = anchorBase + (shp.anchorYPt ?? 0) + box.h;
+        if (bottom > maxBottom) maxBottom = bottom;
+      }
     }
     return maxBottom;
   };
@@ -907,16 +1101,32 @@ export function computePages(
       // next begins on a new page. Using the full paragraph is safer for a
       // single-line next; for multi-line we rely on that paragraph's own
       // break logic after placing.
-      return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, contentW, false);
+      return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, colW(), false);
     }
     if (nxt.type === 'table') {
-      return estimateTableHeight(measureState, nxt as unknown as DocTable, contentW);
+      return estimateTableHeight(measureState, nxt as unknown as DocTable, colW());
     }
     return 0;
   };
 
+  // Stamp the active newspaper column on an element and push it onto the current
+  // page. For single-column sections colIndex is always 0 (the renderer treats
+  // 0/absent identically), so this is behaviour-neutral there.
+  const pushTagged = (el: PaginatedBodyElement) => {
+    el.colIndex = colIndex;
+    pages[pages.length - 1].push(el);
+  };
+
   for (let i = 0; i < body.length; i++) {
     const el = body[i];
+    if (el.type === 'columnBreak') {
+      // ECMA-376 §17.3.1.20 <w:br w:type="column"/>: force the next column (or a
+      // new page's first column when already in the last column — newPage() no-ops
+      // on an empty page, so a column break in the last column of an as-yet-empty
+      // page simply stays put).
+      nextColumnOrPage();
+      continue;
+    }
     if (el.type === 'pageBreak') {
       pages.push([]);
       y = 0;
@@ -956,10 +1166,17 @@ export function computePages(
       // which caused page 2 of demo/sample-1 to spill past the bottom
       // margin). The renderer runs the same registerAnchorFloats call; by
       // mirroring it here the paginator sees the same layout.
+      // Snapshot the float set + paraSeq BEFORE this paragraph registers, so a
+      // relocation to the NEXT COLUMN (which keeps page floats) can roll back this
+      // paragraph's own floats and re-register them at the new column position
+      // without leaving stale duplicates. (A relocation to a new PAGE clears
+      // floats wholesale via newPage(), so this snapshot is unused there.)
+      const floatsBefore = measureState.floats.length;
+      const floatSeqBefore = measureState.floatParaSeq;
       const paragraphAnchorY = measureState.y + effectiveBefore;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
-      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
+      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX());
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
       // body must stop short of the footnote area. Measure the footnotes this
@@ -977,7 +1194,7 @@ export function computePages(
           const note = noteById.get(ids[k]);
           if (!note) continue;
           const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
-          sum += footnoteReserveHeightPt(note, measureState, contentW, firstOnPage);
+          sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
         }
         return sum;
       };
@@ -1024,18 +1241,28 @@ export function computePages(
       // (Word's default behaviour). A keep-on-page float forces relocation too.
       const keepIntact = para.keepLines || needNext > 0 || addReservePt > 0;
       if (breakForFloat || (overflowsHere && keepIntact && needed <= effContentH())) {
-        newPage();
-        // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
-        // this is a REPLACE of the earlier register at the top of the loop (whose
-        // floats were just discarded), not an augment: this paragraph is now the
-        // first registrant on the fresh page and gets paraId 0 — exactly matching
-        // the renderer, which re-registers it from a fresh per-page state. The
-        // re-anchoring against the new page top keeps wrap-around estimates for
-        // this and later paragraphs at the correct (post-break) Y.
-        registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
-        // The references move to the new page; nothing was reserved there yet,
-        // so the separator region still applies to the first footnote.
-        if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
+        const pagesBeforeRelocate = pages.length;
+        nextColumnOrPage();
+        const movedToNewPage = pages.length > pagesBeforeRelocate;
+        if (movedToNewPage) {
+          // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
+          // this is a REPLACE of the earlier register at the top of the loop (whose
+          // floats were just discarded): this paragraph is now the first registrant
+          // on the fresh page and gets paraId 0 — matching the renderer, which
+          // re-registers from a fresh per-page state.
+          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+          // The references move to the new page; nothing was reserved there yet,
+          // so the separator region still applies to the first footnote.
+          if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
+        } else {
+          // Moved to the NEXT COLUMN of the same page. Page floats persist, but
+          // this paragraph's own floats were anchored at the previous column's Y —
+          // roll them back and re-register against the new column top so wrap
+          // estimates for this paragraph (and later ones) use the right band.
+          measureState.floats.length = floatsBefore;
+          measureState.floatParaSeq = floatSeqBefore;
+          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+        }
       }
 
       // ECMA-376 places no "a paragraph must fit on one page" requirement — Word
@@ -1053,13 +1280,18 @@ export function computePages(
       const splittable = !para.keepLines || h > pageContentH;
       if (fitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
-          measureState, para, contentW, suppressBefore, section.marginLeft,
+          measureState, para, colW(), suppressBefore, colX(),
           y, pageContentH, pages,
-          () => { newPage(); },
+          // Overflow during the split advances to the next column first, then a
+          // new page (newspaper fill). Each slice is tagged with the column it
+          // landed in via the colIndex thunk.
+          () => { nextColumnOrPage(); },
+          () => colIndex,
         );
-        // After splitting, `y` is the bottom of the last slice on the
-        // current page (continues for the LAST slice; intermediate slices
-        // filled their pages exactly, so newPage was called between them).
+        // After splitting, `y` is the bottom of the last slice in the
+        // current column (continues for the LAST slice; intermediate slices
+        // filled their column/page exactly, so the break callback ran between
+        // them).
         y = placed.endY;
         measureState.y = section.marginTop + placed.endY;
         // A split footnote-bearing paragraph reserves on the page where it
@@ -1069,7 +1301,7 @@ export function computePages(
           addReservePt = sumReserve(newRefIds);
         }
       } else {
-        pages[pages.length - 1].push(el as PaginatedBodyElement);
+        pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
       }
@@ -1085,7 +1317,9 @@ export function computePages(
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
-      const rowHs = computeTableRowHeights(measureState, tbl, contentW);
+      // Tables in a multi-column section are sized to the column width, not the
+      // full content band.
+      const rowHs = computeTableRowHeights(measureState, tbl, colW());
       const h = rowHs.reduce((s, x) => s + x, 0);
       // Footnote references inside table cells are not folded into the reserve
       // (the per-page reserve is driven by body paragraphs); they still draw at
@@ -1093,16 +1327,19 @@ export function computePages(
       // reserve already accumulated on this page.
       const tableContentH = effContentH();
       if (h > tableContentH) {
-        // Taller than a full page: split row-by-row so the overflow continues
-        // onto the next page instead of being clipped (ECMA-376 table
-        // pagination). Tables that fit on a page keep the simple place-whole
-        // path below.
-        const endY = splitTableAcrossPages(tbl, rowHs, y, tableContentH, pages, () => newPage());
+        // Taller than a full column: split row-by-row so the overflow continues
+        // into the next column / page instead of being clipped (ECMA-376 table
+        // pagination). Tables that fit keep the simple place-whole path below.
+        const endY = splitTableAcrossPages(
+          tbl, rowHs, y, tableContentH, pages,
+          () => { nextColumnOrPage(); },
+          () => colIndex,
+        );
         y = endY;
         measureState.y = section.marginTop + endY;
       } else {
-        if (y + h > tableContentH) newPage();
-        pages[pages.length - 1].push(el);
+        if (y + h > tableContentH) nextColumnOrPage();
+        pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
       }
@@ -1157,7 +1394,11 @@ function buildMeasureState(
     pageWidth: section.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
+    docGrid: {
+      type: section.docGridType ?? null,
+      linePitchPt: section.docGridLinePitch ?? null,
+      charSpacePt: section.docGridCharSpace != null ? section.docGridCharSpace / 4096 : null,
+    },
     docEastAsian,
     fontFamilyClasses,
     kinsoku,
@@ -1230,7 +1471,7 @@ function estimateParagraphHeight(
       pageH: state.pageH,
       markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1));
     if (lines.length === 0) {
       // Anchor-only paragraph: no inline content, but the paragraph mark still
       // occupies one (possibly flowed) line (§17.3.1.29).
@@ -1348,7 +1589,16 @@ function splitParagraphAcrossPages(
   contentH: number,
   pages: PaginatedBodyElement[][],
   newPage: () => void,
+  /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
+   *  `newPage()` (which may advance the column). When provided, every emitted
+   *  slice is tagged with the column it landed in so the renderer flows it in the
+   *  right column. Omitted (single-column / direct unit tests) ⇒ no tag. */
+  tagColIndex?: () => number,
 ): { endY: number } {
+  const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
+    if (tagColIndex) el.colIndex = tagColIndex();
+    return el;
+  };
   const indLeft = para.indentLeft;
   const indRight = para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
@@ -1373,7 +1623,7 @@ function splitParagraphAcrossPages(
       top = 0;
       markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     }
-    pages[pages.length - 1].push(para as PaginatedBodyElement);
+    pages[pages.length - 1].push(stamp(para as PaginatedBodyElement));
     return { endY: top + markH };
   };
   const segs = buildSegments(para.runs, measureState);
@@ -1388,7 +1638,7 @@ function splitParagraphAcrossPages(
     pageH: measureState.pageH,
     markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1));
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -1461,11 +1711,11 @@ function splitParagraphAcrossPages(
     }
     const isFinalSlice = lastFitting === lines.length;
     if (isFinalSlice) usedH += spaceAfter;
-    pages[pages.length - 1].push({
+    pages[pages.length - 1].push(stamp({
       ...(para as object),
       type: 'paragraph',
       lineSlice: { start: firstFitting, end: lastFitting },
-    } as PaginatedBodyElement);
+    } as PaginatedBodyElement));
     lineIdx = lastFitting;
     cursorY += usedH;
     if (!isFinalSlice) {
@@ -1802,6 +2052,10 @@ export function splitTableAcrossPages(
   contentH: number,
   pages: PaginatedBodyElement[][],
   newPage: () => void,
+  /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
+   *  `newPage()`. When provided, each table slice is tagged with its column.
+   *  Omitted (single-column / direct unit tests) ⇒ no tag. */
+  tagColIndex?: () => number,
 ): number {
   const n = table.rows.length;
   // Leading tblHeader rows repeat on each continuation page.
@@ -1829,7 +2083,9 @@ export function splitTableAcrossPages(
 
     const bodyRows = table.rows.slice(start, end);
     const sliceRows = isContinuation ? [...headerRows, ...bodyRows] : bodyRows;
-    pages[pages.length - 1].push({ ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement);
+    const sliceEl = { ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement;
+    if (tagColIndex) sliceEl.colIndex = tagColIndex();
+    pages[pages.length - 1].push(sliceEl);
 
     y += used;
     start = end;
@@ -1902,10 +2158,64 @@ function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): bo
   return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
 }
 
-function renderBodyElements(elements: PaginatedBodyElement[], state: RenderState): void {
+/** ECMA-376 §17.6.4 `<w:cols w:sep="1">` — draw a thin vertical rule centred in
+ *  each inter-column gap, spanning the section's content height. The spec does
+ *  not prescribe a width/colour; Word draws a hairline, so we use ~0.5pt in the
+ *  default text colour (matching the footnote separator convention). */
+function drawColumnSeparators(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  columns: ColumnGeom[],
+  sec: SectionProps,
+  scale: number,
+): void {
+  const topY = sec.marginTop * scale;
+  const botY = (sec.pageHeight - sec.marginBottom) * scale;
+  ctx.save();
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
+  for (let i = 0; i < columns.length - 1; i++) {
+    const gapStart = columns[i].xPt + columns[i].wPt;
+    const gapEnd = columns[i + 1].xPt;
+    const midX = Math.round(((gapStart + gapEnd) / 2) * scale) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(midX, topY);
+    ctx.lineTo(midX, botY);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function renderBodyElements(
+  elements: PaginatedBodyElement[],
+  state: RenderState,
+  /** ECMA-376 §17.6.4 — page-absolute column geometry (pt). When provided and
+   *  the page spans multiple columns, the flow is reset to each element's tagged
+   *  column. Omitted (header/footer, single-column) ⇒ the state's existing
+   *  full-width contentX/contentW is used unchanged. */
+  columns?: ColumnGeom[],
+): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
+  // The column whose flow `state` is currently set to. Starts at -1 so the first
+  // element always seeds the column (when `columns` drives multi-column layout).
+  let activeCol = -1;
+  const multiCol = !!columns && columns.length > 1;
   for (const el of elements) {
+    // Reset the flow when this element belongs to a different newspaper column
+    // than the one currently set up (also seeds the first element). Floats are
+    // NOT cleared here — they are page-scoped and the per-page fresh bodyState
+    // already gave a clean set, so a full-width wrapTopAndBottom band still
+    // pushes down every column and square floats keep constraining their columns.
+    const elCol = el.colIndex ?? 0;
+    if (multiCol && elCol !== activeCol) {
+      const col = columns[Math.min(elCol, columns.length - 1)];
+      state.contentX = col.xPt * state.scale;
+      state.contentW = col.wPt * state.scale;
+      state.y = state.marginTop * state.scale;
+      prevPara = null;
+      prevSpaceAfter = 0;
+      activeCol = elCol;
+    }
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
       const slice = (el as PaginatedBodyElement).lineSlice;
@@ -2078,7 +2388,10 @@ function renderParagraph(
     numTab = para.numbering.tab * scale;
     const suff = para.numbering.suff || 'tab';
     if (suff !== 'tab') {
-      ctx.font = `${getDefaultFontSize(para) * scale}px sans-serif`;
+      // Measure with the marker's RESOLVED font (§17.3.2.26 + §17.9.6), not a
+      // hardcoded generic — the width must match the draw below so the body
+      // offset is exact for a serif (Times) vs sans (Gothic) marker alike.
+      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
       const markerW = ctx.measureText(para.numbering.text).width;
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
       // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
@@ -2155,7 +2468,7 @@ function renderParagraph(
   // indent (positive firstLine, or a bare negative hanging without a marker) to
   // the body as usual. RTL lists keep their existing start-edge handling.
   const firstLineIndent = numMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
-  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
+  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale));
 
   // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
   // inline content on any line, so layoutLines returns zero lines. Per ECMA-376
@@ -2229,6 +2542,13 @@ function renderParagraph(
   // resets state.y baseline so the slice begins at the page's content top.
   const sliceStart = lineSlice ? lineSlice.start : 0;
   const sliceEnd = lineSlice ? lineSlice.end : lines.length;
+  // ECMA-376 §17.6.5 character-grid delta (px per EA glyph) for the DRAW pass —
+  // the SAME value layoutLines folded into measuredWidth. A pure-EA segment is
+  // drawn so its glyphs occupy exactly `measuredWidth` (= natural + len·Δ): the
+  // draw uses `justifiedPiecePositions(..., letterSpacingPx = Δ)`, whose final
+  // glyph lands on the box edge, so the painted advance equals measuredWidth by
+  // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
+  const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
   for (let li = sliceStart; li < sliceEnd; li++) {
     const line = lines[li];
     // First-line indent and numbering prefix only apply to the paragraph's
@@ -2313,7 +2633,11 @@ function renderParagraph(
 
     if (firstLine && numMarker && !dryRun) {
       const numFontSize = getDefaultFontSize(para) * scale;
-      ctx.font = `${numFontSize}px sans-serif`;
+      // Draw the marker with its RESOLVED font (§17.3.2.26 + §17.9.6): the
+      // ascii axis for a Latin number (a decimal "1" → Times → serif), the
+      // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
+      // which forced every number/bullet sans regardless of the heading's font.
+      ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
       ctx.fillStyle = defaultColor;
       if (baseRtl) {
         // The RTL list marker is laid out INLINE at the line's start (right)
@@ -2449,20 +2773,37 @@ function renderParagraph(
         const revActive = state.showTrackChanges && !!s.revision;
         const revColor = revActive ? authorColor(s.revision!.author) : null;
         ctx.fillStyle = revColor ?? (s.color ? `#${s.color}` : defaultColor);
-        // Draw the glyphs. With no internal gap this is a single fillText (the
-        // common path); with inter-CJK gaps the segment is sliced at the gap
-        // offsets and the pen advances `distPerGap` between pieces, so the pitch
-        // appears BETWEEN the ideographs rather than bunched at the segment end.
-        if (stretch && stretch.splitBefore.length > 0) {
+        // Draw the glyphs. Three cases, all anchored to the WHOLE-string
+        // cumulative advance so the browser's contextual CJK metrics (most
+        // visibly 約物半角, the half-width collapse of （「」。）) are honoured and
+        // the painted advance equals the segment's box exactly:
+        //   1. Character grid active on a pure-EA segment (segGridDelta !== 0):
+        //      walk every glyph, advancing each to its cell start
+        //      `measure(prefix) + i·Δ + justGaps·perGap`. The final glyph lands so
+        //      the segment edge is measure(whole) + len·Δ + nGaps·perGap =
+        //      measuredWidth + internalStretch — measure==draw by construction
+        //      (§17.6.5). Folds in any justification pitch at the same time.
+        //   2. Justified inter-CJK pitch only (no grid): the existing
+        //      `justifiedPiecePositions` slice-at-gaps path.
+        //   3. Neither: a single fillText (the common path).
+        const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
+        if (segGridDelta !== 0) {
+          const cps = [...s.text]; // code points (handles surrogate pairs)
+          const justGaps = stretch?.splitBefore ?? [];
+          let g = 0; // justification gaps strictly before the current glyph
+          for (let i = 0; i < cps.length; i++) {
+            while (g < justGaps.length && justGaps[g] <= i) g++;
+            const prefix = cps.slice(0, i).join('');
+            const dx = ctx.measureText(prefix).width + i * drawGridDeltaPx + g * distPerGap;
+            ctx.fillText(cps[i], x + dx, baseline + yOffset);
+          }
+        } else if (stretch && stretch.splitBefore.length > 0) {
           // ECMA-376 §17.18.44 `both`/`distribute` inter-CJK justification pitch.
-          // Anchor each sliced piece to the WHOLE-string cumulative advance (so
-          // the contextual CJK metrics baked into measureText(whole) =
-          // measuredWidth — most visibly 約物半角, the half-width collapse of
-          // （「」。） — are honoured) plus the accumulated pitch, instead of
-          // summing the isolated pieces' advances. That sum drifts wider than
-          // the segment's box and would paint the next run over this segment's
-          // tail (most visible at a CJK→Latin boundary).
-          // See `@silurus/ooxml-core` → text/justify-positions.ts.
+          // Anchor each sliced piece to the WHOLE-string cumulative advance plus
+          // the accumulated pitch, instead of summing the isolated pieces'
+          // advances. That sum drifts wider than the segment's box and would paint
+          // the next run over this segment's tail (most visible at a CJK→Latin
+          // boundary). See `@silurus/ooxml-core` → text/justify-positions.ts.
           const cps = [...s.text]; // code points (handles surrogate pairs)
           const measure = (str: string): number => ctx.measureText(str).width;
           for (const { text: piece, dx } of justifiedPiecePositions(
@@ -2513,9 +2854,12 @@ function renderParagraph(
         // horizontal strokes; each snaps onto the nearest crisp device row from
         // its own y (an odd device-width one would otherwise straddle two rows).
         // Compute the offset per line because each stroke sits at a different y.
-        // Underline / strike run the full stretched glyph span (natural glyph
-        // width + the internal justification pitch).
-        const textW = ctx.measureText(s.text).width + internalStretch;
+        // Underline / strike run the full stretched glyph span. Use the
+        // segment's box (measuredWidth, which already folds in the §17.6.5
+        // character-grid delta) plus the internal justification pitch, so the
+        // decoration matches the drawn advance instead of re-measuring the
+        // natural width (which would ignore the grid on a packed EA run).
+        const textW = s.measuredWidth + internalStretch;
 
         const isInsertion = revActive && s.revision?.kind === 'insertion';
         const isDeletion = revActive && s.revision?.kind === 'deletion';
@@ -2753,6 +3097,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     const csBold = r.boldCs ?? base.bold;
     const csItalic = r.italicCs ?? base.italic;
 
+    // ECMA-376 §17.3.2.26 eastAsia axis. Within a non-complex-script slice, CJK
+    // code points take the eastAsia face while Latin/digits keep the ascii face
+    // (`base.fontFamily`). Only `DocxTextRun` carries the axis; absent (field
+    // runs / single-axis parser output) ⇒ fall back to ascii, exactly like
+    // `shapeTokenFamily`. Bold/italic/size are NOT axis-specific here — eastAsia
+    // shares the Latin (non-cs) toggles, so only the family differs.
+    const eaFontFamily = (base as DocxTextRun).fontFamilyEastAsia ?? base.fontFamily;
+
     // Word classifies European digits in an Arabic/Hebrew complex-script run as
     // AN (§17.3.2.20 w:lang w:bidi): use the bidi language's primary subtag when
     // present, else fall back to the run being rtl-marked.
@@ -2760,7 +3112,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       (forceCs || r.rtl === true) && isRtlBidiLang(r.langBidi, r.rtl === true);
 
     let firstSeg = true;
-    const emit = (word: string, cs: boolean) => {
+    // Script slot for an emitted segment (§17.3.2.26): 'cs' = complex-script
+    // (Arabic/Hebrew/...), 'ea' = East-Asian (CJK → eastAsia face), 'latin' =
+    // Latin/digits/neutral (ascii face). Each segment stays SINGLE-FONT — one
+    // family for its whole `.text` — so the measure==draw / docGrid char-grid
+    // invariant holds and the draw loop needs no per-segment font switching.
+    const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
+      const cs = slot === 'cs';
+      const fontFamily = slot === 'cs' ? csFontFamily : slot === 'ea' ? eaFontFamily : base.fontFamily;
       segs.push({
         text: word,
         bold: cs ? csBold : base.bold,
@@ -2769,7 +3128,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: cs ? csFontFamily : base.fontFamily,
+        fontFamily,
         vertAlign,
         measuredWidth: 0,
         smallCaps: base.smallCaps ?? false,
@@ -2783,6 +3142,14 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       firstSeg = false;
     };
 
+    // A non-complex-script slice still mixes scripts at the CJK boundary: emit
+    // its maximal CJK runs on the 'ea' (eastAsia) slot and the rest on 'latin'
+    // (ascii). Keeps each emitted segment single-font (so a serif ascii digit
+    // sits next to a gothic eastAsia title) without changing the cs path.
+    const emitNonCs = (slice: string) => {
+      for (const part of splitByEastAsia(slice)) emit(part.text, part.ea ? 'ea' : 'latin');
+    };
+
     for (const word of splitTextForLayout(displayText)) {
       if (forceCs) {
         // When the run's digits are AN-classified, split a token into maximal
@@ -2792,14 +3159,18 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
         // so a single-segment date would otherwise stay 28-02-2026.
         if (digitsAsAN) {
-          for (const slice of splitDigitGroups(word)) emit(slice, true);
+          for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
         } else {
-          emit(word, true);
+          emit(word, 'cs');
         }
       } else {
         // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
-        // so each side gets its own (cs vs Latin) size and typeface.
-        for (const slice of splitByComplexScript(word)) emit(slice.text, slice.cs);
+        // so each side gets its own (cs vs Latin) size and typeface; the non-cs
+        // side then sub-splits at CJK boundaries for the eastAsia face.
+        for (const slice of splitByComplexScript(word)) {
+          if (slice.cs) emit(slice.text, 'cs');
+          else emitNonCs(slice.text);
+        }
       }
     }
   };
@@ -2916,12 +3287,17 @@ function fitCJKPrefix(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   text: string,
   maxWidth: number,
+  // ECMA-376 §17.6.5 character-grid delta (px per EA glyph, 0 when inactive).
+  // The fit must compare CELL widths so the grid's char count lands per line —
+  // the same `gridWidth` the line box / draw uses, keeping the split consistent.
+  gridDeltaPx = 0,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
   let lo = 0, hi = chars.length;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (ctx.measureText(chars.slice(0, mid).join('')).width <= maxWidth) lo = mid;
+    const prefix = chars.slice(0, mid).join('');
+    if (gridWidth(ctx.measureText(prefix).width, prefix, gridDeltaPx) <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
   return chars.slice(0, lo).join('');
@@ -3034,6 +3410,51 @@ function splitByComplexScript(text: string): { text: string; cs: boolean }[] {
 }
 
 /**
+ * Split a (non-complex-script) string into maximal runs that are uniformly
+ * East-Asian (CJK) or not, per the §17.3.2.26 ascii/eastAsia axis split. Returns
+ * `[{text, ea}]` in logical order. CJK classification uses the canonical
+ * {@link isCjkBreakChar} from `@silurus/ooxml-core` — the SAME predicate the
+ * shape-text path ({@link shapeTokenFamily}) and the body wrap/justify paths
+ * use, so the eastAsia face is picked consistently across renderers with no name
+ * heuristics. Each returned slice stays single-font when emitted, preserving the
+ * measure==draw / docGrid char-grid invariant.
+ *
+ * Boundary rule: classification is purely per code point (every CJK code point
+ * opens/continues an `ea` run; every other code point a `latin` run). This is
+ * intentionally simpler than {@link splitByComplexScript}'s neutral-attachment —
+ * a digit between two ideographs is Latin/ascii either way (Word renders ASCII
+ * digits with the ascii face), and a single fillText anchors to the cumulative
+ * whole-string advance, so the visible spacing is unchanged.
+ *
+ * NOTE: this split decides the FONT slot only. Whether a resulting segment is
+ * snapped to the §17.6.5 character grid is decided SEPARATELY by the grid's own
+ * `EAST_ASIAN_RE` purity test (see `gridSegDeltaPx`/`eaGlyphCount`), not by the
+ * `ea` flag here. The two CJK predicates classify slightly different code-point
+ * sets; correctness of the grid total relies on `eaGlyphCount` being additive
+ * over this partition (covered by docgrid-char.test.ts's mixed-token case). Keep
+ * them independent — do not "unify" the predicates without re-checking that test.
+ */
+function splitByEastAsia(text: string): { text: string; ea: boolean }[] {
+  const out: { text: string; ea: boolean }[] = [];
+  let curEa: boolean | null = null;
+  let buf = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    const ea = isCjkBreakChar(cp);
+    if (curEa === null || ea === curEa) {
+      curEa = ea;
+      buf += ch;
+    } else {
+      out.push({ text: buf, ea: curEa });
+      curEa = ea;
+      buf = ch;
+    }
+  }
+  if (buf.length > 0) out.push({ text: buf, ea: curEa ?? false });
+  return out;
+}
+
+/**
  * Split a token into maximal runs of European digits (U+0030–0039) versus
  * everything else, so a date / number in an AN-classified Arabic run can be
  * reordered group-by-group by the per-line bidi pass (which works at segment
@@ -3086,6 +3507,10 @@ function layoutLines(
   // ECMA-376 §17.15.1.58–.60 Japanese line-breaking rules. Default kinsoku is
   // ON; the CJK overflow path retracts the break to a kinsoku-legal position.
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
+  // ECMA-376 §17.6.5 docGrid CHARACTER grid: per-EA-glyph cell delta in px (0
+  // when inactive). Folded into every advance via `gridWidth` so line breaking
+  // packs the grid's char count per line; the draw paths add the SAME delta.
+  gridDeltaPx = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -3207,13 +3632,26 @@ function layoutLines(
     return ctx.measureText(s.text);
   };
 
+  // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
+  // character-grid delta. This is the SINGLE source of truth shared with the
+  // draw paths (gridWidth) — every line-break / fit / tab measurement uses it so
+  // line wrapping packs the grid's char count and the box matches what is drawn.
+  const segAdvance = (s: LayoutTextSeg): number =>
+    gridWidth(measureText(s).width, s.text, gridDeltaPx);
+  // Grid advance of an arbitrary string under a segment's font (for split
+  // prefixes/tails). Selects the font, then applies the same gridWidth model.
+  const strAdvance = (s: LayoutTextSeg, text: string): number => {
+    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+    return gridWidth(ctx.measureText(text).width, text, gridDeltaPx);
+  };
+
   // Width of a queued segment, for right/center tab look-ahead.
   const tabFollowWidth = (q: LayoutSeg): number => {
     if ('isTab' in q) return q.measuredWidth || 0;
     if ('imagePath' in q) return q.widthPt * scale;
     if ('mathNodes' in q) return q.measuredWidth || 0;
     if ('lineBreak' in q) return 0;
-    return measureText(q).width;
+    return segAdvance(q);
   };
 
   // Use an explicit queue so CJK split-tails can be re-queued
@@ -3254,7 +3692,7 @@ function layoutLines(
     const head = sp > 0 ? ts.text.slice(0, sp) : ts.text;
     const firstChar = [...head][0] ?? '';
     const probe = { ...ts, text: firstChar };
-    return measureText(probe).width;
+    return segAdvance(probe);
   };
 
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
@@ -3316,10 +3754,11 @@ function layoutLines(
             addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
           } else {
             const m = measureText(q);
-            q.measuredWidth = m.width;
+            const w = gridWidth(m.width, q.text, gridDeltaPx);
+            q.measuredWidth = w;
             const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
             const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
-            addToLine(q, m.width, q.fontSize, asc, desc);
+            addToLine(q, w, q.fontSize, asc, desc);
           }
         }
         continue;
@@ -3391,7 +3830,9 @@ function layoutLines(
     // ── Text segment ─────────────────────────────────────
     const s = seg as LayoutTextSeg;
     const m = measureText(s);
-    const w = m.width;
+    // Advance = natural width + character-grid delta (the SINGLE model shared
+    // with the draw paths; 0 unless an active grid AND a pure-EA segment).
+    const w = gridWidth(m.width, s.text, gridDeltaPx);
     // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
@@ -3431,8 +3872,11 @@ function layoutLines(
     //      InDesign, Word) and keeps layout close to Word's output.
     const SPACE_SHRINK_RATIO = 0.25;
     const trimmed = s.text.replace(/ +$/, '');
+    // Subtract the GRID width of the trimmed text (not the natural width) so the
+    // grid delta on EA glyphs cancels and trailingSpaceW is the bare space
+    // advance — keeping `w` and `wForFit` on the one advance model.
     const trailingSpaceW = s.text.endsWith(' ')
-      ? w - ctx.measureText(trimmed).width
+      ? w - gridWidth(ctx.measureText(trimmed).width, trimmed, gridDeltaPx)
       : 0;
     const wForFit = w - trailingSpaceW;
     const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
@@ -3448,7 +3892,7 @@ function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, gridDeltaPx) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -3462,9 +3906,10 @@ function layoutLines(
       const split = kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit);
       const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {
-        const pm = ctx.measureText(prefix);
-        const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pm.width };
-        addToLine(headSeg, pm.width, h, asc, desc);
+        // Grid advance for the head piece — the same model as the line box / draw.
+        const pw = strAdvance(s, prefix);
+        const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pw };
+        addToLine(headSeg, pw, h, asc, desc);
         const tail = s.text.slice(prefix.length);
         if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
       } else if (currentLine.length > 0) {
@@ -3485,9 +3930,9 @@ function layoutLines(
           if (k > 0) {
             const headText = chars.slice(0, chars.length - k).join('');
             const tailText = chars.slice(chars.length - k).join('');
-            retracted = { ...lastText, text: tailText, measuredWidth: measureText({ ...lastText, text: tailText }).width };
+            retracted = { ...lastText, text: tailText, measuredWidth: strAdvance(lastText, tailText) };
             if (headText) {
-              const headW = measureText({ ...lastText, text: headText }).width;
+              const headW = strAdvance(lastText, headText);
               currentWidth -= lastText.measuredWidth - headW;
               currentLine[currentLine.length - 1] = { ...lastText, text: headText, measuredWidth: headW };
             } else {
@@ -3506,9 +3951,9 @@ function layoutLines(
         // Empty line and not even one char fits — force-fit one char to guarantee progress
         const firstChar = [...s.text][0] ?? '';
         if (firstChar) {
-          const fm = ctx.measureText(firstChar);
-          const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fm.width };
-          addToLine(headSeg, fm.width, h, asc, desc);
+          const fw = strAdvance(s, firstChar);
+          const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fw };
+          addToLine(headSeg, fw, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
           if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
         }
@@ -3774,8 +4219,25 @@ function lineEndToArrowEnd(
   return { type: end.type, w: end.w, len: end.len };
 }
 
-function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
-  const { ctx, scale } = state;
+/**
+ * Resolve an anchored shape's page-space bounding box {x,y,w,h} (px). Shared by
+ * renderAnchorShape (where the shape is drawn) and registerAnchorFloats (where
+ * its float-exclusion rect is built), so the exclusion band matches the paint
+ * box exactly — see root CLAUDE.md (no duplicated geometry).
+ *
+ * Mirrors the renderer's sizing: sizeRelH/sizeRelV (ECMA-376 §20.4.2.18)
+ * override the static extent, and a wgp child scales by the group ratio with its
+ * within-group offset scaled in step; resolveAnchorX/Y then place the box. `w`/`h`
+ * may be 0/negative for degenerate line presets — the caller decides how to
+ * treat those (renderAnchorShape draws a line; a wrap-shape with no area
+ * registers no float).
+ */
+function resolveShapeBox(
+  shape: ShapeRun,
+  state: RenderState,
+  paragraphTopPx: number,
+): { x: number; y: number; w: number; h: number } {
+  const { scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
   // size × pct.
@@ -3815,6 +4277,20 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     }
     alignHeightPt = newSizePt;
   }
+  const x = resolveAnchorX(
+    shape.anchorXAlign, shape.anchorXFromMargin, offsetXPt, w, state,
+    shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,
+  );
+  const y = resolveAnchorY(
+    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPx, state,
+    shape.anchorYRelativeFrom, shape.pctPosV, alignHeightPt,
+  );
+  return { x, y, w, h };
+}
+
+function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
+  const { ctx, scale } = state;
+  const { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
   // Line/connector presets (ECMA-376 §20.1.9.18) are valid with a degenerate
   // bounding box — a horizontal line has h==0, a vertical line w==0. Stroking
   // such a path still draws a visible segment, so only bail when there is truly
@@ -3827,14 +4303,6 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     preset.startsWith('curvedconnector');
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
-  const x = resolveAnchorX(
-    shape.anchorXAlign, shape.anchorXFromMargin, offsetXPt, w, state,
-    shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,
-  );
-  const y = resolveAnchorY(
-    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPx, state,
-    shape.anchorYRelativeFrom, shape.pctPosV, alignHeightPt,
-  );
 
   const rot = shape.rotation ?? 0;
   const flipH = shape.flipH ?? false;
@@ -3951,19 +4419,194 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // sits on top of the panel. Rotation is intentionally not applied to body
   // text — the cover-template usage we care about uses anchor-only text.
   if (shape.textBlocks && shape.textBlocks.length > 0) {
-    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses);
+    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses, state.images);
   }
+}
+
+/** Fit an image block to the text-box inner width, preserving aspect from its
+ *  natural pt size. If the natural width already fits, draw at natural size ×
+ *  scale; otherwise scale down to innerW. Falls back to a square innerW box when
+ *  the natural size is unknown (0). Returns px dimensions. */
+/** Greedy line-wrap for text-box body text within `maxWidth` px (ECMA-376
+ *  §21.1.2.1.1 — text-box content wraps to the inset box width unless wrap is
+ *  off). Latin words break at spaces (the space stays with the preceding word);
+ *  CJK / ideographic characters may break between any two (they carry no
+ *  inter-word spaces). `ctx.font` must already be the block's font. A single
+ *  token wider than `maxWidth` is left to overflow its own line (no
+ *  hyphenation). Always returns at least one line. */
+// Ideographic / CJK classification for the shape-text tokenizers uses the
+// canonical `isCjkBreakChar` from @silurus/ooxml-core (imported above), the same
+// predicate the body's wrap/justify paths use. It covers U+3000–U+9FFF, the
+// Hangul Syllables block U+AC00–U+D7A3, U+F900–U+FAFF and U+FF00–U+FFEF — so
+// Korean text-box text is classified as CJK (and takes the eastAsia face), which
+// the previous local `isCjkCp` dropped. NOTE: that local predicate also covered
+// the SIP Ext-B range U+20000–U+2FA1F; `isCjkBreakChar` does not, so it is
+// intentionally dropped here. If Ext-B ideographs ever need CJK treatment, the
+// fix belongs in the core predicate (shared by pptx/docx/xlsx), not a docx-local
+// re-fork.
+
+/** Per-token font family for a shape-text run, picked by the token's script
+ *  (ECMA-376 §17.3.2.26): a CJK token (its first code point is East-Asian) uses
+ *  the run's eastAsia axis, a Latin/digit token uses the ascii axis. The
+ *  tokenizer ({@link tokenizeShapeText}) makes every token homogeneous — one CJK
+ *  char, or a Latin word incl. its trailing space — so the first code point
+ *  classifies the whole token. Falls back to the ascii `fontFamily` when the
+ *  eastAsia axis is absent (older parser output / single-axis runs). The font
+ *  CLASS (serif/sans) then comes from `fontFamilyClasses` (fontTable §17.8.3.10),
+ *  so a serif ascii face and a gothic eastAsia face render in their own styles
+ *  with no name heuristics. */
+function shapeTokenFamily(token: string, run: ShapeTextRun): string | null {
+  const cp = token.codePointAt(0) ?? 0;
+  return isCjkBreakChar(cp) ? (run.fontFamilyEastAsia ?? run.fontFamily ?? null) : (run.fontFamily ?? null);
+}
+
+/** Split a string into atomic wrap units: each CJK char alone, or a run of
+ *  non-CJK characters up to and including a trailing space. Shared by the
+ *  single-format ({@link wrapShapeText}) and rich ({@link wrapShapeRuns})
+ *  text-box layout paths so they tokenize identically. */
+function tokenizeShapeText(text: string): string[] {
+  const tokens: string[] = [];
+  let buf = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (isCjkBreakChar(cp)) {
+      if (buf) {
+        tokens.push(buf);
+        buf = '';
+      }
+      tokens.push(ch);
+    } else if (ch === ' ') {
+      buf += ch;
+      tokens.push(buf);
+      buf = '';
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf) tokens.push(buf);
+  return tokens;
+}
+
+function wrapShapeText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+): string[] {
+  if (!text) return [''];
+  if (maxWidth <= 0) return [text];
+  const tokens = tokenizeShapeText(text);
+
+  const lines: string[] = [];
+  let cur = '';
+  for (const tok of tokens) {
+    if (cur !== '' && ctx.measureText(cur + tok).width > maxWidth) {
+      lines.push(cur.replace(/\s+$/, ''));
+      cur = tok.replace(/^\s+/, ''); // a wrapped line never starts with a space
+    } else {
+      cur += tok;
+    }
+  }
+  if (cur !== '') lines.push(cur.replace(/\s+$/, ''));
+  return lines.length ? lines : [text];
+}
+
+/** A single wrap unit tagged with the run it came from. `text` is a Latin word
+ *  (incl. trailing space) or one CJK character (see {@link tokenizeShapeText}).
+ *  `width` is its measured advance in px under the run's font (filled during
+ *  greedy line-fill). */
+interface RichToken {
+  text: string;
+  run: ShapeTextRun;
+  width: number;
+}
+
+/** Greedy line-wrap for a rich (mixed-format) text-box paragraph. Builds one
+ *  flat token stream across all `runs` (each token carrying its run's format),
+ *  measures every token under its own font, and fills lines to `maxWidth` px —
+ *  the same wrap rule {@link wrapShapeText} uses, but per-token-font-aware.
+ *  A leading space is dropped when a line wraps (a wrapped line never starts
+ *  with a space); a token wider than `maxWidth` stays on its own line. Mutates
+ *  `ctx.font` while measuring. Always returns at least one (possibly empty)
+ *  line. */
+function wrapShapeRuns(
+  ctx: CanvasRenderingContext2D,
+  runs: ShapeTextRun[],
+  maxWidth: number,
+  scale: number,
+  fontFamilyClasses: Record<string, string>,
+): RichToken[][] {
+  const tokens: RichToken[] = [];
+  for (const run of runs) {
+    const fontPx = run.fontSizePt * scale;
+    for (const text of tokenizeShapeText(run.text)) {
+      // Measure each token under its OWN per-character font (ascii vs eastAsia
+      // axis, §17.3.2.26) so a CJK glyph's advance is read from the eastAsia face
+      // and a Latin/digit glyph's from the ascii face.
+      ctx.font = buildFont(run.bold ?? false, run.italic ?? false, fontPx, shapeTokenFamily(text, run), fontFamilyClasses);
+      tokens.push({ text, run, width: ctx.measureText(text).width });
+    }
+  }
+  if (tokens.length === 0) return [[]];
+
+  const lines: RichToken[][] = [];
+  let cur: RichToken[] = [];
+  let curW = 0;
+  for (const tok of tokens) {
+    if (cur.length > 0 && curW + tok.width > maxWidth) {
+      lines.push(cur);
+      // A wrapped line never starts with a space — drop a leading space token.
+      if (tok.text.trim() === '') {
+        cur = [];
+        curW = 0;
+        continue;
+      }
+      cur = [tok];
+      curW = tok.width;
+    } else {
+      cur.push(tok);
+      curW += tok.width;
+    }
+  }
+  if (cur.length > 0) lines.push(cur);
+  return lines.length ? lines : [[]];
+}
+
+function fitShapeImage(
+  widthPt: number,
+  heightPt: number,
+  innerW: number,
+  scale: number,
+): { w: number; h: number } {
+  const natW = (widthPt ?? 0) * scale;
+  const natH = (heightPt ?? 0) * scale;
+  if (natW <= 0 || natH <= 0) {
+    // No intrinsic size surfaced — reserve a square innerW box.
+    return { w: innerW, h: innerW };
+  }
+  if (natW <= innerW) return { w: natW, h: natH };
+  const s = innerW / natW;
+  return { w: innerW, h: natH * s };
 }
 
 /** Render a shape's body text inside its bounding box, honoring lIns/tIns/
  *  rIns/bIns and the wps:bodyPr @anchor (t / ctr / b). Alignment within each
- *  line is read from the per-block paragraph alignment. */
-function renderShapeText(
+ *  line is read from the per-block paragraph alignment.
+ *
+ *  Blocks carrying an `imagePath` (an inline image inside the text box, e.g. a
+ *  WMF chart wrapped as the sole content of a paragraph) draw the decoded
+ *  bitmap from `images` instead of text, fitted to the inner width. The
+ *  reserved height is the SAME value used by the first-pass measurement and the
+ *  draw advance, so vertical anchoring (t/ctr/b) stays consistent. A missing
+ *  bitmap reserves its height but draws nothing (no crash).
+ *
+ *  Exported for unit testing the inline-image fit/draw + missing-bitmap paths. */
+export function renderShapeText(
   shape: ShapeRun,
   x: number, y: number, w: number, h: number,
   ctx: CanvasRenderingContext2D,
   scale: number,
   fontFamilyClasses: Record<string, string> = {},
+  images: Map<string, DecodedImage> = new Map(),
 ): void {
   const blocks = shape.textBlocks ?? [];
   const lIns = (shape.textInsetL ?? 0) * scale;
@@ -3975,9 +4618,41 @@ function renderShapeText(
   const innerY = y + tIns;
   const innerH = Math.max(0, h - tIns - bIns);
 
-  // First pass: measure each block's natural height (one line at fontSize px)
-  const lineHeights = blocks.map((b) => b.fontSizePt * scale * 1.2);
-  const totalH = lineHeights.reduce((s, lh) => s + lh, 0);
+  // First pass: lay out each block. Text blocks WRAP to the inner width
+  // (ECMA-376 §21.1.2.1.1) — a long title/abstract that exceeds the box width
+  // breaks onto multiple lines instead of overflowing the page; image blocks
+  // reserve their fitted height. The computed layout drives both vertical
+  // anchoring (totalH) and the draw pass (no re-wrapping).
+  type BlockLayout =
+    | { kind: 'image'; fitW: number; fitH: number }
+    | { kind: 'text'; lines: string[]; lineH: number }
+    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[] };
+  const layouts: BlockLayout[] = blocks.map((b) => {
+    if (b.imagePath) {
+      const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, innerW, scale);
+      return { kind: 'image', fitW, fitH };
+    }
+    // Rich path: a paragraph with explicit per-run formatting lays out as mixed
+    // fonts. Each line's height is the tallest run on it × 1.2 (ECMA-376 line
+    // box ≈ largest font on the line).
+    if (b.runs && b.runs.length > 0) {
+      const lines = wrapShapeRuns(ctx, b.runs, innerW, scale, fontFamilyClasses);
+      const lineHeights = lines.map((toks) => {
+        const maxPt = toks.reduce((m, t) => Math.max(m, t.run.fontSizePt), 0);
+        return (maxPt > 0 ? maxPt : b.fontSizePt) * scale * 1.2;
+      });
+      return { kind: 'rich', lines, lineHeights };
+    }
+    const fontPx = b.fontSizePt * scale;
+    ctx.font = buildFont(b.bold ?? false, b.italic ?? false, fontPx, b.fontFamily ?? null, fontFamilyClasses);
+    return { kind: 'text', lines: wrapShapeText(ctx, b.text, innerW), lineH: fontPx * 1.2 };
+  });
+  const blockHeight = (l: BlockLayout): number => {
+    if (l.kind === 'image') return l.fitH;
+    if (l.kind === 'rich') return l.lineHeights.reduce((s, h) => s + h, 0);
+    return l.lines.length * l.lineH;
+  };
+  const totalH = layouts.reduce((s, l) => s + blockHeight(l), 0);
 
   const anchor = shape.textAnchor ?? 't';
   let cursorY: number;
@@ -3991,33 +4666,95 @@ function renderShapeText(
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
+    const layout = layouts[i];
+
+    if (layout.kind === 'image') {
+      // Inline image inside the text box. Fit to inner width, place
+      // horizontally per the paragraph alignment (figures default to centered),
+      // and advance by the reserved height regardless of whether a bitmap is
+      // present (a missing decode must not shift the rest of the layout).
+      const { fitW, fitH } = layout;
+      const bmp = block.imagePath ? images.get(imageKey(block.imagePath)) : undefined;
+      if (bmp) {
+        let drawX = innerX + Math.max(0, (innerW - fitW) / 2); // default: centered
+        if (block.alignment === 'left' || block.alignment === 'both') {
+          drawX = innerX;
+        } else if (block.alignment === 'right') {
+          drawX = innerX + Math.max(0, innerW - fitW);
+        }
+        ctx.drawImage(bmp, drawX, cursorY, fitW, fitH);
+      }
+      cursorY += fitH;
+      continue;
+    }
+
+    if (layout.kind === 'rich') {
+      // Mixed-format paragraph: each token carries its own run's font/color.
+      // 'distribute' stays centered (no inter-word stretch in shape text), like
+      // the single-format path.
+      const edgeFor = (rtl: boolean) =>
+        block.alignment === 'distribute' ? 'center' : resolveAlignEdge(block.alignment, rtl);
+      ctx.textAlign = 'left';
+      for (let li = 0; li < layout.lines.length; li++) {
+        const lineToks = layout.lines[li];
+        const lineH = layout.lineHeights[li];
+        const lineW = lineToks.reduce((s, t) => s + t.width, 0);
+        // Base direction (first-strong) from the line's own text, matching the
+        // single-format path's per-block resolution but resolved per line.
+        const lineText = lineToks.map((t) => t.text).join('');
+        const baseRtl = resolveBaseDirection(undefined, lineText) === 'rtl';
+        ctx.direction = baseRtl ? 'rtl' : 'ltr';
+        const edge = edgeFor(baseRtl);
+        let tx = innerX;
+        if (edge === 'center') {
+          tx = innerX + Math.max(0, (innerW - lineW) / 2);
+        } else if (edge === 'right') {
+          tx = innerX + Math.max(0, innerW - lineW);
+        }
+        // Baseline uses the tallest font on the line (lineH / 1.2 × 0.85).
+        const lineMaxFontPx = lineH / 1.2;
+        const baseline = cursorY + lineMaxFontPx * 0.85;
+        for (const tok of lineToks) {
+          const fontPx = tok.run.fontSizePt * scale;
+          // Per-character font (ascii vs eastAsia axis, §17.3.2.26): a CJK token
+          // draws with the eastAsia family, a Latin/digit token with the ascii
+          // family. Mirrors the measure pass so advance and draw agree.
+          ctx.font = buildFont(tok.run.bold ?? false, tok.run.italic ?? false, fontPx, shapeTokenFamily(tok.text, tok.run), fontFamilyClasses);
+          ctx.fillStyle = tok.run.color ? `#${tok.run.color}` : '#000000';
+          ctx.fillText(tok.text, tx, baseline);
+          tx += tok.width;
+        }
+        cursorY += lineH;
+      }
+      continue;
+    }
+
     const fontPx = block.fontSizePt * scale;
     ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
     ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
-    // The whole block is drawn in one fillText, so Canvas applies UAX#9 over
-    // the full string; we only set the base direction (for neutral resolution)
-    // and resolve alignment. No explicit shape-paragraph rtl flag exists, so
-    // derive the base direction from the content (first-strong).
+    // Base direction (for neutral resolution) + alignment, derived from the
+    // content (first-strong) since shape paragraphs carry no explicit rtl flag.
     const baseRtl = resolveBaseDirection(undefined, block.text) === 'rtl';
-    // Shape text draws one line per block with no inter-word stretching, so
-    // 'distribute' keeps its pre-bidi approximation (centered) rather than the
-    // justify edge resolveAlignEdge reports for paragraphs.
+    // No inter-word stretching in shape text, so 'distribute' stays centered
+    // rather than the justify edge resolveAlignEdge reports for paragraphs.
     const edge = block.alignment === 'distribute'
       ? 'center'
       : resolveAlignEdge(block.alignment, baseRtl);
     ctx.textAlign = 'left';
     ctx.direction = baseRtl ? 'rtl' : 'ltr';
-    const m = ctx.measureText(block.text);
-    let tx = innerX;
-    if (edge === 'center') {
-      tx = innerX + Math.max(0, (innerW - m.width) / 2);
-    } else if (edge === 'right') {
-      tx = innerX + Math.max(0, innerW - m.width);
+    for (const line of layout.lines) {
+      const m = ctx.measureText(line);
+      let tx = innerX;
+      if (edge === 'center') {
+        tx = innerX + Math.max(0, (innerW - m.width) / 2);
+      } else if (edge === 'right') {
+        tx = innerX + Math.max(0, innerW - m.width);
+      }
+      // Baseline = line top + ascent (approx 0.85 of font size for default fonts).
+      const baseline = cursorY + fontPx * 0.85;
+      ctx.fillText(line, tx, baseline);
+      cursorY += layout.lineH;
     }
-    // Baseline = cursorY + ascent (approx 0.85 of font size for default fonts).
-    const baseline = cursorY + fontPx * 0.85;
-    ctx.fillText(block.text, tx, baseline);
-    cursorY += lineHeights[i];
   }
   ctx.direction = 'ltr'; // reset for subsequent draws
 }
@@ -4057,70 +4794,154 @@ function resolveAnchorBox(
   };
 }
 
-/** Register floats from a paragraph's anchor images and draw the image bitmap immediately. */
+/** Register floats from a paragraph's anchor images and shapes. Anchor images
+ *  are drawn immediately; anchor shapes are NOT drawn here (renderAnchorShape
+ *  paints them separately) — we only reserve their float-exclusion band so body
+ *  text wraps around them (ECMA-376 §20.4.2.16/.17), exactly like images. */
 function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
   // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
   // a paraId (e.g. two side-by-side photos in one paragraph) never displace each
   // other; floats from different paragraphs do (de-facto overlap avoidance).
   const paraId = state.floatParaSeq++;
   for (const run of para.runs) {
-    if (run.type !== 'image') continue;
-    const img = run as unknown as ImageRun;
-    if (!img.anchor) continue;
-    if (!isWrapFloat(img.wrapMode)) continue;
-
-    const mode: 'square' | 'topAndBottom' =
-      img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
-
-    // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
-    const box = resolveAnchorBox(img, state, paragraphAnchorY);
-    const { w, h, dl, dr, dt, db } = box;
-    let pageX = box.x;
-    let pageY = box.y;
-
-    // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
-    // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
-    // permits overlap. Default true per §20.4.2.3.
-    // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
-    // displacing the later document-order float, the "other paragraphs only"
-    // gate under allowOverlap=true, and the right-then-down re-seat using dist
-    // padding as the float-to-float gap. See resolveFloatOverlap header.
-    const allowOverlap = img.allowOverlap ?? true;
-    const resolved = resolveFloatOverlap(
-      pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap,
-      state.pageWidth * state.scale, state.floats,
-    );
-    pageX = resolved.x;
-    pageY = resolved.y;
-
-    const key = imageKey(img.imagePath, img.colorReplaceFrom);
-    const rect: FloatRect = {
-      mode,
-      imageKey: key,
-      imageX: pageX,
-      imageY: pageY,
-      imageW: w,
-      imageH: h,
-      xLeft: pageX - dl,
-      xRight: pageX + w + dr,
-      yTop: pageY - dt,
-      yBottom: pageY + h + db,
-      side: img.wrapSide ?? 'bothSides',
-      distLeft: dl,
-      distRight: dr,
-      distTop: dt,
-      distBottom: db,
-      paraId,
-      drawn: false,
-    };
-    state.floats.push(rect);
-
-    if (!state.dryRun) {
-      const bmp = state.images.get(key);
-      if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
-      rect.drawn = true;
+    if (run.type === 'image') {
+      registerImageFloat(run as unknown as ImageRun, state, paragraphAnchorY, paraId);
+    } else if (run.type === 'shape') {
+      registerShapeFloat(run as unknown as ShapeRun, state, paragraphAnchorY, paraId);
     }
   }
+}
+
+/** Reserve the float-exclusion rect for one anchored wrap-image and draw the
+ *  bitmap immediately (the image is the float). */
+function registerImageFloat(
+  img: ImageRun,
+  state: RenderState,
+  paragraphAnchorY: number,
+  paraId: number,
+): void {
+  if (!img.anchor) return;
+  if (!isWrapFloat(img.wrapMode)) return;
+
+  const mode: 'square' | 'topAndBottom' =
+    img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
+
+  // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
+  const box = resolveAnchorBox(img, state, paragraphAnchorY);
+  const { w, h, dl, dr, dt, db } = box;
+  let pageX = box.x;
+  let pageY = box.y;
+
+  // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
+  // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
+  // permits overlap. Default true per §20.4.2.3.
+  // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
+  // displacing the later document-order float, the "other paragraphs only"
+  // gate under allowOverlap=true, and the right-then-down re-seat using dist
+  // padding as the float-to-float gap. See resolveFloatOverlap header.
+  const allowOverlap = img.allowOverlap ?? true;
+  const resolved = resolveFloatOverlap(
+    pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap,
+    state.pageWidth * state.scale, state.floats,
+  );
+  pageX = resolved.x;
+  pageY = resolved.y;
+
+  const key = imageKey(img.imagePath, img.colorReplaceFrom);
+  const rect: FloatRect = {
+    mode,
+    imageKey: key,
+    imageX: pageX,
+    imageY: pageY,
+    imageW: w,
+    imageH: h,
+    xLeft: pageX - dl,
+    xRight: pageX + w + dr,
+    yTop: pageY - dt,
+    yBottom: pageY + h + db,
+    side: img.wrapSide ?? 'bothSides',
+    distLeft: dl,
+    distRight: dr,
+    distTop: dt,
+    distBottom: db,
+    paraId,
+    drawn: false,
+  };
+  state.floats.push(rect);
+
+  if (!state.dryRun) {
+    const bmp = state.images.get(key);
+    if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    rect.drawn = true;
+  }
+}
+
+/** Reserve the float-exclusion rect for one anchored wrap-shape (wps:txbx /
+ *  DrawingML wp:anchor shape). The shape is drawn separately by
+ *  renderAnchorShape, so here we only push the FloatRect (drawn=true ⇒ the
+ *  deferred-image-draw path never tries to paint it). The box is resolved by the
+ *  SAME resolveShapeBox the renderer draws with, so the band matches the shape. */
+function registerShapeFloat(
+  shape: ShapeRun,
+  state: RenderState,
+  paragraphAnchorY: number,
+  paraId: number,
+): void {
+  if (!isWrapFloat(shape.wrapMode)) return;
+
+  // Match resolveShapeBox's paragraphTopPx convention. resolveAnchorY reads
+  // paragraphTopPx only for relativeFrom="paragraph"/"line" (anchorYFromPara);
+  // wrap floats anchor against the post-spaceBefore textAreaTop, identical to
+  // the image path (resolveAnchorBox uses paragraphAnchorY there).
+  const { x, y, w, h } = resolveShapeBox(shape, state, paragraphAnchorY);
+  // A degenerate (zero/negative-area) box — e.g. a wrap-flagged line preset —
+  // reserves no band; bail like renderAnchorShape skips drawing it.
+  if (w <= 0 || h <= 0) return;
+
+  const mode: 'square' | 'topAndBottom' =
+    shape.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
+
+  const scale = state.scale;
+  const dl = (shape.distLeft   ?? 0) * scale;
+  const dr = (shape.distRight  ?? 0) * scale;
+  const dt = (shape.distTop    ?? 0) * scale;
+  const db = (shape.distBottom ?? 0) * scale;
+  let pageX = x;
+  let pageY = y;
+
+  // Overlap avoidance, kept consistent with the image path. Shapes carry no
+  // parsed allowOverlap field; the spec default is true (§20.4.2.3), so
+  // same-paragraph floats never displace each other and a lone shape is a no-op
+  // here — but running it keeps multi-float behavior identical to images.
+  const resolved = resolveFloatOverlap(
+    pageX, pageY, w, h, dl, dr, dt, db, paraId, /* allowOverlap */ true,
+    state.pageWidth * state.scale, state.floats,
+  );
+  pageX = resolved.x;
+  pageY = resolved.y;
+
+  const rect: FloatRect = {
+    mode,
+    imageKey: '',
+    imageX: pageX,
+    imageY: pageY,
+    imageW: w,
+    imageH: h,
+    xLeft: pageX - dl,
+    xRight: pageX + w + dr,
+    yTop: pageY - dt,
+    yBottom: pageY + h + db,
+    side: shape.wrapSide ?? 'bothSides',
+    distLeft: dl,
+    distRight: dr,
+    distTop: dt,
+    distBottom: db,
+    paraId,
+    // The shape is painted by renderAnchorShape, not by the deferred image-draw
+    // path; mark it drawn so that path skips it (it has no bitmap to draw).
+    drawn: true,
+  };
+  state.floats.push(rect);
 }
 
 // ===== Table rendering =====
@@ -4315,7 +5136,7 @@ function measureParaHeight(
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), paragraphIsEastAsian(para));
   }
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku);
+  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku, gridCharDeltaPx(grid, scale));
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 
@@ -4584,6 +5405,23 @@ function buildFont(
   return `${s} ${w} ${sizePx}px ${f}`;
 }
 
+/** Resolve the list-marker glyph's font family (ECMA-376 §17.3.2.26 + §17.9.6).
+ *  The marker is drawn/measured as a single `fillText`/`measureText`, so it must
+ *  be one family. Pick it per the marker's leading code point, exactly like the
+ *  body's per-character split and {@link shapeTokenFamily}: a CJK marker (e.g. an
+ *  ideographic bullet) → the eastAsia axis, anything else (a decimal "1", roman
+ *  "i", letter, or "•") → the ascii axis. Realistic markers are single-script, so
+ *  the leading code point classifies the whole glyph string. eastAsia falls back
+ *  to ascii when absent (older parser output / no eastAsia font). The font CLASS
+ *  (serif/sans) is then resolved by `fontFamilyClasses` (fontTable §17.8.3.10),
+ *  so e.g. a serif ascii (Times) number renders serif even when the heading's
+ *  eastAsia axis is a Gothic (sans). */
+function markerFontFamily(num: NumberingInfo): string | null {
+  const cp = num.text.codePointAt(0) ?? 0;
+  const ascii = num.fontFamily ?? null;
+  return isCjkBreakChar(cp) ? (num.fontFamilyEastAsia ?? ascii) : ascii;
+}
+
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
  *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
  *  list MUST mirror the Arabic entries there). A run whose font is one of these
@@ -4643,10 +5481,16 @@ function sansTail(cjk: ReturnType<typeof classifyCjkFont>): string {
   const cjkPart =
     cjk && cjk !== 'jp'
       ? cjkFallbackChain(cjk, 'sans')
-      : // JP / Latin default: keep the historical system-font hints first, then
-        // the Noto CJK siblings so a CJK glyph still resolves on hosts lacking
-        // the system faces.
+      : // JP / stray-CJK sans faces: historical system-font hints, then the Noto
+        // CJK siblings so a CJK glyph still resolves on hosts lacking them.
         ['Noto Sans JP', 'Hiragino Sans', 'Meiryo', ...cjkFallbackChain('jp', 'sans').slice(1)];
+  // A Latin (non-CJK) sans font must fall back to a LATIN sans for its
+  // letters/digits — otherwise the browser grabs them from a Japanese Gothic
+  // (wider, CJK-tuned Latin), widening Latin runs. Lead with Latin sans faces;
+  // the CJK gothic faces follow for any stray CJK glyph. (Mirrors serifTail.)
+  if (cjk == null) {
+    return `${quoteAll([...NON_CJK_SANS_FALLBACKS, 'Arial', 'Helvetica', 'Liberation Sans', ...cjkPart, ...ARABIC_TAIL_SANS])}, sans-serif`;
+  }
   return `${quoteAll([...cjkPart, ...ARABIC_TAIL_SANS, ...NON_CJK_SANS_FALLBACKS])}, sans-serif`;
 }
 
@@ -4655,12 +5499,21 @@ function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
   const cjkPart =
     cjk && cjk !== 'jp'
       ? cjkFallbackChain(cjk, 'serif')
-      : // JP / Latin default: historical mincho system hints, then Noto serif
-        // CJK siblings.
+      : // JP / stray-CJK serif faces: historical mincho system hints, then Noto
+        // serif CJK siblings.
         [
           'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho',
           'Noto Serif JP', ...cjkFallbackChain('jp', 'serif').slice(1),
         ];
+  // A Latin (non-CJK) serif font (e.g. Century) must fall back to a LATIN serif
+  // for its letters/digits. If the CJK mincho faces lead, the browser's
+  // per-glyph fallback grabs Latin glyphs from a Japanese Mincho (e.g. Hiragino
+  // Mincho ProN on macOS) whose Latin is ~15-18% wider, widening every Latin
+  // run and forcing spurious line wraps. Lead with Latin serif faces; the CJK
+  // mincho faces follow so a stray CJK glyph in a Latin-font run still resolves.
+  if (cjk == null) {
+    return `${quoteAll([...NON_CJK_SERIF_FALLBACKS, 'Times New Roman', 'Cambria', 'Liberation Serif', ...cjkPart, ...ARABIC_TAIL_SANS])}, serif`;
+  }
   return `${quoteAll([...cjkPart, ...ARABIC_TAIL_SANS, ...NON_CJK_SERIF_FALLBACKS])}, serif`;
 }
 
@@ -4848,6 +5701,84 @@ interface DocGridCtx {
   type: string | null | undefined;
   /** Grid pitch in pt (already converted from twips in the parser). */
   linePitchPt: number | null | undefined;
+  /** ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` divided by 4096 — the per-EA-
+   *  glyph character-grid delta = charSpace/4096 in FLAT POINTS (independent of
+   *  font size), added to the measured glyph advance (≈1em for full-width EA
+   *  glyphs). Negative tightens. `null`/`undefined` when the section declares no
+   *  charSpace; the character grid is then inactive even if `type` is
+   *  linesAndChars/snapToChars. See {@link gridCharDeltaPx}. */
+  charSpacePt?: number | null;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ECMA-376 §17.6.5 docGrid CHARACTER grid (字詰め). When the section's docGrid
+// `type` is "linesAndChars" or "snapToChars" AND a `charSpace` is declared,
+// every full-width East-Asian glyph gains a fixed per-EA-glyph spacing delta
+//   Δpt = charSpace / 4096   in FLAT POINTS (NEGATIVE = tighter)
+// that is INDEPENDENT of font size — it is added to the glyph's MEASURED advance
+// (≈1em for full-width EA glyphs), NOT scaled by it. (`gridCharDeltaPx` returns
+// exactly `charSpacePt * scale` = charSpace/4096 pt in px; it does not multiply
+// by the font size.) Latin / digits are NOT snapped (they keep their natural
+// advance), so the grid delta applies only to EA code points.
+//
+// ── The single advance model (measure == draw) ──────────────────────────────
+// To make line-break MEASUREMENT and the draw ADVANCE provably identical, the
+// grid delta enters in exactly ONE way: as a per-code-point spacing on a
+// PURE-EA segment. `gridSegDeltaPx` returns the total delta a segment's box
+// gains (`len × Δpx` for a pure-EA segment, else 0 — mixed/Latin segments get
+// no grid effect, sidestepping any contextual-metric or justification drift),
+// and `gridWidth` adds it to the natural `measureText` width. BOTH the layout's
+// `measuredWidth` and every draw path derive the segment's advance from this
+// SAME quantity:
+//   • non-justified draw walks the glyphs via `justifiedPiecePositions(cps,
+//     [1..n-1], perGap=0, measure, letterSpacingPx=Δ)`, whose final glyph lands
+//     at `measure(whole) + n·Δ` = the box edge;
+//   • justified draw reuses the EXISTING `justifiedPiecePositions` path with the
+//     same `letterSpacingPx = Δ`, so its box edge is `measure(whole) + n·Δ +
+//     nGaps·perGap` = `measuredWidth + internalStretch`.
+// Because both come from `measure(prefix) + (cps before)·Δ`, draw never diverges
+// from `measuredWidth` by construction — there is no separate per-glyph sum to
+// drift against the whole-string measure (約物半角 contextual collapse stays
+// honoured). See packages/core/src/text/justify-positions.ts.
+
+/** Per-EA-glyph character-grid delta in px for a paragraph's grid, or 0 when the
+ *  CHARACTER grid is inactive. Active only for docGrid type ∈ {linesAndChars,
+ *  snapToChars} with a declared charSpace (ECMA-376 §17.6.5). The line grid
+ *  ("lines") and a missing charSpace leave EA glyphs at natural advance. */
+function gridCharDeltaPx(grid: DocGridCtx | undefined, scale: number): number {
+  if (!grid || grid.charSpacePt == null) return 0;
+  if (grid.type !== 'linesAndChars' && grid.type !== 'snapToChars') return 0;
+  return grid.charSpacePt * scale;
+}
+
+/** Count of East-Asian (full-width) code points in `text` — the glyphs the
+ *  character grid snaps to cells. Uses the same {@link EAST_ASIAN_RE} content
+ *  predicate as docGrid line-cell rounding (no font-name heuristic). */
+function eaGlyphCount(text: string): number {
+  let n = 0;
+  for (const ch of text) if (EAST_ASIAN_RE.test(ch)) n++;
+  return n;
+}
+
+/** The total character-grid delta (px) a segment's advance gains under an active
+ *  character grid. Applied ONLY to a PURE East-Asian segment (every code point
+ *  is EA): then `len × deltaPx` cells the whole run, and a uniform per-cp
+ *  letter-spacing of `deltaPx` reproduces it exactly on both draw paths. A mixed
+ *  or pure-Latin segment returns 0 — Latin is never snapped (§17.6.5), and
+ *  skipping mixed segments avoids the per-cp-vs-whole-string and justification
+ *  drift that would break measure==draw. `deltaPx===0` (grid inactive) ⇒ 0. */
+function gridSegDeltaPx(text: string, deltaPx: number): number {
+  if (deltaPx === 0 || text.length === 0) return 0;
+  const cps = [...text];
+  return eaGlyphCount(text) === cps.length ? cps.length * deltaPx : 0;
+}
+
+/** Single source of truth for a text segment's laid-out advance: the natural
+ *  `measureText` width plus the character-grid delta (0 unless an active grid
+ *  AND a pure-EA segment). EVERY line-break / advance measurement and every draw
+ *  path must derive the segment advance from this, so they cannot diverge. */
+function gridWidth(naturalWidthPx: number, text: string, deltaPx: number): number {
+  return naturalWidthPx + gridSegDeltaPx(text, deltaPx);
 }
 
 function isGridLineRule(ctx: DocGridCtx | undefined): boolean {

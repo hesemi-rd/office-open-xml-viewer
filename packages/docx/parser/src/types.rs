@@ -168,6 +168,51 @@ pub struct SectionProps {
     /// this instead of the font's natural line height.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_line_pitch: Option<f64>,
+    /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` (ST_DecimalNumber, signed).
+    /// The per-character-grid spacing in 1/4096ths of an em (NOT twips). When
+    /// `doc_grid_type` is "linesAndChars" or "snapToChars", every full-width
+    /// East-Asian glyph occupies a fixed cell of width `fontSizePt +
+    /// charSpace/4096` pt; a positive value loosens the cell, a negative value
+    /// (the common case) tightens it. `None` when the attribute is absent (the
+    /// renderer then leaves East-Asian glyphs at their natural em advance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_char_space: Option<f64>,
+    /// ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout for the
+    /// section. `None` when the section is single-column (`<w:cols>` absent or
+    /// `@w:num` <= 1), in which case the renderer keeps its single full-width
+    /// content column (unchanged behavior).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<ColumnsSpec>,
+}
+
+/// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnsSpec {
+    /// `@w:num` — number of columns (>= 2 when this struct is emitted).
+    pub count: usize,
+    /// `@w:space` in pt (converted from twips) — the inter-column gap used when
+    /// `equal_width` is true. Default 720 twips (36 pt) per the spec.
+    pub space_pt: f64,
+    /// `@w:equalWidth` — when true (the default), every column has the same
+    /// width and `space_pt` is the uniform gap; `cols` is empty. When false the
+    /// per-column `cols` entries define the geometry verbatim.
+    pub equal_width: bool,
+    /// `@w:sep` — draw vertical separator rules between columns.
+    pub sep: bool,
+    /// Per-column `<w:col>` entries (width + trailing space, pt). Empty when
+    /// `equal_width` is true.
+    pub cols: Vec<ColSpec>,
+}
+
+/// ECMA-376 §17.6.3 `<w:col>` — one column's width and trailing space.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColSpec {
+    /// `@w:w` — the column's width in pt (converted from twips).
+    pub width_pt: f64,
+    /// `@w:space` — space after this column in pt (converted from twips).
+    pub space_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -183,6 +228,13 @@ pub enum BodyElement {
         #[serde(skip_serializing_if = "Option::is_none")]
         parity: Option<String>,
     },
+    /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
+    /// content into the next newspaper column of the current section (or the
+    /// first column of the next page when already in the last column). Hoisted
+    /// to the body level (mirroring `PageBreak`) so the paginator can act on it
+    /// without inspecting runs mid-paragraph. In a single-column section it
+    /// behaves like a page break.
+    ColumnBreak,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -202,7 +254,11 @@ pub struct DocParagraph {
     pub space_after: f64,
     /// None = single (1.0), Some(LineSpacing)
     pub line_spacing: Option<LineSpacing>,
-    pub numbering: Option<NumberingInfo>,
+    /// Boxed: `NumberingInfo` carries several resolved strings (text + marker
+    /// font axes); boxing keeps `DocParagraph` small enough that the
+    /// `BodyElement`/`CellElement` enums stay balanced (clippy::large_enum_variant).
+    /// Serde flattens the Box, so the JSON shape is unchanged.
+    pub numbering: Option<Box<NumberingInfo>>,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
@@ -331,12 +387,28 @@ pub struct NumberingInfo {
     /// ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
     /// Determines where body text starts after the marker on the first line.
     pub suff: String,
+    /// ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
+    /// level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
+    /// renderer draws Latin marker chars (e.g. a decimal "1") with this family,
+    /// so a heading whose ascii=Times renders its auto-number in Times (serif)
+    /// even when eastAsia=Gothic. `None` ⇒ renderer falls back to its default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 eastAsia axis for the marker glyph (same resolution as
+    /// `font_family`). The renderer draws CJK marker chars (e.g. an ideographic
+    /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DocRun {
-    Text(TextRun),
+    // Boxed: TextRun is the largest non-Shape Run variant (it carries the full
+    // run-format axis incl. the eastAsia font + complex-script fields); boxing
+    // keeps the enum compact (clippy::large_enum_variant). Serde flattens the
+    // Box, so the JSON tag/shape is unchanged.
+    Text(Box<TextRun>),
     Image(ImageRun),
     /// `rename_all` on the enum only renames variant tags; the field
     /// `break_type` would otherwise serialize as snake_case while the TS
@@ -518,6 +590,24 @@ pub struct ShapeRun {
     /// Wrap mode matching ImageRun.wrap_mode semantics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_mode: Option<String>,
+    /// distT (top padding, pt). Anchor-only. Mirrors ImageRun.dist_top so an
+    /// anchored wrap-shape reserves the same float-exclusion band as an image
+    /// (ECMA-376 §20.4.2.x — distT/B/L/R are the min text↔object distance).
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_top: f64,
+    /// distB (bottom padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_bottom: f64,
+    /// distL (left padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_left: f64,
+    /// distR (right padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_right: f64,
+    /// wrapSquare/wrapTight "wrapText" attribute: "bothSides" | "left" | "right"
+    /// | "largest". Defaults to "bothSides" when absent. Mirrors ImageRun.wrap_side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_side: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -630,6 +720,16 @@ pub struct TextRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+    /// through the style chain + docDefaults. CJK characters in this run render
+    /// with this family; `font_family` keeps the conflated single-font fallback
+    /// (ascii → eastAsia) for any path that does not split per character. The
+    /// renderer routes consecutive CJK code points to this axis (the same per-
+    /// script rule `ShapeTextRun` already uses), so a Gothic eastAsia title sits
+    /// alongside a serif ascii number with no name heuristics. `None` ⇒ renderer
+    /// falls back to `font_family`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
     /// "super" | "sub" | None
@@ -738,10 +838,43 @@ pub struct RubyAnnotation {
     pub font_size_pt: f64,
 }
 
+/// One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the
+/// fields of {@link ShapeText} that carry character formatting, resolved
+/// through the SAME chain (`parse_run_fmt` + docDefaults font fallback). The
+/// renderer lays a paragraph's `runs` out as rich text (per-run font), so a
+/// bold label followed by non-bold body text keeps each run's formatting
+/// instead of collapsing to the first run's.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTextRun {
+    pub text: String,
+    pub font_size_pt: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// ECMA-376 §17.3.2.26 ascii axis (`<w:rFonts w:ascii>`), resolved through
+    /// docDefaults. The renderer draws Latin letters/digits in this run with this
+    /// family.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+    /// through docDefaults. The renderer draws CJK characters in this run with
+    /// this family (falling back to `font_family` when absent). Splitting the two
+    /// axes lets a serif ascii face and a gothic eastAsia face coexist in one run
+    /// (e.g. serif digits inside a gothic Japanese title).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+}
+
 /// One paragraph of text rendered inside a shape (`<wps:txbx><w:txbxContent>`).
-/// Reduced to a single combined string + the first run's effective formatting
-/// — the shape-text layouts in our current sample corpus carry one run per
-/// paragraph, so we don't yet support mixed runs / full inline layout here.
+/// The single `text`/format fields carry the concatenated paragraph string and
+/// the FIRST run's effective formatting (kept for backward compatibility with
+/// existing consumers and the image-block path); `runs` additionally preserves
+/// PER-RUN formatting so the renderer can draw mixed bold/non-bold runs as rich
+/// text (ECMA-376 §17.3.2 — each `<w:r>` resolves its own rPr).
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeText {
@@ -755,8 +888,37 @@ pub struct ShapeText {
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// Per-run formatting for this paragraph (one entry per `<w:r>` that carries
+    /// text). Empty for an image-only paragraph (the image path is unchanged).
+    /// The renderer prefers `runs` (rich layout) over the single format fields
+    /// when non-empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<ShapeTextRun>,
     /// Paragraph alignment ("left" | "center" | "right" | "both").
     pub alignment: String,
+    /// Embedded zip path of an inline image living inside this text-box
+    /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
+    /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved
+    /// the same way body images are (`resolve_blip_urls`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+    /// MIME type of the blip at `image_path` (e.g. `image/x-wmf`,
+    /// `image/png`). `None` when there is no image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Vector original from the Microsoft `asvg:svgBlip` extension (the zip
+    /// path of the `.svg` part), preferred over `image_path` when present.
+    /// `None` for a plain raster/metafile blip or a text-only paragraph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg_image_path: Option<String>,
+    /// Inline image natural width in pt (from `<wp:extent cx=>` EMU→pt). 0
+    /// when there is no image.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub image_width_pt: f64,
+    /// Inline image natural height in pt (from `<wp:extent cy=>` EMU→pt). 0
+    /// when there is no image.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub image_height_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone)]

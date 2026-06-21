@@ -69,7 +69,7 @@ export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
  *  still rejects sub-pixel slivers between full-width floats. */
 export const MIN_LINE_GAP = 1;
 
-export function isWrapFloat(mode?: string): boolean {
+export function isWrapFloat(mode?: string | null): boolean {
   return mode === 'square' || mode === 'topAndBottom' || mode === 'tight' || mode === 'through';
 }
 

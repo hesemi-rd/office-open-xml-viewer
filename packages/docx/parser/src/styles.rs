@@ -746,9 +746,14 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         fmt.underline = Some(val != "none");
     }
 
-    // Font size — w:sz is used for Latin and East Asian (CJK) text.
-    // w:szCs is for complex scripts (Arabic/Hebrew RTL text) only; fall back to it when sz is absent.
-    if let Some(sz) = child_w(rpr, "sz").or_else(|| child_w(rpr, "szCs")) {
+    // Font size — w:sz (§17.3.2.38) governs Latin and East Asian (CJK) text
+    // ONLY. w:szCs (§17.3.2.39) is the complex-script (Arabic/Hebrew/RTL) size,
+    // recorded separately below as font_size_cs; the renderer selects it for
+    // complex-script runs. Do NOT fall back to szCs here: a non-complex run that
+    // carries only szCs (common Word editing residue) must inherit its sz from
+    // the style/docDefaults chain, not adopt the complex-script metric —
+    // otherwise body text with a leftover szCs renders a size too large.
+    if let Some(sz) = child_w(rpr, "sz") {
         if let Some(v) = attr_w(sz, "val") {
             fmt.font_size = Some(half_pt_to_pt(&v));
         }
@@ -993,6 +998,26 @@ mod tests {
     fn explicit_hex_color_is_lowercased() {
         let fmt = run_fmt_from(r#"<w:color w:val="FF0000"/>"#);
         assert_eq!(fmt.color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn sz_sets_latin_cjk_font_size() {
+        // §17.3.2.38: w:sz (half-points) → the Latin/CJK font size.
+        let fmt = run_fmt_from(r#"<w:sz w:val="20"/>"#);
+        assert_eq!(fmt.font_size, Some(10.0));
+    }
+
+    #[test]
+    fn szcs_alone_does_not_set_latin_cjk_font_size() {
+        // §17.3.2.39: w:szCs is the complex-script size only. A non-complex run
+        // carrying ONLY szCs (Word editing residue) must leave font_size None so
+        // it inherits sz from the style/docDefaults chain — it must NOT adopt the
+        // complex-script metric (the bug that rendered body text at 12pt instead
+        // of the inherited 10pt). szCs is still recorded as font_size_cs for
+        // complex-script runs.
+        let fmt = run_fmt_from(r#"<w:szCs w:val="24"/>"#);
+        assert_eq!(fmt.font_size, None);
+        assert_eq!(fmt.font_size_cs, Some(12.0));
     }
 
     #[test]

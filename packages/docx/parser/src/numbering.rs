@@ -1,3 +1,4 @@
+use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
@@ -16,6 +17,13 @@ pub struct LevelDef {
     /// relative to the marker on the first line.
     pub suff: String,
     pub start: u32,
+    /// ECMA-376 §17.9.6 `<w:lvl><w:rPr>` — the level's run (character) properties
+    /// for the number/bullet glyph itself. Merged OVER the paragraph's resolved
+    /// run formatting at use-site so the marker's font axes (ascii/eastAsia)
+    /// resolve through the same chain a body run uses. Often only carries a bare
+    /// `<w:rFonts w:hint="eastAsia"/>` (no explicit typeface), in which case every
+    /// axis is `None` and the marker simply inherits the paragraph's fonts.
+    pub rpr: RunFmt,
 }
 
 impl Default for LevelDef {
@@ -28,6 +36,7 @@ impl Default for LevelDef {
             tab: 36.0,
             suff: "tab".to_string(),
             start: 1,
+            rpr: RunFmt::default(),
         }
     }
 }
@@ -95,6 +104,13 @@ impl NumberingMap {
                 let suff = child_w(lvl_node, "suff")
                     .and_then(|n| attr_w(n, "val"))
                     .unwrap_or_else(|| "tab".to_string());
+                // §17.9.6 — the level's run properties for the marker glyph.
+                // Parsed with the SAME `parse_run_fmt` body runs use; theme refs
+                // stay as "@theme:<ref>" markers and are resolved at use-site once
+                // merged over the paragraph's run formatting.
+                let rpr = child_w(lvl_node, "rPr")
+                    .map(parse_run_fmt)
+                    .unwrap_or_default();
                 levels.push(LevelDef {
                     format,
                     text,
@@ -103,6 +119,7 @@ impl NumberingMap {
                     tab,
                     suff,
                     start,
+                    rpr,
                 });
             }
             map.abstract_nums.insert(abs_id, levels);
@@ -153,6 +170,13 @@ impl NumberingMap {
     }
 
     /// Advance counter for (numId, level), resetting deeper levels.
+    ///
+    /// `counters` stores each level's CURRENT displayed value (not the next):
+    /// a level's first appearance shows its `start`, each later advance adds
+    /// one, and advancing a level clears all deeper levels (§17.9.25 default
+    /// `lvlRestart`). Shallower levels are seeded to their `start` so an
+    /// ancestor that only prefixes the marker (e.g. `%1.%2`) still resolves
+    /// when it is never advanced on its own. Returns the value to display.
     pub fn advance(&mut self, num_id: u32, level: u32) -> u32 {
         // Pre-compute start values to avoid borrow conflicts
         let starts: Vec<u32> = (0..=level).map(|l| self.get_start(num_id, l)).collect();
@@ -165,30 +189,57 @@ impl NumberingMap {
             entry.remove(&k);
         }
 
-        // Ensure levels from 0 to level-1 are initialized
+        // Seed shallower levels to their start (their displayed value when they
+        // are never advanced themselves).
         for (lvl, &start) in starts.iter().enumerate().take(level as usize) {
             entry.entry(lvl as u32).or_insert(start);
         }
 
-        let current = entry.entry(level).or_insert(starts[level as usize]);
-        let val = *current;
-        *current = val + 1;
+        // Current level: first appearance shows start, otherwise increment.
+        let val = match entry.get(&level) {
+            Some(&v) => v + 1,
+            None => starts[level as usize],
+        };
+        entry.insert(level, val);
         val
     }
 
     /// Resolve the display text for a counter value in the given level.
+    ///
+    /// ECMA-376 §17.9.11 (`<w:lvlText>`): each `%N` placeholder is the counter
+    /// of level `N-1`, formatted with THAT level's own `<w:numFmt>`. A
+    /// multi-level marker such as `%1.%2` therefore needs every ancestor
+    /// counter, not just the current level's. The current level uses `counter`
+    /// (the value `advance` just returned); ancestor levels read their live
+    /// counter from `self.counters` — `advance` seeds every shallower level to
+    /// its start, so an ancestor that is never itself advanced (e.g. a list
+    /// whose level 0 only exists to prefix subsection numbers with a fixed
+    /// `start`) still resolves to its start value.
     pub fn resolve_text(&self, num_id: u32, level: u32, counter: u32) -> String {
         let Some(lvl) = self.get_level(num_id, level) else {
             return format!("{}.", counter);
         };
 
-        let formatted = format_counter(counter, &lvl.format);
-
-        // Replace %N placeholders in lvlText
         let mut text = lvl.text.clone();
-        // Only replace the placeholder for current level (simplified)
-        let placeholder = format!("%{}", level + 1);
-        text = text.replace(&placeholder, &formatted);
+        // Replace from the deepest placeholder down so "%1" can never partially
+        // match a two-digit "%1N" (Word caps lists at 9 levels, so this is
+        // belt-and-braces — but cheap).
+        for k in (0..=level).rev() {
+            let val = if k == level {
+                counter
+            } else {
+                self.counters
+                    .get(&num_id)
+                    .and_then(|m| m.get(&k))
+                    .copied()
+                    .unwrap_or_else(|| self.get_start(num_id, k))
+            };
+            let fmt = self
+                .get_level(num_id, k)
+                .map(|l| l.format.as_str())
+                .unwrap_or(lvl.format.as_str());
+            text = text.replace(&format!("%{}", k + 1), &format_counter(val, fmt));
+        }
         text
     }
 }
@@ -236,4 +287,68 @@ fn to_roman(n: u32) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const W: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+
+    fn map(body: &str) -> NumberingMap {
+        NumberingMap::parse(&format!("<w:numbering {W}>{body}</w:numbering>"))
+    }
+
+    /// §17.9.11 — a subsection list (`%1.%2`) whose level 0 is never advanced
+    /// but starts at 3 must render "3.1", "3.2", … (the bug: only the current
+    /// level's placeholder was substituted, leaving a literal "%1").
+    #[test]
+    fn multilevel_parent_placeholder_uses_level_start_when_not_advanced() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="5">
+                 <w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/></w:lvl>
+                 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="5"><w:abstractNumId w:val="5"/></w:num>"#);
+        let c1 = m.advance(5, 1);
+        assert_eq!(m.resolve_text(5, 1, c1), "3.1");
+        let c2 = m.advance(5, 1);
+        assert_eq!(m.resolve_text(5, 1, c2), "3.2");
+        let c3 = m.advance(5, 1);
+        assert_eq!(m.resolve_text(5, 1, c3), "3.3");
+    }
+
+    /// Parent counter is tracked live and resets deeper levels: 1, 1.1, 1.2,
+    /// 2, 2.1.
+    #[test]
+    fn multilevel_parent_counter_increments_and_resets() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="0">
+                 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#);
+        let a = m.advance(1, 0);
+        assert_eq!(m.resolve_text(1, 0, a), "1.");
+        let b = m.advance(1, 1);
+        assert_eq!(m.resolve_text(1, 1, b), "1.1");
+        let c = m.advance(1, 1);
+        assert_eq!(m.resolve_text(1, 1, c), "1.2");
+        let d = m.advance(1, 0);
+        assert_eq!(m.resolve_text(1, 0, d), "2.");
+        let e = m.advance(1, 1);
+        assert_eq!(m.resolve_text(1, 1, e), "2.1"); // deeper level reset on parent advance
+    }
+
+    /// Each level's `%N` is formatted with its OWN numFmt (§17.9.11): an
+    /// upper-letter parent with a decimal child renders "A.1".
+    #[test]
+    fn multilevel_per_level_format() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="2">
+                 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="upperLetter"/><w:lvlText w:val="%1"/></w:lvl>
+                 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>"#);
+        m.advance(2, 0);
+        let c = m.advance(2, 1);
+        assert_eq!(m.resolve_text(2, 1, c), "A.1");
+    }
 }

@@ -35,21 +35,29 @@ describe('normalizeFontFamily — Arabic substitute fonts', () => {
   });
 });
 
-describe('normalizeFontFamily — Latin defaults keep JP companion + add non-CJK scripts', () => {
-  it('keeps Noto Sans JP as the East-Asian companion for a Latin sans font', () => {
+describe('normalizeFontFamily — Latin fonts lead with Latin faces, JP companion follows', () => {
+  it('leads a Latin sans font with Latin sans faces; JP companion follows for stray CJK', () => {
     const chain = normalizeFontFamily('Arial');
-    expect(chain.startsWith('"Arial", "Noto Sans JP"')).toBe(true);
-    expect(chain.endsWith('sans-serif')).toBe(true);
-    // Arabic + non-CJK script Notos present so glyphs degrade to real web fonts.
+    expect(chain.startsWith('"Arial"')).toBe(true);
+    // Latin letters/digits must resolve to a Latin sans, NOT a Japanese Gothic's
+    // wider Latin glyphs — so the Latin companions precede the JP companion.
+    expect(chain.indexOf('"Helvetica"')).toBeLessThan(chain.indexOf('"Noto Sans JP"'));
+    // …but the JP companion (and non-CJK script Notos) are still present so a
+    // stray CJK / non-Latin glyph degrades to a real web font.
+    expect(chain).toContain('"Noto Sans JP"');
     expect(chain).toContain('"Noto Naskh Arabic"');
     expect(chain).toContain('"Noto Sans Hebrew"');
     expect(chain).toContain('"Noto Sans Thai"');
     expect(chain).toContain('"Noto Sans Devanagari"');
+    expect(chain.endsWith('sans-serif')).toBe(true);
   });
 
-  it('keeps the serif JP companion for a Latin serif font', () => {
+  it('leads a Latin serif font with Latin serif faces; mincho companion follows for stray CJK', () => {
     const chain = normalizeFontFamily('Times New Roman');
-    expect(chain.startsWith('"Times New Roman", "Yu Mincho"')).toBe(true);
+    expect(chain.startsWith('"Times New Roman"')).toBe(true);
+    // Latin glyphs resolve to a Latin serif before the (wider-Latin) JP mincho.
+    expect(chain.indexOf('"Cambria"')).toBeLessThan(chain.indexOf('"Yu Mincho"'));
+    expect(chain).toContain('"Yu Mincho"');
     expect(chain).toContain('"Noto Serif JP"');
     expect(chain).toContain('"Noto Serif Hebrew"');
     expect(chain.endsWith('serif')).toBe(true);

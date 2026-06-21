@@ -7,6 +7,9 @@ export type {
   DocxDocumentModel,
   DocSettings,
   SectionProps,
+  // Multi-column section sub-types (reachable via SectionProps.columns).
+  ColumnsSpec,
+  ColSpec,
   HeadersFooters,
   HeaderFooter,
   NumberingInfo,
@@ -18,6 +21,8 @@ export type {
   ImageRun,
   ShapeRun,
   ShapeText,
+  // Per-run shape-text formatting (reachable via ShapeText.runs).
+  ShapeTextRun,
   RubyAnnotation,
   RenderPageOptions,
   RunRevision,
