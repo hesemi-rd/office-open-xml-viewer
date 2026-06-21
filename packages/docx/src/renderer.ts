@@ -31,10 +31,11 @@ import {
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
   isCjkBreakChar,
+  classifyFontGeneric,
+  decodeRasterOrMetafile,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
-import { isWmf, isEmf, renderWmfToBitmap } from './wmf.js';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
@@ -417,25 +418,6 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
   return createImageBitmap(offscreen);
 }
 
-/** Upper bound for a metafile raster dimension (px). Keeps memory bounded for
- *  large intended draw sizes while staying sharp at typical chart sizes. */
-const WMF_RASTER_MAX_PX = 2000;
-/** Supersampling factor for metafile rasterization (≈retina). The draw site
- *  scales the bitmap to the resolved box via `drawImage`, so a higher intrinsic
- *  resolution just buys sharper vector edges. */
-const WMF_RASTER_SCALE = 2;
-
-/** Pick a raster target size (px) for a vector metafile from its intended draw
- *  size (pt), supersampled and capped. Falls back to a sane square when the
- *  intended size is unknown (0). */
-function wmfRasterTarget(widthPt: number, heightPt: number): { w: number; h: number } {
-  const fallbackPt = 300; // ~4 inch — only used when no size is surfaced
-  const wPt = widthPt > 0 ? widthPt : fallbackPt;
-  const hPt = heightPt > 0 ? heightPt : fallbackPt;
-  const clamp = (n: number) => Math.max(1, Math.min(WMF_RASTER_MAX_PX, Math.round(n)));
-  return { w: clamp(wPt * WMF_RASTER_SCALE), h: clamp(hPt * WMF_RASTER_SCALE) };
-}
-
 /**
  * Decode a raster blip to an `ImageBitmap`, pulling the bytes lazily by zip path
  * via `fetchImage(imagePath, mimeType)` (twin of pptx's `fetchImage`) rather
@@ -443,12 +425,20 @@ function wmfRasterTarget(widthPt: number, heightPt: number): { w: number; h: num
  * (`colorReplaceFrom`) make-transparent pass when requested — unchanged
  * post-decode behavior.
  *
- * Browsers can't decode WMF/EMF via `createImageBitmap`, so the bytes are
- * content-sniffed first (extension/MIME are unreliable — sample-10's chart is a
- * standard WMF mislabeled `.emf`). A WMF is rasterized by our minimal player
- * ({@link renderWmfToBitmap}) at a size derived from `widthPt`/`heightPt`. A
- * true EMF is detected but not yet interpreted; it throws so `preloadImages`
- * drops it (the existing "missing image" behavior, no crash).
+ * The raster/metafile path delegates to the shared
+ * {@link decodeRasterOrMetafile} (the one decoder docx/pptx/xlsx now share):
+ * browsers can't decode WMF/EMF via `createImageBitmap`, so it content-sniffs
+ * the bytes first (extension/MIME are unreliable — sample-10's chart is a
+ * standard WMF mislabeled `.emf`), rasterizing a WMF via the minimal player at a
+ * size derived from `widthPt`/`heightPt`, returning `null` for a true EMF (or a
+ * geometry-less metafile), else `createImageBitmap`. A `null` result throws so
+ * `preloadImages` drops the image (the existing "missing image" behavior, no
+ * crash).
+ *
+ * `suppressBoundaryFrame: true` is REQUIRED: docx's former in-tree player ran the
+ * window/device-boundary edge suppression unconditionally (to hide sample-10's
+ * Fig.1 cosmetic outer frame). Core defaults that heuristic OFF (spec-clean), so
+ * docx must opt in here to preserve its current rendering.
  *
  * Exported for unit testing of the lazy-bytes contract.
  */
@@ -461,25 +451,13 @@ export async function decodeRaster(
   heightPt = 0,
 ): Promise<ImageBitmap> {
   const blob = await fetchImage(imagePath, mimeType);
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-
-  if (isWmf(bytes)) {
-    const { w, h } = wmfRasterTarget(widthPt, heightPt);
-    const wmfBmp = await renderWmfToBitmap(bytes, w, h);
-    if (!wmfBmp) throw new Error(`WMF ${imagePath} produced no drawable output`);
-    return colorReplaceFrom ? applyColorReplacement(wmfBmp, colorReplaceFrom) : wmfBmp;
-  }
-  if (isEmf(bytes)) {
-    // TODO: EMF is a separate, larger format than WMF — follow-up. For now,
-    // skip gracefully (drop → current "missing image" behavior).
-    throw new Error(`EMF ${imagePath} is not yet supported`);
-  }
-
-  let bmp = await createImageBitmap(blob);
-  if (colorReplaceFrom) {
-    bmp = await applyColorReplacement(bmp, colorReplaceFrom);
-  }
-  return bmp;
+  const bmp = await decodeRasterOrMetafile(blob, {
+    widthPt,
+    heightPt,
+    suppressBoundaryFrame: true,
+  });
+  if (!bmp) throw new Error(`${imagePath} produced no drawable output`);
+  return colorReplaceFrom ? applyColorReplacement(bmp, colorReplaceFrom) : bmp;
 }
 
 /**
@@ -5573,18 +5551,6 @@ export function normalizeFontFamily(
     return `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
   }
 
-  // A CJK face's stroke style (song/ming = serif, gothic/hei = sans) decides
-  // which Noto CJK variant leads its tail. Names verified against the Office
-  // default font set: song (宋/SimSun/Batang), ming (明/MingLiU/PMingLiU),
-  // kai (楷/KaiTi/標楷體), fangsong (仿宋) and any *Mincho are serif; the rest
-  // (hei/黑, gothic/ゴシック, YaHei, JhengHei, Malgun, Gulim, Dotum, 角ゴ) are sans.
-  const isCjkSerif =
-    cjk != null &&
-    (/song|sung|simsun|nsimsun|batang|gungsuh|mincho|mingliu|pmingliu|ming\s*liu|fang\s*song|fangsong|kai\s*ti|kaiti|stsong|stkaiti|stfangsong|stzhongsong|simkai|simfang|新細明|細明|宋体|明朝|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝/.test(
-      lower,
-    ) ||
-      /新細明體|細明體|宋体|明朝|楷体|楷體|仿宋|標楷體|游明朝|ＭＳ 明朝/.test(family));
-
   // 1) Authoritative classification from word/fontTable.xml §17.8.3.10.
   const tableClass = fontFamilyClasses[family];
   if (tableClass && tableClass !== 'auto') {
@@ -5601,31 +5567,24 @@ export function normalizeFontFamily(
     }
   }
 
-  // 2) Name-pattern fallback for fonts absent from fontTable or classified "auto".
-  const isSerif =
-    isCjkSerif ||
-    family.includes('明朝') ||
-    family.includes('明朝体') ||
-    /\bmincho\b/i.test(family) ||
-    /\bmin\s*cho\b/i.test(family) ||
-    family.includes('ＭＳ 明朝') ||
-    family.includes('MS Mincho') ||
-    family.includes('Yu Mincho') ||
-    family.includes('游明朝') ||
-    family.includes('Hiragino Mincho') ||
-    family.includes('ヒラギノ明朝') ||
-    family.includes('Cambria') ||
-    family.includes('Caladea') ||
-    family.includes('Times') ||
-    family.includes('Georgia') ||
-    family.includes('Bodoni') ||
-    family.includes('Garamond') ||
-    family.includes('Playfair') ||
-    family.includes('Source Serif') ||
-    family.includes('Noto Serif');
-
-  if (isSerif) {
+  // 2) Name-pattern fallback for fonts absent from fontTable or classified
+  //    "auto". The serif/sans/mono DECISION is the shared core classifier
+  //    (`classifyFontGeneric`, §17.8.3.10-aligned name heuristic) that pptx and
+  //    xlsx also route through — so all three renderers agree on the generic
+  //    class. docx keeps its own richer fallback-chain construction (Latin-first
+  //    ordering + per-language CJK chains + Arabic tail + JP system hints) below;
+  //    only the regex-based decision is delegated here. Core's serif token set
+  //    is a verified superset of docx's former serif tokens (it additionally
+  //    detects e.g. Century/Palatino/Didot as serif and Consolas/Courier/等幅 as
+  //    mono on the name path), so no prior serif/sans coverage is lost.
+  const generic = classifyFontGeneric(family);
+  if (generic === 'serif') {
     return `${head}, ${serifTail(cjk)}`;
+  }
+  if (generic === 'mono') {
+    // Mirror the fontTable `modern` branch's monospace fallback. NEW for the
+    // name path: core now detects consolas/courier/等幅 etc. as mono.
+    return `${head}, "Courier New", monospace`;
   }
 
   // Japanese system-font hints (only meaningful for JP / Latin faces; a non-JP
