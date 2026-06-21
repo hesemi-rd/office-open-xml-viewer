@@ -17,6 +17,7 @@ import {
   getConnectorAnchors,
   mathToMathML,
   recolorSvg,
+  crispOffset,
   PT_TO_PX,
   resolveBaseDirection,
   isHTMLCanvas,
@@ -140,6 +141,10 @@ export async function prepareMathRuns(body: BodyElement[], math: MathRenderer): 
 interface RenderState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
+  /** Device-pixel ratio the canvas was scaled by (`ctx.scale(dpr, dpr)`). Used to
+   *  compute the crisp-line offset (see crispOffset) so thin axis-aligned strokes
+   *  land on a single device row instead of straddling two. */
+  dpr: number;
   contentX: number; // left of content area (px)
   contentW: number; // width of content area (px)
   y: number;        // current Y cursor (px)
@@ -513,6 +518,7 @@ export async function renderDocumentToCanvas(
   const baseState: RenderState = {
     ctx,
     scale,
+    dpr,
     contentX: sec.marginLeft * scale,
     contentW: (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale,
     y: sec.marginTop * scale,
@@ -638,10 +644,16 @@ function drawPageFootnotes(
   const ctx = baseState.ctx;
   ctx.save();
   ctx.strokeStyle = baseState.defaultColor;
-  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
+  const ruleLw = Math.max(1, Math.round(0.5 * scale));
+  ctx.lineWidth = ruleLw;
+  // Crispness nudge (see crispOffset): a horizontal rule on an integer y needs a
+  // half-device-pixel offset only when its device width is odd. The previous
+  // hardcoded `+ 0.5` was a logical-px offset that only happened to be crisp at
+  // dpr=1 and blurred at dpr>1; crispOffset makes it device-correct at any dpr.
+  const ruleNudge = crispOffset(ruleLw, baseState.dpr);
   ctx.beginPath();
-  ctx.moveTo(leftX, ruleY + 0.5);
-  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + 0.5);
+  ctx.moveTo(leftX, ruleY + ruleNudge);
+  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + ruleNudge);
   ctx.stroke();
   ctx.restore();
 
@@ -684,10 +696,15 @@ function drawEndnotes(
   const leftX = sec.marginLeft * scale;
   ctx.save();
   ctx.strokeStyle = bodyState.defaultColor;
-  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
+  const ruleLw = Math.max(1, Math.round(0.5 * scale));
+  ctx.lineWidth = ruleLw;
+  // Crispness nudge (see crispOffset): device-correct replacement for the old
+  // hardcoded logical `+ 0.5`, which only rendered crisp at dpr=1.
+  const ruleNudge = crispOffset(ruleLw, bodyState.dpr);
+  const ruleY = Math.round(y);
   ctx.beginPath();
-  ctx.moveTo(leftX, Math.round(y) + 0.5);
-  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, Math.round(y) + 0.5);
+  ctx.moveTo(leftX, ruleY + ruleNudge);
+  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + ruleNudge);
   ctx.stroke();
   ctx.restore();
 
@@ -1122,6 +1139,7 @@ function buildMeasureState(
   return {
     ctx,
     scale: 1,
+    dpr: 1,
     contentX: 0,
     contentW: section.pageWidth - section.marginLeft - section.marginRight,
     y: 0,
@@ -1995,7 +2013,7 @@ function renderEmptyMarkParagraph(
   }
   state.y += emptyH;
   if (para.borders && !dryRun) {
-    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
+    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr);
   }
   // Only the slice covering the FINAL line emits spaceAfter. With no inline
   // lines there is a single slice, so this is the whole paragraph.
@@ -2490,6 +2508,10 @@ function renderParagraph(
 
         const lineColor = revColor ?? (s.color ? `#${s.color}` : defaultColor);
         const lineW = Math.max(0.5, effSizePx * 0.05);
+        // Crispness nudge (see crispOffset): underline / strike-through are
+        // horizontal strokes; an odd device-width one lands crisp on a single
+        // device row only when offset by half a device pixel in Y.
+        const lineNudge = crispOffset(lineW, state.dpr);
         // Underline / strike run the full stretched glyph span (natural glyph
         // width + the internal justification pitch).
         const textW = ctx.measureText(s.text).width + internalStretch;
@@ -2500,22 +2522,22 @@ function renderParagraph(
         if (s.underline || isInsertion) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
-          const uy = baseline + yOffset + effSizePx * 0.12;
+          const uy = baseline + yOffset + effSizePx * 0.12 + lineNudge;
           ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + textW, uy); ctx.stroke();
         }
 
         if (s.strikethrough || isDeletion) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
-          const sy = baseline + yOffset - effSizePx * 0.3;
+          const sy = baseline + yOffset - effSizePx * 0.3 + lineNudge;
           ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x + textW, sy); ctx.stroke();
         }
 
         if (s.doubleStrikethrough) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
-          const sy1 = baseline + yOffset - effSizePx * 0.35;
-          const sy2 = baseline + yOffset - effSizePx * 0.22;
+          const sy1 = baseline + yOffset - effSizePx * 0.35 + lineNudge;
+          const sy2 = baseline + yOffset - effSizePx * 0.22 + lineNudge;
           ctx.beginPath(); ctx.moveTo(x, sy1); ctx.lineTo(x + textW, sy1); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(x, sy2); ctx.lineTo(x + textW, sy2); ctx.stroke();
         }
@@ -2538,7 +2560,7 @@ function renderParagraph(
 
   if (para.borders && !dryRun) {
     const textH = state.y - textAreaTopY;
-    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale);
+    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr);
   }
 
   // spaceAfter is paragraph-level; only emit it on the slice that covers
@@ -4360,7 +4382,7 @@ function renderCell(
     ctx.fillRect(x, y, w, h);
   }
 
-  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, mirror);
+  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, mirror, state.dpr);
 
   const cm = effCellMargins(cell, table);
   const mt = cm.top * scale;
@@ -4472,6 +4494,7 @@ function drawCellBorders(
   table: TableBorders,
   scale: number,
   mirror = false,
+  dpr = 1,
 ): void {
   const top = cell.top ?? table.top;
   const bottom = cell.bottom ?? table.bottom;
@@ -4481,10 +4504,10 @@ function drawCellBorders(
   const left = mirror ? (cell.right ?? table.right) : (cell.left ?? table.left);
   const right = mirror ? (cell.left ?? table.left) : (cell.right ?? table.right);
 
-  if (top && top.style !== 'none') drawBorderLine(ctx, x, y, x + w, y, top, scale);
-  if (bottom && bottom.style !== 'none') drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale);
-  if (left && left.style !== 'none') drawBorderLine(ctx, x, y, x, y + h, left, scale);
-  if (right && right.style !== 'none') drawBorderLine(ctx, x + w, y, x + w, y + h, right, scale);
+  if (top && top.style !== 'none') drawBorderLine(ctx, x, y, x + w, y, top, scale, dpr);
+  if (bottom && bottom.style !== 'none') drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale, dpr);
+  if (left && left.style !== 'none') drawBorderLine(ctx, x, y, x, y + h, left, scale, dpr);
+  if (right && right.style !== 'none') drawBorderLine(ctx, x + w, y, x + w, y + h, right, scale, dpr);
 }
 
 function drawBorderLine(
@@ -4492,13 +4515,26 @@ function drawBorderLine(
   x1: number, y1: number, x2: number, y2: number,
   spec: BorderSpec,
   scale: number,
+  dpr = 1,
 ): void {
   ctx.save();
   ctx.strokeStyle = spec.color ? `#${spec.color}` : '#000000';
-  ctx.lineWidth = Math.max(0.5, spec.width * scale);
+  const lw = Math.max(0.5, spec.width * scale);
+  ctx.lineWidth = lw;
+  // Crispness nudge (see crispOffset): a thin (odd device-width) axis-aligned
+  // stroke on an integer coordinate straddles two device rows and blurs; nudging
+  // it by half a device pixel perpendicular to the line centers it on one row.
+  // Cell / paragraph borders are always horizontal (y1===y2) or vertical
+  // (x1===x2) — never diagonal — so the orientation is read directly from the
+  // endpoints. An even device width gets 0 (already crisp on the integer edge).
+  const horizontal = y1 === y2;
+  const vertical = x1 === x2;
+  const nudge = horizontal || vertical ? crispOffset(lw, dpr) : 0;
+  const dpx = vertical ? nudge : 0;
+  const dpy = horizontal ? nudge : 0;
   ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(x2, y2);
+  ctx.moveTo(x1 + dpx, y1 + dpy);
+  ctx.lineTo(x2 + dpx, y2 + dpy);
   ctx.stroke();
   ctx.restore();
 }
@@ -4508,11 +4544,12 @@ function drawParaBorders(
   x: number, y: number, w: number, h: number,
   borders: ParagraphBorders,
   scale: number,
+  dpr = 1,
 ): void {
   const drawEdge = (edge: ParaBorderEdge | null, x1: number, y1: number, x2: number, y2: number) => {
     if (!edge || edge.style === 'none') return;
     const spec: BorderSpec = { width: edge.width, color: edge.color, style: edge.style };
-    drawBorderLine(ctx, x1, y1, x2, y2, spec, scale);
+    drawBorderLine(ctx, x1, y1, x2, y2, spec, scale, dpr);
   };
   const sp = (edge: ParaBorderEdge | null) => (edge?.space ?? 0) * scale;
   drawEdge(borders.top,    x, y - sp(borders.top),         x + w, y - sp(borders.top));

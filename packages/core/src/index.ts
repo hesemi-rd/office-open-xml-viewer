@@ -137,6 +137,7 @@ export {
 export type { MathNode, MathFormula, MathStyle } from './types/math';
 export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';
 export { isHTMLCanvas, defaultDpr } from './canvas/env';
+export { crispOffset } from './canvas/crisp';
 export {
   WorkerBridge,
   type WorkerLike,
