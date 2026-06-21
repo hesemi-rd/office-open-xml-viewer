@@ -4366,6 +4366,21 @@ function isCjkCp(cp: number): boolean {
   );
 }
 
+/** Per-token font family for a shape-text run, picked by the token's script
+ *  (ECMA-376 §17.3.2.26): a CJK token (its first code point is East-Asian) uses
+ *  the run's eastAsia axis, a Latin/digit token uses the ascii axis. The
+ *  tokenizer ({@link tokenizeShapeText}) makes every token homogeneous — one CJK
+ *  char, or a Latin word incl. its trailing space — so the first code point
+ *  classifies the whole token. Falls back to the ascii `fontFamily` when the
+ *  eastAsia axis is absent (older parser output / single-axis runs). The font
+ *  CLASS (serif/sans) then comes from `fontFamilyClasses` (fontTable §17.8.3.10),
+ *  so a serif ascii face and a gothic eastAsia face render in their own styles
+ *  with no name heuristics. */
+function shapeTokenFamily(token: string, run: ShapeTextRun): string | null {
+  const cp = token.codePointAt(0) ?? 0;
+  return isCjkCp(cp) ? (run.fontFamilyEastAsia ?? run.fontFamily ?? null) : (run.fontFamily ?? null);
+}
+
 /** Split a string into atomic wrap units: each CJK char alone, or a run of
  *  non-CJK characters up to and including a trailing space. Shared by the
  *  single-format ({@link wrapShapeText}) and rich ({@link wrapShapeRuns})
@@ -4444,8 +4459,11 @@ function wrapShapeRuns(
   const tokens: RichToken[] = [];
   for (const run of runs) {
     const fontPx = run.fontSizePt * scale;
-    ctx.font = buildFont(run.bold ?? false, run.italic ?? false, fontPx, run.fontFamily ?? null, fontFamilyClasses);
     for (const text of tokenizeShapeText(run.text)) {
+      // Measure each token under its OWN per-character font (ascii vs eastAsia
+      // axis, §17.3.2.26) so a CJK glyph's advance is read from the eastAsia face
+      // and a Latin/digit glyph's from the ascii face.
+      ctx.font = buildFont(run.bold ?? false, run.italic ?? false, fontPx, shapeTokenFamily(text, run), fontFamilyClasses);
       tokens.push({ text, run, width: ctx.measureText(text).width });
     }
   }
@@ -4619,7 +4637,10 @@ export function renderShapeText(
         const baseline = cursorY + lineMaxFontPx * 0.85;
         for (const tok of lineToks) {
           const fontPx = tok.run.fontSizePt * scale;
-          ctx.font = buildFont(tok.run.bold ?? false, tok.run.italic ?? false, fontPx, tok.run.fontFamily ?? null, fontFamilyClasses);
+          // Per-character font (ascii vs eastAsia axis, §17.3.2.26): a CJK token
+          // draws with the eastAsia family, a Latin/digit token with the ascii
+          // family. Mirrors the measure pass so advance and draw agree.
+          ctx.font = buildFont(tok.run.bold ?? false, tok.run.italic ?? false, fontPx, shapeTokenFamily(tok.text, tok.run), fontFamilyClasses);
           ctx.fillStyle = tok.run.color ? `#${tok.run.color}` : '#000000';
           ctx.fillText(tok.text, tx, baseline);
           tx += tok.width;
@@ -5364,10 +5385,16 @@ function sansTail(cjk: ReturnType<typeof classifyCjkFont>): string {
   const cjkPart =
     cjk && cjk !== 'jp'
       ? cjkFallbackChain(cjk, 'sans')
-      : // JP / Latin default: keep the historical system-font hints first, then
-        // the Noto CJK siblings so a CJK glyph still resolves on hosts lacking
-        // the system faces.
+      : // JP / stray-CJK sans faces: historical system-font hints, then the Noto
+        // CJK siblings so a CJK glyph still resolves on hosts lacking them.
         ['Noto Sans JP', 'Hiragino Sans', 'Meiryo', ...cjkFallbackChain('jp', 'sans').slice(1)];
+  // A Latin (non-CJK) sans font must fall back to a LATIN sans for its
+  // letters/digits — otherwise the browser grabs them from a Japanese Gothic
+  // (wider, CJK-tuned Latin), widening Latin runs. Lead with Latin sans faces;
+  // the CJK gothic faces follow for any stray CJK glyph. (Mirrors serifTail.)
+  if (cjk == null) {
+    return `${quoteAll([...NON_CJK_SANS_FALLBACKS, 'Arial', 'Helvetica', 'Liberation Sans', ...cjkPart, ...ARABIC_TAIL_SANS])}, sans-serif`;
+  }
   return `${quoteAll([...cjkPart, ...ARABIC_TAIL_SANS, ...NON_CJK_SANS_FALLBACKS])}, sans-serif`;
 }
 
@@ -5376,12 +5403,21 @@ function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
   const cjkPart =
     cjk && cjk !== 'jp'
       ? cjkFallbackChain(cjk, 'serif')
-      : // JP / Latin default: historical mincho system hints, then Noto serif
-        // CJK siblings.
+      : // JP / stray-CJK serif faces: historical mincho system hints, then Noto
+        // serif CJK siblings.
         [
           'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho',
           'Noto Serif JP', ...cjkFallbackChain('jp', 'serif').slice(1),
         ];
+  // A Latin (non-CJK) serif font (e.g. Century) must fall back to a LATIN serif
+  // for its letters/digits. If the CJK mincho faces lead, the browser's
+  // per-glyph fallback grabs Latin glyphs from a Japanese Mincho (e.g. Hiragino
+  // Mincho ProN on macOS) whose Latin is ~15-18% wider, widening every Latin
+  // run and forcing spurious line wraps. Lead with Latin serif faces; the CJK
+  // mincho faces follow so a stray CJK glyph in a Latin-font run still resolves.
+  if (cjk == null) {
+    return `${quoteAll([...NON_CJK_SERIF_FALLBACKS, 'Times New Roman', 'Cambria', 'Liberation Serif', ...cjkPart, ...ARABIC_TAIL_SANS])}, serif`;
+  }
   return `${quoteAll([...cjkPart, ...ARABIC_TAIL_SANS, ...NON_CJK_SERIF_FALLBACKS])}, serif`;
 }
 
