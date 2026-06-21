@@ -63,3 +63,18 @@ describe('cssFontStack — non-CJK scripts appended to Latin faces', () => {
     expect(stack.endsWith('serif')).toBe(true);
   });
 });
+
+describe('cssFontStack — serif/sans generic classification (core classifier)', () => {
+  it('Cambria degrades to a serif (latent pptx fix — was sans-serif)', () => {
+    const stack = cssFontStack('Cambria');
+    expect(stack.endsWith('serif')).toBe(true);
+    expect(stack.endsWith('sans-serif')).toBe(false);
+    // Cambria's metric-compatible substitute is appended (OFFICE_FONT_SUBSTITUTE).
+    expect(stack).toContain('"Caladea"');
+  });
+
+  it('regression: Calibri stays sans, Times New Roman stays serif', () => {
+    expect(cssFontStack('Calibri').endsWith('sans-serif')).toBe(true);
+    expect(cssFontStack('Times New Roman').endsWith('serif')).toBe(true);
+  });
+});

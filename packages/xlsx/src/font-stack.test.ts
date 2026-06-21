@@ -49,7 +49,52 @@ describe('fontStackFor — CJK language-specific Noto ordering', () => {
     expect(tail).toContain('"Calibri"');
   });
 
-  it('non-CJK named face falls back to the default chain', () => {
-    expect(cssTailFor('Times New Roman')).toBe(fontStackFor(null));
+  it('non-CJK SANS named face falls back to the default sans chain', () => {
+    expect(cssTailFor('Arial')).toBe(fontStackFor(null));
+  });
+});
+
+describe('cssTailFor / fontStackFor — Latin serif & mono (bug fix)', () => {
+  it('a Latin serif the host lacks (Century) degrades to a serif, not sans', () => {
+    const tail = cssTailFor('Century');
+    expect(tail.endsWith('serif')).toBe(true);
+    expect(tail.endsWith('sans-serif')).toBe(false);
+    // Office serif (Cambria) and its metric clone (Caladea) lead the serif default.
+    expect(tail).toContain('"Cambria"');
+    expect(tail).toContain('"Caladea"');
+    // Pure Latin serif — no CJK Noto face should lead the chain.
+    expect(tail.startsWith('"Noto Serif')).toBe(false);
+    expect(tail.startsWith('"Noto Sans')).toBe(false);
+  });
+
+  it('fontStackFor leads with the named serif face then the serif default', () => {
+    expect(fontStackFor('Century')).toBe(`"Century", ${cssTailFor('Century')}`);
+    expect(fontStackFor('Century').startsWith('"Century", "Cambria"')).toBe(true);
+  });
+
+  it('other Latin serifs (Garamond, Times New Roman) also end in serif', () => {
+    expect(cssTailFor('Garamond').endsWith('serif')).toBe(true);
+    expect(cssTailFor('Times New Roman').endsWith('serif')).toBe(true);
+  });
+
+  it('a monospaced face the host lacks (Consolas) degrades to monospace', () => {
+    expect(cssTailFor('Consolas').endsWith('monospace')).toBe(true);
+  });
+
+  it('regression: a Latin sans face / unnamed cell still ends in sans-serif', () => {
+    expect(cssTailFor('Arial').endsWith('sans-serif')).toBe(true);
+    expect(fontStackFor(null).endsWith('sans-serif')).toBe(true);
+    expect(fontStackFor('Arial').startsWith('"Arial", "Calibri", "Carlito"')).toBe(true);
+    // "Century Gothic" is SANS despite the "century" token — must not regress to
+    // the serif default just because the serif Century family does.
+    expect(cssTailFor('Century Gothic').endsWith('sans-serif')).toBe(true);
+    expect(cssTailFor('Century Gothic')).toBe(fontStackFor(null));
+  });
+
+  it('regression: CJK serif/sans ordering unchanged', () => {
+    expect(cssTailFor('SimSun').startsWith('"Noto Serif SC"')).toBe(true);
+    expect(cssTailFor('SimSun').endsWith('serif')).toBe(true);
+    expect(cssTailFor('Microsoft YaHei').startsWith('"Noto Sans SC"')).toBe(true);
+    expect(cssTailFor('Microsoft YaHei').endsWith('sans-serif')).toBe(true);
   });
 });

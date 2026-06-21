@@ -42,6 +42,7 @@ export type { LoadOptions } from './types/load-options';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 export {
   classifyCjkFont,
+  classifyFontGeneric,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
@@ -49,6 +50,7 @@ export {
   SCRIPT_PRELOAD_NAMES,
   scriptPreloadNamesForText,
   type CjkLang,
+  type FontGenericClass,
   type FontVariant,
 } from './fonts/scripts';
 export { renderChart } from './chart/renderer';

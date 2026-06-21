@@ -53,6 +53,7 @@ import {
   isHTMLCanvas,
   defaultDpr,
   classifyCjkFont,
+  classifyFontGeneric,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
@@ -500,22 +501,12 @@ const CSS_GENERIC_FAMILIES = new Set([
   'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
 ]);
 
-/** Infer a CSS generic fallback from a named font so missing fonts degrade consistently. */
+/** Infer a CSS generic fallback from a named font so missing fonts degrade
+ *  consistently. Delegates the serif/sans/mono decision to the shared core
+ *  classifier (single source of truth); maps it to the CSS generic keyword. */
 function genericFallback(family: string): string {
-  const l = family.toLowerCase();
-  if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'monospace';
-  // Serif: mincho (Japanese serif), roman, times, garamond, etc., plus CJK
-  // song/ming/kai (serif) faces — SimSun(宋)/Batang/PMingLiU(細明)/KaiTi(楷)/
-  // FangSong(仿宋) — so their Noto CJK fallback picks the serif variant.
-  if (
-    /mincho|明朝|roman|times|garamond|georgia|palatino|century|didot|song|sung|simsun|nsimsun|batang|gungsuh|mingliu|pmingliu|fangsong|kaiti|simkai|simfang|stsong|stkaiti|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝/.test(
-      l,
-    ) ||
-    /新細明體|細明體|宋体|楷体|楷體|仿宋|標楷體|游明朝/.test(family)
-  )
-    return 'serif';
-  // Everything else (gothic, kaku, round, rounded, sans, grotesk, …) → sans-serif
-  return 'sans-serif';
+  const g = classifyFontGeneric(family);
+  return g === 'mono' ? 'monospace' : g === 'serif' ? 'serif' : 'sans-serif';
 }
 
 /**

@@ -104,6 +104,53 @@ export function classifyCjkFont(family: string | null | undefined): CjkLang | nu
   return null;
 }
 
+/** CSS generic class of a font face, inferred from its name. */
+export type FontGenericClass = 'serif' | 'sans' | 'mono';
+
+/**
+ * Classify a font *name* into a CSS generic class (serif / sans / monospace).
+ * The shared serif/sans name heuristic for the pptx and xlsx renderers, which
+ * both now route through it (collapsing their two duplicated regexes into one).
+ * docx is NOT yet wired in: its name classifier layers word/fontTable.xml
+ * `<w:family>` priority and Arabic-companion handling on top, and its Latin-first
+ * fallback ordering is still on an unmerged branch — routing docx through here is
+ * a deferred follow-up (it becomes the third caller, completing the unification).
+ *
+ * This is the NAME-pattern fallback only. A caller that has authoritative class
+ * data — Word's word/fontTable.xml `<w:family>` §17.8.3.10 (roman/swiss/modern)
+ * — MUST consult that first and use this only for faces absent from the table or
+ * marked "auto". The token set is the union of all three renderers' prior regexes
+ * (docx included, so the future docx migration loses no coverage); no new name
+ * guessing is introduced.
+ *
+ * - mono : mono / courier / consolas / 等幅 …
+ * - serif: Latin serifs (Times, Cambria/Caladea, Georgia, Garamond, Century,
+ *          Palatino, Didot, Bodoni, Playfair, "… Serif", roman) AND CJK
+ *          song/ming/kai/fangsong faces (SimSun 宋 / Batang / PMingLiU 細明 /
+ *          KaiTi 楷 / FangSong 仿宋 / *Mincho 明朝) — so the per-language Noto CJK
+ *          fallback picks its serif variant.
+ * - sans : everything else (gothic, hei, kaku, round, grotesk, …).
+ */
+export function classifyFontGeneric(family: string | null | undefined): FontGenericClass {
+  if (!family) return 'sans';
+  const l = family.toLowerCase();
+  if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'mono';
+  // `century(?!\s*gothic)` keeps the serif Century family (Century, Century
+  // Schoolbook, …) but excludes the geometric SANS "Century Gothic" — the one
+  // union token where a serif name collides with a real sans face. (The
+  // authoritative split is the §17.8.3.10 <w:family> class the caller checks
+  // first; this only refines the name-pattern fallback.)
+  if (
+    /roman|times|cambria|caladea|georgia|garamond|century(?!\s*gothic)|palatino|didot|bodoni|playfair|source serif|noto serif|min\s*cho|明朝体|明朝|song|sung|simsun|nsimsun|batang|gungsuh|ming\s*liu|mingliu|pmingliu|fang\s*song|fangsong|kai\s*ti|kaiti|simkai|simfang|stsong|stkaiti|stfangsong|stzhongsong|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝|ms mincho|yu mincho|hiragino mincho|ヒラギノ明朝/.test(
+      l,
+    ) ||
+    /新細明體|細明體|宋体|明朝|楷体|楷體|仿宋|標楷體|游明朝|ＭＳ 明朝/.test(family)
+  ) {
+    return 'serif';
+  }
+  return 'sans';
+}
+
 /**
  * Ordered Noto CJK family names for a given language, primary face first so the
  * browser resolves shared Han glyphs to that language's shapes. The other three
