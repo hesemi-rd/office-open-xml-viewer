@@ -392,6 +392,16 @@ export interface NumberingInfo {
    *  this family. Absent ⇒ the renderer falls back to
    *  {@link NumberingInfo.fontFamily}. */
   fontFamilyEastAsia?: string | null;
+  /** ECMA-376 §17.9.9/§17.9.20 — when the level uses a `<w:lvlPicBulletId>`,
+   *  the marker is this image (zip path, e.g. `word/media/image1.gif`), drawn in
+   *  place of {@link NumberingInfo.text}. Absent ⇒ ordinary text/glyph marker. */
+  picBulletImagePath?: string;
+  /** MIME type of {@link NumberingInfo.picBulletImagePath} (e.g. `image/gif`). */
+  picBulletMimeType?: string;
+  /** Picture-bullet marker width in pt (from the `<v:shape style="width">`). */
+  picBulletWidthPt?: number;
+  /** Picture-bullet marker height in pt (from the `<v:shape style="height">`). */
+  picBulletHeightPt?: number;
 }
 
 export type DocRun =
