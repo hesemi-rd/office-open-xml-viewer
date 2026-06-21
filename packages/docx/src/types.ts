@@ -295,6 +295,19 @@ export interface ParaBorderEdge {
   space: number;
 }
 
+/** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border drawn as a box around the
+ *  run's text. Parallel to {@link ParaBorderEdge} but applies per run. */
+export interface DocxRunBorder {
+  /** "single" | "double" | "dashed" | ... (w:bdr/@w:val) */
+  style: string;
+  /** hex 6-char, or null for automatic (renderer falls back to text color) */
+  color?: string | null;
+  /** pt (sz / 8) */
+  width: number;
+  /** pt spacing between the border and the run text (w:space) */
+  space: number;
+}
+
 export interface TabStop {
   /** tab stop position in pt (from the left of paragraph content area) */
   pos: number;
@@ -548,6 +561,15 @@ export interface DocxTextRun {
   fontFamilyEastAsia?: string | null;
   isLink: boolean;
   background: string | null;
+  /** ECMA-376 §17.3.2.6 — `<w:color w:val="auto"/>` was set on this run. When
+   *  true and {@link DocxTextRun.color} is absent, the renderer resolves the
+   *  glyph color from the effective background (an implementation-defined
+   *  black/white contrast pick; ECMA-376 gives no normative algorithm) instead
+   *  of the default text color. */
+  colorAuto?: boolean | null;
+  /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) drawn around the
+   *  run text. Absent when the run has no border. */
+  border?: DocxRunBorder | null;
   vertAlign: 'super' | 'sub' | null;
   /** Target URL for hyperlinks (resolved from relationships.xml) */
   hyperlink: string | null;

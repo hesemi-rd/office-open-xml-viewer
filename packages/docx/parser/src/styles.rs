@@ -11,6 +11,15 @@ pub struct RunFmt {
     pub strikethrough: Option<bool>,
     pub font_size: Option<f64>, // pt
     pub color: Option<String>,  // hex 6
+    /// ECMA-376 §17.3.2.6 `<w:color w:val="auto"/>` — an explicit *automatic*
+    /// color. Unlike a concrete `color`, auto does not name a value; the final
+    /// color is resolved from the effective background at render time. The
+    /// black/white contrast resolution is implementation-defined — ECMA-376
+    /// gives no normative algorithm; `auto` itself is defined by §17.3.2.6 /
+    /// ST_HexColorAuto §17.18.39. `color_auto` also breaks inheritance in
+    /// `apply_run`, dropping any
+    /// inherited concrete color so e.g. PlaceholderText gray does not survive.
+    pub color_auto: bool,
     pub font_family_ascii: Option<String>,
     pub font_family_east_asia: Option<String>,
     pub background: Option<String>, // hex 6
@@ -26,6 +35,9 @@ pub struct RunFmt {
     pub vanish: Option<bool>,
     /// Highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     pub highlight: Option<String>,
+    /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border drawn as a box around
+    /// the run's text. Reuses `EdgeBorder` (width pt, color, style, space pt).
+    pub border: Option<EdgeBorder>,
     /// ECMA-376 §17.3.2.30 w:rtl — this run contains complex-script (RTL)
     /// content. Resolved through the style chain onto the run model, where the
     /// renderer uses it to force complex-script shaping and feed the UAX#9
@@ -129,6 +141,10 @@ pub struct EdgeBorder {
     pub width: f64,
     pub color: Option<String>,
     pub style: String,
+    /// ECMA-376 CT_Border `@w:space` — spacing between the border and the
+    /// content, in points (not eighths). Defaults to 0; harmless for table
+    /// borders, which never set it.
+    pub space: f64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -461,8 +477,16 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_size.is_some() {
         dst.font_size = src.font_size;
     }
-    if src.color.is_some() {
+    if src.color_auto {
+        // §17.3.2.6: explicit auto breaks inheritance (an inherited style color
+        // such as PlaceholderText gray must not survive) and defers the final
+        // color to background-contrast resolution at render time (an
+        // implementation-defined black/white pick; no normative algorithm).
+        dst.color = None;
+        dst.color_auto = true;
+    } else if src.color.is_some() {
         dst.color = src.color.clone();
+        dst.color_auto = false;
     }
     if src.font_family_ascii.is_some() {
         dst.font_family_ascii = src.font_family_ascii.clone();
@@ -490,6 +514,9 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.highlight.is_some() {
         dst.highlight = src.highlight.clone();
+    }
+    if src.border.is_some() {
+        dst.border = src.border.clone();
     }
     if src.rtl.is_some() {
         dst.rtl = src.rtl;
@@ -790,16 +817,21 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         }
     }
 
-    // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) is NOT
-    // the same as an absent color: it means "the automatic text color" (black on
-    // a light background) and must OVERRIDE any inherited style color — e.g. a
-    // run that carries `rStyle="PlaceholderText"` (gray #808080) plus a direct
-    // `w:color="auto"` renders black, not gray. Mapping auto to None (inherit)
-    // would wrongly keep the gray. An absent `<w:color>` element stays None.
+    // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) does NOT
+    // name a concrete color and is NOT "inherit": auto leaves the final color to
+    // be decided from the effective background at render time (an
+    // implementation-defined black/white pick; ECMA-376 defines no algorithm).
+    // We
+    // record it as `color=None` + `color_auto=true`. `color_auto` also breaks
+    // inheritance in `apply_run` so an inherited style color (e.g. a run with
+    // `rStyle="PlaceholderText"`, gray #808080) does not survive past an
+    // explicit auto. An absent `<w:color>` element stays None with color_auto
+    // false (pure inherit).
     if let Some(col) = child_w(rpr, "color") {
         let val = attr_w(col, "val").unwrap_or_default();
         if val == "auto" {
-            fmt.color = Some("000000".to_string());
+            fmt.color = None;
+            fmt.color_auto = true;
         } else if !val.is_empty() {
             fmt.color = Some(val.to_lowercase());
         }
@@ -827,7 +859,10 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         fmt.font_family_cs = direct_cs.or_else(|| theme_cs.map(|t| format!("@theme:{t}")));
     }
 
-    // Background highlight
+    // Run shading (ECMA-376 §17.3.2.32 w:shd). We adopt `@w:fill` only; `@w:val`
+    // (the pattern) and `@w:color` are not modeled. `val="clear"` (inverse
+    // video) is exact since only the fill is visible, but `val="solid"` etc.
+    // drop information by ignoring the pattern foreground.
     if let Some(shd) = child_w(rpr, "shd") {
         if let Some(fill) = attr_w(shd, "fill") {
             if fill != "auto" && fill.len() == 6 {
@@ -862,6 +897,16 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         fmt.highlight = attr_w(hl, "val").filter(|v| v != "none");
     }
 
+    // Run border (ECMA-376 §17.3.2.4 w:bdr) — drawn as a box around the run.
+    // val="none"/"nil" means no border, so we drop it rather than carrying a
+    // zero-style EdgeBorder.
+    if let Some(bdr) = child_w(rpr, "bdr") {
+        let edge = parse_edge_border(bdr);
+        if edge.style != "none" && edge.style != "nil" {
+            fmt.border = Some(edge);
+        }
+    }
+
     // Complex-script / RTL run (ECMA-376 §17.3.2.30 w:rtl). On-off toggle.
     fmt.rtl = bool_prop(rpr, "rtl");
     // §17.3.2.7 w:cs — complex-script run toggle (distinct from rFonts@cs,
@@ -889,10 +934,15 @@ fn parse_edge_border(node: roxmltree::Node) -> EdgeBorder {
     let color = attr_w(node, "color")
         .filter(|c| c != "auto")
         .map(|c| c.to_lowercase());
+    // CT_Border @w:space is in points (no eighths conversion), unlike @w:sz.
+    let space = attr_w(node, "space")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
     EdgeBorder {
         width,
         color,
         style,
+        space,
     }
 }
 
@@ -985,13 +1035,55 @@ mod tests {
     }
 
     #[test]
-    fn explicit_color_auto_resolves_to_black_overriding_inheritance() {
-        // ECMA-376 §17.3.2.6: an explicit w:color="auto" is the automatic text
-        // color (black on a light background), NOT "inherit". It must override a
-        // style color (e.g. PlaceholderText gray), so it is parsed as a concrete
-        // value rather than None.
+    fn explicit_color_auto_breaks_inheritance_and_defers_to_background() {
+        // ECMA-376 §17.3.2.6: an explicit w:color="auto" is NOT "inherit" and is
+        // NOT a concrete color either — it defers the final color to the
+        // background-contrast resolution (implementation-defined; no normative
+        // algorithm). We record it as
+        // color=None + color_auto=true so the renderer can pick black/white from
+        // the effective background. The intent of overriding an inherited style
+        // color (e.g. PlaceholderText gray) is carried by `color_auto` in
+        // `apply_run`, which clears `dst.color` when a child sets auto.
         let fmt = run_fmt_from(r#"<w:color w:val="auto"/>"#);
-        assert_eq!(fmt.color.as_deref(), Some("000000"));
+        assert_eq!(fmt.color, None);
+        assert!(fmt.color_auto);
+    }
+
+    #[test]
+    fn color_auto_breaks_inherited_concrete_color_on_merge() {
+        // §17.3.2.6: a child run that sets w:color="auto" must drop an inherited
+        // concrete color (e.g. PlaceholderText gray #808080), deferring to the
+        // background-contrast pass rather than keeping the gray.
+        let mut dst = RunFmt {
+            color: Some("808080".to_string()),
+            ..RunFmt::default()
+        };
+        let src = run_fmt_from(r#"<w:color w:val="auto"/>"#);
+        apply_run(&mut dst, &src);
+        assert_eq!(dst.color, None);
+        assert!(dst.color_auto);
+    }
+
+    #[test]
+    fn run_border_bdr_is_parsed() {
+        // ECMA-376 §17.3.2.4 w:bdr — a run-level border ("box"). w:sz is in
+        // eighths of a point (4 → 0.5pt); w:space is in points (1 → 1.0pt).
+        let fmt = run_fmt_from(r#"<w:bdr w:val="single" w:sz="4" w:space="1" w:color="auto"/>"#);
+        let b = fmt.border.expect("border should be Some");
+        assert_eq!(b.style, "single");
+        assert_eq!(b.width, 0.5);
+        assert_eq!(b.space, 1.0);
+        // color=auto on a border means "automatic" → recorded as None so the
+        // renderer falls back to the default text color.
+        assert_eq!(b.color, None);
+    }
+
+    #[test]
+    fn run_shading_fill_sets_background() {
+        // §17.3.2.32 w:shd/@w:fill — run shading fill becomes the run background.
+        // Regression guard for the inverse-video case (black fill).
+        let fmt = run_fmt_from(r#"<w:shd w:val="clear" w:color="auto" w:fill="000000"/>"#);
+        assert_eq!(fmt.background.as_deref(), Some("000000"));
     }
 
     #[test]

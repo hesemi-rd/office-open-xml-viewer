@@ -1847,6 +1847,17 @@ fn parse_run_inner(
     let small_caps = fmt.small_caps.unwrap_or(false);
     let double_strikethrough = fmt.dstrike.unwrap_or(false);
     let highlight = fmt.highlight.clone();
+    // Run-level color=auto (§17.3.2.6) and border/box (§17.3.2.4). color_auto
+    // travels so the renderer can pick black/white from the effective
+    // background (implementation-defined contrast; no normative algorithm); the
+    // EdgeBorder is mapped to the serialized RunBorder shape.
+    let color_auto = fmt.color_auto;
+    let border = fmt.border.as_ref().map(|b| crate::types::RunBorder {
+        style: b.style.clone(),
+        color: b.color.clone(),
+        width: b.width,
+        space: b.space,
+    });
     // RTL / complex-script properties (ECMA-376 §17.3.2.30 / §17.3.2.26 /
     // §17.3.2.39). The renderer uses `rtl` to drive complex-script shaping and
     // the UAX#9 reordering / direction-mirroring pass. The cs font goes through
@@ -1883,6 +1894,8 @@ fn parse_run_inner(
                         font_family_east_asia: font_family_east_asia.clone(),
                         is_link,
                         background: fmt.background.clone(),
+                        color_auto,
+                        border: border.clone(),
                         vert_align: vert_align.clone(),
                         hyperlink: hyperlink.clone(),
                         all_caps,
@@ -1916,6 +1929,8 @@ fn parse_run_inner(
                     font_family_east_asia: font_family_east_asia.clone(),
                     is_link,
                     background: fmt.background.clone(),
+                    color_auto,
+                    border: border.clone(),
                     vert_align: vert_align.clone(),
                     hyperlink: hyperlink.clone(),
                     all_caps,
@@ -2048,6 +2063,8 @@ fn parse_run_inner(
                     font_family_east_asia: font_family_east_asia.clone(),
                     is_link,
                     background: fmt.background.clone(),
+                    color_auto,
+                    border: border.clone(),
                     // Force superscript regardless of the run's original
                     // vertAlign so reference markers appear above the line.
                     // NOTE: the model value is "super" (see the styles.rs
@@ -4437,8 +4454,17 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.font_size.is_some() {
         base.font_size = direct.font_size;
     }
-    if direct.color.is_some() {
+    // Color, with the same auto-breaks-inheritance rule as styles::apply_run:
+    // a direct `w:color="auto"` (§17.3.2.6) clears any inherited concrete color
+    // and defers the final color to background contrast at render time (an
+    // implementation-defined black/white pick; no normative algorithm); a
+    // concrete direct color overrides and clears the auto flag.
+    if direct.color_auto {
+        base.color = None;
+        base.color_auto = true;
+    } else if direct.color.is_some() {
         base.color = direct.color.clone();
+        base.color_auto = false;
     }
     if direct.font_family_ascii.is_some() {
         base.font_family_ascii = direct.font_family_ascii.clone();
@@ -4469,6 +4495,28 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     }
     if direct.lang_bidi.is_some() {
         base.lang_bidi = direct.lang_bidi.clone();
+    }
+    // The following arms must stay in parity with styles::apply_run — this
+    // function is a hand-maintained mirror of it for the direct-rPr path, and
+    // a missing arm silently drops a directly-applied run property (the cause
+    // of `<w:highlight>` / `<w:bdr>` not rendering on styleless body runs).
+    if direct.all_caps.is_some() {
+        base.all_caps = direct.all_caps;
+    }
+    if direct.small_caps.is_some() {
+        base.small_caps = direct.small_caps;
+    }
+    if direct.dstrike.is_some() {
+        base.dstrike = direct.dstrike;
+    }
+    if direct.vanish.is_some() {
+        base.vanish = direct.vanish;
+    }
+    if direct.highlight.is_some() {
+        base.highlight = direct.highlight.clone();
+    }
+    if direct.border.is_some() {
+        base.border = direct.border.clone();
     }
 
     // Complex-script font size: a directly-applied `w:sz` without an
@@ -4623,6 +4671,56 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+
+    // Regression guard for the direct-rPr merge path. `apply_direct_run` is a
+    // hand-maintained mirror of `styles::apply_run`; a missing arm silently
+    // drops a directly-applied run property. This previously dropped
+    // `<w:highlight>` and (after PR A) `<w:bdr>` / `w:color="auto"` on styleless
+    // body runs, which `parse_run_fmt`-only unit tests could not catch.
+    #[test]
+    fn apply_direct_run_carries_decoration_fields() {
+        let mut base = RunFmt::default();
+        let direct = RunFmt {
+            highlight: Some("yellow".to_string()),
+            border: Some(EdgeBorder {
+                width: 0.5,
+                color: Some("000000".to_string()),
+                style: "single".to_string(),
+                space: 1.0,
+            }),
+            all_caps: Some(true),
+            small_caps: Some(true),
+            dstrike: Some(true),
+            vanish: Some(true),
+            ..Default::default()
+        };
+        apply_direct_run(&mut base, &direct);
+        assert_eq!(base.highlight.as_deref(), Some("yellow"));
+        assert!(base.border.is_some());
+        assert_eq!(base.all_caps, Some(true));
+        assert_eq!(base.small_caps, Some(true));
+        assert_eq!(base.dstrike, Some(true));
+        assert_eq!(base.vanish, Some(true));
+    }
+
+    // ECMA-376 §17.3.2.6 — a direct `w:color="auto"` breaks an inherited concrete
+    // color (here a style-supplied gray) on the direct-rPr path, deferring the
+    // final color to background contrast at render time (implementation-defined
+    // black/white pick; no normative algorithm).
+    #[test]
+    fn apply_direct_run_color_auto_breaks_inherited_color() {
+        let mut base = RunFmt {
+            color: Some("808080".to_string()),
+            ..Default::default()
+        };
+        let direct = RunFmt {
+            color_auto: true,
+            ..Default::default()
+        };
+        apply_direct_run(&mut base, &direct);
+        assert_eq!(base.color, None);
+        assert!(base.color_auto);
     }
 }
 

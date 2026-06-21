@@ -373,6 +373,21 @@ pub struct ParaBorderEdge {
     pub space: f64,
 }
 
+/// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border ("box" around the run).
+/// Serialized shape matches `DocxRunBorder` on the TS side.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBorder {
+    /// "single" | "double" | "dashed" | ... (w:bdr/@w:val)
+    pub style: String,
+    /// hex 6, or None for automatic (renderer falls back to text color)
+    pub color: Option<String>,
+    /// pt (w:sz / 8)
+    pub width: f64,
+    /// pt spacing between the border and the run text (w:space)
+    pub space: f64,
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TabStop {
@@ -760,6 +775,16 @@ pub struct TextRun {
     pub font_family_east_asia: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
+    /// ECMA-376 §17.3.2.6 — `<w:color w:val="auto"/>` was set on this run. The
+    /// renderer resolves the glyph color from the effective background
+    /// (implementation-defined black/white pick; no normative algorithm) when
+    /// this is true and no concrete `color` is present.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub color_auto: bool,
+    /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box). `None` when the
+    /// run has no border.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<RunBorder>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
     /// Target URL for hyperlinks (from relationships.xml), None if not a link or no URL
