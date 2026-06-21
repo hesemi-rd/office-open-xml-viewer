@@ -1296,6 +1296,21 @@ function renderQuadrant(
   // the next cell's fill would overpaint the previous cell's overflow.
   const textTasks: Array<() => void> = [];
 
+  // Deferred merged-cell border drawing. Cell gridlines (#d0d0d0) are stroked
+  // interleaved with cell borders inside the grid loop, at each cell's right +
+  // bottom edge. For a 1×1 cell that ordering is harmless (within a row the
+  // left neighbour is visited — and draws its right gridline — before the cell
+  // strokes its own left border over it). A merged anchor, however, draws its
+  // border ONCE at full span height/width during the anchor's row, while the
+  // cells in the column to the left of the covered rows are visited in LATER
+  // rows and stroke their right gridline over the merge's already-drawn left
+  // border — shaving a device column off it (sample-30 B14:B23 left edge read
+  // thinner/greyer below the anchor). Excel treats an explicit cell border as
+  // replacing the gridline on that edge, so the merge perimeter must sit above
+  // every gridline. Defer it to a pass flushed after the whole grid loop (but
+  // before text, which stays on top — same z-order as the per-cell path).
+  const mergeBorderTasks: Array<() => void> = [];
+
   // Pre-pass: merge cells whose anchor lies outside this viewport quadrant but whose
   // span overlaps it (e.g. scrolled past the anchor row/col, or the anchor is in a
   // frozen quadrant while we are rendering the scrollable quadrant).
@@ -1348,8 +1363,18 @@ function renderQuadrant(
       const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
       fillDataBar(ctx, cf.dataBar.color, aCx + bInset, aCy + bInset, bW, cH - bInset * 2, cf.dataBar.gradient);
     }
+    // Defer this off-screen-anchored merge's border too: its in-viewport span
+    // is exposed to the same gridline overpaint (left-column cells in the
+    // covered rows stroke their right gridline over it in the main loop). Note
+    // this pre-pass draws its own text *inline* below (the main loop defers
+    // text via `textTasks`), so the deferred border ends up above this cell's
+    // text rather than below it — visible only if a *thick* border grazed the
+    // padding-inset, clipped text of an off-screen-anchored merge. Routing this
+    // pre-pass text through `textTasks` for full gridline<border<text parity is
+    // a follow-up; the current order is visually inert.
     const mergedBorder = resolveMergeBorder(border, aRow, aCol, info.right, info.bottom, rc.cellMap, styles);
-    renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH, false, false, dpr);
+    const preBorder = mergeBorders(mergedBorder, cf.border);
+    mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, false, false, dpr));
 
     if (!cell) continue;
     const text = formatCellValue(cell, styles, cf.numFmt);
@@ -1689,7 +1714,18 @@ function renderQuadrant(
           invertedLeft = picked === leftRight && before !== leftRight;
         }
       }
-      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft, dpr);
+      if (mergeInfo) {
+        // Merged anchors draw their (full-span) border above all gridlines —
+        // see `mergeBorderTasks`. A 1×1 cell keeps the inline per-cell ordering.
+        // Snapshot the per-iteration `let` bindings (mergedBorder/invertedTop/
+        // invertedLeft are reassigned by the inherit logic above) so the
+        // deferred closure draws the values as of *this* anchor; cx/cy/cellW/
+        // cellH are already block `const` and safe to capture directly.
+        const mb = mergedBorder, mit = invertedTop, mil = invertedLeft;
+        mergeBorderTasks.push(() => renderBorder(ctx, mb, cx, cy, cellW, cellH, mit, mil, dpr));
+      } else {
+        renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft, dpr);
+      }
 
       // Excel Table style overlay (ECMA-376 §18.8.83). Custom styles draw only
       // their dxf-defined borders; built-in style names fall back to a
@@ -1697,6 +1733,11 @@ function renderQuadrant(
       // empty-border data cell still shows the table structure that the style
       // actually defines. None-style tables produce no entry in
       // `tableStyleMap` (see `buildTableStyleMap`), so this block is skipped.
+      // NB: for a merged anchor the base cell border is deferred (see
+      // `mergeBorderTasks`) and so paints *above* this overlay rather than
+      // below it. That ordering is unreachable in valid input — Excel forbids
+      // merging cells inside a structured Table range — so `mergeInfo &&
+      // tableStyle` never co-occur on one cell.
       if (tableStyle) {
         const overlay = tableOverlayBorder(tableStyle, tsDxfWhole, tsDxfHeader, colIndex);
         if (overlay.kind === 'dxf') {
@@ -2235,6 +2276,13 @@ function renderQuadrant(
       });
     }
   }
+
+  // Merge borders sit above every gridline (the bug this fixes) and below the
+  // deferred text, preserving the per-cell path's gridline < border < text
+  // order. (The only layer this reorders relative to a merged anchor is the
+  // table-style overlay, which now paints below the base border — unreachable
+  // for merged cells; see the overlay block above.)
+  for (const task of mergeBorderTasks) task();
 
   for (const task of textTasks) task();
 
