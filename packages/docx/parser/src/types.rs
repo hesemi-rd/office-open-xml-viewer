@@ -506,6 +506,20 @@ pub struct NumberingInfo {
     /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// ECMA-376 §17.9.9/§17.9.20 — when the level uses a `<w:lvlPicBulletId>`,
+    /// the marker is this image (zip path, e.g. `word/media/image1.gif`) drawn in
+    /// place of `text`. `None` ⇒ ordinary text/glyph marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic_bullet_image_path: Option<String>,
+    /// MIME type of {@link pic_bullet_image_path} (e.g. `image/gif`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic_bullet_mime_type: Option<String>,
+    /// Picture-bullet marker width in pt (from the `<v:shape style="width">`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic_bullet_width_pt: Option<f64>,
+    /// Picture-bullet marker height in pt (from the `<v:shape style="height">`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic_bullet_height_pt: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone)]

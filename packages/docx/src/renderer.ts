@@ -363,6 +363,21 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
       existing.heightPt = Math.max(existing.heightPt, pair.heightPt);
     }
   };
+  // ECMA-376 §17.9.9/§17.9.20 — a level's picture-bullet marker is an image
+  // that lives on the paragraph's numbering, not in any run. Feed it into the
+  // same decode pipeline (keyed by its zip path) so the marker draw site finds
+  // a decoded bitmap.
+  const recordPara = (para: DocParagraph) => {
+    const pb = para.numbering?.picBulletImagePath;
+    if (pb) {
+      record({
+        imagePath: pb,
+        mimeType: para.numbering!.picBulletMimeType ?? '',
+        widthPt: para.numbering!.picBulletWidthPt ?? 0,
+        heightPt: para.numbering!.picBulletHeightPt ?? 0,
+      });
+    }
+  };
   const walk = (runs: DocRun[]) => {
     for (const run of runs) {
       if (run.type === 'image') {
@@ -398,13 +413,20 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
     for (const row of tbl.rows)
       for (const cell of row.cells)
         for (const ce of cell.content) {
-          if (ce.type === 'paragraph') walk((ce as unknown as DocParagraph).runs);
-          else if (ce.type === 'table') walkTable(ce as unknown as DocTable);
+          if (ce.type === 'paragraph') {
+            const p = ce as unknown as DocParagraph;
+            recordPara(p);
+            walk(p.runs);
+          } else if (ce.type === 'table') walkTable(ce as unknown as DocTable);
         }
   };
   const walkBody = (body: BodyElement[]) => {
     for (const el of body) {
-      if (el.type === 'paragraph') walk((el as unknown as DocParagraph).runs);
+      if (el.type === 'paragraph') {
+        const p = el as unknown as DocParagraph;
+        recordPara(p);
+        walk(p.runs);
+      }
       if (el.type === 'table') walkTable(el as unknown as DocTable);
     }
   };
@@ -3157,10 +3179,14 @@ function renderParagraph(
   const indRight = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight) * scale;
   const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
-  // Numbering marker. `numMarker` doubles as the "this paragraph has a marker"
-  // flag (truthiness); the marker glyph itself is drawn from para.numbering.text.
+  // Numbering marker. `hasMarker` is the "this paragraph has a marker" flag;
+  // it is true for a text/glyph marker (`numMarker`) AND for a §17.9.9 picture
+  // bullet (whose lvlText is typically empty — `numMarker` would be falsy).
   let numMarker = '';
   let numTab = 0;
+  // §17.9.9/§17.9.20 — when the level uses a picture bullet, this holds its
+  // decoded bitmap + draw size (px); the marker is drawn as an image, not text.
+  let picBullet: { bmp: DecodedImage; w: number; h: number } | null = null;
   // First-line body offset (px) from paraX for an LTR numbered paragraph, set by
   // the §17.9.28 `<w:suff>` that follows the marker:
   //   tab (default) → body advances to the indentLeft tab stop (offset 0),
@@ -3170,17 +3196,34 @@ function renderParagraph(
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
     const suff = para.numbering.suff || 'tab';
+    const pbPath = para.numbering.picBulletImagePath;
+    if (pbPath) {
+      const bmp = state.images.get(imageKey(pbPath));
+      if (bmp) {
+        const w = (para.numbering.picBulletWidthPt ?? 9) * scale;
+        const h = (para.numbering.picBulletHeightPt ?? 9) * scale;
+        picBullet = { bmp, w, h };
+      }
+    }
     if (suff !== 'tab') {
-      // Measure with the marker's RESOLVED font (§17.3.2.26 + §17.9.6), not a
-      // hardcoded generic — the width must match the draw below so the body
-      // offset is exact for a serif (Times) vs sans (Gothic) marker alike.
-      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
-      const markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+      // Body-offset width: the picture bullet's own width if present, else the
+      // measured glyph width (§17.3.2.26 + §17.9.6) with the marker's RESOLVED
+      // font — the width must match the draw below so the body offset is exact
+      // for a serif (Times) vs sans (Gothic) marker alike.
+      let markerW: number;
+      if (picBullet) {
+        markerW = picBullet.w;
+      } else {
+        ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
+        markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+      }
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
       // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
       numBodyOffset = indFirst + markerW + spaceW;
     }
   }
+  // True when the paragraph has any marker to draw (text glyph OR picture bullet).
+  const hasMarker = numMarker !== '' || picBullet !== null;
 
   const paraX = contentX + indLeft;
   const firstLineX = paraX + indFirst;
@@ -3250,7 +3293,7 @@ function renderParagraph(
   // (numBodyOffset, computed above). Non-numbered paragraphs apply the first-line
   // indent (positive firstLine, or a bare negative hanging without a marker) to
   // the body as usual. RTL lists keep their existing start-edge handling.
-  const firstLineIndent = numMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
+  const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
   const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale));
 
   // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
@@ -3363,7 +3406,7 @@ function renderParagraph(
     // (the indentLeft tab stop for suff=tab → offset 0; the marker end for
     // space/nothing); indFirst only pulls the marker into the hanging margin
     // (drawn below). Non-numbered first lines apply indFirst to the body directly.
-    let x = firstLine && !baseRtl ? (numMarker ? lineLeft + numBodyOffset : lineLeft + indFirst) : lineLeft;
+    let x = firstLine && !baseRtl ? (hasMarker ? lineLeft + numBodyOffset : lineLeft + indFirst) : lineLeft;
     const effAvailW = baseRtl && firstLine ? lineAvailW - indFirst : lineAvailW;
 
     // Visual draw order. Under bidi we reorder the line's segments per UAX#9
@@ -3414,35 +3457,49 @@ function renderParagraph(
     // 'left' and stretched 'justify' keep alignOffset 0.
     x += alignOffset;
 
-    if (firstLine && numMarker && !dryRun) {
-      const numFontSize = getDefaultFontSize(para) * scale;
-      // Draw the marker with its RESOLVED font (§17.3.2.26 + §17.9.6): the
-      // ascii axis for a Latin number (a decimal "1" → Times → serif), the
-      // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
-      // which forced every number/bullet sans regardless of the heading's font.
-      ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
-      ctx.fillStyle = defaultColor;
-      if (baseRtl) {
-        // The RTL list marker is laid out INLINE at the line's start (right)
-        // edge: its right edge sits numTab (w:hanging) to the right of the
-        // text's start edge, mirroring the LTR `firstLineX - numTab` anchor,
-        // and it follows the text through jc alignment (sample-8 PDF ground
-        // truth: marker right edge = aligned text right edge + hanging).
-        const prevAlign = ctx.textAlign;
-        const prevDir = ctx.direction;
-        ctx.textAlign = 'left';
-        ctx.direction = 'rtl';
-        const markerText = markerDisplayText(para.numbering!);
-        const markerW = ctx.measureText(markerText).width;
-        ctx.fillText(markerText, x + lineWidth + numTab - markerW, baseline);
-        ctx.textAlign = prevAlign;
-        ctx.direction = prevDir;
+    if (firstLine && hasMarker && !dryRun) {
+      if (picBullet) {
+        // §17.9.9/§17.9.20 — the marker is an image. It occupies the same
+        // anchor a text marker would (LTR: left edge in the hanging margin;
+        // RTL: right edge numTab past the start edge), and rides the line's jc
+        // alignment via `x`/`lineWidth` exactly like the glyph marker below.
+        // Vertically it bottom-aligns to the baseline (the inline-image
+        // convention, §17.3.3 anchored to the text bottom) so a sub-em bullet
+        // rests on the line like a glyph.
+        const { bmp, w, h } = picBullet;
+        const top = baseline - h;
+        const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst;
+        ctx.drawImage(bmp, left, top, w, h);
       } else {
-        // Marker sits in the hanging margin at lineLeft + indFirst (= firstLineX
-        // when the line isn't shifted by a float; lineLeft already includes any
-        // float xOffset, so the marker tracks the body that hangs off it). The
-        // body was advanced past the marker above (numBodyOffset).
-        ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst, baseline);
+        const numFontSize = getDefaultFontSize(para) * scale;
+        // Draw the marker with its RESOLVED font (§17.3.2.26 + §17.9.6): the
+        // ascii axis for a Latin number (a decimal "1" → Times → serif), the
+        // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
+        // which forced every number/bullet sans regardless of the heading's font.
+        ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
+        ctx.fillStyle = defaultColor;
+        if (baseRtl) {
+          // The RTL list marker is laid out INLINE at the line's start (right)
+          // edge: its right edge sits numTab (w:hanging) to the right of the
+          // text's start edge, mirroring the LTR `firstLineX - numTab` anchor,
+          // and it follows the text through jc alignment (sample-8 PDF ground
+          // truth: marker right edge = aligned text right edge + hanging).
+          const prevAlign = ctx.textAlign;
+          const prevDir = ctx.direction;
+          ctx.textAlign = 'left';
+          ctx.direction = 'rtl';
+          const markerText = markerDisplayText(para.numbering!);
+          const markerW = ctx.measureText(markerText).width;
+          ctx.fillText(markerText, x + lineWidth + numTab - markerW, baseline);
+          ctx.textAlign = prevAlign;
+          ctx.direction = prevDir;
+        } else {
+          // Marker sits in the hanging margin at lineLeft + indFirst (= firstLineX
+          // when the line isn't shifted by a float; lineLeft already includes any
+          // float xOffset, so the marker tracks the body that hangs off it). The
+          // body was advanced past the marker above (numBodyOffset).
+          ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst, baseline);
+        }
       }
     }
 

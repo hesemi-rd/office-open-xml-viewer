@@ -1,7 +1,38 @@
 use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
+use ooxml_common::blip::mime_from_ext;
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
+
+/// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
+/// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
+/// (1pt), `in` (72pt), `pc` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A bare
+/// number with no unit is treated as pt (VML's default user unit for shapes is
+/// the point). Returns `None` when the property is absent or unparseable.
+fn vml_style_len(style: &str, prop: &str) -> Option<f64> {
+    for decl in style.split(';') {
+        let (k, v) = decl.split_once(':')?;
+        if k.trim() != prop {
+            continue;
+        }
+        let v = v.trim();
+        let (num, factor) = if let Some(n) = v.strip_suffix("pt") {
+            (n, 1.0)
+        } else if let Some(n) = v.strip_suffix("in") {
+            (n, 72.0)
+        } else if let Some(n) = v.strip_suffix("pc") {
+            (n, 12.0)
+        } else if let Some(n) = v.strip_suffix("mm") {
+            (n, 2.834_645_7)
+        } else if let Some(n) = v.strip_suffix("cm") {
+            (n, 28.346_457)
+        } else {
+            (v, 1.0)
+        };
+        return num.trim().parse::<f64>().ok().map(|n| n * factor);
+    }
+    None
+}
 
 #[derive(Debug, Clone)]
 pub struct LevelDef {
@@ -24,6 +55,30 @@ pub struct LevelDef {
     /// `<w:rFonts w:hint="eastAsia"/>` (no explicit typeface), in which case every
     /// axis is `None` and the marker simply inherits the paragraph's fonts.
     pub rpr: RunFmt,
+    /// ECMA-376 §17.9.9 `<w:lvlPicBulletId w:val="N"/>` — when present, the
+    /// level's marker is the image defined by the `<w:numPicBullet>` whose
+    /// `numPicBulletId` is N (§17.9.20), drawn in place of `text`. Resolved at
+    /// parse time to the bullet image's zip path (+ MIME + pt size from the
+    /// `<v:shape style>`). `None` ⇒ ordinary text/glyph marker.
+    pub pic_bullet: Option<PicBullet>,
+}
+
+/// ECMA-376 §17.9.20 `<w:numPicBullet>` — an image used as a list marker. The
+/// image is defined by a VML `<w:pict><v:shape><v:imagedata r:id="…"/>` whose
+/// `r:id` resolves through `word/_rels/numbering.xml.rels` to a media part, and
+/// whose `<v:shape style="width:..;height:..">` carries the marker size.
+#[derive(Debug, Clone)]
+pub struct PicBullet {
+    /// Zip path of the bullet image (e.g. `word/media/image1.gif`), resolved
+    /// from the `<v:imagedata r:id>` via the numbering part's relationships.
+    pub image_path: String,
+    /// MIME type derived from the part extension (e.g. `image/gif`).
+    pub mime_type: String,
+    /// Marker width in pt, from the `<v:shape style="width:..">` (default 9pt
+    /// when the style omits a width — the common Word default for bullet shapes).
+    pub width_pt: f64,
+    /// Marker height in pt, from the `<v:shape style="height:..">`.
+    pub height_pt: f64,
 }
 
 impl Default for LevelDef {
@@ -37,6 +92,7 @@ impl Default for LevelDef {
             suff: "tab".to_string(),
             start: 1,
             rpr: RunFmt::default(),
+            pic_bullet: None,
         }
     }
 }
@@ -54,13 +110,68 @@ pub struct NumberingMap {
 }
 
 impl NumberingMap {
-    pub fn parse(xml: &str) -> Self {
+    /// Parse `word/numbering.xml`. `media_map` is the numbering part's own
+    /// relationship table (rId → zip media path, built from
+    /// `word/_rels/numbering.xml.rels`); it is required to resolve the
+    /// `<w:numPicBullet>` images (§17.9.20) — an empty map simply yields no
+    /// picture bullets, leaving levels on their text/glyph markers.
+    pub fn parse(xml: &str, media_map: &HashMap<String, String>) -> Self {
         let mut map = NumberingMap::default();
         let doc = match XmlDoc::parse(xml) {
             Ok(d) => d,
             Err(_) => return map,
         };
         let root = doc.root_element();
+
+        // ECMA-376 §17.9.20 — collect `<w:numPicBullet>` definitions first so
+        // each level's `<w:lvlPicBulletId>` (§17.9.9) can resolve against them.
+        // The bullet image is a VML `<v:shape><v:imagedata r:id>`; the r:id maps
+        // to a media part through the numbering part's rels (`media_map`), and
+        // the `<v:shape style="width:..;height:..">` carries the marker size.
+        let mut pic_bullets: HashMap<u32, PicBullet> = HashMap::new();
+        for pb_node in children_w(root, "numPicBullet") {
+            let Some(id) = attr_w(pb_node, "numPicBulletId").and_then(|v| v.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Some(imagedata) = pb_node
+                .descendants()
+                .find(|n| n.tag_name().name() == "imagedata")
+            else {
+                continue;
+            };
+            // `r:id` lives in the relationships namespace; fall back to the
+            // unqualified attribute for defensiveness.
+            let Some(rid) = imagedata
+                .attribute((R_NS, "id"))
+                .or_else(|| imagedata.attribute("id"))
+            else {
+                continue;
+            };
+            let Some(image_path) = media_map.get(rid).cloned() else {
+                continue;
+            };
+            // `<v:shape style="width:9pt;height:9pt">` — VML CSS lengths. Word
+            // always emits explicit pt for bullet shapes; default to 9pt (Word's
+            // standard picture-bullet size) when a dimension is absent.
+            let shape_style = pb_node
+                .descendants()
+                .find(|n| n.tag_name().name() == "shape")
+                .and_then(|n| n.attribute("style"))
+                .unwrap_or("");
+            let width_pt = vml_style_len(shape_style, "width").unwrap_or(9.0);
+            let height_pt = vml_style_len(shape_style, "height").unwrap_or(9.0);
+            let mime_type = mime_from_ext(&image_path).to_string();
+            pic_bullets.insert(
+                id,
+                PicBullet {
+                    image_path,
+                    mime_type,
+                    width_pt,
+                    height_pt,
+                },
+            );
+        }
 
         // Parse abstractNum definitions
         for abs_node in children_w(root, "abstractNum") {
@@ -111,6 +222,12 @@ impl NumberingMap {
                 let rpr = child_w(lvl_node, "rPr")
                     .map(parse_run_fmt)
                     .unwrap_or_default();
+                // §17.9.9 — resolve the level's picture bullet (if any) against
+                // the `<w:numPicBullet>` definitions collected above.
+                let pic_bullet = child_w(lvl_node, "lvlPicBulletId")
+                    .and_then(|n| attr_w(n, "val"))
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .and_then(|id| pic_bullets.get(&id).cloned());
                 levels.push(LevelDef {
                     format,
                     text,
@@ -120,6 +237,7 @@ impl NumberingMap {
                     suff,
                     start,
                     rpr,
+                    pic_bullet,
                 });
             }
             map.abstract_nums.insert(abs_id, levels);
@@ -296,7 +414,75 @@ mod tests {
     const W: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
 
     fn map(body: &str) -> NumberingMap {
-        NumberingMap::parse(&format!("<w:numbering {W}>{body}</w:numbering>"))
+        NumberingMap::parse(
+            &format!("<w:numbering {W}>{body}</w:numbering>"),
+            &HashMap::new(),
+        )
+    }
+
+    /// §17.9.20 / §17.9.9 — a `<w:numPicBullet>` image resolves through the
+    /// numbering part's rels (`media_map`), and the level's `<w:lvlPicBulletId>`
+    /// picks it up with the `<v:shape style>` size (here width:9pt;height:9pt).
+    #[test]
+    fn picture_bullet_resolves_image_path_and_size() {
+        const R: &str =
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+        const V: &str = "xmlns:v=\"urn:schemas-microsoft-com:vml\"";
+        const O: &str = "xmlns:o=\"urn:schemas-microsoft-com:office:office\"";
+        let media: HashMap<String, String> =
+            [("rId1".to_string(), "word/media/image1.gif".to_string())]
+                .into_iter()
+                .collect();
+        let xml = format!(
+            r#"<w:numbering {W} {R} {V} {O}>
+                 <w:numPicBullet w:numPicBulletId="0">
+                   <w:pict>
+                     <v:shape id="x" style="width:9pt;height:9pt" o:bullet="t">
+                       <v:imagedata r:id="rId1" o:title="BD"/>
+                     </v:shape>
+                   </w:pict>
+                 </w:numPicBullet>
+                 <w:abstractNum w:abstractNumId="8">
+                   <w:lvl w:ilvl="0">
+                     <w:numFmt w:val="bullet"/><w:lvlText w:val=""/>
+                     <w:lvlPicBulletId w:val="0"/>
+                   </w:lvl>
+                 </w:abstractNum>
+                 <w:num w:numId="3"><w:abstractNumId w:val="8"/></w:num>
+               </w:numbering>"#
+        );
+        let m = NumberingMap::parse(&xml, &media);
+        let lvl = m.get_level(3, 0).expect("level 0");
+        let pb = lvl.pic_bullet.as_ref().expect("picture bullet resolved");
+        assert_eq!(pb.image_path, "word/media/image1.gif");
+        assert_eq!(pb.mime_type, "image/gif");
+        assert!((pb.width_pt - 9.0).abs() < 1e-6);
+        assert!((pb.height_pt - 9.0).abs() < 1e-6);
+    }
+
+    /// An unresolvable `r:id` (no matching rel) yields no picture bullet — the
+    /// level falls back to its ordinary text marker.
+    #[test]
+    fn picture_bullet_missing_rel_falls_back() {
+        const R: &str =
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+        const V: &str = "xmlns:v=\"urn:schemas-microsoft-com:vml\"";
+        let xml = format!(
+            r#"<w:numbering {W} {R} {V}>
+                 <w:numPicBullet w:numPicBulletId="0">
+                   <w:pict><v:shape style="width:9pt;height:9pt">
+                     <v:imagedata r:id="rIdX"/>
+                   </v:shape></w:pict>
+                 </w:numPicBullet>
+                 <w:abstractNum w:abstractNumId="8">
+                   <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/>
+                     <w:lvlPicBulletId w:val="0"/></w:lvl>
+                 </w:abstractNum>
+                 <w:num w:numId="3"><w:abstractNumId w:val="8"/></w:num>
+               </w:numbering>"#
+        );
+        let m = NumberingMap::parse(&xml, &HashMap::new());
+        assert!(m.get_level(3, 0).unwrap().pic_bullet.is_none());
     }
 
     /// §17.9.11 — a subsection list (`%1.%2`) whose level 0 is never advanced

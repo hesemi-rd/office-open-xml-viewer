@@ -57,8 +57,28 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/numbering.xml".to_string());
+    // The numbering part has its OWN relationships (`<part>.xml.rels`), needed to
+    // resolve `<w:numPicBullet>` image r:ids (§17.9.26). Resolve them the same
+    // way headers/footers do their per-part media (parse_rels + load_media_map),
+    // derived from the numbering part's stem so a non-default numbering target
+    // (e.g. "numbering2.xml") still finds its sibling rels.
+    let numbering_media_map = {
+        let stem = numbering_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&numbering_path)
+            .trim_end_matches(".xml");
+        let dir = numbering_path
+            .rsplit_once('/')
+            .map(|(d, _)| d)
+            .unwrap_or("word");
+        let rels_path = format!("{}/_rels/{}.xml.rels", dir, stem);
+        let rels_xml = read_zip_entry(&mut zip, &rels_path).unwrap_or_default();
+        let rel_map = parse_rels(&rels_xml);
+        load_media_map(&mut zip, &rel_map, &format!("{}/", dir))
+    };
     let mut num_map = read_zip_entry(&mut zip, &numbering_path)
-        .map(|s| NumberingMap::parse(&s))
+        .map(|s| NumberingMap::parse(&s, &numbering_media_map))
         .unwrap_or_default();
 
     // Theme is referenced by a relationship with Type ending in "/theme" — resolve
@@ -1351,7 +1371,7 @@ fn parse_paragraph_cond(
             // theme refs. A bare `<w:rFonts w:hint="eastAsia"/>` carries no
             // typeface, so the marker simply inherits the paragraph's ascii (e.g.
             // Times → the auto-number renders serif) and eastAsia (e.g. MS Gothic).
-            let (format, ind_left, tab, suff, marker_ascii, marker_ea) = num_map
+            let (format, ind_left, tab, suff, marker_ascii, marker_ea, pic_bullet) = num_map
                 .get_level(num_id, num_level)
                 .map(|l| {
                     let mut marker_fmt = base_run.clone();
@@ -1363,6 +1383,7 @@ fn parse_paragraph_cond(
                         l.suff.clone(),
                         theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
                         theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                        l.pic_bullet.clone(),
                     )
                 })
                 .unwrap_or_else(|| {
@@ -1373,10 +1394,25 @@ fn parse_paragraph_cond(
                         "tab".to_string(),
                         theme.resolve_font_ref(base_run.font_family_ascii.clone()),
                         theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                        None,
                     )
                 });
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
+            let (
+                pic_bullet_image_path,
+                pic_bullet_mime_type,
+                pic_bullet_width_pt,
+                pic_bullet_height_pt,
+            ) = match pic_bullet {
+                Some(pb) => (
+                    Some(pb.image_path),
+                    Some(pb.mime_type),
+                    Some(pb.width_pt),
+                    Some(pb.height_pt),
+                ),
+                None => (None, None, None, None),
+            };
             Some(Box::new(NumberingInfo {
                 num_id,
                 level: num_level,
@@ -1387,6 +1423,10 @@ fn parse_paragraph_cond(
                 suff,
                 font_family: marker_ascii,
                 font_family_east_asia: marker_ea,
+                pic_bullet_image_path,
+                pic_bullet_mime_type,
+                pic_bullet_width_pt,
+                pic_bullet_height_pt,
             }))
         } else {
             None
@@ -6841,7 +6881,7 @@ mod numbering_marker_font_tests {
             .find(|n| n.tag_name().name() == "body")
             .unwrap();
         let style_map = StyleMap::parse(&styles_xml());
-        let mut num_map = NumberingMap::parse(&numbering_xml());
+        let mut num_map = NumberingMap::parse(&numbering_xml(), &std::collections::HashMap::new());
         let elems = parse_body_elements(
             body,
             &style_map,
