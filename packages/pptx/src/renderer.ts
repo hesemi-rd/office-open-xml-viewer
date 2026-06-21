@@ -17,6 +17,7 @@ import type {
   RenderOptions,
   TabStop,
 } from './types';
+import { asBullet } from './types';
 import {
   renderChart,
   crispOffset,
@@ -1320,7 +1321,7 @@ function presetTextRect(
   }
 }
 
-function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback) {
+function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
@@ -1340,7 +1341,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     }
     if (el.textBody) {
       const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc, onTextRun);
+      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc, onTextRun, false, fetchImage);
     }
     return;
   }
@@ -1720,7 +1721,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       if (tr) { tx = tr.tx; ty = tr.ty; tw = tr.tw; th = tr.th; }
     }
     // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
-    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, onTextRun);
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, onTextRun, false, fetchImage);
     ctx.restore();
   }
 
@@ -1859,7 +1860,10 @@ export function resolveBulletLabel(
   return '';
 }
 
-function renderTextBody(
+// Exported (like `layoutParagraph` / `paintHighlight`) so the picture-bullet
+// draw path can be unit-tested against a mock 2D context without standing up a
+// full canvas. Not re-exported from index.ts — module-internal otherwise.
+export function renderTextBody(
   ctx: CanvasRenderingContext2D,
   body: TextBody,
   bx: number,
@@ -1876,6 +1880,7 @@ function renderTextBody(
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
   measureOnly = false,
+  fetchImage?: FetchImage,
 ): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -1924,7 +1929,7 @@ function renderTextBody(
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
     // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, wrappedOnTextRun);
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, wrappedOnTextRun, false, fetchImage);
     ctx.restore();
     return;
   }
@@ -1978,6 +1983,10 @@ function renderTextBody(
     bulletFont: string;
     bulletColor: string;
     bulletX: number;      // canvas X for bullet
+    // Picture bullet (`<a:buBlip>`, §21.1.2.4.2): the resolved image + its
+    // drawn size in px (square, scaled by buSzPct). null when this paragraph
+    // has no picture bullet. Only set on the paragraph's first line.
+    bulletImage: { imagePath: string; mimeType: string; sizePx: number } | null;
     textX: number;        // canvas X for text
     textMaxW: number;     // max wrap width
     alignment: string;
@@ -2006,8 +2015,17 @@ function renderTextBody(
     const paraDefaultColor = para.defColor
       ? hexToRgba(para.defColor) : bodyDefaultColor;
 
-    // Bullet resolution
-    const hasBullet = para.bullet.type === 'char' || para.bullet.type === 'autoNum';
+    // Bullet resolution. A picture bullet (`blip`) occupies the gutter exactly
+    // like a char/autoNum marker, so it must suppress the first-line hanging
+    // indent too — otherwise the first line of a hanging-indent list starts at
+    // the bullet's x and renders ON TOP of the picture (cf. the char-bullet em-
+    // dash overlap noted below, and docx PR #476).
+    const hasBullet =
+      para.bullet.type === 'char' ||
+      para.bullet.type === 'autoNum' ||
+      // `blip` exists only on the PPTX-widened Bullet (the shared core type omits
+      // it), so narrow via asBullet rather than comparing the raw union member.
+      asBullet(para.bullet).type === 'blip';
 
     // Per ECMA-376 §21.1.2.4.13: when no buSz* is declared, the bullet takes
     // the first run's font size. Using paraDefaultFontSizePx here (the layout
@@ -2044,6 +2062,9 @@ function renderTextBody(
     let bulletLabel  = '';
     let bulletFont   = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
     let bulletColor  = bulletInheritedColor;
+    // Picture bullet (`<a:buBlip>`, §21.1.2.4.2). Resolved to its image + drawn
+    // size below; stays null for char/number/none bullets.
+    let bulletImage: { imagePath: string; mimeType: string; sizePx: number } | null = null;
 
     // Resolve the marker label and advance the autoNum counter. Empty
     // paragraphs (Enter on a blank line) draw no marker and do not advance the
@@ -2052,8 +2073,11 @@ function renderTextBody(
     // rule, so PowerPoint's behaviour is the reference (see resolveBulletLabel).
     bulletLabel = resolveBulletLabel(para, autoNumCounters);
 
-    if (para.bullet.type === 'char') {
-      const b = para.bullet;
+    // The parser may emit the picture-bullet variant (`type: "blip"`), which the
+    // shared core `Bullet` type doesn't list — narrow once via asBullet.
+    const bullet = asBullet(para.bullet);
+    if (bullet.type === 'char') {
+      const b = bullet;
       const bSizePx = b.sizePct != null
         ? bulletBaseSizePx * (b.sizePct / 100)
         : bulletBaseSizePx;
@@ -2062,9 +2086,20 @@ function renderTextBody(
       const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
       bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
       bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
-    } else if (para.bullet.type === 'autoNum') {
+    } else if (bullet.type === 'autoNum') {
       bulletFont  = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
       bulletColor = bulletInheritedColor;
+    } else if (bullet.type === 'blip') {
+      // ECMA-376 §21.1.2.4.2 picture bullet. The bitmap is drawn as a square
+      // sized to the text (the bullet's em box), scaled by `<a:buSzPct>`
+      // (§21.1.2.4.3; default 100%). It's not a glyph, so there is no label —
+      // an empty paragraph still draws no marker (bulletLabel stays '' and the
+      // draw site gates the image on the first line having content).
+      const b = bullet;
+      const sizePx = b.sizePct != null
+        ? bulletBaseSizePx * (b.sizePct / 100)
+        : bulletBaseSizePx;
+      bulletImage = { imagePath: b.imagePath, mimeType: b.mimeType, sizePx };
     }
 
     // Text start X and wrap width.
@@ -2119,6 +2154,11 @@ function renderTextBody(
         const bSizeApprox = bm.actualBoundingBoxAscent + bm.actualBoundingBoxDescent;
         if (bSizeApprox > maxSizePx) maxSizePx = bSizeApprox;
       }
+      // A picture bullet's box also counts toward the line height so a tall
+      // bitmap marker isn't clipped by a short first line.
+      if (isFirst && bulletImage && bulletImage.sizePx > maxSizePx) {
+        maxSizePx = bulletImage.sizePx;
+      }
 
       let lineHeight: number;
       if (para.spaceLine) {
@@ -2148,11 +2188,21 @@ function renderTextBody(
       // Non-bullet first-line indent
       const textXOffset = (!hasBullet && isFirst) ? indentPx : 0;
 
+      // Picture bullets, like char/number markers, are drawn only on the
+      // paragraph's first line and only when that line carries content (an
+      // empty paragraph gets no marker — PowerPoint behaviour, mirroring
+      // resolveBulletLabel's empty-paragraph handling).
+      const lineHasContent = line.segments.some(
+        (s) => (s.text && s.text.length > 0) || s.math != null,
+      );
+      const entryBulletImage = isFirst && lineHasContent ? bulletImage : null;
+
       allLines.push({
         line, linePx, lineHeight, topGapPx: topGap,
         textXOffset,
         bulletLabel: isFirst ? bulletLabel : '',
         bulletFont, bulletColor, bulletX,
+        bulletImage: entryBulletImage,
         textX, textMaxW,
         alignment: para.alignment,
         isLastLine: isLast,
@@ -2271,7 +2321,7 @@ function renderTextBody(
   let entriesInCol = 0;
 
   for (const entry of allLines) {
-    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, alignment, isLastLine } = entry;
+    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletImage, alignment, isLastLine } = entry;
     // Balanced column advance: when the current column has reached its share
     // of paragraphs, jump to the next one. PowerPoint never breaks a single
     // line across columns and never spills past the last column — anything
@@ -2333,6 +2383,32 @@ function renderTextBody(
         ctx.direction = prevDir;
       } else {
         ctx.fillText(bulletLabel, bulletX, baseline);
+      }
+    }
+
+    // Picture bullet (`<a:buBlip>`, ECMA-376 §21.1.2.4.2). The bitmap sits on
+    // the text baseline at the same gutter x a char bullet uses. The image was
+    // warmed by renderSlide's prefetch pass; if its decode hasn't resolved yet
+    // (or fetchImage is absent), draw nothing — the marker simply appears once
+    // the bitmap is ready, never blocking the frame.
+    if (bulletImage && fetchImage) {
+      const bmp = peekCachedBitmap(bulletImage.imagePath, fetchImage);
+      if (bmp) {
+        // The bullet HEIGHT is the text-derived size (× buSzPct); the WIDTH is
+        // derived from the decoded bitmap's intrinsic aspect ratio so a
+        // non-square marker isn't squished. §21.1.2.4.2 is silent on the exact
+        // dimensions; this mirrors the PowerPoint runtime, which scales the
+        // picture to the line text height while preserving its aspect ratio.
+        const h = bulletImage.sizePx;
+        const w = bmp.height > 0 ? h * (bmp.width / bmp.height) : h;
+        const imgY = baseline - h; // bottom-aligned to the baseline
+        if (paraNeedsBidi && baseRtl) {
+          // Mirror into the right gutter, matching the char-bullet RTL offset.
+          const imgX = textX + textMaxW + (textX - bulletX) - w;
+          ctx.drawImage(bmp, imgX, imgY, w, h);
+        } else {
+          ctx.drawImage(bmp, bulletX, imgY, w, h);
+        }
       }
     }
 
@@ -2646,19 +2722,38 @@ function renderTextBody(
 // lets a deck's bitmaps be reclaimed with it.
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
 const IMAGE_BITMAP_CACHE_MAX = 256;
+// Each entry pairs the in-flight/settled decode promise with its resolved bitmap.
+// `bitmap` is populated once the promise resolves (see getCachedBitmap), giving
+// the synchronous draw sites (picture bullets, §21.1.2.4.2) a settled value to
+// read via peekCachedBitmap without awaiting — no separate parallel cache to
+// keep in sync, so eviction/teardown only ever drop the whole entry.
+//
 // The decode can resolve to `null` for a metafile we can't rasterize (a true
-// EMF, or a WMF with no drawable geometry) — those blips are skipped at the draw
-// site, not crashed on. Caching the `null` avoids re-fetching+re-sniffing the
-// same unsupported blip every frame.
-const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, Promise<ImageBitmap | null>>>();
+// EMF, or a WMF with no drawable geometry); the null is cached (avoiding a
+// re-fetch+re-sniff every frame) and the draw sites skip a null bitmap.
+type BitmapCacheEntry = { promise: Promise<ImageBitmap | null>; bitmap?: ImageBitmap | null };
+const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, BitmapCacheEntry>>();
 
-function bitmapCacheFor(fetchImage: FetchImage): Map<string, Promise<ImageBitmap | null>> {
+function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
   let cache = bitmapCacheByFetch.get(fetchImage);
   if (!cache) {
     cache = new Map();
     bitmapCacheByFetch.set(fetchImage, cache);
   }
   return cache;
+}
+
+/**
+ * Synchronously return a bullet image's decoded bitmap if its decode has already
+ * resolved (warmed by {@link getCachedBitmap}), else `undefined`. Used by the
+ * synchronous text-body draw to paint picture bullets without awaiting. A
+ * still-loading image has no `bitmap` on its entry yet, so it's simply skipped.
+ */
+export function peekCachedBitmap(
+  imagePath: string,
+  fetchImage: FetchImage,
+): ImageBitmap | null | undefined {
+  return bitmapCacheByFetch.get(fetchImage)?.get(imagePath)?.bitmap;
 }
 
 
@@ -2986,21 +3081,28 @@ export function getCachedBitmap(
     // Refresh LRU position.
     cache.delete(imagePath);
     cache.set(imagePath, existing);
-    return existing;
+    return existing.promise;
   }
-  const p = fetchImage(imagePath, mimeType).then((b) =>
+  const promise = fetchImage(imagePath, mimeType).then((b) =>
     decodeRasterOrMetafile(b, { widthPt, heightPt }),
   );
+  const entry: BitmapCacheEntry = { promise };
+  // Record the resolved bitmap on the entry so the synchronous bullet draw
+  // (peekCachedBitmap) can read it after the warm pass awaits this promise.
+  // A `null` (unsupported metafile) is recorded too, so the draw skips it.
+  void promise.then((bmp) => {
+    entry.bitmap = bmp;
+  });
   // Don't poison the cache on a transient decode failure.
-  p.catch(() => cache.delete(imagePath));
-  cache.set(imagePath, p);
+  promise.catch(() => cache.delete(imagePath));
+  cache.set(imagePath, entry);
   if (cache.size > IMAGE_BITMAP_CACHE_MAX) {
     const oldestKey = cache.keys().next().value as string;
     const oldest = cache.get(oldestKey);
     cache.delete(oldestKey);
-    oldest?.then((b) => b?.close()).catch(() => {});
+    oldest?.promise.then((b) => b?.close()).catch(() => {});
   }
-  return p;
+  return promise;
 }
 
 /**
@@ -3012,7 +3114,7 @@ export function getCachedBitmap(
 export function dropImageBitmapCache(fetchImage: FetchImage): void {
   const cache = bitmapCacheByFetch.get(fetchImage);
   if (!cache) return;
-  for (const p of cache.values()) p.then((b) => b?.close()).catch(() => {});
+  for (const entry of cache.values()) entry.promise.then((b) => b?.close()).catch(() => {});
   cache.clear();
   bitmapCacheByFetch.delete(fetchImage);
 }
@@ -3953,12 +4055,38 @@ export async function renderSlide(
     }
   }
 
+  // Picture bullets (`<a:buBlip>`, §21.1.2.4.2) are drawn inside the SYNCHRONOUS
+  // text-body layout, which can't await a decode. Resolve every bullet image up
+  // front (deduped by path via getCachedBitmap) and await them so the draw loop's
+  // peekCachedBitmap finds a settled bitmap. Missing/failed decodes resolve to
+  // undefined and the marker is simply skipped — never blocking the frame.
+  if (opts.fetchImage) {
+    const fetchImage = opts.fetchImage;
+    const bulletPaths = new Set<string>();
+    for (const el of slide.elements) {
+      if (el.type !== 'shape' || !el.textBody) continue;
+      for (const para of el.textBody.paragraphs) {
+        const b = asBullet(para.bullet);
+        if (b.type === 'blip') bulletPaths.add(`${b.imagePath} ${b.mimeType}`);
+      }
+    }
+    if (bulletPaths.size > 0) {
+      await Promise.all(
+        [...bulletPaths].map((key) => {
+          const [path, mime] = key.split(' ');
+          return getCachedBitmap(path, mime, fetchImage).catch(() => undefined);
+        }),
+      );
+      if (superseded()) return canvas;
+    }
+  }
+
   for (const el of slide.elements) {
     // A newer render of this canvas started while we awaited an image/equation —
     // stop so we don't paint this (now stale) slide over the newer one.
     if (superseded()) return canvas;
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun);
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun, opts.fetchImage);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale, opts.fetchImage);
     } else if (el.type === 'table') {

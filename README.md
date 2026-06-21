@@ -586,7 +586,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Vertical anchor (top / center / bottom) | ✅ |
 | | Line spacing (`spcPct`, `spcPts`) | ✅ |
 | | Space before / after paragraph | ✅ |
-| | Bullet points (character and auto-numbered) | ✅ |
+| | Bullet points (character, auto-numbered, and picture `a:buBlip` §21.1.2.4.2) | ✅ |
 | | Tab stops | ✅ |
 | | Indent / margin | ✅ |
 | | Vertical text (`bodyPr@vert` — vert / vert270 / eaVert) | ✅ |

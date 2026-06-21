@@ -8,7 +8,6 @@ export type {
   Reflection,
   Stroke,
   SpaceLine,
-  Bullet,
   TabStop,
   TextRun, TextRunData, LineBreak,
   RenderOptions,
@@ -19,13 +18,51 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+
+/**
+ * Picture bullet — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip r:embed>`. The
+ * embed is resolved to the blip's embedded zip path + mime at parse time
+ * (mirrors {@link ImageFill}); the renderer fetches the bytes lazily by path
+ * via the same `getCachedBitmap(imagePath, mimeType, fetchImage)` path used for
+ * `pic`/blipFill. PPTX-only: the shared core `Bullet` union (used by docx/xlsx,
+ * which have no picture bullets) does not carry this variant, so it lives on
+ * the PPTX side, exactly like {@link Paragraph} extends the core paragraph.
+ */
+export interface BlipBullet {
+  type: 'blip';
+  /** Embedded zip path of the bullet image (e.g. "ppt/media/image1.png"). */
+  imagePath: string;
+  /** MIME type of the blip at {@link BlipBullet.imagePath} (e.g. `image/png`). */
+  mimeType: string;
+  /**
+   * `<a:buSzPct val>` (ECMA-376 §21.1.2.4.3) as a percentage of the text size
+   * (100 = same size). `null` when no explicit `<a:buSzPct>` is present, in
+   * which case the renderer uses the spec default of 100%.
+   */
+  sizePct: number | null;
+}
+
+/**
+ * PPTX bullet marker. The shared core {@link CoreBullet} union
+ * (none/inherit/char/autoNum) plus the PPTX-only picture bullet
+ * ({@link BlipBullet}, §21.1.2.4.2). The parser emits the `blip` variant with
+ * `type: "blip"`, so this is a discriminated union just like the core one.
+ */
+export type Bullet = CoreBullet | BlipBullet;
 
 /**
  * PPTX paragraph. Extends the shared core `Paragraph` with the PPTX-only
  * `eaLnBrk` flag that the pptx parser emits but the shared core model does not
  * carry (docx/xlsx paragraphs don't surface it). Mirrors the Rust
  * `Paragraph` struct's `ea_ln_brk` field 1:1.
+ *
+ * Note on `bullet`: the parser also emits the picture-bullet variant
+ * ({@link BlipBullet}, `type: "blip"`) at runtime, but `bullet` keeps the
+ * narrower core type here because a TS interface can only *narrow* an inherited
+ * property, not widen its union (the core `Paragraph.bullet` is used by
+ * docx/xlsx, which have no picture bullets). Consumers that need the picture
+ * variant narrow `bullet` with {@link asBullet} / a `type === 'blip'` check.
  */
 export interface Paragraph extends CoreParagraph {
   /**
@@ -36,6 +73,17 @@ export interface Paragraph extends CoreParagraph {
    * emits an effective boolean.
    */
   eaLnBrk: boolean;
+}
+
+/**
+ * View a paragraph's `bullet` as the PPTX {@link Bullet} union (which includes
+ * the picture bullet). The pptx parser emits `{ type: "blip", … }` at runtime,
+ * but the statically-typed `CoreParagraph.bullet` only lists none/inherit/char/
+ * autoNum because that type is shared with docx/xlsx. This is the single, named
+ * cast site so the widening is documented rather than scattered.
+ */
+export function asBullet(bullet: CoreBullet): Bullet {
+  return bullet as Bullet;
 }
 
 /**

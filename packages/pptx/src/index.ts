@@ -50,6 +50,10 @@ export type {
   // Geometry + text run sub-types (reachable via ShapeElement / TextBody).
   PathCmd,
   Bullet,
+  // Picture-bullet variant (`<a:buBlip>`, §21.1.2.4.2) — part of the PPTX
+  // `Bullet` union; exported so consumers narrowing on `bullet.type === 'blip'`
+  // have a name for the shape.
+  BlipBullet,
   SpaceLine,
   TabStop,
   TextBody,
