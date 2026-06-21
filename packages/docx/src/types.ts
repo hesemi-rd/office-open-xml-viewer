@@ -276,6 +276,52 @@ export interface DocParagraph {
    * Text" style, so footnote bodies use compact natural line height.
    */
   snapToGrid?: boolean;
+  /**
+   * ECMA-376 §17.3.1.11 `<w:framePr>` — text-frame / drop-cap properties.
+   * Present ⇒ this paragraph is part of a text frame; the renderer positions it
+   * as a frame (drop cap or generic frame) and registers a wrap exclusion so
+   * following body text flows around it. Absent ⇒ ordinary in-flow paragraph.
+   */
+  framePr?: FramePr;
+}
+
+/**
+ * ECMA-376 §17.3.1.11 `<w:framePr>` — text-frame / drop-cap properties.
+ *
+ * Lengths are pt (parser converts from twips). Per the spec, `x`/`y` are
+ * ignored when `xAlign`/`yAlign` are set, and for a drop cap `y`/`yAlign` are
+ * ignored entirely while `lines` drives the height. `w`/`h`/`x`/`y` are
+ * `undefined` when the attribute was absent (distinct from an explicit 0).
+ */
+export interface FramePr {
+  /** ST_DropCap (§17.18.20): 'none' | 'drop' | 'margin'. Default 'none'. */
+  dropCap: 'none' | 'drop' | 'margin' | string;
+  /** §17.3.1.11 `lines` — drop-cap vertical height in anchor lines. Default 1. */
+  lines: number;
+  /** ST_Wrap (§17.18.104): 'around'|'auto'|'none'|'notBeside'|'through'|'tight'. Default 'around'. */
+  wrap: 'around' | 'auto' | 'none' | 'notBeside' | 'through' | 'tight' | string;
+  /** ST_HAnchor (§17.18.35): 'text'(=column) | 'margin' | 'page'. Default 'page'. */
+  hAnchor: 'text' | 'margin' | 'page' | string;
+  /** ST_VAnchor (§17.18.100): 'text' | 'margin' | 'page'. Default 'page'. */
+  vAnchor: 'text' | 'margin' | 'page' | string;
+  /** ST_HeightRule (§17.18.37): 'auto' | 'atLeast' | 'exact'. Default 'auto'. */
+  hRule: 'auto' | 'atLeast' | 'exact' | string;
+  /** hSpace — min wrap padding L/R when wrap='around' (pt). Default 0. */
+  hSpace: number;
+  /** vSpace — min wrap padding top/bottom (pt). Default 0. */
+  vSpace: number;
+  /** w — exact frame width (pt). Absent ⇒ auto (max content line width). */
+  w?: number;
+  /** h — frame height (pt). Meaning gated by hRule. Absent ⇒ auto. */
+  h?: number;
+  /** x — absolute horizontal offset from hAnchor (pt). Ignored when xAlign set. */
+  x?: number;
+  /** y — absolute vertical offset from vAnchor (pt). Ignored when yAlign set / drop cap. */
+  y?: number;
+  /** ST_XAlign (§22.9.2.18): 'left'|'center'|'right'|'inside'|'outside'. Supersedes x. */
+  xAlign?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
+  /** ST_YAlign (§22.9.2.20): 'inline'|'top'|'center'|'bottom'|'inside'|'outside'. Supersedes y. */
+  yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
 }
 
 export interface ParagraphBorders {

@@ -344,6 +344,15 @@ pub struct DocParagraph {
     /// style.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_to_grid: Option<bool>,
+    /// ECMA-376 §17.3.1.11 `<w:framePr>` — text-frame / drop-cap properties.
+    /// `Some` ⇒ this paragraph is part of a text frame; the renderer positions
+    /// it as a frame (drop cap or generic frame) and registers a wrap exclusion
+    /// for following body text. `None` ⇒ ordinary in-flow paragraph.
+    /// Boxed (like `numbering`) so `DocParagraph` stays small enough that the
+    /// `BodyElement` / `CellElement` enum variants remain balanced
+    /// (clippy::large_enum_variant); serde flattens the Box, so JSON is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_pr: Option<Box<FramePr>>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -412,6 +421,61 @@ pub struct LineSpacing {
     /// snap to one grid pitch per line regardless of the multiplier.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub explicit: bool,
+}
+
+/// ECMA-376 §17.3.1.11 `<w:framePr>` — text-frame / drop-cap properties for a
+/// paragraph. The presence of `framePr` makes the paragraph part of a text
+/// frame; adjacent paragraphs whose attribute sets are identical belong to the
+/// same frame. Lengths are normalized to pt (twip / 20); the raw enum strings
+/// are carried verbatim so the renderer maps them with no re-derivation.
+///
+/// Attribute defaults (per §17.3.1.11):
+///   wrap     → "around"   hRule → "auto"   vRule (implied) → none here
+///   hAnchor  → "page"     vAnchor → "page"
+///   lines    → 1          h/w/x/y → 0
+/// `x`/`y` are ignored when `xAlign`/`yAlign` are set; for a drop cap, `y`/
+/// `yAlign` are ignored entirely and `lines` drives the height.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FramePr {
+    /// ST_DropCap (§17.18.20): "none" | "drop" | "margin". Absent ⇒ "none".
+    pub drop_cap: String,
+    /// §17.3.1.11 `lines` — drop-cap vertical height in anchor lines. Default 1.
+    pub lines: u32,
+    /// ST_Wrap (§17.18.104): "around" | "auto" | "none" | "notBeside" |
+    /// "through" | "tight". Absent ⇒ "around".
+    pub wrap: String,
+    /// ST_HAnchor (§17.18.35): "text"(=column) | "margin" | "page". Default "page".
+    pub h_anchor: String,
+    /// ST_VAnchor (§17.18.100): "text" | "margin" | "page". Default "page".
+    pub v_anchor: String,
+    /// ST_HeightRule (§17.18.37): "auto" | "atLeast" | "exact". Default "auto".
+    pub h_rule: String,
+    /// hSpace — min wrap padding L/R when wrap="around" (pt). Default 0.
+    pub h_space: f64,
+    /// vSpace — min wrap padding top/bottom (pt). Default 0.
+    pub v_space: f64,
+    /// w — exact frame width (pt). 0/absent ⇒ auto (max content line width).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    /// h — frame height (pt). Meaning gated by h_rule. 0/absent ⇒ auto.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
+    /// x — absolute horizontal offset from h_anchor (pt). Ignored when x_align set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// y — absolute vertical offset from v_anchor (pt). Ignored when y_align set
+    /// or when this is a drop cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    /// ST_XAlign (§22.9.2.18): "left" | "center" | "right" | "inside" |
+    /// "outside". Supersedes `x` when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_align: Option<String>,
+    /// ST_YAlign (§22.9.2.20): "inline" | "top" | "center" | "bottom" |
+    /// "inside" | "outside". Supersedes `y` when present (ignored if v_anchor=text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y_align: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

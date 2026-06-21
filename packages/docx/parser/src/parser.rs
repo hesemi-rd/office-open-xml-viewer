@@ -1491,6 +1491,9 @@ fn parse_paragraph_cond(
         // ECMA-376 §17.3.1.32 — when explicitly off, the renderer skips docGrid
         // line snapping for this paragraph (e.g. footnote text).
         snap_to_grid: base_para.snap_to_grid,
+        // ECMA-376 §17.3.1.11 — text-frame / drop-cap properties, resolved
+        // through the style chain. Some ⇒ paragraph is part of a text frame.
+        frame_pr: base_para.frame_pr.clone(),
     }
 }
 
@@ -4526,6 +4529,11 @@ fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
     }
     if direct.snap_to_grid.is_some() {
         base.snap_to_grid = direct.snap_to_grid;
+    }
+    // §17.3.1.11: a direct framePr replaces any style-inherited frame whole-sale
+    // (grouped element, not attribute-merged).
+    if direct.frame_pr.is_some() {
+        base.frame_pr = direct.frame_pr.clone();
     }
 }
 

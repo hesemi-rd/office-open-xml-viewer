@@ -126,6 +126,10 @@ pub struct ParaFmt {
     /// "Footnote Text" style sets this off, which is why footnote bodies use
     /// compact natural line height rather than the 18 pt grid pitch.
     pub snap_to_grid: Option<bool>,
+    /// ECMA-376 §17.3.1.11 w:framePr — text-frame / drop-cap properties.
+    /// Resolved through the style chain like other pPr; `Some` ⇒ this paragraph
+    /// is part of a text frame. Boxed to match `DocParagraph::frame_pr`.
+    pub frame_pr: Option<Box<crate::types::FramePr>>,
 }
 
 #[derive(Debug, Default)]
@@ -531,6 +535,12 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.snap_to_grid.is_some() {
         dst.snap_to_grid = src.snap_to_grid;
     }
+    // §17.3.1.11: framePr is a single grouped element — a later level that
+    // specifies it replaces the whole frame definition (Word does not merge
+    // individual frame attributes across the style chain).
+    if src.frame_pr.is_some() {
+        dst.frame_pr = src.frame_pr.clone();
+    }
 }
 
 fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
@@ -826,6 +836,41 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         {
             fmt.para_borders = Some(borders);
         }
+    }
+
+    // Text frame / drop cap (ECMA-376 §17.3.1.11 w:framePr). Presence makes the
+    // paragraph part of a text frame; all attributes are optional with the
+    // spec-defined defaults applied here so the renderer never re-derives them.
+    if let Some(fp) = child_w(ppr, "framePr") {
+        use crate::types::FramePr;
+        let twips = |name: &str| attr_w(fp, name).map(|s| twips_to_pt(&s));
+        fmt.frame_pr = Some(Box::new(FramePr {
+            // ST_DropCap default "none" (§17.18.20).
+            drop_cap: attr_w(fp, "dropCap").unwrap_or_else(|| "none".to_string()),
+            // §17.3.1.11 lines default 1.
+            lines: attr_w(fp, "lines")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            // ST_Wrap default "around" (§17.3.1.11 / §17.18.104).
+            wrap: attr_w(fp, "wrap").unwrap_or_else(|| "around".to_string()),
+            // ST_HAnchor / ST_VAnchor default "page" (§17.3.1.11).
+            h_anchor: attr_w(fp, "hAnchor").unwrap_or_else(|| "page".to_string()),
+            v_anchor: attr_w(fp, "vAnchor").unwrap_or_else(|| "page".to_string()),
+            // ST_HeightRule default "auto" (§17.18.37).
+            h_rule: attr_w(fp, "hRule").unwrap_or_else(|| "auto".to_string()),
+            // hSpace / vSpace default 0 (§17.3.1.11).
+            h_space: twips("hSpace").unwrap_or(0.0),
+            v_space: twips("vSpace").unwrap_or(0.0),
+            // w/h/x/y are kept Option so the renderer can tell "auto" (absent)
+            // from an explicit 0; §17.3.1.11 assumes 0 when consumed.
+            w: twips("w"),
+            h: twips("h"),
+            x: twips("x"),
+            y: twips("y"),
+            // ST_XAlign / ST_YAlign — supersede x/y when present (§17.3.1.11).
+            x_align: attr_w(fp, "xAlign"),
+            y_align: attr_w(fp, "yAlign"),
+        }));
     }
 
     fmt

@@ -32,6 +32,8 @@ export type {
   NoteRef,
   // Paragraph / line-spacing sub-types.
   LineSpacing,
+  // Text-frame / drop-cap properties (reachable via DocParagraph.framePr).
+  FramePr,
   TabStop,
   ParagraphBorders,
   ParaBorderEdge,

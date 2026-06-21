@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -1240,6 +1240,27 @@ export function computePages(
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
       if (para.pageBreakBefore) newPage();
+
+      // A frame paragraph (ECMA-376 §17.3.1.11) is positioned out of flow: it
+      // does not advance the page cursor and is not split. Register its wrap
+      // float on the measureState so following paragraphs estimate around it,
+      // and emit it onto the current page (the renderer draws it absolutely).
+      // It does NOT advance y / measureState.y and leaves prevPara/spaceAfter
+      // untouched so the following paragraph spaces against the paragraph
+      // BEFORE the frame. (Pagination of a frame that itself overflows the page
+      // bottom — moving the frame + its anchor text together — is Word runtime
+      // behaviour not pinned by ECMA-376; see HEURISTIC note below. We keep the
+      // minimal model: the frame stays with the anchor paragraph because it
+      // adds no height here, so a normal break on the anchor paragraph carries
+      // the wrap band implicitly. TODO(§17.3.1.11): once a self-contained frame
+      // height/keep calc exists, drive an explicit keep-with-anchor here.)
+      if (para.framePr) {
+        const anchorH = frameAnchorLineHeightPx(body as PaginatedBodyElement[], el, measureState);
+        const box = resolveFrameBox(para, measureState, anchorH);
+        registerFrameFloat(box, para.framePr, measureState);
+        pushTagged(el as PaginatedBodyElement);
+        continue;
+      }
       const suppressBefore = contextualSuppressed(prevPara, para);
 
       // Collapse with the previous paragraph's spaceAfter — Word takes
@@ -2348,6 +2369,14 @@ function renderBodyElements(
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
       const slice = (el as PaginatedBodyElement).lineSlice;
+      // A frame paragraph (ECMA-376 §17.3.1.11) is positioned out of flow and
+      // does not participate in spacing collapse or pagination splitting. Draw
+      // it absolutely and leave prevPara/spaceAfter untouched so the following
+      // non-frame paragraph spaces against the paragraph BEFORE the frame.
+      if (para.framePr) {
+        renderFrameParagraph(para, state, frameAnchorLineHeightPx(elements, el, state));
+        continue;
+      }
       const suppress = contextualSuppressed(prevPara, para);
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
@@ -2469,6 +2498,396 @@ function renderEmptyMarkParagraph(
   }
 }
 
+// ===== Text frames & drop caps (ECMA-376 §17.3.1.11) =====
+
+/**
+ * One line height (px) of the anchor (following non-frame) paragraph, used to
+ * size a drop cap by `lines` (§17.3.1.11). The drop cap height equals
+ * `lines` × this. Scans `elements` after the frame element for the first
+ * non-frame paragraph; falls back to the frame paragraph's own single-line
+ * height when none follows (a degenerate trailing frame).
+ */
+function frameAnchorLineHeightPx(
+  elements: PaginatedBodyElement[],
+  frameEl: PaginatedBodyElement,
+  state: RenderState,
+): number {
+  const start = elements.indexOf(frameEl);
+  for (let j = start + 1; j < elements.length; j++) {
+    const e = elements[j];
+    if (e.type !== 'paragraph') continue;
+    const p = e as unknown as DocParagraph;
+    if (p.framePr) continue; // adjacent frame paragraphs are part of the frame
+    return paragraphMarkLineHeight(
+      p,
+      state.scale,
+      paraGrid(p, state),
+      paragraphHasRuby(p),
+      state.docEastAsian,
+      state.ctx,
+      state.fontFamilyClasses,
+    );
+  }
+  const fp = frameEl as unknown as DocParagraph;
+  return paragraphMarkLineHeight(
+    fp,
+    state.scale,
+    paraGrid(fp, state),
+    paragraphHasRuby(fp),
+    state.docEastAsian,
+    state.ctx,
+    state.fontFamilyClasses,
+  );
+}
+
+/** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
+ *  unit tests only (the table-driven frame-geometry assertions) — not part of
+ *  the package API. */
+export interface FrameBox {
+  /** Drawing origin of the frame content (text area top-left). */
+  x: number;
+  y: number;
+  /** Frame content width / height. */
+  w: number;
+  h: number;
+  /** Padded exclusion rect for the wrap FloatRect (frame + hSpace/vSpace). */
+  exLeft: number;
+  exRight: number;
+  exTop: number;
+  exBottom: number;
+}
+
+/**
+ * Horizontal container band for a frame's hAnchor (ECMA-376 §17.3.1.11 /
+ * §17.18.35). This is a SEPARATE relativeFrom set from DrawingML's
+ * §20.4.3 (so {@link xContainer} is intentionally not reused):
+ *   - "text"   → the COLUMN text margin the anchor paragraph sits in
+ *                (state.contentX..contentX+contentW). This keeps a drop cap
+ *                inside its own newspaper column (#513 per-section columns).
+ *   - "margin" → the page content margin (marginLeft..pageWidth-marginRight).
+ *   - "page"   → the physical page edges (0..pageWidth).
+ * All values in canvas px.
+ */
+function frameXContainer(hAnchor: string, state: RenderState): { left: number; right: number } {
+  const sc = state.scale;
+  switch (hAnchor) {
+    case 'margin':
+      return { left: state.marginLeft * sc, right: (state.pageWidth - state.marginRight) * sc };
+    case 'page':
+      return { left: 0, right: state.pageWidth * sc };
+    case 'text':
+    case 'column':
+    default:
+      // "text" anchors against the current COLUMN band so a frame in a multi-
+      // column section stays inside its column.
+      return { left: state.contentX, right: state.contentX + state.contentW };
+  }
+}
+
+/**
+ * Vertical container origin for a frame's vAnchor (ECMA-376 §17.3.1.11 /
+ * §17.18.100). `paraTop` is the anchor paragraph's text-area top (canvas px).
+ *   - "text"   → the paragraph top (y offsets/relative positions are measured
+ *                from where the frame paragraph sits in the flow).
+ *   - "margin" → the page top content margin.
+ *   - "page"   → the physical page top.
+ */
+function frameYContainer(vAnchor: string, paraTop: number, state: RenderState): number {
+  const sc = state.scale;
+  switch (vAnchor) {
+    case 'margin':
+      return state.marginTop * sc;
+    case 'page':
+      return 0;
+    case 'text':
+    default:
+      return paraTop;
+  }
+}
+
+/**
+ * Resolve a frame's box in canvas px. `paraTop` is the in-flow top of the frame
+ * paragraph (post-spaceBefore). `contentW`/`contentH` are the frame content's
+ * measured natural size (px); `anchorLineHpx` is one line height of the
+ * following non-frame (anchor) paragraph, used to size a drop cap by `lines`.
+ *
+ * Exported for unit tests only (frame-geometry table) — not package API.
+ */
+export function computeFrameBox(
+  fp: FramePr,
+  state: RenderState,
+  paraTop: number,
+  contentW: number,
+  contentH: number,
+  anchorLineHpx: number,
+): FrameBox {
+  const sc = state.scale;
+  const isDropCap = fp.dropCap === 'drop' || fp.dropCap === 'margin';
+
+  const hx = frameXContainer(fp.hAnchor, state);
+  const vy = frameYContainer(fp.vAnchor, paraTop, state);
+
+  // Frame width: explicit `w` (exact) else natural content width (§17.3.1.11 w).
+  const frameW = fp.w != null ? fp.w * sc : contentW;
+
+  // Frame height. For a drop cap the height is `lines` × the anchor paragraph's
+  // line height (§17.3.1.11 lines: "the height of the drop cap is the first N
+  // lines of the anchor paragraph"; y/yAlign are ignored). For a generic frame
+  // hRule gates h: exact = h, atLeast = max(h, content), auto = content.
+  let frameH: number;
+  if (isDropCap) {
+    frameH = Math.max(1, fp.lines) * anchorLineHpx;
+  } else {
+    const hPx = fp.h != null ? fp.h * sc : 0;
+    frameH =
+      fp.hRule === 'exact'
+        ? hPx
+        : fp.hRule === 'atLeast'
+          ? Math.max(hPx, contentH)
+          : contentH;
+  }
+
+  // Horizontal placement.
+  //   dropCap="drop"   → inside the column/text margin (frame at band left).
+  //   dropCap="margin" → outside the margin (frame left = band left − frameW).
+  //   generic frame    → xAlign (left/center/right/inside/outside) supersedes x;
+  //                      else absolute x offset from the hAnchor's left edge.
+  let frameX: number;
+  if (fp.dropCap === 'drop') {
+    frameX = hx.left;
+  } else if (fp.dropCap === 'margin') {
+    frameX = hx.left - frameW;
+  } else if (fp.xAlign) {
+    switch (fp.xAlign) {
+      case 'center':
+        frameX = hx.left + (hx.right - hx.left - frameW) / 2;
+        break;
+      case 'right':
+      case 'outside':
+        frameX = hx.right - frameW;
+        break;
+      case 'left':
+      case 'inside':
+      default:
+        frameX = hx.left;
+        break;
+    }
+  } else {
+    // §17.3.1.11 x: absolute signed offset from the hAnchor left edge.
+    frameX = hx.left + (fp.x != null ? fp.x * sc : 0);
+  }
+
+  // Vertical placement. For a drop cap, y/yAlign are ignored: the cap sits at
+  // the anchor paragraph top (§17.3.1.11 lines). Otherwise yAlign supersedes y
+  // (ignored when vAnchor="text" — relative positioning is not allowed there,
+  // §17.3.1.11 yAlign), else absolute y offset from the vAnchor edge.
+  let frameY: number;
+  if (isDropCap) {
+    frameY = vy;
+  } else if (fp.yAlign && fp.vAnchor !== 'text') {
+    switch (fp.yAlign) {
+      case 'center':
+        frameY = vy + (state.pageH - frameH) / 2 - state.marginTop * sc;
+        break;
+      case 'bottom':
+      case 'outside':
+        frameY = (state.pageH - state.marginBottom * sc) - frameH;
+        break;
+      case 'top':
+      case 'inside':
+      case 'inline':
+      default:
+        frameY = vy;
+        break;
+    }
+  } else {
+    frameY = vy + (fp.y != null ? fp.y * sc : 0);
+  }
+
+  // Exclusion padding: hSpace L/R applies only with wrap="around" (§17.3.1.11
+  // hSpace); vSpace top/bottom always.
+  const hSpacePx = fp.wrap === 'around' || fp.wrap === 'auto' ? fp.hSpace * sc : 0;
+  const vSpacePx = fp.vSpace * sc;
+
+  return {
+    x: frameX,
+    y: frameY,
+    w: frameW,
+    h: frameH,
+    exLeft: frameX - hSpacePx,
+    exRight: frameX + frameW + hSpacePx,
+    exTop: frameY - vSpacePx,
+    exBottom: frameY + frameH + vSpacePx,
+  };
+}
+
+/**
+ * Render a paragraph that is part of a text frame (`para.framePr` set), per
+ * ECMA-376 §17.3.1.11.
+ *
+ * The frame is OUT OF FLOW: it is drawn at an absolute (anchor-relative)
+ * position and does NOT advance the in-flow `state.y`, so the following
+ * non-frame paragraph begins where this paragraph sat. The frame's glyphs are
+ * painted at their own run sizes (a drop cap's big letter is just a large `sz`
+ * run, e.g. sample-11's 58.5 pt "D"). A wrap exclusion FloatRect is registered
+ * (unless wrap="none") so the following body text flows around the frame — the
+ * exclusion x-range is built from the frame's COLUMN-relative band so
+ * resolveLineFloatWindow only constrains the matching column (#513).
+ *
+ * `anchorLineHpx` is one line height of the following non-frame paragraph,
+ * needed to size a drop cap by `lines`. Falls back to the frame paragraph's own
+ * single-line height when there is no following paragraph.
+ */
+/**
+ * Resolve a frame paragraph's box (canvas px) from the current flow geometry.
+ * Lays the frame content out at a wide width to get its natural size, then maps
+ * the framePr anchors/alignment. Shared by the renderer (draw) and the
+ * paginator (wrap estimate) so both see the same band.
+ */
+function resolveFrameBox(
+  para: DocParagraph,
+  state: RenderState,
+  anchorLineHpx: number,
+): FrameBox {
+  const fp = para.framePr!;
+  const { scale } = state;
+  const paraTop = state.y;
+  const grid = paraGrid(para, state);
+  const paraHasRuby = paragraphHasRuby(para);
+  const segments = buildSegments(para.runs, state);
+
+  // Measure the frame's natural content size at a wide width (single-line frame
+  // content stays one line). No floats apply INSIDE the frame; the cap glyph's
+  // own run size drives its extent.
+  const measureW = 100000;
+  const lines =
+    segments.length === 0
+      ? []
+      : layoutLines(
+          state.ctx,
+          segments,
+          measureW,
+          0,
+          scale,
+          para.tabStops,
+          undefined,
+          state.fontFamilyClasses,
+          0,
+          state.kinsoku,
+          gridCharDeltaPx(grid, scale),
+        );
+  const contentW =
+    lines.length === 0
+      ? 0
+      : Math.max(...lines.map((l) => l.segments.reduce((s, sg) => s + sg.measuredWidth, 0)));
+  const contentH = lines.reduce(
+    (s, l) =>
+      s +
+      lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)),
+    0,
+  );
+
+  return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHpx);
+}
+
+/**
+ * Push the wrap-exclusion FloatRect for a resolved frame box onto
+ * `state.floats` so following body text flows around the frame. No-op for
+ * wrap="none" or a degenerate (zero-area) box. Shared by the renderer (after
+ * drawing) and the paginator (so the anchor paragraph's measured height
+ * accounts for the wrap). The exclusion x-range is COLUMN-relative (built in
+ * frameXContainer from state.contentX/contentW for hAnchor="text"), so
+ * resolveLineFloatWindow only constrains the matching column (#513).
+ *
+ * Wrap-mode → FloatRect mapping (ECMA-376 §17.18.104):
+ *   none      → no exclusion (text may overlap; the frame is drawn absolutely
+ *               and following text starts at its normal Y).
+ *   notBeside → topAndBottom (text never sits beside the frame).
+ *   around / auto → square side wrap. "auto" is Word's application-defined
+ *               default, effectively "around" in Word, so treated as around.
+ *   tight / through → a frame is a rectangle, so contour wrapping collapses to
+ *               a square wrap (no contour follow for a rectangular frame).
+ *
+ * Exported for unit tests only (frame-geometry table) — not package API.
+ */
+export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderState): void {
+  if (fp.wrap === 'none') return;
+  if (box.w <= 0 || box.h <= 0) return;
+
+  const paraId = state.floatParaSeq++;
+  const mode: 'square' | 'topAndBottom' = fp.wrap === 'notBeside' ? 'topAndBottom' : 'square';
+  const rect: FloatRect = {
+    mode,
+    imageKey: '', // non-image float: the frame is painted above, not deferred.
+    imageX: box.x,
+    imageY: box.y,
+    imageW: box.w,
+    imageH: box.h,
+    xLeft: box.exLeft,
+    xRight: box.exRight,
+    yTop: box.exTop,
+    yBottom: box.exBottom,
+    // A drop cap sits at the column's left edge, so text wraps only to its
+    // RIGHT. A generic frame may sit anywhere, so text wraps on both sides
+    // (resolveLineFloatWindow then takes the widest free gap around it).
+    side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
+    distLeft: box.x - box.exLeft,
+    distRight: box.exRight - (box.x + box.w),
+    distTop: box.y - box.exTop,
+    distBottom: box.exBottom - (box.y + box.h),
+    paraId,
+    drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
+  };
+  state.floats.push(rect);
+}
+
+/**
+ * Render a paragraph that is part of a text frame (`para.framePr` set), per
+ * ECMA-376 §17.3.1.11.
+ *
+ * The frame is OUT OF FLOW: it is drawn at an absolute (anchor-relative)
+ * position and does NOT advance the in-flow `state.y`, so the following
+ * non-frame paragraph begins where this paragraph sat. The frame's glyphs are
+ * painted at their own run sizes (a drop cap's big letter is just a large `sz`
+ * run, e.g. sample-11's 58.5 pt "D"). A wrap exclusion is then registered so
+ * following body text flows around the frame.
+ *
+ * `anchorLineHpx` is one line height of the following non-frame paragraph,
+ * needed to size a drop cap by `lines` (§17.3.1.11).
+ */
+function renderFrameParagraph(
+  para: DocParagraph,
+  state: RenderState,
+  anchorLineHpx: number,
+): void {
+  const fp = para.framePr!;
+  // In-flow Y the following paragraph must resume from. The frame is out of
+  // flow; we restore this after drawing so state.y is untouched by the frame.
+  const inFlowY = state.y;
+  const box = resolveFrameBox(para, state, anchorLineHpx);
+
+  // Draw the frame's glyphs by redirecting the flow geometry to the frame box,
+  // then rendering the paragraph through the normal line path. inFrame=true
+  // suppresses anchor-float re-registration and avoids re-entering the frame
+  // dispatch; suppressSpaceBefore=true keeps the cap anchored to the paragraph
+  // top (the frame is positioned absolutely, not in flow).
+  const savedX = state.contentX;
+  const savedW = state.contentW;
+  state.contentX = box.x;
+  state.contentW = Math.max(box.w, box.exRight - box.x);
+  state.y = box.y;
+  renderParagraph(para, state, true, undefined, /* inFrame */ true);
+  state.contentX = savedX;
+  state.contentW = savedW;
+
+  // Restore the in-flow cursor: the frame consumes NO vertical space in the
+  // body flow (§17.3.1.11 — the frame is positioned relative to the next
+  // non-frame paragraph; the frame itself does not advance the flow).
+  state.y = inFlowY;
+
+  registerFrameFloat(box, fp, state);
+}
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -2476,6 +2895,14 @@ function renderParagraph(
   /** When set, render only `lines[start, end)` of the laid-out paragraph,
    *  used by the paginator to split paragraphs that don't fit on one page. */
   lineSlice?: { start: number; end: number },
+  /** True when this call is the redirected draw of a `<w:framePr>` frame
+   *  paragraph (from {@link renderFrameParagraph}). It suppresses the in-flow
+   *  cursor bookkeeping that the frame path handles itself: anchor-float
+   *  registration is skipped (the frame is the float) and the
+   *  topAndBottom-skip / frame dispatch are bypassed (the geometry is already
+   *  the frame box). Frame dispatch for a non-frame call lives in
+   *  renderBodyElements so it can pass the anchor paragraph's line height. */
+  inFrame = false,
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
@@ -2483,9 +2910,11 @@ function renderParagraph(
 
   if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
 
-  // Register anchor floats from this paragraph (must happen after spaceBefore so that
-  // paragraph-relative Y resolves against the textAreaTop, matching Word).
-  registerAnchorFloats(para, state, state.y);
+  // Register anchor floats from this paragraph (must happen after spaceBefore so
+  // that paragraph-relative Y resolves against the textAreaTop, matching Word).
+  // Skipped for the frame-draw recursion: a frame paragraph's wrap exclusion is
+  // its own FloatRect (renderFrameParagraph), not an anchor image/shape float.
+  if (!inFrame) registerAnchorFloats(para, state, state.y);
 
   // behindDoc shapes must render before text so they appear behind it.
   renderAnchorImages(para, state, paragraphStartY, 'behind');
@@ -2498,10 +2927,17 @@ function renderParagraph(
   // ECMA-376 §17.3.1.12 w:ind — the transitional left/right attributes are
   // logical start/end (Part 4 §14.11.2). In a bidi paragraph the start side is
   // the physical RIGHT, so the two indents swap physical sides here.
+  //
+  // A frame paragraph's own body-style indents (e.g. a default first-line indent
+  // inherited from the body style) do NOT apply to the frame content: the frame
+  // box already positions the glyphs from its left edge, and the wrap exclusion
+  // is built from that same left edge (§17.3.1.11). Honoring the indent here
+  // would shift the cap glyph right of the exclusion band and let body text
+  // overlap it, so zero the indents in the frame-draw recursion.
   const baseRtl = para.bidi === true;
-  const indLeft = (baseRtl ? para.indentRight : para.indentLeft) * scale;
-  const indRight = (baseRtl ? para.indentLeft : para.indentRight) * scale;
-  const indFirst = para.indentFirst * scale;
+  const indLeft = inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft) * scale;
+  const indRight = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight) * scale;
+  const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
   // Numbering marker. `numMarker` doubles as the "this paragraph has a marker"
   // flag (truthiness); the marker glyph itself is drawn from para.numbering.text.
