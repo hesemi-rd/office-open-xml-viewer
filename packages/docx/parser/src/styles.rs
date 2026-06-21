@@ -162,6 +162,15 @@ pub struct RawTblBorders {
 pub struct CondFmt {
     pub shd: Option<String>,
     pub borders: RawTblBorders,
+    /// ECMA-376 §17.7.6: the conditional block's `<w:rPr>` — run defaults that
+    /// apply to runs in cells covered by this condition (e.g. Calendar 3's
+    /// firstRow sets `<w:color w:val="365F91"/>` for the "Sun/Mon/…" header).
+    /// Layered as a BASE below paragraph/character styles and direct rPr
+    /// (§17.7.2), so a directly-colored run still wins.
+    pub run: Option<RunFmt>,
+    /// ECMA-376 §17.7.6: the conditional block's `<w:pPr>` — paragraph defaults
+    /// for cells covered by this condition (e.g. firstRow `<w:jc w:val="right"/>`).
+    pub para: Option<ParaFmt>,
 }
 
 /// Table style (`w:style w:type="table"`) cell/border formatting.
@@ -171,6 +180,17 @@ pub struct TableStyleDef {
     pub borders: RawTblBorders,
     pub cell_shd: Option<String>,
     pub cell_valign: Option<String>,
+    /// ECMA-376 §17.7.6: the table style's whole-table `<w:rPr>` — run defaults
+    /// applied to every cell (e.g. Calendar 3's `<w:color w:val="7F7F7F"/>`
+    /// makes day numbers gray). Layered below the conditional `run` but above
+    /// docDefaults (§17.7.2).
+    pub run: Option<RunFmt>,
+    /// ECMA-376 §17.7.6: the table style's whole-table `<w:pPr>` — paragraph
+    /// defaults for every cell (e.g. Calendar 3's `<w:jc w:val="right"/>`).
+    /// "Table Grid"'s line/after spacing is already threaded through
+    /// `StyleMap::styles`; this field carries the table style's pPr for the
+    /// conditional-formatting resolution path used by `resolve_table_cond`.
+    pub para: Option<ParaFmt>,
     /// keyed by w:tblStylePr w:type (firstRow, band1Horz, band2Horz, …).
     pub cond: HashMap<String, CondFmt>,
 }
@@ -317,12 +337,27 @@ impl StyleMap {
             if def.cell_valign.is_some() {
                 out.cell_valign = def.cell_valign.clone();
             }
+            // §17.7.6: a derived table style's whole-table rPr/pPr layers ON TOP
+            // of the base style's. We fold each level into a single accumulated
+            // RunFmt/ParaFmt with the standard merge semantics (later wins).
+            if let Some(r) = &def.run {
+                apply_run(out.run.get_or_insert_with(RunFmt::default), r);
+            }
+            if let Some(p) = &def.para {
+                apply_para(out.para.get_or_insert_with(ParaFmt::default), p);
+            }
             for (k, v) in &def.cond {
                 let slot = out.cond.entry(k.clone()).or_default();
                 if v.shd.is_some() {
                     slot.shd = v.shd.clone();
                 }
                 merge_raw_borders(&mut slot.borders, &v.borders);
+                if let Some(r) = &v.run {
+                    apply_run(slot.run.get_or_insert_with(RunFmt::default), r);
+                }
+                if let Some(p) = &v.para {
+                    apply_para(slot.para.get_or_insert_with(ParaFmt::default), p);
+                }
             }
         }
         out
@@ -337,6 +372,27 @@ impl StyleMap {
         style_id: Option<&str>,
         table_style_id: Option<&str>,
     ) -> (ParaFmt, RunFmt) {
+        self.resolve_para_cond(style_id, table_style_id, None)
+    }
+
+    /// Like [`resolve_para`], but additionally layers a table style's resolved
+    /// conditional formatting (`w:tblStylePr`'s `<w:rPr>`/`<w:pPr>`, §17.7.6)
+    /// onto the cell's base formatting.
+    ///
+    /// ECMA-376 §17.7.2 style-application order (low→high): docDefaults <
+    /// table-style (whole-table) < **table conditional** < numbering <
+    /// paragraph style < character style < direct. So the conditional layer is
+    /// applied AFTER the whole-table table-style chain but BEFORE the paragraph
+    /// style — it is a BASE the paragraph/character styles and direct rPr (which
+    /// the caller applies via `apply_direct_*` on top of the returned values)
+    /// override, never the other way around. This is why a cell whose run
+    /// carries a direct color still wins over a conditional row color.
+    pub fn resolve_para_cond(
+        &self,
+        style_id: Option<&str>,
+        table_style_id: Option<&str>,
+        cond: Option<&CondFmt>,
+    ) -> (ParaFmt, RunFmt) {
         let mut merged_para = ParaFmt::default();
         let mut merged_run = RunFmt::default();
 
@@ -346,9 +402,25 @@ impl StyleMap {
         // Table style pPr applies to every paragraph inside the table, below
         // the paragraph style (§17.7.6). "Table Grid" sets line=240 after=0;
         // without this, cell paragraphs inherit docDefault's M=1.15 spacing
-        // and render ~3pt taller per line than Word.
+        // and render ~3pt taller per line than Word. This step also folds in the
+        // table style's whole-table rPr (e.g. Calendar 3's gray day-number
+        // color) since table styles are indexed in `self.styles`.
         if let Some(tid) = table_style_id {
             self.apply_style_chain(tid, &mut merged_para, &mut merged_run);
+        }
+
+        // §17.7.2: the row/band conditional formatting sits one layer above the
+        // whole-table table style and below the paragraph style. Apply its pPr
+        // then rPr with the standard merge semantics (set values override, unset
+        // inherit) so e.g. firstRow's `<w:color w:val="365F91"/>` colors the
+        // header runs unless a more specific layer overrides it.
+        if let Some(c) = cond {
+            if let Some(p) = &c.para {
+                apply_para(&mut merged_para, p);
+            }
+            if let Some(r) = &c.run {
+                apply_run(&mut merged_run, r);
+            }
         }
 
         // Use explicit pStyle if present, otherwise fall back to the
@@ -998,6 +1070,19 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         def.cell_shd = shd_fill(tc_pr);
         def.cell_valign = child_w(tc_pr, "vAlign").and_then(|v| attr_w(v, "val"));
     }
+    // ECMA-376 §17.7.6: a table style's top-level `<w:rPr>`/`<w:pPr>` are
+    // whole-table run/paragraph defaults applied to every cell (e.g. Calendar 3
+    // sets `<w:color w:val="7F7F7F"/>` so day numbers are gray, and `<w:jc
+    // w:val="right"/>` so they right-align). These are also indexed in
+    // `StyleMap::styles` for the resolve_para pPr path, but we keep a copy here
+    // so the conditional-formatting resolution (resolve_table_cond) can layer
+    // them below the conditional rPr/pPr without re-walking the named-style map.
+    if let Some(rpr) = child_w(style_node, "rPr") {
+        def.run = Some(parse_run_fmt(rpr));
+    }
+    if let Some(ppr) = child_w(style_node, "pPr") {
+        def.para = Some(parse_para_fmt(ppr));
+    }
     for sp in children_w(style_node, "tblStylePr") {
         let Some(typ) = attr_w(sp, "type") else {
             continue;
@@ -1013,6 +1098,14 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             if let Some(borders) = child_w(tbl_pr, "tblBorders") {
                 merge_raw_borders(&mut cf.borders, &parse_raw_tbl_borders(borders));
             }
+        }
+        // §17.7.6: the conditional block carries its own `<w:rPr>`/`<w:pPr>`
+        // (e.g. firstRow `<w:color w:val="365F91"/>` + `<w:jc w:val="right"/>`).
+        if let Some(rpr) = child_w(sp, "rPr") {
+            cf.run = Some(parse_run_fmt(rpr));
+        }
+        if let Some(ppr) = child_w(sp, "pPr") {
+            cf.para = Some(parse_para_fmt(ppr));
         }
         def.cond.insert(typ, cf);
     }
@@ -1116,5 +1209,126 @@ mod tests {
     fn absent_color_element_stays_none_to_inherit() {
         let fmt = run_fmt_from(r#"<w:b/>"#);
         assert_eq!(fmt.color, None);
+    }
+
+    // ===== Table style conditional rPr/pPr (§17.7.6 / §17.7.2) =====
+
+    /// A minimal styles.xml with a Calendar-3-like table style: a whole-table
+    /// rPr gray color + a firstRow conditional rPr blue color and a firstRow
+    /// pPr right-jc. Mirrors the real Calendar 3 (styleId "Calendar3") subset
+    /// the parser must resolve.
+    fn calendar_style_map() -> StyleMap {
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="Calendar3">
+                <w:name w:val="Calendar 3"/>
+                <w:pPr><w:jc w:val="right"/></w:pPr>
+                <w:rPr><w:color w:val="7F7F7F"/></w:rPr>
+                <w:tblStylePr w:type="firstRow">
+                  <w:pPr><w:jc w:val="right"/></w:pPr>
+                  <w:rPr><w:color w:val="365F91"/><w:sz w:val="44"/></w:rPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        StyleMap::parse(&xml)
+    }
+
+    #[test]
+    fn table_style_parses_whole_table_and_conditional_run_para() {
+        let sm = calendar_style_map();
+        let def = sm.resolve_table_style("Calendar3");
+        // Whole-table rPr/pPr captured.
+        assert_eq!(def.run.as_ref().unwrap().color.as_deref(), Some("7f7f7f"));
+        assert_eq!(
+            def.para.as_ref().unwrap().alignment.as_deref(),
+            Some("right")
+        );
+        // firstRow conditional rPr/pPr captured.
+        let fr = def.cond.get("firstRow").unwrap();
+        assert_eq!(fr.run.as_ref().unwrap().color.as_deref(), Some("365f91"));
+        assert_eq!(fr.run.as_ref().unwrap().font_size, Some(22.0));
+        assert_eq!(
+            fr.para.as_ref().unwrap().alignment.as_deref(),
+            Some("right")
+        );
+    }
+
+    #[test]
+    fn firstrow_conditional_run_color_is_inherited_by_cell_base() {
+        // §17.7.6 + §17.7.2: a cell paragraph in the firstRow inherits the
+        // conditional rPr color (365F91) as its run BASE — this is the calendar
+        // header "Sun/Mon/…" blue.
+        let sm = calendar_style_map();
+        let cond = {
+            let def = sm.resolve_table_style("Calendar3");
+            def.cond.get("firstRow").cloned()
+        };
+        let (para, run) = sm.resolve_para_cond(None, Some("Calendar3"), cond.as_ref());
+        assert_eq!(run.color.as_deref(), Some("365f91"));
+        // firstRow pPr right-jc also resolves onto the paragraph.
+        assert_eq!(para.alignment.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn body_row_inherits_whole_table_color_not_conditional() {
+        // A row with no conditional (cond = None) inherits only the whole-table
+        // rPr gray (7F7F7F) — the calendar day numbers — never the firstRow blue.
+        let sm = calendar_style_map();
+        let (_para, run) = sm.resolve_para_cond(None, Some("Calendar3"), None);
+        assert_eq!(run.color.as_deref(), Some("7f7f7f"));
+    }
+
+    #[test]
+    fn direct_run_color_overrides_conditional_base() {
+        // §17.7.2 ordering: the table conditional rPr is a BASE below direct
+        // run formatting. A run that carries its OWN w:color must win over the
+        // firstRow conditional color. We resolve the conditional base, then
+        // layer a direct rPr the way the run walk does (set-value wins).
+        let sm = calendar_style_map();
+        let cond = {
+            let def = sm.resolve_table_style("Calendar3");
+            def.cond.get("firstRow").cloned()
+        };
+        let (_para, base_run) = sm.resolve_para_cond(None, Some("Calendar3"), cond.as_ref());
+        assert_eq!(base_run.color.as_deref(), Some("365f91"));
+
+        // Direct rPr on the run: explicit red. apply_run mirrors the
+        // set-value-wins merge that apply_direct_run performs for the run walk.
+        let mut fmt = base_run.clone();
+        let direct = run_fmt_from(r#"<w:color w:val="FF0000"/>"#);
+        apply_run(&mut fmt, &direct);
+        assert_eq!(
+            fmt.color.as_deref(),
+            Some("ff0000"),
+            "direct run color must override the conditional base"
+        );
+    }
+
+    #[test]
+    fn conditional_run_para_default_to_none_when_absent() {
+        // A table style with no rPr/pPr anywhere yields None — no panics, no
+        // spurious base layer (so cells inherit docDefaults/paragraph style).
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="Plain">
+                <w:name w:val="Plain"/>
+                <w:tblStylePr w:type="firstRow">
+                  <w:tcPr><w:shd w:val="clear" w:fill="CCCCCC"/></w:tcPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let sm = StyleMap::parse(&xml);
+        let def = sm.resolve_table_style("Plain");
+        assert!(def.run.is_none());
+        assert!(def.para.is_none());
+        let fr = def.cond.get("firstRow").unwrap();
+        assert!(fr.run.is_none());
+        assert!(fr.para.is_none());
+        // shd still parses (existing behavior unchanged).
+        assert_eq!(fr.shd.as_deref(), Some("cccccc"));
     }
 }

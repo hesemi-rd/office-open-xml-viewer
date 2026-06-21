@@ -1274,6 +1274,32 @@ fn parse_paragraph(
     theme: &ThemeColors,
     table_style_id: Option<&str>,
 ) -> DocParagraph {
+    parse_paragraph_cond(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        rel_map,
+        theme,
+        table_style_id,
+        None,
+    )
+}
+
+/// Parse a paragraph, optionally layering a table style's resolved conditional
+/// formatting (§17.7.6, threaded from `parse_table`) as a base below the
+/// paragraph/character styles and direct formatting (§17.7.2 ordering).
+#[allow(clippy::too_many_arguments)]
+fn parse_paragraph_cond(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    table_style_id: Option<&str>,
+    cond: Option<&CondFmt>,
+) -> DocParagraph {
     // Get style ID from pPr/pStyle. When absent, resolve_para falls back to the
     // paragraph style marked w:default="1" via StyleMap::default_para_style_id.
     let ppr_node = child_w(node, "pPr");
@@ -1281,9 +1307,9 @@ fn parse_paragraph(
         .and_then(|p| child_w(p, "pStyle"))
         .and_then(|s| attr_w(s, "val"));
 
-    // Resolve base formatting from style
+    // Resolve base formatting from style (incl. table-style conditional rPr/pPr).
     let (mut base_para, mut base_run) =
-        style_map.resolve_para(explicit_style_id.as_deref(), table_style_id);
+        style_map.resolve_para_cond(explicit_style_id.as_deref(), table_style_id, cond);
 
     // Apply direct paragraph formatting overrides
     if let Some(ppr) = ppr_node {
@@ -3985,45 +4011,60 @@ fn parse_table(
         })
         .unwrap_or((0.0, 0.0, 3.6, 3.6));
 
-    let mut rows = vec![];
-    let mut row_cnf: Vec<Option<String>> = vec![];
-    for tr_node in children_w_flat(node, "tr") {
-        // §17.4.7 conditional-format bitmask on the row (firstRow/band1Horz/…).
-        row_cnf.push(
-            child_w(tr_node, "trPr")
+    // §17.4.7 conditional-format bitmask on each row (firstRow/band1Horz/…),
+    // captured up front so we can both (a) thread the resolved conditional
+    // rPr/pPr into the cell content as a base layer (§17.7.2), and (b) apply the
+    // conditional cell shading post-hoc below.
+    let tr_nodes: Vec<roxmltree::Node> = children_w_flat(node, "tr");
+    let row_cnf: Vec<Option<String>> = tr_nodes
+        .iter()
+        .map(|tr| {
+            child_w(*tr, "trPr")
                 .and_then(|p| child_w(p, "cnfStyle"))
-                .and_then(|c| attr_w(c, "val")),
-        );
-        let row = parse_table_row(
-            tr_node,
-            style_map,
-            num_map,
-            media_map,
-            rel_map,
-            theme,
-            table_style_id.as_deref(),
-        );
-        rows.push(row);
-    }
+                .and_then(|c| attr_w(c, "val"))
+        })
+        .collect();
 
-    // Apply table-style cell shading + vAlign where the cell didn't set them inline.
-    // Only treat row 0 as a non-banded "first row" when firstRow is enabled AND the
-    // style's firstRow conditional actually carries formatting; an empty firstRow
-    // (like EHC) must NOT shift the banding (Word bands from row 0 → 1st row = band1).
+    // Only treat row 0 as a non-banded "first row" when firstRow is enabled AND
+    // the style's firstRow conditional actually carries shading; an empty
+    // firstRow (like EHC) must NOT shift the banding (Word bands from row 0 →
+    // 1st row = band1). NOTE: this gate uses `shd` deliberately — it governs the
+    // horizontal-banding PARITY for cell shading, not whether firstRow rPr/pPr
+    // applies. The conditional run/paragraph formatting (color, jc, …) is keyed
+    // separately by `firstRow_has_fmt` below so a header row with only a color
+    // (e.g. Calendar 3) still inherits firstRow rPr.
     let first_row_styled = first_row
         && tstyle
             .cond
             .get("firstRow")
             .map(|c| c.shd.is_some())
             .unwrap_or(false);
-    for (r, row) in rows.iter_mut().enumerate() {
-        // Pick the conditional format: the row's explicit cnfStyle wins (§17.4.7);
-        // otherwise fall back to tblLook firstRow + horizontal banding by row parity.
-        let cond_name: Option<String> = if let Some(cnf) = &row_cnf[r] {
+    // firstRow rPr/pPr is honored whenever firstRow is enabled and the style
+    // defines ANY firstRow run/para formatting (independent of shading).
+    let first_row_has_fmt = first_row
+        && tstyle
+            .cond
+            .get("firstRow")
+            .map(|c| c.run.is_some() || c.para.is_some())
+            .unwrap_or(false);
+
+    // Resolve the conditional-format KEY for row `r`. The row's explicit
+    // cnfStyle wins (§17.4.7); otherwise fall back to tblLook firstRow +
+    // horizontal banding by row parity. Used both for content threading (below)
+    // and post-hoc cell shading. Scope note: `cnf_to_cond` only decodes the four
+    // row-level bits (firstRow/lastRow/band1Horz/band2Horz); column-band and
+    // corner conditions (firstCol/lastCol/band*Vert/neCell/…) are NOT resolved
+    // here, so their conditional rPr/pPr (e.g. Calendar 3's firstCol color) is
+    // intentionally unsupported.
+    let cond_name_for = |r: usize| -> Option<String> {
+        if let Some(cnf) = &row_cnf[r] {
             cnf_to_cond(cnf)
-        } else if r == 0 && first_row_styled {
+        } else if r == 0 && (first_row_styled || first_row_has_fmt) {
             Some("firstRow".to_string())
         } else if h_band {
+            // The banding parity offset only shifts when row 0 was consumed as a
+            // SHADED first row; a first row that only carries rPr/pPr (no shd)
+            // still bands from row 0 like Word.
             let bi = if first_row_styled {
                 r as i64 - 1
             } else {
@@ -4039,8 +4080,32 @@ fn parse_table(
             )
         } else {
             None
-        };
-        let cond: Option<&CondFmt> = cond_name.as_deref().and_then(|n| tstyle.cond.get(n));
+        }
+    };
+
+    let mut rows = vec![];
+    for (r, tr_node) in tr_nodes.iter().enumerate() {
+        // §17.7.2: thread the row's resolved conditional rPr/pPr into the cell
+        // content as a BASE layer (below paragraph/character styles + direct
+        // formatting). A first-row band condition gives the calendar header its
+        // 365F91 blue; band rows pick up their banded run color, etc.
+        let cond: Option<&CondFmt> = cond_name_for(r).as_deref().and_then(|n| tstyle.cond.get(n));
+        let row = parse_table_row(
+            *tr_node,
+            style_map,
+            num_map,
+            media_map,
+            rel_map,
+            theme,
+            table_style_id.as_deref(),
+            cond,
+        );
+        rows.push(row);
+    }
+
+    // Apply table-style cell shading + vAlign where the cell didn't set them inline.
+    for (r, row) in rows.iter_mut().enumerate() {
+        let cond: Option<&CondFmt> = cond_name_for(r).as_deref().and_then(|n| tstyle.cond.get(n));
         let row_shd = cond
             .and_then(|c| c.shd.clone())
             .or_else(|| tstyle.cell_shd.clone());
@@ -4111,6 +4176,7 @@ fn parse_table(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_table_row(
     node: roxmltree::Node,
     style_map: &StyleMap,
@@ -4119,6 +4185,9 @@ fn parse_table_row(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
+    // §17.7.6 resolved conditional formatting for this row (firstRow/band*Horz),
+    // threaded into cell content as a base layer below paragraph/char styles.
+    cond: Option<&CondFmt>,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
@@ -4141,6 +4210,7 @@ fn parse_table_row(
             rel_map,
             theme,
             table_style_id,
+            cond,
         );
         cells.push(cell);
     }
@@ -4153,6 +4223,7 @@ fn parse_table_row(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_table_cell(
     node: roxmltree::Node,
     style_map: &StyleMap,
@@ -4161,6 +4232,8 @@ fn parse_table_cell(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
+    // §17.7.6 resolved conditional formatting for the owning row.
+    cond: Option<&CondFmt>,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -4232,7 +4305,7 @@ fn parse_table_cell(
     let mut content: Vec<CellElement> = vec![];
     for child in element_children_flat(node) {
         match child.tag_name().name() {
-            "p" => content.push(CellElement::Paragraph(parse_paragraph(
+            "p" => content.push(CellElement::Paragraph(parse_paragraph_cond(
                 child,
                 style_map,
                 num_map,
@@ -4240,7 +4313,10 @@ fn parse_table_cell(
                 rel_map,
                 theme,
                 table_style_id,
+                cond,
             ))),
+            // A nested table resolves its OWN table style + conditional
+            // formatting; the outer cell's `cond` does not propagate into it.
             "tbl" => content.push(CellElement::Table(parse_table(
                 child, style_map, num_map, media_map, rel_map, theme,
             ))),
