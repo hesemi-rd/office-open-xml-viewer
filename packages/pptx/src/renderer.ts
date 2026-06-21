@@ -84,9 +84,11 @@ export interface RenderContext {
    * `ctx.scale(dpr, dpr)` in the top render fn). Threaded so axis-aligned
    * thin line strokes (table grid borders, text underline / strike-through)
    * can apply {@link crispOffset} and render crisp on a DPR=1 display.
-   * Defaults to 1 (no nudge) when unset.
+   * Always set — `renderSlide` populates it from the real dpr; the in-module
+   * default literals use 1. Required so the crisp-line call sites need no
+   * `?? 1` fallback (aligns with docx's required `RenderState.dpr`).
    */
-  dpr?: number;
+  dpr: number;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -206,11 +208,12 @@ function drawUnderline(
   const lineW = heavy ? baseLineW * 1.8 : baseLineW;
   const y = baseline + Math.max(2, lineW);
   // Crispness nudge (see crispOffset): a horizontal underline whose device-pixel
-  // width is odd straddles two device rows on a DPR=1 display (blurry). Shifting
-  // the line's y by half a device px centers an odd-width stroke on one device
-  // row → crisp. Applied to the straight / dbl / dashed branches only; the wavy
-  // variant is not axis-aligned per pixel, so it deliberately omits the offset.
-  const crispY = crispOffset(lineW, dpr);
+  // width is odd straddles two device rows on a DPR=1 display (blurry). Snapping
+  // the line's y onto the nearest crisp device position centers an odd-width
+  // stroke on one device row → crisp. Applied to the straight / dbl / dashed
+  // branches only; the wavy variant is not axis-aligned per pixel, so it
+  // deliberately omits the offset.
+  const crispY = crispOffset(y, lineW, dpr);
   ctx.strokeStyle = color;
   ctx.lineWidth = lineW;
   ctx.setLineDash([]);
@@ -261,11 +264,14 @@ function drawUnderline(
 
   if (style === 'dbl') {
     const offset = lineW * 1.4;
+    // Two parallel rules straddling y; snap each onto its own crisp device row.
+    const y1 = y - offset / 2;
+    const y2 = y + offset / 2;
     ctx.beginPath();
-    ctx.moveTo(x, y - offset / 2 + crispY);
-    ctx.lineTo(x + width, y - offset / 2 + crispY);
-    ctx.moveTo(x, y + offset / 2 + crispY);
-    ctx.lineTo(x + width, y + offset / 2 + crispY);
+    ctx.moveTo(x, y1 + crispOffset(y1, lineW, dpr));
+    ctx.lineTo(x + width, y1 + crispOffset(y1, lineW, dpr));
+    ctx.moveTo(x, y2 + crispOffset(y2, lineW, dpr));
+    ctx.lineTo(x + width, y2 + crispOffset(y2, lineW, dpr));
     ctx.stroke();
     return;
   }
@@ -702,7 +708,7 @@ export function layoutParagraph(
   defaultItalic: boolean = false,
   fontScale: number = 1.0,
   slideNumber?: number,
-  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
+  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: LayoutLine = { segments: [] };
@@ -1311,7 +1317,7 @@ function presetTextRect(
   }
 }
 
-function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }, onTextRun?: TextRunCallback) {
+function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
@@ -1864,7 +1870,7 @@ function renderTextBody(
   shapeFlipV = false,
   themeDefaultColor = '#000000',
   slideNumber?: number,
-  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
+  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
   measureOnly = false,
 ): number | void {
@@ -2518,7 +2524,7 @@ function renderTextBody(
       }
 
       if (seg.underline) {
-        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle, rc.dpr ?? 1);
+        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle, rc.dpr);
       }
 
       if (seg.strikethrough) {
@@ -2526,27 +2532,29 @@ function renderTextBody(
         ctx.strokeStyle = seg.color;
         ctx.lineWidth = lineW;
         ctx.setLineDash([]);
-        // Crispness nudge (see crispOffset): the strike is a horizontal stroke,
-        // so an odd device-pixel width is centered on one device row by shifting
-        // y half a device px at DPR=1 (otherwise it straddles two rows → blurry).
-        const crispY = crispOffset(lineW, rc.dpr ?? 1);
+        // Crispness nudge (see crispOffset): the strike is a horizontal stroke;
+        // an odd device-pixel width is centered on one device row by snapping its
+        // y onto the nearest crisp device position (otherwise it straddles two
+        // rows → blurry). Snap each line from its own y.
+        const yMid = segBaseline - seg.sizePx * 0.32;
         if (seg.strikeDouble) {
           // Two parallel lines straddling the standard strike position,
           // separated by ~ 1.5× the line weight (visually distinct yet
           // staying inside the glyph's central band).
           const offset = lineW * 0.9;
-          const yMid = segBaseline - seg.sizePx * 0.32 + crispY;
+          const yUp = yMid - offset;
+          const yDn = yMid + offset;
           ctx.beginPath();
-          ctx.moveTo(penX, yMid - offset);
-          ctx.lineTo(penX + segW + jext, yMid - offset);
-          ctx.moveTo(penX, yMid + offset);
-          ctx.lineTo(penX + segW + jext, yMid + offset);
+          ctx.moveTo(penX, yUp + crispOffset(yUp, lineW, rc.dpr));
+          ctx.lineTo(penX + segW + jext, yUp + crispOffset(yUp, lineW, rc.dpr));
+          ctx.moveTo(penX, yDn + crispOffset(yDn, lineW, rc.dpr));
+          ctx.lineTo(penX + segW + jext, yDn + crispOffset(yDn, lineW, rc.dpr));
           ctx.stroke();
         } else {
-          const yMid = segBaseline - seg.sizePx * 0.32 + crispY;
+          const sy = yMid + crispOffset(yMid, lineW, rc.dpr);
           ctx.beginPath();
-          ctx.moveTo(penX, yMid);
-          ctx.lineTo(penX + segW + jext, yMid);
+          ctx.moveTo(penX, sy);
+          ctx.lineTo(penX + segW + jext, sy);
           ctx.stroke();
         }
       }
@@ -3602,7 +3610,7 @@ function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale
 
 // ─── Table rendering ─────────────────────────────────────────────────────────
 
-function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }) {
+function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }) {
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
@@ -3737,17 +3745,18 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
       // Borders
       // Crispness nudge (see crispOffset): an axis-aligned thin grid line whose
       // device-pixel width is odd straddles two device rows/cols on a DPR=1
-      // display (each ~50% ink → blurry). Offsetting the integer cell edge by
-      // half a device pixel perpendicular to the line centers an odd-width
+      // display (each ~50% ink → blurry). Snapping the cell edge perpendicular
+      // to the line onto the nearest crisp device position centers an odd-width
       // stroke on one device row/col → crisp. `applyStroke` sets ctx.lineWidth
-      // to the logical width, so we read it back to pick the right offset.
-      // Horizontal edges (T/B) shift Y; vertical edges (L/R) shift X. Diagonals
-      // can't be pixel-aligned this way, so they are left untouched.
-      const dpr = rc.dpr ?? 1;
+      // to the logical width, so we read it back to pick the right offset, and
+      // the snap delta is derived from the edge's own coordinate (fractional-
+      // safe). Horizontal edges (T/B) shift Y from their y; vertical edges (L/R)
+      // shift X from their x. Diagonals can't be pixel-aligned, so untouched.
+      const dpr = rc.dpr;
       ctx.save();
       if (cell.borderT) {
         applyStroke(ctx, cell.borderT, scale);
-        const dy = crispOffset(ctx.lineWidth, dpr);
+        const dy = crispOffset(rowY, ctx.lineWidth, dpr);
         ctx.beginPath();
         ctx.moveTo(colX, rowY + dy);
         ctx.lineTo(colX + cellW, rowY + dy);
@@ -3755,7 +3764,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
       }
       if (cell.borderB) {
         applyStroke(ctx, cell.borderB, scale);
-        const dy = crispOffset(ctx.lineWidth, dpr);
+        const dy = crispOffset(rowY + cellH, ctx.lineWidth, dpr);
         ctx.beginPath();
         ctx.moveTo(colX, rowY + cellH + dy);
         ctx.lineTo(colX + cellW, rowY + cellH + dy);
@@ -3763,7 +3772,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
       }
       if (cell.borderL) {
         applyStroke(ctx, cell.borderL, scale);
-        const dx = crispOffset(ctx.lineWidth, dpr);
+        const dx = crispOffset(colX, ctx.lineWidth, dpr);
         ctx.beginPath();
         ctx.moveTo(colX + dx, rowY);
         ctx.lineTo(colX + dx, rowY + cellH);
@@ -3771,7 +3780,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
       }
       if (cell.borderR) {
         applyStroke(ctx, cell.borderR, scale);
-        const dx = crispOffset(ctx.lineWidth, dpr);
+        const dx = crispOffset(colX + cellW, ctx.lineWidth, dpr);
         ctx.beginPath();
         ctx.moveTo(colX + cellW + dx, rowY);
         ctx.lineTo(colX + cellW + dx, rowY + cellH);

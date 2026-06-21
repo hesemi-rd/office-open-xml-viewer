@@ -646,11 +646,11 @@ function drawPageFootnotes(
   ctx.strokeStyle = baseState.defaultColor;
   const ruleLw = Math.max(1, Math.round(0.5 * scale));
   ctx.lineWidth = ruleLw;
-  // Crispness nudge (see crispOffset): a horizontal rule on an integer y needs a
-  // half-device-pixel offset only when its device width is odd. The previous
-  // hardcoded `+ 0.5` was a logical-px offset that only happened to be crisp at
-  // dpr=1 and blurred at dpr>1; crispOffset makes it device-correct at any dpr.
-  const ruleNudge = crispOffset(ruleLw, baseState.dpr);
+  // Crispness nudge (see crispOffset): a horizontal rule snaps onto the nearest
+  // crisp device row from its own y. The previous hardcoded `+ 0.5` was a
+  // logical-px offset that only happened to be crisp at dpr=1 and blurred at
+  // dpr>1; crispOffset makes it device-correct at any dpr and fractional y.
+  const ruleNudge = crispOffset(ruleY, ruleLw, baseState.dpr);
   ctx.beginPath();
   ctx.moveTo(leftX, ruleY + ruleNudge);
   ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + ruleNudge);
@@ -699,9 +699,10 @@ function drawEndnotes(
   const ruleLw = Math.max(1, Math.round(0.5 * scale));
   ctx.lineWidth = ruleLw;
   // Crispness nudge (see crispOffset): device-correct replacement for the old
-  // hardcoded logical `+ 0.5`, which only rendered crisp at dpr=1.
-  const ruleNudge = crispOffset(ruleLw, bodyState.dpr);
+  // hardcoded logical `+ 0.5`, which only rendered crisp at dpr=1. Snap from the
+  // rule's own y so it stays crisp at any dpr and fractional position.
   const ruleY = Math.round(y);
+  const ruleNudge = crispOffset(ruleY, ruleLw, bodyState.dpr);
   ctx.beginPath();
   ctx.moveTo(leftX, ruleY + ruleNudge);
   ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + ruleNudge);
@@ -2509,9 +2510,9 @@ function renderParagraph(
         const lineColor = revColor ?? (s.color ? `#${s.color}` : defaultColor);
         const lineW = Math.max(0.5, effSizePx * 0.05);
         // Crispness nudge (see crispOffset): underline / strike-through are
-        // horizontal strokes; an odd device-width one lands crisp on a single
-        // device row only when offset by half a device pixel in Y.
-        const lineNudge = crispOffset(lineW, state.dpr);
+        // horizontal strokes; each snaps onto the nearest crisp device row from
+        // its own y (an odd device-width one would otherwise straddle two rows).
+        // Compute the offset per line because each stroke sits at a different y.
         // Underline / strike run the full stretched glyph span (natural glyph
         // width + the internal justification pitch).
         const textW = ctx.measureText(s.text).width + internalStretch;
@@ -2522,22 +2523,26 @@ function renderParagraph(
         if (s.underline || isInsertion) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
-          const uy = baseline + yOffset + effSizePx * 0.12 + lineNudge;
+          const uyRaw = baseline + yOffset + effSizePx * 0.12;
+          const uy = uyRaw + crispOffset(uyRaw, lineW, state.dpr);
           ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + textW, uy); ctx.stroke();
         }
 
         if (s.strikethrough || isDeletion) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
-          const sy = baseline + yOffset - effSizePx * 0.3 + lineNudge;
+          const syRaw = baseline + yOffset - effSizePx * 0.3;
+          const sy = syRaw + crispOffset(syRaw, lineW, state.dpr);
           ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x + textW, sy); ctx.stroke();
         }
 
         if (s.doubleStrikethrough) {
           ctx.strokeStyle = lineColor;
           ctx.lineWidth = lineW;
-          const sy1 = baseline + yOffset - effSizePx * 0.35 + lineNudge;
-          const sy2 = baseline + yOffset - effSizePx * 0.22 + lineNudge;
+          const sy1Raw = baseline + yOffset - effSizePx * 0.35;
+          const sy2Raw = baseline + yOffset - effSizePx * 0.22;
+          const sy1 = sy1Raw + crispOffset(sy1Raw, lineW, state.dpr);
+          const sy2 = sy2Raw + crispOffset(sy2Raw, lineW, state.dpr);
           ctx.beginPath(); ctx.moveTo(x, sy1); ctx.lineTo(x + textW, sy1); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(x, sy2); ctx.lineTo(x + textW, sy2); ctx.stroke();
         }
@@ -4522,16 +4527,15 @@ function drawBorderLine(
   const lw = Math.max(0.5, spec.width * scale);
   ctx.lineWidth = lw;
   // Crispness nudge (see crispOffset): a thin (odd device-width) axis-aligned
-  // stroke on an integer coordinate straddles two device rows and blurs; nudging
-  // it by half a device pixel perpendicular to the line centers it on one row.
-  // Cell / paragraph borders are always horizontal (y1===y2) or vertical
-  // (x1===x2) — never diagonal — so the orientation is read directly from the
-  // endpoints. An even device width gets 0 (already crisp on the integer edge).
+  // stroke straddles two device rows and blurs; nudging it perpendicular to the
+  // line snaps it onto the nearest crisp device position. Cell / paragraph
+  // borders are always horizontal (y1===y2) or vertical (x1===x2) — never
+  // diagonal — so the orientation is read directly from the endpoints, and the
+  // snap delta is derived from the line's own coordinate (fractional-safe).
   const horizontal = y1 === y2;
   const vertical = x1 === x2;
-  const nudge = horizontal || vertical ? crispOffset(lw, dpr) : 0;
-  const dpx = vertical ? nudge : 0;
-  const dpy = horizontal ? nudge : 0;
+  const dpx = vertical ? crispOffset(x1, lw, dpr) : 0;
+  const dpy = horizontal ? crispOffset(y1, lw, dpr) : 0;
   ctx.beginPath();
   ctx.moveTo(x1 + dpx, y1 + dpy);
   ctx.lineTo(x2 + dpx, y2 + dpy);

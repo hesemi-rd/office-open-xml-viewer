@@ -592,16 +592,23 @@ function drawTextDecoLine(
   ctx: CanvasRenderingContext2D,
   x1: number, x2: number, y: number,
   color: string, double: boolean,
+  dpr = 1,
 ): void {
   ctx.save();
   ctx.strokeStyle = color;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
+  // crispOffset snaps each horizontal stroke onto the device pixel grid so the
+  // 0.5-px rule renders crisp at any dpr (matches docx/pptx underline/strike).
   if (double) {
-    ctx.moveTo(x1, y - 1); ctx.lineTo(x2, y - 1);
-    ctx.moveTo(x1, y + 1); ctx.lineTo(x2, y + 1);
+    const yUp = y - 1, yDn = y + 1;
+    const yu = yUp + crispOffset(yUp, 0.5, dpr);
+    const yd = yDn + crispOffset(yDn, 0.5, dpr);
+    ctx.moveTo(x1, yu); ctx.lineTo(x2, yu);
+    ctx.moveTo(x1, yd); ctx.lineTo(x2, yd);
   } else {
-    ctx.moveTo(x1, y); ctx.lineTo(x2, y);
+    const ys = y + crispOffset(y, 0.5, dpr);
+    ctx.moveTo(x1, ys); ctx.lineTo(x2, ys);
   }
   ctx.stroke();
   ctx.restore();
@@ -1580,28 +1587,32 @@ function renderQuadrant(
       }
 
       // Grid lines – draw only right + bottom edges once per cell (avoids double-drawing at
-      // shared cell boundaries). Half-device-pixel offset (0.5/dpr) aligns each line to the
-      // device pixel grid so we get a crisp 1-device-pixel result.
+      // shared cell boundaries). crispOffset snaps each line onto the device
+      // pixel grid so we get a crisp 1-device-pixel result at any dpr (a fixed
+      // 0.5/dpr offset blurs at even device widths, e.g. dpr=3).
       // Skipped when the sheet has `<sheetView showGridLines="0">` (View →
       // Gridlines unchecked; ECMA-376 §18.3.1.83).
       if (rc.worksheet.showGridlines !== false) {
-        const hp = 0.5 / dpr;
         ctx.strokeStyle = '#d0d0d0';
         ctx.lineWidth = 0.5;
         ctx.beginPath();
         if (!suppressRightGridCol.has(ci)) {
-          ctx.moveTo(cx + cellW + hp, cy);        // right edge
-          ctx.lineTo(cx + cellW + hp, cy + cellH);
+          const rx = cx + cellW + crispOffset(cx + cellW, 0.5, dpr);  // right edge
+          ctx.moveTo(rx, cy);
+          ctx.lineTo(rx, cy + cellH);
         }
-        ctx.moveTo(cx, cy + cellH + hp);           // bottom edge
-        ctx.lineTo(cx + cellW, cy + cellH + hp);
+        const by = cy + cellH + crispOffset(cy + cellH, 0.5, dpr);    // bottom edge
+        ctx.moveTo(cx, by);
+        ctx.lineTo(cx + cellW, by);
         if (ri === 0) {                            // top edge for first row
-          ctx.moveTo(cx, cy + hp);
-          ctx.lineTo(cx + cellW, cy + hp);
+          const ty = cy + crispOffset(cy, 0.5, dpr);
+          ctx.moveTo(cx, ty);
+          ctx.lineTo(cx + cellW, ty);
         }
         if (ci === 0) {                            // left edge for first column
-          ctx.moveTo(cx + hp, cy);
-          ctx.lineTo(cx + hp, cy + cellH);
+          const lx = cx + crispOffset(cx, 0.5, dpr);
+          ctx.moveTo(lx, cy);
+          ctx.lineTo(lx, cy + cellH);
         }
         ctx.stroke();
       }
@@ -1683,11 +1694,14 @@ function renderQuadrant(
           ctx.strokeStyle = overlay.color;
           ctx.lineWidth = overlay.lineWidth;
           ctx.beginPath();
+          // perimeter inset (-hp) kept literal: snapping could push it outside
+          // the cell's bottom edge; dpr>=3 edge accepted
           ctx.moveTo(cx, cy + cellH - hp);
           ctx.lineTo(cx + cellW, cy + cellH - hp);
           if (overlay.topEdge) {
-            ctx.moveTo(cx, cy + hp);
-            ctx.lineTo(cx + cellW, cy + hp);
+            const ty = cy + crispOffset(cy, overlay.lineWidth, dpr);
+            ctx.moveTo(cx, ty);
+            ctx.lineTo(cx + cellW, ty);
           }
           ctx.stroke();
         }
@@ -2010,13 +2024,14 @@ function renderQuadrant(
             if (seg.font.underline) {
               const stroke = segColor ? hexToRgba(segColor) : '#000000';
               const dbl = seg.font.underlineStyle === 'double' || seg.font.underlineStyle === 'doubleAccounting';
-              drawTextDecoLine(ctx, xx, xx + seg.width, yy + rSizePx + 1, stroke, dbl);
+              drawTextDecoLine(ctx, xx, xx + seg.width, yy + rSizePx + 1, stroke, dbl, dpr);
             }
             if (seg.font.strike) {
               ctx.save();
               ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
               ctx.lineWidth = 0.5;
-              const sy2 = yy + Math.round(rSizePx * 0.5);
+              const sy2base = yy + Math.round(rSizePx * 0.5);
+              const sy2 = sy2base + crispOffset(sy2base, 0.5, dpr);
               ctx.beginPath(); ctx.moveTo(xx, sy2); ctx.lineTo(xx + seg.width, sy2); ctx.stroke();
               ctx.restore();
             }
@@ -2102,7 +2117,7 @@ function renderQuadrant(
                 : cy + cellH - paddingY + 1;
             const uy = uyBase + yShift;
             const stroke = runColor ? hexToRgba(runColor) : '#000000';
-            drawTextDecoLine(ctx, runX, runX + runWidths[i], uy, stroke, rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting');
+            drawTextDecoLine(ctx, runX, runX + runWidths[i], uy, stroke, rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting', dpr);
           }
           if (rf.strike) {
             const syBase = alignV === 'top'
@@ -2110,7 +2125,7 @@ function renderQuadrant(
               : alignV === 'center'
                 ? cy + cellH / 2
                 : cy + cellH - paddingY - Math.round(rSizePx * 0.35);
-            const sy = syBase + yShift;
+            const sy = syBase + yShift + crispOffset(syBase + yShift, 0.5, dpr);
             ctx.save();
             ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
             ctx.lineWidth = 0.5;
@@ -2161,16 +2176,17 @@ function renderQuadrant(
               : cy + cellH - paddingY + 1) + vaYShift;
           const stroke = hyperlinkUrl ? '#0563C1' : (textColor ? hexToRgba(textColor) : '#000000');
           const dbl = fontForDraw.underlineStyle === 'double' || fontForDraw.underlineStyle === 'doubleAccounting';
-          drawTextDecoLine(ctx, ux, ux + tW, uy, stroke, dbl);
+          drawTextDecoLine(ctx, ux, ux + tW, uy, stroke, dbl, dpr);
         }
         if (fontForDraw.strike) {
           const { x: sx, width: tW } = overlayX();
           // Strike line sits roughly at the x-height mid-line (~45% up from baseline)
-          const sy = (alignV === 'top'
+          const syBase = (alignV === 'top'
             ? cy + paddingY + Math.round(sizePx * 0.5)
             : alignV === 'center'
               ? cy + cellH / 2
               : cy + cellH - paddingY - Math.round(sizePx * 0.35)) + vaYShift;
+          const sy = syBase + crispOffset(syBase, 0.5, dpr);
           ctx.save();
           ctx.strokeStyle = textColor ? hexToRgba(textColor) : '#000000';
           ctx.lineWidth = 0.5;
@@ -2488,22 +2504,22 @@ export function renderViewport(
   // band (which now anchors at the right). The horizontal divider is
   // unaffected by the x-mirror but its row-header end moves to the right.
   const rtl = worksheet.rightToLeft === true;
-  // Half-device-pixel offset so the 0.5-px divider lands crisp on the device
-  // grid (same convention as gridlines/headers). At dpr=1 this is +0.5; the
-  // previous hardcoded +0.5 was a *logical* px and blurred at dpr>1.
-  const hp = 0.5 / dpr;
+  // crispOffset snaps the 0.5-px divider onto the device grid (same convention
+  // as gridlines/headers). A fixed 0.5/dpr offset blurred at even device
+  // widths (e.g. dpr=3).
   if (freezeRows > 0) {
     ctx.save();
     ctx.strokeStyle = FREEZE_LINE_COLOR;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
+    const dy = scrollAreaY + crispOffset(scrollAreaY, 0.5, dpr);
     if (rtl) {
       // cell area is [0, canvasW - hw]
-      ctx.moveTo(0, scrollAreaY + hp);
-      ctx.lineTo(canvasW - hw, scrollAreaY + hp);
+      ctx.moveTo(0, dy);
+      ctx.lineTo(canvasW - hw, dy);
     } else {
-      ctx.moveTo(hw, scrollAreaY + hp);
-      ctx.lineTo(canvasW, scrollAreaY + hp);
+      ctx.moveTo(hw, dy);
+      ctx.lineTo(canvasW, dy);
     }
     ctx.stroke();
     ctx.restore();
@@ -2516,7 +2532,8 @@ export function renderViewport(
     // Divider sits between the frozen band and the scroll band. In LTR that
     // is at scrollAreaX = hw + frozenW; mirrored that becomes
     // canvasW - scrollAreaX.
-    const dividerX = rtl ? canvasW - scrollAreaX + hp : scrollAreaX + hp;
+    const dividerBase = rtl ? canvasW - scrollAreaX : scrollAreaX;
+    const dividerX = dividerBase + crispOffset(dividerBase, 0.5, dpr);
     ctx.moveTo(dividerX, hh);
     ctx.lineTo(dividerX, canvasH);
     ctx.stroke();
@@ -2583,8 +2600,12 @@ function renderHeaders(
   ctx.strokeStyle = HEADER_BORDER;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
-  ctx.moveTo(cornerX + hp, 0); ctx.lineTo(cornerX + hp, hh);          // left
-  ctx.moveTo(cornerX, hp); ctx.lineTo(cornerX + hw, hp);              // top
+  const cornerL = cornerX + crispOffset(cornerX, 0.5, dpr);
+  const cornerT = crispOffset(0, 0.5, dpr);
+  ctx.moveTo(cornerL, 0); ctx.lineTo(cornerL, hh);                    // left
+  ctx.moveTo(cornerX, cornerT); ctx.lineTo(cornerX + hw, cornerT);    // top
+  // perimeter inset (-hp) kept literal: snapping could push it outside the
+  // header box; dpr>=3 edge accepted
   ctx.moveTo(cornerX + hw - hp, 0); ctx.lineTo(cornerX + hw - hp, hh);  // right
   ctx.moveTo(cornerX, hh - hp); ctx.lineTo(cornerX + hw, hh - hp);    // bottom
   ctx.stroke();
@@ -2608,9 +2629,11 @@ function renderHeaders(
     ctx.strokeStyle = colBorder(col);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(cx + hp, 0);          ctx.lineTo(cx + hp, hh);        // left = column boundary (aligns with data grid at +hp)
-    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (strip perimeter, inset)
-    ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top (strip perimeter)
+    const colSepX = cx + crispOffset(cx, 0.5, dpr);  // column boundary, aligns with data grid
+    const colTopY = crispOffset(0, 0.5, dpr);
+    ctx.moveTo(colSepX, 0);           ctx.lineTo(colSepX, hh);       // left = column boundary (aligns with data grid)
+    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (strip perimeter, inset -hp kept literal)
+    ctx.moveTo(cx, colTopY);          ctx.lineTo(cx + cw, colTopY);  // top (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
@@ -2634,9 +2657,11 @@ function renderHeaders(
     ctx.strokeStyle = rowBorder(row);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (strip perimeter, inset)
-    ctx.moveTo(rx, cy + hp);       ctx.lineTo(rx + hw, cy + hp);         // top = row boundary (aligns with data grid at +hp)
-    ctx.moveTo(rx + hp, cy);       ctx.lineTo(rx + hp, cy + ch);         // left (strip perimeter)
+    const rowSepY = cy + crispOffset(cy, 0.5, dpr);   // row boundary, aligns with data grid
+    const rowLeftX = rx + crispOffset(rx, 0.5, dpr);
+    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (strip perimeter, inset -hp kept literal)
+    ctx.moveTo(rx, rowSepY);       ctx.lineTo(rx + hw, rowSepY);         // top = row boundary (aligns with data grid)
+    ctx.moveTo(rowLeftX, cy);      ctx.lineTo(rowLeftX, cy + ch);        // left (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textBaseline = 'middle';
@@ -3506,13 +3531,13 @@ function renderBorder(
     ctx.lineWidth = lw;
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
-    // Crispness nudge (see crispOffset): an odd device-width stroke is centered
-    // on a pixel midpoint so it renders crisp instead of bleeding across two
-    // rows; an even device width is already crisp on the integer cell edge and
-    // gets 0. Diagonals can't be pixel-aligned, so no offset.
-    const crispNudge = kind !== 'd' ? crispOffset(lw, dpr) : 0;
-    const dpx = kind === 'v' ? crispNudge : 0;
-    const dpy = kind === 'h' ? crispNudge : 0;
+    // Crispness snap (see crispOffset): snap the stroke to the nearest crisp
+    // device position derived from its own coordinate — the x of a vertical
+    // edge, the y of a horizontal edge. An odd device-width stroke lands on a
+    // pixel midpoint; an even device width snaps to an integer boundary (0 when
+    // already aligned). Diagonals can't be pixel-aligned, so no offset.
+    const dpx = kind === 'v' ? crispOffset(x1, lw, dpr) : 0;
+    const dpy = kind === 'h' ? crispOffset(y1, lw, dpr) : 0;
     ctx.moveTo(x1 + dpx, y1 + dpy);
     ctx.lineTo(x2 + dpx, y2 + dpy);
     ctx.stroke();
