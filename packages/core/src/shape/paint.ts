@@ -17,6 +17,33 @@ export function hexToRgba(hex: string, alpha = 1): string {
 }
 
 /**
+ * Rec.601 perceptual luma (`0.299·R + 0.587·G + 0.114·B`) of a colour, on the
+ * 0–255 scale. Accepts a 6- or 8-char hex; a leading `#` is tolerated and the
+ * alpha byte (if present) is ignored, matching {@link hexToRgba}'s hex
+ * normalisation.
+ */
+export function relativeLuma(hex: string): number {
+  const h = hex.charCodeAt(0) === 35 /* '#' */ ? hex.slice(1) : hex;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/**
+ * Pick black or white text for legibility against a background colour. The
+ * mid-gray threshold (128) on the Rec.601 luma splits light vs dark: a dark
+ * background ⇒ white text, otherwise black. `bgHex=null` (no background ⇒ page
+ * white) ⇒ black text. The black/white pick is implementation-defined — no
+ * normative algorithm exists (ECMA-376 §17.3.2.6 `w:color="auto"` only says the
+ * consumer chooses "an appropriate color based on the background").
+ */
+export function autoContrastColor(bgHex: string | null): '#000000' | '#FFFFFF' {
+  if (!bgHex) return '#000000';
+  return relativeLuma(bgHex) < 128 ? '#FFFFFF' : '#000000';
+}
+
+/**
  * Resolve a Fill to a CanvasRenderingContext2D-compatible paint.
  * Gradients require pixel bounds (x, y, w, h) to construct the CanvasGradient.
  * Returns null for noFill.

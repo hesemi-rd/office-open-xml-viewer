@@ -11,6 +11,7 @@ import {
   hasPreset,
   getCachedSvgImageByPath,
   hexToRgba,
+  autoContrastColor,
   resolveFill,
   applyStroke,
   drawArrowHead,
@@ -325,30 +326,6 @@ function authorColor(author?: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
-}
-
-/**
- * Automatic text color: pick black or white for legible contrast against the
- * effective background. This black/white resolution is implementation-defined —
- * ECMA-376 specifies no normative algorithm; the `auto` value itself is defined
- * by §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39. Uses Rec.601 luma; a
- * mid-gray threshold (128) splits light vs dark. `bg=null` ⇒ page white ⇒
- * black text.
- *
- * TODO: the fully-conformant effective background also folds in
- * paragraph-level shading (`<w:pPr><w:shd>`) and table cell shading. The draw
- * loop currently only has the run shading at this point, which covers the
- * inverse-video case (run `w:shd w:fill="000000"`). Paragraph/cell shading
- * should be threaded into `LayoutTextSeg.background` when those backgrounds
- * are dark enough to flip automatic text to white.
- */
-export function autoContrastColor(bgHex: string | null): string {
-  if (!bgHex) return '#000000';
-  const r = parseInt(bgHex.slice(0, 2), 16);
-  const g = parseInt(bgHex.slice(2, 4), 16);
-  const b = parseInt(bgHex.slice(4, 6), 16);
-  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-  return luma < 128 ? '#FFFFFF' : '#000000';
 }
 
 function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
@@ -3684,10 +3661,41 @@ function renderParagraph(
       distPerGap = dist ? dist.perGap : 0;
     }
 
+    // ECMA-376 §17.3.2.4 (`<w:bdr>`): adjacent runs whose border attribute set
+    // is identical form ONE run-border group and are "rendered within the same
+    // set of borders". Accumulate the group's pixel extent as segments are
+    // drawn left-to-right and stroke a single frame when the group ends (a
+    // segment with a different / absent border, or end of line). Grouping is by
+    // visual adjacency within this line; mixed-direction lines are an edge case
+    // (the spec phrases the group in logical order) left for a follow-up.
+    interface OpenBorderGroup {
+      border: DocxRunBorder;
+      left: number; right: number; top: number; bottom: number;
+    }
+    let borderGroup: OpenBorderGroup | null = null;
+    const flushBorderGroup = () => {
+      if (!borderGroup) return;
+      const g = borderGroup;
+      borderGroup = null;
+      const bw = Math.max(1, g.border.width * scale); // w:sz/8 is in pt
+      const sp = (g.border.space ?? 0) * scale;
+      ctx.strokeStyle = g.border.color ? `#${g.border.color}` : defaultColor;
+      ctx.lineWidth = bw;
+      ctx.strokeRect(
+        g.left - sp,
+        g.top - sp,
+        g.right - g.left + 2 * sp,
+        g.bottom - g.top + 2 * sp,
+      );
+    };
+
     for (let vi = 0; vi < segCount; vi++) {
       const si = visual ? visual.order[vi] : vi;
       const seg = line.segments[si];
       if (visual) ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
+      // A non-text segment (tab / inline image / math) breaks run-border
+      // adjacency (§17.3.2.4 groups adjacent *runs*), so close any open frame.
+      if (!('text' in seg)) flushBorderGroup();
       if ('isTab' in seg) {
         // Tabs render as blank space, optionally filled with a leader (TOC dots etc.).
         if (!dryRun && seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
@@ -3748,22 +3756,34 @@ function renderParagraph(
           ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, spanW, effSizePx * 1.1);
         }
 
-        // ECMA-376 §17.3.2.4 run border (`<w:bdr>`, "box"): stroke a rectangle
-        // around the run, inflated by w:space (pt → px). Drawn after the
-        // background so the box outlines the filled area. The box is drawn per
-        // layout segment; we do not merge consecutive runs that share an
-        // identical bdr into a single frame (Word merges them).
-        if (s.border && s.border.style !== 'none' && s.border.style !== 'nil') {
-          const bw = Math.max(1, s.border.width * scale); // w:sz/8 is in pt
-          const sp = (s.border.space ?? 0) * scale;
-          ctx.strokeStyle = s.border.color ? `#${s.border.color}` : defaultColor;
-          ctx.lineWidth = bw;
-          ctx.strokeRect(
-            x - sp,
-            baseline + yOffset - effSizePx * 0.85 - sp,
-            spanW + 2 * sp,
-            effSizePx * 1.1 + 2 * sp,
-          );
+        // ECMA-376 §17.3.2.4 run border (`<w:bdr>`, "box"): a rectangle around
+        // the run, inflated by w:space (pt → px), drawn after the background so
+        // the box outlines the filled area. Per the spec, adjacent runs sharing
+        // an identical border render within the SAME frame, so instead of
+        // stroking here we extend (or open) the current border group; the frame
+        // is stroked by flushBorderGroup() when the group ends. The box bounds
+        // each segment's glyph box (same rect the shading uses) unioned across
+        // the group, so a mixed-size group still encloses every run.
+        const activeBorder =
+          s.border && s.border.style !== 'none' && s.border.style !== 'nil'
+            ? s.border
+            : null;
+        if (activeBorder) {
+          const segTop = baseline + yOffset - effSizePx * 0.85;
+          const segBottom = segTop + effSizePx * 1.1;
+          if (borderGroup && runBordersEqual(borderGroup.border, activeBorder)) {
+            borderGroup.right = x + spanW;
+            borderGroup.top = Math.min(borderGroup.top, segTop);
+            borderGroup.bottom = Math.max(borderGroup.bottom, segBottom);
+          } else {
+            flushBorderGroup();
+            borderGroup = {
+              border: activeBorder,
+              left: x, right: x + spanW, top: segTop, bottom: segBottom,
+            };
+          }
+        } else {
+          flushBorderGroup();
         }
 
         // Track-changes overlay: paint insertions / deletions in the author's
@@ -3779,9 +3799,16 @@ function renderParagraph(
         } else if (s.color) {
           glyphColor = `#${s.color}`;
         } else if (s.colorAuto) {
-          // Automatic color picks black/white for contrast against the
-          // effective background (run shading > default page white). The
-          // black/white pick is implementation-defined (no normative algorithm).
+          // ECMA-376 §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39: automatic
+          // color picks black/white for contrast against the effective
+          // background. The black/white pick is implementation-defined (no
+          // normative algorithm) — delegated to core's autoContrastColor.
+          // TODO: the fully-conformant effective background also folds in
+          // paragraph-level shading (`<w:pPr><w:shd>`) and table cell shading.
+          // The draw loop currently only has the run shading at this point,
+          // which covers the inverse-video case (run `w:shd w:fill="000000"`).
+          // Paragraph/cell shading should be threaded into
+          // `LayoutTextSeg.background` when dark enough to flip auto text white.
           glyphColor = autoContrastColor(s.background ?? null);
         } else {
           glyphColor = defaultColor;
@@ -3921,6 +3948,9 @@ function renderParagraph(
       // so the final glyph still lands on the margin (Σgaps == slack).
       if (stretch?.trailingGap) x += distPerGap;
     }
+    // End of line closes any open run-border group: a frame never spans lines
+    // (each line wrap starts a fresh box on the next line).
+    flushBorderGroup();
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
     state.y += lineH;
@@ -6614,6 +6644,20 @@ function drawParaBorders(
 }
 
 // ===== Utilities =====
+
+/** ECMA-376 §17.3.2.4 — two `<w:bdr>` borders belong to the same run-border
+ *  group iff their attribute sets are identical. We compare the attributes the
+ *  model carries (style/sz/space/color); themeColor/themeTint/shadow/frame are
+ *  not modelled, so identical themed borders that differ only in unmodelled
+ *  attributes still group (acceptable — the painted frame is identical anyway). */
+function runBordersEqual(a: DocxRunBorder, b: DocxRunBorder): boolean {
+  return (
+    a.style === b.style &&
+    a.width === b.width &&
+    (a.space ?? 0) === (b.space ?? 0) &&
+    (a.color ?? null) === (b.color ?? null)
+  );
+}
 
 function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number {
   let size = s.fontSize * scale;

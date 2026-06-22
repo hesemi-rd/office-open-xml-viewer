@@ -70,7 +70,7 @@ export {
   type CustGeomEndpoint,
   type CustGeomEndpoints,
 } from './shape/custgeom-endpoints';
-export { hexToRgba, resolveFill, applyStroke } from './shape/paint';
+export { hexToRgba, relativeLuma, autoContrastColor, resolveFill, applyStroke } from './shape/paint';
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
 export { drawArrowHead } from './shape/arrow';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all

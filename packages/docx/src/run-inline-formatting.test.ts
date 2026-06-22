@@ -1,24 +1,197 @@
 import { describe, it, expect } from 'vitest';
-import { autoContrastColor } from './renderer.js';
+import { renderDocumentToCanvas } from './renderer.js';
+import type {
+  BodyElement,
+  DocParagraph,
+  DocxTextRun,
+  DocxDocumentModel,
+  DocxRunBorder,
+  SectionProps,
+} from './types';
 
-describe('autoContrastColor — automatic text color (impl-defined; w:color auto §17.3.2.6)', () => {
-  it('picks white text on a black background (inverse video)', () => {
-    // "Some text in inverse video." — run shading fill #000000 + w:color="auto".
-    expect(autoContrastColor('000000')).toBe('#FFFFFF');
+// End-to-end renderer verification of run-level box (`<w:bdr>` §17.3.2.4) and
+// shading (`<w:shd w:fill>` §17.3.2.32) draw geometry, plus the spec's
+// run-border GROUPING rule: adjacent runs whose border attribute set is
+// identical render within a single frame (§17.3.2.4). These are checked through
+// a recording 2D context that captures every fillRect / strokeRect / fillText
+// in draw order with its geometry and style. (autoContrastColor's unit tests
+// moved to packages/core/src/shape/paint.test.ts when the function was lifted
+// into core.)
+
+type DrawEvent =
+  | { kind: 'fillRect'; x: number; y: number; w: number; h: number; style: string }
+  | { kind: 'strokeRect'; x: number; y: number; w: number; h: number; style: string; lineWidth: number }
+  | { kind: 'fillText'; text: string; x: number };
+
+/** Recording 2D context. Glyph advance = charCount × fontPx; font box 0.8/0.2
+ *  em — the same synthetic metrics the numbering-marker test uses. */
+function makeRecordingCanvas(): {
+  canvas: HTMLCanvasElement;
+  events: DrawEvent[];
+} {
+  let font = '16px serif';
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '16');
+  const events: DrawEvent[] = [];
+  const ctx = {
+    get font() { return font; },
+    set font(v: string) { font = v; },
+    letterSpacing: '0px',
+    measureText: (s: string) => {
+      const p = px();
+      return {
+        width: [...s].length * p,
+        fontBoundingBoxAscent: p * 0.8,
+        fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8,
+        actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, beginPath() {}, closePath() {},
+    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, clip() {}, rect() {},
+    scale() {}, translate() {}, setLineDash() {}, drawImage() {}, clearRect() {},
+    arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
+    createLinearGradient() { return { addColorStop() {} }; },
+    fillRect(x: number, y: number, w: number, h: number) {
+      events.push({ kind: 'fillRect', x, y, w, h, style: String(this.fillStyle) });
+    },
+    strokeRect(x: number, y: number, w: number, h: number) {
+      events.push({
+        kind: 'strokeRect', x, y, w, h,
+        style: String(this.strokeStyle), lineWidth: this.lineWidth,
+      });
+    },
+    fillText(text: string, x: number, _y: number) {
+      events.push({ kind: 'fillText', text, x });
+    },
+    strokeText() {},
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = {
+    width: 0, height: 0,
+    style: {} as Record<string, string>,
+    getContext: () => ctx,
+  };
+  return { canvas: canvas as unknown as HTMLCanvasElement, events };
+}
+
+function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocxTextRun {
+  return {
+    text, bold: false, italic: false, underline: false, strikethrough: false,
+    fontSize: 16, color: null, fontFamily: 'Arial', fontFamilyEastAsia: 'Arial',
+    isLink: false, background: null, vertAlign: null, hyperlink: null,
+    ...extra,
+  };
+}
+
+function paraDoc(runs: DocxTextRun[]): DocxDocumentModel {
+  const p: DocParagraph = {
+    alignment: 'left',
+    indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null, tabStops: [],
+    runs: runs.map((r) => ({ type: 'text', ...r }) as DocParagraph['runs'][number]),
+    defaultFontSize: 16, defaultFontFamily: 'Arial',
+    widowControl: false,
+  };
+  return {
+    section: {
+      pageWidth: 400, pageHeight: 400,
+      marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps,
+    body: [{ type: 'paragraph', ...p } as BodyElement],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    // Arial → swiss (sans) so the segment stays single-font; not load-bearing
+    // for the rect geometry these tests assert.
+    fontFamilyClasses: { Arial: 'swiss' },
+  } as unknown as DocxDocumentModel;
+}
+
+async function render(runs: DocxTextRun[]) {
+  const { canvas, events } = makeRecordingCanvas();
+  await renderDocumentToCanvas(paraDoc(runs), canvas, 0, {
+    dpr: 1,
+    width: 400, // scale = 1 (px per pt) so geometry is in pt-equivalent px
+  });
+  return events;
+}
+
+const border = (extra: Partial<DocxRunBorder> = {}): DocxRunBorder => ({
+  style: 'single', color: '0000FF', width: 1, space: 0, ...extra,
+});
+
+describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', () => {
+  it('insets the box outside the glyph box by w:space', async () => {
+    // One run carrying BOTH shading (fillRect at the glyph box) and a border
+    // with w:space — the strokeRect must sit `space*scale` OUTSIDE the shading
+    // rect on every side (box bounds = glyph box + space inset). Select the RUN
+    // shading rect by its colour (the first fillRect is the page-white bg).
+    const sp = 4;
+    const events = await render([
+      textRun('AB', { background: '00FF00', border: border({ space: sp }) }),
+    ]);
+    const fill = events.find((e) => e.kind === 'fillRect' && e.style.toUpperCase() === '#00FF00');
+    const stroke = events.find((e) => e.kind === 'strokeRect');
+    expect(fill).toBeDefined();
+    expect(stroke).toBeDefined();
+    if (fill?.kind !== 'fillRect' || stroke?.kind !== 'strokeRect') throw new Error('unreachable');
+    // scale = 1 ⇒ inset = sp px on each side.
+    expect(stroke.x).toBeCloseTo(fill.x - sp);
+    expect(stroke.y).toBeCloseTo(fill.y - sp);
+    expect(stroke.w).toBeCloseTo(fill.w + 2 * sp);
+    expect(stroke.h).toBeCloseTo(fill.h + 2 * sp);
+    // The box is the run's border colour.
+    expect(stroke.style.toUpperCase()).toBe('#0000FF');
   });
 
-  it('picks black text on a white background', () => {
-    expect(autoContrastColor('ffffff')).toBe('#000000');
+  it('merges two adjacent runs with an identical w:bdr into one frame (§17.3.2.4)', async () => {
+    // Two adjacent runs, identical border, no shading. The spec: identical
+    // adjacent borders form one group rendered within a single set of borders.
+    const events = await render([
+      textRun('AB', { border: border() }),
+      textRun('CD', { border: border() }),
+    ]);
+    const strokes = events.filter((e) => e.kind === 'strokeRect');
+    expect(strokes).toHaveLength(1); // ONE frame, not one per run
+    const stroke = strokes[0];
+    if (stroke.kind !== 'strokeRect') throw new Error('unreachable');
+    // The frame spans both runs: width ≈ |AB| + |CD| = 2 chars × 16px × 2 runs.
+    // space = 0 ⇒ no inset. Each char advance is 16px (synthetic metrics).
+    expect(stroke.w).toBeCloseTo(4 * 16);
+    // First glyph of the first run starts at the frame's left edge.
+    const firstText = events.find((e) => e.kind === 'fillText');
+    if (firstText?.kind !== 'fillText') throw new Error('unreachable');
+    expect(stroke.x).toBeCloseTo(firstText.x);
   });
 
-  it('defaults to black text when there is no background (page white)', () => {
-    expect(autoContrastColor(null)).toBe('#000000');
+  it('does NOT merge two adjacent runs whose borders differ (separate frames)', async () => {
+    const events = await render([
+      textRun('AB', { border: border({ color: '0000FF' }) }),
+      textRun('CD', { border: border({ color: 'FF0000' }) }),
+    ]);
+    const strokes = events.filter((e) => e.kind === 'strokeRect');
+    expect(strokes).toHaveLength(2); // different colour ⇒ two groups
   });
 
-  it('uses Rec.601 luma — mid green is light enough for black text', () => {
-    // green #00FF00 has luma 0.587*255 ≈ 150 (> 128) ⇒ black text.
-    expect(autoContrastColor('00ff00')).toBe('#000000');
-    // dark blue #0000FF has luma 0.114*255 ≈ 29 (< 128) ⇒ white text.
-    expect(autoContrastColor('0000ff')).toBe('#FFFFFF');
+  it('paints the shading fillRect behind the text (before the glyphs)', async () => {
+    const events = await render([
+      textRun('AB', { background: 'C0C0C0' }),
+    ]);
+    // Select the RUN shading rect by colour (the page-white bg fillRect runs
+    // first and would otherwise win findIndex).
+    const fillIdx = events.findIndex((e) => e.kind === 'fillRect' && e.style.toUpperCase() === '#C0C0C0');
+    const textIdx = events.findIndex((e) => e.kind === 'fillText' && e.text.includes('A'));
+    expect(fillIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThanOrEqual(0);
+    // Shading is drawn FIRST so the glyphs sit on top of the fill.
+    expect(fillIdx).toBeLessThan(textIdx);
+    const fill = events[fillIdx];
+    if (fill.kind !== 'fillRect') throw new Error('unreachable');
+    // …in the run's shading colour, at the glyph box.
+    expect(fill.style.toUpperCase()).toBe('#C0C0C0');
+    expect(fill.w).toBeCloseTo(2 * 16); // |AB| = 2 chars × 16px
   });
 });
