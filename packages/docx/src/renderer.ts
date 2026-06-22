@@ -2020,8 +2020,12 @@ function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt:
     // suppressSpaceBefore flag is for page-break continuations, not intra-cell
     // collapse), so sumCellContentHeight folds in contextualSuppressed
     // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap to match the
-    // paint pass's renderCellContent.
-    return cm.top + cm.bottom + sumCellContentHeight(cell.content, (ce) => {
+    // paint pass's renderCellContent. Drop the §17.4.7 trailing structural
+    // empty paragraph after a nested table for the SAME reason the paint-side
+    // measurer (measureCellContentHeightPx) does — otherwise the paginator
+    // would reserve more height than the paint pass uses and break the page
+    // early (the two are contracted to agree, per this function's docstring).
+    return cm.top + cm.bottom + sumCellContentHeight(trimTrailingStructuralMarker(cell.content), (ce) => {
       if (ce.type === 'paragraph') {
         return estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
       }
@@ -2041,16 +2045,15 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
  *   - layout === 'fixed': use the tblGrid widths verbatim (the historical
  *     behavior), then scale down proportionally if the grid total overflows the
  *     available content width.
- *   - layout absent or 'autofit' (the spec default): each grid column's width is
- *     the maximum *preferred* width (cell `widthPt`, i.e. `<w:tcW type="dxa">`,
- *     or `widthPct` resolved against `contentWPt`) over the cells anchored in
- *     it. A gridSpan cell contributes its preference distributed across the
- *     columns it spans, in proportion to those columns' tblGrid widths, but
- *     only raises a column above what single-column cells already require.
- *     Columns with no preference anywhere keep their tblGrid width. If the
- *     resulting table width exceeds `contentWPt`, all columns are scaled
- *     proportionally to fit — this is what Word does when the preferred-width
- *     sum overflows the text column.
+ *   - layout absent or 'autofit' (the spec default): the tblGrid widths
+ *     (§17.4.48) ARE the column widths, scaled to fit `contentWPt`, with each
+ *     column's content min-width (§17.4.52 auto-fit grows a column too narrow
+ *     for its longest token) the only thing that can raise it. Per-cell `tcW`
+ *     (§17.4.71) is NOT applied here: Word bakes the resolved auto-fit widths
+ *     back into the saved `<w:gridCol>`, so for a round-tripped file the grid is
+ *     already the tcW-resolved layout (see the in-body comment for the full
+ *     rationale + the sample-3 evidence + the tblW=pct limitation). Only a
+ *     degenerate all-zero grid falls back to a tcW-preference distribution.
  *
  * The returned widths sum to at most `contentWPt`. Both `renderTable` (which
  * then multiplies by the device scale) and `computeTableRowHeights` (which
@@ -2110,7 +2113,10 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
   return maxTokenPt + cm.left + cm.right;
 }
 
-function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
+/** Resolve a table's per-grid-column widths (pt) to fit `contentWPt`. Exported
+ *  for unit tests (column-widths.test) — see {@link calculateRowHeight} for the
+ *  same test-export pattern. */
+export function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
   const n = table.colWidths.length;
   if (n === 0) return [];
 
@@ -2205,10 +2211,43 @@ function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderS
     return g;
   }
 
-  // Autofit (default): preferred widths drive the column sizes.
+  // Autofit (default). Use the `<w:tblGrid>` (§17.4.48 / gridCol §17.4.16) as
+  // the column widths, scaled to fit, with content min-widths the only grower.
+  //
+  // DELIBERATE DEVIATION from the literal autofit algorithm, to match Word's
+  // actual output: §17.4.16 (gridCol Note) and §17.4.52 (tblLayout) make a
+  // cell's preferred `<w:tcW>` (§17.4.71) an INPUT that can OVERRIDE the grid's
+  // initial widths. But Word does not ship the pre-autofit state — it BAKES the
+  // resolved autofit widths back into the saved `<w:gridCol>` values. So for a
+  // round-tripped Word file (every real-world docx) the grid already IS the
+  // tcW-resolved layout; re-applying `tcW` on top double-counts and diverges
+  // from the ground-truth PDF. sample-3's résumé grid is [2137, 222, 2430, 279,
+  // 2427, 279] twips (a deliberately narrow first content column), yet each
+  // row's single-column cells carry `tcW≈30%`; the old "tcW overrides grid"
+  // path equalized the columns to ~116 pt apiece, shifting every later column
+  // right (the 2nd heading moved ~11 pt past Word's x) and re-wrapping the
+  // description paragraphs past their divider rule. Trusting the grid reproduces
+  // Word exactly.
+  //
+  // LIMITATION: a `tblW=pct` (§17.4.63) table whose SAVED grid no longer matches
+  // the available width (e.g. authored under different margins, or by a tool
+  // that did not bake the grid) is NOT re-scaled up to the pct target here — the
+  // grid is taken as-is (only scaled DOWN by `fitToContent` on overflow). In
+  // practice the renderer lays a table out at the same content width Word saved
+  // it under, so the grid sums to that width; the gap only appears for stale /
+  // non-Word grids. Tracked for a future full tblW pass.
+  const gridSum = grid.reduce((s, w) => s + w, 0);
+  if (gridSum > 0) {
+    const desired = grid.map((g, c) => Math.max(g, minW[c]));
+    return fitToContent(desired);
+  }
+
+  // Degenerate grid (no `<w:gridCol>` widths, e.g. a hand-built model or a
+  // malformed table): fall back to preferred-width autofit, where `tcW` and
+  // content drive the column sizes since there is no grid to anchor them.
   // `pref[c]` accumulates the strongest single-column preference seen so far.
   const pref: number[] = new Array(n).fill(0);
-  // `gridFallback[c]` is true while no cell has expressed a preference for c.
+  // `hasPref[c]` is true once any cell has expressed a preference for c.
   const hasPref: boolean[] = new Array(n).fill(false);
 
   // Translate a cell's `<w:tcW>` into a preferred width in pt, or null when the
@@ -2844,6 +2883,12 @@ function renderFrameParagraph(
   registerFrameFloat(box, fp, state);
 }
 
+/** Default tab interval (pt) when no explicit stop matches — Word's default is
+ *  720 twips = 36 pt (ECMA-376 §17.15.1.25 `defaultTabStop`; this document sets
+ *  no override). Shared by the line layout (`layoutLines`) and the numbered-list
+ *  marker's trailing-tab advance (`renderParagraph`). */
+const DEFAULT_TAB_PT = 36;
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -2908,6 +2953,11 @@ function renderParagraph(
   //   tab (default) → body advances to the indentLeft tab stop (offset 0),
   //   space/nothing → body abuts the marker (marker end, + one space for space).
   let numBodyOffset = 0;
+  // §17.9.8 `<w:lvlJc>` — horizontal shift (px) applied to the LTR marker draw so
+  // it left/right/centre-aligns at the hanging-indent reference (firstLineX).
+  // 0 = left (default); −markerW = right (period-aligned numerals: right edge at
+  // firstLineX); −markerW/2 = centre. Set in the numbering block below.
+  let markerJcShiftPx = 0;
   if (para.numbering) {
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
@@ -2923,21 +2973,51 @@ function renderParagraph(
         picBullet = { bmp, w: size.w * scale, h: size.h * scale };
       }
     }
+    // Marker glyph width (px) with its RESOLVED font (§17.3.2.26 + §17.9.6); the
+    // picture bullet's own width when present. Needed for both the suff≠tab abut
+    // and the suff=tab overrun check below, so measure once up front.
+    let markerW: number;
+    if (picBullet) {
+      markerW = picBullet.w;
+    } else {
+      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
+      markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+    }
+    // §17.9.8 lvlJc: shift the marker so its left/right/centre aligns at
+    // firstLineX (the hanging-indent reference). The marker's RIGHT edge measured
+    // from paraX (the indentLeft tab) is then `indFirst + shift + markerW`.
+    const lvlJc = para.numbering.jc || 'left';
+    markerJcShiftPx = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
+    const markerEndFromIndent = indFirst + markerJcShiftPx + markerW;
     if (suff !== 'tab') {
-      // Body-offset width: the picture bullet's own width if present, else the
-      // measured glyph width (§17.3.2.26 + §17.9.6) with the marker's RESOLVED
-      // font — the width must match the draw below so the body offset is exact
-      // for a serif (Times) vs sans (Gothic) marker alike.
-      let markerW: number;
-      if (picBullet) {
-        markerW = picBullet.w;
-      } else {
-        ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
-        markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
-      }
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
-      // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
-      numBodyOffset = indFirst + markerW + spaceW;
+      // body abuts the marker's right edge (+ one space for suff="space").
+      numBodyOffset = markerEndFromIndent + spaceW;
+    } else {
+      // suff=tab: the marker is followed by a tab that advances the body to the
+      // numbering's indentLeft tab stop (numBodyOffset 0 — the body sits at
+      // paraX). But ECMA-376 §17.9.6 + §17.3.1.37: a tab never moves BACKWARD, so
+      // when the marker overruns that stop — a wide multi-level number like
+      // "1.1.1." whose glyphs exceed the hanging indent (the marker `indFirst`
+      // budget), e.g. in a substitute font — the tab advances to the next stop
+      // PAST the marker end instead, and the body follows it. Without this the
+      // body stays at indentLeft and the marker overprints it (sample-11's
+      // "1.1.1. Three" collided; Word advances "Three" to the next default tab).
+      // markerEndFromIndent (jc-adjusted right edge from paraX) ≤ 0 ⇒ it fits
+      // (right-aligned markers always do), leave the body at indentLeft.
+      if (markerEndFromIndent > 0) {
+        // Next tab stop strictly past the marker end, in paraX-relative px:
+        // honor the paragraph's explicit stops (measured from the text margin,
+        // hence − indLeft to make them paraX-relative), else the default grid.
+        const defTabPx = DEFAULT_TAB_PT * scale;
+        const markerEndFromMargin = indLeft + markerEndFromIndent;
+        let nextFromMargin = Math.ceil((markerEndFromMargin + 0.01) / defTabPx) * defTabPx;
+        for (const ts of para.tabStops ?? []) {
+          const p = ts.pos * scale;
+          if (p > markerEndFromMargin && p < nextFromMargin) nextFromMargin = p;
+        }
+        numBodyOffset = nextFromMargin - indLeft;
+      }
     }
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
@@ -3013,6 +3093,32 @@ function renderParagraph(
   // the body as usual. RTL lists keep their existing start-edge handling.
   const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
   const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale));
+
+  // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
+  // `decimal`) only positions content at a tab stop when an explicit tab
+  // character advances to it; absent a tab, content starts at the indent. Word,
+  // however, aligns a bare number to a leading DECIMAL tab with NO tab character
+  // — the built-in "Decimal Aligned" paragraph style on table number cells does
+  // exactly this. sample-11's College table proves it: 110 / 103 / +7 etc. each
+  // right-align on the decimal tab at 18 pt (Word PDF bbox: per-column right
+  // edges coincide), where we previously left-aligned them. This is a deliberate
+  // Word-runtime deviation (user-approved); it is gated to NUMERIC content whose
+  // first tab stop is `decimal` and which carries no explicit tab, so ordinary
+  // paragraphs are untouched. We right-edge align the number at the stop — the
+  // same approximation the explicit-tab decimal path uses (frac=1; it does not
+  // split on the '.'), exact for the integers in scope. Applied at DRAW time as
+  // a pure horizontal offset, so the measured row height (and the paginate/paint
+  // height contract) is unaffected.
+  const decimalAutoTabPx: number | null = (() => {
+    if (segments.some((s) => 'isTab' in s)) return null; // explicit tab wins
+    const stops = para.tabStops ?? [];
+    if (stops.length === 0) return null;
+    const firstStop = stops.reduce((a, b) => (b.pos < a.pos ? b : a));
+    if (firstStop.alignment !== 'decimal') return null;
+    const txt = para.runs.map((r) => (r as { text?: string }).text ?? '').join('').trim();
+    if (txt === '' || !/^[+\-(]?[\d., ]+\)?%?$/.test(txt)) return null; // numbers only
+    return firstStop.pos * scale - indLeft; // px, relative to paraX (mirrors layoutLines' stopXof)
+  })();
 
   // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
   // inline content on any line, so layoutLines returns zero lines. Per ECMA-376
@@ -3173,6 +3279,15 @@ function renderParagraph(
       alignOffset = lineSlack;
     }
     // 'left' and stretched 'justify' keep alignOffset 0.
+    // Decimal-tab auto-alignment (see decimalAutoTabPx above): override the
+    // paragraph alignment so the number's right edge (its decimal point, for an
+    // integer) lands on the decimal tab. `paraX + decimalAutoTabPx` is the stop
+    // in device space; subtracting the line width and the current `x` yields the
+    // left-shift, clamped ≥ 0 so a number wider than the stop simply overflows
+    // right (never pulled left of its natural start).
+    if (decimalAutoTabPx != null && lineWidth > 0) {
+      alignOffset = Math.max(0, paraX + decimalAutoTabPx - lineWidth - x);
+    }
     x += alignOffset;
 
     if (firstLine && hasMarker && !dryRun) {
@@ -3186,7 +3301,9 @@ function renderParagraph(
         // rests on the line like a glyph.
         const { bmp, w, h } = picBullet;
         const top = baseline - h;
-        const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst;
+        // LTR: left edge at firstLineX, shifted by lvlJc (§17.9.8); RTL keeps its
+        // own mirrored anchor.
+        const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst + markerJcShiftPx;
         ctx.drawImage(bmp, left, top, w, h);
       } else {
         const numFontSize = getDefaultFontSize(para) * scale;
@@ -3214,9 +3331,11 @@ function renderParagraph(
         } else {
           // Marker sits in the hanging margin at lineLeft + indFirst (= firstLineX
           // when the line isn't shifted by a float; lineLeft already includes any
-          // float xOffset, so the marker tracks the body that hangs off it). The
-          // body was advanced past the marker above (numBodyOffset).
-          ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst, baseline);
+          // float xOffset, so the marker tracks the body that hangs off it),
+          // shifted by lvlJc (§17.9.8) so a "right" level period-aligns its right
+          // edge at firstLineX. The body was advanced past the marker above
+          // (numBodyOffset).
+          ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst + markerJcShiftPx, baseline);
         }
       }
     }
@@ -4235,9 +4354,6 @@ function layoutLines(
   };
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
-
-  // Default tab interval when no matching explicit stop exists (Word's default is 720 twips = 36pt)
-  const DEFAULT_TAB_PT = 36;
 
   let lineHasRuby = false;
   const flush = (forceHeight?: number) => {
@@ -5670,12 +5786,22 @@ function measureCellContentHeightPx(
 ): number {
   const cm = effCellMargins(cell, table);
   const contentW = cellW - (cm.left + cm.right) * scale;
+  // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When the cell's
+  // visible content is a nested table, Word emits a trailing empty <w:p/> purely
+  // as that syntactic anchor; it carries no ink and does NOT grow the row (Word's
+  // outer cell hugs the inner table — sample-11's "table inside a table" outer
+  // row measures the inner table height, not inner + the structural mark's line
+  // box + its inherited space-before). Drop it from the row-height measurement,
+  // exactly as the vAlign block height already does (trimTrailingStructuralMarker).
+  // The mark itself is still painted by renderCellContent; being empty it adds no
+  // visible content, so excluding it from sizing cannot hide anything.
+  const measured = trimTrailingStructuralMarker(cell.content);
   // measureCellElementHeight always includes paragraph spaceBefore+spaceAfter;
   // sumCellContentHeight folds in contextualSuppressed (§17.3.1.33) and the
   // prevSpaceAfter/spaceBefore overlap collapse to match the paint pass's
   // renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
-    cell.content,
+    measured,
     (ce) => measureCellElementHeight(state, ce, contentW, scale),
     scale,
   );
@@ -5895,7 +6021,30 @@ function measureParaHeight(
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), paragraphIsEastAsian(para));
   }
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku, gridCharDeltaPx(grid, scale));
+  // ECMA-376 §17.3.1.12 (`<w:ind>`): the paragraph's own left/right indent
+  // narrows the wrap width and `firstLine` insets the first line — exactly as
+  // the paint pass (renderParagraph) and the paginator (estimateParagraphHeight)
+  // lay it out. The row-height measurer MUST honor them too: without the indent,
+  // a cell paragraph that carries a first-line/left indent (e.g. sample-11's
+  // table cells, firstLine=21.6 pt) is measured for fewer wrapped lines than it
+  // paints, so the row is sized too short and the overflow ("Town" /
+  // "University") bleeds into the next row. `maxWidth` is the cell's inner width
+  // (cell margins already removed by the caller); the paragraph indents come off
+  // it here. `tabOriginPx = indentLeft` mirrors layoutLines' tab origin in the
+  // paint/paginate paths.
+  //
+  // NOTE: like `estimateParagraphHeight` (the paginator), this passes the raw
+  // `indentFirst` and does NOT model a numbering marker's `numBodyOffset` (the
+  // hanging-indent first-line geometry `renderParagraph` applies for a numbered
+  // paragraph). The two non-paint measurers therefore stay consistent with each
+  // other, but a NUMBERED paragraph inside a cell that wraps can still measure
+  // slightly differently from the paint pass. No such cell exists in the covered
+  // samples; revisit together with estimateParagraphHeight if list-in-cell
+  // fidelity is needed.
+  const indLeftPx = para.indentLeft * scale;
+  const indRightPx = para.indentRight * scale;
+  const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
+  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale));
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 

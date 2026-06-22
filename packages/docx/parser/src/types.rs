@@ -494,6 +494,10 @@ pub struct NumberingInfo {
     /// ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
     /// Determines where body text starts after the marker on the first line.
     pub suff: String,
+    /// ECMA-376 §17.9.8 `<w:lvlJc>` — marker justification: "left" (default) |
+    /// "right" (period-aligned numerals — marker right edge at the hanging-indent
+    /// position) | "center". The renderer offsets the marker draw accordingly.
+    pub jc: String,
     /// ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
     /// level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
     /// renderer draws Latin marker chars (e.g. a decimal "1") with this family,

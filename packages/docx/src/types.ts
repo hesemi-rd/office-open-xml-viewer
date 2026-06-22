@@ -381,6 +381,12 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.28 `<w:suff>` — "tab" (default) | "space" | "nothing".
    *  Where body text starts after the marker on the first line. */
   suff: string;
+  /** ECMA-376 §17.9.8 `<w:lvlJc>` — marker justification: "left" (default) |
+   *  "right" (period-aligned numerals: marker RIGHT edge at the hanging-indent
+   *  position) | "center". The renderer offsets the marker draw accordingly.
+   *  Always emitted by the parser; optional here so hand-built fixtures may omit
+   *  it (the renderer treats absent as "left"). */
+  jc?: string;
   /** ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
    *  level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
    *  renderer draws Latin marker chars (e.g. a decimal "1") with this family, so
@@ -832,9 +838,12 @@ export interface DocTable {
   /** table horizontal alignment on the page: 'left' | 'center' | 'right'. */
   jc: string;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
-   *  (undefined) ⇒ spec default 'autofit': columns are sized by the per-column
-   *  max preferred width (cell `widthPt`), tblGrid only as fallback. 'fixed'
-   *  uses tblGrid widths verbatim (scaled to fit). */
+   *  (undefined) ⇒ spec default 'autofit'. Both paths size columns from the
+   *  tblGrid (§17.4.48) scaled to fit: 'fixed' uses the grid verbatim; 'autofit'
+   *  additionally lets content min-width grow a column. Per-cell `widthPt`/
+   *  `widthPct` (`<w:tcW>`) is NOT re-applied — Word bakes the resolved widths
+   *  into the saved grid (see resolveColumnWidths). Only a degenerate all-zero
+   *  grid falls back to tcW-preference sizing. */
   layout?: string;
   /** ECMA-376 §17.4.63 `<w:tblW>` preferred table width (type="dxa"), pt. */
   widthPt?: number;
@@ -892,12 +901,15 @@ export interface DocTableCell {
   borders: CellBorders;
   background: string | null;
   vAlign: 'top' | 'center' | 'bottom';
-  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. Drives
-   *  autofit column sizing: each grid column's width is the max `widthPt` over
-   *  the cells anchored in it. */
+  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. A
+   *  PREFERRED width only: autofit column sizing is driven by the tblGrid
+   *  (§17.4.48), not by re-applying this (Word bakes the resolved widths into
+   *  the saved grid — see resolveColumnWidths). Consulted only for the
+   *  degenerate all-zero-grid fallback. */
   widthPt: number | null;
   /** `<w:tcW>` type="pct": 50ths of a percent of available content width.
-   *  Resolved against the available width at render time. */
+   *  Resolved against the available width at render time. Preferred width only
+   *  (see `widthPt`). */
   widthPct?: number;
   /** Per-cell margins (pt) from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42). Each
    *  edge overrides the table-level `cellMargin*` default when set; null/absent
