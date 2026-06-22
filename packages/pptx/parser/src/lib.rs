@@ -1888,7 +1888,18 @@ fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> 
 
 /// Resolve a relative path against a base directory inside the ZIP.
 fn resolve_path(base_dir: &str, target: &str) -> String {
-    let mut parts: Vec<&str> = base_dir.split('/').collect();
+    // A relationship Target beginning with "/" is a package-root-absolute part
+    // name (e.g. `/ppt/charts/chart5.xml`), not a reference relative to the
+    // source part's directory. Resolve it from the package root and ignore
+    // `base_dir`; otherwise the base is prepended, yielding a path that doesn't
+    // exist in the archive (OPC part names are root-anchored when they start
+    // with "/" — ECMA-376 Part 2 §9.3). xlsx::resolve_zip_path and docx's
+    // media path resolution already handle this; pptx was the outlier.
+    let mut parts: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base_dir.split('/').collect()
+    };
     for seg in target.split('/') {
         match seg {
             ".." => {
@@ -5310,14 +5321,32 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let is_pt_container =
         |name: &str| matches!(name, "strCache" | "numCache" | "strLit" | "numLit");
 
-    let categories: Vec<String> = ser_nodes[0]
+    // Category labels live under `<c:cat>` in one of two shapes:
+    //   * single-level: a strCache/numCache/strLit/numLit holding `<c:pt>`
+    //     children directly, or
+    //   * multi-level: a `<c:multiLvlStrCache>` (ECMA-376 §21.2.2.95) whose
+    //     `<c:pt>` are nested one level deeper inside `<c:lvl>` elements.
+    // For a multi-level axis we use the innermost level (the first `<c:lvl>`),
+    // which carries one label per data point — matching how Word / PowerPoint
+    // label the category axis. Missing this path left `categories` empty, which
+    // collapsed `pt_count` to 1 and truncated every series to a single value
+    // (issue #556: area chart rendered as a blank zero-width sliver).
+    let cat_node = ser_nodes[0]
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "cat")
+        .find(|n| n.is_element() && n.tag_name().name() == "cat");
+    let categories: Vec<String> = cat_node
         .and_then(|cat| {
             cat.descendants()
                 .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
+                .map(&collect_pt_strings)
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    // Multi-level: collect from the first `<c:lvl>` of the cache.
+                    cat.descendants()
+                        .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+                        .map(&collect_pt_strings)
+                })
         })
-        .map(&collect_pt_strings)
         .unwrap_or_default();
 
     let pt_count = categories.len().max(1);
@@ -8831,7 +8860,13 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             Some(t) => t.clone(),
             None => continue,
         };
-        let slide_path = format!("ppt/{rel_target}");
+        // Resolve via `resolve_path` (not `format!("ppt/{rel_target}")`) so a
+        // package-root-absolute slide Target — e.g. `/ppt/slides/slide1.xml`
+        // (leading slash, OPC / ECMA-376 Part 2 §9.3) — resolves correctly
+        // instead of producing `ppt//ppt/slides/slide1.xml`. Relative targets
+        // (the common `slides/slide1.xml`) are unaffected. Same fix class as
+        // the chart-rel resolution above.
+        let slide_path = resolve_path("ppt", &rel_target);
         let slide_file = rel_target
             .split('/')
             .next_back()
@@ -9070,6 +9105,84 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[test]
+    fn resolve_path_handles_absolute_leading_slash_target() {
+        // An OPC relationship Target may be a package-root-absolute part name
+        // (leading "/"), e.g. `/ppt/charts/chart5.xml` as emitted by some
+        // generators. It must resolve from the package root and ignore the
+        // source part's directory (ECMA-376 Part 2 / OPC §9.3). Regression for
+        // issue #556 where a chart with an absolute Target silently failed to
+        // load (read_zip_str on `ppt/slides/ppt/charts/chart5.xml`) and the
+        // slide rendered the chart as a blank area.
+        assert_eq!(
+            resolve_path("ppt/slides", "/ppt/charts/chart5.xml"),
+            "ppt/charts/chart5.xml"
+        );
+        // Relative references are unaffected by the absolute-target handling.
+        assert_eq!(
+            resolve_path("ppt/slides", "../charts/chart1.xml"),
+            "ppt/charts/chart1.xml"
+        );
+        assert_eq!(
+            resolve_path("ppt/slideLayouts", "../slideMasters/slideMaster1.xml"),
+            "ppt/slideMasters/slideMaster1.xml"
+        );
+    }
+
+    #[test]
+    fn resolve_path_resolves_slide_targets_from_package_root() {
+        // Slide parts are resolved from the presentation rels with base "ppt".
+        // The common Target is relative (`slides/slide1.xml`); a generator may
+        // also emit a package-root-absolute Target (`/ppt/slides/slide1.xml`),
+        // which must NOT become `ppt//ppt/slides/slide1.xml`. Guards the
+        // `resolve_path("ppt", rel_target)` slide-loading path.
+        assert_eq!(
+            resolve_path("ppt", "slides/slide1.xml"),
+            "ppt/slides/slide1.xml"
+        );
+        assert_eq!(
+            resolve_path("ppt", "/ppt/slides/slide1.xml"),
+            "ppt/slides/slide1.xml"
+        );
+    }
+
+    #[test]
+    fn legacy_chart_parses_multi_level_category_axis() {
+        // A `<c:cat>` may carry its labels in a `<c:multiLvlStrCache>` (multi-
+        // level category axis, ECMA-376 §21.2.2.95) whose `<c:pt>` live under
+        // `<c:lvl>` children rather than directly under the cache. Before the
+        // fix, category extraction only recognized strCache/numCache/strLit/
+        // numLit, so categories came back empty; that collapsed the shared
+        // point count to 1 (`categories.len().max(1)`) and truncated EVERY
+        // series to a single value. For an area chart a single point is a zero-
+        // width sliver — i.e. a blank plot (issue #556).
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <c:chart><c:plotArea><c:areaChart>
+  <c:ser>
+   <c:cat><c:multiLvlStrRef><c:f>S!$A$1:$A$3</c:f><c:multiLvlStrCache>
+     <c:ptCount val="3"/>
+     <c:lvl><c:pt idx="0"><c:v>Jan</c:v></c:pt><c:pt idx="1"><c:v>Feb</c:v></c:pt><c:pt idx="2"><c:v>Mar</c:v></c:pt></c:lvl>
+   </c:multiLvlStrCache></c:multiLvlStrRef></c:cat>
+   <c:val><c:numRef><c:f>S!$B$1:$B$3</c:f><c:numCache>
+     <c:ptCount val="3"/>
+     <c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt>
+   </c:numCache></c:numRef></c:val>
+  </c:ser>
+ </c:areaChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+        let chart = parse_legacy_chart(xml, &HashMap::new())
+            .expect("area chart with multi-level cat should parse");
+        assert_eq!(chart.chart_type, "area");
+        assert_eq!(chart.categories, vec!["Jan", "Feb", "Mar"]);
+        assert_eq!(chart.series.len(), 1);
+        assert_eq!(
+            chart.series[0].values,
+            vec![Some(10.0), Some(20.0), Some(30.0)],
+            "all three points must survive — a multi-level cat must not truncate the series"
+        );
     }
 
     #[test]
