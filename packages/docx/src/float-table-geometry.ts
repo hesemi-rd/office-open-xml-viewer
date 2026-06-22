@@ -65,7 +65,10 @@ export function computeFloatTableBox(
   const hx = tp.horzSpecified
     ? frameXContainer(tp.horzAnchor, state)
     : frameXContainer('text', state);
-  const vy = frameYContainer(tp.vertAnchor, paraTop, state);
+  // Vertical band of the vertAnchor (the "anchor object", §22.9.2.20). The
+  // "text" band end uses the table height; tblpYSpec is gated out for "text" so
+  // only band.start (= paraTop) is consumed there.
+  const vBand = frameYContainer(tp.vertAnchor, paraTop, tableH, state);
 
   // Horizontal: tblpXSpec (ST_XAlign) supersedes the absolute tblpX offset
   // (§17.4.57). Mirrors computeFrameBox's xAlign handling.
@@ -83,9 +86,10 @@ export function computeFloatTableBox(
   // Mirrors computeFrameBox's yAlign handling (ignored when vAnchor="text").
   let y: number;
   if (tp.tblpYSpec && tp.vertAnchor !== 'text') {
-    y = resolveAlignedPosV(tp.tblpYSpec, vy, tableH, state);
+    y = resolveAlignedPosV(tp.tblpYSpec, vBand, tableH);
   } else {
-    y = vy + tp.tblpY * sc;
+    // §17.4.57 tblpY: absolute signed offset from the vertAnchor band start.
+    y = vBand.start + tp.tblpY * sc;
   }
 
   return { x, y, w: tableW, h: tableH };

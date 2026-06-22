@@ -165,7 +165,38 @@ describe('floating table geometry (§17.4.57) — vertical placement', () => {
   it('vertAnchor="margin" + tblpYSpec="center" centers vertically, superseding tblpY', () => {
     const st = makeState();
     const b = box(tblp({ vertAnchor: 'margin', tblpY: 999, tblpYSpec: 'center' }), st, 300, 150, 60);
-    expect(b.y).toBe(72 + (800 - 60) / 2 - 72); // vy + (pageH−h)/2 − marginTop
+    // margin band [72, 728]: start + (end − start − h)/2 = 72 + (728 − 72 − 60)/2
+    expect(b.y).toBe(72 + (728 - 72 - 60) / 2);
+  });
+
+  // §22.9.2.20: ST_YAlign positions relative to the ANCHOR OBJECT (the vertAnchor
+  // band), NOT the physical page. For vertAnchor="page" the band is [0, pageH], so
+  // center/bottom must NOT carry a margin offset (the pre-band code subtracted
+  // marginTop even for page-anchored tables, §17.18.100 page = page edges).
+  it('vertAnchor="page" + tblpYSpec="center" centers over the FULL page (no margin offset)', () => {
+    const st = makeState(); // page band [0, 800]
+    const b = box(tblp({ vertAnchor: 'page', tblpY: 999, tblpYSpec: 'center' }), st, 300, 150, 60);
+    expect(b.y).toBe((800 - 60) / 2); // 370 — NOT (800−60)/2 − marginTop
+  });
+
+  it('vertAnchor="page" + tblpYSpec="bottom" sits flush to the physical page bottom', () => {
+    const st = makeState();
+    const b = box(tblp({ vertAnchor: 'page', tblpY: 999, tblpYSpec: 'bottom' }), st, 300, 150, 60);
+    expect(b.y).toBe(800 - 60); // pageH − tableH (no marginBottom inset)
+  });
+
+  it('vertAnchor="page" + tblpYSpec="outside" sits flush to the physical page bottom', () => {
+    const st = makeState();
+    const b = box(tblp({ vertAnchor: 'page', tblpY: 999, tblpYSpec: 'outside' }), st, 300, 150, 60);
+    expect(b.y).toBe(800 - 60);
+  });
+
+  it('vertAnchor="page" + tblpYSpec="top"/"inside" sits at the page top (band start)', () => {
+    const st = makeState();
+    for (const spec of ['top', 'inside']) {
+      const b = box(tblp({ vertAnchor: 'page', tblpY: 999, tblpYSpec: spec }), st, 300, 150, 60);
+      expect(b.y, spec).toBe(0); // page band start = 0
+    }
   });
 });
 

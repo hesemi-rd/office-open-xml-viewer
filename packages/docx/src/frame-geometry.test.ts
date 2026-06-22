@@ -198,6 +198,75 @@ describe('frame geometry (§17.3.1.11) — hAnchor / vAnchor containers', () => 
   });
 });
 
+describe('frame geometry (§17.3.1.11 / §22.9.2.20) — yAlign is vAnchor-band relative', () => {
+  // ST_YAlign positions the frame relative to the ANCHOR OBJECT (the vAnchor
+  // band), NOT the physical page (§22.9.2.20: "relative position … relative to
+  // the vertical anchor"). The band per §17.18.100:
+  //   page   → [0, pageH]                       (page edges)
+  //   margin → [marginTop, pageH−marginBottom]  (text margins)
+  //   text   → [paraTop, paraTop+contentH]      (anchor paragraph text extents)
+  // yAlign is ignored for vAnchor="text" (relative positioning not allowed).
+
+  it('vAnchor="margin" + yAlign="center" centers in the MARGIN band, not the page', () => {
+    const st = makeState(); // margin band [72, 728], height 656
+    const fp = frame({ vAnchor: 'margin', yAlign: 'center', hRule: 'exact', h: 60 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    // start + (end − start − h)/2 = 72 + (728 − 72 − 60)/2 = 72 + 298 = 370
+    expect(b.y).toBe(72 + (728 - 72 - 60) / 2);
+  });
+
+  it('vAnchor="margin" + yAlign="bottom" sits flush to the bottom margin', () => {
+    const st = makeState();
+    const fp = frame({ vAnchor: 'margin', yAlign: 'bottom', hRule: 'exact', h: 60 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(728 - 60); // (pageH − marginBottom) − h
+  });
+
+  it('vAnchor="margin" + yAlign="outside" sits flush to the bottom margin', () => {
+    const st = makeState();
+    const fp = frame({ vAnchor: 'margin', yAlign: 'outside', hRule: 'exact', h: 60 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(728 - 60);
+  });
+
+  it('vAnchor="margin" + yAlign="top"/"inside" sits at the margin top (band start)', () => {
+    const st = makeState();
+    for (const ya of ['top', 'inside'] as const) {
+      const fp = frame({ vAnchor: 'margin', yAlign: ya, hRule: 'exact', h: 60 });
+      const b = box(fp, st, 300, 40, 100, 12);
+      expect(b.y, ya).toBe(72); // band start = marginTop
+    }
+  });
+
+  it('vAnchor="page" + yAlign="center" centers over the FULL page (no margin offset)', () => {
+    const st = makeState(); // page band [0, 800]
+    const fp = frame({ vAnchor: 'page', yAlign: 'center', hRule: 'exact', h: 60 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe((800 - 60) / 2); // 370 — NOT (800−60)/2 − marginTop
+  });
+
+  it('vAnchor="page" + yAlign="bottom" sits flush to the physical page bottom', () => {
+    const st = makeState();
+    const fp = frame({ vAnchor: 'page', yAlign: 'bottom', hRule: 'exact', h: 60 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(800 - 60); // pageH − h
+  });
+
+  it('explicit y is measured from the vAnchor band start (margin top)', () => {
+    const st = makeState();
+    const fp = frame({ vAnchor: 'margin', y: 5 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(72 + 5); // band start (marginTop) + y
+  });
+
+  it('yAlign is ignored for vAnchor="text" (relative positioning not allowed)', () => {
+    const st = makeState();
+    const fp = frame({ vAnchor: 'text', yAlign: 'center', y: 7 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(300 + 7); // paraTop + y; yAlign ignored
+  });
+});
+
 describe('frame geometry (§17.3.1.11) — generic frame (dropCap="none") sizing', () => {
   it('hRule="exact" forces the frame height to h regardless of content', () => {
     const st = makeState();
