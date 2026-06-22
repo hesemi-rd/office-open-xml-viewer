@@ -196,12 +196,12 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     expect(st.floats).toHaveLength(0);
   });
 
-  it('overlap="never" (allowOverlap=false) re-seats the new float off a blocker', () => {
-    // Pre-seat a blocking float [0,200]×[300,360] from another paragraph.
+  it('overlap="never" (allowOverlap=false) re-seats the new float off another table', () => {
+    // Pre-seat a blocking FLOATING TABLE [0,200]×[300,360] from another paragraph.
     const st = makeState({
       floatParaSeq: 1,
       floats: [{
-        mode: 'square', imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
+        kind: 'table', mode: 'square', imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
         xLeft: 0, xRight: 200, yTop: 300, yBottom: 360, side: 'bothSides',
         distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0, drawn: true,
       }],
@@ -213,6 +213,50 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     const f = st.floats[st.floats.length - 1];
     // resolveFloatOverlap re-seats it to the right of the blocker's right edge.
     expect(f.xLeft).toBeGreaterThanOrEqual(200);
+  });
+
+  // §17.4.56 scope: a floating table with <w:tblOverlap w:val="never"/> must
+  // only avoid OTHER FLOATING TABLES. DrawingML anchors (§20.4.2.3) and text
+  // frames keep their own placement — a never-overlap table does NOT re-seat off
+  // them. These pin that scoping via FloatRect.kind.
+  describe('overlap="never" scopes to other floating tables only (§17.4.56)', () => {
+    // A blocker occupying [0,200]×[300,360], anchored in another paragraph,
+    // parameterized by kind so we can assert table-vs-non-table behavior.
+    const blocker = (kind: FloatRect['kind']): FloatRect => ({
+      kind, mode: 'square', imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
+      xLeft: 0, xRight: 200, yTop: 300, yBottom: 360, side: 'bothSides',
+      distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0, drawn: true,
+    });
+    // A never-overlap floating table seated at page-left x=0, overlapping [0,200].
+    const seatNeverTable = (blockers: FloatRect[]): FloatRect => {
+      const st = makeState({ floatParaSeq: 1, floats: blockers });
+      const tp = tblp({ horzAnchor: 'page', tblpX: 0, vertAnchor: 'page', tblpY: 320 });
+      const b = box(tp, st, 0, 100, 20); // box at (0,320), overlaps [0,200]
+      registerFloat(b, tp, st, 'right', /* allowOverlap (never) */ false);
+      return st.floats[st.floats.length - 1];
+    };
+
+    it('does NOT re-seat off a DrawingML shape/image float (stays at x=0)', () => {
+      const f = seatNeverTable([blocker('shape')]);
+      expect(f.xLeft).toBe(0); // overlap permitted: §17.4.56 ignores non-tables
+    });
+
+    it('does NOT re-seat off a text-frame float (stays at x=0)', () => {
+      const f = seatNeverTable([blocker('frame')]);
+      expect(f.xLeft).toBe(0);
+    });
+
+    it('DOES re-seat off another floating-table float', () => {
+      const f = seatNeverTable([blocker('table')]);
+      expect(f.xLeft).toBeGreaterThanOrEqual(200); // avoids the other table
+    });
+
+    it('avoids only the table blocker when a shape and a table both overlap', () => {
+      // shape at [0,200], table at [0,200] (same band, different paragraphs):
+      // the table re-seats past the TABLE's right edge, ignoring the shape.
+      const f = seatNeverTable([blocker('shape'), blocker('table')]);
+      expect(f.xLeft).toBeGreaterThanOrEqual(200);
+    });
   });
 });
 

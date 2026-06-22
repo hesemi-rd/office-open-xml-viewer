@@ -12,6 +12,13 @@
 
 /** Anchor image float that affects text wrap on the current page. */
 export interface FloatRect {
+  /** What kind of object reserved this float. Used to scope overlap avoidance:
+   *  ECMA-376 §17.4.56 (tblOverlap="never") only forbids a floating table from
+   *  overlapping OTHER FLOATING TABLES — not DrawingML anchors (§20.4.2.3) or
+   *  text frames. resolveFloatOverlap reads this to limit a never-overlap
+   *  table's blockers to kind==='table'. 'shape' = DrawingML wp:anchor shape,
+   *  'frame' = <w:framePr> text frame; both also cover anchor images. */
+  kind: 'table' | 'shape' | 'frame';
   mode: 'square' | 'topAndBottom';
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
@@ -224,13 +231,23 @@ export function resolveLineFloatWindow(
  * Multi-float collision resolution for a NEW wrap float, against floats already
  * registered on the page.
  *
- * What ECMA-376 actually mandates here is narrow. Part 1 §20.4.2.3
- * (wp:anchor/@allowOverlap) says an object that "cannot overlap other DrawingML
- * object … shall be repositioned when displayed to prevent this overlap" — i.e.
- * allowOverlap="false" REQUIRES repositioning. allowOverlap="true" (the default
- * when omitted, §20.4.2.3) only *permits* overlap; the spec is silent on whether
- * a renderer may avoid it. So:
- *   - allowOverlap === false → spec-mandated avoidance of ALL other floats.
+ * What ECMA-376 actually mandates here is narrow, and the mandate differs by
+ * what kind of object forbids overlap:
+ *   - A DrawingML anchor with @allowOverlap="false" (Part 1 §20.4.2.3): an
+ *     object that "cannot overlap other DrawingML object … shall be
+ *     repositioned when displayed to prevent this overlap" — i.e. it must avoid
+ *     OTHER DRAWINGML OBJECTS. (We never pass allowOverlap=false for shapes/
+ *     images today; the default is "true", which only *permits* overlap.)
+ *   - A floating table with <w:tblOverlap w:val="never"/> (§17.4.56): the table
+ *     "cannot overlap with OTHER FLOATING TABLES in the document." It does NOT
+ *     mandate avoiding DrawingML anchors (§20.4.2.3) or text frames — those keep
+ *     their own §20.4.2.3 behavior. So a never-overlap table must only avoid
+ *     blockers with kind==='table'.
+ * allowOverlap="true"/omitted (the default, §20.4.2.3 / §17.4.56) only *permits*
+ * overlap; the spec is silent on whether a renderer may avoid it. So:
+ *   - allowOverlap === false → spec-mandated avoidance. Scoped by `kind`: a
+ *     table avoids only other tables (§17.4.56); any other kind would avoid all
+ *     (§20.4.2.3) — not currently exercised, see above.
  *   - allowOverlap === true  → implementation-defined avoidance of floats
  *     anchored in OTHER paragraphs only.
  *
@@ -261,16 +278,23 @@ export function resolveFloatOverlap(
   x: number, y: number, w: number, h: number,
   dl: number, dr: number, dt: number, db: number,
   paraId: number, allowOverlap: boolean,
+  kind: FloatRect['kind'],
   pageRight: number, floats: FloatRect[],
 ): { x: number; y: number } {
   for (let guard = 0; guard < 16; guard++) {
     const exL = x - dl, exR = x + w + dr, exT = y - dt, exB = y + h + db;
-    // Blocking floats whose exclusion rects intersect ours. When the moving
-    // float forbids overlap (§20.4.2.3 allowOverlap="false") EVERY intersecting
-    // float blocks; otherwise only floats from OTHER paragraphs block (Word
-    // de-facto cross-paragraph avoidance).
+    // Which already-registered floats block the moving float:
+    //   - allowOverlap === false (spec-mandated avoidance): scope by the moving
+    //     float's kind. A floating table with tblOverlap="never" (§17.4.56) may
+    //     only overlap-avoid OTHER FLOATING TABLES, so it blocks on kind==='table'
+    //     alone; DrawingML anchors / frames keep their own §20.4.2.3 placement.
+    //     Any other kind would avoid all intersecting floats (§20.4.2.3), but no
+    //     caller passes allowOverlap=false for non-tables today.
+    //   - allowOverlap === true (Word de-facto cross-paragraph avoidance): only
+    //     floats anchored in OTHER paragraphs block, regardless of kind.
     const blockers = floats.filter(
-      (f) => (allowOverlap ? f.paraId !== paraId : true) &&
+      (f) =>
+        (allowOverlap ? f.paraId !== paraId : kind !== 'table' || f.kind === 'table') &&
         rectsOverlap(exL, exR, exT, exB, f.xLeft, f.xRight, f.yTop, f.yBottom),
     );
     if (blockers.length === 0) return { x, y };

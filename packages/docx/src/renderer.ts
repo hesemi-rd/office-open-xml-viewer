@@ -2955,6 +2955,9 @@ interface PushFloatOpts {
   dr: number;
   dt: number;
   db: number;
+  /** What reserved this float — scopes overlap avoidance (§17.4.56). See
+   *  {@link FloatRect.kind}. */
+  kind: FloatRect['kind'];
   mode: 'square' | 'topAndBottom';
   side: string;
   imageKey: string;
@@ -2964,8 +2967,9 @@ interface PushFloatOpts {
    *  false (frame floats) the box is used as-is. */
   avoidOverlap: boolean;
   /** allowOverlap arg passed to resolveFloatOverlap when avoidOverlap is true
-   *  (true ⇒ only avoid OTHER paragraphs' floats; false ⇒ avoid ALL). Ignored
-   *  when avoidOverlap is false. */
+   *  (true ⇒ only avoid OTHER paragraphs' floats; false ⇒ spec-mandated
+   *  avoidance, scoped by `kind`: a table avoids only other tables, §17.4.56).
+   *  Ignored when avoidOverlap is false. */
   allowOverlap?: boolean;
 }
 
@@ -2984,12 +2988,13 @@ function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
   if (o.avoidOverlap) {
     const resolved = resolveFloatOverlap(
       px, py, o.w, o.h, o.dl, o.dr, o.dt, o.db, o.paraId, o.allowOverlap ?? true,
-      state.pageWidth * state.scale, state.floats,
+      o.kind, state.pageWidth * state.scale, state.floats,
     );
     px = resolved.x;
     py = resolved.y;
   }
   const rect: FloatRect = {
+    kind: o.kind,
     mode: o.mode,
     imageKey: o.imageKey,
     imageX: px,
@@ -3049,6 +3054,7 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderStat
     dr: box.exRight - (box.x + box.w),
     dt: box.y - box.exTop,
     db: box.exBottom - (box.y + box.h),
+    kind: 'frame',
     mode,
     // A drop cap sits at the column's left edge, so text wraps only to its
     // RIGHT. A generic frame may sit anywhere, so text wraps on both sides
@@ -3155,14 +3161,18 @@ export function registerTableFloat(
 
   // §17.4.56: resolve overlap against already-registered page floats before
   // fixing the exclusion rect. allowOverlap=false (tblOverlap="never") forces
-  // avoidance of ALL floats; allowOverlap=true only avoids OTHER paragraphs'
-  // floats (the implementation-defined scope documented on resolveFloatOverlap).
+  // avoidance of OTHER FLOATING TABLES only — §17.4.56 scopes "never" to other
+  // floating tables, NOT DrawingML anchors (§20.4.2.3) or text frames. The
+  // kind==='table' tag below makes resolveFloatOverlap limit blockers to tables.
+  // allowOverlap=true only avoids OTHER paragraphs' floats (the implementation-
+  // defined scope documented on resolveFloatOverlap).
   pushFloatRect(state, {
     x: box.x,
     y: box.y,
     w: box.w,
     h: box.h,
     dl, dr, dt, db,
+    kind: 'table',
     mode: 'square',
     side,
     imageKey: '', // non-image float: the table is painted by renderFloatTable.
@@ -5880,6 +5890,7 @@ function registerImageFloat(
     x: box.x,
     y: box.y,
     w, h, dl, dr, dt, db,
+    kind: 'shape', // DrawingML anchor (§20.4.2.3); not a floating table.
     mode,
     side: img.wrapSide ?? 'bothSides',
     imageKey: key,
@@ -5933,6 +5944,7 @@ function registerShapeFloat(
   // here — but running it keeps multi-float behavior identical to images.
   pushFloatRect(state, {
     x, y, w, h, dl, dr, dt, db,
+    kind: 'shape', // DrawingML wp:anchor shape (§20.4.2.3); not a floating table.
     mode,
     side: shape.wrapSide ?? 'bothSides',
     imageKey: '',
