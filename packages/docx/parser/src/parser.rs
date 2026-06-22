@@ -1396,32 +1396,35 @@ fn parse_paragraph_cond(
             // theme refs. A bare `<w:rFonts w:hint="eastAsia"/>` carries no
             // typeface, so the marker simply inherits the paragraph's ascii (e.g.
             // Times → the auto-number renders serif) and eastAsia (e.g. MS Gothic).
-            let (format, ind_left, tab, suff, marker_ascii, marker_ea, pic_bullet) = num_map
-                .get_level(num_id, num_level)
-                .map(|l| {
-                    let mut marker_fmt = base_run.clone();
-                    apply_direct_run(&mut marker_fmt, &l.rpr);
-                    (
-                        l.format.clone(),
-                        l.indent_left,
-                        l.tab,
-                        l.suff.clone(),
-                        theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
-                        theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
-                        l.pic_bullet.clone(),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        "decimal".to_string(),
-                        36.0,
-                        18.0,
-                        "tab".to_string(),
-                        theme.resolve_font_ref(base_run.font_family_ascii.clone()),
-                        theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
-                        None,
-                    )
-                });
+            let (format, ind_left, tab, suff, lvl_jc, marker_ascii, marker_ea, pic_bullet) =
+                num_map
+                    .get_level(num_id, num_level)
+                    .map(|l| {
+                        let mut marker_fmt = base_run.clone();
+                        apply_direct_run(&mut marker_fmt, &l.rpr);
+                        (
+                            l.format.clone(),
+                            l.indent_left,
+                            l.tab,
+                            l.suff.clone(),
+                            l.lvl_jc.clone(),
+                            theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
+                            theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                            l.pic_bullet.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            "decimal".to_string(),
+                            36.0,
+                            18.0,
+                            "tab".to_string(),
+                            "left".to_string(),
+                            theme.resolve_font_ref(base_run.font_family_ascii.clone()),
+                            theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                            None,
+                        )
+                    });
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
             let (
@@ -1450,6 +1453,7 @@ fn parse_paragraph_cond(
                 indent_left: ind_left,
                 tab,
                 suff,
+                jc: lvl_jc,
                 font_family: marker_ascii,
                 font_family_east_asia: marker_ea,
                 pic_bullet_image_path,

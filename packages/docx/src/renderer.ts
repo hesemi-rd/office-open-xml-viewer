@@ -2953,6 +2953,11 @@ function renderParagraph(
   //   tab (default) → body advances to the indentLeft tab stop (offset 0),
   //   space/nothing → body abuts the marker (marker end, + one space for space).
   let numBodyOffset = 0;
+  // §17.9.8 `<w:lvlJc>` — horizontal shift (px) applied to the LTR marker draw so
+  // it left/right/centre-aligns at the hanging-indent reference (firstLineX).
+  // 0 = left (default); −markerW = right (period-aligned numerals: right edge at
+  // firstLineX); −markerW/2 = centre. Set in the numbering block below.
+  let markerJcShiftPx = 0;
   if (para.numbering) {
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
@@ -2978,10 +2983,16 @@ function renderParagraph(
       ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
       markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
     }
+    // §17.9.8 lvlJc: shift the marker so its left/right/centre aligns at
+    // firstLineX (the hanging-indent reference). The marker's RIGHT edge measured
+    // from paraX (the indentLeft tab) is then `indFirst + shift + markerW`.
+    const lvlJc = para.numbering.jc || 'left';
+    markerJcShiftPx = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
+    const markerEndFromIndent = indFirst + markerJcShiftPx + markerW;
     if (suff !== 'tab') {
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
-      // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
-      numBodyOffset = indFirst + markerW + spaceW;
+      // body abuts the marker's right edge (+ one space for suff="space").
+      numBodyOffset = markerEndFromIndent + spaceW;
     } else {
       // suff=tab: the marker is followed by a tab that advances the body to the
       // numbering's indentLeft tab stop (numBodyOffset 0 — the body sits at
@@ -2992,9 +3003,8 @@ function renderParagraph(
       // PAST the marker end instead, and the body follows it. Without this the
       // body stays at indentLeft and the marker overprints it (sample-11's
       // "1.1.1. Three" collided; Word advances "Three" to the next default tab).
-      // markerEndFromIndent is the marker's right edge measured from paraX (the
-      // indentLeft tab); ≤ 0 ⇒ it fits, leave the body at indentLeft.
-      const markerEndFromIndent = indFirst + markerW;
+      // markerEndFromIndent (jc-adjusted right edge from paraX) ≤ 0 ⇒ it fits
+      // (right-aligned markers always do), leave the body at indentLeft.
       if (markerEndFromIndent > 0) {
         // Next tab stop strictly past the marker end, in paraX-relative px:
         // honor the paragraph's explicit stops (measured from the text margin,
@@ -3291,7 +3301,9 @@ function renderParagraph(
         // rests on the line like a glyph.
         const { bmp, w, h } = picBullet;
         const top = baseline - h;
-        const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst;
+        // LTR: left edge at firstLineX, shifted by lvlJc (§17.9.8); RTL keeps its
+        // own mirrored anchor.
+        const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst + markerJcShiftPx;
         ctx.drawImage(bmp, left, top, w, h);
       } else {
         const numFontSize = getDefaultFontSize(para) * scale;
@@ -3319,9 +3331,11 @@ function renderParagraph(
         } else {
           // Marker sits in the hanging margin at lineLeft + indFirst (= firstLineX
           // when the line isn't shifted by a float; lineLeft already includes any
-          // float xOffset, so the marker tracks the body that hangs off it). The
-          // body was advanced past the marker above (numBodyOffset).
-          ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst, baseline);
+          // float xOffset, so the marker tracks the body that hangs off it),
+          // shifted by lvlJc (§17.9.8) so a "right" level period-aligns its right
+          // edge at firstLineX. The body was advanced past the marker above
+          // (numBodyOffset).
+          ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst + markerJcShiftPx, baseline);
         }
       }
     }

@@ -47,6 +47,11 @@ pub struct LevelDef {
     /// (default), "space", or "nothing". Controls where the body text starts
     /// relative to the marker on the first line.
     pub suff: String,
+    /// ECMA-376 §17.9.8 `<w:lvlJc>` — marker justification at its reference
+    /// position: "left" (default, marker LEFT edge at the hanging-indent
+    /// position), "right" (marker RIGHT edge there — period-aligned roman/decimal
+    /// numerals), or "center". `<w:start>` is unrelated.
+    pub lvl_jc: String,
     pub start: u32,
     /// ECMA-376 §17.9.6 `<w:lvl><w:rPr>` — the level's run (character) properties
     /// for the number/bullet glyph itself. Merged OVER the paragraph's resolved
@@ -94,6 +99,7 @@ impl Default for LevelDef {
             indent_right: None,
             tab: 36.0,
             suff: "tab".to_string(),
+            lvl_jc: "left".to_string(),
             start: 1,
             rpr: RunFmt::default(),
             pic_bullet: None,
@@ -220,6 +226,10 @@ impl NumberingMap {
                 let suff = child_w(lvl_node, "suff")
                     .and_then(|n| attr_w(n, "val"))
                     .unwrap_or_else(|| "tab".to_string());
+                // §17.9.8 `<w:lvlJc>` — marker justification; absent ⇒ "left".
+                let lvl_jc = child_w(lvl_node, "lvlJc")
+                    .and_then(|n| attr_w(n, "val"))
+                    .unwrap_or_else(|| "left".to_string());
                 // §17.9.6 — the level's run properties for the marker glyph.
                 // Parsed with the SAME `parse_run_fmt` body runs use; theme refs
                 // stay as "@theme:<ref>" markers and are resolved at use-site once
@@ -240,6 +250,7 @@ impl NumberingMap {
                     indent_right,
                     tab,
                     suff,
+                    lvl_jc,
                     start,
                     rpr,
                     pic_bullet,
