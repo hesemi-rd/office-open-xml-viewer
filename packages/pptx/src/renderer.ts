@@ -64,6 +64,7 @@ import {
   decodeRasterOrMetafile,
   highlightBox,
   symbolFontToUnicode,
+  isSymbolFontFamily,
   pptxDashArray,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
@@ -907,7 +908,13 @@ export function layoutParagraph(
       // whether the symbol font is installed; fall back to the real symbol font
       // for unmapped glyphs.
       const SYMBOL_PUA_RE = /[-]/;
-      if (SYMBOL_PUA_RE.test(token) && (familySym || /wingding|webding|symbol/i.test(family))) {
+      // Gate on core's isSymbolFontFamily (exact "symbol" / any "wingdings";
+      // shared with docx). A familySym (a:sym, §21.1.2.3.10) explicitly names
+      // the run's symbol typeface, so its presence also opens the path.
+      // (Webdings / "SymbolMT" no longer match the family branch — both already
+      // passthrough unchanged since core gates "symbol" exactly and has no
+      // Webdings table, so this is behaviour-preserving.)
+      if (SYMBOL_PUA_RE.test(token) && (familySym != null || isSymbolFontFamily(family))) {
         const symName = familySym ?? family;
         for (const ch of token) {
           let drawCh = ch;

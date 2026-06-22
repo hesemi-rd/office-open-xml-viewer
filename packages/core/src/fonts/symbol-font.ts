@@ -186,13 +186,12 @@ export function symbolFontToUnicode(
  * encodings that {@link symbolFontToUnicode} knows how to normalize — currently
  * exactly "Symbol" and any "Wingdings" family (§17.3.2.26 / §21.1.2.3.10).
  *
- * Intended as the shared "is this a symbol font?" gate so callers don't
- * hand-roll divergent regexes. docx uses it; pptx still has its own broader
- * inline gate (`/wingding|webding|symbol/i`) and is a follow-up to migrate. It
- * deliberately does NOT match "Webdings" (core has no Webdings table yet — a
- * Webdings PUA point would pass the gate only to return unchanged) nor a Latin
- * face like "SymbolMT" (the "symbol" check is exact, not a substring), so a
- * caller wanting either must add it explicitly and accept passthrough.
+ * The shared "is this a symbol font?" gate, used by both docx and pptx so they
+ * don't hand-roll divergent regexes. It deliberately does NOT match "Webdings"
+ * (core has no Webdings table yet — a Webdings PUA point would pass the gate
+ * only to return unchanged) nor a Latin face like "SymbolMT" (the "symbol"
+ * check is exact, not a substring), so a caller wanting either must add it
+ * explicitly and accept passthrough.
  */
 export function isSymbolFontFamily(
   fontFamily: string | null | undefined,
