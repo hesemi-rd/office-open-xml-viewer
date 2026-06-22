@@ -11,12 +11,14 @@ import type { DocTable, DocTableRow, DocTableCell } from './types.js';
 //             output PDFs, however, treat @val as a LOWER BOUND (same as
 //             atLeast) when hRule is omitted and @val is present — e.g.
 //             sample-11.docx's December 2007 calendar emits trHeight w:val=576
-//             (no hRule, spec default = auto) and Word renders each row at
-//             ~43.2 pt = 576 / 20, matching @val as a floor (pdftotext -bbox
-//             measurement). XML inspection confirms no other height signal
-//             exists. We deliberately deviate from the §17.4.80 literal to
-//             match Word's behavior; @val absent still falls back to the
-//             implementation-defined minimum.
+//             (no hRule, spec default = auto) on its date rows and Word renders
+//             each such row at exactly 576 / 20 = 28.8 pt, matching @val as a
+//             floor (pdftotext -bbox; the larger per-week cadence is that
+//             28.8 pt date row plus an unmarked auto spacer row, not one @val
+//             row). XML inspection confirms no other height signal exists. We
+//             deliberately deviate from the §17.4.80 literal to match Word's
+//             behavior; @val absent still falls back to the implementation-
+//             defined minimum.
 //
 // These tests pin the floor logic with empty cells: with no content, the cell's
 // content height is just its (here zero) margins, so the row height is governed
@@ -79,8 +81,8 @@ describe('calculateRowHeight — ST_HeightRule (§17.4.80 / §17.18.37)', () => 
   // Word-compatible deviation from the §17.4.80 literal: with hRule omitted
   // (spec default = auto) and @val present, Word honors @val as a lower bound.
   // Ground truth is the Word output PDF — sample-11.docx's December calendar
-  // measures 43.2 pt per row = trHeight @val 576 / 20. See the resolveSingleRowHeight
-  // docstring (table-geometry.ts) for the full rationale.
+  // date rows measure exactly trHeight @val 576 / 20 = 28.8 pt. See the
+  // resolveSingleRowHeight docstring (table-geometry.ts) for the full rationale.
   it('auto with @val — @val is honored as a lower bound (Word-compatible)', () => {
     const h = calculateRowHeight(rowWith(600, 'auto'), t, COLS, SCALE, EMPTY_STATE);
     expect(h).toBe(600 * SCALE);

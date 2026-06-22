@@ -74,13 +74,16 @@ export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) =
  *                 honored as a LOWER BOUND (atLeast-equivalent) when `hRule` is
  *                 omitted and `@val` is present: e.g. sample-11.docx's December
  *                 2007 calendar emits `<w:trHeight w:val="576"/>` (hRule
- *                 omitted; spec default = auto) and Word lays each row out at
- *                 ~43.2 pt = 576 / 20, matching `@val` as a floor (pdftotext
- *                 -bbox measures 343.536−300.336 = 43.2 pt). XML inspection
- *                 confirms no other height information exists, so `@val` is the
- *                 only signal that produces Word's geometry. We deliberately
- *                 deviate from the §17.4.80 literal to follow Word's behavior.
- *                 With `@val` absent, auto falls back to `MIN_ROW_HEIGHT_PT`.
+ *                 omitted; spec default = auto) on its date rows, and Word lays
+ *                 each such row out at exactly 576 / 20 = 28.8 pt — `@val` as a
+ *                 floor (pdftotext -bbox confirms the date glyph rows sit on a
+ *                 28.8 pt pitch; the larger ~43.2 pt visual cadence per WEEK is
+ *                 that 28.8 pt date row PLUS an unmarked auto spacer row below
+ *                 it, not a single `@val` row). XML inspection confirms no other
+ *                 height information exists, so `@val` is the only signal that
+ *                 produces Word's geometry. We deliberately deviate from the
+ *                 §17.4.80 literal to follow Word's behavior. With `@val`
+ *                 absent, auto falls back to `MIN_ROW_HEIGHT_PT`.
  *   - gridSpan: a cell's width is the sum of the `cell.colSpan` columns it
  *     anchors (clamped to the remaining columns).
  *   - ECMA-376 §17.4.85 (vMerge): a `vMerge=restart` cell's content occupies the
@@ -118,9 +121,9 @@ export function resolveSingleRowHeight(
   // §17.4.80 literal says `auto` ignores `@val`. Word's output PDFs disagree:
   // when `hRule` is omitted and `@val` is present, Word treats `@val` as a
   // lower bound (atLeast-equivalent). Deliberate deviation to match Word —
-  // ground truth is the Word output PDF (sample-11.docx calendar measured at
-  // 43.2 pt = `@val` 576 / 20). With `@val` absent, auto still collapses to
-  // the implementation-defined minimum.
+  // ground truth is the Word output PDF (sample-11.docx calendar date rows
+  // measured at exactly `@val` 576 / 20 = 28.8 pt). With `@val` absent, auto
+  // still collapses to the implementation-defined minimum.
   let rowH =
     row.rowHeight != null && (row.rowHeightRule === 'atLeast' || row.rowHeightRule === 'auto')
       ? row.rowHeight * scale
