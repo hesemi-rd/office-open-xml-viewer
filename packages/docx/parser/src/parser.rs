@@ -1960,9 +1960,11 @@ fn parse_run_inner(
     let rpr_node = child_w(node, "rPr");
     let mut fmt = base_run.clone();
 
-    // Apply rStyle. ECMA-376 §17.7.5: character styles overlay on top of the
-    // paragraph's run formatting; they must not re-introduce docDefaults or
-    // the default paragraph style — those are already baked into base_run.
+    // Apply rStyle (§17.3.2.29). ECMA-376 §17.7.2 (Style Hierarchy) applies
+    // character styles ON TOP of the paragraph's run formatting (Document
+    // defaults < Table < Numbering < Paragraph < Character < Direct); they must
+    // not re-introduce docDefaults or the default paragraph style — those are
+    // already baked into base_run.
     if let Some(rpr) = rpr_node {
         if let Some(rs) = child_w(rpr, "rStyle").and_then(|n| attr_w(n, "val")) {
             let style_run = style_map.resolve_run_style(&rs);
@@ -1994,7 +1996,7 @@ fn parse_run_inner(
     // ECMA-376 §17.16.22 (<w:hyperlink>) defines link *structure* only — the
     // r:id / w:anchor targets and click behaviour. It carries no visual styling.
     // A link's blue/underline appearance comes entirely from the run's character
-    // style (typically `rStyle="Hyperlink"`, §17.7.5) plus any direct rPr, which
+    // style (typically `rStyle="Hyperlink"`, §17.3.2.29) plus any direct rPr, which
     // are already resolved into `fmt` above. So both external (URL) and internal
     // (anchor: TOC entries, cross-references) links honour the resolved `fmt`
     // identically; we do not strip styling from internal links nor synthesize
@@ -4208,6 +4210,11 @@ fn parse_table(
     // noHBand/noVBand SUPPRESS banding ⇒ banding active = NOT no*Band.
     let h_band = !look_flag("noHBand", 0x0200);
     let v_band = !look_flag("noVBand", 0x0400);
+    // ECMA-376 §17.7.6.7 / §17.7.6.5: rows/columns per band (default 1). With a
+    // band size of N, band1/band2 alternate every N rows/columns rather than
+    // every single one (e.g. size 3 ⇒ band1Horz on rows 1-3, band2Horz on 4-6).
+    let row_band = tstyle.row_band_size.unwrap_or(1);
+    let col_band = tstyle.col_band_size.unwrap_or(1);
 
     // Table borders: inline tblBorders win; otherwise the table style's borders
     // (so styles like "Table Grid" show their gridlines).
@@ -4310,7 +4317,9 @@ fn parse_table(
             } else {
                 r as i64
             };
-            out.push(if bi % 2 == 0 {
+            // §17.7.6.7: group consecutive `row_band` body rows into one band
+            // before alternating band1/band2.
+            out.push(if (bi / row_band as i64) % 2 == 0 {
                 "band1Horz"
             } else {
                 "band2Horz"
@@ -4352,7 +4361,9 @@ fn parse_table(
             // conditional paints nothing yet still shifts vertical banding), gate
             // this on a `first_col_styled` (shd) predicate to match the row side.
             let bi = if first_col { c as i64 - 1 } else { c as i64 };
-            out.push(if bi % 2 == 0 {
+            // §17.7.6.5: group consecutive `col_band` body columns into one band
+            // before alternating band1/band2.
+            out.push(if (bi / col_band as i64) % 2 == 0 {
                 "band1Vert"
             } else {
                 "band2Vert"
@@ -8278,6 +8289,164 @@ mod numbering_marker_font_tests {
         assert_eq!(
             cell_text_color(&t.rows[0].cells[1]).as_deref(),
             Some("bbb222")
+        );
+    }
+
+    // §17.7.6.5 tblStyleColBandSize: a band size >1 groups consecutive columns
+    // into a single vertical band before alternating band1/band2. With
+    // colBandSize=2, columns 0-1 are band1Vert and columns 2-3 are band2Vert
+    // (per the spec example: "band1Vert applied to columns 1 and 2, 5 and 6").
+    // noHBand isolates the vertical axis.
+    #[test]
+    fn vertical_band_size_groups_two_columns() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="VB2">
+                    <w:tblPr><w:tblStyleColBandSize w:val="2"/></w:tblPr>
+                    <w:tblStylePr w:type="band1Vert"><w:rPr><w:color w:val="aaa111"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Vert"><w:rPr><w:color w:val="bbb222"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        // tblLook 0200 = noHBand only; vertical banding stays on by default.
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="VB2"/>
+                 <w:tblLook w:val="0200"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>C0</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>C1</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>C2</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>C3</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &styles,
+        );
+        // Columns 0,1 → band1Vert; columns 2,3 → band2Vert.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("aaa111"),
+            "col 0 in band1"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("aaa111"),
+            "col 1 in band1"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[2]).as_deref(),
+            Some("bbb222"),
+            "col 2 in band2"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[3]).as_deref(),
+            Some("bbb222"),
+            "col 3 in band2"
+        );
+    }
+
+    // §17.7.6.7 tblStyleRowBandSize: a band size >1 groups consecutive rows into
+    // a single horizontal band before alternating band1/band2. With
+    // rowBandSize=2, rows 0-1 are band1Horz and rows 2-3 are band2Horz. noVBand
+    // isolates the horizontal axis.
+    #[test]
+    fn horizontal_band_size_groups_two_rows() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="HB2">
+                    <w:tblPr><w:tblStyleRowBandSize w:val="2"/></w:tblPr>
+                    <w:tblStylePr w:type="band1Horz"><w:rPr><w:color w:val="111aaa"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Horz"><w:rPr><w:color w:val="222bbb"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        // tblLook 0400 = noVBand only; horizontal banding stays on by default.
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="HB2"/>
+                 <w:tblLook w:val="0400"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc><w:p><w:r><w:t>R0</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>R1</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>R2</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>R3</w:t></w:r></w:p></w:tc></w:tr>"#,
+            &styles,
+        );
+        // Rows 0,1 → band1Horz; rows 2,3 → band2Horz.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("111aaa"),
+            "row 0 in band1"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[1].cells[0]).as_deref(),
+            Some("111aaa"),
+            "row 1 in band1"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[2].cells[0]).as_deref(),
+            Some("222bbb"),
+            "row 2 in band2"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[3].cells[0]).as_deref(),
+            Some("222bbb"),
+            "row 3 in band2"
+        );
+    }
+
+    // D-3 (V-1: Word real-app behavior NOT adjudicated). A 2x2 table whose style
+    // defines firstRow and firstCol in DIFFERENT colors but NO nwCell, with
+    // tblLook firstRow=1 firstColumn=1. The top-left cell is BOTH firstRow and
+    // firstCol; with no nwCell to break the tie, the resolved color reflects the
+    // CURRENT cell_cond layer order (firstRow then firstCol → firstCol wins).
+    // If Word is later confirmed to prefer firstRow here, swap the firstCol/
+    // firstRow ordering in cell_cond's `keys.extend` and update this expected
+    // value. corner_nwcell_overrides_row_and_col already covers the nwCell case.
+    #[test]
+    fn corner_without_nwcell_uses_firstcol_then_firstrow_order() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="NoCnr">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="111111"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="firstCol"><w:rPr><w:color w:val="222222"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="NoCnr"/>
+                 <w:tblLook w:firstRow="1" w:firstColumn="1"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>NW</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>NE</w:t></w:r></w:p></w:tc>
+               </w:tr>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>SW</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>SE</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &styles,
+        );
+        // Top-left (firstRow ∩ firstCol, no nwCell): firstCol layered last → wins.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("222222"),
+            "NW = firstCol color (current layer order; V-1 unadjudicated)"
+        );
+        // Sanity anchors: NE is firstRow-only, SW is firstCol-only.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("111111"),
+            "NE = firstRow"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[1].cells[0]).as_deref(),
+            Some("222222"),
+            "SW = firstCol"
         );
     }
 
