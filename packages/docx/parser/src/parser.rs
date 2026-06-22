@@ -4353,6 +4353,11 @@ fn parse_table(
     };
 
     let mut rows = vec![];
+    // Per-row effective conditional formatting, computed by a SINGLE grid walk
+    // (gridSpan-aware) and reused by both the content-threading pass below and
+    // the shading/vAlign pass after. Indexed [row][cell] in tc order; row.cells
+    // is built 1:1 from the same tc list, so the indices stay aligned.
+    let mut all_cell_conds: Vec<Vec<CondFmt>> = Vec::with_capacity(tr_nodes.len());
     for (r, tr_node) in tr_nodes.iter().enumerate() {
         // Pre-compute the per-cell effective conditional formatting for this
         // row, walking the grid so each cell knows its starting grid column
@@ -4387,26 +4392,15 @@ fn parse_table(
             &cell_conds,
         );
         rows.push(row);
+        all_cell_conds.push(cell_conds);
     }
 
     // Apply table-style cell shading + vAlign where the cell didn't set them
     // inline. Each cell's effective conditional shading (firstRow/firstCol/band/
-    // corner, §17.7.6) wins over the whole-table cell shading. Re-resolve the
-    // per-cell condition with the same grid walk used for content threading.
-    for (r, (row, tr_node)) in rows.iter_mut().zip(tr_nodes.iter()).enumerate() {
-        let tc_nodes = children_w_flat(*tr_node, "tc");
-        let mut grid_col = 0usize;
-        for (cell, tc) in row.cells.iter_mut().zip(tc_nodes.iter()) {
-            let span: usize = child_w(*tc, "tcPr")
-                .and_then(|p| child_w(p, "gridSpan"))
-                .and_then(|g| attr_w(g, "val"))
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1);
-            let cell_cnf = child_w(*tc, "tcPr")
-                .and_then(|p| child_w(p, "cnfStyle"))
-                .and_then(|c| attr_w(c, "val"));
-            let eff = cell_cond(r, grid_col, cell_cnf.as_deref());
-            grid_col += span.max(1);
+    // corner, §17.7.6) wins over the whole-table cell shading. Reuse the
+    // per-cell condition computed in the grid walk above instead of re-walking.
+    for (row, cell_conds) in rows.iter_mut().zip(all_cell_conds.iter()) {
+        for (cell, eff) in row.cells.iter_mut().zip(cell_conds.iter()) {
             let cell_shd = eff.shd.clone().or_else(|| tstyle.cell_shd.clone());
             if cell.background.is_none() {
                 cell.background = cell_shd;
@@ -5889,6 +5883,76 @@ mod cs_toggle_tests {
             run_of(r#"<w:p><w:r><w:rPr><w:rFonts w:cs="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, None);
         assert_eq!(run.font_family_cs.as_deref(), Some("Arial"));
+    }
+
+    // run_of (above) covers only the DIRECT-rPr path (apply_direct_run). The two
+    // tests below exercise the STYLE-CHAIN path (styles::apply_run): a <w:cs/>
+    // authored in a paragraph/character style rPr (§17.3.2.7) must survive the
+    // chain merge. Before the apply_run cs_toggle arm was added it was dropped,
+    // even though apply_direct_run had it (the two were out of parity).
+    fn run_of_with_styles(styles_xml: &str, body_inner: &str) -> TextRun {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body_inner}</w:body></w:document>"#
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse(styles_xml);
+        let mut num_map = NumberingMap::default();
+        let elems = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
+        for e in elems {
+            if let BodyElement::Paragraph(p) = e {
+                for r in p.runs {
+                    if let DocRun::Text(t) = r {
+                        return *t;
+                    }
+                }
+            }
+        }
+        panic!("no text run");
+    }
+
+    #[test]
+    fn character_style_cs_element_propagates_to_referencing_run() {
+        // §17.3.2.7: a <w:cs/> in a CHARACTER style rPr is applied to runs that
+        // reference it via rStyle through the style chain (styles::apply_run).
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="CsChar">
+                <w:rPr><w:cs/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="CsChar"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.cs, Some(true));
+    }
+
+    #[test]
+    fn paragraph_style_cs_element_propagates_to_run() {
+        // §17.3.2.7: a <w:cs/> in a PARAGRAPH style rPr feeds the run base
+        // formatting via the style chain (styles::apply_run) and must reach a
+        // styleless run in that paragraph.
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="paragraph" w:styleId="CsPara">
+                <w:rPr><w:cs/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:pPr><w:pStyle w:val="CsPara"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.cs, Some(true));
     }
 }
 
