@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAnchorY } from './renderer.js';
+import { resolveAnchorY } from './anchor-geometry.js';
 
 // resolveAnchorY reads only { scale, marginTop, marginBottom, pageH } of
 // RenderState (via yContainer); cast a minimal stand-in like the other geometry
@@ -21,6 +21,13 @@ describe('resolveAnchorY — ST_AlignV inside/outside (ECMA-376 §20.4.3.1)', ()
   // The page-binding-relative inside/outside degrade to the top/bottom edge of
   // the container (odd-page approximation), mirroring resolveAnchorX's
   // inside→left / outside→right.
+  //
+  // NOTE (S-11): these assertions PIN the odd-page approximation, not the true
+  // §20.4.3.1 page-parity behavior. Word flips the binding edge on EVEN pages
+  // (inside→bottom, outside→top), which is not implemented — resolveAnchorY has
+  // no page-index input. When that parity is added, update inside/outside here
+  // to the page-relative expectations (the odd-page values below stay correct
+  // for odd pages only).
   it('inside aligns to the container top edge (= top)', () => {
     expect(y('inside', 'page')).toBe(0); // page band top
     expect(y('inside', 'page')).toBe(y('top', 'page'));

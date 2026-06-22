@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeFloatTableBox, registerTableFloat, floatTableWrapSide } from './renderer.js';
-import type { FloatTableBox } from './renderer.js';
+import { computeFloatTableBox, registerTableFloat, floatTableWrapSide } from './float-table-geometry.js';
+import type { FloatTableBox } from './float-table-geometry.js';
 import type { TblpPr } from './types.js';
 import type { FloatRect } from './float-layout.js';
 

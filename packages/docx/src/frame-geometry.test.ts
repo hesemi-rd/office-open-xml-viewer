@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeFrameBox, registerFrameFloat } from './renderer.js';
-import type { FrameBox } from './renderer.js';
+import { computeFrameBox, registerFrameFloat } from './frame-geometry.js';
+import type { FrameBox } from './frame-geometry.js';
 import type { FramePr } from './types.js';
 import type { FloatRect } from './float-layout.js';
 

@@ -53,13 +53,29 @@ import {
   type FloatRect,
   isWrapFloat,
   resolveLineFloatWindow,
-  resolveFloatOverlap,
   skipPastTopAndBottom,
 } from './float-layout.js';
 import {
   distributeLineSlack,
   type SegStretch,
 } from './text-distribute.js';
+import {
+  type FrameBox,
+  computeFrameBox,
+  registerFrameFloat,
+  pushFloatRect,
+} from './frame-geometry.js';
+import {
+  computeFloatTableBox,
+  registerTableFloat,
+  floatTableWrapSide,
+} from './float-table-geometry.js';
+import {
+  xContainer,
+  yContainer,
+  resolveAnchorX,
+  resolveAnchorY,
+} from './anchor-geometry.js';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -146,7 +162,7 @@ export async function prepareMathRuns(body: BodyElement[], math: MathRenderer): 
   }
 }
 
-interface RenderState {
+export interface RenderState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
   /** Device-pixel ratio the canvas was scaled by (`ctx.scale(dpr, dpr)`). Used to
@@ -2633,231 +2649,6 @@ function frameAnchorLineHeightPx(
   );
 }
 
-/** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
- *  unit tests only (the table-driven frame-geometry assertions) — not part of
- *  the package API. */
-export interface FrameBox {
-  /** Drawing origin of the frame content (text area top-left). */
-  x: number;
-  y: number;
-  /** Frame content width / height. */
-  w: number;
-  h: number;
-  /** Padded exclusion rect for the wrap FloatRect (frame + hSpace/vSpace). */
-  exLeft: number;
-  exRight: number;
-  exTop: number;
-  exBottom: number;
-}
-
-/** Resolved top-left placement (canvas px) of a floating table (`<w:tblpPr>`,
- *  ECMA-376 §17.4.57). `w`/`h` are the rendered table extent (sum of column
- *  widths × row heights). Exported for unit tests only — not package API. */
-export interface FloatTableBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/**
- * Horizontal container band for a frame's hAnchor (ECMA-376 §17.3.1.11 /
- * §17.18.35). This is a SEPARATE relativeFrom set from DrawingML's
- * §20.4.3 (so {@link xContainer} is intentionally not reused):
- *   - "text"   → the COLUMN text margin the anchor paragraph sits in
- *                (state.contentX..contentX+contentW). This keeps a drop cap
- *                inside its own newspaper column (#513 per-section columns).
- *   - "margin" → the page content margin (marginLeft..pageWidth-marginRight).
- *   - "page"   → the physical page edges (0..pageWidth).
- * All values in canvas px.
- */
-function frameXContainer(hAnchor: string, state: RenderState): { left: number; right: number } {
-  const sc = state.scale;
-  switch (hAnchor) {
-    case 'margin':
-      return { left: state.marginLeft * sc, right: (state.pageWidth - state.marginRight) * sc };
-    case 'page':
-      return { left: 0, right: state.pageWidth * sc };
-    case 'text':
-    case 'column':
-    default:
-      // "text" anchors against the current COLUMN band so a frame in a multi-
-      // column section stays inside its column.
-      return { left: state.contentX, right: state.contentX + state.contentW };
-  }
-}
-
-/**
- * Vertical container origin for a frame's vAnchor (ECMA-376 §17.3.1.11 /
- * §17.18.100). `paraTop` is the anchor paragraph's text-area top (canvas px).
- *   - "text"   → the paragraph top (y offsets/relative positions are measured
- *                from where the frame paragraph sits in the flow).
- *   - "margin" → the page top content margin.
- *   - "page"   → the physical page top.
- */
-function frameYContainer(vAnchor: string, paraTop: number, state: RenderState): number {
-  const sc = state.scale;
-  switch (vAnchor) {
-    case 'margin':
-      return state.marginTop * sc;
-    case 'page':
-      return 0;
-    case 'text':
-    default:
-      return paraTop;
-  }
-}
-
-/**
- * Resolve a horizontal aligned position (canvas px) for a frame (xAlign,
- * §17.3.1.11) or a floating table (tblpXSpec, §17.4.57). Both use the same
- * ST_XAlign vocabulary against a container band [containerLeft, containerRight]:
- *   center          → box centred in the band
- *   right / outside  → box flush to the band's right edge
- *   left / inside / * → box flush to the band's left edge (the default)
- * Shared by {@link computeFrameBox} and {@link computeFloatTableBox} so the two
- * stay byte-identical.
- */
-function resolveAlignedPosH(
-  spec: string,
-  containerLeft: number,
-  containerRight: number,
-  size: number,
-): number {
-  switch (spec) {
-    case 'center':
-      return containerLeft + (containerRight - containerLeft - size) / 2;
-    case 'right':
-    case 'outside':
-      return containerRight - size;
-    case 'left':
-    case 'inside':
-    default:
-      return containerLeft;
-  }
-}
-
-/**
- * Resolve a vertical aligned position (canvas px) for a frame (yAlign,
- * §17.3.1.11) or a floating table (tblpYSpec, §17.4.57). Both use the same
- * ST_YAlign vocabulary, measured against the page box (not the band) per spec:
- *   center           → box centred between the top/bottom content margins
- *   bottom / outside  → box flush to the bottom content margin
- *   top / inside / inline / * → box at the vAnchor origin `vy` (the default)
- * Callers gate this on vAnchor!=='text' (relative vertical positioning is not
- * allowed there). Shared by {@link computeFrameBox} and
- * {@link computeFloatTableBox}.
- */
-function resolveAlignedPosV(
-  spec: string,
-  vy: number,
-  size: number,
-  state: RenderState,
-): number {
-  const sc = state.scale;
-  switch (spec) {
-    case 'center':
-      return vy + (state.pageH - size) / 2 - state.marginTop * sc;
-    case 'bottom':
-    case 'outside':
-      return state.pageH - state.marginBottom * sc - size;
-    case 'top':
-    case 'inside':
-    case 'inline':
-    default:
-      return vy;
-  }
-}
-
-/**
- * Resolve a frame's box in canvas px. `paraTop` is the in-flow top of the frame
- * paragraph (post-spaceBefore). `contentW`/`contentH` are the frame content's
- * measured natural size (px); `anchorLineHpx` is one line height of the
- * following non-frame (anchor) paragraph, used to size a drop cap by `lines`.
- *
- * Exported for unit tests only (frame-geometry table) — not package API.
- */
-export function computeFrameBox(
-  fp: FramePr,
-  state: RenderState,
-  paraTop: number,
-  contentW: number,
-  contentH: number,
-  anchorLineHpx: number,
-): FrameBox {
-  const sc = state.scale;
-  const isDropCap = fp.dropCap === 'drop' || fp.dropCap === 'margin';
-
-  const hx = frameXContainer(fp.hAnchor, state);
-  const vy = frameYContainer(fp.vAnchor, paraTop, state);
-
-  // Frame width: explicit `w` (exact) else natural content width (§17.3.1.11 w).
-  const frameW = fp.w != null ? fp.w * sc : contentW;
-
-  // Frame height. For a drop cap the height is `lines` × the anchor paragraph's
-  // line height (§17.3.1.11 lines: "the height of the drop cap is the first N
-  // lines of the anchor paragraph"; y/yAlign are ignored). For a generic frame
-  // hRule gates h: exact = h, atLeast = max(h, content), auto = content.
-  let frameH: number;
-  if (isDropCap) {
-    frameH = Math.max(1, fp.lines) * anchorLineHpx;
-  } else {
-    const hPx = fp.h != null ? fp.h * sc : 0;
-    frameH =
-      fp.hRule === 'exact'
-        ? hPx
-        : fp.hRule === 'atLeast'
-          ? Math.max(hPx, contentH)
-          : contentH;
-  }
-
-  // Horizontal placement.
-  //   dropCap="drop"   → inside the column/text margin (frame at band left).
-  //   dropCap="margin" → outside the margin (frame left = band left − frameW).
-  //   generic frame    → xAlign (left/center/right/inside/outside) supersedes x;
-  //                      else absolute x offset from the hAnchor's left edge.
-  let frameX: number;
-  if (fp.dropCap === 'drop') {
-    frameX = hx.left;
-  } else if (fp.dropCap === 'margin') {
-    frameX = hx.left - frameW;
-  } else if (fp.xAlign) {
-    frameX = resolveAlignedPosH(fp.xAlign, hx.left, hx.right, frameW);
-  } else {
-    // §17.3.1.11 x: absolute signed offset from the hAnchor left edge.
-    frameX = hx.left + (fp.x != null ? fp.x * sc : 0);
-  }
-
-  // Vertical placement. For a drop cap, y/yAlign are ignored: the cap sits at
-  // the anchor paragraph top (§17.3.1.11 lines). Otherwise yAlign supersedes y
-  // (ignored when vAnchor="text" — relative positioning is not allowed there,
-  // §17.3.1.11 yAlign), else absolute y offset from the vAnchor edge.
-  let frameY: number;
-  if (isDropCap) {
-    frameY = vy;
-  } else if (fp.yAlign && fp.vAnchor !== 'text') {
-    frameY = resolveAlignedPosV(fp.yAlign, vy, frameH, state);
-  } else {
-    frameY = vy + (fp.y != null ? fp.y * sc : 0);
-  }
-
-  // Exclusion padding: hSpace L/R applies only with wrap="around" (§17.3.1.11
-  // hSpace); vSpace top/bottom always.
-  const hSpacePx = fp.wrap === 'around' || fp.wrap === 'auto' ? fp.hSpace * sc : 0;
-  const vSpacePx = fp.vSpace * sc;
-
-  return {
-    x: frameX,
-    y: frameY,
-    w: frameW,
-    h: frameH,
-    exLeft: frameX - hSpacePx,
-    exRight: frameX + frameW + hSpacePx,
-    exTop: frameY - vSpacePx,
-    exBottom: frameY + frameH + vSpacePx,
-  };
-}
-
 /**
  * Render a paragraph that is part of a text frame (`para.framePr` set), per
  * ECMA-376 §17.3.1.11.
@@ -2927,268 +2718,9 @@ function resolveFrameBox(
   return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHpx);
 }
 
-/** Options for {@link pushFloatRect}: the resolved image/float box (x,y,w,h),
- *  its dist* padding (dl,dr,dt,db, all px), and the FloatRect descriptors. */
-interface PushFloatOpts {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  dl: number;
-  dr: number;
-  dt: number;
-  db: number;
-  /** What reserved this float — scopes overlap avoidance (§17.4.56). See
-   *  {@link FloatRect.kind}. */
-  kind: FloatRect['kind'];
-  mode: 'square' | 'topAndBottom';
-  side: string;
-  imageKey: string;
-  drawn: boolean;
-  paraId: number;
-  /** Run §20.4.2.3 / §17.4.56 overlap avoidance before fixing the rect. When
-   *  false (frame floats) the box is used as-is. */
-  avoidOverlap: boolean;
-  /** allowOverlap arg passed to resolveFloatOverlap when avoidOverlap is true
-   *  (true ⇒ only avoid OTHER paragraphs' floats; false ⇒ spec-mandated
-   *  avoidance, scoped by `kind`: a table avoids only other tables, §17.4.56).
-   *  Ignored when avoidOverlap is false. */
-  allowOverlap?: boolean;
-}
-
-/**
- * Build a wrap-exclusion {@link FloatRect} from a resolved box + dist padding,
- * optionally running overlap avoidance first, push it onto `state.floats`, and
- * return it. Single source of the `xLeft = x − dl, xRight = x + w + dr,
- * yTop = y − dt, yBottom = y + h + db` exclusion-rect construction shared by
- * registerFrameFloat / registerTableFloat / registerImageFloat /
- * registerShapeFloat (the `dist*` fields carry dl/dr/dt/db verbatim for
- * re-seating). The returned ref lets the image path flip `drawn` after painting.
- */
-function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
-  let px = o.x;
-  let py = o.y;
-  if (o.avoidOverlap) {
-    const resolved = resolveFloatOverlap(
-      px, py, o.w, o.h, o.dl, o.dr, o.dt, o.db, o.paraId, o.allowOverlap ?? true,
-      o.kind, state.pageWidth * state.scale, state.floats,
-    );
-    px = resolved.x;
-    py = resolved.y;
-  }
-  const rect: FloatRect = {
-    kind: o.kind,
-    mode: o.mode,
-    imageKey: o.imageKey,
-    imageX: px,
-    imageY: py,
-    imageW: o.w,
-    imageH: o.h,
-    xLeft: px - o.dl,
-    xRight: px + o.w + o.dr,
-    yTop: py - o.dt,
-    yBottom: py + o.h + o.db,
-    side: o.side,
-    distLeft: o.dl,
-    distRight: o.dr,
-    distTop: o.dt,
-    distBottom: o.db,
-    paraId: o.paraId,
-    drawn: o.drawn,
-  };
-  state.floats.push(rect);
-  return rect;
-}
-
-/**
- * Push the wrap-exclusion FloatRect for a resolved frame box onto
- * `state.floats` so following body text flows around the frame. No-op for
- * wrap="none" or a degenerate (zero-area) box. Shared by the renderer (after
- * drawing) and the paginator (so the anchor paragraph's measured height
- * accounts for the wrap). The exclusion x-range is COLUMN-relative (built in
- * frameXContainer from state.contentX/contentW for hAnchor="text"), so
- * resolveLineFloatWindow only constrains the matching column (#513).
- *
- * Wrap-mode → FloatRect mapping (ECMA-376 §17.18.104):
- *   none      → no exclusion (text may overlap; the frame is drawn absolutely
- *               and following text starts at its normal Y).
- *   notBeside → topAndBottom (text never sits beside the frame).
- *   around / auto → square side wrap. "auto" is Word's application-defined
- *               default, effectively "around" in Word, so treated as around.
- *   tight / through → a frame is a rectangle, so contour wrapping collapses to
- *               a square wrap (no contour follow for a rectangular frame).
- *
- * Exported for unit tests only (frame-geometry table) — not package API.
- */
-export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderState): void {
-  if (fp.wrap === 'none') return;
-  if (box.w <= 0 || box.h <= 0) return;
-
-  const paraId = state.floatParaSeq++;
-  const mode: 'square' | 'topAndBottom' = fp.wrap === 'notBeside' ? 'topAndBottom' : 'square';
-  // dist padding recovered from the box's pre-computed exclusion edges so the
-  // unified builder reproduces xLeft=box.exLeft etc. exactly.
-  pushFloatRect(state, {
-    x: box.x,
-    y: box.y,
-    w: box.w,
-    h: box.h,
-    dl: box.x - box.exLeft,
-    dr: box.exRight - (box.x + box.w),
-    dt: box.y - box.exTop,
-    db: box.exBottom - (box.y + box.h),
-    kind: 'frame',
-    mode,
-    // A drop cap sits at the column's left edge, so text wraps only to its
-    // RIGHT. A generic frame may sit anywhere, so text wraps on both sides
-    // (resolveLineFloatWindow then takes the widest free gap around it).
-    side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
-    imageKey: '', // non-image float: the frame is painted above, not deferred.
-    drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
-    paraId,
-    avoidOverlap: false, // frames opt out of overlap re-seating.
-  });
-}
-
 // ===== Floating tables (ECMA-376 §17.4.57 w:tblpPr / §17.4.56 w:tblOverlap) =====
-
-/**
- * Resolve a floating table's top-left placement (canvas px) from its
- * `<w:tblpPr>` (ECMA-376 §17.4.57). `tableW`/`tableH` are the already-laid-out
- * table extent in px. The anchor / alignment semantics line up 1:1 with a
- * `<w:framePr>` text frame (horzAnchor↔hAnchor, vertAnchor↔vAnchor,
- * tblpXSpec↔xAlign, tblpYSpec↔yAlign, tblpX/tblpY↔x/y), so this mirrors
- * {@link computeFrameBox}'s placement math exactly — `frameXContainer` /
- * `frameYContainer` give the same per-anchor bands (text→column band,
- * margin→page content margin, page→physical edges), which is the #513
- * column-integrity guarantee.
- *
- * Exported for unit tests only (the float-table-geometry table) — not package API.
- */
-export function computeFloatTableBox(
-  tp: TblpPr,
-  state: RenderState,
-  paraTop: number,
-  tableW: number,
-  tableH: number,
-): FloatTableBox {
-  const sc = state.scale;
-  // §17.4.57 + §17.18.35: horzAnchor's literal default is "page", which would
-  // pin a floating table to the physical page edge (left margin). But when the
-  // source `<w:tblpPr>` gave NO horizontal positioning at all (no horzAnchor, no
-  // tblpX, no tblpXSpec), Word anchors the table at the anchor paragraph's text/
-  // column left — the in-flow position it was converted from — NOT the page edge.
-  // (Word runtime behavior; the spec-literal page default does not match Word
-  // here. See calibre sample-11 p.3 "ITEM/NEEDED" float.) We force the text band
-  // for that case so the table aligns with the body column, then let tblpX=0
-  // place it at that band's left.
-  const hx = tp.horzSpecified
-    ? frameXContainer(tp.horzAnchor, state)
-    : frameXContainer('text', state);
-  const vy = frameYContainer(tp.vertAnchor, paraTop, state);
-
-  // Horizontal: tblpXSpec (ST_XAlign) supersedes the absolute tblpX offset
-  // (§17.4.57). Mirrors computeFrameBox's xAlign handling.
-  let x: number;
-  if (tp.tblpXSpec) {
-    x = resolveAlignedPosH(tp.tblpXSpec, hx.left, hx.right, tableW);
-  } else {
-    // §17.4.57 tblpX: absolute signed offset from the horzAnchor left edge.
-    x = hx.left + tp.tblpX * sc;
-  }
-
-  // Vertical: tblpYSpec (ST_YAlign) supersedes the absolute tblpY offset
-  // (§17.4.57) — EXCEPT when vertAnchor="text", where relative vertical
-  // positioning is not allowed and tblpYSpec is ignored (fall back to tblpY).
-  // Mirrors computeFrameBox's yAlign handling (ignored when vAnchor="text").
-  let y: number;
-  if (tp.tblpYSpec && tp.vertAnchor !== 'text') {
-    y = resolveAlignedPosV(tp.tblpYSpec, vy, tableH, state);
-  } else {
-    y = vy + tp.tblpY * sc;
-  }
-
-  return { x, y, w: tableW, h: tableH };
-}
-
-/**
- * Push the wrap-exclusion FloatRect for a resolved floating-table box onto
- * `state.floats` so following body text flows around the table (§17.4.57). The
- * exclusion is the table box padded by the *FromText dist values. Overlap
- * avoidance (§17.4.56) runs FIRST (mirroring registerShapeFloat: resolve x/y,
- * THEN build the exclusion from the resolved x/y) with allowOverlap =
- * `table.overlap !== 'never'` (default true ⇒ overlap permitted).
- *
- * `side` (which side text wraps on) is computed by the caller from the resolved
- * box vs the column band: the table sits to one side and text fills the other
- * (§17.4.57). The x-range is built from the box (which for horzAnchor="text" is
- * column-relative via frameXContainer), so resolveLineFloatWindow only
- * constrains the matching column (#513), consistent with registerFrameFloat.
- *
- * Exported for unit tests only (the float-table-geometry table) — not package API.
- */
-export function registerTableFloat(
-  box: FloatTableBox,
-  tp: TblpPr,
-  state: RenderState,
-  side: string,
-  allowOverlap: boolean,
-): void {
-  if (box.w <= 0 || box.h <= 0) return;
-  const sc = state.scale;
-  const dl = tp.leftFromText * sc;
-  const dr = tp.rightFromText * sc;
-  const dt = tp.topFromText * sc;
-  const db = tp.bottomFromText * sc;
-  const paraId = state.floatParaSeq++;
-
-  // §17.4.56: resolve overlap against already-registered page floats before
-  // fixing the exclusion rect. allowOverlap=false (tblOverlap="never") forces
-  // avoidance of OTHER FLOATING TABLES only — §17.4.56 scopes "never" to other
-  // floating tables, NOT DrawingML anchors (§20.4.2.3) or text frames. The
-  // kind==='table' tag below makes resolveFloatOverlap limit blockers to tables.
-  // allowOverlap=true only avoids OTHER paragraphs' floats (the implementation-
-  // defined scope documented on resolveFloatOverlap).
-  pushFloatRect(state, {
-    x: box.x,
-    y: box.y,
-    w: box.w,
-    h: box.h,
-    dl, dr, dt, db,
-    kind: 'table',
-    mode: 'square',
-    side,
-    imageKey: '', // non-image float: the table is painted by renderFloatTable.
-    drawn: true, // painted by renderFloatTable; deferred image path must skip it.
-    paraId,
-    avoidOverlap: true,
-    allowOverlap,
-  });
-}
-
-/**
- * §17.4.57 — which side the body text wraps on, from the resolved float box vs
- * the current COLUMN band [contentX, contentX+contentW]. A floating table sits
- * to ONE side of the column and text fills the OTHER:
- *   - float's right edge at/left-of the column centre ⇒ float on the LEFT ⇒
- *     text wraps on the RIGHT (side='right').
- *   - float's left edge at/right-of the column centre ⇒ float on the RIGHT ⇒
- *     text wraps on the LEFT (side='left').
- *   - otherwise the float straddles the centre ⇒ 'bothSides' (resolveLineFloat-
- *     Window then takes the widest free gap on either flank).
- * Coordinates are page-absolute px; the comparison is against the column band so
- * a per-column floating table wraps within its own column (#513).
- *
- * Exported for unit tests only (the float-table-geometry table) — not package API.
- */
-export function floatTableWrapSide(box: FloatTableBox, state: RenderState): string {
-  const colLeft = state.contentX;
-  const colRight = state.contentX + state.contentW;
-  const center = (colLeft + colRight) / 2;
-  if (box.x + box.w <= center) return 'right';
-  if (box.x >= center) return 'left';
-  return 'bothSides';
-}
+// Placement math (computeFloatTableBox / registerTableFloat / floatTableWrapSide)
+// lives in float-table-geometry.ts; the float-table render path below consumes it.
 
 /**
  * Render a paragraph that is part of a text frame (`para.framePr` set), per
@@ -3743,9 +3275,16 @@ function renderParagraph(
         // decorations (highlight) and ruby centring / onTextRun reporting.
         const spanW = s.measuredWidth + internalStretch;
 
+        // Glyph box used by every run-level box decoration (highlight fill,
+        // §17.3.2.32 shading fill, §17.3.2.4 border): same vertical extent of
+        // ~0.85em above the baseline to ~0.25em below it. Computed once so the
+        // three decorations stay byte-identical (no duplicated 0.85 / 1.1).
+        const boxTop = baseline + yOffset - effSizePx * 0.85;
+        const boxHeight = effSizePx * 1.1;
+
         if (s.highlight) {
           ctx.fillStyle = HIGHLIGHT_COLORS[s.highlight] ?? '#FFFF00';
-          ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, spanW, effSizePx * 1.1);
+          ctx.fillRect(x, boxTop, spanW, boxHeight);
         }
 
         // ECMA-376 §17.3.2.32 run shading fill (`<w:shd w:fill>`): a solid
@@ -3753,7 +3292,7 @@ function renderParagraph(
         // + automatic = white text). Same rect geometry as the highlight box.
         if (s.background) {
           ctx.fillStyle = `#${s.background}`;
-          ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, spanW, effSizePx * 1.1);
+          ctx.fillRect(x, boxTop, spanW, boxHeight);
         }
 
         // ECMA-376 §17.3.2.4 run border (`<w:bdr>`, "box"): a rectangle around
@@ -3769,8 +3308,8 @@ function renderParagraph(
             ? s.border
             : null;
         if (activeBorder) {
-          const segTop = baseline + yOffset - effSizePx * 0.85;
-          const segBottom = segTop + effSizePx * 1.1;
+          const segTop = boxTop;
+          const segBottom = segTop + boxHeight;
           if (borderGroup && runBordersEqual(borderGroup.border, activeBorder)) {
             borderGroup.right = x + spanW;
             borderGroup.top = Math.min(borderGroup.top, segTop);
@@ -5144,141 +4683,9 @@ function renderAnchorImages(
   }
 }
 
-/** Draw a wps:wsp shape via core's custGeom primitive. */
-/** Resolve a shape's page X by combining the explicit `anchorXPt` offset with
- *  any `anchorXAlign` (ECMA-376 §20.4.3.1 wp:align). When align is set we
- *  position the shape inside the container indicated by `relativeFrom` (or
- *  `anchorXFromMargin` for the legacy two-state hint). When `pctPos` is set
- *  we ignore the explicit offset and place the shape at `pct` of the
- *  container's width / height (ECMA-376 §20.4.2.7 wp14:pctPosH/VOffset).
- *
- *  relativeFrom containers (ECMA-376 §20.4.3.4):
- *    - "page"          → full page rect
- *    - "margin"        → printable area between margins
- *    - "leftMargin"    → strip from x=0 to x=marginLeft
- *    - "rightMargin"   → strip from x=pageW-marginRight to x=pageW
- *    - "insideMargin"  → on odd pages = leftMargin, even = rightMargin
- *                        (we approximate as leftMargin)
- *    - "outsideMargin" → on odd pages = rightMargin, even = leftMargin
- *                        (we approximate as rightMargin)
- *    - "character"     → degrade to "margin" (no run-relative anchor data)
- *    - "topMargin"     → strip from y=0 to y=marginTop
- *    - "bottomMargin"  → strip from y=pageH-marginBottom to y=pageH
- *    - "paragraph"/"line" → relative to paragraph top (V only) */
-function xContainer(
-  relativeFrom: string | null | undefined,
-  fromMarginHint: boolean,
-  state: RenderState,
-): { start: number; end: number } {
-  const { scale } = state;
-  const pageW = state.pageWidth * scale;
-  const ml = state.marginLeft * scale;
-  const mr = state.marginRight * scale;
-  const rf = relativeFrom ?? (fromMarginHint ? 'margin' : 'page');
-  switch (rf) {
-    case 'page':          return { start: 0, end: pageW };
-    case 'leftMargin':    return { start: 0, end: ml };
-    case 'rightMargin':   return { start: pageW - mr, end: pageW };
-    case 'insideMargin':  return { start: 0, end: ml };
-    case 'outsideMargin': return { start: pageW - mr, end: pageW };
-    case 'margin':
-    case 'character':
-    case 'column':
-    default:              return { start: ml, end: pageW - mr };
-  }
-}
-
-function yContainer(
-  relativeFrom: string | null | undefined,
-  fromParaHint: boolean,
-  paragraphTopPx: number,
-  state: RenderState,
-): { start: number; end: number } {
-  const { scale } = state;
-  const mt = state.marginTop * scale;
-  const mb = state.marginBottom * scale;
-  const rf = relativeFrom ?? (fromParaHint ? 'paragraph' : 'page');
-  switch (rf) {
-    case 'page':         return { start: 0, end: state.pageH };
-    case 'topMargin':    return { start: 0, end: mt };
-    case 'bottomMargin': return { start: state.pageH - mb, end: state.pageH };
-    case 'paragraph':
-    case 'line':         return { start: paragraphTopPx, end: state.pageH };
-    case 'margin':
-    default:             return { start: mt, end: state.pageH - mb };
-  }
-}
-
-/** Resolve the page X for an anchor or anchor-group child. `offsetPx` carries
- *  the shape's offset (within the group for wgp children, 0 for standalone
- *  anchors). `alignWidthPx` is the width used when aligning — the GROUP's
- *  width for wgp children, the shape's own width for standalone anchors. */
-function resolveAnchorX(
-  align: string | null | undefined,
-  fromMargin: boolean,
-  offsetPt: number,
-  widthPx: number,
-  state: RenderState,
-  relativeFrom?: string | null,
-  pctPos?: number | null,
-  alignWidthPt?: number | null,
-): number {
-  const { scale } = state;
-  const c = xContainer(relativeFrom, fromMargin, state);
-  const offsetPx = offsetPt * scale;
-  if (pctPos != null) {
-    return c.start + (c.end - c.start) * pctPos + offsetPx;
-  }
-  if (!align) {
-    return c.start + offsetPx;
-  }
-  const containerW = c.end - c.start;
-  const aw = alignWidthPt != null ? alignWidthPt * scale : widthPx;
-  switch (align) {
-    case 'center': return c.start + (containerW - aw) / 2 + offsetPx;
-    case 'right':
-    case 'outside': return c.end - aw + offsetPx;
-    case 'inside':
-    case 'left':
-    default:        return c.start + offsetPx;
-  }
-}
-
-export function resolveAnchorY(
-  align: string | null | undefined,
-  fromPara: boolean,
-  offsetPt: number,
-  heightPx: number,
-  paragraphTopPx: number,
-  state: RenderState,
-  relativeFrom?: string | null,
-  pctPos?: number | null,
-  alignHeightPt?: number | null,
-): number {
-  const { scale } = state;
-  const c = yContainer(relativeFrom, fromPara, paragraphTopPx, state);
-  const offsetPx = offsetPt * scale;
-  if (pctPos != null) {
-    return c.start + (c.end - c.start) * pctPos + offsetPx;
-  }
-  if (!align) {
-    return c.start + offsetPx;
-  }
-  const containerH = c.end - c.start;
-  const ah = alignHeightPt != null ? alignHeightPt * scale : heightPx;
-  switch (align) {
-    case 'center': return c.start + (containerH - ah) / 2 + offsetPx;
-    // ECMA-376 §20.4.3.1 ST_AlignV: "inside"/"outside" are page-binding-
-    // relative. Mirroring resolveAnchorX (and the insideMargin/outsideMargin
-    // approximation in yContainer/xContainer): on an odd page the binding edge
-    // is the top, so inside→top edge and outside→bottom edge.
-    case 'bottom':
-    case 'outside': return c.end - ah + offsetPx;
-    case 'top':
-    case 'inside':
-    default:        return c.start + offsetPx;
-  }
-}
+// Anchor placement geometry (xContainer / yContainer / resolveAnchorX /
+// resolveAnchorY, ECMA-376 §20.4.3.x) lives in anchor-geometry.ts and is
+// imported above; the shape/image render paths below consume it.
 
 /** Convert a parsed docx LineEnd into core's ArrowEnd. Returns undefined when
  *  absent so the Stroke field stays unset. */
@@ -6195,6 +5602,12 @@ function renderTable(table: DocTable, state: RenderState): void {
   state.y = y;
 }
 
+/** Minimum table-row height (pt) when no `w:trHeight` floor applies — i.e. an
+ *  `auto` row, or `atLeast`/`exact` with no `@val`. ECMA-376 leaves the auto
+ *  minimum implementation-defined; this is the floor an empty row collapses to
+ *  before content (cell margins + measured content) expands it. */
+const MIN_ROW_HEIGHT_PT = 10;
+
 export function calculateRowHeight(
   row: DocTableRow,
   table: DocTable,
@@ -6216,7 +5629,7 @@ export function calculateRowHeight(
   const minH =
     row.rowHeight != null && row.rowHeightRule === 'atLeast'
       ? row.rowHeight * scale
-      : 10 * scale;
+      : MIN_ROW_HEIGHT_PT * scale;
 
   let maxH = minH;
   let ci = 0;
