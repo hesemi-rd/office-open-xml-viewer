@@ -769,6 +769,21 @@ export interface ImageRun {
   anchorXAlign?: string | null;
   /** Vertical equivalent of anchorXAlign: "top" | "center" | "bottom". */
   anchorYAlign?: string | null;
+  /**
+   * ECMA-376 §20.4.3.2 `<wp:positionH/@relativeFrom>` / §20.4.3.5
+   * `<wp:positionV/@relativeFrom>` — names the container the offset / align /
+   * pctPos is measured against. Raw spec string: `"page"`, `"margin"`,
+   * `"paragraph"`, `"line"`, `"leftMargin"`, `"rightMargin"`, `"topMargin"`,
+   * `"bottomMargin"`, `"insideMargin"`, `"outsideMargin"`, `"column"`,
+   * `"character"`. Mirrors {@link ShapeRun.anchorXRelativeFrom} /
+   * {@link ShapeRun.anchorYRelativeFrom}. When present, supersedes the legacy
+   * coarse boolean hints (`anchorXFromMargin` / `anchorYFromPara`) for the
+   * align and pctPos paths so e.g. `relativeFrom="margin"` + `align="top"`
+   * pins the image to the top content margin rather than the page top. Absent
+   * for inline images and for anchors that omitted `<wp:positionH/V>`.
+   */
+  anchorXRelativeFrom?: string | null;
+  anchorYRelativeFrom?: string | null;
 }
 
 // ===== Table =====

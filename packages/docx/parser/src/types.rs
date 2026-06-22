@@ -1127,6 +1127,21 @@ pub struct ImageRun {
     /// Values: "top", "center", "bottom".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_align: Option<String>,
+    /// ECMA-376 §20.4.3.2 `<wp:positionH>` / §20.4.3.5 `<wp:positionV>`
+    /// `@relativeFrom` — names the container the offset / align / pctPos
+    /// is measured against (raw spec string: "page", "margin", "paragraph",
+    /// "line", "leftMargin", "rightMargin", "topMargin", "bottomMargin",
+    /// "insideMargin", "outsideMargin", "column", "character"). Mirrors
+    /// `ShapeRun::anchor_x_relative_from` / `anchor_y_relative_from`. The
+    /// renderer routes this to `xContainer` / `yContainer` so e.g.
+    /// `relativeFrom="margin"` + `align="top"` pins the image to the top
+    /// content margin instead of the page top. `None` for inline images and
+    /// for anchors that didn't carry a positionH/V (preserve the legacy
+    /// boolean hints `anchor_x_from_margin` / `anchor_y_from_para`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_relative_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_relative_from: Option<String>,
 }
 
 fn is_zero_f64(v: &f64) -> bool {

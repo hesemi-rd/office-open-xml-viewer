@@ -2487,6 +2487,10 @@ fn parse_inline_drawing(
             // Inline images have no wp:align (positionH/V is anchor-only).
             anchor_x_align: None,
             anchor_y_align: None,
+            // Inline images have no positionH/V at all; relativeFrom is
+            // anchor-only (ECMA-376 §20.4.3.2/§20.4.3.5).
+            anchor_x_relative_from: None,
+            anchor_y_relative_from: None,
         })];
     }
 
@@ -2632,6 +2636,16 @@ fn parse_inline_drawing(
         // the discarded posOffset. `None` falls back to the offset path.
         anchor_x_align: x_align.clone(),
         anchor_y_align: y_align.clone(),
+        // ECMA-376 §20.4.3.2 `<wp:positionH/@relativeFrom>` / §20.4.3.5
+        // `<wp:positionV/@relativeFrom>` — the raw container string
+        // ("page" | "margin" | "topMargin" | "leftMargin" | "paragraph" …).
+        // Mirrors `apply_pos_meta` for ShapeRun. The renderer routes this
+        // through `xContainer` / `yContainer` so e.g. `relativeFrom="margin"`
+        // + `align="top"` pins the image to the body's top content margin
+        // instead of the page top. `None` falls back to the legacy
+        // `anchor_*_from_*` boolean hints.
+        anchor_x_relative_from: rel_h.clone(),
+        anchor_y_relative_from: rel_v.clone(),
     })]
 }
 
@@ -3049,6 +3063,11 @@ fn parse_group_pic(
         // align (if any) is already baked into anchor_x_pt by parse_wgp_images.
         anchor_x_align: None,
         anchor_y_align: None,
+        // For wgp child images, relativeFrom is similarly baked into the
+        // already-page-absolute anchor_*_pt by the group transform chain.
+        // Leave None so the renderer doesn't double-resolve the container.
+        anchor_x_relative_from: None,
+        anchor_y_relative_from: None,
     })
 }
 
@@ -6921,6 +6940,8 @@ mod svg_blip_tests {
             allow_overlap: true,
             anchor_x_align: None,
             anchor_y_align: None,
+            anchor_x_relative_from: None,
+            anchor_y_relative_from: None,
         };
         let json = serde_json::to_string(&run).expect("serialize");
         assert!(
@@ -7149,6 +7170,176 @@ mod svg_blip_tests {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+// ===== ECMA-376 §20.4.3.2 / §20.4.3.5 — wp:positionH/V @relativeFrom on
+// anchor images =====
+//
+// Pins that the parser threads the raw `<wp:positionH>` / `<wp:positionV>`
+// `@relativeFrom` string ("page", "margin", "topMargin", "leftMargin", …) into
+// `ImageRun::anchor_x_relative_from` / `anchor_y_relative_from`. The renderer
+// then routes this through `xContainer` / `yContainer` so e.g.
+// `relativeFrom="margin"` + `<wp:align>top</wp:align>` pins the image to the
+// body's top content margin instead of the page top (the sample-11 "image
+// arrow overflows into the top page margin" bug).
+//
+// `parse_inline_drawing` is private; build the smallest XML that reaches it
+// through `parse()`, matching the pattern used by the svg_blip end-to-end
+// tests above.
+#[cfg(test)]
+mod anchor_image_relative_from_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    // Tiny valid PNG (1x1) so resolve_inline_blip's extent+blip contract holds.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn build_docx(body_inner: &str) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body_inner}</w:body></w:document>"#
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdPng" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            let mut put = |name: &str, bytes: &[u8]| {
+                use std::io::Write;
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            };
+            put("word/document.xml", document_xml.as_bytes());
+            put("word/_rels/document.xml.rels", rels_xml.as_bytes());
+            put("word/media/image1.png", PNG_1X1);
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn first_image(doc: &Document) -> &ImageRun {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Image(im) => Some(im),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one anchor image")
+    }
+
+    /// Body XML for an anchor image with the given `<wp:positionH>` and
+    /// `<wp:positionV>` children (relativeFrom + align). Mirrors the shape
+    /// produced by Word for the sample-11 left/right page arrows: `wrap=none`,
+    /// `<wp:align>top</wp:align>`, `relativeFrom="margin"`.
+    fn anchor_body(position_h: &str, position_v: &str) -> String {
+        format!(
+            r#"<w:p><w:r><w:drawing>
+  <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             behindDoc="0" distT="0" distB="0" distL="0" distR="0"
+             allowOverlap="1" relativeHeight="1">
+    {position_h}
+    {position_v}
+    <wp:extent cx="304800" cy="304800"/>
+    <wp:wrapNone/>
+    <wp:docPr id="1" name="img"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:anchor>
+</w:drawing></w:r></w:p>"#
+        )
+    }
+
+    /// ECMA-376 §20.4.3.5 — `<wp:positionV relativeFrom="margin"><wp:align>top
+    /// </wp:align></wp:positionV>` must reach `ImageRun.anchor_y_relative_from`
+    /// as the raw "margin" string AND `anchor_y_align="top"`. Without this the
+    /// renderer falls back to relativeFrom=None ⇒ page band, and a "top" image
+    /// lands at Y=0 (inside the page top margin) instead of Y=marginTop.
+    #[test]
+    fn anchor_position_v_margin_top_preserves_relative_from_margin() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="margin"><wp:align>top</wp:align></wp:positionV>"#,
+        );
+        let data = build_docx(&body);
+        let doc = parse(&data).expect("parse must succeed");
+        let img = first_image(&doc);
+        assert_eq!(
+            img.anchor_y_relative_from.as_deref(),
+            Some("margin"),
+            "raw positionV relativeFrom must reach ImageRun"
+        );
+        assert_eq!(img.anchor_y_align.as_deref(), Some("top"));
+    }
+
+    /// ECMA-376 §20.4.3.2 — same wiring on the horizontal axis. Mirror sanity.
+    #[test]
+    fn anchor_position_h_margin_left_preserves_relative_from_margin() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="margin"><wp:align>left</wp:align></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>"#,
+        );
+        let data = build_docx(&body);
+        let doc = parse(&data).expect("parse must succeed");
+        let img = first_image(&doc);
+        assert_eq!(img.anchor_x_relative_from.as_deref(), Some("margin"));
+        assert_eq!(img.anchor_x_align.as_deref(), Some("left"));
+    }
+
+    /// `relativeFrom="page"` must round-trip unchanged (the renderer relies on
+    /// the distinction between "page" and "margin" to pick the container).
+    #[test]
+    fn anchor_position_relative_from_page_is_preserved() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="page"><wp:align>center</wp:align></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="page"><wp:align>center</wp:align></wp:positionV>"#,
+        );
+        let data = build_docx(&body);
+        let doc = parse(&data).expect("parse must succeed");
+        let img = first_image(&doc);
+        assert_eq!(img.anchor_x_relative_from.as_deref(), Some("page"));
+        assert_eq!(img.anchor_y_relative_from.as_deref(), Some("page"));
+    }
+
+    /// Inline images carry no positionH/V at all — both relativeFrom fields
+    /// must be `None` so the renderer doesn't accidentally re-resolve the
+    /// container for an inline image.
+    #[test]
+    fn inline_image_has_no_relative_from() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx(body);
+        let doc = parse(&data).expect("parse must succeed");
+        let img = first_image(&doc);
+        assert!(img.anchor_x_relative_from.is_none());
+        assert!(img.anchor_y_relative_from.is_none());
     }
 }
 

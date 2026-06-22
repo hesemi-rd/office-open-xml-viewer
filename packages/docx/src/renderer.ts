@@ -5190,7 +5190,18 @@ export function renderShapeText(
  * wrapNone images use the pre-spaceBefore paragraph top (see the
  * anchoredFloatBottomOffset note in the paginator). This is the box origin BEFORE
  * any overlap displacement; resolveFloatOverlap runs on top of it for floats.
+ *
+ * Exported under a `_test` alias for the anchor-image relativeFrom wiring test
+ * (the public renderer entry points consume the box internally; pin the
+ * positionH/V → xContainer/yContainer plumbing at this seam).
  */
+export const __test_resolveAnchorBox = (
+  img: ImageRun,
+  state: RenderState,
+  paraBaseY: number,
+): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } =>
+  resolveAnchorBox(img, state, paraBaseY);
+
 function resolveAnchorBox(
   img: ImageRun,
   state: RenderState,
@@ -5203,18 +5214,23 @@ function resolveAnchorBox(
   // renderer aligns the image within its relativeFrom container instead of
   // using the (discarded) posOffset. Mirrors resolveShapeBox (the ShapeRun
   // equivalent): we route X/Y through resolveAnchorX/Y with the image's own
-  // box size as the align size. ImageRun carries neither a raw relativeFrom
-  // string nor pctPos/sizeRel, so those args are null and the boolean
-  // anchorXFromMargin / anchorYFromPara hints pick page-vs-margin containers
-  // (xContainer/yContainer). When align is absent, resolveAnchorX/Y fall back
-  // to the same offset path this function used previously.
+  // box size as the align size. The raw §20.4.3.2/§20.4.3.5
+  // `<wp:positionH/V>@relativeFrom` string (e.g. "margin", "topMargin") is
+  // threaded through so xContainer/yContainer pick the correct container.
+  // Without it a `relativeFrom="margin"` + `align="top"` image would degrade
+  // to the page-relative top edge (Y=0 → inside the top margin), which is
+  // exactly the sample-11 misplacement before this wire-up. ImageRun carries
+  // no pctPos/sizeRel, so those args remain null and the legacy boolean
+  // anchorXFromMargin / anchorYFromPara hints still gate page-vs-margin when
+  // no raw relativeFrom is present. When align is absent, resolveAnchorX/Y
+  // fall back to the offset path.
   const x = resolveAnchorX(
     img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, state,
-    null, null, null,
+    img.anchorXRelativeFrom ?? null, null, null,
   );
   const y = resolveAnchorY(
     img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, state,
-    null, null, null,
+    img.anchorYRelativeFrom ?? null, null, null,
   );
   return {
     x,
