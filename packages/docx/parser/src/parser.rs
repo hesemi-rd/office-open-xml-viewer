@@ -2089,6 +2089,63 @@ fn parse_run_inner(
                     })));
                 }
             }
+            "sym" => {
+                // ECMA-376 §17.3.3.30 <w:sym w:font=".." w:char="F0A7"/> — an
+                // explicit symbol character. `w:char` is the glyph's code point in
+                // the named font's own (private) encoding, written as hex and
+                // commonly PUA-shifted (U+F020–U+F0FF). We emit it as a one-glyph
+                // text run whose font_family is the sym's `w:font` (overriding the
+                // run's ascii axis for this glyph only), so the renderer's
+                // Symbol/Wingdings → Unicode normalization (the same path the body
+                // text and list markers use) maps it to the intended glyph. The
+                // resolved sym font goes through the same theme font-ref resolution
+                // as the rFonts axes. <w:sym> may sit between other text in the run,
+                // so we emit it inline to preserve order.
+                let sym_char = attr_w(child, "char")
+                    .and_then(|v| u32::from_str_radix(v.trim(), 16).ok())
+                    .and_then(char::from_u32);
+                if let Some(c) = sym_char {
+                    let sym_font = theme
+                        .resolve_font_ref(attr_w(child, "font"))
+                        .or_else(|| font_family.clone());
+                    runs.push(DocRun::Text(Box::new(TextRun {
+                        text: c.to_string(),
+                        bold,
+                        italic,
+                        underline,
+                        strikethrough,
+                        font_size,
+                        color: color.clone(),
+                        font_family: sym_font.clone(),
+                        // Keep the eastAsia axis pointed at the sym font too, so a
+                        // glyph that happens to classify as CJK still resolves
+                        // against the symbol font rather than the run's eastAsia
+                        // face. PUA sym chars route to the Latin slot, so the ascii
+                        // axis (`font_family`) is what actually drives rendering.
+                        font_family_east_asia: sym_font,
+                        is_link,
+                        background: fmt.background.clone(),
+                        color_auto,
+                        border: border.clone(),
+                        vert_align: vert_align.clone(),
+                        hyperlink: hyperlink.clone(),
+                        all_caps,
+                        small_caps,
+                        double_strikethrough,
+                        highlight: highlight.clone(),
+                        ruby: None,
+                        revision: revision.cloned(),
+                        rtl,
+                        cs: cs_toggle,
+                        font_family_cs: font_family_cs.clone(),
+                        font_size_cs,
+                        bold_cs,
+                        italic_cs,
+                        lang_bidi: lang_bidi.clone(),
+                        note_ref: None,
+                    })));
+                }
+            }
             "tab" => {
                 // w:tab emits a horizontal tab character; layout handles tab stop alignment.
                 runs.push(DocRun::Text(Box::new(TextRun {
@@ -5707,6 +5764,100 @@ mod math_jc_tests {
                <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#,
         );
         assert_eq!(p.alignment, "left");
+    }
+}
+
+#[cfg(test)]
+mod sym_run_tests {
+    use super::*;
+
+    fn parse_p(inner: &str) -> DocParagraph {
+        let xml = format!(
+            r#"<w:p xmlns:w="{w}" xmlns:m="{m}">{inner}</w:p>"#,
+            w = W_NS,
+            m = M_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+            None,
+            &mut field,
+        )
+    }
+
+    fn text_runs(p: &DocParagraph) -> Vec<&TextRun> {
+        p.runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ECMA-376 §17.3.3.30 — <w:sym w:font="Wingdings" w:char="F0A7"/> emits a
+    // one-glyph text run carrying the decoded PUA character (U+F0A7) and the
+    // sym's font on the ascii axis, so the renderer's Symbol/Wingdings → Unicode
+    // normalization can map it. The hex char is parsed as base-16.
+    #[test]
+    fn sym_emits_decoded_char_with_sym_font() {
+        let p = parse_p(r#"<w:r><w:sym w:font="Wingdings" w:char="F0A7"/></w:r>"#);
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "\u{F0A7}");
+        assert_eq!(runs[0].font_family.as_deref(), Some("Wingdings"));
+    }
+
+    // The sym font overrides the run's rFonts ascii axis for that glyph only:
+    // surrounding <w:t> text keeps the run font, the <w:sym> takes its own.
+    #[test]
+    fn sym_overrides_run_font_and_preserves_order() {
+        let p = parse_p(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Calibri"/></w:rPr>
+                 <w:t xml:space="preserve">a</w:t>
+                 <w:sym w:font="Symbol" w:char="F0B7"/>
+                 <w:t xml:space="preserve">b</w:t>
+               </w:r>"#,
+        );
+        let runs = text_runs(&p);
+        // Order preserved: "a", sym glyph, "b".
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "a");
+        assert_eq!(runs[0].font_family.as_deref(), Some("Calibri"));
+        assert_eq!(runs[1].text, "\u{F0B7}");
+        assert_eq!(runs[1].font_family.as_deref(), Some("Symbol"));
+        assert_eq!(runs[2].text, "b");
+        assert_eq!(runs[2].font_family.as_deref(), Some("Calibri"));
+    }
+
+    // A bare (non-PUA) hex char is decoded the same way (§17.3.3.30 places no
+    // restriction to the PUA): "00B7" → U+00B7 MIDDLE DOT.
+    #[test]
+    fn sym_decodes_bare_codepoint() {
+        let p = parse_p(r#"<w:r><w:sym w:font="Symbol" w:char="00B7"/></w:r>"#);
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "\u{00B7}");
+    }
+
+    // A malformed/absent w:char yields no run (no panic) rather than tofu.
+    #[test]
+    fn sym_with_invalid_char_is_skipped() {
+        let p = parse_p(r#"<w:r><w:sym w:font="Wingdings" w:char="ZZZZ"/></w:r>"#);
+        assert!(text_runs(&p).is_empty());
+        let p2 = parse_p(r#"<w:r><w:sym w:font="Wingdings"/></w:r>"#);
+        assert!(text_runs(&p2).is_empty());
     }
 }
 
