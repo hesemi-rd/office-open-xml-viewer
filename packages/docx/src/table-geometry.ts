@@ -68,9 +68,19 @@ export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) =
  *       exact   — height is exactly `w:trHeight/@val` (× `scale`); overflow is
  *                 clipped by the caller.
  *       atLeast — `@val` (× `scale`) is a lower bound; content can grow the row.
- *       auto    — `@val` is IGNORED ("no predetermined minimum or maximum size",
- *                 advisory layout cache only); the row falls back to the
- *                 `MIN_ROW_HEIGHT_PT` floor. Same as a row with no `w:trHeight`.
+ *       auto    — by the literal text of §17.4.80, `@val` is IGNORED ("no
+ *                 predetermined minimum or maximum size", advisory layout cache
+ *                 only). However, Word's own output PDFs show `@val` being
+ *                 honored as a LOWER BOUND (atLeast-equivalent) when `hRule` is
+ *                 omitted and `@val` is present: e.g. sample-11.docx's December
+ *                 2007 calendar emits `<w:trHeight w:val="576"/>` (hRule
+ *                 omitted; spec default = auto) and Word lays each row out at
+ *                 ~43.2 pt = 576 / 20, matching `@val` as a floor (pdftotext
+ *                 -bbox measures 343.536−300.336 = 43.2 pt). XML inspection
+ *                 confirms no other height information exists, so `@val` is the
+ *                 only signal that produces Word's geometry. We deliberately
+ *                 deviate from the §17.4.80 literal to follow Word's behavior.
+ *                 With `@val` absent, auto falls back to `MIN_ROW_HEIGHT_PT`.
  *   - gridSpan: a cell's width is the sum of the `cell.colSpan` columns it
  *     anchors (clamped to the remaining columns).
  *   - ECMA-376 §17.4.85 (vMerge): a `vMerge=restart` cell's content occupies the
@@ -88,9 +98,12 @@ export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) =
  * Height of ONE row (ECMA-376 §17.4.80 / §17.18.37 ST_HeightRule + gridSpan),
  * EXCLUDING the §17.4.85 vMerge span extension (the caller / the table-level
  * resolver applies that in a post-pass). `exact` returns exactly `@val × scale`;
- * `atLeast` floors at `@val × scale`; `auto` / no-`@val` floors at
- * `MIN_ROW_HEIGHT_PT × scale`. A `vMerge=restart` cell is excluded (its content
- * is distributed across the span, not absorbed by its first row) and a
+ * `atLeast` floors at `@val × scale`; `auto` with `@val` present also floors at
+ * `@val × scale` (intentional Word-compatible deviation from the §17.4.80
+ * literal "ignored" — see the resolver docstring above for the rationale and
+ * the sample-11.docx December calendar evidence). `auto` with no `@val` floors
+ * at `MIN_ROW_HEIGHT_PT × scale`. A `vMerge=restart` cell is excluded (its
+ * content is distributed across the span, not absorbed by its first row) and a
  * `vMerge=continue` cell renders no content. This is the single source of the
  * trHeight rule, shared by {@link resolveTableRowHeights} and the exported
  * `calculateRowHeight`.
@@ -102,8 +115,14 @@ export function resolveSingleRowHeight(
   measureCellContentHeight: MeasureCellContentHeight,
 ): number {
   if (row.rowHeight != null && row.rowHeightRule === 'exact') return row.rowHeight * scale;
+  // §17.4.80 literal says `auto` ignores `@val`. Word's output PDFs disagree:
+  // when `hRule` is omitted and `@val` is present, Word treats `@val` as a
+  // lower bound (atLeast-equivalent). Deliberate deviation to match Word —
+  // ground truth is the Word output PDF (sample-11.docx calendar measured at
+  // 43.2 pt = `@val` 576 / 20). With `@val` absent, auto still collapses to
+  // the implementation-defined minimum.
   let rowH =
-    row.rowHeight != null && row.rowHeightRule === 'atLeast'
+    row.rowHeight != null && (row.rowHeightRule === 'atLeast' || row.rowHeightRule === 'auto')
       ? row.rowHeight * scale
       : MIN_ROW_HEIGHT_PT * scale;
 

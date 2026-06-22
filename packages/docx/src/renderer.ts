@@ -1949,21 +1949,28 @@ function splitParagraphAcrossPages(
  *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
  *  ECMA-376 §17.4.80, §17.4.85) via the shared {@link resolveTableRowHeights}
  *  skeleton. Works in pt (scale 1); the cell measurer is the paginator's
- *  float-aware `estimateParagraphHeight` cursor-walk. */
+ *  float-aware `estimateParagraphHeight` cursor-walk. Adjacent paragraphs inside
+ *  a cell collapse spacing the same way `renderCellContent` does (ECMA-376
+ *  §17.3.1.33 contextualSpacing + spaceAfter/spaceBefore overlap = max not sum),
+ *  so the measured height matches the painted height. Without this, a cell
+ *  containing a nested table followed by a paragraph with `spaceBefore` would
+ *  measure taller than it paints, leaving a gap below the nested table. */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
   const colWidths = resolveColumnWidths(table, contentWPt, state);
   return resolveTableRowHeights(table, colWidths, 1, (cell, cellW) => {
     const cm = effCellMargins(cell, table);
     const innerW = Math.max(1, cellW - cm.left - cm.right);
-    let ch = cm.top + cm.bottom;
-    for (const ce of cell.content) {
+    // pt-space: estimateParagraphHeight emits the full spaceBefore (its
+    // suppressSpaceBefore flag is for page-break continuations, not intra-cell
+    // collapse), so sumCellContentHeight folds in contextualSuppressed
+    // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap to match the
+    // paint pass's renderCellContent.
+    return cm.top + cm.bottom + sumCellContentHeight(cell.content, (ce) => {
       if (ce.type === 'paragraph') {
-        ch += estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
-      } else if (ce.type === 'table') {
-        ch += estimateTableHeight(state, ce as unknown as DocTable, innerW);
+        return estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
       }
-    }
-    return ch;
+      return estimateTableHeight(state, ce as unknown as DocTable, innerW);
+    }, 1);
   });
 }
 
@@ -2323,6 +2330,62 @@ function renderBodyElement(el: BodyElement, state: RenderState): void {
 
 function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): boolean {
   return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
+}
+
+/**
+ * Sum the heights of a cell's content elements with paragraph spacing collapsed
+ * the same way `renderCellContent` paints them, so a cell measured for row
+ * sizing equals the height it actually paints. Two collapse rules apply
+ * (mirroring the paint pass):
+ *
+ *   - ECMA-376 §17.3.1.33 `<w:contextualSpacing>`: a paragraph whose
+ *     contextualSpacing toggle matches the previous paragraph's AND shares its
+ *     styleId emits zero spaceBefore (the toggle suppresses spacing between
+ *     same-style siblings).
+ *   - Adjacent-paragraph spacing OVERLAP: the gap between two paragraphs is
+ *     `max(prevSpaceAfter, currSpaceBefore)`, not their sum. We subtract the
+ *     overlap `min(prevSpaceAfter, effBefore)` so a 12pt space-after followed
+ *     by a 12pt space-before contributes 12pt of gap, not 24pt.
+ *
+ * A nested table (CellElement other than paragraph) resets the
+ * prev-paragraph context — the next paragraph after a table spaces from a
+ * fresh baseline, exactly as `renderCellContent` does.
+ *
+ * `perElementHeight(elem)` returns each element's full measured height: for a
+ * paragraph it must include its full `spaceBefore` (no contextual or overlap
+ * adjustment) so this helper can subtract the collapse correctly; for a nested
+ * table it is the table's own total height. `spaceScale` converts spec spacing
+ * (pt) into the same units as `perElementHeight` returns (1 for pt; the device
+ * scale for px); the subtracted collapse therefore lands in matching units.
+ *
+ * Exported for unit tests (table-spacing-collapse.test).
+ */
+export function sumCellContentHeight(
+  content: CellElement[],
+  perElementHeight: (el: CellElement) => number,
+  spaceScale: number,
+): number {
+  let h = 0;
+  let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
+  for (const ce of content) {
+    if (ce.type === 'paragraph') {
+      const para = ce as unknown as DocParagraph;
+      const suppress = contextualSuppressed(prevPara, para);
+      const effBefore = suppress ? 0 : para.spaceBefore;
+      const overlap = Math.min(prevSpaceAfter, effBefore);
+      h += perElementHeight(ce)
+        - (suppress ? para.spaceBefore : 0) * spaceScale
+        - overlap * spaceScale;
+      prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
+    } else {
+      h += perElementHeight(ce);
+      prevPara = null;
+      prevSpaceAfter = 0;
+    }
+  }
+  return h;
 }
 
 /** ECMA-376 §17.6.4 `<w:cols w:sep="1">` — draw a thin vertical rule centred in
@@ -5374,8 +5437,11 @@ function computeTableLayout(
 
 /** Content height (px, at `scale`) of a table cell laid out at total width
  *  `cellW`: cell top/bottom margins plus each content element measured at the
- *  paint pass's `measureCellElementHeight`. Shared by the per-row skeleton (via
- *  computeTableLayout) and the exported {@link calculateRowHeight}. */
+ *  paint pass's `measureCellElementHeight`. Adjacent paragraphs inside the cell
+ *  collapse spacing the same way `renderCellContent` does (ECMA-376 §17.3.1.33
+ *  contextualSpacing + spaceAfter/spaceBefore overlap = max not sum), so the
+ *  measured height matches the painted height. Shared by the per-row skeleton
+ *  (via computeTableLayout) and the exported {@link calculateRowHeight}. */
 function measureCellContentHeightPx(
   cell: DocTableCell,
   table: DocTable,
@@ -5385,11 +5451,15 @@ function measureCellContentHeightPx(
 ): number {
   const cm = effCellMargins(cell, table);
   const contentW = cellW - (cm.left + cm.right) * scale;
-  let h = (cm.top + cm.bottom) * scale;
-  for (const ce of cell.content) {
-    h += measureCellElementHeight(state, ce, contentW, scale);
-  }
-  return h;
+  // measureCellElementHeight always includes paragraph spaceBefore+spaceAfter;
+  // sumCellContentHeight folds in contextualSuppressed (§17.3.1.33) and the
+  // prevSpaceAfter/spaceBefore overlap collapse to match the paint pass's
+  // renderCellContent. Spacing is converted from pt to px with `scale`.
+  return (cm.top + cm.bottom) * scale + sumCellContentHeight(
+    cell.content,
+    (ce) => measureCellElementHeight(state, ce, contentW, scale),
+    scale,
+  );
 }
 
 /** Draw all rows of a table whose grid origin is `tableX` (px) and whose top is
