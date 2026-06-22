@@ -5416,6 +5416,23 @@ function drawTableRows(
   // from logical column offset to a physical x flips.
   const mirror = table.bidiVisual === true;
 
+  // ECMA-376 §17.4.66 (border-collapse): a shared gridline must sit ON TOP of
+  // every cell fill. Painting cell-by-cell (fill→border, per cell) let the next
+  // column's background fill cover the half of the vertical border the previous
+  // column had just drawn; with alternating row banding (e.g. Medium List 2)
+  // this made a shared vertical rule look like its thickness changed row to row.
+  // So walk the grid ONCE to collect every cell's paint box, then paint in TWO
+  // passes: all backgrounds + content first, all borders second.
+  const jobs: Array<{
+    cell: DocTableCell;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    edges: CellEdgeFlags;
+    clipExact: boolean;
+  }> = [];
+
   let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
@@ -5462,8 +5479,8 @@ function drawTableRows(
         // cell spans multiple rows, so it is never governed by a single row's
         // exact height — only single-row cells clip.
         const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
-        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, edges, mirror, clipExact);
-        else measureCellContent(cell, table, cellW, scale, state);
+        if (dryRun) measureCellContent(cell, table, cellW, scale, state);
+        else jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact });
       }
 
       x += cellW;
@@ -5471,6 +5488,20 @@ function drawTableRows(
     }
 
     y += rowH;
+  }
+
+  // Pass 1: backgrounds + content. Pass 2: borders, so a border is never
+  // overpainted by a neighbouring cell's fill. `mirror` only swaps which
+  // physical side a logical border maps to, so it is consulted in the border
+  // pass alone.
+  for (const j of jobs) {
+    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact);
+  }
+  for (const j of jobs) {
+    drawCellBorders(
+      state.ctx, j.x, j.y, j.w, j.h, j.cell.borders, table.borders,
+      scale, j.edges, mirror, state.dpr,
+    );
   }
   return y;
 }
@@ -5636,18 +5667,18 @@ function renderCell(
   w: number,
   h: number,
   state: RenderState,
-  edges: CellEdgeFlags,
-  mirror = false,
   clipExact = false,
 ): void {
   const { ctx, scale } = state;
 
+  // Cell BACKGROUND + content only. Borders are painted in a separate, later
+  // pass by drawTableRows (ECMA-376 §17.4.66 border-collapse): a shared gridline
+  // must sit on top of every cell fill, so no neighbouring cell's background can
+  // occlude the border drawn by the cell on the other side of the gridline.
   if (cell.background) {
     ctx.fillStyle = `#${cell.background}`;
     ctx.fillRect(x, y, w, h);
   }
-
-  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, edges, mirror, state.dpr);
 
   const cm = effCellMargins(cell, table);
   const mt = cm.top * scale;
@@ -5879,6 +5910,25 @@ export function borderDashPattern(style: string, lw: number): number[] {
   return docxBorderDashArray(style, lw);
 }
 
+/**
+ * Device-pixel band layout for an ECMA-376 §17.18.2 `double` border of stroked
+ * width `lw` (px) on a `ctx.scale(dpr,dpr)`-d canvas: three bands — rail / gap /
+ * rail, each ≈ lw/3 — but each FLOORED at one device pixel. The floor is what
+ * stops a thin double (e.g. sz6 ≈ 0.75px) collapsing into a single line: with
+ * `gapDev ≥ 1` the two rails are always separated by at least one device pixel,
+ * and with `railDev ≥ 1` each rail always paints. For thick borders it reduces
+ * to equal thirds. Exported for unit tests only — not part of the package API.
+ */
+export function doubleRailGeometry(lw: number, dpr: number): {
+  railDev: number;
+  gapDev: number;
+  spanDev: number;
+} {
+  const railDev = Math.max(1, Math.round((lw * dpr) / 3));
+  const gapDev = Math.max(1, Math.round((lw * dpr) / 3));
+  return { railDev, gapDev, spanDev: 2 * railDev + gapDev };
+}
+
 function drawBorderLine(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x1: number, y1: number, x2: number, y2: number,
@@ -5891,15 +5941,33 @@ function drawBorderLine(
   const lw = Math.max(0.5, spec.width * scale);
 
   if (spec.style === 'double') {
-    // ECMA-376 §17.18.2 ST_Border "double": a double line around the object.
-    // The standard does not normatively define the rail/gap geometry, so this
-    // matches Word's rendering — three equal bands across the nominal width
-    // (line / gap / line), each rail = sz/3, gap = sz/3, the pair centered on
-    // the edge. (Word's own UI labels `sz` as the total double-border width.)
-    const railW = Math.max(0.5, lw / 3);
-    const offset = (lw - railW) / 2; // rail centers sit ±offset from the edge
-    strokeCrispSegment(ctx, x1, y1, x2, y2, railW, dpr, -offset);
-    strokeCrispSegment(ctx, x1, y1, x2, y2, railW, dpr, offset);
+    // ECMA-376 §17.18.2 ST_Border "double": two parallel lines. The standard
+    // leaves the rail/gap PIXEL geometry to the implementation, so this matches
+    // Word — three bands across the nominal width (line / gap / line, each
+    // ≈ lw/3) — but with each band FLOORED at one device pixel so a thin double
+    // (e.g. sz6 ≈ 0.75px) never collapses into a single line. This is a
+    // rendering-legibility floor, NOT a content heuristic; for thick borders it
+    // reduces to the equal line/gap/line thirds.
+    //
+    // Drawn as device-pixel-aligned FILLS rather than two independently
+    // crisp-snapped strokes: `crispOffset` snaps each thin rail to the nearest
+    // device row on its own, which would pull two rails only ~1px apart back on
+    // top of each other and re-collapse the gap. Computing both rails from a
+    // single rounded band origin in device space keeps the rail/gap/rail bands
+    // whole device pixels, so the gap survives at any sz/scale/dpr.
+    const { railDev, gapDev, spanDev } = doubleRailGeometry(lw, dpr);
+    ctx.fillStyle = ctx.strokeStyle;
+    const horizontal = y1 === y2;
+    if (horizontal) {
+      // Centre the band on the edge, snapped to a whole device row.
+      const startDev = Math.round(y1 * dpr - spanDev / 2);
+      ctx.fillRect(x1, startDev / dpr, x2 - x1, railDev / dpr);
+      ctx.fillRect(x1, (startDev + railDev + gapDev) / dpr, x2 - x1, railDev / dpr);
+    } else {
+      const startDev = Math.round(x1 * dpr - spanDev / 2);
+      ctx.fillRect(startDev / dpr, y1, railDev / dpr, y2 - y1);
+      ctx.fillRect((startDev + railDev + gapDev) / dpr, y1, railDev / dpr, y2 - y1);
+    }
     ctx.restore();
     return;
   }
