@@ -54,7 +54,12 @@ export {
   type FontGenericClass,
   type FontVariant,
 } from './fonts/scripts';
-export { SYMBOL_FONT_MAP, symbolFontToUnicode } from './fonts/symbol-font';
+export {
+  SYMBOL_FONT_MAP,
+  SYMBOL_MAP,
+  WINGDINGS_MAP,
+  symbolFontToUnicode,
+} from './fonts/symbol-font';
 export { renderChart } from './chart/renderer';
 export { autoResize, type AutoResizeOptions } from './autoResize';
 export { buildCustomPath } from './shape/custGeom';
