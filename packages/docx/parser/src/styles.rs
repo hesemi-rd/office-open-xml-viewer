@@ -645,9 +645,6 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     // §17.3.2.7 <w:cs/> — complex-script run toggle. Must mirror
     // apply_direct_run; without this arm a style-chain <w:cs/> (set in a
     // paragraph/character style rPr by parse_run_fmt) is silently dropped.
-    // §17.3.2.7 <w:cs/> — complex-script run toggle. Must mirror
-    // apply_direct_run; without this arm a style-chain <w:cs/> (set in a
-    // paragraph/character style rPr by parse_run_fmt) is silently dropped.
     if src.cs_toggle.is_some() {
         dst.cs_toggle = src.cs_toggle;
     }

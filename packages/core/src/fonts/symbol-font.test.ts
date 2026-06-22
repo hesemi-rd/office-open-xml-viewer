@@ -4,6 +4,8 @@ import {
   SYMBOL_MAP,
   WINGDINGS_MAP,
   symbolFontToUnicode,
+  isSymbolFontFamily,
+  symbolTextToUnicodeSegments,
 } from './symbol-font';
 
 const ch = (code: number): string => String.fromCharCode(code);
@@ -103,5 +105,65 @@ describe('symbolFontToUnicode', () => {
   it('keeps the deprecated SYMBOL_FONT_MAP alias pointing at Wingdings', () => {
     expect(SYMBOL_FONT_MAP).toBe(WINGDINGS_MAP);
     expect(SYMBOL_FONT_MAP[0xa7]).toBe('▪');
+  });
+});
+
+describe('isSymbolFontFamily', () => {
+  it('matches exactly "symbol" and any "wingdings" family', () => {
+    expect(isSymbolFontFamily('Symbol')).toBe(true);
+    expect(isSymbolFontFamily('SYMBOL')).toBe(true);
+    expect(isSymbolFontFamily('Wingdings')).toBe(true);
+    expect(isSymbolFontFamily('Wingdings 2')).toBe(true);
+  });
+
+  it('does NOT match Webdings (no core table) or ordinary faces', () => {
+    // Webdings is intentionally excluded — core has no Webdings table, so the
+    // gate must not claim it can normalize a Webdings run.
+    expect(isSymbolFontFamily('Webdings')).toBe(false);
+    expect(isSymbolFontFamily('Calibri')).toBe(false);
+    // "Symbol" must be exact, not a substring (e.g. "SymbolMT" is a real Latin
+    // PostScript face), matching symbolFontToUnicode's own gate.
+    expect(isSymbolFontFamily('SymbolMT')).toBe(false);
+    expect(isSymbolFontFamily(null)).toBe(false);
+    expect(isSymbolFontFamily(undefined)).toBe(false);
+  });
+});
+
+describe('symbolTextToUnicodeSegments', () => {
+  it('returns the whole string unmapped for a non-symbol font', () => {
+    expect(symbolTextToUnicodeSegments('abc', 'Calibri')).toEqual([
+      { text: 'abc', mapped: false },
+    ]);
+    expect(symbolTextToUnicodeSegments(ch(0xf0a7), null)).toEqual([
+      { text: ch(0xf0a7), mapped: false },
+    ]);
+  });
+
+  it('maps every Wingdings PUA glyph and flags the run as mapped', () => {
+    // U+F0A7 (square) U+F0E0 (right arrow) → ▪ →
+    const segs = symbolTextToUnicodeSegments(ch(0xf0a7) + ch(0xf0e0), 'Wingdings');
+    expect(segs).toEqual([{ text: '▪→', mapped: true }]);
+  });
+
+  it('splits at mapped/unmapped boundaries so each run is single-font', () => {
+    // 0x21 "!" has no Wingdings entry (passthrough), 0xF0A7 maps to ▪.
+    const segs = symbolTextToUnicodeSegments(ch(0x21) + ch(0xf0a7) + ch(0x22), 'Wingdings');
+    expect(segs).toEqual([
+      { text: ch(0x21), mapped: false },
+      { text: '▪', mapped: true },
+      { text: ch(0x22), mapped: false },
+    ]);
+  });
+
+  it('preserves astral targets by iterating code points', () => {
+    // Wingdings 0x24 → U+1F453 EYEGLASSES (astral). Must survive as one glyph.
+    const segs = symbolTextToUnicodeSegments(ch(0x24), 'Wingdings');
+    expect(segs).toEqual([{ text: '\u{1F453}', mapped: true }]);
+  });
+
+  it('handles the empty string', () => {
+    expect(symbolTextToUnicodeSegments('', 'Wingdings')).toEqual([
+      { text: '', mapped: false },
+    ]);
   });
 });

@@ -180,3 +180,76 @@ export function symbolFontToUnicode(
   const code = char.charCodeAt(0);
   return table[code] ?? char;
 }
+
+/**
+ * True when `fontFamily` is one of the font-specific (non-Unicode-cmap)
+ * encodings that {@link symbolFontToUnicode} knows how to normalize — currently
+ * exactly "Symbol" and any "Wingdings" family (§17.3.2.26 / §21.1.2.3.10).
+ *
+ * Intended as the shared "is this a symbol font?" gate so callers don't
+ * hand-roll divergent regexes. docx uses it; pptx still has its own broader
+ * inline gate (`/wingding|webding|symbol/i`) and is a follow-up to migrate. It
+ * deliberately does NOT match "Webdings" (core has no Webdings table yet — a
+ * Webdings PUA point would pass the gate only to return unchanged) nor a Latin
+ * face like "SymbolMT" (the "symbol" check is exact, not a substring), so a
+ * caller wanting either must add it explicitly and accept passthrough.
+ */
+export function isSymbolFontFamily(
+  fontFamily: string | null | undefined,
+): boolean {
+  if (!fontFamily) return false;
+  const lower = fontFamily.toLowerCase();
+  return lower === 'symbol' || lower.includes('wingdings');
+}
+
+/** A maximal run of characters sharing a single rendering disposition. */
+export interface SymbolTextSegment {
+  /** The (possibly normalized) text for this run. */
+  text: string;
+  /**
+   * True when at least one character in `text` was mapped from the symbol
+   * font's private encoding to a Unicode equivalent. Such a segment must be
+   * drawn in a generic fallback face (the Symbol/Wingdings font, if present,
+   * would re-interpret the Unicode code point as the WRONG glyph); an unmapped
+   * segment keeps the requested symbol font so an installed Symbol/Wingdings
+   * still draws its native glyph.
+   */
+  mapped: boolean;
+}
+
+/**
+ * String-level companion to {@link symbolFontToUnicode}: normalize every
+ * character of `text` through the font's private encoding and split the result
+ * into maximal same-disposition runs so the caller can switch the draw font at
+ * each mapped/unmapped boundary.
+ *
+ * When `fontFamily` is not a symbol font (per {@link isSymbolFontFamily}), the
+ * whole string is returned as a single `{ text, mapped: false }` segment
+ * unchanged — the caller then needs no special handling. Iterates by code point
+ * so astral targets (e.g. Wingdings 0x24 → U+1F453) survive intact.
+ */
+export function symbolTextToUnicodeSegments(
+  text: string,
+  fontFamily: string | null | undefined,
+): SymbolTextSegment[] {
+  if (!isSymbolFontFamily(fontFamily) || text.length === 0) {
+    return [{ text, mapped: false }];
+  }
+  const out: SymbolTextSegment[] = [];
+  let buf = '';
+  let bufMapped: boolean | null = null;
+  for (const ch of text) {
+    const normalized = symbolFontToUnicode(ch, fontFamily);
+    const mapped = normalized !== ch;
+    if (bufMapped === null || mapped === bufMapped) {
+      bufMapped = mapped;
+      buf += normalized;
+    } else {
+      out.push({ text: buf, mapped: bufMapped });
+      bufMapped = mapped;
+      buf = normalized;
+    }
+  }
+  if (buf.length > 0) out.push({ text: buf, mapped: bufMapped ?? false });
+  return out;
+}

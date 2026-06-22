@@ -59,6 +59,9 @@ export {
   SYMBOL_MAP,
   WINGDINGS_MAP,
   symbolFontToUnicode,
+  isSymbolFontFamily,
+  symbolTextToUnicodeSegments,
+  type SymbolTextSegment,
 } from './fonts/symbol-font';
 export { renderChart } from './chart/renderer';
 export { autoResize, type AutoResizeOptions } from './autoResize';

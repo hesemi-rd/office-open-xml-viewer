@@ -35,6 +35,8 @@ import {
   isComplexScriptCodePoint,
   decodeRasterOrMetafile,
   symbolFontToUnicode,
+  isSymbolFontFamily,
+  symbolTextToUnicodeSegments,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -4130,11 +4132,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     // Latin/digits/neutral (ascii face). Each segment stays SINGLE-FONT — one
     // family for its whole `.text` — so the measure==draw / docGrid char-grid
     // invariant holds and the draw loop needs no per-segment font switching.
-    const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
-      const cs = slot === 'cs';
-      const fontFamily = slot === 'cs' ? csFontFamily : slot === 'ea' ? eaFontFamily : base.fontFamily;
+    const pushSeg = (text: string, cs: boolean, fontFamily: string | null) => {
       segs.push({
-        text: word,
+        text,
         bold: cs ? csBold : base.bold,
         italic: cs ? csItalic : base.italic,
         underline: base.underline,
@@ -4156,6 +4156,29 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         digitsAsAN: digitsAsAN ? true : undefined,
       });
       firstSeg = false;
+    };
+    const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
+      const cs = slot === 'cs';
+      const fontFamily = slot === 'cs' ? csFontFamily : slot === 'ea' ? eaFontFamily : base.fontFamily;
+      // ECMA-376 §17.3.2.26 + §17.3.3.30: a run whose rFonts axis is Symbol or
+      // Wingdings stores glyphs as the FONT's own (private) code points — Word
+      // commonly in the PUA (U+F020–U+F0FF). Those render as tofu in any
+      // fallback face, so normalize each character to its Unicode equivalent
+      // (core `symbolTextToUnicodeSegments`, the same table the list marker uses
+      // via `symbolFontToUnicode`). The string is split at mapped/unmapped
+      // boundaries: a MAPPED run is drawn in a generic fallback (fontFamily=null
+      // → sans tail with the dingbat glyphs; keeping the symbol family would let
+      // an installed Symbol/Wingdings re-interpret the Unicode code point as the
+      // WRONG glyph), while an UNMAPPED run keeps the symbol family so a host
+      // that ships Symbol/Wingdings still draws its native glyph. Done once at
+      // build time so measure==draw (the seg.text is never transformed later).
+      if (isSymbolFontFamily(fontFamily)) {
+        for (const part of symbolTextToUnicodeSegments(word, fontFamily)) {
+          pushSeg(part.text, cs, part.mapped ? null : fontFamily);
+        }
+        return;
+      }
+      pushSeg(word, cs, fontFamily);
     };
 
     // A non-complex-script slice still mixes scripts at the CJK boundary: emit
