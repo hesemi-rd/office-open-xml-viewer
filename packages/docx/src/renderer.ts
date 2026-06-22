@@ -2883,6 +2883,12 @@ function renderFrameParagraph(
   registerFrameFloat(box, fp, state);
 }
 
+/** Default tab interval (pt) when no explicit stop matches — Word's default is
+ *  720 twips = 36 pt (ECMA-376 §17.15.1.25 `defaultTabStop`; this document sets
+ *  no override). Shared by the line layout (`layoutLines`) and the numbered-list
+ *  marker's trailing-tab advance (`renderParagraph`). */
+const DEFAULT_TAB_PT = 36;
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -2962,21 +2968,46 @@ function renderParagraph(
         picBullet = { bmp, w: size.w * scale, h: size.h * scale };
       }
     }
+    // Marker glyph width (px) with its RESOLVED font (§17.3.2.26 + §17.9.6); the
+    // picture bullet's own width when present. Needed for both the suff≠tab abut
+    // and the suff=tab overrun check below, so measure once up front.
+    let markerW: number;
+    if (picBullet) {
+      markerW = picBullet.w;
+    } else {
+      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
+      markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+    }
     if (suff !== 'tab') {
-      // Body-offset width: the picture bullet's own width if present, else the
-      // measured glyph width (§17.3.2.26 + §17.9.6) with the marker's RESOLVED
-      // font — the width must match the draw below so the body offset is exact
-      // for a serif (Times) vs sans (Gothic) marker alike.
-      let markerW: number;
-      if (picBullet) {
-        markerW = picBullet.w;
-      } else {
-        ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
-        markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
-      }
       const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
       // marker sits at firstLineX (= paraX + indFirst); body starts at its end.
       numBodyOffset = indFirst + markerW + spaceW;
+    } else {
+      // suff=tab: the marker is followed by a tab that advances the body to the
+      // numbering's indentLeft tab stop (numBodyOffset 0 — the body sits at
+      // paraX). But ECMA-376 §17.9.6 + §17.3.1.37: a tab never moves BACKWARD, so
+      // when the marker overruns that stop — a wide multi-level number like
+      // "1.1.1." whose glyphs exceed the hanging indent (the marker `indFirst`
+      // budget), e.g. in a substitute font — the tab advances to the next stop
+      // PAST the marker end instead, and the body follows it. Without this the
+      // body stays at indentLeft and the marker overprints it (sample-11's
+      // "1.1.1. Three" collided; Word advances "Three" to the next default tab).
+      // markerEndFromIndent is the marker's right edge measured from paraX (the
+      // indentLeft tab); ≤ 0 ⇒ it fits, leave the body at indentLeft.
+      const markerEndFromIndent = indFirst + markerW;
+      if (markerEndFromIndent > 0) {
+        // Next tab stop strictly past the marker end, in paraX-relative px:
+        // honor the paragraph's explicit stops (measured from the text margin,
+        // hence − indLeft to make them paraX-relative), else the default grid.
+        const defTabPx = DEFAULT_TAB_PT * scale;
+        const markerEndFromMargin = indLeft + markerEndFromIndent;
+        let nextFromMargin = Math.ceil((markerEndFromMargin + 0.01) / defTabPx) * defTabPx;
+        for (const ts of para.tabStops ?? []) {
+          const p = ts.pos * scale;
+          if (p > markerEndFromMargin && p < nextFromMargin) nextFromMargin = p;
+        }
+        numBodyOffset = nextFromMargin - indLeft;
+      }
     }
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
@@ -4309,9 +4340,6 @@ function layoutLines(
   };
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
-
-  // Default tab interval when no matching explicit stop exists (Word's default is 720 twips = 36pt)
-  const DEFAULT_TAB_PT = 36;
 
   let lineHasRuby = false;
   const flush = (forceHeight?: number) => {
