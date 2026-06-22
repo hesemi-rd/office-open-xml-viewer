@@ -76,6 +76,11 @@ import {
   resolveAnchorX,
   resolveAnchorY,
 } from './anchor-geometry.js';
+import {
+  findMergeEndRow,
+  resolveTableRowHeights,
+  resolveSingleRowHeight,
+} from './table-geometry.js';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -1941,65 +1946,24 @@ function splitParagraphAcrossPages(
 
 /** Per-row heights used by both pagination and the height estimate. Mirrors the
  *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
- *  ECMA-376 §17.4.80, §17.4.85). */
+ *  ECMA-376 §17.4.80, §17.4.85) via the shared {@link resolveTableRowHeights}
+ *  skeleton. Works in pt (scale 1); the cell measurer is the paginator's
+ *  float-aware `estimateParagraphHeight` cursor-walk. */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
   const colWidths = resolveColumnWidths(table, contentWPt, state);
-
-  const rowHs: number[] = [];
-  const restartInfo: Array<{ ri: number; ci: number; contentH: number }> = [];
-
-  for (let ri = 0; ri < table.rows.length; ri++) {
-    const row = table.rows[ri];
-    if (row.rowHeight != null && row.rowHeightRule === 'exact') {
-      rowHs.push(row.rowHeight);
-      continue;
-    }
-    // ECMA-376 §17.4.80 / §17.18.37 (ST_HeightRule):
-    //   auto (default)  — height is content-driven; the trHeight val is ignored
-    //                     ("with no predetermined minimum or maximum size"). val
-    //                     is only an advisory layout cache Word may emit.
-    //   atLeast         — val is a lower bound the content can exceed.
-    // So only atLeast uses val as a floor; auto falls back to the minimum row
-    // height (10pt) like a row with no trHeight at all.
-    let rowH =
-      row.rowHeight != null && row.rowHeightRule === 'atLeast' ? row.rowHeight : 10;
-    let ci = 0;
-    for (const cell of row.cells) {
-      const span = Math.min(cell.colSpan, colWidths.length - ci);
-      const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
-      const cm = effCellMargins(cell, table);
-      const innerW = Math.max(1, cellW - cm.left - cm.right);
-      let ch = cm.top + cm.bottom;
-      for (const ce of cell.content) {
-        if (ce.type === 'paragraph') {
-          ch += estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
-        } else if (ce.type === 'table') {
-          ch += estimateTableHeight(state, ce as unknown as DocTable, innerW);
-        }
+  return resolveTableRowHeights(table, colWidths, 1, (cell, cellW) => {
+    const cm = effCellMargins(cell, table);
+    const innerW = Math.max(1, cellW - cm.left - cm.right);
+    let ch = cm.top + cm.bottom;
+    for (const ce of cell.content) {
+      if (ce.type === 'paragraph') {
+        ch += estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
+      } else if (ce.type === 'table') {
+        ch += estimateTableHeight(state, ce as unknown as DocTable, innerW);
       }
-      // ECMA-376 §17.4.85: vMerge=restart cell content spans the merged region;
-      // do not inflate the first row alone. vMerge=false (continue) renders no
-      // content. Both are deferred to the post-pass below.
-      if (cell.vMerge === true) {
-        restartInfo.push({ ri, ci, contentH: ch });
-      } else if (cell.vMerge !== false) {
-        if (ch > rowH) rowH = ch;
-      }
-      ci += span;
     }
-    rowHs.push(rowH);
-  }
-
-  for (const info of restartInfo) {
-    const endRi = findMergeEndRow(table, info.ri, info.ci);
-    let spanH = 0;
-    for (let rj = info.ri; rj <= endRi; rj++) spanH += rowHs[rj];
-    if (spanH < info.contentH) {
-      rowHs[endRi] += info.contentH - spanH;
-    }
-  }
-
-  return rowHs;
+    return ch;
+  });
 }
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
@@ -2321,29 +2285,6 @@ export function splitTableAcrossPages(
     }
   }
   return y;
-}
-
-/** Find the last row index in a vMerge span starting at (startRi, startCi) —
- *  i.e. walk forward while subsequent rows have a cell at column-start ci with
- *  vMerge=false (continue). ECMA-376 §17.4.85. */
-function findMergeEndRow(table: DocTable, startRi: number, startCi: number): number {
-  let endRi = startRi;
-  for (let rj = startRi + 1; rj < table.rows.length; rj++) {
-    const row = table.rows[rj];
-    let ci = 0;
-    let matched = false;
-    for (const cell of row.cells) {
-      if (ci === startCi) {
-        if (cell.vMerge === false) matched = true;
-        break;
-      }
-      if (ci > startCi) break;
-      ci += cell.colSpan;
-    }
-    if (!matched) break;
-    endRi = rj;
-  }
-  return endRi;
 }
 
 function pickHeaderFooter(
@@ -5419,34 +5360,35 @@ function computeTableLayout(
   const colWidths = resolveColumnWidths(table, contentWPx / scale, state).map((w) => w * scale);
   const tableW = colWidths.reduce((s, w) => s + w, 0);
 
-  const rowHeights: number[] = [];
-  for (const row of table.rows) {
-    rowHeights.push(calculateRowHeight(row, table, colWidths, scale, state));
-  }
-
-  // ECMA-376 §17.4.85: extend each vMerge span's last row when the restart
-  // cell's content exceeds the sum of its rows. calculateRowHeight excluded
-  // restart cells from per-row height to keep the FIRST row from absorbing
-  // all the content of a tall merged cell.
-  for (let ri = 0; ri < table.rows.length; ri++) {
-    let ci = 0;
-    for (const cell of table.rows[ri].cells) {
-      const span = Math.min(cell.colSpan, colWidths.length - ci);
-      if (cell.vMerge === true) {
-        const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
-        const contentH = measureRestartCellContentHeight(cell, table, cellW, scale, state);
-        const endRi = findMergeEndRow(table, ri, ci);
-        let spanH = 0;
-        for (let rj = ri; rj <= endRi; rj++) spanH += rowHeights[rj];
-        if (spanH < contentH) {
-          rowHeights[endRi] += contentH - spanH;
-        }
-      }
-      ci += span;
-    }
-  }
+  // Shared ST_HeightRule + §17.4.85 vMerge-span skeleton (resolveTableRowHeights),
+  // with the paint pass's px cell measurer. The restart-span extension is part of
+  // the skeleton now — calculateRowHeight already excludes restart cells per-row,
+  // and the resolver re-measures them via the same callback to grow the last row.
+  const rowHeights = resolveTableRowHeights(table, colWidths, scale, (cell, cellW) =>
+    measureCellContentHeightPx(cell, table, cellW, scale, state),
+  );
 
   return { colWidths, tableW, rowHeights };
+}
+
+/** Content height (px, at `scale`) of a table cell laid out at total width
+ *  `cellW`: cell top/bottom margins plus each content element measured at the
+ *  paint pass's `measureCellElementHeight`. Shared by the per-row skeleton (via
+ *  computeTableLayout) and the exported {@link calculateRowHeight}. */
+function measureCellContentHeightPx(
+  cell: DocTableCell,
+  table: DocTable,
+  cellW: number,
+  scale: number,
+  state: RenderState,
+): number {
+  const cm = effCellMargins(cell, table);
+  const contentW = cellW - (cm.left + cm.right) * scale;
+  let h = (cm.top + cm.bottom) * scale;
+  for (const ce of cell.content) {
+    h += measureCellElementHeight(state, ce, contentW, scale);
+  }
+  return h;
 }
 
 /** Draw all rows of a table whose grid origin is `tableX` (px) and whose top is
@@ -5602,12 +5544,10 @@ function renderTable(table: DocTable, state: RenderState): void {
   state.y = y;
 }
 
-/** Minimum table-row height (pt) when no `w:trHeight` floor applies — i.e. an
- *  `auto` row, or `atLeast`/`exact` with no `@val`. ECMA-376 leaves the auto
- *  minimum implementation-defined; this is the floor an empty row collapses to
- *  before content (cell margins + measured content) expands it. */
-const MIN_ROW_HEIGHT_PT = 10;
-
+/** Height (px) of a single table row via the shared ST_HeightRule skeleton
+ *  ({@link resolveSingleRowHeight}), with the paint pass's px cell measurer.
+ *  EXCLUDES the §17.4.85 vMerge span extension — `computeTableLayout` applies
+ *  that across the whole table. Exported for unit tests (table-row-height.test). */
 export function calculateRowHeight(
   row: DocTableRow,
   table: DocTable,
@@ -5615,74 +5555,9 @@ export function calculateRowHeight(
   scale: number,
   state: RenderState,
 ): number {
-  // ECMA-376 §17.4.80 / §17.18.37 (ST_HeightRule):
-  //   exact   — height is exactly w:trHeight/@val; overflow is clipped.
-  //   atLeast — w:trHeight/@val is a lower bound; content can expand the row.
-  //   auto    — height is determined entirely by the content; the @val is
-  //             ignored ("with no predetermined minimum or maximum size").
-  //             @val on an auto row is only an advisory layout cache Word may
-  //             write back, never a floor. (auto is also the default when
-  //             @hRule is omitted.)
-  // Only atLeast contributes a val-derived floor; auto and the no-trHeight case
-  // fall back to the minimum row height.
-  if (row.rowHeight != null && row.rowHeightRule === 'exact') return row.rowHeight * scale;
-  const minH =
-    row.rowHeight != null && row.rowHeightRule === 'atLeast'
-      ? row.rowHeight * scale
-      : MIN_ROW_HEIGHT_PT * scale;
-
-  let maxH = minH;
-  let ci = 0;
-  for (const cell of row.cells) {
-    const span = Math.min(cell.colSpan, colWidths.length - ci);
-    const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
-    const cm = effCellMargins(cell, table);
-    const contentW = cellW - (cm.left + cm.right) * scale;
-
-    // ECMA-376 §17.4.85 (w:vMerge): a vMerge=restart cell's content occupies
-    // the entire merged span (this row + following rows whose same column
-    // carries vMerge=continue). Including its content height in THIS row's
-    // height would inflate the first row of the span and push subsequent
-    // content downward — Word distributes the merged-cell content across the
-    // full span instead. We exclude such cells here; the calling code applies
-    // a second pass to extend the span's last row when the merged sum is
-    // shorter than the restart cell's content.
-    if (cell.vMerge === true) {
-      ci += span;
-      continue;
-    }
-    // vMerge=false (continue) cells contain no rendered content.
-    if (cell.vMerge === false) {
-      ci += span;
-      continue;
-    }
-
-    let h = (cm.top + cm.bottom) * scale;
-    for (const ce of cell.content) {
-      h += measureCellElementHeight(state, ce, contentW, scale);
-    }
-    if (h > maxH) maxH = h;
-    ci += span;
-  }
-  return maxH;
-}
-
-/** Measure a vMerge=restart cell's full content height including cell margins.
- *  Used by the pass-2 merge-span extension in renderTable / estimateTableHeight. */
-function measureRestartCellContentHeight(
-  cell: DocTableCell,
-  table: DocTable,
-  cellW: number,
-  scale: number,
-  state: RenderState,
-): number {
-  const cm = effCellMargins(cell, table);
-  const contentW = cellW - (cm.left + cm.right) * scale;
-  let h = (cm.top + cm.bottom) * scale;
-  for (const ce of cell.content) {
-    h += measureCellElementHeight(state, ce, contentW, scale);
-  }
-  return h;
+  return resolveSingleRowHeight(row, colWidths, scale, (cell, cellW) =>
+    measureCellContentHeightPx(cell, table, cellW, scale, state),
+  );
 }
 
 function measureParaHeight(
