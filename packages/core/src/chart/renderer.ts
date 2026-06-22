@@ -531,25 +531,96 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
   // and never collide with the tick labels.
   const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
-  // Right-hand band for the secondary value axis: tick labels + a rotated title.
+  // Value-axis scales are computed up-front (before `pad`) so the side gutters
+  // can be sized to the actual tick-label widths instead of a fixed fraction of
+  // the chart width — short numeric labels otherwise leave a big empty gap
+  // between the axis title and the labels (PowerPoint sizes the gutter to fit
+  // the labels). The scales depend only on the series data, not on `pad`.
+  let dataMax = 0;
+  for (let ci = 0; ci < n; ci++) {
+    let stackSum = 0;
+    for (const s of barSeries) {
+      const v = s.values[ci] ?? 0;
+      if (stacked) stackSum += Math.abs(v);
+      else dataMax = Math.max(dataMax, Math.abs(v));
+    }
+    if (stacked) dataMax = Math.max(dataMax, stackSum);
+  }
+  if (pct) dataMax = 100;
+  if (chart.valMax != null) dataMax = chart.valMax;
+  if (dataMax === 0) dataMax = 1;
+  // Bar/column anchors the value axis at 0; ignore the returned min.
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
+
+  // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
+  // own "nice" major unit / gridline count (the auto unit is Excel-proprietary,
+  // so it can differ from PowerPoint by one step). Explicit `<c:scaling>` wins.
+  let sMin = 0, sMax = 1, sStep = 1;
+  if (sec) {
+    const lineVals: number[] = [];
+    for (const s of lineSeries) {
+      if (s.useSecondaryAxis !== true) continue;
+      for (const v of s.values) if (v != null) lineVals.push(v);
+    }
+    const dMin = lineVals.length ? Math.min(...lineVals) : 0;
+    const dMax = lineVals.length ? Math.max(...lineVals) : 1;
+    const scl = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max);
+    sMin = scl.min; sMax = scl.max; sStep = scl.step;
+  }
+
+  // Vertical pads first (independent of the side gutters) so the plot height —
+  // and thus the tick-label font — is known before measuring the labels.
+  const padT = titleH + legTopH + h * 0.02;
+  const padB = isH
+    ? (chart.valAxisHidden ? h * 0.02 : h * 0.08) + catTitleH + legBottomH
+    : h * 0.14 + catTitleH + legBottomH;
+  const phEst = h - padT - padB;
+
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
-  const secLabelBandW = sec && !sec.hidden ? secTickFontPx * 3 + 10 : 0;
+  const tickFontPx = Math.max(8, Math.min(11, phEst / 20));
+  const prevFont = ctx.font;
+  // Primary value-axis label band (column charts only; horizontal bars keep a
+  // wider left band for the category labels).
+  let valLabelBandW = 0;
+  if (!isH && !chart.valAxisHidden) {
+    ctx.font = `${tickFontPx}px sans-serif`;
+    let wmax = 0;
+    const vSteps = Math.round(axMax / step);
+    for (let si = 0; si <= vSteps; si++) {
+      const label = pct
+        ? `${Math.round(si * step)}%`
+        : formatChartValWithCode(si * step, chart.valAxisFormatCode);
+      wmax = Math.max(wmax, ctx.measureText(label).width);
+    }
+    valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
+  }
+  // Secondary value-axis label band (right edge), measured the same way.
+  let secLabelBandW = 0;
+  if (sec && !sec.hidden) {
+    ctx.font = `${secTickFontPx}px sans-serif`;
+    let wmax = 0;
+    const sSteps = Math.round((sMax - sMin) / sStep);
+    for (let si = 0; si <= sSteps; si++) {
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(sMin + si * sStep, undefined)).width);
+    }
+    secLabelBandW = wmax + 18;
+  }
+  ctx.font = prevFont;
   const secTitleBandW = sec && sec.title
     ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
     : 0;
+
   const pad = {
-    t: titleH + legTopH + h * 0.02,
+    t: padT,
     r: legRightW + w * 0.03 + secLabelBandW + secTitleBandW,
-    b: h * 0.14 + catTitleH + legBottomH,
-    l: w * 0.12 + valTitleW + legLeftW,
+    b: padB,
+    // Column charts: title band + measured label band, tight to the axis.
+    // Horizontal bars: keep the wider left band for the category labels
+    // (`c:catAx/c:delete val="1"` → no category labels, so tighten).
+    l: isH
+      ? (chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW
+      : legLeftW + valTitleW + valLabelBandW,
   };
-  if (isH) {
-    // With the category axis hidden (`c:catAx/c:delete val="1"`) there are no
-    // category tick labels to reserve room for — tighten the left margin so
-    // the bars can extend to the chart edge, matching Excel's rendering.
-    pad.l = (chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW;
-    pad.b = (chart.valAxisHidden ? h * 0.02 : h * 0.08) + catTitleH + legBottomH;
-  }
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
@@ -579,44 +650,11 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     ctx.fillRect(px0, py0, pw, ph);
   }
 
-  let dataMax = 0;
-  for (let ci = 0; ci < n; ci++) {
-    let stackSum = 0;
-    for (const s of barSeries) {
-      const v = s.values[ci] ?? 0;
-      if (stacked) stackSum += Math.abs(v);
-      else dataMax = Math.max(dataMax, Math.abs(v));
-    }
-    if (stacked) dataMax = Math.max(dataMax, stackSum);
-  }
-  if (pct) dataMax = 100;
-  if (chart.valMax != null) dataMax = chart.valMax;
-  if (dataMax === 0) dataMax = 1;
-
-  // Bar/column anchors the value axis at 0; ignore the returned min.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
-
-  // Secondary value-axis scale (combo charts). Line series bound to it map
-  // through `toYSecondary` instead of the primary axMax. Explicit
-  // `<c:scaling><c:min/max>` win; otherwise derive from the line extents. The
-  // axis is INDEPENDENT of the primary: it keeps its own "nice" major unit and
-  // gridline count (PowerPoint draws the secondary tick labels at their own
-  // positions, not aligned to the primary gridlines). The auto major unit is
-  // Excel-proprietary, so the count can differ from PowerPoint by one step.
-  let sMin = 0, sMax = 1, sStep = 1;
-  if (sec) {
-    const lineVals: number[] = [];
-    for (const s of lineSeries) {
-      if (s.useSecondaryAxis !== true) continue;
-      for (const v of s.values) if (v != null) lineVals.push(v);
-    }
-    const dMin = lineVals.length ? Math.min(...lineVals) : 0;
-    const dMax = lineVals.length ? Math.max(...lineVals) : 1;
-    const scl = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max);
-    sMin = scl.min;
-    sMax = scl.max;
-    sStep = scl.step;
-  }
+  // `axMax`/`step` (primary) and `sMin`/`sMax`/`sStep` (secondary) were computed
+  // above the `pad` block so the gutters could be sized to the labels. The
+  // line-mapping helpers need the now-final plot rect, so they live here. Line
+  // series bound to the secondary axis map through `toYSecondary`; everything
+  // else uses the primary `axMax`.
   const sRange = (sMax - sMin) || 1;
   const toYPrimaryLine = (v: number): number => py0 + ph - (v / axMax) * ph;
   const toYSecondary   = (v: number): number => py0 + ph - ((v - sMin) / sRange) * ph;
@@ -642,7 +680,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         ctx.lineWidth = si === 0 ? 1 : 0.5;
         ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
         ctx.textAlign = 'right';
-        ctx.fillText(label, px0 - 4, gy);
+        ctx.fillText(label, px0 - 12, gy);
       } else {
         const gx = px0 + (val / axMax) * pw;
         ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
@@ -680,46 +718,51 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   };
   const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
   const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden && chart.valAxisLineColor != null;
-  if (!isH) {
-    if (drawCatLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, catLineColor, catLineW); // bottom
-    if (drawValLine) strokeAxis(px0, py0, px0, py0 + ph, valLineColor, valLineW);           // left
-  } else {
-    if (drawCatLine) strokeAxis(px0, py0, px0, py0 + ph, catLineColor, catLineW);           // left
-    if (drawValLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW); // bottom
-  }
+  // Axis rules + tick marks are drawn AFTER the bars/line (see `drawAxesOnTop`
+  // below) so the bars don't paint over the category baseline — PowerPoint
+  // keeps the axis line crisp on top of the columns.
+  const drawAxesOnTop = (): void => {
+    if (!isH) {
+      if (drawCatLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, catLineColor, catLineW); // bottom
+      if (drawValLine) strokeAxis(px0, py0, px0, py0 + ph, valLineColor, valLineW);           // left
+    } else {
+      if (drawCatLine) strokeAxis(px0, py0, px0, py0 + ph, catLineColor, catLineW);           // left
+      if (drawValLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW); // bottom
+    }
 
-  // Axis major tick marks (`<c:*Ax><c:majorTickMark>` — ECMA-376 §21.2.2.101).
-  // PowerPoint draws short ruler ticks even when the axis rule itself is light,
-  // so the bar renderer must emit them too (the line renderer already does).
-  // `drawAxisTick`'s `axis` arg selects GEOMETRY: 'val' = vertical rule with
-  // horizontal ticks, 'cat' = horizontal rule with vertical ticks. For a
-  // column chart the value axis is vertical (left) and the category axis
-  // horizontal (bottom); a horizontal bar chart swaps the two.
-  if (!chart.valAxisHidden && chart.valAxisMajorTickMark && chart.valAxisMajorTickMark !== 'none') {
-    for (let si = 0; si <= steps; si++) {
-      const val = si * step;
-      if (!isH) {
-        drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, py0 + ph - (val / axMax) * ph, valLineColor, valLineW);
-      } else {
-        drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, px0 + (val / axMax) * pw, valLineColor, valLineW);
+    // Axis major tick marks (`<c:*Ax><c:majorTickMark>` — ECMA-376 §21.2.2.101).
+    // PowerPoint draws short ruler ticks even when the axis rule itself is light,
+    // so the bar renderer must emit them too (the line renderer already does).
+    // `drawAxisTick`'s `axis` arg selects GEOMETRY: 'val' = vertical rule with
+    // horizontal ticks, 'cat' = horizontal rule with vertical ticks. For a
+    // column chart the value axis is vertical (left) and the category axis
+    // horizontal (bottom); a horizontal bar chart swaps the two.
+    if (!chart.valAxisHidden && chart.valAxisMajorTickMark && chart.valAxisMajorTickMark !== 'none') {
+      for (let si = 0; si <= steps; si++) {
+        const val = si * step;
+        if (!isH) {
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, py0 + ph - (val / axMax) * ph, valLineColor, valLineW);
+        } else {
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, px0 + (val / axMax) * pw, valLineColor, valLineW);
+        }
       }
     }
-  }
-  // Category ticks sit at band BOUNDARIES with crossBetween="between" (the
-  // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
-  // at category centers under "midCat".
-  if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
-    const onBoundary = chart.catAxisCrossBetween !== 'midCat';
-    const last = onBoundary ? n : n - 1;
-    for (let ci = 0; ci <= last; ci++) {
-      const frac = onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1));
-      if (!isH) {
-        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + frac * pw, catLineColor, catLineW);
-      } else {
-        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', px0, py0 + frac * ph, catLineColor, catLineW);
+    // Category ticks sit at band BOUNDARIES with crossBetween="between" (the
+    // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
+    // at category centers under "midCat".
+    if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
+      const onBoundary = chart.catAxisCrossBetween !== 'midCat';
+      const last = onBoundary ? n : n - 1;
+      for (let ci = 0; ci <= last; ci++) {
+        const frac = onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1));
+        if (!isH) {
+          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + frac * pw, catLineColor, catLineW);
+        } else {
+          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', px0, py0 + frac * ph, catLineColor, catLineW);
+        }
       }
     }
-  }
+  };
 
   // Bar cluster geometry — ECMA-376 §21.2.2.13 (gapWidth = % of bar width
   // between categories, default 150) and §21.2.2.25 (overlap = signed % of
@@ -883,6 +926,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
+  // Primary axis rules + ticks on top of the bars/line so the category
+  // baseline stays visible (the bars would otherwise paint over it).
+  drawAxesOnTop();
+
   // Secondary value axis (right edge). Independent scale: its own "nice" major
   // unit drives the tick labels, positioned via `toYSecondary` (NOT aligned to
   // the primary gridlines — PowerPoint places them independently). Draws its
@@ -910,7 +957,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           ctx.strokeStyle = secLineColor; ctx.lineWidth = secLineW;
           ctx.beginPath(); ctx.moveTo(axX + inner, gy); ctx.lineTo(axX + outer, gy); ctx.stroke();
         }
-        ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null), axX + 6, gy);
+        ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null), axX + 14, gy);
       }
     }
     if (sec.title) {
