@@ -5798,23 +5798,43 @@ function renderCell(
     const visibleContent = trimTrailingStructuralMarker(cell.content);
     let contentH = visibleContent.reduce(
       (s, ce) => s + measureCellElementHeight(cellState, ce, w - ml - mr, scale), 0);
-    // Word collapses the LAST paragraph's space-after against the cell's bottom
-    // content boundary when vertically aligning. That trailing spacing produces
-    // no ink (nothing follows it inside the cell), so including it in the
-    // centered block height lifts the visible text above true center. Word
-    // centers the line box alone: a header cell whose paragraph carries an 8 pt
-    // space-after still centers the ~16.8 pt line box, not 24.8 pt. This mirrors
-    // how block space-after collapses at a container edge (ECMA-376 §17.3.1.33
-    // describes spacing between paragraphs, not at the frame boundary). The
-    // render path already adds this space-after after the final line where it
-    // has no visual effect, so trimming it here only fixes the measurement.
-    // Spacing BETWEEN two paragraphs inside the cell is left intact.
+    // ECMA-376 §17.3.1.33 + §17.4.84 (vAlign): Word collapses the FIRST
+    // paragraph's space-before and the LAST paragraph's space-after against the
+    // cell's content boundary when vertically aligning. Neither produces any ink
+    // (nothing surrounds them inside the cell), so including them in the
+    // vertically-aligned block height pushes the visible block off centre/bottom.
+    // Word vertically aligns the INKED block alone: a header cell whose only
+    // paragraph carries 6 pt space-before + 8 pt space-after still centres the
+    // ~16.8 pt line box, not 30.8 pt. The symmetric trim mirrors how block
+    // spacing collapses at a container edge (§17.3.1.33 describes spacing
+    // BETWEEN paragraphs, not at the frame boundary). Spacing BETWEEN two
+    // paragraphs inside the cell is left intact (handled by §17.3.1.33's
+    // contextual / max-overlap rules inside the paint pass).
+    const firstEl = visibleContent[0];
     const lastEl = visibleContent[visibleContent.length - 1];
+    // Leading space-before (first paragraph only). Nested table first ⇒ 0.
+    const firstSpaceBefore =
+      firstEl && firstEl.type === 'paragraph'
+        ? (firstEl as unknown as DocParagraph).spaceBefore * scale
+        : 0;
+    contentH -= firstSpaceBefore;
+    // Trailing space-after (last paragraph only). Nested table last ⇒ 0.
     if (lastEl && lastEl.type === 'paragraph') {
       contentH -= (lastEl as unknown as DocParagraph).spaceAfter * scale;
     }
-    if (cell.vAlign === 'center') cellState.y = y + (h - contentH) / 2;
-    else cellState.y = y + h - contentH - mb;
+    // `renderParagraph` will re-consume the first paragraph's spaceBefore (it
+    // unconditionally adds `para.spaceBefore * scale` to `state.y`). Pull
+    // `cellState.y` up by `firstSpaceBefore` so that addition lands the inked
+    // top exactly on the vertically-aligned position. Without this pull-up the
+    // visible block lands `firstSpaceBefore` PAST the intended vAlign position
+    // (= +3 pt down for a typical 6 pt spaceBefore at scale 1) — asymmetric with
+    // the trailing-spaceAfter trim, which renderParagraph never reconsumes
+    // because nothing follows it inside the cell.
+    if (cell.vAlign === 'center') {
+      cellState.y = y + (h - contentH) / 2 - firstSpaceBefore;
+    } else {
+      cellState.y = y + h - contentH - mb - firstSpaceBefore;
+    }
   }
 
   if (clipExact) {
