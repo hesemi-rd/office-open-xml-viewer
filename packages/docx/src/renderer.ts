@@ -2723,6 +2723,67 @@ function frameYContainer(vAnchor: string, paraTop: number, state: RenderState): 
 }
 
 /**
+ * Resolve a horizontal aligned position (canvas px) for a frame (xAlign,
+ * §17.3.1.11) or a floating table (tblpXSpec, §17.4.57). Both use the same
+ * ST_XAlign vocabulary against a container band [containerLeft, containerRight]:
+ *   center          → box centred in the band
+ *   right / outside  → box flush to the band's right edge
+ *   left / inside / * → box flush to the band's left edge (the default)
+ * Shared by {@link computeFrameBox} and {@link computeFloatTableBox} so the two
+ * stay byte-identical.
+ */
+function resolveAlignedPosH(
+  spec: string,
+  containerLeft: number,
+  containerRight: number,
+  size: number,
+): number {
+  switch (spec) {
+    case 'center':
+      return containerLeft + (containerRight - containerLeft - size) / 2;
+    case 'right':
+    case 'outside':
+      return containerRight - size;
+    case 'left':
+    case 'inside':
+    default:
+      return containerLeft;
+  }
+}
+
+/**
+ * Resolve a vertical aligned position (canvas px) for a frame (yAlign,
+ * §17.3.1.11) or a floating table (tblpYSpec, §17.4.57). Both use the same
+ * ST_YAlign vocabulary, measured against the page box (not the band) per spec:
+ *   center           → box centred between the top/bottom content margins
+ *   bottom / outside  → box flush to the bottom content margin
+ *   top / inside / inline / * → box at the vAnchor origin `vy` (the default)
+ * Callers gate this on vAnchor!=='text' (relative vertical positioning is not
+ * allowed there). Shared by {@link computeFrameBox} and
+ * {@link computeFloatTableBox}.
+ */
+function resolveAlignedPosV(
+  spec: string,
+  vy: number,
+  size: number,
+  state: RenderState,
+): number {
+  const sc = state.scale;
+  switch (spec) {
+    case 'center':
+      return vy + (state.pageH - size) / 2 - state.marginTop * sc;
+    case 'bottom':
+    case 'outside':
+      return state.pageH - state.marginBottom * sc - size;
+    case 'top':
+    case 'inside':
+    case 'inline':
+    default:
+      return vy;
+  }
+}
+
+/**
  * Resolve a frame's box in canvas px. `paraTop` is the in-flow top of the frame
  * paragraph (post-spaceBefore). `contentW`/`contentH` are the frame content's
  * measured natural size (px); `anchorLineHpx` is one line height of the
@@ -2775,20 +2836,7 @@ export function computeFrameBox(
   } else if (fp.dropCap === 'margin') {
     frameX = hx.left - frameW;
   } else if (fp.xAlign) {
-    switch (fp.xAlign) {
-      case 'center':
-        frameX = hx.left + (hx.right - hx.left - frameW) / 2;
-        break;
-      case 'right':
-      case 'outside':
-        frameX = hx.right - frameW;
-        break;
-      case 'left':
-      case 'inside':
-      default:
-        frameX = hx.left;
-        break;
-    }
+    frameX = resolveAlignedPosH(fp.xAlign, hx.left, hx.right, frameW);
   } else {
     // §17.3.1.11 x: absolute signed offset from the hAnchor left edge.
     frameX = hx.left + (fp.x != null ? fp.x * sc : 0);
@@ -2802,21 +2850,7 @@ export function computeFrameBox(
   if (isDropCap) {
     frameY = vy;
   } else if (fp.yAlign && fp.vAnchor !== 'text') {
-    switch (fp.yAlign) {
-      case 'center':
-        frameY = vy + (state.pageH - frameH) / 2 - state.marginTop * sc;
-        break;
-      case 'bottom':
-      case 'outside':
-        frameY = (state.pageH - state.marginBottom * sc) - frameH;
-        break;
-      case 'top':
-      case 'inside':
-      case 'inline':
-      default:
-        frameY = vy;
-        break;
-    }
+    frameY = resolveAlignedPosV(fp.yAlign, vy, frameH, state);
   } else {
     frameY = vy + (fp.y != null ? fp.y * sc : 0);
   }
@@ -2907,6 +2941,74 @@ function resolveFrameBox(
   return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHpx);
 }
 
+/** Options for {@link pushFloatRect}: the resolved image/float box (x,y,w,h),
+ *  its dist* padding (dl,dr,dt,db, all px), and the FloatRect descriptors. */
+interface PushFloatOpts {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  dl: number;
+  dr: number;
+  dt: number;
+  db: number;
+  mode: 'square' | 'topAndBottom';
+  side: string;
+  imageKey: string;
+  drawn: boolean;
+  paraId: number;
+  /** Run §20.4.2.3 / §17.4.56 overlap avoidance before fixing the rect. When
+   *  false (frame floats) the box is used as-is. */
+  avoidOverlap: boolean;
+  /** allowOverlap arg passed to resolveFloatOverlap when avoidOverlap is true
+   *  (true ⇒ only avoid OTHER paragraphs' floats; false ⇒ avoid ALL). Ignored
+   *  when avoidOverlap is false. */
+  allowOverlap?: boolean;
+}
+
+/**
+ * Build a wrap-exclusion {@link FloatRect} from a resolved box + dist padding,
+ * optionally running overlap avoidance first, push it onto `state.floats`, and
+ * return it. Single source of the `xLeft = x − dl, xRight = x + w + dr,
+ * yTop = y − dt, yBottom = y + h + db` exclusion-rect construction shared by
+ * registerFrameFloat / registerTableFloat / registerImageFloat /
+ * registerShapeFloat (the `dist*` fields carry dl/dr/dt/db verbatim for
+ * re-seating). The returned ref lets the image path flip `drawn` after painting.
+ */
+function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
+  let px = o.x;
+  let py = o.y;
+  if (o.avoidOverlap) {
+    const resolved = resolveFloatOverlap(
+      px, py, o.w, o.h, o.dl, o.dr, o.dt, o.db, o.paraId, o.allowOverlap ?? true,
+      state.pageWidth * state.scale, state.floats,
+    );
+    px = resolved.x;
+    py = resolved.y;
+  }
+  const rect: FloatRect = {
+    mode: o.mode,
+    imageKey: o.imageKey,
+    imageX: px,
+    imageY: py,
+    imageW: o.w,
+    imageH: o.h,
+    xLeft: px - o.dl,
+    xRight: px + o.w + o.dr,
+    yTop: py - o.dt,
+    yBottom: py + o.h + o.db,
+    side: o.side,
+    distLeft: o.dl,
+    distRight: o.dr,
+    distTop: o.dt,
+    distBottom: o.db,
+    paraId: o.paraId,
+    drawn: o.drawn,
+  };
+  state.floats.push(rect);
+  return rect;
+}
+
 /**
  * Push the wrap-exclusion FloatRect for a resolved frame box onto
  * `state.floats` so following body text flows around the frame. No-op for
@@ -2933,29 +3035,27 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderStat
 
   const paraId = state.floatParaSeq++;
   const mode: 'square' | 'topAndBottom' = fp.wrap === 'notBeside' ? 'topAndBottom' : 'square';
-  const rect: FloatRect = {
+  // dist padding recovered from the box's pre-computed exclusion edges so the
+  // unified builder reproduces xLeft=box.exLeft etc. exactly.
+  pushFloatRect(state, {
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: box.h,
+    dl: box.x - box.exLeft,
+    dr: box.exRight - (box.x + box.w),
+    dt: box.y - box.exTop,
+    db: box.exBottom - (box.y + box.h),
     mode,
-    imageKey: '', // non-image float: the frame is painted above, not deferred.
-    imageX: box.x,
-    imageY: box.y,
-    imageW: box.w,
-    imageH: box.h,
-    xLeft: box.exLeft,
-    xRight: box.exRight,
-    yTop: box.exTop,
-    yBottom: box.exBottom,
     // A drop cap sits at the column's left edge, so text wraps only to its
     // RIGHT. A generic frame may sit anywhere, so text wraps on both sides
     // (resolveLineFloatWindow then takes the widest free gap around it).
     side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
-    distLeft: box.x - box.exLeft,
-    distRight: box.exRight - (box.x + box.w),
-    distTop: box.y - box.exTop,
-    distBottom: box.exBottom - (box.y + box.h),
-    paraId,
+    imageKey: '', // non-image float: the frame is painted above, not deferred.
     drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
-  };
-  state.floats.push(rect);
+    paraId,
+    avoidOverlap: false, // frames opt out of overlap re-seating.
+  });
 }
 
 // ===== Floating tables (ECMA-376 §17.4.57 w:tblpPr / §17.4.56 w:tblOverlap) =====
@@ -2999,20 +3099,7 @@ export function computeFloatTableBox(
   // (§17.4.57). Mirrors computeFrameBox's xAlign handling.
   let x: number;
   if (tp.tblpXSpec) {
-    switch (tp.tblpXSpec) {
-      case 'center':
-        x = hx.left + (hx.right - hx.left - tableW) / 2;
-        break;
-      case 'right':
-      case 'outside':
-        x = hx.right - tableW;
-        break;
-      case 'left':
-      case 'inside':
-      default:
-        x = hx.left;
-        break;
-    }
+    x = resolveAlignedPosH(tp.tblpXSpec, hx.left, hx.right, tableW);
   } else {
     // §17.4.57 tblpX: absolute signed offset from the horzAnchor left edge.
     x = hx.left + tp.tblpX * sc;
@@ -3024,21 +3111,7 @@ export function computeFloatTableBox(
   // Mirrors computeFrameBox's yAlign handling (ignored when vAnchor="text").
   let y: number;
   if (tp.tblpYSpec && tp.vertAnchor !== 'text') {
-    switch (tp.tblpYSpec) {
-      case 'center':
-        y = vy + (state.pageH - tableH) / 2 - state.marginTop * sc;
-        break;
-      case 'bottom':
-      case 'outside':
-        y = (state.pageH - state.marginBottom * sc) - tableH;
-        break;
-      case 'top':
-      case 'inside':
-      case 'inline':
-      default:
-        y = vy;
-        break;
-    }
+    y = resolveAlignedPosV(tp.tblpYSpec, vy, tableH, state);
   } else {
     y = vy + tp.tblpY * sc;
   }
@@ -3081,33 +3154,20 @@ export function registerTableFloat(
   // fixing the exclusion rect. allowOverlap=false (tblOverlap="never") forces
   // avoidance of ALL floats; allowOverlap=true only avoids OTHER paragraphs'
   // floats (the implementation-defined scope documented on resolveFloatOverlap).
-  const resolved = resolveFloatOverlap(
-    box.x, box.y, box.w, box.h, dl, dr, dt, db, paraId, allowOverlap,
-    state.pageWidth * state.scale, state.floats,
-  );
-  const px = resolved.x;
-  const py = resolved.y;
-
-  const rect: FloatRect = {
+  pushFloatRect(state, {
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: box.h,
+    dl, dr, dt, db,
     mode: 'square',
-    imageKey: '', // non-image float: the table is painted by renderFloatTable.
-    imageX: px,
-    imageY: py,
-    imageW: box.w,
-    imageH: box.h,
-    xLeft: px - dl,
-    xRight: px + box.w + dr,
-    yTop: py - dt,
-    yBottom: py + box.h + db,
     side,
-    distLeft: dl,
-    distRight: dr,
-    distTop: dt,
-    distBottom: db,
-    paraId,
+    imageKey: '', // non-image float: the table is painted by renderFloatTable.
     drawn: true, // painted by renderFloatTable; deferred image path must skip it.
-  };
-  state.floats.push(rect);
+    paraId,
+    avoidOverlap: true,
+    allowOverlap,
+  });
 }
 
 /**
@@ -5782,8 +5842,6 @@ function registerImageFloat(
   // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
   const box = resolveAnchorBox(img, state, paragraphAnchorY);
   const { w, h, dl, dr, dt, db } = box;
-  let pageX = box.x;
-  let pageY = box.y;
 
   // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
   // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
@@ -5793,34 +5851,19 @@ function registerImageFloat(
   // gate under allowOverlap=true, and the right-then-down re-seat using dist
   // padding as the float-to-float gap. See resolveFloatOverlap header.
   const allowOverlap = img.allowOverlap ?? true;
-  const resolved = resolveFloatOverlap(
-    pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap,
-    state.pageWidth * state.scale, state.floats,
-  );
-  pageX = resolved.x;
-  pageY = resolved.y;
-
   const key = imageKey(img.imagePath, img.colorReplaceFrom);
-  const rect: FloatRect = {
+  const rect = pushFloatRect(state, {
+    x: box.x,
+    y: box.y,
+    w, h, dl, dr, dt, db,
     mode,
-    imageKey: key,
-    imageX: pageX,
-    imageY: pageY,
-    imageW: w,
-    imageH: h,
-    xLeft: pageX - dl,
-    xRight: pageX + w + dr,
-    yTop: pageY - dt,
-    yBottom: pageY + h + db,
     side: img.wrapSide ?? 'bothSides',
-    distLeft: dl,
-    distRight: dr,
-    distTop: dt,
-    distBottom: db,
-    paraId,
+    imageKey: key,
     drawn: false,
-  };
-  state.floats.push(rect);
+    paraId,
+    avoidOverlap: true,
+    allowOverlap,
+  });
 
   if (!state.dryRun) {
     const bmp = state.images.get(key);
@@ -5859,42 +5902,23 @@ function registerShapeFloat(
   const dr = (shape.distRight  ?? 0) * scale;
   const dt = (shape.distTop    ?? 0) * scale;
   const db = (shape.distBottom ?? 0) * scale;
-  let pageX = x;
-  let pageY = y;
 
   // Overlap avoidance, kept consistent with the image path. Shapes carry no
   // parsed allowOverlap field; the spec default is true (§20.4.2.3), so
   // same-paragraph floats never displace each other and a lone shape is a no-op
   // here — but running it keeps multi-float behavior identical to images.
-  const resolved = resolveFloatOverlap(
-    pageX, pageY, w, h, dl, dr, dt, db, paraId, /* allowOverlap */ true,
-    state.pageWidth * state.scale, state.floats,
-  );
-  pageX = resolved.x;
-  pageY = resolved.y;
-
-  const rect: FloatRect = {
+  pushFloatRect(state, {
+    x, y, w, h, dl, dr, dt, db,
     mode,
-    imageKey: '',
-    imageX: pageX,
-    imageY: pageY,
-    imageW: w,
-    imageH: h,
-    xLeft: pageX - dl,
-    xRight: pageX + w + dr,
-    yTop: pageY - dt,
-    yBottom: pageY + h + db,
     side: shape.wrapSide ?? 'bothSides',
-    distLeft: dl,
-    distRight: dr,
-    distTop: dt,
-    distBottom: db,
-    paraId,
+    imageKey: '',
     // The shape is painted by renderAnchorShape, not by the deferred image-draw
     // path; mark it drawn so that path skips it (it has no bitmap to draw).
     drawn: true,
-  };
-  state.floats.push(rect);
+    paraId,
+    avoidOverlap: true,
+    allowOverlap: true,
+  });
 }
 
 // ===== Table rendering =====
@@ -5998,7 +6022,7 @@ function drawTableRows(
           drawH = 0;
           for (let rj = ri; rj <= endRi; rj++) drawH += rowHeights[rj];
         }
-        // ECMA-376 §17.4.34/§17.4.39: classify which physical edges of this cell
+        // ECMA-376 §17.4.38/§17.4.39: classify which physical edges of this cell
         // are the table's OUTER edges (vs. interior gridlines) from its grid
         // position so drawCellBorders can pick table.top/bottom/left/right vs.
         // table.insideH/insideV. `leftCol`/`rightCol` are the LOGICAL columns
@@ -6368,7 +6392,7 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
 
 /** Which grid edges of the table this cell touches, so {@link drawCellBorders}
  *  can pick the OUTER (table.top/bottom/left/right) vs the INNER
- *  (table.insideH/insideV) spec per physical edge (ECMA-376 §17.4.34/§17.4.39). */
+ *  (table.insideH/insideV) spec per physical edge (ECMA-376 §17.4.38/§17.4.39). */
 interface CellEdgeFlags {
   topRow: boolean;     // cell sits in the table's first row → its top is the table outer top
   bottomRow: boolean;  // cell's bottom edge is the table outer bottom (vMerge-span aware)
@@ -6394,22 +6418,34 @@ function drawCellBorders(
   mirror = false,
   dpr = 1,
 ): void {
-  // ECMA-376 §17.4.34/§17.4.39: a cell's TOP/BOTTOM use the table OUTER border
+  // ECMA-376 §17.4.38/§17.4.39: a cell's TOP/BOTTOM use the table OUTER border
   // (top/bottom) only on the table's outermost rows; an interior horizontal
   // gridline uses table.insideH. Likewise LEFT/RIGHT use the outer left/right
   // only on the outermost columns, interior verticals use table.insideV.
-  // Per-edge precedence (§17.4 + §17.7.6): the cell's own explicit edge (which
-  // already folds the conditional firstRow/lastRow/band tcBorders at parse time)
-  // wins; for an interior edge the cell's insideH/insideV is consulted before the
-  // table inside spec; the table outer spec is the last resort on outer edges.
+  // Per-edge precedence (§17.4.38/§17.4.39, the tblBorders presence cascade):
+  // the cell's own explicit edge (which already folds the conditional
+  // firstRow/lastRow/band tcBorders at parse time) wins; for an interior edge
+  // the cell's insideH/insideV is consulted before the table inside spec; the
+  // table outer spec is the last resort on outer edges.
   //
-  // TODO(border-conflict §17.4.39): true adjacent-cell border conflict
-  // resolution (larger width / style-rank wins, ties broken by color, then by
-  // top-then-left ownership) is NOT implemented. Each cell paints its own four
-  // edges, so an interior gridline is drawn once by each of the two adjacent
-  // cells; for matching specs this is visually identical, and `nil` on either
-  // side still suppresses that side's stroke. When the two sides disagree the
-  // later-painted cell currently wins rather than the spec's max-width rule.
+  // TODO(border-conflict §17.4.66): true adjacent-cell border conflict
+  // resolution is NOT implemented. Per §17.4.66 (tcBorders), when cell spacing
+  // is zero and the two cells sharing an interior gridline disagree, Word picks
+  // the winner by border WEIGHT, not by sz/width:
+  //   weight = (number of lines in the border) × (border style's number)
+  // where "border style's number" is the spec's CT_Border style rank table
+  // (single=1, thick=2, double=3, dotted=4, dashed=5, …, inset=25). The larger
+  // weight wins. Ties are broken, in order:
+  //   1. a style precedence list (single > thick > double > dotted > … > inset);
+  //   2. luminance, darker wins, via three formulas applied in sequence —
+  //      R+B+2G, then B+2G, then G (smaller value wins);
+  //   3. reading order: the first border in reading order is displayed.
+  // (There is no "top-then-left ownership" rule — that was a CSS-ism, not spec.)
+  // Today each cell paints its own four edges, so an interior gridline is drawn
+  // once by each of the two adjacent cells; for matching specs this is visually
+  // identical, and `nil` on either side still suppresses that side's stroke.
+  // When the two sides disagree the later-painted cell currently wins rather
+  // than the §17.4.66 weight rule above.
   const horiz = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
     paintable(own ?? (outer ? table.top : (cell.insideH ?? table.insideH)));
   const horizB = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
