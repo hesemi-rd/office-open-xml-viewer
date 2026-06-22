@@ -215,6 +215,21 @@ describe('frame geometry (§17.3.1.11 / §22.9.2.20) — yAlign is vAnchor-band 
     expect(b.y).toBe(72 + (728 - 72 - 60) / 2);
   });
 
+  it('vAnchor="margin" + yAlign="center": ASYMMETRIC margins center in the margin band, NOT the page', () => {
+    // §22.9.2.20: with vAnchor="margin", yAlign="center" centers in the margin
+    // BAND [marginTop, pageH−marginBottom], which only equals the page centre
+    // when margins are symmetric. The symmetric cases above (marginTop=
+    // marginBottom=72) cannot distinguish "margin band centre" from "page
+    // centre"; this asymmetric case pins the band-relative behaviour.
+    const st = makeState({ marginTop: 40, marginBottom: 120 }); // band [40, 680], height 640
+    const fp = frame({ vAnchor: 'margin', yAlign: 'center', hRule: 'exact', h: 60 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    // band centre = marginTop + (pageH − marginTop − marginBottom − h)/2
+    //             = 40 + (800 − 40 − 120 − 60)/2 = 40 + 290 = 330
+    expect(b.y).toBe(40 + (800 - 40 - 120 - 60) / 2); // 330 — NOT page centre (800−60)/2 = 370
+    expect(b.y).not.toBe((800 - 60) / 2); // explicit: this is the band centre, not the page centre
+  });
+
   it('vAnchor="margin" + yAlign="bottom" sits flush to the bottom margin', () => {
     const st = makeState();
     const fp = frame({ vAnchor: 'margin', yAlign: 'bottom', hRule: 'exact', h: 60 });

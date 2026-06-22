@@ -169,6 +169,20 @@ describe('floating table geometry (§17.4.57) — vertical placement', () => {
     expect(b.y).toBe(72 + (728 - 72 - 60) / 2);
   });
 
+  it('vertAnchor="margin" + tblpYSpec="center": ASYMMETRIC margins center in the margin band, NOT the page', () => {
+    // §22.9.2.20: tblpYSpec="center" centers in the margin BAND
+    // [marginTop, pageH−marginBottom], which only equals the page centre when
+    // margins are symmetric. The symmetric case above (marginTop=marginBottom=72)
+    // cannot distinguish "margin band centre" from "page centre"; this asymmetric
+    // case pins the band-relative behaviour.
+    const st = makeState({ marginTop: 40, marginBottom: 120 }); // band [40, 680], height 640
+    const b = box(tblp({ vertAnchor: 'margin', tblpY: 999, tblpYSpec: 'center' }), st, 300, 150, 60);
+    // band centre = marginTop + (pageH − marginTop − marginBottom − h)/2
+    //             = 40 + (800 − 40 − 120 − 60)/2 = 40 + 290 = 330
+    expect(b.y).toBe(40 + (800 - 40 - 120 - 60) / 2); // 330 — NOT page centre (800−60)/2 = 370
+    expect(b.y).not.toBe((800 - 60) / 2); // explicit: this is the band centre, not the page centre
+  });
+
   // §22.9.2.20: ST_YAlign positions relative to the ANCHOR OBJECT (the vertAnchor
   // band), NOT the physical page. For vertAnchor="page" the band is [0, pageH], so
   // center/bottom must NOT carry a margin offset (the pre-band code subtracted
