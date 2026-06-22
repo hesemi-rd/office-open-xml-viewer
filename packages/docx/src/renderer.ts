@@ -5818,11 +5818,19 @@ function renderCell(
   }
 
   if (clipExact) {
-    // ECMA-376 §17.4.81: clip content to the exact row box so taller content
-    // does not bleed into adjacent rows (Word's behavior for hRule="exact").
+    // ECMA-376 §17.4.80 (trHeight) + §17.18.37 (ST_HeightRule "exact"):
+    // the row height is exactly @val and content taller than that must not
+    // bleed into adjacent rows. The clip is therefore **Y-axis only** — the
+    // spec puts no horizontal bound on cell content. Clipping the full
+    // (x, y, w, h) bbox half-masks a 0.5 pt nested-table border that lands
+    // exactly on the cell's left/right edge (e.g. outer tcMar.left=0 +
+    // tblCellMar.left=0 + inner tblInd=0): half the stroke straddles the clip
+    // boundary and visibly disappears. Clipping by Y alone preserves the
+    // anti-bleed intent without erasing borders that legitimately sit on the
+    // cell edge.
     ctx.save();
     ctx.beginPath();
-    ctx.rect(x, y, w, h);
+    ctx.rect(0, y, ctx.canvas.width, h);
     ctx.clip();
     renderCellContent(cell.content, cellState);
     ctx.restore();
