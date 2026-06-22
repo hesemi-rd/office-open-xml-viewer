@@ -371,13 +371,19 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   // same decode pipeline (keyed by its zip path) so the marker draw site finds
   // a decoded bitmap.
   const recordPara = (para: DocParagraph) => {
-    const pb = para.numbering?.picBulletImagePath;
-    if (pb) {
+    const num = para.numbering;
+    const pb = num?.picBulletImagePath;
+    if (pb && num) {
+      // Same §17.9.20 size resolution the draw site uses (picBulletSizePt): the
+      // extent if present, else the resolved marker font size. Keeping the two in
+      // lock-step matters for WMF/EMF bullets, where this size drives raster
+      // sharpness — a 0 here would rasterize a vector bullet at zero size.
+      const size = picBulletSizePt(num, para);
       record({
         imagePath: pb,
-        mimeType: para.numbering!.picBulletMimeType ?? '',
-        widthPt: para.numbering!.picBulletWidthPt ?? 0,
-        heightPt: para.numbering!.picBulletHeightPt ?? 0,
+        mimeType: num.picBulletMimeType ?? '',
+        widthPt: size.w,
+        heightPt: size.h,
       });
     }
   };
@@ -3326,9 +3332,11 @@ function renderParagraph(
     if (pbPath) {
       const bmp = state.images.get(imageKey(pbPath));
       if (bmp) {
-        const w = (para.numbering.picBulletWidthPt ?? 9) * scale;
-        const h = (para.numbering.picBulletHeightPt ?? 9) * scale;
-        picBullet = { bmp, w, h };
+        // §17.9.20 — size from the bullet drawing's extent, else the resolved
+        // marker font size (picBulletSizePt is the single source of truth shared
+        // with the collect side; no magic pt default).
+        const size = picBulletSizePt(para.numbering, para);
+        picBullet = { bmp, w: size.w * scale, h: size.h * scale };
       }
     }
     if (suff !== 'tab') {
@@ -6872,6 +6880,22 @@ function getDefaultFontSize(para: DocParagraph): number {
   }
   if (typeof para.defaultFontSize === 'number') return para.defaultFontSize;
   return 10; // pt fallback
+}
+
+/** ECMA-376 §17.9.20 picture-bullet marker size in pt. The size comes from the
+ *  `<w:numPicBullet>` drawing's own extent (parsed into
+ *  `picBulletWidthPt`/`picBulletHeightPt`). The spec defines NO fallback
+ *  dimension, so when the extent is absent the marker is sized to the paragraph's
+ *  resolved marker font size — one source of truth shared by the collect side
+ *  (WMF raster sharpness) and the draw site (the drawImage box), keeping them in
+ *  lock-step. Replaces the former mismatched `?? 0` (collect) / `?? 9` (draw)
+ *  defaults; `9` was a magic pt value not present in §17.9.20. */
+function picBulletSizePt(num: NumberingInfo, para: DocParagraph): { w: number; h: number } {
+  const fallback = getDefaultFontSize(para);
+  return {
+    w: num.picBulletWidthPt ?? fallback,
+    h: num.picBulletHeightPt ?? fallback,
+  };
 }
 
 /** Width (px) of the paragraph-mark "em" — the smallest horizontal gap a

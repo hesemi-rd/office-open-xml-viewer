@@ -1430,11 +1430,15 @@ fn parse_paragraph_cond(
                 pic_bullet_width_pt,
                 pic_bullet_height_pt,
             ) = match pic_bullet {
+                // width_pt / height_pt are already Option<f64> (None when the VML
+                // shape style omits the dimension — §17.9.20 defines no default
+                // size, so the renderer resolves the absence against the marker
+                // font), so they flow through unchanged.
                 Some(pb) => (
                     Some(pb.image_path),
                     Some(pb.mime_type),
-                    Some(pb.width_pt),
-                    Some(pb.height_pt),
+                    pb.width_pt,
+                    pb.height_pt,
                 ),
                 None => (None, None, None, None),
             };

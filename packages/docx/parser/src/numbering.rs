@@ -74,11 +74,15 @@ pub struct PicBullet {
     pub image_path: String,
     /// MIME type derived from the part extension (e.g. `image/gif`).
     pub mime_type: String,
-    /// Marker width in pt, from the `<v:shape style="width:..">` (default 9pt
-    /// when the style omits a width — the common Word default for bullet shapes).
-    pub width_pt: f64,
-    /// Marker height in pt, from the `<v:shape style="height:..">`.
-    pub height_pt: f64,
+    /// Marker width in pt, from the `<v:shape style="width:..">`. `None` when the
+    /// shape style omits a width — ECMA-376 §17.9.20 derives the picture-bullet
+    /// size from the drawing's own extent and defines no fallback dimension, so we
+    /// surface the absence and let the renderer fall back to the resolved marker
+    /// font size (its single source of truth) rather than inventing a magic pt.
+    pub width_pt: Option<f64>,
+    /// Marker height in pt, from the `<v:shape style="height:..">`. `None` ⇒ see
+    /// {@link PicBullet::width_pt}.
+    pub height_pt: Option<f64>,
 }
 
 impl Default for LevelDef {
@@ -151,16 +155,17 @@ impl NumberingMap {
             let Some(image_path) = media_map.get(rid).cloned() else {
                 continue;
             };
-            // `<v:shape style="width:9pt;height:9pt">` — VML CSS lengths. Word
-            // always emits explicit pt for bullet shapes; default to 9pt (Word's
-            // standard picture-bullet size) when a dimension is absent.
+            // `<v:shape style="width:9pt;height:9pt">` — VML CSS lengths. The
+            // dimension is left as `None` when the style omits it: §17.9.20 has no
+            // default picture-bullet size, so the renderer (not the parser)
+            // resolves the absence against the marker font size.
             let shape_style = pb_node
                 .descendants()
                 .find(|n| n.tag_name().name() == "shape")
                 .and_then(|n| n.attribute("style"))
                 .unwrap_or("");
-            let width_pt = vml_style_len(shape_style, "width").unwrap_or(9.0);
-            let height_pt = vml_style_len(shape_style, "height").unwrap_or(9.0);
+            let width_pt = vml_style_len(shape_style, "width");
+            let height_pt = vml_style_len(shape_style, "height");
             let mime_type = mime_from_ext(&image_path).to_string();
             pic_bullets.insert(
                 id,
@@ -456,8 +461,97 @@ mod tests {
         let pb = lvl.pic_bullet.as_ref().expect("picture bullet resolved");
         assert_eq!(pb.image_path, "word/media/image1.gif");
         assert_eq!(pb.mime_type, "image/gif");
-        assert!((pb.width_pt - 9.0).abs() < 1e-6);
-        assert!((pb.height_pt - 9.0).abs() < 1e-6);
+        assert!((pb.width_pt.expect("width from style") - 9.0).abs() < 1e-6);
+        assert!((pb.height_pt.expect("height from style") - 9.0).abs() < 1e-6);
+    }
+
+    /// §17.9.20 — when the `<v:shape>` style omits width/height, the size is left
+    /// as `None` (no magic 9pt default in the parser). The renderer falls back to
+    /// the resolved marker font size, so the parser must NOT invent a dimension.
+    #[test]
+    fn picture_bullet_without_shape_size_is_none() {
+        const R: &str =
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+        const V: &str = "xmlns:v=\"urn:schemas-microsoft-com:vml\"";
+        let media: HashMap<String, String> =
+            [("rId1".to_string(), "word/media/image1.png".to_string())]
+                .into_iter()
+                .collect();
+        let xml = format!(
+            r#"<w:numbering {W} {R} {V}>
+                 <w:numPicBullet w:numPicBulletId="0">
+                   <w:pict><v:shape id="x">
+                     <v:imagedata r:id="rId1"/>
+                   </v:shape></w:pict>
+                 </w:numPicBullet>
+                 <w:abstractNum w:abstractNumId="8">
+                   <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val=""/>
+                     <w:lvlPicBulletId w:val="0"/></w:lvl>
+                 </w:abstractNum>
+                 <w:num w:numId="3"><w:abstractNumId w:val="8"/></w:num>
+               </w:numbering>"#
+        );
+        let m = NumberingMap::parse(&xml, &media);
+        let pb = m
+            .get_level(3, 0)
+            .unwrap()
+            .pic_bullet
+            .as_ref()
+            .expect("picture bullet resolved");
+        assert_eq!(pb.image_path, "word/media/image1.png");
+        assert_eq!(pb.mime_type, "image/png");
+        assert_eq!(
+            pb.width_pt, None,
+            "no shape width ⇒ None (no magic default)"
+        );
+        assert_eq!(pb.height_pt, None);
+    }
+
+    /// §17.9.20 → §17.9.9 end-to-end resolution chain: a `<w:numPicBullet>` (id N)
+    /// whose `<v:imagedata r:id>` resolves through the numbering part's rels, then
+    /// a level's `<w:lvlPicBulletId w:val="N"/>` picks that bullet up. Confirms the
+    /// id wiring (not just a single happy-path size): a DIFFERENT id is rejected
+    /// and the matching id surfaces the right media path + size.
+    #[test]
+    fn lvl_pic_bullet_id_resolves_matching_num_pic_bullet() {
+        const R: &str =
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+        const V: &str = "xmlns:v=\"urn:schemas-microsoft-com:vml\"";
+        let media: HashMap<String, String> = [
+            ("rId7".to_string(), "word/media/bullet-a.png".to_string()),
+            ("rId8".to_string(), "word/media/bullet-b.gif".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let xml = format!(
+            r#"<w:numbering {W} {R} {V}>
+                 <w:numPicBullet w:numPicBulletId="1">
+                   <w:pict><v:shape style="width:12pt;height:6pt">
+                     <v:imagedata r:id="rId7"/></v:shape></w:pict>
+                 </w:numPicBullet>
+                 <w:numPicBullet w:numPicBulletId="2">
+                   <w:pict><v:shape style="width:8pt;height:8pt">
+                     <v:imagedata r:id="rId8"/></v:shape></w:pict>
+                 </w:numPicBullet>
+                 <w:abstractNum w:abstractNumId="4">
+                   <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val=""/>
+                     <w:lvlPicBulletId w:val="2"/></w:lvl>
+                 </w:abstractNum>
+                 <w:num w:numId="9"><w:abstractNumId w:val="4"/></w:num>
+               </w:numbering>"#
+        );
+        let m = NumberingMap::parse(&xml, &media);
+        let pb = m
+            .get_level(9, 0)
+            .unwrap()
+            .pic_bullet
+            .as_ref()
+            .expect("lvlPicBulletId=2 resolves to numPicBulletId=2");
+        // The level referenced id=2, so it must surface bullet-b (NOT bullet-a).
+        assert_eq!(pb.image_path, "word/media/bullet-b.gif");
+        assert_eq!(pb.mime_type, "image/gif");
+        assert!((pb.width_pt.unwrap() - 8.0).abs() < 1e-6);
+        assert!((pb.height_pt.unwrap() - 8.0).abs() < 1e-6);
     }
 
     /// An unresolvable `r:id` (no matching rel) yields no picture bullet — the
