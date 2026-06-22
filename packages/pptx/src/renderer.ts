@@ -5,6 +5,7 @@ import type {
   PictureElement,
   MediaElement,
   TableElement,
+  TableCell,
   Fill,
   TileInfo,
   Stroke,
@@ -3809,101 +3810,105 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
     for (let ri = 0; ri < el.rows.length; ri++) { rowTop[ri] = y; y += rowHeights[ri]; }
   }
 
+  // ECMA-376 border-collapse: paint every cell's fill + text body FIRST, then
+  // every cell's borders, so a neighbouring cell's background fill can never
+  // overpaint the half of a shared gridline an adjacent cell already drew.
+  // (Mirrors the docx table renderer's two-pass order.) Collect each
+  // non-continuation cell's paint box once; rowSpan/gridSpan and the RTL
+  // coordinate flip are already baked into colX/rowY/cellW/cellH, so both passes
+  // replay identical geometry.
+  const jobs: Array<{ cell: TableCell; colX: number; rowY: number; cellW: number; cellH: number }> = [];
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
     const rowY = rowTop[ri];
-
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
-
-      // Merged cells that are continuations: skip drawing
-      if (cell.hMerge || cell.vMerge) {
-        continue;
-      }
-
-      // Cell size: span multiple columns/rows
+      // Merged-cell continuations are drawn by their anchor cell.
+      if (cell.hMerge || cell.vMerge) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       let cellH = 0;
-      for (let span = 0; span < (cell.rowSpan || 1); span++) {
-        cellH += rowHeights[ri + span] ?? 0;
-      }
+      for (let span = 0; span < (cell.rowSpan || 1); span++) cellH += rowHeights[ri + span] ?? 0;
       const colX = spannedLeft(ci, cell.gridSpan || 1);
-
-      // Fill
-      const fillColor = resolveFill(cell.fill);
-      if (fillColor) {
-        ctx.fillStyle = fillColor;
-        ctx.fillRect(colX, rowY, cellW, cellH);
-      }
-
-      // Text body — default run colour comes from the table style's tcTxStyle
-      // (e.g. white header text on an accent fill); a run's explicit colour wins.
-      if (cell.textBody) {
-        const cellDefaultColor = cell.textColor ? hexToRgba(cell.textColor) : null;
-        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, cellDefaultColor, 0, false, false, '#000000', slideNumber, rc);
-      }
-
-      // Borders
-      // Crispness nudge (see crispOffset): an axis-aligned thin grid line whose
-      // device-pixel width is odd straddles two device rows/cols on a DPR=1
-      // display (each ~50% ink → blurry). Snapping the cell edge perpendicular
-      // to the line onto the nearest crisp device position centers an odd-width
-      // stroke on one device row/col → crisp. `applyStroke` sets ctx.lineWidth
-      // to the logical width, so we read it back to pick the right offset, and
-      // the snap delta is derived from the edge's own coordinate (fractional-
-      // safe). Horizontal edges (T/B) shift Y from their y; vertical edges (L/R)
-      // shift X from their x. Diagonals can't be pixel-aligned, so untouched.
-      const dpr = rc.dpr;
-      ctx.save();
-      if (cell.borderT) {
-        applyStroke(ctx, cell.borderT, scale);
-        const dy = crispOffset(rowY, ctx.lineWidth, dpr);
-        ctx.beginPath();
-        ctx.moveTo(colX, rowY + dy);
-        ctx.lineTo(colX + cellW, rowY + dy);
-        ctx.stroke();
-      }
-      if (cell.borderB) {
-        applyStroke(ctx, cell.borderB, scale);
-        const dy = crispOffset(rowY + cellH, ctx.lineWidth, dpr);
-        ctx.beginPath();
-        ctx.moveTo(colX, rowY + cellH + dy);
-        ctx.lineTo(colX + cellW, rowY + cellH + dy);
-        ctx.stroke();
-      }
-      if (cell.borderL) {
-        applyStroke(ctx, cell.borderL, scale);
-        const dx = crispOffset(colX, ctx.lineWidth, dpr);
-        ctx.beginPath();
-        ctx.moveTo(colX + dx, rowY);
-        ctx.lineTo(colX + dx, rowY + cellH);
-        ctx.stroke();
-      }
-      if (cell.borderR) {
-        applyStroke(ctx, cell.borderR, scale);
-        const dx = crispOffset(colX + cellW, ctx.lineWidth, dpr);
-        ctx.beginPath();
-        ctx.moveTo(colX + cellW + dx, rowY);
-        ctx.lineTo(colX + cellW + dx, rowY + cellH);
-        ctx.stroke();
-      }
-      // Diagonal borders: top-left→bottom-right and bottom-left→top-right
-      if (cell.diagonalTL) {
-        applyStroke(ctx, cell.diagonalTL, scale);
-        ctx.beginPath();
-        ctx.moveTo(colX, rowY);
-        ctx.lineTo(colX + cellW, rowY + cellH);
-        ctx.stroke();
-      }
-      if (cell.diagonalTR) {
-        applyStroke(ctx, cell.diagonalTR, scale);
-        ctx.beginPath();
-        ctx.moveTo(colX + cellW, rowY);
-        ctx.lineTo(colX, rowY + cellH);
-        ctx.stroke();
-      }
-      ctx.restore();
+      jobs.push({ cell, colX, rowY, cellW, cellH });
     }
+  }
+
+  // Pass 1: fills + text bodies.
+  for (const { cell, colX, rowY, cellW, cellH } of jobs) {
+    const fillColor = resolveFill(cell.fill);
+    if (fillColor) {
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(colX, rowY, cellW, cellH);
+    }
+    // Text body — default run colour comes from the table style's tcTxStyle
+    // (e.g. white header text on an accent fill); a run's explicit colour wins.
+    if (cell.textBody) {
+      const cellDefaultColor = cell.textColor ? hexToRgba(cell.textColor) : null;
+      renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, cellDefaultColor, 0, false, false, '#000000', slideNumber, rc);
+    }
+  }
+
+  // Pass 2: borders, painted on top of every fill.
+  // Crispness nudge (see crispOffset): an axis-aligned thin grid line whose
+  // device-pixel width is odd straddles two device rows/cols on a DPR=1 display
+  // (each ~50% ink → blurry). Snapping the cell edge perpendicular to the line
+  // onto the nearest crisp device position centers an odd-width stroke on one
+  // device row/col → crisp. `applyStroke` sets ctx.lineWidth to the logical
+  // width, so we read it back to pick the right offset, and the snap delta is
+  // derived from the edge's own coordinate (fractional-safe). Horizontal edges
+  // (T/B) shift Y from their y; vertical edges (L/R) shift X from their x.
+  // Diagonals can't be pixel-aligned, so untouched.
+  const dpr = rc.dpr;
+  for (const { cell, colX, rowY, cellW, cellH } of jobs) {
+    ctx.save();
+    if (cell.borderT) {
+      applyStroke(ctx, cell.borderT, scale);
+      const dy = crispOffset(rowY, ctx.lineWidth, dpr);
+      ctx.beginPath();
+      ctx.moveTo(colX, rowY + dy);
+      ctx.lineTo(colX + cellW, rowY + dy);
+      ctx.stroke();
+    }
+    if (cell.borderB) {
+      applyStroke(ctx, cell.borderB, scale);
+      const dy = crispOffset(rowY + cellH, ctx.lineWidth, dpr);
+      ctx.beginPath();
+      ctx.moveTo(colX, rowY + cellH + dy);
+      ctx.lineTo(colX + cellW, rowY + cellH + dy);
+      ctx.stroke();
+    }
+    if (cell.borderL) {
+      applyStroke(ctx, cell.borderL, scale);
+      const dx = crispOffset(colX, ctx.lineWidth, dpr);
+      ctx.beginPath();
+      ctx.moveTo(colX + dx, rowY);
+      ctx.lineTo(colX + dx, rowY + cellH);
+      ctx.stroke();
+    }
+    if (cell.borderR) {
+      applyStroke(ctx, cell.borderR, scale);
+      const dx = crispOffset(colX + cellW, ctx.lineWidth, dpr);
+      ctx.beginPath();
+      ctx.moveTo(colX + cellW + dx, rowY);
+      ctx.lineTo(colX + cellW + dx, rowY + cellH);
+      ctx.stroke();
+    }
+    // Diagonal borders: top-left→bottom-right and bottom-left→top-right
+    if (cell.diagonalTL) {
+      applyStroke(ctx, cell.diagonalTL, scale);
+      ctx.beginPath();
+      ctx.moveTo(colX, rowY);
+      ctx.lineTo(colX + cellW, rowY + cellH);
+      ctx.stroke();
+    }
+    if (cell.diagonalTR) {
+      applyStroke(ctx, cell.diagonalTR, scale);
+      ctx.beginPath();
+      ctx.moveTo(colX + cellW, rowY);
+      ctx.lineTo(colX, rowY + cellH);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 }
 
