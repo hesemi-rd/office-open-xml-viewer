@@ -231,6 +231,17 @@ pub struct TableStyleDef {
     /// `StyleMap::styles`; this field carries the table style's pPr for the
     /// conditional-formatting resolution path used by `resolve_table_cond`.
     pub para: Option<ParaFmt>,
+    /// ECMA-376 §17.7.6.7 `<w:tblStyleRowBandSize>`: number of rows per
+    /// horizontal band (band1Horz/band2Horz alternate every N rows). `None`
+    /// means the element was omitted; callers treat that as the spec default 1.
+    /// Kept as `Option` so a derived style that omits it inherits the base
+    /// style's value through `resolve_table_style` instead of resetting to 1.
+    pub row_band_size: Option<usize>,
+    /// ECMA-376 §17.7.6.5 `<w:tblStyleColBandSize>`: number of columns per
+    /// vertical band (band1Vert/band2Vert alternate every N columns). `None` =
+    /// omitted; callers treat that as the spec default 1. See `row_band_size`
+    /// for why this is an `Option`.
+    pub col_band_size: Option<usize>,
     /// keyed by w:tblStylePr w:type (firstRow, band1Horz, band2Horz, …).
     pub cond: HashMap<String, CondFmt>,
 }
@@ -377,6 +388,14 @@ impl StyleMap {
             if def.cell_valign.is_some() {
                 out.cell_valign = def.cell_valign.clone();
             }
+            // §17.7.6.5 / §17.7.6.7: band widths inherit through basedOn — a
+            // derived style that omits them (None) keeps the base value.
+            if def.row_band_size.is_some() {
+                out.row_band_size = def.row_band_size;
+            }
+            if def.col_band_size.is_some() {
+                out.col_band_size = def.col_band_size;
+            }
             // §17.7.6: a derived table style's whole-table rPr/pPr layers ON TOP
             // of the base style's. We fold each level into a single accumulated
             // RunFmt/ParaFmt with the standard merge semantics (later wins).
@@ -487,10 +506,11 @@ impl StyleMap {
         }
     }
 
-    /// Resolve a character style (rStyle) chain WITHOUT prepending docDefaults
-    /// or the default paragraph style. ECMA-376 §17.7.5: rStyle layers ON TOP
-    /// of the paragraph's already-resolved run formatting — pulling docDefaults
-    /// in here would overwrite values the paragraph style legitimately set
+    /// Resolve a character style (rStyle, §17.3.2.29) chain WITHOUT prepending
+    /// docDefaults or the default paragraph style. ECMA-376 §17.7.2 (Style
+    /// Hierarchy) layers character styles ON TOP of the paragraph's
+    /// already-resolved run formatting — pulling docDefaults in here would
+    /// overwrite values the paragraph style legitimately set
     /// (e.g. Normal's Meiryo UI 9pt being clobbered by docDefault Calibri 11pt
     /// for a run that only says `<w:rStyle w:val="PlaceholderText"/>`).
     pub fn resolve_run_style(&self, style_id: &str) -> RunFmt {
@@ -1160,6 +1180,18 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         if let Some(borders) = child_w(tbl_pr, "tblBorders") {
             def.borders = parse_raw_tbl_borders(borders);
         }
+        // ECMA-376 §17.7.6.7 / §17.7.6.5: row/column band widths. A value of 0
+        // would make banding ill-defined (division by zero in the parity walk),
+        // so clamp to at least 1. Stored as Some(..) only when present so an
+        // omitting derived style inherits the base via resolve_table_style.
+        def.row_band_size = child_w(tbl_pr, "tblStyleRowBandSize")
+            .and_then(|n| attr_w(n, "val"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.max(1));
+        def.col_band_size = child_w(tbl_pr, "tblStyleColBandSize")
+            .and_then(|n| attr_w(n, "val"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.max(1));
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
