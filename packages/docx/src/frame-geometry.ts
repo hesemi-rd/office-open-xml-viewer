@@ -62,23 +62,38 @@ export function frameXContainer(hAnchor: string, state: RenderState): { left: nu
 }
 
 /**
- * Vertical container origin for a frame's vAnchor (ECMA-376 §17.3.1.11 /
- * §17.18.100). `paraTop` is the anchor paragraph's text-area top (canvas px).
- *   - "text"   → the paragraph top (y offsets/relative positions are measured
- *                from where the frame paragraph sits in the flow).
- *   - "margin" → the page top content margin.
- *   - "page"   → the physical page top.
+ * Vertical container band for a frame's vAnchor (ECMA-376 §17.3.1.11 /
+ * §17.18.100). Symmetric with {@link frameXContainer}: ST_YAlign positions the
+ * frame relative to the ANCHOR OBJECT (this band), not the physical page
+ * (§22.9.2.20: "this relative position is specified relative to the vertical
+ * anchor"). All values in canvas px (state.pageH is already px; margins are pt
+ * and scaled here). `paraTop` is the anchor paragraph's text-area top (px) and
+ * `contentH` its frame-content height (px), used only for the "text" band end.
+ *   - "page"   → [0, pageH]: the physical page edges (§17.18.100 page = "the
+ *                location of the edge of the page").
+ *   - "margin" → [marginTop, pageH−marginBottom]: the text margins (§17.18.100
+ *                margin = "the location of the text margin").
+ *   - "text"   → [paraTop, paraTop+contentH]: the anchor paragraph's text
+ *                extents (§17.18.100 text = "the top edge of the text in the
+ *                anchor paragraph"). Relative positioning (yAlign) is not
+ *                allowed for "text" (§17.3.1.11 yAlign), so only `start` is ever
+ *                consumed (as the base for the absolute y offset).
  */
-export function frameYContainer(vAnchor: string, paraTop: number, state: RenderState): number {
+export function frameYContainer(
+  vAnchor: string,
+  paraTop: number,
+  contentH: number,
+  state: RenderState,
+): { start: number; end: number } {
   const sc = state.scale;
   switch (vAnchor) {
     case 'margin':
-      return state.marginTop * sc;
+      return { start: state.marginTop * sc, end: state.pageH - state.marginBottom * sc };
     case 'page':
-      return 0;
+      return { start: 0, end: state.pageH };
     case 'text':
     default:
-      return paraTop;
+      return { start: paraTop, end: paraTop + contentH };
   }
 }
 
@@ -114,31 +129,32 @@ export function resolveAlignedPosH(
 /**
  * Resolve a vertical aligned position (canvas px) for a frame (yAlign,
  * §17.3.1.11) or a floating table (tblpYSpec, §17.4.57). Both use the same
- * ST_YAlign vocabulary, measured against the page box (not the band) per spec:
- *   center           → box centred between the top/bottom content margins
- *   bottom / outside  → box flush to the bottom content margin
- *   top / inside / inline / * → box at the vAnchor origin `vy` (the default)
+ * ST_YAlign vocabulary, measured against the vAnchor BAND `[band.start,
+ * band.end]` (the anchor object, §22.9.2.20) — symmetric with
+ * {@link resolveAlignedPosH}:
+ *   center           → box centred within the band
+ *   bottom / outside  → box flush to the band's end (bottom) edge
+ *   top / inside / inline / * → box flush to the band's start (top) edge (default)
  * Callers gate this on vAnchor!=='text' (relative vertical positioning is not
- * allowed there). Shared by {@link computeFrameBox} and computeFloatTableBox.
+ * allowed there, §17.3.1.11 yAlign). Shared by {@link computeFrameBox} and
+ * computeFloatTableBox.
  */
 export function resolveAlignedPosV(
   spec: string,
-  vy: number,
+  band: { start: number; end: number },
   size: number,
-  state: RenderState,
 ): number {
-  const sc = state.scale;
   switch (spec) {
     case 'center':
-      return vy + (state.pageH - size) / 2 - state.marginTop * sc;
+      return band.start + (band.end - band.start - size) / 2;
     case 'bottom':
     case 'outside':
-      return state.pageH - state.marginBottom * sc - size;
+      return band.end - size;
     case 'top':
     case 'inside':
     case 'inline':
     default:
-      return vy;
+      return band.start;
   }
 }
 
@@ -162,7 +178,10 @@ export function computeFrameBox(
   const isDropCap = fp.dropCap === 'drop' || fp.dropCap === 'margin';
 
   const hx = frameXContainer(fp.hAnchor, state);
-  const vy = frameYContainer(fp.vAnchor, paraTop, state);
+  // Vertical band of the vAnchor (the "anchor object", §22.9.2.20). The "text"
+  // band end uses the frame content height; yAlign is gated out for "text" so
+  // only band.start (= paraTop) is consumed there.
+  const vBand = frameYContainer(fp.vAnchor, paraTop, contentH, state);
 
   // Frame width: explicit `w` (exact) else natural content width (§17.3.1.11 w).
   const frameW = fp.w != null ? fp.w * sc : contentW;
@@ -207,11 +226,12 @@ export function computeFrameBox(
   // §17.3.1.11 yAlign), else absolute y offset from the vAnchor edge.
   let frameY: number;
   if (isDropCap) {
-    frameY = vy;
+    frameY = vBand.start;
   } else if (fp.yAlign && fp.vAnchor !== 'text') {
-    frameY = resolveAlignedPosV(fp.yAlign, vy, frameH, state);
+    frameY = resolveAlignedPosV(fp.yAlign, vBand, frameH);
   } else {
-    frameY = vy + (fp.y != null ? fp.y * sc : 0);
+    // §17.3.1.11 y: absolute signed offset from the vAnchor band start.
+    frameY = vBand.start + (fp.y != null ? fp.y * sc : 0);
   }
 
   // Exclusion padding: hSpace L/R applies only with wrap="around" (§17.3.1.11
