@@ -175,6 +175,9 @@ export {
   pptxDashArray,
   type RelativeDashPattern,
 } from './draw/dash';
+// Shared `double` border rail geometry (§17.18.2 / §18.18.3): floored-thirds
+// device-pixel rail/gap/rail bands + a fill-based painter.
+export { doubleRailGeometry, fillDoubleBorder } from './draw/double-border';
 export {
   WorkerBridge,
   type WorkerLike,

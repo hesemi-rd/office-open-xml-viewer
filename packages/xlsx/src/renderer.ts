@@ -3554,6 +3554,13 @@ function renderBorder(
       continue;
     }
     if (edge.style === 'double' && kind !== 'd') {
+      // NB: core's `fillDoubleBorder` (used by docx) is intentionally NOT used
+      // here. Excel's double is two symmetric 1px strokes at ±1px with corner
+      // extension/trim so a double BOX closes cleanly; the core fill helper's
+      // floored-thirds band has a +0.5-device centring bias and no corner
+      // handling, which measured ~0.3% further from the Excel references
+      // (sample-11) when trialled. These are different conventions, not
+      // duplicated math — keep the Excel-faithful stroke model.
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
       ctx.setLineDash([]);

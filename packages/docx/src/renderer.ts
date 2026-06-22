@@ -39,6 +39,7 @@ import {
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
   docxBorderDashArray,
+  fillDoubleBorder,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -5910,25 +5911,6 @@ export function borderDashPattern(style: string, lw: number): number[] {
   return docxBorderDashArray(style, lw);
 }
 
-/**
- * Device-pixel band layout for an ECMA-376 §17.18.2 `double` border of stroked
- * width `lw` (px) on a `ctx.scale(dpr,dpr)`-d canvas: three bands — rail / gap /
- * rail, each ≈ lw/3 — but each FLOORED at one device pixel. The floor is what
- * stops a thin double (e.g. sz6 ≈ 0.75px) collapsing into a single line: with
- * `gapDev ≥ 1` the two rails are always separated by at least one device pixel,
- * and with `railDev ≥ 1` each rail always paints. For thick borders it reduces
- * to equal thirds. Exported for unit tests only — not part of the package API.
- */
-export function doubleRailGeometry(lw: number, dpr: number): {
-  railDev: number;
-  gapDev: number;
-  spanDev: number;
-} {
-  const railDev = Math.max(1, Math.round((lw * dpr) / 3));
-  const gapDev = Math.max(1, Math.round((lw * dpr) / 3));
-  return { railDev, gapDev, spanDev: 2 * railDev + gapDev };
-}
-
 function drawBorderLine(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x1: number, y1: number, x2: number, y2: number,
@@ -5941,33 +5923,12 @@ function drawBorderLine(
   const lw = Math.max(0.5, spec.width * scale);
 
   if (spec.style === 'double') {
-    // ECMA-376 §17.18.2 ST_Border "double": two parallel lines. The standard
-    // leaves the rail/gap PIXEL geometry to the implementation, so this matches
-    // Word — three bands across the nominal width (line / gap / line, each
-    // ≈ lw/3) — but with each band FLOORED at one device pixel so a thin double
-    // (e.g. sz6 ≈ 0.75px) never collapses into a single line. This is a
-    // rendering-legibility floor, NOT a content heuristic; for thick borders it
-    // reduces to the equal line/gap/line thirds.
-    //
-    // Drawn as device-pixel-aligned FILLS rather than two independently
-    // crisp-snapped strokes: `crispOffset` snaps each thin rail to the nearest
-    // device row on its own, which would pull two rails only ~1px apart back on
-    // top of each other and re-collapse the gap. Computing both rails from a
-    // single rounded band origin in device space keeps the rail/gap/rail bands
-    // whole device pixels, so the gap survives at any sz/scale/dpr.
-    const { railDev, gapDev, spanDev } = doubleRailGeometry(lw, dpr);
+    // ECMA-376 §17.18.2 ST_Border "double": two parallel lines with a gap,
+    // painted as device-pixel-aligned rail/gap/rail fills so a thin double
+    // (e.g. sz6 ≈ 0.75px) never collapses into one line. Shared with the other
+    // renderers via core's `fillDoubleBorder` (see core/draw/double-border.ts).
     ctx.fillStyle = ctx.strokeStyle;
-    const horizontal = y1 === y2;
-    if (horizontal) {
-      // Centre the band on the edge, snapped to a whole device row.
-      const startDev = Math.round(y1 * dpr - spanDev / 2);
-      ctx.fillRect(x1, startDev / dpr, x2 - x1, railDev / dpr);
-      ctx.fillRect(x1, (startDev + railDev + gapDev) / dpr, x2 - x1, railDev / dpr);
-    } else {
-      const startDev = Math.round(x1 * dpr - spanDev / 2);
-      ctx.fillRect(startDev / dpr, y1, railDev / dpr, y2 - y1);
-      ctx.fillRect((startDev + railDev + gapDev) / dpr, y1, railDev / dpr, y2 - y1);
-    }
+    fillDoubleBorder(ctx, x1, y1, x2, y2, lw, dpr);
     ctx.restore();
     return;
   }
