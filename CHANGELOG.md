@@ -4,6 +4,16 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.66.1 — 2026-06-23
+
+Patch. Hotfix for a 0.66.0 regression.
+
+- **docx:** a cover page's `nextPage` section break was read as continuous, so the
+  body flowed up and overprinted the title page (sample-5). Use the section
+  marker's own break kind again (§17.6.x). A continuous body after a title
+  section (sample-13) goes back to the next page until the cover's vAlign
+  page-fill is modelled.
+
 ## 0.66.0 — 2026-06-23
 
 Minor. A DOCX continuous-section newspaper-column overhaul plus EMF figure
