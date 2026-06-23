@@ -5705,14 +5705,18 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         })
         .collect();
 
-    // Check if data labels (showVal) are enabled — at chart level or in any series
+    // Data labels are on when `<c:dLbls>` enables `<c:showVal>` OR
+    // `<c:showPercent>` (ECMA-376 §21.2.2.189 / §21.2.2.187) — at chart level
+    // or in any series. Pie/doughnut decks commonly use showPercent only (e.g.
+    // sample-14 slide-7's "54%/27%/…" slice labels); the renderer draws the
+    // slice percentage for pie/doughnut and the raw value for bar/line.
     let show_data_labels = root
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
         .any(|d_lbls| {
             d_lbls.children().any(|c| {
                 c.is_element()
-                    && c.tag_name().name() == "showVal"
+                    && matches!(c.tag_name().name(), "showVal" | "showPercent")
                     && attr(&c, "val").as_deref() == Some("1")
             })
         });
@@ -9378,6 +9382,30 @@ mod tests {
             dpc,
             &vec![Some("0D9488".to_string()), Some("14B8A6".to_string())],
             "each slice takes its own <c:dPt><c:spPr> fill, not the series colour or the border"
+        );
+    }
+
+    #[test]
+    fn legacy_chart_data_labels_on_for_show_percent_only() {
+        // Pie/doughnut decks commonly enable `<c:showPercent>` with
+        // `<c:showVal val="0">` (ECMA-376 §21.2.2.187 / §21.2.2.189). The old
+        // check looked at `showVal` alone, so the "54%/27%/…" slice labels in
+        // sample-14 slide-7 never rendered. `show_data_labels` must be true
+        // when EITHER flag is set.
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <c:chart><c:plotArea><c:pieChart>
+  <c:dLbls><c:numFmt formatCode="0%" sourceLinked="0"/><c:showVal val="0"/><c:showPercent val="1"/><c:showCatName val="0"/></c:dLbls>
+  <c:ser>
+   <c:cat><c:strRef><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:strRef></c:cat>
+   <c:val><c:numRef><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>60</c:v></c:pt><c:pt idx="1"><c:v>40</c:v></c:pt></c:numCache></c:numRef></c:val>
+  </c:ser>
+ </c:pieChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+        let chart = parse_legacy_chart(xml, &HashMap::new()).expect("pie should parse");
+        assert!(
+            chart.show_data_labels,
+            "showPercent=1 must enable data labels even when showVal=0"
         );
     }
 
