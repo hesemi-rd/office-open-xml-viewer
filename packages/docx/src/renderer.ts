@@ -4534,18 +4534,39 @@ function splitByEastAsia(text: string): { text: string; ea: boolean }[] {
 }
 
 /**
- * Split a token into maximal runs of European digits (U+0030–0039) versus
- * everything else, so a date / number in an AN-classified Arabic run can be
+ * Split a token into maximal runs of European digits (U+0030–0039) versus the
+ * separators between them, so a date in an AN-classified Arabic run can be
  * reordered group-by-group by the per-line bidi pass (which works at segment
- * granularity). "28-02-2026" → ["28","-","02","-","2026"].
+ * granularity). "28-02-2026" → ["28","-","02","-","2026"], which the RTL reorder
+ * then lays out right-to-left as Word does.
+ *
+ * EXCEPTION — ECMA-376 relies on UAX#9 W4: a SINGLE common separator (CS) sitting
+ * between two numbers of the same type joins them into ONE number. So a decimal /
+ * thousands / time separator (`.`, `,`, `:`, `/`, NBSP) flanked by European
+ * digits on BOTH sides stays inside the digit group: "1234.56", "1,234.56" and
+ * "12:34" are one left-to-right number, not three reorderable pieces. (A European
+ * separator like `-` is ES, NOT CS, and W4's ES clause is EN-only — these run
+ * digits are AN — so a hyphen still splits, preserving the date case.) Splitting
+ * a decimal sent "1234.56" through the RTL segment reorder and drew it "56.1234".
  */
-function splitDigitGroups(text: string): string[] {
+export function splitDigitGroups(text: string): string[] {
+  const isEuDigit = (c: number) => c >= 0x30 && c <= 0x39;
+  // UAX#9 Common Separator (CS) subset that can join two adjacent numbers (W4).
+  // The last char is NBSP (U+00A0, e.g. a French thousands separator), itself CS;
+  // a plain space is WS and never reaches here (splitTextForLayout breaks on it).
+  const isJoiningCS = (ch: string) =>
+    ch === '.' || ch === ',' || ch === ':' || ch === '/' || ch === ' ';
   const out: string[] = [];
   let buf = '';
   let bufDigit: boolean | null = null;
-  for (const ch of text) {
-    const c = ch.charCodeAt(0);
-    const isDigit = c >= 0x30 && c <= 0x39;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    let isDigit = isEuDigit(ch.charCodeAt(0));
+    // W4: a single CS between two European digits is part of the number — keep it
+    // in the current digit group so the whole number stays one (LTR) segment.
+    if (!isDigit && bufDigit === true && isJoiningCS(ch) && isEuDigit(text.charCodeAt(i + 1))) {
+      isDigit = true;
+    }
     if (bufDigit === null || isDigit === bufDigit) {
       buf += ch;
     } else {
@@ -5717,7 +5738,6 @@ export function renderShapeText(
         // single-format path's per-block resolution but resolved per line.
         const lineText = lineToks.map((t) => t.text).join('');
         const baseRtl = resolveBaseDirection(undefined, lineText) === 'rtl';
-        ctx.direction = baseRtl ? 'rtl' : 'ltr';
         const edge = edgeFor(baseRtl);
         let tx = innerX;
         if (edge === 'center') {
@@ -5728,7 +5748,19 @@ export function renderShapeText(
         // Baseline uses the tallest font on the line (lineH / 1.2 × 0.85).
         const lineMaxFontPx = lineH / 1.2;
         const baseline = cursorY + lineMaxFontPx * 0.85;
-        for (const tok of lineToks) {
+        // UAX#9 visual reorder (rule L2), the SAME pass body paragraphs use. A
+        // rich line draws one token per fillText, so — unlike the single-fillText
+        // plain path below, where the canvas reorders internally — the tokens
+        // must be reordered HERE or RTL/mixed text draws in logical order (Word
+        // reverses it). Shape paragraphs carry no explicit rtl flag, so the base
+        // direction is the line's first-strong char; ctx.textAlign stays 'left'
+        // so tx is each token's left edge and ctx.direction is set per token to
+        // its resolved level (so a Latin/number island still shapes LTR).
+        const visual = computeLineVisualOrder(lineToks, baseRtl);
+        for (let vi = 0; vi < lineToks.length; vi++) {
+          const si = visual.order[vi];
+          const tok = lineToks[si];
+          ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
           const fontPx = tok.run.fontSizePt * scale;
           // Per-character font (ascii vs eastAsia axis, §17.3.2.26): a CJK token
           // draws with the eastAsia family, a Latin/digit token with the ascii

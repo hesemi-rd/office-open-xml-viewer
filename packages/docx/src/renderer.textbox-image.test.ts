@@ -356,5 +356,43 @@ describe('textbox rich text — per-run formatting', () => {
   });
 });
 
+// A rich (per-run) text box draws one token per fillText, so — unlike the
+// single-fillText plain path, where the canvas reorders internally — the tokens
+// must be reordered by the UAX#9 visual pass (rule L2, the same one body
+// paragraphs use). Without it, RTL/mixed text drew in logical order and Word's
+// word order was reversed (sample-8's yellow text box).
+describe('renderShapeText — rich-text RTL visual reordering (UAX#9 L2)', () => {
+  const run = (text: string): ShapeTextRun =>
+    ({ text, fontSizePt: 10 }) as unknown as ShapeTextRun;
+  // Drawn texts sorted by x = visual left-to-right reading order.
+  const visualOrder = (calls: { text: string; x: number }[]) =>
+    [...calls].sort((a, b) => a.x - b.x).map((c) => c.text.trim()).filter(Boolean);
+
+  it('reverses pure-RTL words into visual order', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    // Logical Arabic "one two three"; under an RTL base the visual L→R order is
+    // the reverse: three, two, one.
+    const shape = richTextbox([run('واحد اثنان ثلاثة')], 'right');
+    renderShapeText(shape, 0, 0, 300, 100, ctx, 1);
+    expect(visualOrder(fillTextCalls)).toEqual(['ثلاثة', 'اثنان', 'واحد']);
+  });
+
+  it('keeps a Latin/number island left-to-right inside an RTL line', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    // "value 2025 end" in Arabic with an embedded number: words reverse, but the
+    // number stays a single LTR island in the middle.
+    const shape = richTextbox([run('قيمة 2025 نهاية')], 'right');
+    renderShapeText(shape, 0, 0, 300, 100, ctx, 1);
+    expect(visualOrder(fillTextCalls)).toEqual(['نهاية', '2025', 'قيمة']);
+  });
+
+  it('leaves pure-LTR rich text in logical order', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const shape = richTextbox([run('alpha beta gamma')], 'left');
+    renderShapeText(shape, 0, 0, 300, 100, ctx, 1);
+    expect(visualOrder(fillTextCalls)).toEqual(['alpha', 'beta', 'gamma']);
+  });
+});
+
 // Local alias matching renderer.ts's internal DecodedImage union.
 type DecodedImage = ImageBitmap | HTMLImageElement;
