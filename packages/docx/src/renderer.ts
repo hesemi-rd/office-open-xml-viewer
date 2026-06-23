@@ -1207,9 +1207,7 @@ export function computePages(
       pages.push([]);
       y = 0;
       colIndex = 0;
-      // A fresh page: the section's columns span it from the content top. A
-      // section that reaches a new page is multi-page ⇒ fill the new page greedily
-      // (balancing only applies to a section that fits within its current page).
+      // A fresh page: the section's columns span it from the content top.
       colTopY = 0;
       maxColBottomY = 0;
       balanceColH = null;
@@ -1222,6 +1220,12 @@ export function computePages(
       measureState.floatParaSeq = 0;
       prescanFloatsFrom(pageStartIdx);
       startPageBookkeeping();
+      // ECMA-376 §17.6.4: re-evaluate balancing for the content continuing on this
+      // page. A multi-page continuous section fills its full pages greedily (both
+      // columns), but its LAST page (the remainder now fitting on one page) is
+      // balanced like a short section — so e.g. the tail of a 2-column body fills
+      // both columns instead of packing column 0.
+      setupBalancing(pageStartIdx);
     }
   };
   // Advance to the next newspaper column of the CURRENT page: reset the vertical
