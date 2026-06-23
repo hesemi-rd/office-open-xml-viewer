@@ -1055,26 +1055,6 @@ export function computePages(
     return computeColumns(section);
   };
 
-  // ECMA-376 §17.6.22 (ST_SectionMark): a section's `<w:type>` specifies how
-  // THAT section begins relative to the previous one (continuous ⇒ same page;
-  // nextPage/odd/even ⇒ a new page). The type lives on the section's OWN sectPr,
-  // which the parser stamps on the SectionBreak marker that ENDS that section.
-  // So the break at a boundary is governed by the UPCOMING section's type — the
-  // kind of the NEXT marker at/after `startIdx`, exactly like sectionColumnsFrom
-  // resolves the upcoming section's columns. (A marker's own kind is the start
-  // type of the section it closes — relevant at the PREVIOUS boundary, not this
-  // one. Using it here is an off-by-one that turns e.g. a title section's
-  // type="nextPage" into a spurious page break before a following
-  // type="continuous" body section.) The last section (no following marker) uses
-  // the body sectPr's start type; absent ⇒ "nextPage" (the spec default).
-  const sectionKindFrom = (startIdx: number): string => {
-    for (let j = startIdx; j < body.length; j++) {
-      const e = body[j];
-      if (e.type === 'sectionBreak') return e.kind ?? 'nextPage';
-    }
-    return section.sectionStart ?? 'nextPage';
-  };
-
   // The active section's column geometry. Reassigned (a) here for the first
   // section and (b) at every `SectionBreak` as the flow enters the next section.
   // `colIndex` tracks which column we are filling; `colX()`/`colW()` give its
@@ -1444,9 +1424,15 @@ export function computePages(
       // columns instead of every section inheriting the body-level section's.
       columns = sectionColumnsFrom(i + 1);
       colIndex = 0;
-      // The break is governed by the UPCOMING section's start type (§17.6.22),
-      // not this marker's own kind (the section it closes). See sectionKindFrom.
-      const upcomingKind = sectionKindFrom(i + 1);
+      // HOTFIX: use THIS marker's own kind for the break. The §17.6.22
+      // "upcoming-section" reading (sectionKindFrom) was correct for a continuous
+      // body that follows a title section (sample-13), but it wrongly turned a
+      // cover page's explicit `nextPage` break into a continuous one, flowing the
+      // body up onto the cover (sample-5 — the novel's text overprinted the title
+      // page). The marker's own kind is the safe, regression-free reading; the
+      // upcoming-section nuance needs the cover's page-fill (vAlign) modelled
+      // first. TODO: revisit with sample-5 + sample-13 both pinned.
+      const upcomingKind = el.kind ?? 'nextPage';
       if (upcomingKind === 'continuous') {
         // ECMA-376 §17.18.79 "continuous": NO page break — the next section's
         // content continues on the SAME page. It must start below the BOTTOM of
