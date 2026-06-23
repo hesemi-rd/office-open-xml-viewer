@@ -2221,15 +2221,18 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
  *   - layout === 'fixed': use the tblGrid widths verbatim (the historical
  *     behavior), then scale down proportionally if the grid total overflows the
  *     available content width.
- *   - layout absent or 'autofit' (the spec default): the tblGrid widths
- *     (§17.4.48) ARE the column widths, scaled to fit `contentWPt`, with each
- *     column's content min-width (§17.4.52 auto-fit grows a column too narrow
- *     for its longest token) the only thing that can raise it. Per-cell `tcW`
- *     (§17.4.71) is NOT applied here: Word bakes the resolved auto-fit widths
- *     back into the saved `<w:gridCol>`, so for a round-tripped file the grid is
- *     already the tcW-resolved layout (see the in-body comment for the full
- *     rationale + the sample-3 evidence + the tblW=pct limitation). Only a
- *     degenerate all-zero grid falls back to a tcW-preference distribution.
+ *   - autofit (the spec default) WITH a preferred table width (tblW=dxa/pct,
+ *     §17.4.63): the tblGrid widths (§17.4.48) ARE the column widths, scaled to
+ *     fit `contentWPt`, content min-width the only grower. Per-cell `tcW`
+ *     (§17.4.71) is NOT re-applied: Word bakes the resolved auto-fit widths back
+ *     into the saved `<w:gridCol>`, so for a round-tripped preferred-width table
+ *     the grid already is the tcW-resolved layout (sample-3).
+ *   - autofit with tblW=auto ("AutoFit to Contents"), or a degenerate all-zero
+ *     grid: per-cell `tcW` + content min drive the column sizes. The saved grid
+ *     is the style/default full text column, not a baked layout, so it must not
+ *     pin the width — otherwise the table spans the page and overrides its own
+ *     `w:jc` placement (sample-7's cover tables). See the in-body comment for the
+ *     full rationale and the commit-8a3d8a5 history.
  *
  * The returned widths sum to at most `contentWPt`. Both `renderTable` (which
  * then multiplies by the device scale) and `computeTableRowHeights` (which
@@ -2387,41 +2390,51 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
     return g;
   }
 
-  // Autofit (default). Use the `<w:tblGrid>` (§17.4.48 / gridCol §17.4.16) as
-  // the column widths, scaled to fit, with content min-widths the only grower.
+  // Autofit (default). The width source depends on the table's preferred width
+  // (ECMA-376 §17.4.63 `<w:tblW>` / §17.18.87 ST_TblWidth):
   //
-  // DELIBERATE DEVIATION from the literal autofit algorithm, to match Word's
-  // actual output: §17.4.16 (gridCol Note) and §17.4.52 (tblLayout) make a
-  // cell's preferred `<w:tcW>` (§17.4.71) an INPUT that can OVERRIDE the grid's
-  // initial widths. But Word does not ship the pre-autofit state — it BAKES the
-  // resolved autofit widths back into the saved `<w:gridCol>` values. So for a
-  // round-tripped Word file (every real-world docx) the grid already IS the
-  // tcW-resolved layout; re-applying `tcW` on top double-counts and diverges
-  // from the ground-truth PDF. sample-3's résumé grid is [2137, 222, 2430, 279,
-  // 2427, 279] twips (a deliberately narrow first content column), yet each
-  // row's single-column cells carry `tcW≈30%`; the old "tcW overrides grid"
-  // path equalized the columns to ~116 pt apiece, shifting every later column
-  // right (the 2nd heading moved ~11 pt past Word's x) and re-wrapping the
-  // description paragraphs past their divider rule. Trusting the grid reproduces
-  // Word exactly.
+  // (a) tblW=dxa or pct (a FIXED preferred width) ⇒ trust the `<w:tblGrid>`
+  //     (§17.4.48 / gridCol §17.4.16), scaled to fit, with content min-widths
+  //     the only grower. DELIBERATE DEVIATION from the literal autofit algorithm
+  //     to match Word: §17.4.16/§17.4.52 make a cell's `<w:tcW>` (§17.4.71) an
+  //     input that can override the grid's initial widths, but Word does not ship
+  //     the pre-autofit state — it BAKES the resolved autofit widths back into
+  //     the saved `<w:gridCol>`. So for a round-tripped, preferred-width Word
+  //     table the grid already IS the tcW-resolved layout; re-applying `tcW`
+  //     double-counts. sample-3's résumé grid is [2137, 222, 2430, 279, 2427,
+  //     279] twips (a deliberately narrow first content column), yet each row's
+  //     single-column cells carry `tcW≈30%`; the old "tcW overrides grid" path
+  //     equalized the columns to ~116 pt apiece, shifting every later column
+  //     right and re-wrapping the description paragraphs. Trusting the grid
+  //     reproduces Word exactly.
   //
-  // LIMITATION: a `tblW=pct` (§17.4.63) table whose SAVED grid no longer matches
-  // the available width (e.g. authored under different margins, or by a tool
-  // that did not bake the grid) is NOT re-scaled up to the pct target here — the
-  // grid is taken as-is (only scaled DOWN by `fitToContent` on overflow). In
-  // practice the renderer lays a table out at the same content width Word saved
-  // it under, so the grid sums to that width; the gap only appears for stale /
-  // non-Word grids. Tracked for a future full tblW pass.
+  // (b) tblW=auto ("AutoFit to Contents") ⇒ the table has NO preferred width, so
+  //     the saved `<w:gridCol>` is the style/layout default (commonly the FULL
+  //     text column), NOT a baked autofit result. Trusting it makes the table
+  //     span the page and defeats its own `w:jc` placement (sample-7's cover
+  //     tables carry gridCol=full-page yet a 100 pt `tcW`; the grid path centred
+  //     them and broke the right/left alignment). So tblW=auto falls through to
+  //     the tcW/content-preference autofit below, exactly as before commit
+  //     8a3d8a5 sized every autofit table — that change correctly fixed the
+  //     preferred-width case (a) but wrongly applied the grid to (b) too.
+  //
+  // A degenerate grid (no `<w:gridCol>` widths) also falls through to (b): with
+  // no grid to anchor the columns, tcW + content are the only sizing signal.
+  //
+  // LIMITATION: a `tblW=pct` table whose SAVED grid no longer matches the
+  // available width (authored under different margins, or by a tool that did not
+  // bake the grid) is NOT re-scaled up to the pct target — the grid is taken
+  // as-is (only scaled DOWN on overflow). Tracked for a future full tblW pass.
+  const hasPreferredWidth = table.widthPt != null || table.widthPct != null;
   const gridSum = grid.reduce((s, w) => s + w, 0);
-  if (gridSum > 0) {
+  if (gridSum > 0 && hasPreferredWidth) {
     const desired = grid.map((g, c) => Math.max(g, minW[c]));
     return fitToContent(desired);
   }
 
-  // Degenerate grid (no `<w:gridCol>` widths, e.g. a hand-built model or a
-  // malformed table): fall back to preferred-width autofit, where `tcW` and
-  // content drive the column sizes since there is no grid to anchor them.
-  // `pref[c]` accumulates the strongest single-column preference seen so far.
+  // (b) tblW=auto (or a degenerate grid): preferred-width autofit, where `tcW`
+  // and content drive the column sizes. `pref[c]` accumulates the strongest
+  // single-column preference seen so far.
   const pref: number[] = new Array(n).fill(0);
   // `hasPref[c]` is true once any cell has expressed a preference for c.
   const hasPref: boolean[] = new Array(n).fill(false);
