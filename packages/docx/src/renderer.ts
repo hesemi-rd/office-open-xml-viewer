@@ -1540,7 +1540,10 @@ export function computePages(
       // Collapse with the previous paragraph's spaceAfter — Word takes
       // max(prev.after, this.before) between paragraphs, not the sum.
       const effectiveBefore = suppressBefore ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effectiveBefore);
+      // §17.3.1.9 contextualSpacing: same-style adjacent paragraphs drop BOTH the
+      // previous after and this before (gap = 0), keeping the paginator's fill in
+      // lockstep with the paint pass.
+      const overlap = suppressBefore ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
       y -= overlap;
       measureState.y -= overlap;
 
@@ -2671,7 +2674,10 @@ export function sumCellContentHeight(
       const para = ce as unknown as DocParagraph;
       const suppress = contextualSuppressed(prevPara, para);
       const effBefore = suppress ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
+      // set it, BOTH the previous after and this before are dropped (gap = 0), not
+      // just collapsed — so e.g. a code listing's lines sit tight.
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       h += perElementHeight(ce)
         - (suppress ? para.spaceBefore : 0) * spaceScale
         - overlap * spaceScale;
@@ -2833,7 +2839,10 @@ function renderBodyElements(
       const suppress = contextualSuppressed(prevPara, para);
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
+      // set it, BOTH the previous after and this before are dropped (gap = 0), not
+      // just collapsed — so e.g. a code listing's lines sit tight.
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       // Continuation slices (slice.start > 0) suppress spaceBefore: the
       // earlier slice already consumed it on the previous page. Likewise
@@ -6575,7 +6584,10 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
       const para = ce as unknown as DocParagraph;
       const suppress = contextualSuppressed(prevPara, para);
       const effBefore = suppress ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
+      // set it, BOTH the previous after and this before are dropped (gap = 0), not
+      // just collapsed — so e.g. a code listing's lines sit tight.
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       renderParagraph(para, state, suppress);
       prevPara = para;
