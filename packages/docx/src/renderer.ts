@@ -1098,6 +1098,16 @@ export function computePages(
   // single-section / single-column document `colTopY` stays 0 — behaviour-neutral.
   let colTopY = 0;
   let maxColBottomY = 0;
+  // ECMA-376 §17.6.4 — newspaper column BALANCING target (content-relative pt per
+  // column) for the CURRENT section, or null when the section fills greedily.
+  // Word balances a continuous multi-column section that does NOT fill its page —
+  // its content is split so all columns end at roughly the same height — but
+  // leaves the FINAL (body) section greedy (it packs column 0 first). `balanceColH`
+  // is the per-column height target; a non-last column breaks to the next column
+  // once it reaches it (see maybeBalanceBreak). null ⇒ greedy fill to the page
+  // bottom (single-column sections, the final section, or a section taller than
+  // one page).
+  let balanceColH: number | null = null;
   // Page-absolute pt of the current region top, stamped on elements so the paint
   // pass resets a column's cursor to the region top (front-loaded layout: the
   // renderer consumes this instead of independently deciding the column top).
@@ -1184,9 +1194,12 @@ export function computePages(
       pages.push([]);
       y = 0;
       colIndex = 0;
-      // A fresh page: the section's columns span it from the content top.
+      // A fresh page: the section's columns span it from the content top. A
+      // section that reaches a new page is multi-page ⇒ fill the new page greedily
+      // (balancing only applies to a section that fits within its current page).
       colTopY = 0;
       maxColBottomY = 0;
+      balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
@@ -1223,6 +1236,75 @@ export function computePages(
     if (colIndex < columns.length - 1) nextColumn();
     else newPage(pageStartIdx);
   };
+
+  // ECMA-376 §17.6.4 newspaper column balancing. Measure the single-column
+  // content height (pt) of the section STARTING at `startIdx` — up to the next
+  // section/page break — and whether a break terminates it. Uses a throwaway
+  // clone of the measure state so the live cursor / floats are untouched. Mirrors
+  // the per-element height the main loop computes (estimateParagraphHeight /
+  // computeTableRowHeights at the column width, with paragraph spacing collapse),
+  // but is an APPROXIMATION: line-level page splitting and floats are ignored,
+  // which is fine for deciding a balance target. Returns `Infinity` when the
+  // section can't be balanced as one block (an inner page break).
+  const measureSectionColumnHeight = (
+    startIdx: number,
+    colWPt: number,
+  ): { height: number; terminated: boolean } => {
+    const ms: RenderState = { ...measureState, y: section.marginTop, floats: [], floatParaSeq: 0 };
+    let total = 0;
+    let prevAfter = 0;
+    let prevP: DocParagraph | null = null;
+    let terminated = false;
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak' || e.type === 'pageBreak') { terminated = true; break; }
+      if (e.type === 'columnBreak') continue;
+      if (e.type === 'paragraph') {
+        const p = e as unknown as DocParagraph;
+        if (p.pageBreakBefore) return { height: Infinity, terminated: false };
+        if (p.framePr) continue; // frame is out of flow (adds no column height)
+        const suppress = contextualSuppressed(prevP, p);
+        const before = suppress ? 0 : p.spaceBefore;
+        total += estimateParagraphHeight(ms, p, colWPt, suppress, 0) - Math.min(prevAfter, before);
+        prevAfter = p.spaceAfter;
+        prevP = p;
+      } else if (e.type === 'table') {
+        const t = e as unknown as DocTable;
+        if (t.tblpPr) continue; // floating table: out of flow
+        total += computeTableRowHeights(ms, t, colWPt).reduce((s, x) => s + x, 0);
+        prevAfter = 0;
+        prevP = null;
+      }
+    }
+    return { height: total, terminated };
+  };
+
+  // Configure balancing for the section starting at `startIdx`. Word balances a
+  // continuous multi-column section that does NOT fill its page (its content is
+  // split so the columns end at roughly equal heights), but leaves greedy: a
+  // single-column section, the FINAL (unterminated) section — Word packs column 0
+  // there, matching the journal templates' last page — and any section taller
+  // than the space available across its columns on this page.
+  const setupBalancing = (startIdx: number): void => {
+    balanceColH = null;
+    const ncols = columns.length;
+    if (ncols < 2) return;
+    const { height, terminated } = measureSectionColumnHeight(startIdx, columns[0].wPt);
+    if (!terminated || !Number.isFinite(height)) return; // final / page-breaking ⇒ greedy
+    const avail = effContentH() - colTopY;
+    if (avail <= 0 || height > ncols * avail) return; // spills past one page ⇒ greedy
+    balanceColH = height / ncols;
+  };
+
+  // True when a whole element of height `fitH` should move to the next column to
+  // keep a balanced section's columns even: balancing is active, the current
+  // column is not the last (the last absorbs the remainder), it already holds
+  // content, and the element would push it past the balanced target.
+  const wantsBalanceBreak = (fitH: number): boolean =>
+    balanceColH != null &&
+    colIndex < columns.length - 1 &&
+    y > colTopY &&
+    y + fitH > colTopY + balanceColH;
 
   // A paragraph-anchored floating object (wp:anchor with positionV
   // relativeFrom="paragraph"/"line", ECMA-376 §20.4.3.4) is positioned by its
@@ -1304,6 +1386,12 @@ export function computePages(
     pages[pages.length - 1].push(el);
   };
 
+  // Balance the FIRST section's columns if it is a non-final multi-column section
+  // that fits on page 1 (§17.6.4). Single-column / multi-page / final first
+  // sections leave `balanceColH` null (greedy), so this is behaviour-neutral for
+  // the common single-section document.
+  setupBalancing(0);
+
   for (let i = 0; i < body.length; i++) {
     const el = body[i];
     if (el.type === 'columnBreak') {
@@ -1320,6 +1408,7 @@ export function computePages(
       y = 0;
       colTopY = 0;
       maxColBottomY = 0;
+      balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
@@ -1371,6 +1460,10 @@ export function computePages(
         maxColBottomY = regionBottom;
         prevPara = null;
         prevSpaceAfter = 0;
+        // ECMA-376 §17.6.4: balance this continuous section's columns if it fits
+        // on the current page below `regionBottom` (Word balances non-final
+        // continuous multi-column sections; the final section stays greedy).
+        setupBalancing(i + 1);
       } else {
         // nextPage (default) / oddPage / evenPage: start a new page (mirrors the
         // pageBreak path, including parity padding). A new page already resets
@@ -1379,6 +1472,7 @@ export function computePages(
         y = 0;
         colTopY = 0;
         maxColBottomY = 0;
+        balanceColH = null;
         prevPara = null;
         prevSpaceAfter = 0;
         measureState.y = section.marginTop;
@@ -1388,6 +1482,8 @@ export function computePages(
         // (the sectionBreak itself emits nothing on the new page).
         prescanFloatsFrom(i + 1);
         startPageBookkeeping();
+        // Balance the new section's columns if it fits on its fresh page (§17.6.4).
+        setupBalancing(i + 1);
         if (upcomingKind === 'oddPage' && pages.length % 2 === 0) {
           pages.push([]);
           startPageBookkeeping();
@@ -1522,7 +1618,12 @@ export function computePages(
       // past the bottom; it is split at a line boundary by the path below
       // (Word's default behaviour). A keep-on-page float forces relocation too.
       const keepIntact = para.keepLines || needNext > 0 || addReservePt > 0;
-      if (breakForFloat || (overflowsHere && keepIntact && needed <= effContentH())) {
+      // ECMA-376 §17.6.4 column balancing: move the whole paragraph to the next
+      // column once the current (non-last) column has reached the balanced target
+      // (reuses the relocate machinery below, which rolls back / re-registers this
+      // paragraph's floats against the new column). No-op when balancing is off.
+      const balanceBreak = wantsBalanceBreak(fitHeight);
+      if (breakForFloat || balanceBreak || (overflowsHere && keepIntact && needed <= effContentH())) {
         const pagesBeforeRelocate = pages.length;
         // Relocating THIS paragraph to a fresh page: pre-scan from `i` so the
         // new page starts with THIS paragraph's own page-level floats counted.
@@ -1672,7 +1773,9 @@ export function computePages(
         y = endY;
         measureState.y = section.marginTop + endY;
       } else {
-        if (y + h > tableContentH) nextColumnOrPage(i);
+        // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
+        // the rest of this column ⇒ advance to the next column / page.
+        if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;

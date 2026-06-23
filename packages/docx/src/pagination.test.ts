@@ -518,3 +518,39 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
     }
   });
 });
+
+describe('computePages — newspaper column balancing (§17.6.4, non-final continuous sections)', () => {
+  const twoColSpec = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
+
+  it('balances a SHORT non-final 2-col section across both columns (not greedy col0)', () => {
+    // section(): content height 100, content width 160, 2-col ⇒ col width 70.
+    // 6 single-line paras × 20px = 120px total. Balanced = 60px/col = 3 paras each.
+    // Greedy (the bug) would put 5 in col0 (fills to 100px) and 1 in col1.
+    // The 2-col section ENDS with a continuous break ⇒ non-final ⇒ balanced.
+    const body: BodyElement[] = [
+      ...Array.from({ length: 6 }, (_, i) => para({ text: `p${i}`, fontSize: 20 })),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx()); // final section = 1-col
+    const colByText: Record<string, number | undefined> = {};
+    for (const e of pages[0]) {
+      const t = textOf(e);
+      if (t.startsWith('p')) colByText[t] = colOf(e);
+    }
+    // Balanced: p0–p2 in col0, p3–p5 in col1.
+    expect([colByText.p0, colByText.p1, colByText.p2]).toEqual([0, 0, 0]);
+    expect([colByText.p3, colByText.p4, colByText.p5]).toEqual([1, 1, 1]);
+  });
+
+  it('does NOT balance the FINAL (body) section — it fills col0 greedily', () => {
+    // Same 6 paras, but now the 2-col geometry is the body-level (final) section
+    // with NO terminating break. Word leaves the final section greedy (the user's
+    // observation: the last page packs the left column). Greedy: col0 holds 5
+    // (100px), col1 holds 1.
+    const body: BodyElement[] = Array.from({ length: 6 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
+    const pages = computePages(body, section({ columns: twoColSpec }), makeCtx());
+    const col0 = pages[0].filter((e) => colOf(e) === 0).map(textOf);
+    expect(col0).toEqual(['p0', 'p1', 'p2', 'p3', 'p4']); // greedy fill, NOT balanced
+  });
+});

@@ -65,13 +65,12 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
       expect(paginate(12).length).toBe(3);
     });
 
-    // Now 6 pages (was 7 before the region-top fix, 5 in Word). The overprint is
-    // gone and the §17.6.22 boundary fix keeps the 2-col body on the title page,
-    // but one extra page remains in the figure/table-dense middle section. Word
-    // does NOT balance these columns (its last 2-col page fills the left column
-    // only), so the residual is a figure/table-sizing + greedy-fill fidelity gap,
-    // not balancing. Marked `fails` as a tracking gate against Word's 5 pages.
-    it.fails('sample-13 paginates to 5 pages — residual figure-region fidelity gap', () => {
+    // 5 pages, matching Word, once non-final continuous multi-column sections are
+    // balanced (§17.6.4): a short 2-col section's content is split across both
+    // columns instead of packing column 0, which frees vertical space for the
+    // following full-width element on the same page and densifies the whole flow.
+    // The final (references) section stays greedy, as Word leaves it.
+    it('sample-13 paginates to 5 pages (Word ground truth)', () => {
       expect(paginate(13).length).toBe(5);
     });
   },
