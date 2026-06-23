@@ -5,6 +5,7 @@
 
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
 import { niceStep, valueAxisScale } from './axis-scale.js';
+import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
 import { hexToRgba } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
@@ -722,16 +723,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // stay) → `*AxisLineHidden`; an `<a:solidFill>` gives `*AxisLineColor`/Width
   // (ECMA-376 §21.2.2.* line props). Office leaves the value-axis rule off by
   // default (gridlines stand in), so only draw it when the file specifies one.
-  const catLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#aaa';
-  const valLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#aaa';
-  // Axis line weights from `<c:*Ax><c:spPr><a:ln@w>` (EMU). `ctx.lineWidth`
-  // is in CANVAS pixels, so the point width must be multiplied by `ptToPx`
-  // (px-per-point at the display scale: ~1.333 for xlsx 96dpi, ~1.05 for
-  // pptx) — exactly like the chart-border code in renderChart. Without it the
-  // rule is under-scaled on HiDPI/zoomed canvases. The `: 1` fallback (no
-  // explicit `@w`) stays a 1px hairline.
-  const catLineW = chart.catAxisLineWidthEmu ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) * ptToPx : 1;
-  const valLineW = chart.valAxisLineWidthEmu ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) * ptToPx : 1;
+  // Colour defaults to '#aaa' (Office's faint default rule); the EMU `<a:ln@w>`
+  // is scaled to canvas px by `ptToPx`. See `resolveAxisLine`.
+  const { color: catLineColor, width: catLineW } = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
+  const { color: valLineColor, width: valLineW } = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
   const strokeAxis = (x1: number, y1: number, x2: number, y2: number, color: string, lw: number): void => {
     ctx.strokeStyle = color; ctx.lineWidth = lw;
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
@@ -771,7 +766,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
     // at category centers under "midCat".
     if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
-      const onBoundary = chart.catAxisCrossBetween !== 'midCat';
+      const onBoundary = isCrossBetween(chart);
       const last = onBoundary ? n : n - 1;
       for (let ci = 0; ci <= last; ci++) {
         const frac = onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1));
@@ -956,8 +951,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // rule + ticks on the right; ticks mirror the left axis ("out" points right).
   if (sec) {
     const axX = px0 + pw;
-    const secLineColor = sec.lineColor ? `#${sec.lineColor}` : '#aaa';
-    const secLineW = sec.lineWidthEmu ? Math.max(0.5, sec.lineWidthEmu / EMU_PER_PT) * ptToPx : 1;
+    const { color: secLineColor, width: secLineW } = resolveAxisLine(sec.lineColor, sec.lineWidthEmu, ptToPx);
     if (!sec.lineHidden) strokeAxis(axX, py0, axX, py0 + ph, secLineColor, secLineW);
     if (!sec.hidden) {
       ctx.font = `${secFontPx}px sans-serif`;
@@ -1068,7 +1062,7 @@ function renderLineChart(
   const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
   // crossBetween="between" (default) insets the first/last category by half a
   // step so points aren't flush against the axes. "midCat" anchors them.
-  const between = chart.catAxisCrossBetween !== 'midCat';
+  const between = isCrossBetween(chart);
   const toX = between
     ? (i: number) => px0 + ((i + 0.5) / n) * pw
     : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
@@ -1217,7 +1211,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // plots its point at the band CENTER, leaving a half-band margin before the
   // first and after the last category — matching PowerPoint's Jan…Dec inset.
   // "midCat" anchors points on the category dividers (flush to the axes).
-  const between = chart.catAxisCrossBetween !== 'midCat';
+  const between = isCrossBetween(chart);
   const toX = between
     ? (i: number) => px0 + ((i + 0.5) / n) * pw
     : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
@@ -1226,10 +1220,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // Axis line colour/weight from `<c:*Ax><c:spPr><a:ln>` (EMU → px at scale),
   // mirroring the bar/line renderers. Office leaves the value-axis rule off by
   // default (gridlines stand in), so only draw it when the file specifies one.
-  const catLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#aaa';
-  const valLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#aaa';
-  const catLineW = chart.catAxisLineWidthEmu ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) * ptToPx : 1;
-  const valLineW = chart.valAxisLineWidthEmu ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) * ptToPx : 1;
+  const { color: catLineColor, width: catLineW } = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
+  const { color: valLineColor, width: valLineW } = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
 
   // Draw the translucent series fills FIRST, then lay gridlines, axis rules,
   // tick marks and labels on top so they stay visible across the filled
@@ -1683,10 +1675,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
+      // Scatter keeps its own undefined colour default (→ drawAxisTick's '#888'),
+      // so only the width formula is shared. `axisLineWidthPx`'s 1 px fallback is
+      // equivalent to undefined here (drawAxisTick treats both as a hairline).
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
-      const yAxisLineWidth = chart.valAxisLineWidthEmu
-        ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) * ptToPx : undefined;
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, yAxisLineColor, yAxisLineWidth);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx));
     }
   }
 
@@ -1720,9 +1713,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
     ctx.save();
     ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
-    ctx.lineWidth = chart.catAxisLineWidthEmu
-      ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) * ptToPx
-      : 1;
+    ctx.lineWidth = axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx);
     ctx.lineCap = 'butt';
     ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
     ctx.restore();
@@ -1730,9 +1721,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     ctx.save();
     ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
-    ctx.lineWidth = chart.valAxisLineWidthEmu
-      ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) * ptToPx
-      : 1;
+    ctx.lineWidth = axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx);
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
     ctx.restore();
   }
@@ -1755,9 +1744,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       const gx = toX(v);
       ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, xAxisY + 4);
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
-      const xAxisLineWidth = chart.catAxisLineWidthEmu
-        ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) * ptToPx : undefined;
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, xAxisLineWidth);
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx));
     }
   }
 
