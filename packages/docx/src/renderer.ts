@@ -4855,14 +4855,38 @@ function layoutLines(
         }
       }
     } else if (currentLine.length === 0) {
-      // Nothing on the line yet and no CJK break — force-fit (word wider than column)
-      s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
+      // A single non-CJK word wider than the FULL line width — e.g. a long URL in
+      // a narrow newspaper column. ECMA-376 prescribes no line-break algorithm;
+      // Word breaks such an over-long word at the character level (overflow-wrap)
+      // so it stays inside the column instead of bleeding past the right margin /
+      // into the next column. Fit the widest character prefix (≥1 char so the
+      // split always advances), draw it, and re-queue the remainder. Segments are
+      // already one space-delimited word (splitTextForLayout), so this never
+      // breaks where a space could have wrapped.
+      const available = availW();
+      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+      const allChars = [...s.text];
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, gridDeltaPx)].length : 0;
+      if (split < 1) split = 1;
+      if (split >= allChars.length) {
+        // The visible glyphs actually fit (only a trailing space pushed it over the
+        // fit test) — place the word whole.
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc);
+      } else {
+        const prefix = allChars.slice(0, split).join('');
+        const pw = strAdvance(s, prefix);
+        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        queue.unshift({ ...s, text: allChars.slice(split).join(''), measuredWidth: 0 });
+      }
     } else {
-      // Latin word wrap: flush and put this word on the next line
+      // Latin word does not fit on the current (non-empty) line: move it to a fresh
+      // line and re-process. There it either fits, or — when it is wider than the
+      // whole column — the empty-line branch above breaks it at the character level
+      // (overflow-wrap). Re-queueing rather than force-adding is what lets that
+      // over-long-word path run instead of letting the word spill the column.
       flush();
-      s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
+      queue.unshift(s);
     }
   }
 

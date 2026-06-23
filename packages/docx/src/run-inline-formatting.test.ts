@@ -195,3 +195,32 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
     expect(fill.w).toBeCloseTo(2 * 16); // |AB| = 2 chars × 16px
   });
 });
+
+describe('over-long word overflow-wrap (long URLs in a narrow column)', () => {
+  it('breaks a no-space token wider than the line at the character level', async () => {
+    // pageWidth 400, margins 0, 16px/char ⇒ 25 chars per line. A 40-char URL with
+    // no break opportunity must wrap (ECMA-376 prescribes no algorithm; Word
+    // breaks an over-long word at the character level so it stays in the column).
+    const url = 'http://example.com/aaaaaaaaaaaaaaaaaaaaa'; // 40 chars, no spaces
+    expect(url.length).toBe(40);
+    const events = await render([textRun(url)]);
+    const texts = events.filter((e) => e.kind === 'fillText') as Array<{ text: string; x: number }>;
+    // It wraps onto more than one line (the bug drew it as a single 640px line).
+    expect(texts.length).toBeGreaterThan(1);
+    // No drawn line exceeds the 400px content width (25 chars × 16px).
+    for (const t of texts) expect(t.text.length * 16).toBeLessThanOrEqual(400 + 1e-6);
+    // Every character is preserved across the wrap (character-level, lossless).
+    expect(texts.map((t) => t.text).join('')).toBe(url);
+  });
+
+  it('still wraps a normal sentence at spaces, not mid-word', async () => {
+    // Guard: ordinary text must keep wrapping at spaces — the over-long path only
+    // engages for a single token wider than the whole line.
+    const events = await render([textRun('alpha bravo charlie delta echo foxtrot')]);
+    const texts = events.filter((e) => e.kind === 'fillText') as Array<{ text: string; x: number }>;
+    // Each drawn token is a whole word (plus trailing space), never a mid-word slice.
+    for (const t of texts) {
+      expect(t.text.trim()).toMatch(/^(alpha|bravo|charlie|delta|echo|foxtrot)$/);
+    }
+  });
+});
