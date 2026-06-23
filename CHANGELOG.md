@@ -4,6 +4,71 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.65.0 — 2026-06-23
+
+Minor. A large PowerPoint chart-fidelity push — blank charts now render, combo
+charts gain a secondary value axis, and pie/doughnut colours and labels match
+PowerPoint — on top of an extensive DOCX table / floating-layout / list batch
+and continued cross-format core unification.
+
+### charts (pptx)
+
+- **Charts that silently rendered as a blank area now render.** Two root causes:
+  a relationship `Target` that is a package-root-absolute part name (leading
+  `/`, e.g. `/ppt/charts/chart5.xml`; OPC / ECMA-376 Part 2 §9.3) was joined onto
+  the source part's directory and the chart graphicFrame was dropped; and a
+  `<c:cat>` backed by a `<c:multiLvlStrCache>` (multi-level category axis,
+  §21.2.2.114) collapsed every series to a single point — an area chart of one
+  point is a zero-width sliver. Both fixed, plus the same absolute-`Target` fix
+  for slide parts. (PR #557)
+- **Combo charts** (`<c:barChart>` + `<c:lineChart>` in one plot) now plot the
+  line series against an independent **secondary value axis** drawn on the right
+  — its own nice scale, ticks, labels and rotated title (`axPos="r"` /
+  `<c:crosses val="max">`, §21.2.2.33). The auto value-axis major unit is now
+  axis-length-aware (a longer axis gets finer gridlines, matching PowerPoint's
+  roughly constant gridline spacing), the category baseline draws on top of the
+  bars, and value-axis numbers clear the tick marks. (PR #560)
+- **Pie / doughnut**: per-slice `<c:dPt>` fill colours render correctly (the
+  point index is a child `<c:idx>` element, §21.2.2.84, not an attribute, so
+  every slice previously fell back to the series colour), and `<c:showPercent>`
+  slice labels (`54% / 27% / …`) now draw. (PR #559, #561)
+- Bar / column / area charts gained `<c:majorTickMark>` ruler ticks (default
+  `out`, ST_TickMark §21.2.3.48, shared with xlsx); area honours the category
+  axis `crossBetween` (half-band inset), draws the value-axis rule, and labels
+  every category. (PR #559)
+
+### docx
+
+- **Tables**: cell and column widths size from `<w:tblGrid>` / `<w:tcW>` spec
+  geometry via a shared two-pass measure, `tblCellMar` inherits through the
+  `TableNormal` style chain (§17.4.41), exact-height row clipping is Y-only so
+  nested-table borders survive (§17.4.80), `tblOverlap` is scoped correctly
+  (§17.4.56), and border render order / double-border rails and conditional
+  (`cnf`) row/column formatting are honoured. (PR #513, #518, #527–#531, #538,
+  #542–#547, #549, #553, #555)
+- **Floating layout**: page- and margin-anchored floats are pre-scanned so
+  earlier paragraphs wrap around them (§20.4.3.x), floating tables, frame
+  `vAnchor` banding (§22.9.2.20), drop-cap `framePr`, and image-anchor
+  `relativeFrom` / alignment are threaded through (§20.4.3.5 / §20.4.3.2).
+  (PR #515, #520, #521, #526, #543, #550, #554)
+- **Lists / text**: picture bullets and bullet/inline symbol-font resolution,
+  table-of-contents styling (including the in-field hyperlink colour),
+  per-section column layout, and sample-10/-11 multi-column + inline-formatting
+  fixes. (PR #507, #514, #516, #519, #522, #524, #525, #534, #540)
+
+### core
+
+- Continued cross-format unification: a shared font generic classifier and
+  WMF/metafile decoder, symbol-font (Wingdings/Webdings) handling, dash-pattern
+  and auto-contrast colour helpers, complex-script code-point segmentation, and
+  shared chart axis-line / `crossBetween` helpers. (PR #509–#512, #528,
+  #535–#537, #541, #562)
+
+### xlsx
+
+- Merged-cell border z-order and the shared two-pass table-cell sizing path.
+  (PR #517, #546)
+
 ## 0.64.3 — 2026-06-21
 
 Patch. Crisp 1-px rendering of Excel grid/border lines at devicePixelRatio = 1, header/data alignment, and toned-down homepage copy.

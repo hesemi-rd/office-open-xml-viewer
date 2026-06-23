@@ -542,6 +542,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Charts (pie, doughnut) | ✅ |
 | | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
 | | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
+| | Charts (combo — bar + line with a secondary value axis on the right) | ✅ |
 | | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`; no native diagram layout engine) | ✅ |
 | | OLE embedded objects (`p:oleObj` — preview/icon rendering) | ❌ Not planned |
 | | Video / audio (poster + interactive playback) | ✅ |
