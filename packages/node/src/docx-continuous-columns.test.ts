@@ -65,13 +65,13 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
       expect(paginate(12).length).toBe(3);
     });
 
-    // Tier 2 (column BALANCING) is not yet implemented: a continuous section's
-    // columns are filled greedily (col 0 to the page bottom, then col 1) instead
-    // of balanced to equal height, so a 2-col run whose last page is half-full
-    // pushes the following full-width section onto a new page. sample-13 thus
-    // over-paginates (7 vs Word's 5). Marked `fails` as a TODO gate: when
-    // balancing lands and this returns 5, the marker flips red — switch to `it`.
-    it.fails('sample-13 paginates to 5 pages — pending column balancing (Tier 2)', () => {
+    // Now 6 pages (was 7 before the region-top fix, 5 in Word). The overprint is
+    // gone and the §17.6.22 boundary fix keeps the 2-col body on the title page,
+    // but one extra page remains in the figure/table-dense middle section. Word
+    // does NOT balance these columns (its last 2-col page fills the left column
+    // only), so the residual is a figure/table-sizing + greedy-fill fidelity gap,
+    // not balancing. Marked `fails` as a tracking gate against Word's 5 pages.
+    it.fails('sample-13 paginates to 5 pages — residual figure-region fidelity gap', () => {
       expect(paginate(13).length).toBe(5);
     });
   },

@@ -158,6 +158,14 @@ pub struct SectionProps {
     pub title_page: bool,
     /// whether even pages have distinct header/footer
     pub even_and_odd_headers: bool,
+    /// ECMA-376 §17.6.22 ST_SectionMark — the body (final) section's `<w:type>`
+    /// start type ("continuous" | "nextPage" | "oddPage" | "evenPage"). Governs
+    /// how the last section begins relative to the previous one; the paginator
+    /// consumes it at the boundary INTO the final section (non-final sections
+    /// carry their start type on their own `SectionBreak` marker). `None` ⇒
+    /// "nextPage" (the spec default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_start: Option<String>,
     /// ECMA-376 §17.6.5 w:docGrid/@w:type ("default" | "lines" |
     /// "linesAndChars" | "snapToChars"). None = default.
     #[serde(skip_serializing_if = "Option::is_none")]

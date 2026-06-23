@@ -125,6 +125,13 @@ export interface SectionProps {
   footerDistance: number;   // pt — bottom of page to footer
   titlePage: boolean;
   evenAndOddHeaders: boolean;
+  /** ECMA-376 §17.6.22 ST_SectionMark — the body (final) section's `<w:type>`
+   *  start type ("continuous" | "nextPage" | "oddPage" | "evenPage"). Governs
+   *  how the last section begins relative to the previous one; consumed by the
+   *  paginator at the boundary INTO the final section. Absent ⇒ "nextPage" (the
+   *  spec default). Non-final sections carry their start type on their own
+   *  SectionBreak marker. */
+  sectionStart?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:type — "default" | "lines" | "linesAndChars" | "snapToChars". */
   docGridType?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:linePitch in pt. When docGridType is "lines" or

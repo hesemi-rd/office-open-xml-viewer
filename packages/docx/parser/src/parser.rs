@@ -1189,6 +1189,7 @@ fn parse_section(
         footer_distance: 36.0,
         title_page: false,
         even_and_odd_headers: false,
+        section_start: None,
         doc_grid_type: None,
         doc_grid_line_pitch: None,
         doc_grid_char_space: None,
@@ -1229,6 +1230,10 @@ fn parse_section(
         }
     }
     props.title_page = child_w(sp, "titlePg").is_some();
+    // ECMA-376 §17.6.22 — the body (final) section's start type. Non-final
+    // sections carry their start type on their own SectionBreak marker; the
+    // paginator needs the final section's here to resolve the boundary INTO it.
+    props.section_start = read_section_break_type(sp);
 
     // ECMA-376 §17.6.5 w:docGrid. When @type=lines|linesAndChars with a
     // linePitch, Word renders each line of text at intervals of linePitch
@@ -7642,6 +7647,26 @@ mod column_tests {
         let (props, _) = parse_section(Some(doc.root_element()), &rel_map);
         let cols = props.columns.expect("columns surfaced on SectionProps");
         assert_eq!(cols.count, 2);
+    }
+
+    /// ECMA-376 §17.6.22 — the body (final) section's `<w:type>` start type is
+    /// surfaced on SectionProps so the paginator can resolve the boundary INTO the
+    /// final section (a "continuous" body section must not page-break). Absent ⇒
+    /// None (the renderer defaults to the spec's "nextPage").
+    #[test]
+    fn section_props_carries_section_start() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+        assert_eq!(
+            parse(r#"<w:type w:val="continuous"/><w:cols w:num="2"/>"#).section_start,
+            Some("continuous".to_string())
+        );
+        // Absent <w:type> ⇒ None (paginator falls back to "nextPage").
+        assert_eq!(parse(r#"<w:cols w:num="2"/>"#).section_start, None);
     }
 
     /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` surfaces on SectionProps as a

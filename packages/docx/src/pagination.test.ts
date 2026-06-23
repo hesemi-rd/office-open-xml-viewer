@@ -460,24 +460,44 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
   });
 
   it('a continuous section break keeps both single-column sections on the SAME page, stacked', () => {
-    // Section A (1 para) — continuous → Section B (1 para) on the same page; final
-    // 2-col section gets a nextPage break. Both A and B are single-column full width
-    // and must NOT reset to the page top (B stacks below A).
+    // ECMA-376 §17.6.22: a section's `<w:type>` describes how THAT section begins
+    // relative to the previous one, and lives on the sectPr that ENDS the section
+    // (the NEXT marker in document order). So the A→B break is governed by section
+    // B's type — the kind of the marker that ENDS B (idx 3) — and the B→final break
+    // by the final (body) section's start type. Here B is continuous (stacks below
+    // A on page 1) and the final 2-col section is nextPage (default) → page 2. Both
+    // A and B are single-column full width and must NOT reset to the page top.
     const body: BodyElement[] = [
       para({ text: 'A', fontSize: 20 }),
-      sectionBreak('continuous', null),
+      sectionBreak('continuous', null), // ends section A (A's own start type)
       para({ text: 'B', fontSize: 20 }),
-      sectionBreak('nextPage', null),
+      sectionBreak('continuous', null), // ends section B ⇒ B begins continuously (A→B same page)
       para({ text: 'final', fontSize: 20 }),
     ];
     const pages = computePages(body, finalTwoCol(), makeCtx());
     expect(pages.length).toBe(2);
-    // A and B share page 1 (continuous), final on page 2.
+    // A and B share page 1 (B continuous), final on page 2 (final section nextPage).
     expect(pages[0].map(textOf)).toEqual(['A', 'B']);
     expect(pages[1].map(textOf)).toEqual(['final']);
     for (const el of pages[0]) {
       expect(colGeomOf(el)).toEqual([{ xPt: 20, wPt: 160 }]);
     }
+  });
+
+  it('the break INTO a section is governed by that section start type, not the prior marker (§17.6.22)', () => {
+    // Regression for the off-by-one: a title section whose own sectPr is nextPage
+    // (the spec default) followed by a continuous body section must NOT page-break —
+    // the boundary is governed by the FOLLOWING (body) section's start type. Mirrors
+    // sample-13, where Word keeps the 2-col body on the title page.
+    const body: BodyElement[] = [
+      para({ text: 'title', fontSize: 20 }),
+      sectionBreak('nextPage', null), // ends the title section (its own start type)
+      para({ text: 'body', fontSize: 20 }),
+    ];
+    const sec = { ...finalTwoCol(), columns: null, sectionStart: 'continuous' };
+    const pages = computePages(body, sec, makeCtx());
+    expect(pages.length).toBe(1);
+    expect(pages[0].map(textOf)).toEqual(['title', 'body']);
   });
 
   it('single-section 2-col docs are UNCHANGED (no SectionBreak markers ⇒ whole body uses section.columns)', () => {
