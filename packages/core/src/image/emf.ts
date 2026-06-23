@@ -1257,28 +1257,12 @@ export async function renderEmfToBitmap(
   // runtime without the shim) ⇒ degrade gracefully to null, exactly as the
   // caller already handles an unsupported metafile — never throw.
   if (typeof OffscreenCanvas === 'undefined') return null;
-  // Rasterize at the EMF's NATIVE aspect ([MS-EMF] HEADER rclBounds: i32 left,
-  // top, right, bottom at byte 8) fitted inside the requested target box, NOT
-  // the box's own aspect. A cropped picture (`<a:srcRect>`, §20.1.8.55) sizes its
-  // display box to the VISIBLE sub-rect, so stretching the whole metafile to that
-  // box would distort it and the crop fractions would no longer line up with the
-  // source — the figure spills out of / is clipped by its frame.
-  let bw = targetW;
-  let bh = targetH;
-  const dv0 = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const nw = dv0.getInt32(16, true) - dv0.getInt32(8, true);
-  const nh = dv0.getInt32(20, true) - dv0.getInt32(12, true);
-  if (nw > 0 && nh > 0) {
-    const aspect = nw / nh;
-    if (bw / bh > aspect) bw = Math.max(1, Math.round(bh * aspect));
-    else bh = Math.max(1, Math.round(bw / aspect));
-  }
-  const canvas = new OffscreenCanvas(bw, bh);
+  const canvas = new OffscreenCanvas(targetW, targetH);
   const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
   if (!ctx) return null;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  const drew = playEmf(bytes, ctx, bw, bh);
+  const drew = playEmf(bytes, ctx, targetW, targetH);
   if (!drew) return null;
   return createImageBitmap(canvas);
 }
