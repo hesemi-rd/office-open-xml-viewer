@@ -368,6 +368,31 @@ function authorColor(author?: string): string {
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
 }
 
+/**
+ * Raster target size (pt) for an embedded image. A raster blip decodes at its
+ * native pixel grid, so its display box is fine. A metafile (WMF/EMF) is
+ * rasterized by us at the size we ask for, and with an `<a:srcRect>` crop
+ * (ECMA-376 §20.1.8.55) the display box is only the visible sub-rectangle. The
+ * crop is relative to the metafile's PICTURE FRAME (the player maps the frame —
+ * not the ink bounds — onto the raster, see `playEmf`), so to crop correctly we
+ * must rasterize the WHOLE frame: scale the target up to the full frame display
+ * size (box ÷ (1−l−r) horizontally, ÷ (1−t−b) vertically). `drawImageCropped`
+ * then selects the right sub-region (e.g. sample-13 Fig.2 crops one composite EMF
+ * into subfigures (a)/(b)(c)). Uncropped metafiles and all raster blips are
+ * unaffected (the box passes through).
+ */
+export function metafileRasterSize(
+  mimeType: string,
+  srcRect: { l: number; t: number; r: number; b: number } | null | undefined,
+  widthPt: number,
+  heightPt: number,
+): { widthPt: number; heightPt: number } {
+  if (!srcRect || !isMetafileMime(mimeType)) return { widthPt, heightPt };
+  const fracW = Math.max(0.01, 1 - srcRect.l - srcRect.r);
+  const fracH = Math.max(0.01, 1 - srcRect.t - srcRect.b);
+  return { widthPt: widthPt / fracW, heightPt: heightPt / fracH };
+}
+
 function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   const seen = new Map<string, ImagePair>();
   // Record one image reference (collapsing duplicate keys, tracking the max
@@ -415,8 +440,7 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
           colorReplaceFrom: img.colorReplaceFrom,
-          widthPt: img.widthPt ?? 0,
-          heightPt: img.heightPt ?? 0,
+          ...metafileRasterSize(img.mimeType, img.srcRect, img.widthPt ?? 0, img.heightPt ?? 0),
           hasCrop: img.srcRect != null,
         });
       } else if (run.type === 'shape') {
@@ -5215,25 +5239,26 @@ function drawTabLeader(
  * the display box, which is exactly the 9-arg `drawImage` behavior. A negative
  * (overscan) edge is clamped to 0 (degrades to a full draw).
  *
- * Crop is applied only for a raster blip, whose decoded `ImageBitmap` is the
- * full source at native resolution. A metafile (WMF/EMF) is rasterized to the
- * CROPPED display box by `decodeRasterOrMetafile`, so cropping its bitmap would
- * squish the whole figure to the sub-rect's aspect (sample-13 Fig.2 / Fig.3) —
- * metafiles draw whole, gated by `isMetafileMime`. When a crop is present
- * `preloadImages` forces the raster decode (an SVG element has no native pixel
- * grid). Mirrors the pptx and xlsx renderers.
+ * Crop applies to BOTH raster blips and metafiles (WMF/EMF). A raster blip's
+ * decoded `ImageBitmap` is the full source at native resolution; a cropped
+ * metafile is rasterized at its FULL PICTURE FRAME — `metafileRasterSize` scales
+ * the raster target up by 1/(1−l−r) and 1/(1−t−b), and `playEmf` maps the EMF
+ * frame (not the ink bounds) onto that raster — so the source rectangle here is
+ * the frame and the fractional crop selects the right sub-region (sample-13 Fig.2
+ * crops one composite EMF into subfigures (a)/(b)(c); Fig.3 trims its frame
+ * margins). When a crop is present `preloadImages` forces the raster decode (an
+ * SVG element has no native pixel grid). Mirrors the pptx and xlsx renderers.
  */
-function drawImageCropped(
+export function drawImageCropped(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   bmp: DecodedImage,
   srcRect: { l: number; t: number; r: number; b: number } | undefined,
-  mimeType: string,
   dx: number,
   dy: number,
   dw: number,
   dh: number,
 ): void {
-  if (srcRect && !isMetafileMime(mimeType) && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
+  if (srcRect && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
     const el = bmp as { naturalWidth?: number; naturalHeight?: number; width?: number; height?: number };
     const bw = el.naturalWidth || el.width || 0;
     const bh = el.naturalHeight || el.height || 0;
@@ -5265,7 +5290,7 @@ function renderInlineImage(
   if (!bmp) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
-  drawImageCropped(ctx, bmp, seg.srcRect, seg.mimeType, x, baseline - h, w, h);
+  drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -5313,7 +5338,7 @@ function renderAnchorImages(
     // does not displace text and is not displaced by other floats), so dist* is
     // unused here.
     const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
-    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, img.mimeType, pageX, pageY, w, h);
+    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
   }
 }
 
@@ -6141,7 +6166,7 @@ function registerImageFloat(
 
   if (!state.dryRun) {
     const bmp = state.images.get(key);
-    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, img.mimeType, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
     rect.drawn = true;
   }
 }

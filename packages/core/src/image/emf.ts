@@ -30,10 +30,11 @@
 // twins), POLYPOLYGON16/POLYPOLYLINE16 (+ 32-bit twins), MOVETOEX, LINETO,
 // RECTANGLE, ELLIPSE, SETPOLYFILLMODE, EXTTEXTOUTW, SETTEXTCOLOR, SETTEXTALIGN,
 // SETBKMODE, BITBLT, STRETCHDIBITS (minimal DIB decoder), EOF.
+// Path clipping IS handled: BEGINPATH/ENDPATH/CLOSEFIGURE build a path and
+// SELECTCLIPPATH applies it as a clip (scoped by SAVEDC/RESTOREDC).
 // Ignored (no-op, skipped by nSize): GDICOMMENT (may hold EMF+, out of scope),
 // SETICMMODE, SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
-// BEGINPATH/ENDPATH/SELECTCLIPPATH (clipping is ignored in v1 — [MS-EMF] clip
-// records), and any unrecognized iType.
+// and any unrecognized iType.
 //
 // Shared across the docx, pptx and xlsx renderers via
 // {@link ./wmf.ts}#decodeRasterOrMetafile, which sniffs the bytes and routes
@@ -69,6 +70,10 @@ const EMR = {
   ELLIPSE: 42,
   RECTANGLE: 43,
   LINETO: 54,
+  BEGINPATH: 59,
+  ENDPATH: 60,
+  CLOSEFIGURE: 61,
+  SELECTCLIPPATH: 67,
   EXTCREATEFONTINDIRECTW: 82,
   EXTTEXTOUTW: 84,
   POLYBEZIER16: 85,
@@ -122,6 +127,7 @@ interface Font {
   weight: number; // lfWeight (400 normal, 700 bold)
   italic: boolean;
   face: string;
+  escapement: number; // lfEscapement — tenths of a degree, counterclockwise
 }
 type EmfObject = Pen | Brush | Font;
 
@@ -239,6 +245,7 @@ interface PlayState {
   curY: number;
   stack: SavedDc[]; // SAVEDC/RESTOREDC graphics-state stack
   drew: boolean;
+  inPath: boolean; // between BEGINPATH and ENDPATH — geometry builds a path, no draw
 }
 
 /** Snapshot of the graphics state pushed by EMR_SAVEDC. */
@@ -435,6 +442,26 @@ function decodeDib(
         putPx(dstRow, x, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, 255);
       }
       anyAlpha = true;
+    } else if (biBitCount === 4 && palette) {
+      // 4bpp: two palette indices per byte, high nibble first (MATLAB exports the
+      // bar-chart fill as a 16-colour STRETCHDIBITS — sample-13 Fig.3 PR_VAR bars).
+      for (let x = 0; x < width; x++) {
+        const byte = dv.getUint8(rowOff + (x >> 1));
+        const idx = (x & 1) === 0 ? (byte >> 4) & 0xf : byte & 0xf;
+        const c = palette[idx] ?? 0;
+        putPx(dstRow, x, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, 255);
+      }
+      anyAlpha = true;
+    } else if (biBitCount === 1 && palette) {
+      // 1bpp: eight palette indices per byte, MSB first (monochrome pattern
+      // brushes — gridlines/axes).
+      for (let x = 0; x < width; x++) {
+        const byte = dv.getUint8(rowOff + (x >> 3));
+        const bit = (byte >> (7 - (x & 7))) & 1;
+        const c = palette[bit] ?? 0;
+        putPx(dstRow, x, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, 255);
+      }
+      anyAlpha = true;
     } else {
       return null; // unsupported bit depth
     }
@@ -544,7 +571,7 @@ function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
   const count = c.u32();
   if (count < 2 || count > 0x100000) return;
   const { ctx } = s;
-  ctx.beginPath();
+  if (!s.inPath) ctx.beginPath();
   let started = false;
   for (let i = 0; i < count; i++) {
     if (c.remaining < 4) break;
@@ -557,6 +584,7 @@ function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
   }
   if (!started) return;
   ctx.closePath();
+  if (s.inPath) return; // path bracket: defer fill/stroke
   if (s.curBrush && s.curBrush.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
     ctx.fill(s.fillRule);
@@ -643,7 +671,7 @@ function fillStrokePolyPoly(
     counts.push(c.u32());
   }
   const { ctx } = s;
-  ctx.beginPath();
+  if (!s.inPath) ctx.beginPath(); // in a path bracket: accumulate, don't reset
   let any = false;
   for (const cnt of counts) {
     if (cnt < 2) {
@@ -660,7 +688,7 @@ function fillStrokePolyPoly(
     if (isPolygon) ctx.closePath();
     any = true;
   }
-  if (!any) return;
+  if (!any || s.inPath) return; // path bracket: geometry added, defer fill/stroke
   if (isPolygon && s.curBrush && s.curBrush.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
     ctx.fill(s.fillRule);
@@ -681,12 +709,13 @@ function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number
   const c1 = toPx(s, r, t);
   const c2 = toPx(s, r, b);
   const c3 = toPx(s, l, b);
-  ctx.beginPath();
+  if (!s.inPath) ctx.beginPath();
   ctx.moveTo(c0[0], c0[1]);
   ctx.lineTo(c1[0], c1[1]);
   ctx.lineTo(c2[0], c2[1]);
   ctx.lineTo(c3[0], c3[1]);
   ctx.closePath();
+  if (s.inPath) return; // path bracket: defer fill/stroke
   if (s.curBrush && s.curBrush.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
     ctx.fill(s.fillRule);
@@ -768,7 +797,9 @@ function readCreateFont(c: EmfCursor, dv: DataView, recStart: number): [number, 
   const ih = c.u32();
   const lfBase = recStart + 12; // ihObject (4) after the 8-byte record header
   const lfHeight = dv.getInt32(lfBase, true);
-  // lfWidth(4), lfEscapement(8), lfOrientation(12)
+  // lfWidth(4), lfEscapement(8), lfOrientation(12) — escapement drives rotated
+  // axis labels (e.g. a vertical "Dx [mm]" at 900 = 90° CCW).
+  const lfEscapement = dv.getInt32(lfBase + 8, true);
   const lfWeight = dv.getInt32(lfBase + 16, true);
   const lfItalic = dv.getUint8(lfBase + 20);
   // lfFaceName: UTF-16, up to 32 code units, at LOGFONT offset 28.
@@ -788,6 +819,7 @@ function readCreateFont(c: EmfCursor, dv: DataView, recStart: number): [number, 
       weight: lfWeight,
       italic: lfItalic !== 0,
       face,
+      escapement: lfEscapement,
     },
   ];
 }
@@ -832,8 +864,23 @@ function drawText(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): v
   // TA_BASELINE(0x18) → alphabetic; else top.
   ctx.textBaseline = (s.textAlign & 0x18) === 0x18 ? 'alphabetic' : 'top';
   // bkMode TRANSPARENT(1): never paint a background box (always the case here).
+  // lfEscapement rotates the text about the reference point (tenths of a degree,
+  // counterclockwise from the device x-axis). Canvas angles are clockwise on a
+  // y-down surface, so negate. Used for vertical axis labels (e.g. 900 = 90°).
+  const escTenths = font?.escapement ?? 0;
   try {
-    ctx.fillText(str, dx, dy);
+    if (escTenths !== 0) {
+      ctx.save();
+      try {
+        ctx.translate(dx, dy);
+        ctx.rotate((-escTenths / 10) * (Math.PI / 180));
+        ctx.fillText(str, 0, 0);
+      } finally {
+        ctx.restore(); // always unwind the save, even if fillText throws
+      }
+    } else {
+      ctx.fillText(str, dx, dy);
+    }
     s.drew = true;
   } catch {
     // Some ctx mocks lack fillText; a missing fillText must not abort the render.
@@ -965,6 +1012,7 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
     curY: 0,
     stack: [],
     drew: false,
+    inPath: false,
   };
 
   let pos = 0;
@@ -984,15 +1032,51 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
     try {
       switch (iType) {
         case EMR.HEADER: {
-          // RECTL rclBounds @ data offset 8 (= record offset 16), then rclFrame.
-          const left = dv.getInt32(pos + 8, true);
-          const top = dv.getInt32(pos + 12, true);
-          const right = dv.getInt32(pos + 16, true);
-          const bottom = dv.getInt32(pos + 20, true);
-          s.left = left;
-          s.top = top;
-          s.boundsW = Math.max(1, right - left);
-          s.boundsH = Math.max(1, bottom - top);
+          // ENHMETAHEADER ([MS-EMF] 2.2.9). rclBounds (the INK bounding box, in
+          // device units) @ record offset 8; rclFrame (the intended PICTURE
+          // FRAME, in .01 mm) @ 24; szlDevice (reference device size, px) @ 72;
+          // szlMillimeters (reference device size, mm) @ 80.
+          const bLeft = dv.getInt32(pos + 8, true);
+          const bTop = dv.getInt32(pos + 12, true);
+          const bRight = dv.getInt32(pos + 16, true);
+          const bBottom = dv.getInt32(pos + 20, true);
+          // Default mapping: the ink bounds fill the target. Used when the frame
+          // or reference device size is absent/degenerate (mirrors the
+          // LibreOffice/POI fallback to the bounds rectangle).
+          s.left = bLeft;
+          s.top = bTop;
+          s.boundsW = Math.max(1, bRight - bLeft);
+          s.boundsH = Math.max(1, bBottom - bTop);
+          // GDI `PlayEnhMetaFile` maps the FRAME — not the ink bounds — onto the
+          // target rectangle, so whitespace around the ink is preserved and a
+          // PowerPoint/Word `<a:srcRect>` crop (defined relative to the frame,
+          // ECMA-376 §20.1.8.55) aligns with the picture. The records draw in
+          // device units (same units as rclBounds), so convert the frame from
+          // .01 mm to those device units via the reference device resolution
+          // (px per .01 mm = szlDevice / (szlMillimeters · 100)) and map THAT
+          // rectangle instead. (Confirmed against [MS-EMF] 2.2.9 + the GDI
+          // PlayEnhMetaFile remarks + LibreOffice emfio / Apache POI HEMF, which
+          // both size the picture to the frame.)
+          if (recEnd >= pos + 88) {
+            const fLeft = dv.getInt32(pos + 24, true);
+            const fTop = dv.getInt32(pos + 28, true);
+            const fRight = dv.getInt32(pos + 32, true);
+            const fBottom = dv.getInt32(pos + 36, true);
+            const devCx = dv.getInt32(pos + 72, true);
+            const devCy = dv.getInt32(pos + 76, true);
+            const mmCx = dv.getInt32(pos + 80, true);
+            const mmCy = dv.getInt32(pos + 84, true);
+            const fwMm = fRight - fLeft;
+            const fhMm = fBottom - fTop;
+            if (fwMm > 0 && fhMm > 0 && devCx > 0 && devCy > 0 && mmCx > 0 && mmCy > 0) {
+              const sx = devCx / (mmCx * 100); // device px per .01 mm (X)
+              const sy = devCy / (mmCy * 100); // device px per .01 mm (Y)
+              s.left = fLeft * sx;
+              s.top = fTop * sy;
+              s.boundsW = Math.max(1, fwMm * sx);
+              s.boundsH = Math.max(1, fhMm * sy);
+            }
+          }
           break;
         }
         case EMR.SETWORLDTRANSFORM: {
@@ -1011,6 +1095,9 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           break;
         }
         case EMR.SAVEDC: {
+          // Mirror the GDI state push on the canvas too, so a clip set via
+          // SELECTCLIPPATH (below) is scoped to the matching RESTOREDC.
+          s.ctx.save();
           s.stack.push({
             wt: { ...s.wt },
             curPen: s.curPen,
@@ -1031,7 +1118,10 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           const iRelative = c.i32();
           const times = Math.min(Math.abs(iRelative) || 1, s.stack.length);
           let saved: SavedDc | undefined;
-          for (let i = 0; i < times; i++) saved = s.stack.pop();
+          for (let i = 0; i < times; i++) {
+            saved = s.stack.pop();
+            s.ctx.restore(); // unwind the matching canvas save (clip/state)
+          }
           if (saved) {
             s.wt = saved.wt;
             s.curPen = saved.curPen;
@@ -1043,6 +1133,34 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
             s.fillRule = saved.fillRule;
             s.curX = saved.curX;
             s.curY = saved.curY;
+          }
+          break;
+        }
+        case EMR.BEGINPATH: {
+          // Start a path bracket ([MS-EMF] 2.3.10): subsequent geometry records
+          // build the path instead of drawing it, until ENDPATH.
+          s.ctx.beginPath();
+          s.inPath = true;
+          break;
+        }
+        case EMR.CLOSEFIGURE: {
+          if (s.inPath) s.ctx.closePath();
+          break;
+        }
+        case EMR.ENDPATH: {
+          s.inPath = false;
+          break;
+        }
+        case EMR.SELECTCLIPPATH: {
+          // Use the path just defined as the clip region (intersecting the
+          // current clip — the common RGN_AND case, and what a following blit
+          // relies on, e.g. sample-13 Fig.3 clips a bar-chart DIB to the bar
+          // shapes so its background is masked out). Scoped by the enclosing
+          // SAVEDC/RESTOREDC.
+          try {
+            s.ctx.clip(s.fillRule);
+          } catch {
+            /* a ctx without clip() (some mocks): leave unclipped */
           }
           break;
         }
@@ -1222,9 +1340,9 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           break;
         default:
           // GDICOMMENT (may hold EMF+, out of scope), SETICMMODE,
-          // SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
-          // BEGINPATH/ENDPATH/SELECTCLIPPATH (clipping ignored in v1 — [MS-EMF]
-          // clip records), and any unrecognized iType: skip by nSize.
+          // SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT, and any
+          // unrecognized iType: skip by nSize. (Path/clip records ARE handled
+          // above.)
           break;
       }
     } catch {

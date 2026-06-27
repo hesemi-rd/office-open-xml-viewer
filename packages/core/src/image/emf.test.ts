@@ -67,15 +67,22 @@ const EMR = {
   SETPOLYFILLMODE: 19,
   SETTEXTALIGN: 22,
   SETTEXTCOLOR: 24,
+  SAVEDC: 33,
+  RESTOREDC: 34,
   MODIFYWORLDTRANSFORM: 36,
   SELECTOBJECT: 37,
   CREATEPEN: 38,
   CREATEBRUSHINDIRECT: 39,
   DELETEOBJECT: 40,
+  BEGINPATH: 59,
+  ENDPATH: 60,
+  CLOSEFIGURE: 61,
+  SELECTCLIPPATH: 67,
   EXTCREATEFONTINDIRECTW: 82,
   EXTTEXTOUTW: 84,
   POLYGON16: 86,
   POLYLINE16: 87,
+  CREATEDIBPATTERNBRUSHPT: 94,
 } as const;
 
 /** An EMF record: u32 iType, u32 nSize (incl. the 8-byte header), then data.
@@ -111,12 +118,32 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 
 /** EMR_HEADER with the given inclusive device bounds (left,top,right,bottom).
  *  The signature " EMF" (0x464D4520) must land at byte offset 40 of the whole
- *  file → record offset 40 (the header record starts at file offset 0). */
-function emfHeader(left = 0, top = 0, right = 100, bottom = 100): Uint8Array {
+ *  file → record offset 40 (the header record starts at file offset 0).
+ *
+ *  `opts.frame` (.01 mm) + `opts.dev`/`opts.mm` (reference device px/mm) drive
+ *  the picture-frame mapping (`playEmf` maps the frame, not the ink bounds, onto
+ *  the target). The default leaves the frame degenerate (0,0,0,0) so the player
+ *  falls back to mapping the ink bounds — keeping the coordinate-pipeline tests
+ *  below focused on the world transform + scaling. The frame path has its own
+ *  test (`maps the picture frame … not the ink bounds`). */
+function emfHeader(
+  left = 0,
+  top = 0,
+  right = 100,
+  bottom = 100,
+  opts: {
+    frame?: { l: number; t: number; r: number; b: number };
+    dev?: { cx: number; cy: number };
+    mm?: { cx: number; cy: number };
+  } = {},
+): Uint8Array {
+  const f = opts.frame ?? { l: 0, t: 0, r: 0, b: 0 };
+  const dev = opts.dev ?? { cx: 1920, cy: 1080 };
+  const mm = opts.mm ?? { cx: 508, cy: 286 };
   return record(EMR.HEADER, (w) => {
     // data starts at record offset 8:
     w.i32(left).i32(top).i32(right).i32(bottom); // rclBounds   (off 8..24)
-    w.i32(0).i32(0).i32(36000).i32(22000); //        rclFrame    (off 24..40)
+    w.i32(f.l).i32(f.t).i32(f.r).i32(f.b); //        rclFrame    (off 24..40)
     w.u32(0x464d4520); //                            dSignature  (off 40) " EMF"
     w.u32(0x00010000); //                            nVersion    (off 44)
     w.u32(0); //                                     nBytes      (off 48)
@@ -124,8 +151,8 @@ function emfHeader(left = 0, top = 0, right = 100, bottom = 100): Uint8Array {
     w.u16(0).u16(0); //                              nHandles/sReserved
     w.u32(0).u32(0); //                              nDescription/offDescription
     w.u32(0); //                                     nPalEntries
-    w.i32(1920).i32(1080); //                        szlDevice (px)
-    w.i32(508).i32(286); //                          szlMillimeters
+    w.i32(dev.cx).i32(dev.cy); //                    szlDevice (px)     (off 72)
+    w.i32(mm.cx).i32(mm.cy); //                      szlMillimeters     (off 80)
   });
 }
 
@@ -220,6 +247,15 @@ function makeRecordingCtx(): MockCtx {
     fillText(t: string, x: number, y: number) {
       calls.push({ op: 'fillText', args: [t, x, y] });
       styles.text.push(_fill);
+    },
+    translate(x: number, y: number) {
+      calls.push({ op: 'translate', args: [x, y] });
+    },
+    rotate(a: number) {
+      calls.push({ op: 'rotate', args: [a] });
+    },
+    clip(rule?: string) {
+      calls.push({ op: 'clip', args: rule ? [rule] : [] });
     },
   };
   return { ctx: ctx as unknown as CanvasRenderingContext2D, calls, styles };
@@ -449,6 +485,123 @@ describe('playEmf — EXTTEXTOUTW text', () => {
     expect(texts[0].args[0]).toBe('F1');
     expect(texts[0].args.slice(1)).toEqual([20, 30]); // identity WT, ×1 device
     expect(m.styles.text.at(-1)?.toLowerCase()).toBe('#ff0000'); // red text color
+  });
+
+  it('rotates text by lfEscapement (vertical axis labels)', () => {
+    // lfEscapement = 900 → 90° counterclockwise. The draw becomes
+    // translate(refPx) + rotate(−90°) + fillText at the origin.
+    const text = 'Dx';
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.EXTCREATEFONTINDIRECTW, (w) => {
+        w.u32(1);
+        // lfHeight, lfWidth, lfEscapement=900, lfOrientation, lfWeight
+        w.i32(-12).i32(0).i32(900).i32(0).i32(400);
+        w.raw(0, 0, 0, 0);
+        w.raw(0, 0, 0, 0);
+        const face = 'Arial';
+        w.utf16(face);
+        for (let i = face.length; i < 32; i++) w.u16(0);
+      }),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.EXTTEXTOUTW, (w) => {
+        w.i32(0).i32(0).i32(100).i32(100);
+        w.u32(1);
+        w.f32(1).f32(1);
+        w.i32(20).i32(30);
+        w.u32(text.length);
+        w.u32(76);
+        w.u32(0);
+        w.i32(0).i32(0).i32(0).i32(0);
+        w.u32(0);
+        w.utf16(text);
+      }),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    expect(m.calls.find((c) => c.op === 'translate')?.args).toEqual([20, 30]);
+    expect(m.calls.find((c) => c.op === 'rotate')?.args[0]).toBeCloseTo(-Math.PI / 2, 6);
+    expect(m.calls.find((c) => c.op === 'fillText')?.args).toEqual(['Dx', 0, 0]);
+  });
+});
+
+describe('playEmf — picture frame mapping + path clip', () => {
+  it('maps the picture frame onto the target — ink fills a sub-rectangle, not the whole raster', () => {
+    // Ink bounds 0..100 (device px); the picture FRAME is twice as large
+    // (rclFrame 0..200 .01 mm with a 1 px/.01 mm reference device ⇒ frame device
+    // extent 200). GDI maps the FRAME to the target, so on a 200×200 raster the
+    // ink corner (100,100) lands at (100,100) — half the frame — NOT (200,200) as
+    // a bounds-fill mapping would give. This is what lets an `<a:srcRect>` crop
+    // (relative to the frame) select the ink region.
+    const file = concat(
+      emfHeader(0, 0, 100, 100, {
+        frame: { l: 0, t: 0, r: 200, b: 200 },
+        dev: { cx: 50800, cy: 28600 }, // = mm × 100 ⇒ 1 device px per .01 mm
+        mm: { cx: 508, cy: 286 },
+      }),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0x00ff0000)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(100).i32(100).u32(2).i16(0).i16(0).i16(100).i16(100),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 200, 200)).toBe(true);
+    expect(m.calls.find((c) => c.op === 'moveTo')?.args).toEqual([0, 0]);
+    expect(m.calls.find((c) => c.op === 'lineTo')?.args).toEqual([100, 100]);
+  });
+
+  it('BEGINPATH…ENDPATH + SELECTCLIPPATH sets a clip; the path geometry is not filled', () => {
+    // A polygon between BEGINPATH and ENDPATH defines the clip shape — it must
+    // build the path (no fill/stroke) and SELECTCLIPPATH applies it as a clip,
+    // bracketed by SAVEDC/RESTOREDC on the canvas (sample-13 Fig.3 clips a DIB to
+    // the bar shapes). Without this the clip-path polygon would paint a red fill.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEBRUSHINDIRECT, (w) => w.u32(1).u32(0).u32(0x000000ff).u32(0)), // red solid
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.SAVEDC, () => {}),
+      record(EMR.BEGINPATH, () => {}),
+      record(EMR.POLYGON16, (w) =>
+        w.i32(0).i32(0).i32(50).i32(50).u32(3).i16(0).i16(0).i16(50).i16(0).i16(50).i16(50),
+      ),
+      record(EMR.ENDPATH, () => {}),
+      record(EMR.SELECTCLIPPATH, (w) => w.u32(1)), // RGN_AND
+      record(EMR.RESTOREDC, (w) => w.i32(-1)),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playEmf(file, m.ctx, 100, 100);
+    expect(m.calls.some((c) => c.op === 'clip')).toBe(true);
+    expect(m.calls.some((c) => c.op === 'fill')).toBe(false); // in-path polygon not filled
+    expect(m.calls.some((c) => c.op === 'save')).toBe(true);
+    expect(m.calls.some((c) => c.op === 'restore')).toBe(true);
+  });
+
+  it('decodes a 4bpp DIB pattern brush (MATLAB bar-chart fill colour)', () => {
+    // A 2×2 4bpp BI_RGB DIB, 1-entry palette = blue, all pixels index 0. The
+    // pattern brush averages to that blue, so a polygon fills blue — exercising
+    // the 4bpp decode path that paints sample-13 Fig.3's bars.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEDIBPATTERNBRUSHPT, (w) => {
+        w.u32(1).u32(0).u32(32).u32(44).u32(76).u32(8); // ih,iUsage,offBmi,cbBmi,offBits,cbBits
+        // BITMAPINFOHEADER (40 bytes) @ record offset 32:
+        w.u32(40).i32(2).i32(2).u16(1).u16(4).u32(0).u32(0).i32(0).i32(0).u32(1).u32(0);
+        w.raw(0xff, 0x00, 0x00, 0x00); // palette[0] = blue (B,G,R,reserved)
+        w.raw(0, 0, 0, 0, 0, 0, 0, 0); // 2 rows × 4-byte stride, all index 0
+      }),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYGON16, (w) =>
+        w.i32(0).i32(0).i32(40).i32(40).u32(3).i16(0).i16(0).i16(40).i16(0).i16(40).i16(40),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    expect(m.styles.fill.at(-1)?.toLowerCase()).toBe('#0000ff');
   });
 });
 
