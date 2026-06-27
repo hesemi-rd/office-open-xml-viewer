@@ -35,6 +35,7 @@ import {
   classifyFontGeneric,
   isComplexScriptCodePoint,
   decodeRasterOrMetafile,
+  isMetafileMime,
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
@@ -332,6 +333,10 @@ interface ImagePair {
    */
   widthPt: number;
   heightPt: number;
+  /** True when at least one reference to this image carries an `<a:srcRect>`
+   *  crop, so the decode must prefer the raster (the crop math needs the
+   *  bitmap's native pixel grid; an SVG vector original has none). */
+  hasCrop?: boolean;
 }
 
 /** Returns a stable map key for an (imagePath, colorReplaceFrom) pair. */
@@ -376,6 +381,8 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
     } else {
       existing.widthPt = Math.max(existing.widthPt, pair.widthPt);
       existing.heightPt = Math.max(existing.heightPt, pair.heightPt);
+      // If ANY reference is cropped, force the raster decode for this key.
+      existing.hasCrop = existing.hasCrop || pair.hasCrop;
     }
   };
   // ECMA-376 §17.9.9/§17.9.20 — a level's picture-bullet marker is an image
@@ -410,6 +417,7 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
           colorReplaceFrom: img.colorReplaceFrom,
           widthPt: img.widthPt ?? 0,
           heightPt: img.heightPt ?? 0,
+          hasCrop: img.srcRect != null,
         });
       } else if (run.type === 'shape') {
         // Inline images living inside a text box (<wps:txbx>) ride on the
@@ -553,12 +561,13 @@ export async function preloadImages(
       const dataIsSvg = pair.mimeType === 'image/svg+xml';
       try {
         let img: DecodedImage;
-        if (pair.svgImagePath != null) {
+        if (pair.svgImagePath != null && !pair.hasCrop) {
           // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
-          // fall back to the raster on any SVG decode failure. A `<a:srcRect>`
-          // crop (§20.1.8.55), when present, is applied at draw time in bitmap
-          // pixels of whichever source we decoded here, so the vector is still
-          // always preferred when present.
+          // fall back to the raster on any SVG decode failure. With an
+          // `<a:srcRect>` crop (§20.1.8.55) we skip this branch and decode the
+          // raster instead, because the crop math (drawImageCropped) needs the
+          // bitmap's native pixel grid — an SVG element has none. Mirrors the
+          // pptx `!srcRect` / xlsx `hasCrop` vector gate.
           try {
             img = await getCachedSvgImageByPath(pair.svgImagePath, fetch);
           } catch {
@@ -5168,34 +5177,45 @@ function drawTabLeader(
  * Draw a decoded image bitmap into the destination box `[dx, dy, dw, dh]`,
  * honoring an optional ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop.
  *
- * `srcRect` insets are fractions 0..1 of the bitmap measured inward from each
- * edge, so the visible source region is `[l, t, 1−r, 1−b]` in bitmap pixels:
+ * `srcRect` insets are fractions 0..1 of the source measured inward from each
+ * edge, so the visible region is `[l, t, 1−r, 1−b]` in source pixels:
  *   `sx = l·W`, `sy = t·H`, `sw = (1−l−r)·W`, `sh = (1−t−b)·H` (clamped ≥ 1).
- * The destination box is unchanged — the same display size the document asked
- * for, now filled by just the cropped slice (the renderer never scales the crop
- * back up; Word stretches the visible source to fill the display box, which is
- * exactly the 9-arg `drawImage` behavior). Applies identically to raster and
- * metafile (WMF/EMF) bitmaps since the crop is in decoded-bitmap pixels.
+ * The destination box is unchanged — Word stretches the visible slice to fill
+ * the display box, which is exactly the 9-arg `drawImage` behavior. A negative
+ * (overscan) edge is clamped to 0 (degrades to a full draw).
+ *
+ * Crop is applied only for a raster blip, whose decoded `ImageBitmap` is the
+ * full source at native resolution. A metafile (WMF/EMF) is rasterized to the
+ * CROPPED display box by `decodeRasterOrMetafile`, so cropping its bitmap would
+ * squish the whole figure to the sub-rect's aspect (sample-13 Fig.2 / Fig.3) —
+ * metafiles draw whole, gated by `isMetafileMime`. When a crop is present
+ * `preloadImages` forces the raster decode (an SVG element has no native pixel
+ * grid). Mirrors the pptx and xlsx renderers.
  */
 function drawImageCropped(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   bmp: DecodedImage,
   srcRect: { l: number; t: number; r: number; b: number } | undefined,
+  mimeType: string,
   dx: number,
   dy: number,
   dw: number,
   dh: number,
 ): void {
-  // ECMA-376 §20.1.8.55 srcRect crop is intentionally DISABLED for now. Cropping
-  // works for a raster blip (the bitmap is the true full image), but a metafile
-  // (WMF/EMF) is rasterized into a bitmap sized to the CROPPED display box, so
-  // the whole metafile is squished to the sub-rect's aspect and the crop no
-  // longer aligns with the source — the figure stretches / spills out of its
-  // frame (sample-13 Fig.2 / Fig.3). Until the decoder can rasterize a metafile
-  // at its native aspect and crop from that, draw the full image (the clean,
-  // pre-crop behavior). `srcRect` stays plumbed through (parser → ImageRun) so
-  // re-enabling it is a one-line change here.
-  void srcRect;
+  if (srcRect && !isMetafileMime(mimeType) && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
+    const el = bmp as { naturalWidth?: number; naturalHeight?: number; width?: number; height?: number };
+    const bw = el.naturalWidth || el.width || 0;
+    const bh = el.naturalHeight || el.height || 0;
+    if (bw > 0 && bh > 0) {
+      const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
+      const sx = clamp01(srcRect.l) * bw;
+      const sy = clamp01(srcRect.t) * bh;
+      const sw = Math.max(1, bw - sx - clamp01(srcRect.r) * bw);
+      const sh = Math.max(1, bh - sy - clamp01(srcRect.b) * bh);
+      ctx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+      return;
+    }
+  }
   ctx.drawImage(bmp, dx, dy, dw, dh);
 }
 
@@ -5214,7 +5234,7 @@ function renderInlineImage(
   if (!bmp) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
-  drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
+  drawImageCropped(ctx, bmp, seg.srcRect, seg.mimeType, x, baseline - h, w, h);
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -5262,7 +5282,7 @@ function renderAnchorImages(
     // does not displace text and is not displaced by other floats), so dist* is
     // unused here.
     const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
-    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
+    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, img.mimeType, pageX, pageY, w, h);
   }
 }
 
@@ -6090,7 +6110,7 @@ function registerImageFloat(
 
   if (!state.dryRun) {
     const bmp = state.images.get(key);
-    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, img.mimeType, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
     rect.drawn = true;
   }
 }
