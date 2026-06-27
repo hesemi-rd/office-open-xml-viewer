@@ -7469,21 +7469,32 @@ function paragraphMarkLineHeight(
   fontFamilyClasses: Record<string, string> = {},
 ): number {
   const fs = getDefaultFontSize(para);
+  const family = getDefaultFontFamily(para);
   let asc: number;
   let desc: number;
-  if (eastAsian && ctx) {
-    // East Asian document: the empty paragraph-mark line follows the real East
-    // Asian font box so docGrid cell rounding (lineBoxHeight) reserves whole
-    // cells — a 20pt mark on a 20pt pitch → 2 cells (40px), matching Word's title
-    // pages. The synthetic 0.8/0.2 ≈ 1em fallback measures exactly one pitch and
-    // would round down to a single cell. fontBoundingBox is font-wide, so any
-    // East Asian glyph probes it.
+  if (ctx) {
+    // ECMA-376 §17.3.1.29 / §17.3.1.33: an empty paragraph's mark line reserves
+    // the mark font's REAL single-line height — the SAME fontBoundingBox a text
+    // line of that font and size uses (layoutLines), so an empty paragraph is
+    // exactly as tall as a one-character paragraph of the same run properties.
+    // The synthetic 0.8/0.2 ≈ 1em box under-measured every empty paragraph
+    // whenever the (often substituted) font's real box exceeds 1em — a Latin
+    // fallback reports ~1.15em — so a run of empty "spacer" paragraphs fell
+    // short and the following content rose into a preceding float's wrap band
+    // (sample-12: the figure caption wrapped beside the image instead of below
+    // it). East Asian documents probe an EA glyph so docGrid cell rounding
+    // (lineBoxHeight) reserves whole cells (a 20pt mark on a 20pt pitch → 2
+    // cells); others probe a Latin glyph. fontBoundingBox is font-wide, so the
+    // probe glyph choice does not change the box. correctLineMetrics rescales a
+    // substituted font to the document font's win box, identical to the text
+    // path (a no-op for fonts absent from the win-metric table, e.g. Latin).
     const prevFont = ctx.font;
-    ctx.font = buildFont(false, false, fs * scale, getDefaultFontFamily(para), fontFamilyClasses);
-    const m = ctx.measureText('あ');
-    asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fs * scale * 0.8;
-    desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fs * scale * 0.2;
+    ctx.font = buildFont(false, false, fs * scale, family, fontFamilyClasses);
+    const m = ctx.measureText(eastAsian ? 'あ' : 'x');
+    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fs * scale * 0.8;
+    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fs * scale * 0.2;
     ctx.font = prevFont;
+    ({ ascent: asc, descent: desc } = correctLineMetrics(family, fs * scale, rawAsc, rawDesc));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
