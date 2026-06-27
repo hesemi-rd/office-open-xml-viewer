@@ -252,6 +252,31 @@ describe('highlight fill spans justification slack (§17.3.1.15 highlight + §17
   });
 });
 
+describe('run border spans justification slack (§17.3.2.4 + §17.18.44 both)', () => {
+  it('extends the border frame across justified inter-word slack', async () => {
+    // The run-border frame goes through the group-accumulation path (not the
+    // fillRect path the highlight test exercises), so guard it separately: on a
+    // justified line the frame's right edge must fold in the widened inter-word
+    // space (decoW), making the line-0 frame WIDER than the same text left-
+    // aligned (where there is no slack). Before the fix both used the natural
+    // glyph span and were equal.
+    const text = 'aaaaa bbbbb ccccc ddddd eeeee fffff ggggg';
+    const firstLineFrameWidth = async (alignment: 'both' | 'left') => {
+      const events = await render([textRun(text, { border: border() })], { alignment }, 410);
+      const strokes = events.filter(
+        (e): e is Extract<DrawEvent, { kind: 'strokeRect' }> => e.kind === 'strokeRect',
+      );
+      expect(strokes.length).toBeGreaterThanOrEqual(2); // wrapped to ≥2 lines ⇒ ≥2 frames
+      const top = Math.min(...strokes.map((s) => s.y));
+      return Math.max(...strokes.filter((s) => Math.round(s.y) === Math.round(top)).map((s) => s.w));
+    };
+    const justified = await firstLineFrameWidth('both');
+    const leftAligned = await firstLineFrameWidth('left');
+    // The justified line-0 frame absorbs the inter-word slack and is strictly wider.
+    expect(justified).toBeGreaterThan(leftAligned + 1);
+  });
+});
+
 describe('over-long word overflow-wrap (long URLs in a narrow column)', () => {
   it('breaks a no-space token wider than the line at the character level', async () => {
     // pageWidth 400, margins 0, 16px/char ⇒ 25 chars per line. A 40-char URL with
