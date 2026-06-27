@@ -169,10 +169,10 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
   });
 
   it('decodeImageSource forces the raster (not the SVG vector) when the picture is cropped', async () => {
-    // A cropped picture (`hasCrop=true`) with an svgBlip vector original must
-    // decode the RASTER fallback: the renderer's `<a:srcRect>` crop math needs
-    // the bitmap's native pixel grid, which an SVG element lacks. So even with
-    // svgImagePath present, createImageBitmap (raster) is the path taken.
+    // A cropped picture (a non-null `srcRect`) with an svgBlip vector original
+    // must decode the RASTER fallback: the renderer's `<a:srcRect>` crop math
+    // needs the bitmap's native pixel grid, which an SVG element lacks. So even
+    // with svgImagePath present, createImageBitmap (raster) is the path taken.
     const bmp = new FakeBitmap('image/png');
     const createImageBitmap = vi.fn(async () => bmp);
     vi.stubGlobal('createImageBitmap', createImageBitmap);
@@ -185,7 +185,7 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
       fetchImage,
       0,
       0,
-      true, // … but the picture is cropped → raster wins
+      { l: 0.1, t: 0, r: 0.1, b: 0 }, // … but the picture is cropped → raster wins
     );
 
     expect(src).toBe(bmp);

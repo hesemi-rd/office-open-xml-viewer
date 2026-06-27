@@ -90,14 +90,14 @@ export function isEmf(bytes: Uint8Array): boolean {
   return dv.getUint32(0, true) === 1 && dv.getUint32(40, true) === EMF_SIGNATURE;
 }
 
-/** True for the WMF/EMF metafile MIME types (`image/wmf`, `image/emf`). A
- *  DrawingML `<a:srcRect>` crop (ECMA-376 §20.1.8.55) cannot be honored on a
- *  metafile because {@link decodeRasterOrMetafile} rasterizes it to the CROPPED
- *  display box rather than native source pixels — so the docx, pptx and xlsx
- *  renderers all gate the crop on this and draw a cropped metafile whole. The
- *  MIME is extension-derived by the parsers (`mime_from_ext`), so a metafile
- *  mislabeled with a raster extension would slip past this gate; acceptable
- *  because authored crops on metafiles are rare. */
+/** True for the WMF/EMF metafile MIME types (`image/wmf`, `image/emf`). Used by
+ *  the shared `<a:srcRect>` crop (ECMA-376 §20.1.8.55): a metafile carries no
+ *  native pixel grid, so a cropped one must be rasterized at its FULL picture
+ *  frame before the fractional crop applies (see {@link ./crop.ts}'s
+ *  `metafileRasterSize`); raster blips skip that scale-up. The MIME is
+ *  extension-derived by the parsers (`mime_from_ext`), so a metafile mislabeled
+ *  with a raster extension would be treated as a raster — acceptable because
+ *  authored crops on metafiles are rare. */
 export function isMetafileMime(mime: string | undefined): boolean {
   return mime === 'image/wmf' || mime === 'image/emf';
 }

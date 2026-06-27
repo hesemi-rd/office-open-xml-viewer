@@ -94,6 +94,15 @@ export {
   decodeRasterOrMetafile,
   type DecodeRasterOptions,
 } from './image/wmf';
+// Shared `<a:srcRect>` crop (§20.1.8.55) for all three renderers: the source-rect
+// math, the full-frame raster size for a cropped metafile, and the draw wrapper.
+export {
+  cropSourceRect,
+  drawImageCropped,
+  imageNaturalSize,
+  metafileRasterSize,
+  type SrcRect,
+} from './image/crop';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /

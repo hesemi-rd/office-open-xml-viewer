@@ -35,7 +35,8 @@ import {
   classifyFontGeneric,
   isComplexScriptCodePoint,
   decodeRasterOrMetafile,
-  isMetafileMime,
+  drawImageCropped,
+  metafileRasterSize,
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
@@ -366,31 +367,6 @@ function authorColor(author?: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
-}
-
-/**
- * Raster target size (pt) for an embedded image. A raster blip decodes at its
- * native pixel grid, so its display box is fine. A metafile (WMF/EMF) is
- * rasterized by us at the size we ask for, and with an `<a:srcRect>` crop
- * (ECMA-376 §20.1.8.55) the display box is only the visible sub-rectangle. The
- * crop is relative to the metafile's PICTURE FRAME (the player maps the frame —
- * not the ink bounds — onto the raster, see `playEmf`), so to crop correctly we
- * must rasterize the WHOLE frame: scale the target up to the full frame display
- * size (box ÷ (1−l−r) horizontally, ÷ (1−t−b) vertically). `drawImageCropped`
- * then selects the right sub-region (e.g. sample-13 Fig.2 crops one composite EMF
- * into subfigures (a)/(b)(c)). Uncropped metafiles and all raster blips are
- * unaffected (the box passes through).
- */
-export function metafileRasterSize(
-  mimeType: string,
-  srcRect: { l: number; t: number; r: number; b: number } | null | undefined,
-  widthPt: number,
-  heightPt: number,
-): { widthPt: number; heightPt: number } {
-  if (!srcRect || !isMetafileMime(mimeType)) return { widthPt, heightPt };
-  const fracW = Math.max(0.01, 1 - srcRect.l - srcRect.r);
-  const fracH = Math.max(0.01, 1 - srcRect.t - srcRect.b);
-  return { widthPt: widthPt / fracW, heightPt: heightPt / fracH };
 }
 
 function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
@@ -5226,53 +5202,6 @@ function drawTabLeader(
     }
   }
   ctx.restore();
-}
-
-/**
- * Draw a decoded image bitmap into the destination box `[dx, dy, dw, dh]`,
- * honoring an optional ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop.
- *
- * `srcRect` insets are fractions 0..1 of the source measured inward from each
- * edge, so the visible region is `[l, t, 1−r, 1−b]` in source pixels:
- *   `sx = l·W`, `sy = t·H`, `sw = (1−l−r)·W`, `sh = (1−t−b)·H` (clamped ≥ 1).
- * The destination box is unchanged — Word stretches the visible slice to fill
- * the display box, which is exactly the 9-arg `drawImage` behavior. A negative
- * (overscan) edge is clamped to 0 (degrades to a full draw).
- *
- * Crop applies to BOTH raster blips and metafiles (WMF/EMF). A raster blip's
- * decoded `ImageBitmap` is the full source at native resolution; a cropped
- * metafile is rasterized at its FULL PICTURE FRAME — `metafileRasterSize` scales
- * the raster target up by 1/(1−l−r) and 1/(1−t−b), and `playEmf` maps the EMF
- * frame (not the ink bounds) onto that raster — so the source rectangle here is
- * the frame and the fractional crop selects the right sub-region (sample-13 Fig.2
- * crops one composite EMF into subfigures (a)/(b)(c); Fig.3 trims its frame
- * margins). When a crop is present `preloadImages` forces the raster decode (an
- * SVG element has no native pixel grid). Mirrors the pptx and xlsx renderers.
- */
-export function drawImageCropped(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  bmp: DecodedImage,
-  srcRect: { l: number; t: number; r: number; b: number } | undefined,
-  dx: number,
-  dy: number,
-  dw: number,
-  dh: number,
-): void {
-  if (srcRect && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
-    const el = bmp as { naturalWidth?: number; naturalHeight?: number; width?: number; height?: number };
-    const bw = el.naturalWidth || el.width || 0;
-    const bh = el.naturalHeight || el.height || 0;
-    if (bw > 0 && bh > 0) {
-      const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
-      const sx = clamp01(srcRect.l) * bw;
-      const sy = clamp01(srcRect.t) * bh;
-      const sw = Math.max(1, bw - sx - clamp01(srcRect.r) * bw);
-      const sh = Math.max(1, bh - sy - clamp01(srcRect.b) * bh);
-      ctx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
-      return;
-    }
-  }
-  ctx.drawImage(bmp, dx, dy, dw, dh);
 }
 
 function renderInlineImage(
