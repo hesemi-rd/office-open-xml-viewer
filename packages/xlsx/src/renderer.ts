@@ -919,11 +919,12 @@ export function layoutRichTextLines(
   return lines;
 }
 
-/** Cell geometry + alignment for {@link drawNonWrapRichText}. `alignH`/`alignV`
- *  accept the raw `xf` strings; any value other than `right`/`center` anchors
- *  left, and other than `top`/`center` anchors bottom (matching the legacy
- *  single-line path's handling of `justify` / `centerContinuous` / etc.). */
-export interface NonWrapRichGeom {
+/** Cell geometry + alignment shared by the rich-text draw helpers (wrap and
+ *  non-wrap). `alignH`/`alignV` accept the raw `xf` strings; any value other
+ *  than `right`/`center` anchors left, and other than `top`/`center` anchors
+ *  bottom (matching the legacy single-line path's handling of `justify` /
+ *  `centerContinuous` / etc.). */
+export interface RichCellGeom {
   alignH: string;
   alignV: string;
   /** Cell top-left in canvas px (merge span included). */
@@ -1037,7 +1038,7 @@ function drawRichLine(
   ctx: CanvasRenderingContext2D,
   lineRuns: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number },
@@ -1072,7 +1073,7 @@ function drawSingleLineRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
@@ -1098,7 +1099,7 @@ function drawMultiLineRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
@@ -1163,7 +1164,7 @@ export function drawNonWrapRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
@@ -1172,6 +1173,47 @@ export function drawNonWrapRichText(
     drawMultiLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
   } else {
     drawSingleLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
+  }
+}
+
+/**
+ * Lay out and draw WRAP-mode rich text (mixed-font runs, §18.8.1 wrapText on).
+ * `layoutRichTextLines` soft-wraps at word / CJK boundaries (and hard breaks),
+ * and each resulting line is painted by the shared {@link drawResolvedRichLine}
+ * (super/subscript §18.4.14, underline/strike, bidi). The wrapped display lines
+ * share one paragraph base direction (§18.8.1 readingOrder), computed once here.
+ * Drives both the in-viewport draw path and the off-screen-anchor merge pre-pass
+ * so a merged wrapped cell renders identically regardless of anchor visibility.
+ */
+function drawWrappedRichText(
+  ctx: CanvasRenderingContext2D,
+  runs: Run[],
+  baseFont: CellFont,
+  geom: RichCellGeom,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; readingOrder?: number } = {},
+): void {
+  const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
+  const rLines = layoutRichTextLines(ctx, runs, baseFont, cs, cellW - leftPad - paddingX);
+  const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
+  let yy: number;
+  if (alignV === 'top') yy = cy + paddingY;
+  else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
+  else yy = cy + cellH - totalH - paddingY;
+  // Bidi base direction for the cell (@readingOrder / first-strong); the wrapped
+  // display lines share one paragraph direction. Gated so pure-LTR cells keep
+  // the exact pre-bidi path.
+  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(runs);
+  const baseRtl = needBidi && cellBaseRtl(opts.readingOrder, runs.map((r) => r.text).join(''));
+  for (const line of rLines) {
+    const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
+    let xx: number;
+    if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
+    else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
+    else xx = cx + leftPad;
+    drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
+    yy += vMetricPx(line.maxFontSize, cs, 1.2);
   }
 }
 
@@ -1718,29 +1760,15 @@ function renderQuadrant(
     const hasRichText = runs && runs.length > 0;
 
     if (xf.wrapText && hasRichText) {
-      // Same shared per-segment drawer as the in-viewport wrap path, so an
-      // off-screen-anchored merge renders identical wrapped rich text — per-run
-      // fonts, super/subscript, underline/strike, and bidi (previously this
-      // pre-pass drew only plain per-segment fonts).
-      const wrapW = cW - leftPad - paddingX;
-      const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-      const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
-      let yy: number;
-      if (alignV === 'top') yy = aCy + paddingY;
-      else if (alignV === 'center') yy = aCy + (cH - totalH) / 2;
-      else yy = aCy + cH - totalH - paddingY;
-      const wrapNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
-      const wrapBaseRtl = wrapNeedsBidi && cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
-      for (const line of rLines) {
-        const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
-        let xx: number;
-        if (alignH === 'right') xx = aCx + cW - paddingX - totalW;
-        else if (alignH === 'center') xx = aCx + cW / 2 - totalW / 2;
-        else xx = aCx + leftPad;
-        drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr,
-          { fontColor: cf.fontColor, needBidi: wrapNeedsBidi, baseRtl: wrapBaseRtl });
-        yy += vMetricPx(line.maxFontSize, cs, 1.2);
-      }
+      // Same helper as the in-viewport wrap path so an off-screen-anchored merge
+      // renders identical wrapped rich text — per-run fonts, super/subscript,
+      // underline/strike, and bidi (previously this pre-pass drew only plain
+      // per-segment fonts).
+      drawWrappedRichText(
+        ctx, runs, fontForDraw,
+        { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
+        cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
+      );
     } else if (xf.wrapText) {
       const lines = wrapTextLines(ctx, text, cW - leftPad - paddingX);
       const lineH = vMetricPx(font.size, cs, 1.2);
@@ -2339,31 +2367,12 @@ function renderQuadrant(
       const hasRichText = runs && runs.length > 0;
 
       if (xf.wrapText && hasRichText) {
-        // Rich text with wrapping: per-run fonts, break on spaces and CJK
-        // boundaries; each line drawn through the shared per-segment drawer
-        // (super/subscript §18.4.14, underline/strike, bidi).
-        const wrapW = cellW - leftPad - paddingX;
-        const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-        const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
-        let yy: number;
-        if (alignV === 'top') yy = cy + paddingY;
-        else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
-        else yy = cy + cellH - totalH - paddingY;
-        // Bidi base direction for the cell (xf @readingOrder / first-strong); the
-        // wrapped display lines share one paragraph direction. Gated so pure-LTR
-        // cells keep the exact pre-bidi path.
-        const wrapNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
-        const wrapBaseRtl = wrapNeedsBidi && cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
-        for (const line of rLines) {
-          const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
-          let xx: number;
-          if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
-          else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
-          else xx = cx + leftPad;
-          drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr,
-            { fontColor: cf.fontColor, needBidi: wrapNeedsBidi, baseRtl: wrapBaseRtl });
-          yy += vMetricPx(line.maxFontSize, cs, 1.2);
-        }
+        // Rich text with wrapping — shared with the off-screen pre-pass.
+        drawWrappedRichText(
+          ctx, runs, fontForDraw,
+          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
+        );
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = vMetricPx(font.size, cs, 1.2);
