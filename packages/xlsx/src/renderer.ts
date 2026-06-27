@@ -773,6 +773,12 @@ interface RichSeg {
 interface RichLine {
   segments: RichSeg[];
   maxFontSize: number; // pt (line-height source)
+  /** 0-based index of the LF-delimited paragraph (hard-break region) this line
+   *  belongs to. Soft-wrapped continuation lines share their paragraph's index;
+   *  it advances only at a hard break. Indexes the per-paragraph bidi base
+   *  direction the wrap draw path resolves — UAX#9: a soft wrap does NOT start a
+   *  new paragraph, but a hard break does. */
+  para: number;
 }
 
 /**
@@ -804,12 +810,16 @@ export function layoutRichTextLines(
   // line, which has no segment of its own. Mirrors drawShapeText's `lastTextPt`
   // seed (PR #583); falls back to the cell's base font.
   let lastTextPt = baseFont.size;
+  // 0-based index of the current LF-delimited paragraph. Advances only at a hard
+  // break (not at a soft wrap), so every line records which paragraph it belongs
+  // to — the wrap draw path resolves a Context base direction per paragraph.
+  let paraIdx = 0;
 
   // `flush` drops an empty region — used at soft-wrap (kinsoku) breaks, where a
   // line carried wholly to the next line must not leave a blank behind.
   const flush = () => {
     if (cur.length === 0) return;
-    lines.push({ segments: cur, maxFontSize: curMaxSize });
+    lines.push({ segments: cur, maxFontSize: curMaxSize, para: paraIdx });
     cur = []; curW = 0; curMaxSize = 0;
   };
 
@@ -819,7 +829,7 @@ export function layoutRichTextLines(
   // reserves one single-line height (the cell analog of PR #583 / docx #582).
   const flushRegion = () => {
     if (cur.length === 0) {
-      lines.push({ segments: [], maxFontSize: lastTextPt || DEFAULT_FONT_SIZE });
+      lines.push({ segments: [], maxFontSize: lastTextPt || DEFAULT_FONT_SIZE, para: paraIdx });
       return;
     }
     flush();
@@ -908,7 +918,11 @@ export function layoutRichTextLines(
       }
     }
     for (const tok of tokens) {
-      if (tok === '\n') flushRegion();
+      // A hard break closes the current paragraph region and opens the next, so
+      // the following lines record the new paragraph index. A soft wrap (handled
+      // inside `push`) keeps the same index — UAX#9 P1: only a hard break starts
+      // a new bidi paragraph.
+      if (tok === '\n') { flushRegion(); paraIdx++; }
       else push(tok, font);
     }
   }
@@ -1180,12 +1194,20 @@ export function drawNonWrapRichText(
  * Lay out and draw WRAP-mode rich text (mixed-font runs, §18.8.1 wrapText on).
  * `layoutRichTextLines` soft-wraps at word / CJK boundaries (and hard breaks),
  * and each resulting line is painted by the shared {@link drawResolvedRichLine}
- * (super/subscript §18.4.14, underline/strike, bidi). The wrapped display lines
- * share one paragraph base direction (§18.8.1 readingOrder), computed once here.
+ * (super/subscript §18.4.14, underline/strike, bidi).
+ *
+ * Base direction (§18.8.1 readingOrder) is resolved PER LF-delimited paragraph,
+ * not once for the whole cell: a soft wrap continues the same bidi paragraph (its
+ * display lines share a direction), but a hard break (Alt+Enter LF) starts a new
+ * paragraph that, under Context reading order (0/absent), resolves its OWN base
+ * direction from its OWN first strong character (UAX#9 P1–P3). Explicit LTR/RTL
+ * (1/2) is cell-wide, so only Context varies between paragraphs. Each line carries
+ * its paragraph index ({@link RichLine.para}) to pick the matching direction.
+ *
  * Drives both the in-viewport draw path and the off-screen-anchor merge pre-pass
  * so a merged wrapped cell renders identically regardless of anchor visibility.
  */
-function drawWrappedRichText(
+export function drawWrappedRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
@@ -1201,17 +1223,23 @@ function drawWrappedRichText(
   if (alignV === 'top') yy = cy + paddingY;
   else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
   else yy = cy + cellH - totalH - paddingY;
-  // Bidi base direction for the cell (@readingOrder / first-strong); the wrapped
-  // display lines share one paragraph direction. Gated so pure-LTR cells keep
-  // the exact pre-bidi path.
-  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(runs);
-  const baseRtl = needBidi && cellBaseRtl(opts.readingOrder, runs.map((r) => r.text).join(''));
+  // Resolve the bidi base direction for each LF-delimited paragraph from its own
+  // text (Context = first-strong; explicit 1/2 = cell-wide). `line.para` indexes
+  // this, so soft-wrapped lines share their paragraph's direction while a hard
+  // break gets its own. Each entry is gated so pure-LTR paragraphs keep the exact
+  // pre-bidi path.
+  const paraTexts = runs.map((r) => r.text).join('').split('\n');
+  const paraBidi = paraTexts.map((t) => {
+    const needBidi = opts.readingOrder === 2 || segmentsHaveRtl([{ text: t }]);
+    return { needBidi, baseRtl: needBidi && cellBaseRtl(opts.readingOrder, t) };
+  });
   for (const line of rLines) {
     const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
     let xx: number;
     if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
     else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
     else xx = cx + leftPad;
+    const { needBidi, baseRtl } = paraBidi[line.para];
     drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
     yy += vMetricPx(line.maxFontSize, cs, 1.2);
   }
