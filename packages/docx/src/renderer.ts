@@ -3819,9 +3819,21 @@ function renderParagraph(
             : 0;
         ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
 
-        // Width spanned by the glyphs after justification, for box-style
-        // decorations (highlight) and ruby centring / onTextRun reporting.
+        // Width spanned by the glyphs after justification, for ruby centring /
+        // onTextRun reporting.
         const spanW = s.measuredWidth + internalStretch;
+
+        // Width spanned by the run-level BOX decorations (highlight / shading /
+        // border). The trailing space of this segment belongs to it, and on a
+        // justified line that space is widened by `distPerGap` (added to the pen
+        // AFTER the segment, see the `x += distPerGap` below). Word paints the
+        // run's highlight/shading across that expanded space, so the box must
+        // reach the next segment's left edge — otherwise a yellow/shaded GAP
+        // opens between words on a `both`/`distribute` line (§17.18.44 +
+        // §17.3.1.15 highlight / §17.3.2.32 shading). The gap is never set on the
+        // visually-final or leading-indent segment, so this never over-paints at
+        // the line edge.
+        const decoW = spanW + (stretch?.trailingGap ? distPerGap : 0);
 
         // Glyph box used by every run-level box decoration (highlight fill,
         // §17.3.2.32 shading fill, §17.3.2.4 border): same vertical extent of
@@ -3832,7 +3844,7 @@ function renderParagraph(
 
         if (s.highlight) {
           ctx.fillStyle = HIGHLIGHT_COLORS[s.highlight] ?? '#FFFF00';
-          ctx.fillRect(x, boxTop, spanW, boxHeight);
+          ctx.fillRect(x, boxTop, decoW, boxHeight);
         }
 
         // ECMA-376 §17.3.2.32 run shading fill (`<w:shd w:fill>`): a solid
@@ -3840,7 +3852,7 @@ function renderParagraph(
         // + automatic = white text). Same rect geometry as the highlight box.
         if (s.background) {
           ctx.fillStyle = `#${s.background}`;
-          ctx.fillRect(x, boxTop, spanW, boxHeight);
+          ctx.fillRect(x, boxTop, decoW, boxHeight);
         }
 
         // ECMA-376 §17.3.2.4 run border (`<w:bdr>`, "box"): a rectangle around
@@ -3859,14 +3871,14 @@ function renderParagraph(
           const segTop = boxTop;
           const segBottom = segTop + boxHeight;
           if (borderGroup && runBordersEqual(borderGroup.border, activeBorder)) {
-            borderGroup.right = x + spanW;
+            borderGroup.right = x + decoW;
             borderGroup.top = Math.min(borderGroup.top, segTop);
             borderGroup.bottom = Math.max(borderGroup.bottom, segBottom);
           } else {
             flushBorderGroup();
             borderGroup = {
               border: activeBorder,
-              left: x, right: x + spanW, top: segTop, bottom: segBottom,
+              left: x, right: x + decoW, top: segTop, bottom: segBottom,
             };
           }
         } else {

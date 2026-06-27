@@ -85,7 +85,11 @@ function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocxTextRun {
   };
 }
 
-function paraDoc(runs: DocxTextRun[]): DocxDocumentModel {
+function paraDoc(
+  runs: DocxTextRun[],
+  paraExtra: Partial<DocParagraph> = {},
+  pageWidth = 400,
+): DocxDocumentModel {
   const p: DocParagraph = {
     alignment: 'left',
     indentLeft: 0, indentRight: 0, indentFirst: 0,
@@ -94,10 +98,11 @@ function paraDoc(runs: DocxTextRun[]): DocxDocumentModel {
     runs: runs.map((r) => ({ type: 'text', ...r }) as DocParagraph['runs'][number]),
     defaultFontSize: 16, defaultFontFamily: 'Arial',
     widowControl: false,
+    ...paraExtra,
   };
   return {
     section: {
-      pageWidth: 400, pageHeight: 400,
+      pageWidth, pageHeight: 400,
       marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
       headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
     } as SectionProps,
@@ -110,11 +115,15 @@ function paraDoc(runs: DocxTextRun[]): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-async function render(runs: DocxTextRun[]) {
+async function render(
+  runs: DocxTextRun[],
+  paraExtra: Partial<DocParagraph> = {},
+  pageWidth = 400,
+) {
   const { canvas, events } = makeRecordingCanvas();
-  await renderDocumentToCanvas(paraDoc(runs), canvas, 0, {
+  await renderDocumentToCanvas(paraDoc(runs, paraExtra, pageWidth), canvas, 0, {
     dpr: 1,
-    width: 400, // scale = 1 (px per pt) so geometry is in pt-equivalent px
+    width: pageWidth, // scale = 1 (px per pt) so geometry is in pt-equivalent px
   });
   return events;
 }
@@ -193,6 +202,53 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
     // …in the run's shading colour, at the glyph box.
     expect(fill.style.toUpperCase()).toBe('#C0C0C0');
     expect(fill.w).toBeCloseTo(2 * 16); // |AB| = 2 chars × 16px
+  });
+});
+
+describe('highlight fill spans justification slack (§17.3.1.15 highlight + §17.18.44 both)', () => {
+  it('tiles the highlight with no gaps across justified inter-word spaces', async () => {
+    // A justified ('both') paragraph that wraps to 2+ lines. Line 0 is justified,
+    // so its inter-word spaces are expanded by the per-gap slack. Word highlights
+    // the run's spaces (incl. the expansion); our per-word highlight rects must
+    // therefore TILE line 0 contiguously. The bug: each rect spans only the word's
+    // natural advance (`measuredWidth`), leaving the expanded space unpainted —
+    // a visible yellow gap between words.
+    const events = await render(
+      [textRun('aaaaa bbbbb ccccc ddddd eeeee fffff ggggg', { highlight: 'yellow' })],
+      { alignment: 'both' },
+      410, // not an exact multiple of the word advance, so line 0 carries slack
+    );
+    const yellow = events.filter(
+      (e): e is Extract<DrawEvent, { kind: 'fillRect' }> =>
+        e.kind === 'fillRect' && e.style.toUpperCase() === '#FFFF00',
+    );
+    expect(yellow.length).toBeGreaterThan(2);
+    // Group rects by line via their top (y). The first line is the smallest y.
+    const ys = [...new Set(yellow.map((r) => Math.round(r.y)))].sort((a, b) => a - b);
+    expect(ys.length).toBeGreaterThanOrEqual(2); // wrapped to ≥2 lines
+    const line0 = yellow
+      .filter((r) => Math.round(r.y) === ys[0])
+      .sort((a, b) => a.x - b.x);
+    expect(line0.length).toBeGreaterThan(1);
+    // Justification guard (fix-stable: keyed off glyph x, which the highlight-width
+    // fix does NOT change): the START-to-START distance between the first two words
+    // exceeds the first word's natural advance — i.e. the inter-word space really
+    // is expanded on line 0. Were the line left-aligned, these would be equal.
+    const line0Words = events
+      .filter((e): e is Extract<DrawEvent, { kind: 'fillText' }> => e.kind === 'fillText')
+      .filter((e) => /a{5}/.test(e.text)) // first word starts with aaaaa
+      .sort((a, b) => a.x - b.x);
+    const word0 = events.find(
+      (e): e is Extract<DrawEvent, { kind: 'fillText' }> => e.kind === 'fillText',
+    );
+    if (!word0) throw new Error('no glyphs drawn');
+    const naturalWord0 = [...word0.text].length * 16; // synthetic metrics: 16px/char
+    expect(line0[1].x - line0[0].x).toBeGreaterThan(naturalWord0); // gap WAS expanded
+    // Contiguity: every rect's right edge meets the next rect's left edge, so the
+    // expanded space is fully painted (no yellow gap between words).
+    for (let i = 0; i < line0.length - 1; i++) {
+      expect(line0[i].x + line0[i].w).toBeCloseTo(line0[i + 1].x, 5);
+    }
   });
 });
 
