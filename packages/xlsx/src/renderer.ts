@@ -3250,7 +3250,7 @@ export async function prepareWorksheetMath(ws: Worksheet, math: MathRenderer): P
   }
 }
 
-function drawShapeText(
+export function drawShapeText(
   ctx: CanvasRenderingContext2D,
   txt: import('./types.js').ShapeText,
   sw: number, sh: number,
@@ -3294,6 +3294,19 @@ function drawShapeText(
     let lineAscent = 0;
     let hasMath = false;
     const flushLine = () => {
+      // An empty paragraph (no runs) or a blank line produced by a standalone /
+      // trailing <a:br> contributes no text or math segment, so lineHeight is
+      // still 0. ECMA-376 §21.1.2.1 / §21.1.2.2: such a line still reserves ONE
+      // single-line height — as tall as a one-character line of the paragraph's
+      // effective font. Without this the empty line reserved zero height, so the
+      // block under-measured and vertical anchoring ('ctr'/'b') drifted. Mirror
+      // the text-line formula (pxSize * 1.2) using the nearest preceding text
+      // size in this paragraph, falling back to the body default.
+      if (lineHeight === 0) {
+        const fallbackPx = (lastTextPt || DEFAULT_FONT_SIZE) * PT_TO_PX * cs;
+        lineHeight = fallbackPx * 1.2;
+        lineAscent = fallbackPx * 0.85;
+      }
       lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath });
       segs = []; lineW = 0; lineHeight = 0; lineAscent = 0; hasMath = false;
     };
