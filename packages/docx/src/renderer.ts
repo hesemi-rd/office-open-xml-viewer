@@ -3805,9 +3805,9 @@ function renderParagraph(
       // Justification stretch for THIS segment (logical index si). `internalStretch`
       // is the px added between the segment's own glyphs (inter-CJK boundaries);
       // `splitBefore` lists the code-point offsets to advance `distPerGap` at while
-      // drawing. Decorations span the stretched width so a highlight / underline /
-      // ruby covers the widened glyphs. trailingGap (the inter-segment boundary)
-      // is added after the segment below.
+      // drawing. `spanW` (the glyph advance + internalStretch) covers every glyph
+      // and the interior pitch; `decoW` (below) additionally covers the segment's
+      // own widened trailing SPACE so run decorations stay gap-free under `both`.
       const stretch = segStretch?.get(si);
       const internalStretch = stretch?.internalStretch ?? 0;
       if (!dryRun) {
@@ -3819,9 +3819,27 @@ function renderParagraph(
             : 0;
         ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
 
-        // Width spanned by the glyphs after justification, for box-style
-        // decorations (highlight) and ruby centring / onTextRun reporting.
+        // Width spanned by the glyphs after justification, for ruby centring /
+        // onTextRun reporting.
         const spanW = s.measuredWidth + internalStretch;
+
+        // Width spanned by EVERY run decoration (highlight §17.3.1.15, shading
+        // §17.3.2.32, border §17.3.2.4, underline §17.3.2.40, strike §17.3.2.37).
+        // On a `both`/`distribute` line (§17.18.44) the justifier widens this
+        // segment's TRAILING SPACE by `distPerGap` and advances the pen past it
+        // (`x += distPerGap`, below). That space belongs to THIS run, so Word
+        // paints its decorations across the widened advance — otherwise a GAP
+        // opens between words (the bug this fixes). We extend ONLY when the
+        // segment actually ends in whitespace it owns: an inter-CJK boundary gap
+        // (no trailing space, e.g. a run/script split between two ideographs) is
+        // NOT owned by either run, so extending there would bleed a highlight
+        // past its run. Disabled under bidi: the pen advances in visual order
+        // while `trailingGap` is a logical-order flag, so the widened gap is not
+        // reliably the segment's own physical-right edge (kept at `spanW`, the
+        // pre-justify-slack behaviour — no regression, just no slack fill).
+        const ownsTrailingSlack =
+          !!stretch?.trailingGap && !paraNeedsBidi && /\s$/.test(s.text);
+        const decoW = spanW + (ownsTrailingSlack ? distPerGap : 0);
 
         // Glyph box used by every run-level box decoration (highlight fill,
         // §17.3.2.32 shading fill, §17.3.2.4 border): same vertical extent of
@@ -3832,7 +3850,7 @@ function renderParagraph(
 
         if (s.highlight) {
           ctx.fillStyle = HIGHLIGHT_COLORS[s.highlight] ?? '#FFFF00';
-          ctx.fillRect(x, boxTop, spanW, boxHeight);
+          ctx.fillRect(x, boxTop, decoW, boxHeight);
         }
 
         // ECMA-376 §17.3.2.32 run shading fill (`<w:shd w:fill>`): a solid
@@ -3840,7 +3858,7 @@ function renderParagraph(
         // + automatic = white text). Same rect geometry as the highlight box.
         if (s.background) {
           ctx.fillStyle = `#${s.background}`;
-          ctx.fillRect(x, boxTop, spanW, boxHeight);
+          ctx.fillRect(x, boxTop, decoW, boxHeight);
         }
 
         // ECMA-376 §17.3.2.4 run border (`<w:bdr>`, "box"): a rectangle around
@@ -3859,14 +3877,14 @@ function renderParagraph(
           const segTop = boxTop;
           const segBottom = segTop + boxHeight;
           if (borderGroup && runBordersEqual(borderGroup.border, activeBorder)) {
-            borderGroup.right = x + spanW;
+            borderGroup.right = x + decoW;
             borderGroup.top = Math.min(borderGroup.top, segTop);
             borderGroup.bottom = Math.max(borderGroup.bottom, segBottom);
           } else {
             flushBorderGroup();
             borderGroup = {
               border: activeBorder,
-              left: x, right: x + spanW, top: segTop, bottom: segBottom,
+              left: x, right: x + decoW, top: segTop, bottom: segBottom,
             };
           }
         } else {
@@ -3987,13 +4005,12 @@ function renderParagraph(
         // horizontal strokes; each snaps onto the nearest crisp device row from
         // its own y (an odd device-width one would otherwise straddle two rows).
         // Compute the offset per line because each stroke sits at a different y.
-        // Underline / strike run the full stretched glyph span. Use the
-        // segment's box (measuredWidth, which already folds in the §17.6.5
-        // character-grid delta) plus the internal justification pitch, so the
-        // decoration matches the drawn advance instead of re-measuring the
-        // natural width (which would ignore the grid on a packed EA run).
-        const textW = s.measuredWidth + internalStretch;
-
+        // Underline / strike run the SAME `decoW` as the box decorations: the
+        // segment's grid-aware advance (§17.6.5) plus the interior + owned
+        // trailing-space justification pitch. Word runs the rule under a run's
+        // spaces (incl. their justified widening), so the line decoration tracks
+        // the drawn advance and stays flush with the box fills (one width concept
+        // for every decoration, matching the pptx renderer's run rules).
         const isInsertion = revActive && s.revision?.kind === 'insertion';
         const isDeletion = revActive && s.revision?.kind === 'deletion';
 
@@ -4002,7 +4019,7 @@ function renderParagraph(
           ctx.lineWidth = lineW;
           const uyRaw = baseline + yOffset + effSizePx * 0.12;
           const uy = uyRaw + crispOffset(uyRaw, lineW, state.dpr);
-          ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + textW, uy); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + decoW, uy); ctx.stroke();
         }
 
         if (s.strikethrough || isDeletion) {
@@ -4010,7 +4027,7 @@ function renderParagraph(
           ctx.lineWidth = lineW;
           const syRaw = baseline + yOffset - effSizePx * 0.3;
           const sy = syRaw + crispOffset(syRaw, lineW, state.dpr);
-          ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x + textW, sy); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x + decoW, sy); ctx.stroke();
         }
 
         if (s.doubleStrikethrough) {
@@ -4020,8 +4037,8 @@ function renderParagraph(
           const sy2Raw = baseline + yOffset - effSizePx * 0.22;
           const sy1 = sy1Raw + crispOffset(sy1Raw, lineW, state.dpr);
           const sy2 = sy2Raw + crispOffset(sy2Raw, lineW, state.dpr);
-          ctx.beginPath(); ctx.moveTo(x, sy1); ctx.lineTo(x + textW, sy1); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(x, sy2); ctx.lineTo(x + textW, sy2); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, sy1); ctx.lineTo(x + decoW, sy1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, sy2); ctx.lineTo(x + decoW, sy2); ctx.stroke();
         }
       }
 
