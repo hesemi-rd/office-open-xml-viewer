@@ -780,9 +780,14 @@ interface RichLine {
  * CJK characters for granular wrapping). Per-run font is preserved so measurement
  * and drawing use the correct font.
  *
- * Follows ECMA-376 §18.3.1.53 (w:r) semantics: runs are inline and share the
- * paragraph width. wrapText breaks at word boundaries (ASCII spaces) and at any
- * CJK code point boundary.
+ * Runs are inline and share the cell width (ECMA-376 §18.4.4 r / §18.4.8 si /
+ * §18.4.9 sst); wrapText (§18.8.1) breaks at word boundaries (ASCII spaces) and
+ * at any CJK code point boundary, and a hard break (LF) starts a new line.
+ *
+ * An empty value returns `[]` (no fabricated line). This deliberately differs
+ * from the plain-text `wrapTextLines`, whose `split('\n')` yields `['']`: an
+ * empty cell has no glyphs, so reserving a line for it would only mis-anchor the
+ * (non-existent) text.
  */
 export function layoutRichTextLines(
   ctx: CanvasRenderingContext2D,
@@ -795,15 +800,34 @@ export function layoutRichTextLines(
   let cur: RichSeg[] = [];
   let curW = 0;
   let curMaxSize = 0;
+  // Size (pt) of the nearest preceding text run — the height source for a blank
+  // line, which has no segment of its own. Mirrors drawShapeText's `lastTextPt`
+  // seed (PR #583); falls back to the cell's base font.
+  let lastTextPt = baseFont.size;
 
+  // `flush` drops an empty region — used at soft-wrap (kinsoku) breaks, where a
+  // line carried wholly to the next line must not leave a blank behind.
   const flush = () => {
     if (cur.length === 0) return;
     lines.push({ segments: cur, maxFontSize: curMaxSize });
     cur = []; curW = 0; curMaxSize = 0;
   };
 
+  // `flushRegion` emits an empty region as a blank line — used at a hard break
+  // (LF) or end-of-value. ECMA-376 §18.8.1 (wrapText): each line of a multi-line
+  // cell, including a blank one from consecutive / leading / trailing breaks,
+  // reserves one single-line height (the cell analog of PR #583 / docx #582).
+  const flushRegion = () => {
+    if (cur.length === 0) {
+      lines.push({ segments: [], maxFontSize: lastTextPt || DEFAULT_FONT_SIZE });
+      return;
+    }
+    flush();
+  };
+
   const push = (text: string, font: CellFont) => {
     if (!text) return;
+    lastTextPt = font.size; // nearest preceding text size, for the next blank line
     ctx.font = buildFont(font, cs);
     const w = ctx.measureText(text).width;
     if (cur.length > 0 && curW + w > maxWidth) {
@@ -882,11 +906,14 @@ export function layoutRichTextLines(
       }
     }
     for (const tok of tokens) {
-      if (tok === '\n') flush();
+      if (tok === '\n') flushRegion();
       else push(tok, font);
     }
   }
-  flush();
+  // Trailing region. If the value ended with a break, `cur` is empty but a line
+  // was already produced, so a trailing blank line is reserved; a value with no
+  // content and no breaks (no segments, no prior line) produces nothing.
+  if (cur.length > 0 || lines.length > 0) flushRegion();
   return lines;
 }
 
