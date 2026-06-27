@@ -561,10 +561,12 @@ export interface PictureElement {
    */
   prstAdjust?: number[];
   /**
-   * ECMA-376 a:srcRect — source image crop as fractions (0..1) of the source
-   * width/height. Omitted when the image is not cropped.
+   * ECMA-376 §20.1.8.55 a:srcRect — source image crop as fractions (0..1) of the
+   * source width/height, measured inward from each edge. Omitted when the image
+   * is not cropped; when present the parser emits all four edges (absent edges
+   * default to 0), so the renderer reads them without a fallback.
    */
-  srcRect?: { l?: number; t?: number; r?: number; b?: number };
+  srcRect?: { l: number; t: number; r: number; b: number };
   /** a:blip > a:alphaModFix@amt as 0..1. Undefined = fully opaque. */
   alpha?: number;
   /**

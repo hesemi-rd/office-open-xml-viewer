@@ -63,6 +63,7 @@ import {
   isCjkBreakChar,
   getCachedSvgImageByPath,
   decodeRasterOrMetafile,
+  isMetafileMime,
   highlightBox,
   symbolFontToUnicode,
   isSymbolFontFamily,
@@ -3187,15 +3188,18 @@ async function renderPicture(
     // ── srcRect sub-rectangle (ECMA-376 a:srcRect). Edge values are fractions
     // of source dims (negative values mean extend past the image, duplicating
     // edge pixels in OOXML; we clamp to [0,1]). Resolve once so both the live
-    // paint and the effect aux paints share identical crop coordinates.
+    // paint and the effect aux paints share identical crop coordinates. Skip a
+    // metafile (WMF/EMF): core's decodeRasterOrMetafile rasterizes it to the
+    // CROPPED display box, so cropping its bitmap would squish the whole picture
+    // (the same gate the docx/xlsx renderers use via `isMetafileMime`).
     const sr = el.srcRect;
     let crop: { sx: number; sy: number; sw: number; sh: number } | null = null;
-    if (sr && (sr.l || sr.t || sr.r || sr.b)) {
+    if (sr && !isMetafileMime(el.mimeType) && (sr.l || sr.t || sr.r || sr.b)) {
       const bw = bitmap.width, bh = bitmap.height;
-      const sl = Math.max(0, Math.min(1, sr.l ?? 0));
-      const st = Math.max(0, Math.min(1, sr.t ?? 0));
-      const srR = Math.max(0, Math.min(1, sr.r ?? 0));
-      const sbB = Math.max(0, Math.min(1, sr.b ?? 0));
+      const sl = Math.max(0, Math.min(1, sr.l));
+      const st = Math.max(0, Math.min(1, sr.t));
+      const srR = Math.max(0, Math.min(1, sr.r));
+      const sbB = Math.max(0, Math.min(1, sr.b));
       const sx = sl * bw;
       const sy = st * bh;
       crop = {
