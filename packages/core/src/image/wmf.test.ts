@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isWmf,
   isEmf,
+  isMetafileMime,
   playWmf,
   renderWmfToBitmap,
   wmfRasterTarget,
@@ -769,5 +770,16 @@ describe('decodeRasterOrMetafile', () => {
     // Opted IN: every edge is on the boundary → nothing strokes → no geometry → null.
     expect(strokeCount).toBe(0);
     expect(sup).toBeNull();
+  });
+});
+
+describe('isMetafileMime', () => {
+  it('is true only for the WMF/EMF metafile MIME types', () => {
+    expect(isMetafileMime('image/wmf')).toBe(true);
+    expect(isMetafileMime('image/emf')).toBe(true);
+    expect(isMetafileMime('image/png')).toBe(false);
+    expect(isMetafileMime('image/jpeg')).toBe(false);
+    expect(isMetafileMime('image/svg+xml')).toBe(false);
+    expect(isMetafileMime(undefined)).toBe(false);
   });
 });

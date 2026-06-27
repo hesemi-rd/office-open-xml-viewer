@@ -87,6 +87,7 @@ export { getCachedSvgImageByPath, dropSvgImageCache } from './image/svg-image-by
 export {
   isWmf,
   isEmf,
+  isMetafileMime,
   playWmf,
   renderWmfToBitmap,
   wmfRasterTarget,

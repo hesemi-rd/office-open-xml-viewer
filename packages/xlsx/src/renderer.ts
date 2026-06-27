@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, xlsxBorderDashArray, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, xlsxBorderDashArray, isMetafileMime, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -2887,8 +2887,7 @@ export function drawImageCropped(
   dw: number,
   dh: number,
 ): void {
-  const isMetafile = mimeType === 'image/wmf' || mimeType === 'image/emf';
-  if (srcRect && !isMetafile && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
+  if (srcRect && !isMetafileMime(mimeType) && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
     const { w: bw, h: bh } = imageNaturalSize(img);
     if (bw > 0 && bh > 0) {
       const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
