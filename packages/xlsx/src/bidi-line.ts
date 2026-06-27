@@ -44,6 +44,23 @@ export function segmentsHaveRtl(segments: readonly unknown[]): boolean {
   return false;
 }
 
+/**
+ * Resolve whether one cell line / paragraph needs the bidi pass and its base
+ * direction, from the xf @readingOrder (§18.8.1) and the line/paragraph text.
+ * Gated so pure-LTR text (no strong-RTL char and not explicitly RTL) keeps the
+ * exact pre-bidi path: `needBidi` false ⇒ no UAX#9 reorder. `baseRtl` is only
+ * resolved when the pass will run. The single source of truth for the gate +
+ * base-direction rule shared by the non-wrap ({@link cellBaseRtl} per LF line)
+ * and wrap (per LF paragraph) rich-text paths — keeping the two in lockstep.
+ */
+export function resolveCellBidi(
+  readingOrder: number | undefined,
+  text: string,
+): { needBidi: boolean; baseRtl: boolean } {
+  const needBidi = readingOrder === 2 || RTL_GATE.test(text);
+  return { needBidi, baseRtl: needBidi && cellBaseRtl(readingOrder, text) };
+}
+
 export interface LineVisualOrder {
   /** Logical segment indices in visual (left-to-right) order. */
   order: number[];
