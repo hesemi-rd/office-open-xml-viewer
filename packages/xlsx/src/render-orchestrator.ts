@@ -3,8 +3,10 @@ import {
   isHTMLCanvas,
   getCachedSvgImageByPath,
   decodeRasterOrMetafile,
+  metafileRasterSize,
   EMU_PER_PT,
   type MathRenderer,
+  type SrcRect,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
@@ -19,9 +21,11 @@ interface ImageRef {
   svgImagePath?: string;
   widthPt?: number;
   heightPt?: number;
-  /** True when the picture carries an `<a:srcRect>` crop, so the decoder forces
-   *  the raster (the crop math needs native bitmap pixels). */
-  hasCrop?: boolean;
+  /** The picture's `<a:srcRect>` crop (§20.1.8.55), when present. Forces the
+   *  raster decode (the crop math needs native bitmap pixels) and, for a
+   *  metafile, scales the raster up to the full picture frame so the fractional
+   *  crop lands correctly (see `metafileRasterSize`). */
+  srcRect?: SrcRect | null;
 }
 
 /** Fetch one image's bytes by zip path and decode them to a drawable
@@ -54,10 +58,19 @@ export async function decodeImageSource(
   fetchImage: (path: string, mime: string) => Promise<Blob>,
   widthPt = 0,
   heightPt = 0,
-  hasCrop = false,
+  srcRect: SrcRect | null = null,
 ): Promise<CanvasImageSource | null> {
-  const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource | null> =>
-    decodeRasterOrMetafile(await fetchImage(path, mime), { widthPt, heightPt });
+  const hasCrop = srcRect != null;
+  const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource | null> => {
+    // A cropped metafile must rasterize at its FULL picture frame, not the
+    // visible sub-rect, so the fractional crop lands correctly; raster blips and
+    // uncropped metafiles pass the box through unchanged.
+    const sized = metafileRasterSize(mime, srcRect, widthPt, heightPt);
+    return decodeRasterOrMetafile(await fetchImage(path, mime), {
+      widthPt: sized.widthPt,
+      heightPt: sized.heightPt,
+    });
+  };
   const dataIsSvg = mimeType === 'image/svg+xml';
   if (svgImagePath != null && !hasCrop) {
     // No crop: prefer the vector original; fall back to the raster on decode
@@ -107,8 +120,9 @@ export async function prefetchImages(
           // Saved EMU extent → pt sizes a metafile raster (0 ⇒ decoder fallback).
           widthPt: img.nativeExtCx > 0 ? img.nativeExtCx / EMU_PER_PT : 0,
           heightPt: img.nativeExtCy > 0 ? img.nativeExtCy / EMU_PER_PT : 0,
-          // An `<a:srcRect>` crop forces the raster decode (native pixel grid).
-          hasCrop: img.srcRect != null,
+          // An `<a:srcRect>` crop forces the raster decode (native pixel grid)
+          // and, for a metafile, the full-frame raster size.
+          srcRect: img.srcRect ?? null,
         });
       }
     }
@@ -124,8 +138,9 @@ export async function prefetchImages(
             // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
             widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
             heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
-            // A crop forces the raster decode (native pixel grid for the crop).
-            hasCrop: shape.geom.srcRect != null,
+            // A crop forces the raster decode (native pixel grid for the crop)
+            // and, for a metafile, the full-frame raster size.
+            srcRect: shape.geom.srcRect ?? null,
           });
         }
       }
@@ -142,7 +157,7 @@ export async function prefetchImages(
           fetch,
           ref.widthPt,
           ref.heightPt,
-          ref.hasCrop,
+          ref.srcRect,
         );
         // Cache the decode result keyed by path — INCLUDING a null for an
         // unsupported metafile (true EMF / geometry-less WMF). Storing the null

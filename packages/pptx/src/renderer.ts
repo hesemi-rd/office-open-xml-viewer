@@ -63,7 +63,8 @@ import {
   isCjkBreakChar,
   getCachedSvgImageByPath,
   decodeRasterOrMetafile,
-  isMetafileMime,
+  cropSourceRect,
+  metafileRasterSize,
   highlightBox,
   symbolFontToUnicode,
   isSymbolFontFamily,
@@ -3137,8 +3138,15 @@ async function renderPicture(
     const dataIsSvg = el.mimeType === 'image/svg+xml';
     // The picture's intended draw size in points sizes any metafile raster
     // (el.width/height are EMU; /PT_TO_EMU = pt). Unused by the raster/SVG paths.
-    const widthPt = el.width / PT_TO_EMU;
-    const heightPt = el.height / PT_TO_EMU;
+    // A cropped metafile rasterizes at its FULL picture frame (scaled up by
+    // 1/(1−crop)) so the fractional crop below lands correctly; raster blips and
+    // uncropped metafiles pass through unchanged.
+    const { widthPt, heightPt } = metafileRasterSize(
+      el.mimeType,
+      el.srcRect,
+      el.width / PT_TO_EMU,
+      el.height / PT_TO_EMU,
+    );
     // `null` is reachable when the raster path resolves to an unsupported
     // metafile (a true EMF, or a WMF with no geometry); guarded below.
     let bitmap: ImageBitmap | HTMLImageElement | null;
@@ -3185,30 +3193,12 @@ async function renderPicture(
       ctx.translate(-(x + w / 2), -(y + h / 2));
     }
 
-    // ── srcRect sub-rectangle (ECMA-376 a:srcRect). Edge values are fractions
-    // of source dims (negative values mean extend past the image, duplicating
-    // edge pixels in OOXML; we clamp to [0,1]). Resolve once so both the live
-    // paint and the effect aux paints share identical crop coordinates. Skip a
-    // metafile (WMF/EMF): core's decodeRasterOrMetafile rasterizes it to the
-    // CROPPED display box, so cropping its bitmap would squish the whole picture
-    // (the same gate the docx/xlsx renderers use via `isMetafileMime`).
-    const sr = el.srcRect;
-    let crop: { sx: number; sy: number; sw: number; sh: number } | null = null;
-    if (sr && !isMetafileMime(el.mimeType) && (sr.l || sr.t || sr.r || sr.b)) {
-      const bw = bitmap.width, bh = bitmap.height;
-      const sl = Math.max(0, Math.min(1, sr.l));
-      const st = Math.max(0, Math.min(1, sr.t));
-      const srR = Math.max(0, Math.min(1, sr.r));
-      const sbB = Math.max(0, Math.min(1, sr.b));
-      const sx = sl * bw;
-      const sy = st * bh;
-      crop = {
-        sx,
-        sy,
-        sw: Math.max(1, bw - sx - srR * bw),
-        sh: Math.max(1, bh - sy - sbB * bh),
-      };
-    }
+    // ── srcRect sub-rectangle (ECMA-376 §20.1.8.55 a:srcRect). Resolve once via
+    // the shared core helper so both the live paint and the effect aux paints
+    // share identical crop coordinates. Applies to raster blips AND metafiles
+    // alike: a cropped metafile was rasterized at its full picture frame above
+    // (`metafileRasterSize`), so its bitmap maps to the same fractional source.
+    const crop = cropSourceRect(bitmap, el.srcRect);
 
     // Trace the picture's clip silhouette (roundRect / custGeom / plain rect).
     // Shared by the clip and the border / contour strokes so the outline always
@@ -4017,13 +4007,21 @@ export async function renderSlide(
         void getCachedSvgImageByPath(p.imagePath, opts.fetchImage).catch(() => undefined);
       } else {
         // Pass the picture's pt size so a metafile blip warms at the same raster
-        // size the draw loop requests (the cache is path-keyed, first-wins).
+        // size the draw loop requests (the cache is path-keyed, first-wins). A
+        // cropped metafile warms at its full picture frame, matching the draw
+        // path's `metafileRasterSize` call.
+        const warm = metafileRasterSize(
+          p.mimeType,
+          p.srcRect,
+          p.width / PT_TO_EMU,
+          p.height / PT_TO_EMU,
+        );
         void getCachedBitmap(
           p.imagePath,
           p.mimeType,
           opts.fetchImage,
-          p.width / PT_TO_EMU,
-          p.height / PT_TO_EMU,
+          warm.widthPt,
+          warm.heightPt,
         ).catch(() => undefined);
       }
     } else if (el.type === 'media') {
