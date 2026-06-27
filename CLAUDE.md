@@ -21,6 +21,15 @@ Rust/WASM parser + TypeScript Canvas renderer 構成。
 - `packages/docx/` — DOCX 固有（Session B 所有）
 - `packages/xlsx/` — XLSX 固有（Session C 所有）
 
+## 横断統合の原則（重要）
+
+docx / xlsx / pptx は同じ ECMA-376 / ISO-29500 の概念（DrawingML の blip・srcRect、段落・テキスト、図形 preset 等）をそれぞれ実装している。**あるパッケージで不具合を見つけ、それが共有構造上ほかのパッケージでも起こりうると判明したら、見つけたパッケージだけを直して終わらせない。3パッケージ（と core / ooxml-common の共有層）を横断して統合的に解決する。**
+
+- **1つの不具合は「他フォーマットにも同じ穴がある」シグナル**として扱う。バグ修正時は必ず「これは他フォーマットでも起きうる共通概念か？」を問い、Yes なら他2パッケージも点検・修正する。
+- **重複ロジックは共有層に集約する。** 共通の型・パース・判定ロジックは `ooxml-common`（Rust）/ `core`（TS）に寄せ、各パッケージはそれを import する。ただし周辺ロジックが本当に分岐するもの（例: 描画 math は各レンダラーの effect/clip 処理と密結合）は無理に共有しない（false-abstraction を避ける。共有するのは型 + パース + 純粋な述語まで）。
+- 横断修正は core / ooxml-common に触れるため、各 package 所有セッションの編集制限の例外として、main を狙う1本の協調的 PR にまとめてよい（commit は「1関心=1commit」で分ける）。
+- 実例: `<a:srcRect>` 画像トリミング。xlsx で発見 → docx は raster crop が全無効化・pptx は cropped metafile を double-crop する潜在バグと判明 → `SrcRect`/`parse_src_rect` を ooxml-common に集約、`isMetafileMime` を core に追加し、docx/pptx を同時修正（PR #576）。
+
 ## Git ワークフロー
 
 **複数セッションが並列で作業するため、main への直接 push は禁止。**
