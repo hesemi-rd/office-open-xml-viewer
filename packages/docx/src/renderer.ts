@@ -1339,34 +1339,30 @@ export function computePages(
   // 0 when the paragraph has no paragraph-anchored floats (page-absolute floats
   // are pinned regardless of which page the anchor lands on, so they never
   // trigger a break). Measured at scale 1 (pt), matching the paginator's `y`.
-  const anchoredFloatBottomOffset = (para: DocParagraph, spaceBeforePt: number): number => {
+  const anchoredFloatBottomOffset = (para: DocParagraph): number => {
     let maxBottom = 0;
     for (const run of para.runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
         if (!img.anchor || !img.anchorYFromPara) continue;
-        // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
-        // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
-        // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
-        // each so the estimate matches the draw position exactly.
-        const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
-        const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
+        // ECMA-376 §20.4.3.5: a `positionV relativeFrom="paragraph"/"line"` float
+        // anchors against the paragraph's pre-spaceBefore TOP, regardless of wrap
+        // mode (registerAnchorFloats + renderAnchorImages both use paragraphStartY).
+        // So its bottom, measured from the paragraph top (the paginator's `y`), is
+        // anchorYPt + height — no spaceBefore term.
+        const bottom = (img.anchorYPt ?? 0) + img.heightPt;
         if (bottom > maxBottom) maxBottom = bottom;
       } else if (run.type === 'shape') {
         // An anchored shape with positionV relativeFrom="paragraph"/"line" is
-        // kept on its anchor's page the same way an image is. Mirror the image
-        // formula exactly — bottom = anchorBase + anchorYPt + height — but take
-        // the height from resolveShapeBox so sizeRelV / wgp-group scaling is
-        // honored. measureState is scale 1 (pt), so box.h is already in pt.
-        // (paragraphTopPx is passed through for shapes whose height depends on a
-        // paragraph/line container via sizeRelV; it does not affect the height
-        // for the common static-extent case.)
+        // kept on its anchor's page the same way an image is, and anchors at the
+        // same pre-spaceBefore paragraph top. Take the height from resolveShapeBox
+        // so sizeRelV / wgp-group scaling is honored. measureState is scale 1 (pt),
+        // so box.h is already in pt.
         const shp = run as unknown as ShapeRun;
         if (!shp.anchorYFromPara) continue;
-        const anchorBase = isWrapFloat(shp.wrapMode) ? spaceBeforePt : 0;
-        const box = resolveShapeBox(shp, measureState, measureState.y + anchorBase);
+        const box = resolveShapeBox(shp, measureState, measureState.y);
         if (box.h <= 0) continue;
-        const bottom = anchorBase + (shp.anchorYPt ?? 0) + box.h;
+        const bottom = (shp.anchorYPt ?? 0) + box.h;
         if (bottom > maxBottom) maxBottom = bottom;
       }
     }
@@ -1580,7 +1576,12 @@ export function computePages(
       // floats wholesale via newPage(), so this snapshot is unused there.)
       const floatsBefore = measureState.floats.length;
       const floatSeqBefore = measureState.floatParaSeq;
-      const paragraphAnchorY = measureState.y + effectiveBefore;
+      // ECMA-376 §20.4.3.5: a `positionV relativeFrom="paragraph"` float anchors
+      // at the paragraph's TOP (pre-spaceBefore), so register it at measureState.y
+      // BEFORE spaceBefore is folded in — matching the paint pass (paragraphStartY)
+      // and renderAnchorImages (wrapNone). See registerAnchorFloats's call site in
+      // renderParagraph for the spec rationale.
+      const paragraphAnchorY = measureState.y;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
       const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX());
@@ -1631,7 +1632,7 @@ export function computePages(
       // keep-on-page behavior). When the float is taller than the page content
       // area it can never fit — leave it on this page and allow the overflow
       // (no break would help, and breaking unconditionally would loop forever).
-      const floatBottomOff = anchoredFloatBottomOffset(para, effectiveBefore);
+      const floatBottomOff = anchoredFloatBottomOffset(para);
       const floatOverflowsHere = floatBottomOff > 0 && y + floatBottomOff > effContentH();
       const floatFitsFresh = floatBottomOff > 0 && floatBottomOff <= effContentH();
       const breakForFloat = y > 0 && floatOverflowsHere && floatFitsFresh;
@@ -1673,7 +1674,7 @@ export function computePages(
           // floats were just discarded): this paragraph is now the first registrant
           // on the fresh page and gets paraId 0 — matching the renderer, which
           // re-registers from a fresh per-page state.
-          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+          registerAnchorFloats(para, measureState, measureState.y);
           // The references move to the new page; nothing was reserved there yet,
           // so the separator region still applies to the first footnote.
           if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
@@ -1684,7 +1685,7 @@ export function computePages(
           // estimates for this paragraph (and later ones) use the right band.
           measureState.floats.length = floatsBefore;
           measureState.floatParaSeq = floatSeqBefore;
-          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+          registerAnchorFloats(para, measureState, measureState.y);
         }
       }
 
@@ -3257,11 +3258,18 @@ function renderParagraph(
 
   if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
 
-  // Register anchor floats from this paragraph (must happen after spaceBefore so
-  // that paragraph-relative Y resolves against the textAreaTop, matching Word).
+  // Register anchor floats from this paragraph. ECMA-376 §20.4.3.5: a
+  // `positionV relativeFrom="paragraph"` float is positioned relative to "the
+  // paragraph which contains the drawing anchor" — its TOP edge, BEFORE the
+  // paragraph's spaceBefore (Word anchors the float at the paragraph top, not the
+  // post-spaceBefore text area). So pass `paragraphStartY` (pre-spaceBefore),
+  // identically for wrap AND wrapNone floats (renderAnchorImages below already
+  // uses paragraphStartY). Anchoring wrap floats at the post-spaceBefore text top
+  // placed them spaceBefore too low — e.g. sample-12's figure (anchor paragraph
+  // spaceBefore=12 pt) sat 12 pt under Word, eating the gap above its caption.
   // Skipped for the frame-draw recursion: a frame paragraph's wrap exclusion is
   // its own FloatRect (renderFrameParagraph), not an anchor image/shape float.
-  if (!inFrame) registerAnchorFloats(para, state, state.y);
+  if (!inFrame) registerAnchorFloats(para, state, paragraphStartY);
 
   // behindDoc shapes must render before text so they appear behind it.
   renderAnchorImages(para, state, paragraphStartY, 'behind');
