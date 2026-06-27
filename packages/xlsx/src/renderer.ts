@@ -828,7 +828,9 @@ export function layoutRichTextLines(
   const push = (text: string, font: CellFont) => {
     if (!text) return;
     lastTextPt = font.size; // nearest preceding text size, for the next blank line
-    ctx.font = buildFont(font, cs);
+    // Measure at the *draw* font so a super/subscript token reserves its reduced
+    // (~65%) glyph width; the segment keeps the run's full size for line height.
+    ctx.font = buildFont(vertAlignDrawFont(font), cs);
     const w = ctx.measureText(text).width;
     if (cur.length > 0 && curW + w > maxWidth) {
       // Kinsoku at the wrap boundary (ECMA-376 §17.15.1.58–.60): retract
@@ -849,7 +851,7 @@ export function layoutRichTextLines(
       if (retract > 0) {
         const keepCps = lastCps.slice(0, lastCps.length - retract);
         const moveCps = lastCps.slice(lastCps.length - retract);
-        ctx.font = buildFont(last.font, cs);
+        ctx.font = buildFont(vertAlignDrawFont(last.font), cs);
         if (keepCps.length === 0) {
           // The whole last segment moves down — drop it from the closing line.
           cur.pop();
@@ -867,7 +869,7 @@ export function layoutRichTextLines(
         curW += carry.width;
         if (carry.font.size > curMaxSize) curMaxSize = carry.font.size;
       }
-      ctx.font = buildFont(font, cs); // restore for the incoming token below
+      ctx.font = buildFont(vertAlignDrawFont(font), cs); // restore for the incoming token below
     }
     cur.push({ text, font, width: w });
     curW += w;
@@ -917,11 +919,12 @@ export function layoutRichTextLines(
   return lines;
 }
 
-/** Cell geometry + alignment for {@link drawNonWrapRichText}. `alignH`/`alignV`
- *  accept the raw `xf` strings; any value other than `right`/`center` anchors
- *  left, and other than `top`/`center` anchors bottom (matching the legacy
- *  single-line path's handling of `justify` / `centerContinuous` / etc.). */
-export interface NonWrapRichGeom {
+/** Cell geometry + alignment shared by the rich-text draw helpers (wrap and
+ *  non-wrap). `alignH`/`alignV` accept the raw `xf` strings; any value other
+ *  than `right`/`center` anchors left, and other than `top`/`center` anchors
+ *  bottom (matching the legacy single-line path's handling of `justify` /
+ *  `centerContinuous` / etc.). */
+export interface RichCellGeom {
   alignH: string;
   alignV: string;
   /** Cell top-left in canvas px (merge span included). */
@@ -947,20 +950,95 @@ function decoYForBaseline(baseline: CanvasTextBaseline, textY: number, rSizePx: 
   return { underline: textY + rSizePx + 1, strike: textY + Math.round(rSizePx * 0.5) };
 }
 
+/** The draw font for a run/segment: super/subscript renders at ~65% size
+ *  (ECMA-376 §18.4.14 vertAlign / ST_VerticalAlignRun §22.9.2.17); everything
+ *  else keeps its declared size. The *base* size still governs line height and
+ *  the baseline shift — only the glyph (and the width it occupies) shrinks. */
+function vertAlignDrawFont(font: CellFont): CellFont {
+  return (font.vertAlign === 'superscript' || font.vertAlign === 'subscript')
+    ? { ...font, size: font.size * 0.65 } : font;
+}
+
 /**
- * Draw one already-grouped line of rich-text runs at `textY` under `baseline`,
- * each run with its own font/color, ~65%-size super/subscript baseline shift
- * (ECMA-376 §18.4.14 vertAlign / ST_VerticalAlignRun §22.9.2.17 — the size ratio
- * and offset are implementation-defined), underline / strike decoration, and the
- * per-line bidi visual-order pass (UAX#9 rule L2). The line is positioned
- * horizontally by `geom.alignH` over its measured width. The single shared
- * per-run drawer for every non-wrap rich path, so they paint runs identically.
+ * Draw a sequence of already-resolved, already-measured rich segments on one
+ * line at `textY` under `baseline`, in bidi visual order (UAX#9 rule L2). The
+ * caller supplies whether the cell needs the bidi pass and its base direction —
+ * a wrapped cell's display lines share one paragraph direction, while hard-break
+ * lines are independent paragraphs. Each segment draws with its own font/color,
+ * ~65%-size super/subscript baseline shift (§18.4.14 vertAlign / §22.9.2.17), and
+ * underline / strike decoration. `startX` is the line's left edge (the caller
+ * resolves alignH from the line's measured width). The single shared per-segment
+ * drawer for every rich path — non-wrap (via {@link drawRichLine}) and wrap.
+ */
+export function drawResolvedRichLine(
+  ctx: CanvasRenderingContext2D,
+  segs: RichSeg[],
+  startX: number,
+  textY: number,
+  baseline: CanvasTextBaseline,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; needBidi?: boolean; baseRtl?: boolean },
+): void {
+  ctx.textAlign = 'left';
+  ctx.textBaseline = baseline;
+  const vis = opts.needBidi ? computeLineVisualOrder(segs, opts.baseRtl ?? false) : null;
+  const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
+  let x = startX;
+  for (let vi = 0; vi < segs.length; vi++) {
+    const i = vis ? vis.order[vi] : vi;
+    if (vis) { try { dctx.direction = vis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
+    const seg = segs[i];
+    const drawFont = vertAlignDrawFont(seg.font);
+    ctx.font = buildFont(drawFont, cs);
+    const segColor = opts.fontColor ?? seg.font.color;
+    ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
+    // Baseline shift for super/subscript, relative to the run's *base* size: up
+    // for super, slightly down for sub so each sits at the right vertical band.
+    const baseSizePx = vMetricPx(seg.font.size, cs);
+    let yShift = 0;
+    if (seg.font.vertAlign === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
+    else if (seg.font.vertAlign === 'subscript') yShift = Math.round(baseSizePx * 0.10);
+    ctx.fillText(seg.text, x, textY + yShift);
+    const rSizePx = vMetricPx(drawFont.size, cs);
+    if (seg.font.underline || seg.font.strike) {
+      const deco = decoYForBaseline(baseline, textY, rSizePx);
+      if (seg.font.underline) {
+        const stroke = segColor ? hexToRgba(segColor) : '#000000';
+        const dbl = seg.font.underlineStyle === 'double' || seg.font.underlineStyle === 'doubleAccounting';
+        drawTextDecoLine(ctx, x, x + seg.width, deco.underline + yShift, stroke, dbl, dpr);
+      }
+      if (seg.font.strike) {
+        const syBase = deco.strike + yShift;
+        const sy = syBase + crispOffset(syBase, 0.5, dpr);
+        ctx.save();
+        ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x + seg.width, sy); ctx.stroke();
+        ctx.restore();
+      }
+    }
+    x += seg.width;
+  }
+  // Defensive reset (the per-cell ctx.restore() also restores direction).
+  if (vis) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
+}
+
+/**
+ * Draw one already-grouped line of rich-text RUNS at `textY` under `baseline`,
+ * positioned horizontally by `geom.alignH` over its measured width. Resolves each
+ * run's font (super/subscript at ~65% size, §18.4.14) into a measured segment —
+ * the segment keeps the run's *full* size (line height + baseline shift) but its
+ * width is measured at the draw font, so a super/subscript run reserves its
+ * reduced glyph width — then delegates the painting to {@link drawResolvedRichLine}.
+ * Used by the non-wrap rich paths; the wrap path drives `drawResolvedRichLine`
+ * directly from its laid-out segments.
  */
 function drawRichLine(
   ctx: CanvasRenderingContext2D,
   lineRuns: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number },
@@ -968,70 +1046,19 @@ function drawRichLine(
   baseline: CanvasTextBaseline,
 ): void {
   const { alignH, cx, cellW, leftPad, paddingX } = geom;
-  // Per-run draw fonts: super/subscript runs render at ~65% size with a baseline
-  // shift; the x-budget uses the run's *base* size.
-  const baseRunFonts = lineRuns.map((r) => applyRunFont(baseFont, r));
-  const runVAlign = lineRuns.map((r) => r.font?.vertAlign);
-  const drawRunFonts = baseRunFonts.map((f, i) =>
-    (runVAlign[i] === 'superscript' || runVAlign[i] === 'subscript') ? { ...f, size: f.size * 0.65 } : f);
-  const runWidths = lineRuns.map((r, i) => {
-    ctx.font = buildFont(drawRunFonts[i], cs);
-    return ctx.measureText(r.text).width;
+  const segs: RichSeg[] = lineRuns.map((r) => {
+    const font = applyRunFont(baseFont, r);
+    ctx.font = buildFont(vertAlignDrawFont(font), cs);
+    return { text: r.text, font, width: ctx.measureText(r.text).width };
   });
-  const totalWidth = runWidths.reduce((a, b) => a + b, 0);
-  let runX: number;
-  if (alignH === 'right') runX = cx + cellW - paddingX - totalWidth;
-  else if (alignH === 'center') runX = cx + cellW / 2 - totalWidth / 2;
-  else runX = cx + leftPad;
-  // We position each run ourselves, so draw left-aligned at the run's baseline.
-  ctx.textAlign = 'left';
-  ctx.textBaseline = baseline;
-  // Bidi: draw the runs in visual order (UAX#9 rule L2) under the cell's base
-  // direction (@readingOrder, or first-strong for Context), each with
-  // ctx.direction set so Canvas shapes/orders it internally. The x-budget is
-  // order-independent. Gated so pure-LTR lines keep the exact pre-bidi path.
-  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(lineRuns);
-  const vis = needBidi
-    ? computeLineVisualOrder(lineRuns, cellBaseRtl(opts.readingOrder, lineRuns.map((r) => r.text).join('')))
-    : null;
-  const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
-  for (let vi = 0; vi < lineRuns.length; vi++) {
-    const i = vis ? vis.order[vi] : vi;
-    if (vis) { try { dctx.direction = vis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
-    const rf = drawRunFonts[i];
-    const baseRf = baseRunFonts[i];
-    ctx.font = buildFont(rf, cs);
-    const runColor = opts.fontColor ?? rf.color;
-    ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
-    // Baseline shift for super/subscript: up for super, slightly down for sub so
-    // each run sits at the right vertical band relative to the line.
-    const baseSizePx = vMetricPx(baseRf.size, cs);
-    let yShift = 0;
-    if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
-    else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
-    ctx.fillText(lineRuns[i].text, runX, textY + yShift);
-    const rSizePx = vMetricPx(rf.size, cs);
-    if (rf.underline || rf.strike) {
-      const deco = decoYForBaseline(baseline, textY, rSizePx);
-      if (rf.underline) {
-        const stroke = runColor ? hexToRgba(runColor) : '#000000';
-        const dbl = rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting';
-        drawTextDecoLine(ctx, runX, runX + runWidths[i], deco.underline + yShift, stroke, dbl, dpr);
-      }
-      if (rf.strike) {
-        const syBase = deco.strike + yShift;
-        const sy = syBase + crispOffset(syBase, 0.5, dpr);
-        ctx.save();
-        ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
-        ctx.lineWidth = 0.5;
-        ctx.beginPath(); ctx.moveTo(runX, sy); ctx.lineTo(runX + runWidths[i], sy); ctx.stroke();
-        ctx.restore();
-      }
-    }
-    runX += runWidths[i];
-  }
-  // Defensive reset (the per-cell ctx.restore() also restores direction).
-  if (vis) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
+  const totalWidth = segs.reduce((a, s) => a + s.width, 0);
+  let startX: number;
+  if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
+  else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
+  else startX = cx + leftPad;
+  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(segs);
+  const baseRtl = needBidi && cellBaseRtl(opts.readingOrder, segs.map((s) => s.text).join(''));
+  drawResolvedRichLine(ctx, segs, startX, textY, baseline, cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
 }
 
 /**
@@ -1046,7 +1073,7 @@ function drawSingleLineRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
@@ -1072,7 +1099,7 @@ function drawMultiLineRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
@@ -1137,7 +1164,7 @@ export function drawNonWrapRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
-  geom: NonWrapRichGeom,
+  geom: RichCellGeom,
   cs: number,
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
@@ -1146,6 +1173,47 @@ export function drawNonWrapRichText(
     drawMultiLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
   } else {
     drawSingleLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
+  }
+}
+
+/**
+ * Lay out and draw WRAP-mode rich text (mixed-font runs, §18.8.1 wrapText on).
+ * `layoutRichTextLines` soft-wraps at word / CJK boundaries (and hard breaks),
+ * and each resulting line is painted by the shared {@link drawResolvedRichLine}
+ * (super/subscript §18.4.14, underline/strike, bidi). The wrapped display lines
+ * share one paragraph base direction (§18.8.1 readingOrder), computed once here.
+ * Drives both the in-viewport draw path and the off-screen-anchor merge pre-pass
+ * so a merged wrapped cell renders identically regardless of anchor visibility.
+ */
+function drawWrappedRichText(
+  ctx: CanvasRenderingContext2D,
+  runs: Run[],
+  baseFont: CellFont,
+  geom: RichCellGeom,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; readingOrder?: number } = {},
+): void {
+  const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
+  const rLines = layoutRichTextLines(ctx, runs, baseFont, cs, cellW - leftPad - paddingX);
+  const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
+  let yy: number;
+  if (alignV === 'top') yy = cy + paddingY;
+  else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
+  else yy = cy + cellH - totalH - paddingY;
+  // Bidi base direction for the cell (@readingOrder / first-strong); the wrapped
+  // display lines share one paragraph direction. Gated so pure-LTR cells keep
+  // the exact pre-bidi path.
+  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(runs);
+  const baseRtl = needBidi && cellBaseRtl(opts.readingOrder, runs.map((r) => r.text).join(''));
+  for (const line of rLines) {
+    const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
+    let xx: number;
+    if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
+    else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
+    else xx = cx + leftPad;
+    drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
+    yy += vMetricPx(line.maxFontSize, cs, 1.2);
   }
 }
 
@@ -1692,31 +1760,15 @@ function renderQuadrant(
     const hasRichText = runs && runs.length > 0;
 
     if (xf.wrapText && hasRichText) {
-      const wrapW = cW - leftPad - paddingX;
-      const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-      const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
-      let yy: number;
-      if (alignV === 'top') yy = aCy + paddingY;
-      else if (alignV === 'center') yy = aCy + (cH - totalH) / 2;
-      else yy = aCy + cH - totalH - paddingY;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      for (const line of rLines) {
-        const lineH = vMetricPx(line.maxFontSize, cs, 1.2);
-        const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
-        let xx: number;
-        if (alignH === 'right') xx = aCx + cW - paddingX - totalW;
-        else if (alignH === 'center') xx = aCx + cW / 2 - totalW / 2;
-        else xx = aCx + leftPad;
-        for (const seg of line.segments) {
-          ctx.font = buildFont(seg.font, cs);
-          const segColor = cf.fontColor ?? seg.font.color;
-          ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
-          ctx.fillText(seg.text, xx, yy);
-          xx += seg.width;
-        }
-        yy += lineH;
-      }
+      // Same helper as the in-viewport wrap path so an off-screen-anchored merge
+      // renders identical wrapped rich text — per-run fonts, super/subscript,
+      // underline/strike, and bidi (previously this pre-pass drew only plain
+      // per-segment fonts).
+      drawWrappedRichText(
+        ctx, runs, fontForDraw,
+        { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
+        cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
+      );
     } else if (xf.wrapText) {
       const lines = wrapTextLines(ctx, text, cW - leftPad - paddingX);
       const lineH = vMetricPx(font.size, cs, 1.2);
@@ -2315,59 +2367,12 @@ function renderQuadrant(
       const hasRichText = runs && runs.length > 0;
 
       if (xf.wrapText && hasRichText) {
-        // Rich text with wrapping: per-run fonts, break on spaces and CJK boundaries
-        const wrapW = cellW - leftPad - paddingX;
-        const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-        const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
-        let yy: number;
-        if (alignV === 'top') yy = cy + paddingY;
-        else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
-        else yy = cy + cellH - totalH - paddingY;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        // Bidi base direction for the cell (xf @readingOrder / first-strong).
-        // Gated so pure-LTR cells keep the exact pre-bidi path.
-        const wrapNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
-        const wrapBaseRtl = wrapNeedsBidi && cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
-        const dctxW = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
-        for (const line of rLines) {
-          const lineH = vMetricPx(line.maxFontSize, cs, 1.2);
-          const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
-          let xx: number;
-          if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
-          else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
-          else xx = cx + leftPad;
-          // Draw the line's segments in visual order (rule L2).
-          const wvis = wrapNeedsBidi ? computeLineVisualOrder(line.segments, wrapBaseRtl) : null;
-          for (let vi = 0; vi < line.segments.length; vi++) {
-            const li2 = wvis ? wvis.order[vi] : vi;
-            const seg = line.segments[li2];
-            if (wvis) { try { dctxW.direction = wvis.rtl[li2] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
-            ctx.font = buildFont(seg.font, cs);
-            const segColor = cf.fontColor ?? seg.font.color;
-            ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
-            ctx.fillText(seg.text, xx, yy);
-            const rSizePx = vMetricPx(seg.font.size, cs);
-            if (seg.font.underline) {
-              const stroke = segColor ? hexToRgba(segColor) : '#000000';
-              const dbl = seg.font.underlineStyle === 'double' || seg.font.underlineStyle === 'doubleAccounting';
-              drawTextDecoLine(ctx, xx, xx + seg.width, yy + rSizePx + 1, stroke, dbl, dpr);
-            }
-            if (seg.font.strike) {
-              ctx.save();
-              ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
-              ctx.lineWidth = 0.5;
-              const sy2base = yy + Math.round(rSizePx * 0.5);
-              const sy2 = sy2base + crispOffset(sy2base, 0.5, dpr);
-              ctx.beginPath(); ctx.moveTo(xx, sy2); ctx.lineTo(xx + seg.width, sy2); ctx.stroke();
-              ctx.restore();
-            }
-            xx += seg.width;
-          }
-          yy += lineH;
-        }
-        // Defensive reset (the per-cell ctx.restore() also restores direction).
-        if (wrapNeedsBidi) { try { dctxW.direction = 'ltr'; } catch { /* ignore */ } }
+        // Rich text with wrapping — shared with the off-screen pre-pass.
+        drawWrappedRichText(
+          ctx, runs, fontForDraw,
+          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
+        );
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = vMetricPx(font.size, cs, 1.2);
