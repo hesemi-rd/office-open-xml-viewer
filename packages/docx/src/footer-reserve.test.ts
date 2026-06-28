@@ -7,7 +7,7 @@ import type { BodyElement, DocNote, DocParagraph, DocxDocumentModel, HeaderFoote
 // bottom-margin allowance (marginBottom − footerDistance) rises into the content area
 // and content (body AND footnotes) must clear it: Word never lays main text over a
 // footer. The paginator measures each page's footer and re-paginates with that
-// reservation (paginateWithFooterReserve), and the footnote block is raised by the
+// reservation (paginateWithHeaderFooterReserve), and the footnote block is raised by the
 // same overflow. A NEGATIVE bottom margin is the spec's explicit exception — text is
 // then measured from the page bottom regardless of the footer and overlaps it, so
 // nothing is reserved. These tests pin those rules with a synthetic doc whose footer
