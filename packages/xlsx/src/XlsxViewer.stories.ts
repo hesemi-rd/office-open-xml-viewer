@@ -10,6 +10,7 @@ const math = { loadMathJax, mathMLToSvg };
 
 type Args = {
   scale: number;
+  selectionColor: string;
 };
 
 const meta: Meta<Args> = {
@@ -20,8 +21,12 @@ const meta: Meta<Args> = {
       control: { type: 'range', min: 0.25, max: 2, step: 0.05 },
       description: 'Cell/header scale (1 = normal size)',
     },
+    selectionColor: {
+      control: { type: 'color' },
+      description: 'Cell-selection accent (border + translucent fill)',
+    },
   },
-  args: { scale: 1 },
+  args: { scale: 1, selectionColor: '#1a73e8' },
 };
 export default meta;
 type Story = StoryObj<Args>;
@@ -49,6 +54,7 @@ export function buildViewerUI(
 
   const viewer = new XlsxViewer(viewerContainer, {
     cellScale: args.scale,
+    selectionColor: args.selectionColor,
     useGoogleFonts: true,
     math,
     onReady: (names) => {
@@ -178,6 +184,26 @@ export const FileUpload: Story = {
       loadBuffer(await file.arrayBuffer());
     });
 
+    return root;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Interactions: drag-to-resize columns/rows, Ctrl+wheel zoom, selection color
+// ---------------------------------------------------------------------------
+/**
+ * Auto-loads the bundled demo sheet to exercise the view-only interactions:
+ *  - **Resize**: drag a column-header or row-header border to resize it. The
+ *    cursor turns into a col-/row-resize handle over the border. Resizing is
+ *    held in viewer state and never written back to the file (issue #567).
+ *  - **Zoom**: Ctrl/⌘ + mouse wheel (or trackpad pinch) zooms the grid.
+ *  - **Selection color**: change the `selectionColor` control to recolor the
+ *    selection rectangle (border + translucent fill).
+ */
+export const Interactions: Story = {
+  name: 'Resize / zoom / selection color',
+  render(args) {
+    const { root } = buildViewerUI(args, '/xlsx/demo/sample-1.xlsx');
     return root;
   },
 };
