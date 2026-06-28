@@ -1,20 +1,20 @@
 /* ------------------------------------------------------------------ *
  * Japanese line-breaking (kinsoku shori / 禁則処理)
  *
- * ECMA-376 §17.15.1.58 `w:kinsoku` is a document-wide on/off toggle for
+ * ECMA-376 §17.3.1.16 `w:kinsoku` is a document-wide on/off toggle for
  * "East Asian typography line-breaking rules". Its default, when the
  * element is absent from settings.xml, is TRUE (the toggle is a
  * ST_OnOff whose absence Word treats as enabled for kinsoku). So a doc
  * with no <w:kinsoku> still gets Japanese line breaking — which is what
  * Word does and what users see.
  *
- * §17.15.1.59 `w:noLineBreaksAfter` / §17.15.1.60 `w:noLineBreaksBefore`
+ * §17.15.1.58 `w:noLineBreaksAfter` / §17.15.1.59 `w:noLineBreaksBefore`
  * let a document override the character set used by the kinsoku engine
  * for a given language (`w:lang`):
- *   - noLineBreaksBefore (§.60): characters that "cannot begin a line"
- *     (行頭禁則 — line-start-forbidden).
- *   - noLineBreaksAfter  (§.59): characters that "cannot end a line"
- *     (行末禁則 — line-end-forbidden).
+ *   - noLineBreaksBefore (§17.15.1.59): characters that "cannot begin a
+ *     line" (行頭禁則 — line-start-forbidden).
+ *   - noLineBreaksAfter  (§17.15.1.58): characters that "cannot end a
+ *     line" (行末禁則 — line-end-forbidden).
  * The spec states the `w:val` "specifies the set of characters" — it is
  * the COMPLETE set, so a present override REPLACES the application's
  * default set for that language (it does not extend it). When the
@@ -27,12 +27,16 @@
  * them as two flat string constants (data, not scattered conditionals);
  * membership is a Set lookup.
  *
- * Word applies kinsoku only to East-Asian wrapping (the per-character
- * break path). Pure-Latin word wrap is untouched: these sets contain no
- * ASCII letters/space, and the Latin path never consults them.
+ * Word applies the document-customizable East-Asian kinsoku to the
+ * per-character break path. The `lineStartForbidden` set ALSO contains the
+ * ASCII non-starters (!),.:;?]}) — these belong to the UNIVERSAL Latin line
+ * breaking rule (UAX#14 LB13: no break before a closing/mid-punctuation), not
+ * to East-Asian typography. The renderers' Latin wrap paths consult the DEFAULT
+ * set for those (independent of the §17.3.1.16 toggle and of any custom
+ * §17.15.1.59 override) so a Latin comma is never orphaned at a line start.
  * ------------------------------------------------------------------ */
 
-/** §17.15.1.60 default 行頭禁則 — characters that may NOT begin a line.
+/** §17.15.1.59 default 行頭禁則 — characters that may NOT begin a line.
  *  Closing brackets/quotes, mid/end punctuation, small kana, prolonged
  *  sound mark, iteration marks, and their halfwidth forms. */
 const KINSOKU_DEFAULT_LINE_START_FORBIDDEN =
@@ -52,7 +56,7 @@ const KINSOKU_DEFAULT_LINE_START_FORBIDDEN =
   '｡｣､･ｰﾞﾟ' +
   '!),.:;?]}｠';
 
-/** §17.15.1.59 default 行末禁則 — characters that may NOT end a line.
+/** §17.15.1.58 default 行末禁則 — characters that may NOT end a line.
  *  Opening brackets / quotes and currency/lead symbols. */
 const KINSOKU_DEFAULT_LINE_END_FORBIDDEN =
   // opening brackets / quotes (fullwidth)
@@ -63,8 +67,9 @@ const KINSOKU_DEFAULT_LINE_END_FORBIDDEN =
   '([{｟';
 
 /** Resolved kinsoku configuration for a document.
- *  `enabled` reflects §17.15.1.58; the two sets are §.60 / §.59 (custom
- *  sets replace the defaults — see resolveKinsokuRules). */
+ *  `enabled` reflects §17.3.1.16; the two sets are §17.15.1.59 (start) /
+ *  §17.15.1.58 (end) (custom sets replace the defaults — see
+ *  resolveKinsokuRules). */
 export interface KinsokuRules {
   enabled: boolean;
   /** Code points forbidden at line START (行頭禁則). */
@@ -80,9 +85,9 @@ function codePointSet(text: string): Set<number> {
 }
 
 /** Build the active {@link KinsokuRules} from the document settings.
- *  - `enabled` defaults to TRUE when undefined (§17.15.1.58 default).
+ *  - `enabled` defaults to TRUE when undefined (§17.3.1.16 default).
  *  - A non-undefined custom set REPLACES the default for that direction
- *    (§17.15.1.59 / §.60 "specifies the set of characters"). An empty
+ *    (§17.15.1.58 / §17.15.1.59 "specifies the set of characters"). An empty
  *    string is a legitimate replacement that disables that direction.
  */
 export function resolveKinsokuRules(settings?: {

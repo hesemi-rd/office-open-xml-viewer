@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isCjkBreakChar } from './cjk-ranges.js';
+import { isCjkBreakChar, isLatinWordCodePoint } from './cjk-ranges.js';
 
 describe('isCjkBreakChar', () => {
   // [code point, expected] — exercises every range edge (low−1, low, high,
@@ -28,5 +28,25 @@ describe('isCjkBreakChar', () => {
     it(`U+${cp.toString(16).toUpperCase().padStart(4, '0')} → ${expected}`, () => {
       expect(isCjkBreakChar(cp)).toBe(expected);
     });
+  }
+});
+
+describe('isLatinWordCodePoint', () => {
+  // Word characters (no intra-word break) — letters, digits, ASCII punctuation,
+  // and NBSP (U+00A0, non-breaking, so it must NOT count as a break boundary).
+  const wordCps: [string, number][] = [
+    ['a', 0x61], ['Z', 0x5a], ['7', 0x37], ['comma', 0x2c], ['period', 0x2e],
+    ['paren', 0x29], ['hyphen', 0x2d], ['at', 0x40], ['NBSP', 0x00a0],
+  ];
+  for (const [label, c] of wordCps) {
+    it(`${label} is a word code point`, () => expect(isLatinWordCodePoint(c)).toBe(true));
+  }
+  // Break-eligible whitespace and CJK code points are NOT word characters.
+  const nonWordCps: [string, number][] = [
+    ['space', 0x20], ['tab', 0x09], ['LF', 0x0a], ['CR', 0x0d],
+    ['ideograph', 0x6f22], ['ideographic comma', 0x3001], ['fullwidth comma', 0xff0c],
+  ];
+  for (const [label, c] of nonWordCps) {
+    it(`${label} is not a word code point`, () => expect(isLatinWordCodePoint(c)).toBe(false));
   }
 });

@@ -53,3 +53,20 @@ export function isCjkBreakChar(cp: number): boolean {
     (cp >= 0xff00 && cp <= 0xffef) // Halfwidth/Fullwidth Forms
   );
 }
+
+/**
+ * True when `cp` is a "word" code point for Latin/Western line breaking — one
+ * that carries NO intra-word break opportunity on its own. It is neither
+ * break-eligible whitespace (ASCII space / tab / LF / CR — the inter-word break
+ * points; NBSP is intentionally excluded, it is non-breaking) nor a CJK
+ * character (each of which {@link isCjkBreakChar} treats as its own break
+ * opportunity). Used by the renderers' wrap paths to find the boundary of a
+ * Latin word when applying the UAX#14 LB13 non-starter rule (keep a closing
+ * comma/period/etc. with its preceding word across run boundaries).
+ *
+ * @param cp A Unicode scalar value (e.g. from `String.prototype.codePointAt`).
+ */
+export function isLatinWordCodePoint(cp: number): boolean {
+  if (cp === 0x20 || cp === 0x09 || cp === 0x0a || cp === 0x0d) return false;
+  return !isCjkBreakChar(cp);
+}
