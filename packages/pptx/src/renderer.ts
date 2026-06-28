@@ -763,6 +763,47 @@ export function layoutParagraph(
     }
   };
 
+  // UAX#14 LB13 (行頭禁則): pull the trailing word of the current line down onto a
+  // fresh line so a glued non-starter (comma, period, … in a SEPARATE run, no
+  // whitespace between) does not orphan at the next line's head nor tear the word.
+  // Re-pushes the word — with its run formatting — to lead the new line; the
+  // caller then appends the non-starter. The trailing word normally lives in the
+  // last (same-meta-merged) segment and is split at its last whitespace; when a
+  // formatting change split the word across segments, the last segment has no
+  // internal whitespace, so the whole tail segment moves down instead (the word
+  // splits at the format seam, but the comma is still never orphaned — matching
+  // docx/xlsx). Returns false (changing nothing) only when that tail segment IS
+  // the whole line (no preceding content / nowhere to retract to). Mirrors the
+  // docx/xlsx fixes; the ASCII non-starters live in
+  // DEFAULT_KINSOKU_RULES.lineStartForbidden.
+  const retractTrailingWord = (): boolean => {
+    const seg = currentLine.segments.at(-1);
+    if (!seg || seg.math) return false;
+    const m = /^(.*\s)(\S+)$/s.exec(seg.text);
+    let word: string;
+    if (m) {
+      seg.text = m[1]; // close the current line on the whitespace boundary
+      word = m[2];
+    } else if (currentLine.segments.length > 1) {
+      currentLine.segments.pop(); // tail segment of a format-split word moves whole
+      word = seg.text;
+    } else {
+      return false; // the segment is the whole line — cannot retract without emptying it
+    }
+    newLine();
+    // Re-push the word (with its run formatting) so it leads the fresh line.
+    push(word, seg.font, seg.sizePx, seg.color, seg.underline, seg.strikethrough, seg.baseline, {
+      strikeDouble: seg.strikeDouble,
+      letterSpacingPx: seg.letterSpacingPx,
+      underlineStyle: seg.underlineStyle,
+      underlineColor: seg.underlineColor,
+      shadow: seg.shadow,
+      outline: seg.outline,
+      highlight: seg.highlight,
+    });
+    return true;
+  };
+
   for (const run of para.runs) {
     if (run.type === 'break') {
       newLine();
@@ -1018,7 +1059,16 @@ export function layoutParagraph(
         // size the bbox correctly. Match that behavior.
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       } else {
-        newLine();
+        // UAX#14 LB13: if the overflowing token is a non-starter (comma, …) glued
+        // to the word ending this line (no whitespace between — e.g. authored in a
+        // separate run), move the WHOLE word down with it so the comma never leads
+        // a line and the word is never torn. Otherwise wrap normally.
+        const firstCp = token.codePointAt(0);
+        const glued =
+          firstCp !== undefined &&
+          DEFAULT_KINSOKU_RULES.lineStartForbidden.has(firstCp) &&
+          /\S$/.test(currentLine.segments.at(-1)?.text ?? '');
+        if (!(glued && retractTrailingWord())) newLine();
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       }
     }
