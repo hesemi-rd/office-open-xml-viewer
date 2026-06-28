@@ -52,25 +52,41 @@
 //     the band top; Word fits the 1.3965 × 12 ≈ 16.8 pt box inside the row with
 //     visible top/bottom gaps.
 //
-// This table provides the intended font's win ascent and descent ratios
-// (`usWinAscent / unitsPerEm` and `usWinDescent / unitsPerEm`) so the line box
-// can be sized — and the baseline placed within it — as Word would, independent
-// of which fallback ends up drawing the glyphs. Carrying ascent and descent
-// separately (rather than only their sum) matters when the substitute's
+// This table provides the intended font's design ascent and descent ratios so
+// the line box can be sized — and the baseline placed within it — as Word would,
+// independent of which fallback ends up drawing the glyphs. Carrying ascent and
+// descent separately (rather than only their sum) matters when the substitute's
 // ascent:descent split differs from the document font's: using the substitute's
 // split would mis-place the baseline inside an otherwise correctly sized box,
 // shifting vertically-centered text off center. Only fonts whose metrics are
-// verified from real OS/2 data belong here — never a value tuned to make one
-// sample look right. Latin fonts are intentionally absent: their win ratio
-// (~1.15–1.22 em) is close to what the browser fallback already reports, so the
-// correction is negligible.
+// verified from real OS/2 / hhea data belong here — never a value tuned to make
+// one sample look right.
+//
+// Win vs hhea — which single-line height Word uses
+// ------------------------------------------------
+// Word sizes one `lineRule="auto"` line from the font's DESIGN line height. For
+// the CJK / Arabic faces below (Meiryo, Sakkal Majalla) that is the OS/2 win sum
+// `(usWinAscent + usWinDescent) / unitsPerEm`, and their hhea `lineGap` is 0 so
+// the win sum already equals the full hhea line height. For Latin faces it is
+// the hhea line height `(ascent + |descent| + lineGap) / unitsPerEm`, which is
+// LARGER than the win sum by exactly the hhea `lineGap` (Times New Roman: win
+// 2268/2048 = 1.107 em vs hhea 2355/2048 = 1.150 em; Arial: 1.117 vs 1.150).
+// Canvas `fontBoundingBoxAscent/Descent` reports the win box, so without these
+// Latin entries an installed Times New Roman / Arial body renders ~4 % too tight
+// vertically (sample-13: the two-column body and every multi-line paragraph were
+// short, pushing later content up). The lineGap is folded into `desc` so the
+// design sum is correct; the renderer's lineBoxHeight floor (intendedSingleLinePx)
+// raises the line box to it and the draw path centers the glyph ink with
+// symmetric half-leading. The Latin ratios here are face-independent of weight
+// (Arial Regular and Bold both report hhea 1.150).
 
 interface WinMetric {
-  /** `usWinAscent / unitsPerEm`. */ asc: number;
-  /** `usWinDescent / unitsPerEm`. */ desc: number;
+  /** Design ascent ratio (ascent units / unitsPerEm). */ asc: number;
+  /** Design descent ratio: `(|descent| + hhea lineGap) / unitsPerEm` so
+   *  `asc + desc` is the font's full design single-line height. */ desc: number;
 }
 
-/** A known font's win metrics. Keyed by a normalized (lowercased) name test. */
+/** A known font's design line metrics. Keyed by a normalized (lowercased) name test. */
 const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinMetric]> = [
   // Meiryo / Meiryo UI — unitsPerEm 2048, usWinAscent 2210, usWinDescent 1059
   // (OS/2 table; USE_TYPO_METRICS fsSelection bit 7 is clear, so Word uses the
@@ -102,6 +118,23 @@ const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinM
   // reports ≈2.2 em from fontBoundingBox with a more ascent-heavy split, so
   // without this both the line box and the baseline position are wrong.
   [(n) => n.includes('sakkal majalla') || n.includes('majalla'), { asc: 1810 / 2048, desc: 1050 / 2048 }],
+  // Times New Roman — unitsPerEm 2048; hhea ascent 1825, descent −443, lineGap
+  // 87 (extracted from the installed `Times New Roman.ttf` via fontTools; OS/2
+  // USE_TYPO_METRICS bit clear). Word's single-line height is the hhea line
+  // height (1825 + 443 + 87)/2048 = 2355/2048 = 1.1499 em — verified against the
+  // Word PDF of sample-13: a 10 pt body line is 11.52 pt = 1.152 em (the win sum
+  // 2268/2048 = 1.107 em that Canvas fontBoundingBox reports is 0.043 em short).
+  // lineGap folded into desc: asc 1825/2048, desc (443 + 87)/2048 = 530/2048.
+  // EXACT match: the Bold/Italic faces share this hhea ratio, but unrelated
+  // families must not be caught by a substring test.
+  [(n) => n === 'times new roman', { asc: 1825 / 2048, desc: 530 / 2048 }],
+  // Arial — unitsPerEm 2048; hhea ascent 1854, descent −434, lineGap 67 (from the
+  // installed `Arial.ttf`; USE_TYPO_METRICS clear). hhea line height
+  // (1854 + 434 + 67)/2048 = 2355/2048 = 1.1499 em, vs win sum 2288/2048 =
+  // 1.117 em. lineGap folded into desc: asc 1854/2048, desc (434 + 67)/2048.
+  // EXACT match: "Arial Narrow" (1.1475), "Arial Black" (1.4102) and "Arial Nova"
+  // have DIFFERENT metrics, so a substring test would mis-size them.
+  [(n) => n === 'arial', { asc: 1854 / 2048, desc: 501 / 2048 }],
 ];
 
 function lookupWinMetric(family: string | null | undefined): WinMetric | null {
@@ -114,9 +147,12 @@ function lookupWinMetric(family: string | null | undefined): WinMetric | null {
 }
 
 /**
- * Win line-height ratio (`(usWinAscent+usWinDescent)/unitsPerEm`) for a
- * requested font family, or `null` when the font is not in the table (the
- * caller should then fall back to the substituted font's Canvas metrics).
+ * Word's design single-line-height ratio for a requested font family, or `null`
+ * when the font is not in the table (the caller then falls back to the
+ * substituted font's Canvas metrics). The ratio is the win sum
+ * `(usWinAscent+usWinDescent)/unitsPerEm` for the CJK/Arabic faces and the hhea
+ * sum `(ascent+|descent|+lineGap)/unitsPerEm` for the Latin faces (see
+ * WIN_METRICS). The legacy name is kept to avoid churn at the call sites.
  */
 export function fontWinLineHeightRatio(family: string | null | undefined): number | null {
   const m = lookupWinMetric(family);
@@ -139,18 +175,20 @@ export function intendedSingleLinePx(family: string | null | undefined, emPx: nu
  * against the DOCUMENT font's design line box.
  *
  * Two regimes, decided by comparing the substitute's natural box with the
- * document font's win box (`usWinAscent+usWinDescent / unitsPerEm`):
+ * document font's design box (`asc + desc` from the table — the win sum for the
+ * CJK/Arabic faces, the hhea sum for the Latin faces; see WIN_METRICS):
  *
- * - Substitute box ≤ document box (e.g. Meiryo drawn via Hiragino): return the
- *   substitute's measured metrics UNCHANGED. The {@link intendedSingleLinePx}
- *   floor (applied by layoutLines) raises the LINE BOX to the document font's
- *   win height, and the renderer centers the natural line inside it — keeping
- *   the substitute's glyph ink centered where Word's ink sits. Replacing the
- *   split here instead shifted every line's ink upward and regressed the
- *   Word-reference VRT (private/sample-3).
+ * - Substitute box ≤ document box (e.g. Meiryo drawn via Hiragino, or an
+ *   installed Times New Roman whose win-box Canvas metrics fall short of its hhea
+ *   design height): return the substitute's measured metrics UNCHANGED. The
+ *   {@link intendedSingleLinePx} floor (applied by layoutLines) raises the LINE
+ *   BOX to the document font's design height, and the renderer centers the
+ *   natural line inside it — keeping the glyph ink centered where Word's ink
+ *   sits. Replacing the split here instead shifted every line's ink upward and
+ *   regressed the Word-reference VRT (private/sample-3).
  *
  * - Substitute box > document box (Sakkal Majalla drawn via Noto Naskh Arabic,
- *   win 2.2 em vs 1.3965 em): return the document font's win ascent/descent.
+ *   2.2 em vs 1.3965 em): return the document font's design ascent/descent.
  *   Without the shrink, exact-height rows (§17.4.81) and vAlign-centered cells
  *   (§17.4.84) overflow — the sample-7 page-2 header case.
  *

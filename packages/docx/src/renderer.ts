@@ -7639,16 +7639,17 @@ function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: number; d
 
 /** Corrected single-line ascent/descent (px) from an ALREADY-measured
  *  `TextMetrics`: the Canvas `fontBoundingBox` (with the synthetic 0.8/0.2-em
- *  fallback when the engine reports none), rescaled to the document font's win
- *  box via {@link correctLineMetrics}. The single source of truth for "how tall
- *  is one line of `family`", shared by the text-line path (layoutLines) and the
- *  empty paragraph-mark path (paragraphMarkLineHeight) so the two cannot drift —
- *  that drift (the empty path skipping `correctLineMetrics`) was the
+ *  fallback when the engine reports none), rescaled to the document font's design
+ *  line box via {@link correctLineMetrics}. The single source of truth for "how
+ *  tall is one line of `family`", shared by the text-line path (layoutLines) and
+ *  the empty paragraph-mark path (paragraphMarkLineHeight) so the two cannot
+ *  drift — that drift (the empty path skipping `correctLineMetrics`) was the
  *  empty-paragraph under-measure bug (§17.3.1.29 / §17.3.1.33). `fallbackEmPx`
  *  sizes the synthetic box (the run's full size); `correctionEmPx` is the design
  *  size handed to `correctLineMetrics` — they differ only for smallCaps/vertAlign
  *  runs (where the text path keeps the full-size fallback) and coincide for a
- *  plain paragraph-mark line. */
+ *  plain paragraph-mark line. The hhea single-line FLOOR for tabled fonts is
+ *  applied separately by lineBoxHeight via {@link intendedSingleLinePx}. */
 function correctedLineMetrics(
   m: TextMetrics,
   family: string | null | undefined,
@@ -7697,9 +7698,10 @@ function paragraphMarkLineHeight(
     // cells); others probe a Latin glyph. fontBoundingBox is reported per
     // resolved face (not per glyph), so the probe choice does not change the box
     // for a face that contains it — and the probe is script-matched, so the mark
-    // font does. correctLineMetrics rescales a substituted font to the document
-    // font's win box, identical to the text path (a no-op for fonts absent from
-    // the win-metric table, e.g. Latin).
+    // font does. correctedLineMetrics rescales a substituted font to the document
+    // font's design box, identical to the text path; the hhea single-line floor
+    // (intendedSingleLinePx, via emptyIntendedSinglePx below) then raises tabled
+    // fonts — Latin included — to Word's line height.
     const prevFont = ctx.font;
     ctx.font = buildFont(false, false, fs * scale, family, fontFamilyClasses);
     const m = ctx.measureText(eastAsian ? 'あ' : 'x');

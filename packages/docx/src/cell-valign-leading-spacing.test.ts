@@ -79,10 +79,17 @@ function makeRecordingCanvas(): {
 
 // ---------- model builders ----------
 
+// A deliberately SYNTHETIC, untabled font: the mock canvas reports a clean
+// 1.0 em box (0.8/0.2) for it, so these vAlign tests isolate the §17.4.84 leading
+// trim without the font-metrics single-line FLOOR. (Real Latin faces like Times
+// New Roman / Arial are tabled with their hhea design height — see font-metrics.ts
+// — which raises the line box and is covered by font-metrics.test.ts instead.)
+const TEST_FONT = 'Synthetic Untabled Serif';
+
 function textRun(text: string): DocxTextRun {
   return {
     text, bold: false, italic: false, underline: false, strikethrough: false,
-    fontSize: 10, color: null, fontFamily: 'Times New Roman', fontFamilyEastAsia: '',
+    fontSize: 10, color: null, fontFamily: TEST_FONT, fontFamilyEastAsia: '',
     isLink: false, background: null, vertAlign: null, hyperlink: null,
   };
 }
@@ -97,7 +104,7 @@ function paraOf(text: string, opts: Partial<DocParagraph> = {}): CellElement {
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
     numbering: null, tabStops: [],
     runs: [{ type: 'text', ...textRun(text) } as DocParagraph['runs'][number]],
-    defaultFontSize: 10, defaultFontFamily: 'Times New Roman',
+    defaultFontSize: 10, defaultFontFamily: TEST_FONT,
     widowControl: false,
     ...opts,
   } as unknown as CellElement;
@@ -147,7 +154,7 @@ function docWithTable(t: DocTable): DocxDocumentModel {
     body: [{ type: 'table', ...t } as BodyElement],
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
-    fontFamilyClasses: { 'Times New Roman': 'roman' },
+    fontFamilyClasses: { [TEST_FONT]: 'roman' },
   } as unknown as DocxDocumentModel;
 }
 

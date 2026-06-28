@@ -17,12 +17,20 @@ describe('fontWinLineHeightRatio', () => {
     expect(fontWinLineHeightRatio('meiryo ui')).toBeCloseTo(3269 / 2048, 5);
     expect(fontWinLineHeightRatio('MEIRYO')).toBeCloseTo(3269 / 2048, 5);
   });
-  it('returns null for untabled fonts (Latin / unknown / null)', () => {
-    // Latin fonts are intentionally absent — their win ratio (~1.15–1.22) is
-    // close to the browser fallback, so no correction is needed.
-    expect(fontWinLineHeightRatio('Arial')).toBeNull();
-    expect(fontWinLineHeightRatio('Calibri')).toBeNull();
+  it('returns the hhea single-line ratio for tabled Latin fonts (Times New Roman, Arial)', () => {
+    // Word sizes a line from the hhea line height (ascent+|descent|+lineGap), not
+    // the win sum Canvas reports. Times New Roman: (1825+443+87)/2048 = 1.1499 em;
+    // Arial: (1854+434+67)/2048 = 1.1499 em. Verified from the installed fonts.
+    expect(fontWinLineHeightRatio('Times New Roman')).toBeCloseTo(2355 / 2048, 5);
+    expect(fontWinLineHeightRatio('arial')).toBeCloseTo(2355 / 2048, 5);
+  });
+  it('matches Latin entries EXACTLY so variant families keep their own metrics', () => {
+    // "Arial Narrow" / "Arial Black" / "Arial Nova" and any other family must NOT
+    // be caught by the Arial/Times entries — they have different design metrics.
     expect(fontWinLineHeightRatio('Arial Nova')).toBeNull();
+    expect(fontWinLineHeightRatio('Arial Narrow')).toBeNull();
+    expect(fontWinLineHeightRatio('Arial Black')).toBeNull();
+    expect(fontWinLineHeightRatio('Calibri')).toBeNull();
     expect(fontWinLineHeightRatio(null)).toBeNull();
     expect(fontWinLineHeightRatio(undefined)).toBeNull();
     expect(fontWinLineHeightRatio('')).toBeNull();
@@ -38,7 +46,7 @@ describe('intendedSingleLinePx', () => {
     expect(intendedSingleLinePx('Meiryo UI', 18)).toBeCloseTo(meiryo * 18, 5);
   });
   it('returns 0 (no-op sentinel) for untabled fonts', () => {
-    expect(intendedSingleLinePx('Arial', 96)).toBe(0);
+    expect(intendedSingleLinePx('Calibri', 96)).toBe(0);
     expect(intendedSingleLinePx(null, 96)).toBe(0);
   });
 });
@@ -65,7 +73,16 @@ describe('correctLineMetrics', () => {
     expect(intendedSingleLinePx('Meiryo UI', 18)).toBeCloseTo((3269 / 2048) * 18, 5);
   });
   it('passes through measured metrics unchanged for untabled fonts', () => {
-    const r = correctLineMetrics('Arial', 12, 11, 3);
+    const r = correctLineMetrics('Calibri', 12, 11, 3);
     expect(r).toEqual({ ascent: 11, descent: 3 });
+  });
+  it('keeps the measured box for an installed Latin font shorter than its design box', () => {
+    // Times New Roman is tabled (design 1.1499 em). At em = 12 the design box is
+    // ~13.8 px; the Canvas win box (≈1.107 em ≈ 13.3 px, here 10.7 + 2.6) is
+    // SMALLER, so correctLineMetrics passes it through and the intendedSingleLinePx
+    // floor (not this function) raises the LINE BOX — matching the Meiryo regime.
+    const r = correctLineMetrics('Times New Roman', 12, 10.7, 2.6);
+    expect(r).toEqual({ ascent: 10.7, descent: 2.6 });
+    expect(intendedSingleLinePx('Times New Roman', 12)).toBeCloseTo((2355 / 2048) * 12, 5);
   });
 });
