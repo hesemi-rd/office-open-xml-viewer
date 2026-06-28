@@ -1688,6 +1688,10 @@ export function computePages(
       // Mirrors contextualSpacing's full drop of the previous after; no-op when the
       // spacer is NOT collapsed (sample-13, before=22 keeps normal flow).
       const leadsCollapsedRun = isInklessParagraph(para) && isCollapsedContinuousSpacer(i + 1);
+      // Stamp it so the paint pass reads the decision here rather than re-deriving it
+      // from per-page adjacency: the collapsed spacer this looks ahead to can fall on
+      // the NEXT page's element list, where paint could not see it (lockstep).
+      if (leadsCollapsedRun) (el as PaginatedBodyElement).leadsCollapsedRun = true;
 
       // Collapse with the previous paragraph's spaceAfter — Word takes
       // max(prev.after, this.before) between paragraphs, not the sum.
@@ -3246,13 +3250,12 @@ function renderBodyElements(
       // marker is gone from this per-page list), so read the tag here.
       const spacer = !!(el as PaginatedBodyElement).sectionBreakSpacer;
       const suppress = contextual || spacer;
-      // An empty paragraph immediately before a COLLAPSED continuous spacer begins
-      // the section-break empty run; Word renders it FLUSH below the preceding
-      // content, dropping the previous paragraph's spaceAfter too (mirrors the
-      // paginator's leadsCollapsedRun). The next element carries the
-      // `collapsedSpacer` tag stamped during pagination.
-      const leadsCollapsedRun = isInklessParagraph(para)
-        && !!(elements[elIdx + 1] as PaginatedBodyElement | undefined)?.collapsedSpacer;
+      // An empty paragraph immediately before a COLLAPSED continuous spacer begins the
+      // section-break empty run; Word renders it FLUSH below the preceding content,
+      // dropping the previous paragraph's spaceAfter too. Read the paginator-stamped
+      // flag rather than looking ahead in this per-page slice: the collapsed spacer can
+      // sit on the next page, where `elements[elIdx + 1]` would be undefined.
+      const leadsCollapsedRun = !!(el as PaginatedBodyElement).leadsCollapsedRun;
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
       // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
