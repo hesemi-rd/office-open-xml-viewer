@@ -1344,7 +1344,7 @@ export function computePages(
         const p = e as unknown as DocParagraph;
         if (p.pageBreakBefore) return { height: Infinity, terminated: false };
         if (p.framePr) continue; // frame is out of flow (adds no column height)
-        const suppress = contextualSuppressed(prevP, p);
+        const suppress = contextualSuppressed(prevP, p) || isSectionBreakSpacerAt(body, j);
         const before = suppress ? 0 : p.spaceBefore;
         total += estimateParagraphHeight(ms, p, colWPt, suppress, 0) - Math.min(prevAfter, before);
         prevAfter = p.spaceAfter;
@@ -1614,7 +1614,15 @@ export function computePages(
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
-      const suppressBefore = contextualSuppressed(prevPara, para);
+      const contextual = contextualSuppressed(prevPara, para);
+      // An empty section-break spacer drops only ITS OWN before (gap collapses to
+      // prev.after, normally 0) — NOT the previous paragraph's after (see
+      // isSectionBreakSpacerAt). contextualSpacing drops both. Stamp the element so
+      // the paint pass (which gets per-page lists with the sectionBreak already
+      // consumed, so it cannot re-detect the adjacency) applies the same drop.
+      const spacer = isSectionBreakSpacerAt(body, i);
+      if (spacer) (el as PaginatedBodyElement).sectionBreakSpacer = true;
+      const suppressBefore = contextual || spacer;
 
       // Collapse with the previous paragraph's spaceAfter — Word takes
       // max(prev.after, this.before) between paragraphs, not the sum.
@@ -1622,7 +1630,7 @@ export function computePages(
       // §17.3.1.9 contextualSpacing: same-style adjacent paragraphs drop BOTH the
       // previous after and this before (gap = 0), keeping the paginator's fill in
       // lockstep with the paint pass.
-      const overlap = suppressBefore ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
+      const overlap = contextual ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
       y -= overlap;
       measureState.y -= overlap;
 
@@ -2812,6 +2820,56 @@ function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): bo
 }
 
 /**
+ * Whether a paragraph places NO inline content — no text, image, shape, math, or
+ * break run. It still produces one paragraph-mark line box (§17.3.1.29), but
+ * carries no glyphs.
+ */
+function isInklessParagraph(p: DocParagraph): boolean {
+  return !(p.runs ?? []).some((r) => {
+    const run = r as { type?: string; text?: string };
+    if (run.type === 'text') return (run.text ?? '').length > 0;
+    return true; // image / shape / math / break runs are visible content
+  });
+}
+
+/**
+ * Whether `body[i]` is an empty paragraph that carries a SECTION BREAK — an
+ * inkless paragraph immediately followed by a `sectionBreak` element. (The parser
+ * emits a sectPr-bearing paragraph as a `Paragraph` followed by a `SectionBreak`,
+ * so the spacer paragraph and its break are adjacent siblings.)
+ *
+ * Such a paragraph's spacing-BEFORE is suppressed: it sits flush below the
+ * preceding paragraph (it is a section transition, not normal content flow).
+ *
+ * Intentionally NOT gated to "continuous" breaks. The break's effective kind is
+ * the FOLLOWING section's start type (§17.6.22), not the marker's own `.kind`
+ * (sample-13's marker is `nextPage` yet renders continuous), so a `kind` check
+ * here would mis-fire. The all-kinds form is safe: for a genuine next-page break
+ * the spacer is the closing section's LAST line, sitting at the page bottom — the
+ * next section resets to a fresh page regardless — so dropping its before can
+ * only shift that one trailing empty mark up by its own before, never the
+ * following content.
+ *
+ * NOTE — interop heuristic, not ECMA-376. §17.3.1.33 would apply the `before`
+ * normally (a consumer takes `max(prev.after, this.before)`), and no clause —
+ * nor any [MS-DOC] / [MS-OI29500] note — suppresses it for a section-break or
+ * empty paragraph (verified independently). But Microsoft Word AND LibreOffice
+ * both render it with NO before: in sample-13 the empty `mSectionBreak` spacer
+ * between "Keywords" and "1. INTRODUCTION" carries `w:before="440"` (22pt); with
+ * that applied the two-column body started ~22pt too low, while both editors omit
+ * it (confirmed by the document author placing a character in the spacer and
+ * watching the heading NOT move). This matches that shared behaviour; revisit and
+ * cite if a primary source ever surfaces.
+ */
+function isSectionBreakSpacerAt(body: ArrayLike<{ type?: string }>, i: number): boolean {
+  const el = body[i] as { type?: string } | undefined;
+  if (!el || el.type !== 'paragraph') return false;
+  const next = body[i + 1] as { type?: string } | undefined;
+  if (next?.type !== 'sectionBreak') return false;
+  return isInklessParagraph(el as unknown as DocParagraph);
+}
+
+/**
  * Sum the heights of a cell's content elements with paragraph spacing collapsed
  * the same way `renderCellContent` paints them, so a cell measured for row
  * sizing equals the height it actually paints. Two collapse rules apply
@@ -3019,13 +3077,19 @@ function renderBodyElements(
         renderFrameParagraph(para, state, frameAnchorLineHeightPx(elements, el, state));
         continue;
       }
-      const suppress = contextualSuppressed(prevPara, para);
+      const contextual = contextualSuppressed(prevPara, para);
+      // Empty section-break spacer: drop only its own before (see
+      // isSectionBreakSpacerAt); contextualSpacing drops the previous after too.
+      // The adjacency was detected during pagination and stamped (the sectionBreak
+      // marker is gone from this per-page list), so read the tag here.
+      const spacer = !!(el as PaginatedBodyElement).sectionBreakSpacer;
+      const suppress = contextual || spacer;
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
       // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
       // set it, BOTH the previous after and this before are dropped (gap = 0), not
       // just collapsed — so e.g. a code listing's lines sit tight.
-      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      const overlap = contextual ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       // Continuation slices (slice.start > 0) suppress spaceBefore: the
       // earlier slice already consumed it on the previous page. Likewise

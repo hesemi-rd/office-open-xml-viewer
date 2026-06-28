@@ -225,6 +225,14 @@ export type BodyElement =
  *  sections. */
 export type PaginatedBodyElement = BodyElement & {
   lineSlice?: { start: number; end: number };
+  /** An empty paragraph that carries a section break (an inkless paragraph
+   *  immediately followed by a `sectionBreak` element) has its spacing-BEFORE
+   *  suppressed — Word/LibreOffice render it flush below the preceding paragraph.
+   *  Stamped by the paginator because the paint pass receives per-page element
+   *  lists with the `sectionBreak` marker already consumed, so it cannot re-detect
+   *  the adjacency itself. Runtime-only — never emitted by the parser. See
+   *  `isSectionBreakSpacerAt` in renderer.ts. */
+  sectionBreakSpacer?: boolean;
   colIndex?: number;
   /** ECMA-376 §17.6.4 — the column geometry of the SECTION this element belongs
    *  to (per-section newspaper columns). Stamped by the paginator so the renderer
