@@ -1,6 +1,6 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
@@ -688,14 +688,28 @@ export async function renderDocumentToCanvas(
     noteNumbers,
   };
 
+  // ECMA-376 §17.10.1 — per-section header/footer selection. Resolve the section
+  // active at the top of this page (and whether it's that section's first page)
+  // from the paginated elements' stamped `sectionHF`, then apply the spec
+  // precedence (first → even → default). Single-section docs resolve to
+  // doc.headers/footers/section.titlePage, unchanged.
+  const pageSection = resolvePageSection(pages, pageIndex, doc);
+  const isEvenPage = pageIndex % 2 === 1;
+
   // Header: top of page, starting at headerDistance
-  const header = pickHeaderFooter(doc.headers, pageIndex, totalPages, doc.section.titlePage, doc.section.evenAndOddHeaders);
+  const header = pickHeaderFooter(
+    pageSection.headers, pageSection.isFirstPageOfSection, isEvenPage,
+    pageSection.titlePage, doc.section.evenAndOddHeaders,
+  );
   if (header) {
     renderHeaderFooter(header, sec.headerDistance * scale, baseState);
   }
 
   // Footer: anchored from bottom, rising by its measured height
-  const footer = pickHeaderFooter(doc.footers, pageIndex, totalPages, doc.section.titlePage, doc.section.evenAndOddHeaders);
+  const footer = pickHeaderFooter(
+    pageSection.footers, pageSection.isFirstPageOfSection, isEvenPage,
+    pageSection.titlePage, doc.section.evenAndOddHeaders,
+  );
   if (footer) {
     const footerHeight = measureHeaderFooterHeight(footer, baseState);
     const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
@@ -904,6 +918,12 @@ function drawEndnotes(
  *  approximation for the common case. */
 const FOOTNOTE_SEPARATOR_GAP_PT = 6;
 
+/** ECMA-376 §17.10.1 — an empty header/footer set (no default/first/even). Used
+ *  when a per-section `SectionBreak` declares one reference type but not others:
+ *  the absent types fall back to this so `pickHeaderFooter` simply finds none and
+ *  renders nothing for that page kind. */
+const EMPTY_HEADERS_FOOTERS: HeadersFooters = { default: null, first: null, even: null };
+
 /** Build a map from a note's `@w:id` to its 1-based sequential number, in the
  *  order the notes appear in footnotes.xml / endnotes.xml (ECMA-376 §17.11
  *  default decimal numbering, start=1, no restart). */
@@ -1091,6 +1111,30 @@ export function computePages(
     return section.sectionStart ?? 'nextPage';
   };
 
+  // ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag for
+  // the section that OWNS the content starting at body index `startIdx`. Mirrors
+  // `sectionColumnsFrom`: the owning section's set is carried on the NEXT
+  // `SectionBreak` marker at/after `startIdx` (the marker ENDS that section); if
+  // there is none, the content belongs to the FINAL (body-level) section whose
+  // set lives on `doc.headers`/`doc.footers`/`section.titlePage`. The paginator
+  // stamps this on each element so the renderer can pick the active section's
+  // header/footer per page without re-deriving the body→page mapping.
+  const sectionHFFrom = (startIdx: number): PaginatedBodyElement['sectionHF'] => {
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak') {
+        return {
+          headers: e.headers ?? EMPTY_HEADERS_FOOTERS,
+          footers: e.footers ?? EMPTY_HEADERS_FOOTERS,
+          titlePage: e.titlePage ?? false,
+        };
+      }
+    }
+    // Final section: the body-level set. `undefined` ⇒ the renderer's fallback
+    // (doc.headers/footers/section.titlePage), which IS this same set.
+    return undefined;
+  };
+
   // The active section's column geometry. Reassigned (a) here for the first
   // section and (b) at every `SectionBreak` as the flow enters the next section.
   // `colIndex` tracks which column we are filling; `colX()`/`colW()` give its
@@ -1103,6 +1147,11 @@ export function computePages(
   let colIndex = 0;
   const colX = () => columns[colIndex].xPt;
   const colW = () => columns[colIndex].wPt;
+  // ECMA-376 §17.10.1 — the active section's resolved header/footer set + titlePg,
+  // tracked in lockstep with `columns` (reassigned at every SectionBreak). Stamped
+  // on each element so the renderer picks the active section's header/footer per
+  // page. `undefined` for the final section ⇒ the renderer's body-level fallback.
+  let currentSectionHF = sectionHFFrom(0);
   // ECMA-376 §17.6.4 / §17.18.79 — the CURRENT multi-column region's vertical
   // extent on the current page, in content-relative pt (0 = page content top,
   // i.e. the same frame as `y`). A region tiled into N newspaper columns is a
@@ -1401,6 +1450,7 @@ export function computePages(
     el.colIndex = colIndex;
     el.colGeom = columns;
     el.colTopPt = colTopAbsPt();
+    el.sectionHF = currentSectionHF;
     pages[pages.length - 1].push(el);
   };
 
@@ -1456,6 +1506,9 @@ export function computePages(
       // columns instead of every section inheriting the body-level section's.
       columns = sectionColumnsFrom(i + 1);
       colIndex = 0;
+      // ECMA-376 §17.10.1 — the section starting at i+1 owns the following pages'
+      // headers/footers (resolved from the NEXT marker, or the body-level set).
+      currentSectionHF = sectionHFFrom(i + 1);
       // The break is governed by the UPCOMING section's start type (§17.6.22),
       // not this marker's own kind (the section it closes). See sectionKindFrom.
       // The sample-5 cover overprint that prompted the 0.66.1 hotfix is now fixed
@@ -1730,6 +1783,7 @@ export function computePages(
           columns,
           () => colTopY,
           columnBottomLimit,
+          () => currentSectionHF,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -1820,6 +1874,7 @@ export function computePages(
           columns,
           () => colTopY,
           section.marginTop,
+          () => currentSectionHF,
         );
         y = endY;
         measureState.y = section.marginTop + endY;
@@ -2103,6 +2158,11 @@ function splitParagraphAcrossPages(
    *  section) is uncapped at the page content bottom. Omitted ⇒ `contentH` (the
    *  page bottom) — behaviour-neutral for the single-column / greedy paths. */
   columnBottom?: () => number,
+  /** ECMA-376 §17.10.1 — the active SECTION's resolved header/footer set. A
+   *  paragraph never spans a section boundary, so this is constant for all slices;
+   *  stamped so the renderer picks the right section's header/footer per page.
+   *  Omitted ⇒ the renderer's body-level fallback. */
+  tagSectionHF?: () => PaginatedBodyElement['sectionHF'],
 ): { endY: number } {
   const colTop = columnTop ?? (() => 0);
   const colBot = columnBottom ?? (() => contentH);
@@ -2112,6 +2172,7 @@ function splitParagraphAcrossPages(
     // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
     // pass resets this slice's column cursor to it instead of the page top.
     if (columnTop) el.colTopPt = measureState.marginTop + colTop();
+    if (tagSectionHF) el.sectionHF = tagSectionHF();
     return el;
   };
   const indLeft = para.indentLeft;
@@ -2614,6 +2675,10 @@ export function splitTableAcrossPages(
   /** Page-content top (pt) used to convert `columnTop()` to a page-absolute Y for
    *  the `colTopPt` stamp. Omitted ⇒ no `colTopPt` stamp (single-column tests). */
   marginTopPt?: number,
+  /** ECMA-376 §17.10.1 — the active SECTION's resolved header/footer set (constant
+   *  across the split). Stamped so the renderer picks the right section's header/
+   *  footer per page. Omitted ⇒ the renderer's body-level fallback. */
+  tagSectionHF?: () => PaginatedBodyElement['sectionHF'],
 ): number {
   const colTop = columnTop ?? (() => 0);
   const n = table.rows.length;
@@ -2648,6 +2713,7 @@ export function splitTableAcrossPages(
     // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
     // pass resets this slice's column cursor to it instead of the page top.
     if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
+    if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
     pages[pages.length - 1].push(sliceEl);
 
     y += used;
@@ -2661,16 +2727,53 @@ export function splitTableAcrossPages(
   return y;
 }
 
+/**
+ * ECMA-376 §17.10.1 precedence for picking a section's header/footer for one page:
+ *   1. `first` — on the section's FIRST page when `<w:titlePg>` is set;
+ *   2. `even`  — on even-parity pages when `<w:evenAndOddHeaders>` is set;
+ *   3. `default` — otherwise.
+ * `isFirstPageOfSection` (the section's first page, not necessarily page 0) and
+ * `isEvenPage` (document page parity) are resolved per page by the caller so this
+ * works for per-section title pages (e.g. sample-13's masthead section gets its
+ * own first-page footer on whatever document page it begins).
+ */
 function pickHeaderFooter(
-  set: DocxDocumentModel['headers'],
-  pageIndex: number,
-  _totalPages: number,
+  set: HeadersFooters,
+  isFirstPageOfSection: boolean,
+  isEvenPage: boolean,
   titlePage: boolean,
   evenAndOdd: boolean,
 ): HeaderFooter | null {
-  if (titlePage && pageIndex === 0 && set.first) return set.first;
-  if (evenAndOdd && pageIndex % 2 === 1 && set.even) return set.even;
+  if (titlePage && isFirstPageOfSection && set.first) return set.first;
+  if (evenAndOdd && isEvenPage && set.even) return set.even;
   return set.default ?? null;
+}
+
+/**
+ * ECMA-376 §17.10.1 — resolve the section active at the TOP of `pageIndex` (the
+ * section that owns that page's content) and whether `pageIndex` is that section's
+ * FIRST page. The paginator stamps each element's `sectionHF` (the upcoming
+ * `SectionBreak`'s resolved set, or — when absent — the body-level section). So the
+ * active section for a page is the `sectionHF` of its first element; `undefined`
+ * means the final/body section (`doc.headers`/`doc.footers`/`section.titlePage`).
+ *
+ * `isFirstPageOfSection` is true when this is page 0 or the active section differs
+ * from the previous page's — i.e. a section boundary fell on this page's top. Two
+ * distinct sections are compared by reference identity of their stamped `sectionHF`
+ * object (each section is stamped with one shared object instance).
+ */
+function resolvePageSection(
+  pages: PaginatedBodyElement[][],
+  pageIndex: number,
+  doc: DocxDocumentModel,
+): { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean; isFirstPageOfSection: boolean } {
+  const sectionOf = (idx: number): PaginatedBodyElement['sectionHF'] => pages[idx]?.[0]?.sectionHF;
+  const active = sectionOf(pageIndex);
+  const headers = active?.headers ?? doc.headers;
+  const footers = active?.footers ?? doc.footers;
+  const titlePage = active?.titlePage ?? doc.section.titlePage;
+  const isFirstPageOfSection = pageIndex === 0 || sectionOf(pageIndex - 1) !== active;
+  return { headers, footers, titlePage, isFirstPageOfSection };
 }
 
 function renderHeaderFooter(hf: HeaderFooter, topY: number, base: RenderState): void {

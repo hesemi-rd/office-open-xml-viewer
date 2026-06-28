@@ -200,8 +200,21 @@ export type BodyElement =
    *  "continuous" (same page), "nextPage" (default; page break), "oddPage" /
    *  "evenPage" (page break + parity padding). The paginator switches its active
    *  newspaper-column geometry per section at each marker — fixing the regression
-   *  where every section inherited the body-level section's columns. */
-  | { type: 'sectionBreak'; kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage' | string; columns?: ColumnsSpec | null };
+   *  where every section inherited the body-level section's columns.
+   *
+   *  `headers`/`footers` carry the ENDING section's resolved (§17.10.1-inherited)
+   *  header/footer set, and `titlePage` its own `<w:titlePg>` flag, so the renderer
+   *  can pick the active section's header/footer per page (mirroring how `columns`
+   *  drives per-section column geometry). The body-level (final) section's sets
+   *  live on {@link DocxDocumentModel.section}/`.headers`/`.footers` instead. */
+  | {
+      type: 'sectionBreak';
+      kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage' | string;
+      columns?: ColumnsSpec | null;
+      headers?: HeadersFooters;
+      footers?: HeadersFooters;
+      titlePage?: boolean;
+    };
 
 /** A BodyElement annotated with a line range to render. Set when the
  *  paginator splits a paragraph that doesn't fit on a single page —
@@ -232,6 +245,14 @@ export type PaginatedBodyElement = BodyElement & {
    *  columns. Absent ⇒ the renderer uses the page content top (single-column /
    *  page-spanning section). Runtime-only — never emitted by the parser. */
   colTopPt?: number;
+  /** ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag of
+   *  the SECTION this element belongs to. Stamped by the paginator (from the
+   *  upcoming `SectionBreak` marker, or the body-level section for the final
+   *  section) so the renderer picks the active section's header/footer per page —
+   *  mirroring how `colGeom` resolves per-section columns. Absent ⇒ the renderer
+   *  falls back to the body-level `doc.headers`/`doc.footers`/`section.titlePage`.
+   *  Runtime-only — never emitted by the parser. */
+  sectionHF?: { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean };
 };
 
 export interface DocParagraph {
