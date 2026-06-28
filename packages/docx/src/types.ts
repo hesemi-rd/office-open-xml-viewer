@@ -596,6 +596,12 @@ export interface ShapeText {
    *  paragraphs. */
   runs?: ShapeTextRun[];
   alignment: string;
+  /** ECMA-376 §17.3.1.33 `<w:spacing w:before>` of this text-box paragraph, in
+   *  pt — reserved ABOVE the paragraph inside the box. Absent/0 ⇒ no offset. */
+  spaceBefore?: number;
+  /** ECMA-376 §17.3.1.33 `<w:spacing w:after>` of this text-box paragraph, in
+   *  pt — reserved BELOW the paragraph. Absent/0 ⇒ no offset. */
+  spaceAfter?: number;
   /** Zip path of an inline image inside this text-box paragraph
    *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
    *  Absent for a text-only paragraph. */

@@ -255,6 +255,16 @@ export interface RenderState {
    *  flow reaches that paragraph. Reset whenever floats are reset (page flip
    *  or column relocation that rolls back this paragraph's own floats). */
   pageAnchorPrescanned?: Set<DocParagraph>;
+  /** ECMA-376 §20.4.2.10 `behindDoc` z-order: an anchored object with
+   *  `behindDoc="0"` floats IN FRONT of the inline text/image flow. The flow is
+   *  painted in document order, so a front-anchored shape in an EARLY paragraph
+   *  would be overpainted by a LATER inline image (sample-13: the "Journal
+   *  homepage" text box, anchored to the first paragraph, sat behind the inline
+   *  masthead banner that follows it). When this collector is set, the body
+   *  render defers each front-anchor draw into it (capturing the column band)
+   *  and replays them after the whole page's flow, so front floats land on top.
+   *  `null`/absent ⇒ draw in place (headers/footers and measurement passes). */
+  deferFront?: Array<() => void> | null;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -2912,6 +2922,11 @@ function renderBodyElements(
   // break, which is a no-op here but matches the paginator's call sites).
   state.pageAnchorPrescanned = new Set();
   preRegisterPageFloats(elements, 0, state);
+  // Collect front floats (behindDoc="0") and paint them after the whole flow, so
+  // they layer ON TOP of later inline content (§20.4.2.10). Saved/restored so a
+  // nested render (table cell / header-footer) keeps its own top layer.
+  const prevDeferFront = state.deferFront;
+  state.deferFront = [];
   // The (geometry, column index) the flow `state` is currently set to. `activeCol`
   // starts at -1 so the first element always seeds the column. `activeGeom` tracks
   // the SECTION whose columns are in effect (per-section newspaper columns,
@@ -3047,6 +3062,11 @@ function renderBodyElements(
       }
     }
   }
+  // Paint the deferred front floats on top of the page's inline flow, then
+  // restore the enclosing render's collector.
+  const deferredFront = state.deferFront ?? [];
+  state.deferFront = prevDeferFront;
+  for (const draw of deferredFront) draw();
 }
 
 function renderParaList(paras: DocParagraph[], state: RenderState): void {
@@ -5372,6 +5392,26 @@ function renderAnchorImages(
     for (const s of shapes) renderAnchorShape(s as unknown as ShapeRun, state, paragraphTopPx);
     return;
   }
+  // Front floats (behindDoc="0"): defer to the page's top layer so a later inline
+  // image cannot overpaint them (§20.4.2.10). Capture the current column band so
+  // the replayed draw resolves a column-relative anchor against the right widths.
+  if (state.deferFront) {
+    const cx = state.contentX;
+    const cw = state.contentW;
+    state.deferFront.push(() => {
+      const sx = state.contentX;
+      const sw = state.contentW;
+      const sd = state.deferFront;
+      state.contentX = cx;
+      state.contentW = cw;
+      state.deferFront = null; // draw in place this time
+      renderAnchorImages(para, state, paragraphTopPx, 'front');
+      state.contentX = sx;
+      state.contentW = sw;
+      state.deferFront = sd;
+    });
+    return;
+  }
   for (const run of para.runs) {
     if (run.type === 'shape') {
       const s = run as unknown as ShapeRun;
@@ -5845,7 +5885,13 @@ export function renderShapeText(
     if (l.kind === 'rich') return l.lineHeights.reduce((s, h) => s + h, 0);
     return l.lines.length * l.lineH;
   };
-  const totalH = layouts.reduce((s, l) => s + blockHeight(l), 0);
+  // ECMA-376 §17.3.1.33 — each text-box paragraph's own spaceBefore/After is
+  // reserved inside the box (px). sample-13's "Journal homepage" line carries
+  // spaceBefore = 50 pt, which drops it well below the box top so it clears the
+  // masthead banner instead of hiding behind it.
+  const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
+  const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
+  const totalH = layouts.reduce((s, l, i) => s + spBefore[i] + blockHeight(l) + spAfter[i], 0);
 
   const anchor = shape.textAnchor ?? 't';
   let cursorY: number;
@@ -5860,6 +5906,10 @@ export function renderShapeText(
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
     const layout = layouts[i];
+
+    // Reserve this paragraph's spaceBefore (and the previous paragraph's
+    // spaceAfter) above it, mirroring the body's inter-paragraph advance.
+    cursorY += spBefore[i] + (i > 0 ? spAfter[i - 1] : 0);
 
     if (layout.kind === 'image') {
       // Inline image inside the text box. Fit to inner width, place

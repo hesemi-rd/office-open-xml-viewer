@@ -261,6 +261,7 @@ pub struct TableStyleDef {
     pub cell_margin_right: Option<f64>,
 }
 
+#[derive(Default)]
 pub struct StyleMap {
     styles: HashMap<String, StyleDef>,
     table_styles: HashMap<String, TableStyleDef>,

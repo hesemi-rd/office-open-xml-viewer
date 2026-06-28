@@ -2516,7 +2516,7 @@ fn parse_run_inner(
                 }
             }
             "drawing" => {
-                for r in parse_inline_drawing(child, media_map, theme) {
+                for r in parse_inline_drawing(style_map, child, media_map, theme) {
                     runs.push(r);
                 }
             }
@@ -2582,7 +2582,7 @@ fn parse_run_inner(
                 if let Some(choice) = child.children().find(|n| n.tag_name().name() == "Choice") {
                     for inner in choice.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
-                            for r in parse_inline_drawing(inner, media_map, theme) {
+                            for r in parse_inline_drawing(style_map, inner, media_map, theme) {
                                 runs.push(r);
                             }
                         }
@@ -2595,7 +2595,7 @@ fn parse_run_inner(
                 // Word still emits these for simple text boxes. We surface the
                 // shape's fill/stroke/size and its txbxContent as a ShapeRun so
                 // the existing shape renderer draws the panel + RTL body text.
-                if let Some(shp) = parse_vml_pict(child, theme, media_map) {
+                if let Some(shp) = parse_vml_pict(style_map, child, theme, media_map) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -2689,6 +2689,7 @@ fn resolve_inline_blip(
 }
 
 fn parse_inline_drawing(
+    style_map: &StyleMap,
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
     theme: &ThemeColors,
@@ -2810,6 +2811,7 @@ fn parse_inline_drawing(
             out.push(DocRun::Image(img));
         }
         for mut shp in parse_wgp_shapes(
+            style_map,
             wgp,
             theme,
             media_map,
@@ -2832,6 +2834,7 @@ fn parse_inline_drawing(
         .find(|n| n.tag_name().name() == "wsp")
     {
         if let Some(mut shp) = parse_wsp_shape(
+            style_map,
             wsp,
             theme,
             media_map,
@@ -3436,6 +3439,7 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
 /// the path from the wgp down to the wsp — not just the outermost grpSpPr.
 #[allow(clippy::too_many_arguments)]
 fn parse_wgp_shapes(
+    style_map: &StyleMap,
     wgp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -3470,6 +3474,7 @@ fn parse_wgp_shapes(
     let mut results = Vec::new();
     let mut z_order: u32 = 0;
     walk_group_children(
+        style_map,
         wgp,
         base,
         theme,
@@ -3494,6 +3499,7 @@ fn parse_wgp_shapes(
 /// resulting z-index matches a flat descendant walk.
 #[allow(clippy::too_many_arguments)]
 fn walk_group_children(
+    style_map: &StyleMap,
     group: roxmltree::Node,
     xform: GroupTransform,
     theme: &ThemeColors,
@@ -3514,6 +3520,7 @@ fn walk_group_children(
                 let idx = *z_order;
                 *z_order += 1;
                 if let Some(mut shape) = parse_wsp_shape(
+                    style_map,
                     child,
                     theme,
                     media_map,
@@ -3540,6 +3547,7 @@ fn walk_group_children(
                     None => xform,
                 };
                 walk_group_children(
+                    style_map,
                     child,
                     child_xform,
                     theme,
@@ -3569,6 +3577,7 @@ fn walk_group_children(
 // these are interdependent transform parameters, not an arbitrary bag.
 #[allow(clippy::too_many_arguments)]
 fn parse_wsp_shape(
+    style_map: &StyleMap,
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -3750,7 +3759,7 @@ fn parse_wsp_shape(
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
     let (text_blocks, text_anchor, text_inset_l, text_inset_t, text_inset_r, text_inset_b) =
-        parse_shape_text_body(wsp, theme, media_map);
+        parse_shape_text_body(style_map, wsp, theme, media_map);
 
     Some(ShapeRun {
         width_pt,
@@ -3795,6 +3804,7 @@ fn parse_wsp_shape(
 /// Defaults follow §21.1.2.1.1: lIns=rIns=91440 EMU (0.1in = 7.2pt),
 /// tIns=bIns=45720 EMU (0.05in = 3.6pt).
 fn parse_shape_text_body(
+    style_map: &StyleMap,
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -3836,7 +3846,7 @@ fn parse_shape_text_body(
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(p, theme, media_map))
+                .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
                 .collect()
         })
         .unwrap_or_default();
@@ -3857,6 +3867,7 @@ fn parse_shape_text_body(
 /// A paragraph with neither text nor an image yields `None`; an image-only
 /// paragraph (empty text) still yields a block so the picture is not dropped.
 fn extract_simple_paragraph_text(
+    style_map: &StyleMap,
     p: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -3969,10 +3980,39 @@ fn extract_simple_paragraph_text(
         return None;
     }
 
-    let alignment = child_w(p, "pPr")
+    // ECMA-376 §17.7.2 — resolve alignment through the paragraph STYLE chain,
+    // then let a direct `<w:jc>` override it. sample-13's "Journal homepage"
+    // line is centered ONLY via its style (mJournalHomePageLink → jc=center);
+    // reading pPr/jc alone dropped it to the default left and the text rendered
+    // flush-left instead of centered in the masthead box.
+    let direct_jc = child_w(p, "pPr")
         .and_then(|ppr| child_w(ppr, "jc"))
-        .and_then(|jc| attr_w(jc, "val"))
+        .and_then(|jc| attr_w(jc, "val"));
+    let style_id = child_w(p, "pPr")
+        .and_then(|ppr| child_w(ppr, "pStyle"))
+        .and_then(|s| attr_w(s, "val"));
+    let alignment = direct_jc
+        .or_else(|| {
+            style_map
+                .resolve_para(style_id.as_deref(), None)
+                .0
+                .alignment
+        })
         .unwrap_or_else(|| "left".to_string());
+
+    // ECMA-376 §17.3.1.33 — the txbxContent paragraph's own `<w:spacing>` is
+    // reserved INSIDE the text box (twips → pt). Word offsets the text down by
+    // `w:before` (sample-13's "Journal homepage" line carries `w:before="1000"`,
+    // i.e. 50 pt, which is why it sits well below the box top). Absent ⇒ 0.
+    let spacing = child_w(p, "pPr").and_then(|ppr| child_w(ppr, "spacing"));
+    let space_before = spacing
+        .and_then(|s| attr_w(s, "before"))
+        .map(|v| twips_to_pt(&v))
+        .unwrap_or(0.0);
+    let space_after = spacing
+        .and_then(|s| attr_w(s, "after"))
+        .map(|v| twips_to_pt(&v))
+        .unwrap_or(0.0);
 
     // Single block-level format fields come from the FIRST text run (kept for
     // backward compatibility with existing consumers and the image-block path).
@@ -4009,6 +4049,8 @@ fn extract_simple_paragraph_text(
         italic,
         runs,
         alignment: normalize_align(&alignment).to_string(),
+        space_before,
+        space_after,
         image_path,
         mime_type,
         svg_image_path,
@@ -4030,6 +4072,7 @@ fn extract_simple_paragraph_text(
 /// flow with their anchor paragraph, which Word places at the left margin just
 /// below the preceding content.
 fn parse_vml_pict(
+    style_map: &StyleMap,
     pict: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -4100,7 +4143,7 @@ fn parse_vml_pict(
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(p, theme, media_map))
+                .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
                 .collect()
         })
         .unwrap_or_default();
@@ -8486,8 +8529,12 @@ mod txbx_inline_image_tests {
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
 
-        let (blocks, _anchor, _l, _t, _r, _b) =
-            parse_shape_text_body(doc.root_element(), &ThemeColors::default(), &media);
+        let (blocks, _anchor, _l, _t, _r, _b) = parse_shape_text_body(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &media,
+        );
 
         assert_eq!(blocks.len(), 2, "image paragraph + caption paragraph");
 
@@ -8541,9 +8588,13 @@ mod txbx_inline_image_tests {
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
 
-        let block =
-            extract_simple_paragraph_text(doc.root_element(), &ThemeColors::default(), &media)
-                .expect("image-only paragraph must still yield a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &media,
+        )
+        .expect("image-only paragraph must still yield a block");
         assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
         assert!(block.text.is_empty());
     }
@@ -8561,11 +8612,71 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let mut theme = ThemeColors::default();
         theme.set_default_run_fonts(Some("Century".to_string()), Some("MS Mincho".to_string()));
-        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
-            .expect("text paragraph yields a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &theme,
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
         assert_eq!(block.text, "Abstract");
         // Latin-first run with no explicit face → the default ascii font, NOT None.
         assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box paragraph's alignment resolves through its
+    /// paragraph STYLE, not just a direct `<w:jc>`. sample-13's "Journal
+    /// homepage" line is centered ONLY via its style (mJournalHomePageLink →
+    /// jc=center); a direct jc still overrides the style.
+    #[test]
+    fn extract_simple_paragraph_text_alignment_from_style() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Centered"><w:pPr><w:jc w:val="center"/></w:pPr></w:style>
+            </w:styles>"#,
+        );
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &styles,
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+        // Style-only alignment ⇒ center (was dropped to "left" before the fix).
+        let centered = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Centered"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(centered.alignment, "center");
+        // Direct jc overrides the style.
+        let overridden = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Centered"/><w:jc w:val="right"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(overridden.alignment, "right");
+    }
+
+    /// ECMA-376 §17.3.1.33 — a text-box paragraph surfaces its own
+    /// spaceBefore/After (twips→pt) so the renderer can offset the text inside
+    /// the box (sample-13's homepage line carries `w:before="1000"` = 50 pt).
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_spacing() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr><w:spacing w:before="1000" w:after="180"/></w:pPr>
+              <w:r><w:t>x</w:t></w:r></w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!((block.space_before - 50.0).abs() < 1e-6);
+        assert!((block.space_after - 9.0).abs() < 1e-6);
     }
 
     /// A text-box run with NO `<w:rPr>` at all still inherits the document default
@@ -8578,8 +8689,13 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let mut theme = ThemeColors::default();
         theme.set_default_run_fonts(Some("Century".to_string()), None);
-        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
-            .expect("text paragraph yields a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &theme,
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
         assert_eq!(block.font_family.as_deref(), Some("Century"));
     }
 
@@ -8598,8 +8714,13 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let mut theme = ThemeColors::default();
         theme.set_default_run_fonts(Some("Century".to_string()), Some("ＭＳ 明朝".to_string()));
-        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
-            .expect("text paragraph yields a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &theme,
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
         assert_eq!(block.runs.len(), 1);
         // ascii axis: no run ascii face → docDefault ascii "Century" (serif).
         assert_eq!(block.runs[0].font_family.as_deref(), Some("Century"));
@@ -8622,8 +8743,13 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let mut theme = ThemeColors::default();
         theme.set_default_run_fonts(Some("Century".to_string()), Some("ＭＳ 明朝".to_string()));
-        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
-            .expect("text paragraph yields a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &theme,
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
         assert_eq!(block.runs.len(), 1);
         assert_eq!(block.runs[0].font_family.as_deref(), Some("Century"));
         assert_eq!(
@@ -8642,8 +8768,13 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let mut theme = ThemeColors::default();
         theme.set_default_run_fonts(Some("Century".to_string()), Some("MS Mincho".to_string()));
-        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
-            .expect("text paragraph yields a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &theme,
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
         assert_eq!(block.font_family.as_deref(), Some("Yu Mincho"));
     }
 
@@ -8656,6 +8787,7 @@ mod txbx_inline_image_tests {
             </w:p>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
             doc.root_element(),
             &ThemeColors::default(),
             &HashMap::new(),
@@ -8677,6 +8809,7 @@ mod txbx_inline_image_tests {
             </w:p>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
             doc.root_element(),
             &ThemeColors::default(),
             &HashMap::new(),
@@ -8712,9 +8845,13 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
-        let block =
-            extract_simple_paragraph_text(doc.root_element(), &ThemeColors::default(), &media)
-                .expect("image-only paragraph must still yield a block");
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &media,
+        )
+        .expect("image-only paragraph must still yield a block");
         assert!(block.runs.is_empty());
         assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
     }
@@ -8728,6 +8865,7 @@ mod txbx_inline_image_tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         assert!(
             extract_simple_paragraph_text(
+                &StyleMap::default(),
                 doc.root_element(),
                 &ThemeColors::default(),
                 &HashMap::new(),
