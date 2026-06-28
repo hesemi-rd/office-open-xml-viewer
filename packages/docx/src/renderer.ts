@@ -4063,8 +4063,10 @@ function renderParagraph(
       : null;
     if (paraNeedsBidi) ctx.textAlign = 'left';
     const segCount = line.segments.length;
-    // The segment whose trailing spaces sit at the line's PHYSICAL end (no
-    // stretch there): the visually-last segment. Equals the logical last in
+    // The visually-last segment (its trailing edge is the line's physical end, so
+    // no gap opens there). Consumed ONLY on the bidi path of the justification
+    // distribution below: an LTR line excludes no segment (the kernel's content-
+    // span trim already closes the final glyph's gap). Equals the logical last in
     // the LTR fast path.
     const lastDrawnSi = visual ? visual.order[segCount - 1] : segCount - 1;
 
@@ -4198,7 +4200,16 @@ function renderParagraph(
         distSegs,
         slack,
         firstContentSi,
-        lastDrawnSi,
+        // §17.18.44 spreads the slack across EVERY inter-CJK boundary on the line,
+        // so the visually-last segment must still distribute pitch INTERNALLY when
+        // it is a multi-glyph CJK run — else it stays at the bare grid pitch while
+        // earlier segments absorb all the slack (two pitches on one line). The
+        // kernel already closes only the FINAL glyph's gap via its content-span
+        // trim, so an LTR line excludes no segment: pass `segCount`, the no-match
+        // sentinel the pptx justifier also uses. Bidi keeps the whole-segment
+        // exclusion because its logical-last unit is not the visually-last glyph.
+        // See the `lastDrawnSi` option doc in core/src/text/line-distribute.ts.
+        paraNeedsBidi ? lastDrawnSi : segCount,
         minPerGap,
         slack > 0,
       );
