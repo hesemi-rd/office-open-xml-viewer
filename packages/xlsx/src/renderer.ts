@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -694,6 +694,35 @@ function kinsokuRetractCount(lineCps: string[], nextCps: string[]): number {
   return splitAt - adj;
 }
 
+/**
+ * Extend a per-code-point kinsoku retract so it never TEARS a Latin word.
+ *
+ * `kinsokuRetractCount` retracts glyph-by-glyph — correct for CJK, where every
+ * character is a break opportunity, but wrong for Latin: a non-starter (comma,
+ * period, …, UAX#14 LB13) overflowing after "system" retracts a single "m" →
+ * "syste" / "m,". Latin has no mid-word break opportunity, so when the retract
+ * boundary sits between two {@link isLatinWordCodePoint} characters, pull it back
+ * to the last whitespace (the real break) so the WHOLE word moves down ahead of
+ * the non-starter. If the line is one unbroken word (no whitespace to retract
+ * to), keep the original retract rather than empty the line — an over-long
+ * single word is handled by the normal overflow path. NOTE: the retract is still
+ * capped at the last segment by the caller, so a word split across runs by a
+ * formatting change splits at that seam (the comma stays glued to the tail).
+ */
+function extendLatinWordRetract(lineCps: string[], retract: number): number {
+  let r = retract;
+  while (r < lineCps.length) {
+    const keep = lineCps[lineCps.length - r - 1]; // last char staying on the line
+    const move = lineCps[lineCps.length - r];     // first char moving down
+    const keepCp = keep?.codePointAt(0);
+    const moveCp = move?.codePointAt(0);
+    if (keepCp !== undefined && moveCp !== undefined
+        && isLatinWordCodePoint(keepCp) && isLatinWordCodePoint(moveCp)) r++;
+    else break;
+  }
+  return r >= lineCps.length ? retract : r;
+}
+
 /** Word-wrap a single paragraph (no embedded \n). Unlike a naive
  *  `split(' ')`, CJK characters are treated as individual break opportunities
  *  so that Japanese headings like "夏休みアクティビティ カレンダー 2026"
@@ -852,6 +881,11 @@ export function layoutRichTextLines(
       // next line.
       const lineCps = cur.flatMap((s) => [...s.text]);
       let retract = kinsokuRetractCount(lineCps, [...text]);
+      // UAX#14 LB13: a per-glyph retract would tear a Latin word (e.g. a comma in
+      // a separate run overflowing after "system" → "syste" / "m,"). Pull the
+      // retract back to the last whitespace so the whole word rides down with the
+      // non-starter; CJK boundaries (move char is CJK) are left untouched.
+      if (retract > 0) retract = extendLatinWordRetract(lineCps, retract);
       const last = cur[cur.length - 1];
       const lastCps = [...last.text];
       // Only retract within the last segment to preserve each run's font; the
