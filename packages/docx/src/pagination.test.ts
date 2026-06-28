@@ -153,6 +153,29 @@ describe('computePages — empty-paragraph relocation (C2: §17.3.1.29)', () => 
   });
 });
 
+describe('computePages — tall header/footer reserve indexing (§17.6.11)', () => {
+  it('applies a uniform reserve to EVERY page, not just those in the array (pass-2 page growth)', () => {
+    // The two-pass paginator computes reserves from pass 1, then re-paginates; a tall
+    // header shrinks every page from the top, so pass 2 routinely has MORE pages than
+    // pass 1. A page index past the reserve array must clamp to the last entry (the
+    // uniform reserve), not fall to zero — else later pages stay un-reserved, over-pack,
+    // and the down-shifted body overflows the bottom margin.
+    // content height = 100; empty mark = 20px → 5/page bare, 4/page with a 20px top reserve.
+    const body = Array.from({ length: 14 }, () => para());
+    const reserve = { top: 20, bottom: 0 };
+    // A single-entry array expresses "uniform 20px top reserve" (one page measured).
+    const short = computePages(body, section(), makeCtx(), {}, undefined, [], [reserve]);
+    // The same reserve spelled out for more pages than the body can ever need.
+    const full = computePages(body, section(), makeCtx(), {}, undefined, [], Array.from({ length: 14 }, () => reserve));
+    // The short (clamped) array must paginate identically to the fully-specified one.
+    expect(short.map((p) => p.length)).toEqual(full.map((p) => p.length));
+    // Non-triviality: the reserve really is in force (4 per page, not the bare 5) and
+    // the body genuinely spans several pages where the clamp matters.
+    expect(short[0].length).toBe(4);
+    expect(short.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
 describe('computePages — line-boundary splitting + widowControl (C1: §17.3.1.44)', () => {
   // contentW = 160, glyph advance = fontPx; at 20px → 8 chars/line. 48 chars → 6 lines.
   // content height = 100 → 5 lines (100px) fit per page.

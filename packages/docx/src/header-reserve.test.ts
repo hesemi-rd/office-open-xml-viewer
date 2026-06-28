@@ -15,7 +15,7 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, HeaderFooter, Sectio
 // nothing is reserved. These tests pin those rules with a synthetic doc whose header is
 // far taller than its top margin (the header-side mirror of sample-13's masthead).
 
-interface Call { text: string; y: number; }
+interface Call { text: string; x: number; y: number; }
 
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   let font = '10px serif';
@@ -38,8 +38,8 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
-    fillText(s: string, _x: number, y: number) { calls.push({ text: s, y }); },
-    strokeText(s: string, _x: number, y: number) { calls.push({ text: s, y }); },
+    fillText(s: string, x: number, y: number) { calls.push({ text: s, x, y }); },
+    strokeText(s: string, x: number, y: number) { calls.push({ text: s, x, y }); },
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
@@ -70,13 +70,13 @@ function para(text: string): DocParagraph {
 function docWithHeader(
   body: BodyElement[],
   header: HeaderFooter | null,
-  opts: { marginTop?: number } = {},
+  opts: { marginTop?: number; pageHeight?: number; columns?: SectionProps['columns'] } = {},
 ): DocxDocumentModel {
   const section: SectionProps = {
-    pageWidth: 400, pageHeight: 600,
+    pageWidth: 400, pageHeight: opts.pageHeight ?? 600,
     marginTop: opts.marginTop ?? 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
     headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
-    sectionStart: 'nextPage',
+    sectionStart: 'nextPage', columns: opts.columns ?? null,
   } as SectionProps;
   return {
     section,
@@ -128,6 +128,30 @@ describe('header reserve — content never overlaps a tall header (ECMA-376 §17
     // above is not satisfied trivially and that the reservation, not a short header, is
     // what clears the header band.
     expect(minBodyNone).toBeLessThan(maxHeader);
+  });
+
+  it('starts EVERY newspaper column below a tall header (ECMA-376 §17.6.4 + §17.6.11)', async () => {
+    // The reserve shrinks the content area from the top for the WHOLE page, not just
+    // column 0. A short page so column 0 overflows into column 1 on page 0; a tall
+    // header that overflows the top margin. Each newspaper column (§17.6.4) restarts
+    // at the section's region top, which must be the RESERVED top, not the bare margin.
+    const cols = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
+    const manyBody = Array.from({ length: 40 }, () => para('BODY') as unknown as BodyElement);
+    const calls = await renderPage0(docWithHeader(manyBody, tallHeader, { columns: cols, pageHeight: 300 }));
+
+    const bodyCalls = calls.filter((c) => c.text === 'BODY');
+    const headerY = calls.filter((c) => c.text === 'HDR').map((c) => c.y);
+
+    // Preconditions: the header is painted, and the body genuinely reached the SECOND
+    // column (≥2 distinct x positions) — otherwise the invariant below is vacuous.
+    expect(headerY.length).toBeGreaterThan(0);
+    const distinctX = new Set(bodyCalls.map((c) => Math.round(c.x)));
+    expect(distinctX.size).toBeGreaterThanOrEqual(2);
+
+    // INVARIANT: the topmost body line across BOTH columns sits below the bottom-most
+    // header line. Pre-fix, column 1 reset to the bare top margin and painted into the
+    // header band (its first line is the global minimum), so this caught the overlap.
+    expect(Math.min(...bodyCalls.map((c) => c.y))).toBeGreaterThan(Math.max(...headerY));
   });
 
   it('does not reserve a header when the top margin is negative (§17.6.11 exception)', async () => {
