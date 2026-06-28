@@ -127,6 +127,61 @@ describe('per-section headers/footers (§17.10.1)', () => {
     expect(joined).not.toContain('FOOTER_A_DEFAULT');
   });
 
+  it('evenAndOddHeaders: even page uses the even footer, odd page the default (§17.10.1)', async () => {
+    // Single section, document-wide even/odd toggle ON, with distinct default and
+    // even footers. Two paragraphs split by a page break ⇒ page 0 (odd) → default,
+    // page 1 (even) → even. (Parity is the absolute page index here; for a section
+    // starting at page 0 that equals the section-relative count.)
+    const section: SectionProps = {
+      pageWidth: 400, pageHeight: 120,
+      marginTop: 10, marginRight: 10, marginBottom: 30, marginLeft: 10,
+      headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: true,
+    } as SectionProps;
+    const doc = {
+      section,
+      body: [
+        para('PAGE0_BODY') as unknown as BodyElement,
+        { type: 'pageBreak' } as BodyElement,
+        para('PAGE1_BODY') as unknown as BodyElement,
+      ],
+      headers: hf({}),
+      footers: hf({ default: footer('FOOTER_DEFAULT'), even: footer('FOOTER_EVEN') }),
+      fontFamilyClasses: { 'Times New Roman': 'roman' },
+    } as unknown as DocxDocumentModel;
+
+    const p0 = (await renderPageTexts(doc, 0)).join('|');
+    expect(p0).toContain('PAGE0_BODY');
+    expect(p0).toContain('FOOTER_DEFAULT');
+    expect(p0).not.toContain('FOOTER_EVEN');
+
+    const p1 = (await renderPageTexts(doc, 1)).join('|');
+    expect(p1).toContain('PAGE1_BODY');
+    expect(p1).toContain('FOOTER_EVEN');
+    expect(p1).not.toContain('FOOTER_DEFAULT');
+  });
+
+  it('evenAndOddHeaders OFF: even page still uses the default footer', async () => {
+    const section: SectionProps = {
+      pageWidth: 400, pageHeight: 120,
+      marginTop: 10, marginRight: 10, marginBottom: 30, marginLeft: 10,
+      headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const doc = {
+      section,
+      body: [
+        para('PAGE0_BODY') as unknown as BodyElement,
+        { type: 'pageBreak' } as BodyElement,
+        para('PAGE1_BODY') as unknown as BodyElement,
+      ],
+      headers: hf({}),
+      footers: hf({ default: footer('FOOTER_DEFAULT'), even: footer('FOOTER_EVEN') }),
+      fontFamilyClasses: { 'Times New Roman': 'roman' },
+    } as unknown as DocxDocumentModel;
+    const p1 = (await renderPageTexts(doc, 1)).join('|');
+    expect(p1).toContain('FOOTER_DEFAULT');
+    expect(p1).not.toContain('FOOTER_EVEN');
+  });
+
   it('falls back to body-level footer for a single-section document (unchanged path)', async () => {
     const section: SectionProps = {
       pageWidth: 400, pageHeight: 200,

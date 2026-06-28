@@ -153,11 +153,15 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/settings.xml".to_string());
     let mut document_settings: Option<crate::types::DocumentSettings> = None;
+    // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
+    // capture it here and stamp it onto the section below.
+    let mut even_and_odd_headers = false;
     if let Ok(settings_xml) = read_zip_entry(&mut zip, &settings_path) {
         if let Some(lang) = parse_theme_font_bidi_lang(&settings_xml) {
             theme.fill_default_cs_font(&lang);
         }
         document_settings = parse_document_settings(&settings_xml);
+        even_and_odd_headers = parse_even_and_odd_headers(&settings_xml);
     }
 
     // ECMA-376 §17.7.2 — record the document default run fonts on the theme so
@@ -187,7 +191,10 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .rfind(|n| n.is_element())
         .filter(|n| n.tag_name().name() == "sectPr");
 
-    let (section, _body_refs) = parse_section(sect_pr, &rel_map);
+    let (mut section, _body_refs) = parse_section(sect_pr, &rel_map);
+    // §17.10.1 — the even/odd-headers toggle lives in settings.xml,
+    // not the sectPr; apply the document-wide flag captured above.
+    section.even_and_odd_headers = even_and_odd_headers;
 
     // ECMA-376 §17.10.1 — header/footer references inherit across sections, but
     // each section keeps its OWN effective set (a "first" footer declared on the
@@ -691,6 +698,19 @@ fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "themeFontLang")?;
     attr_w(node, "bidi").filter(|s| !s.is_empty())
+}
+
+/// ECMA-376 §17.10.1 `<w:evenAndOddHeaders/>` — a document-wide
+/// (settings.xml) ST_OnOff toggle. When on, even-numbered pages use the
+/// section's `even` header/footer reference instead of the default; when absent
+/// (the common case) it is off and every page uses the default. Surfaced onto
+/// `SectionProps.even_and_odd_headers`, which the renderer's `pickHeaderFooter`
+/// already consumes for the even-page branch.
+fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
+    let Ok(doc) = XmlDoc::parse(settings_xml) else {
+        return false;
+    };
+    bool_prop(doc.root_element(), "evenAndOddHeaders").unwrap_or(false)
 }
 
 /// Parse the typography settings the renderer needs from `word/settings.xml`.
@@ -6615,6 +6635,23 @@ mod theme_cs_tests {
         assert_eq!(s.kinsoku, Some(false));
         assert_eq!(s.no_line_breaks_before, None);
         assert_eq!(s.no_line_breaks_after, None);
+    }
+
+    #[test]
+    fn even_and_odd_headers_flag_from_settings() {
+        // §17.10.1 — presence (ST_OnOff) turns it on; an explicit
+        // w:val="false" turns it off; absence is off.
+        let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+        assert!(parse_even_and_odd_headers(&format!(
+            "<w:settings {w}><w:evenAndOddHeaders/></w:settings>"
+        )));
+        assert!(parse_even_and_odd_headers(&format!(
+            "<w:settings {w}><w:evenAndOddHeaders w:val=\"true\"/></w:settings>"
+        )));
+        assert!(!parse_even_and_odd_headers(&format!(
+            "<w:settings {w}><w:evenAndOddHeaders w:val=\"false\"/></w:settings>"
+        )));
+        assert!(!parse_even_and_odd_headers(&format!("<w:settings {w}/>")));
     }
 
     #[test]
