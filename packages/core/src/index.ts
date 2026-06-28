@@ -216,7 +216,7 @@ export {
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
 } from './text/kinsoku';
-export { isCjkBreakChar } from './text/cjk-ranges';
+export { isCjkBreakChar, isLatinWordCodePoint } from './text/cjk-ranges';
 export { highlightBox } from './text/highlight-box';
 export {
   distributeLineSlack,
