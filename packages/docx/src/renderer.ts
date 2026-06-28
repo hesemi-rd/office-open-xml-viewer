@@ -4980,6 +4980,40 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       });
     }
   }
+
+  // ── UAX#14 LB13 / ECMA-376 §17.15.1.59 (行頭禁則 — line-start-forbidden) ──────
+  // A closing / mid-punctuation code point (comma, period, ; : ! ? ) ] } and
+  // their CJK forms) carries NO line-break opportunity before it, so it may
+  // never BEGIN a line. When such a char OPENS a segment that is glued to the
+  // previous text segment — no intervening whitespace, e.g. a comma authored in
+  // its own run as in sample-12's "…detection system" | ", metadata" — mark it
+  // `joinPrev` so the group machinery in layoutLines keeps it with the preceding
+  // word and wraps "system," together instead of orphaning "," at the next
+  // line's head.
+  //
+  // This is a UNIVERSAL Latin/Western rule (UAX#14 LB13), NOT the East-Asian
+  // kinsoku feature, so it consults the application's DEFAULT forbidden table
+  // UNCONDITIONALLY — independent of the document's §17.3.1.16 `w:kinsoku`
+  // toggle and of any custom §17.15.1.59 `w:noLineBreaksBefore` set (which
+  // REPLACES the default East-Asian table for a language and so must NOT be able
+  // to drop the ASCII non-starters and re-orphan a Latin comma). The document's
+  // kinsoku settings still govern the separate per-character CJK retract paths
+  // (kinsokuAdjustedSplit / crossRunKinsokuRetract), which read `state.kinsoku`.
+  // The ASCII non-starters (!),.:;?]}) live in that default table (core
+  // rules.ts), so one membership test covers Latin and (incidentally) CJK forms.
+  for (let i = 1; i < segs.length; i++) {
+    const cur = segs[i];
+    if (!('text' in cur) || cur.joinPrev) continue;
+    const firstCp = cur.text.codePointAt(0);
+    if (firstCp === undefined || !DEFAULT_KINSOKU_RULES.lineStartForbidden.has(firstCp)) continue;
+    const prev = segs[i - 1];
+    // Only glue across a boundary that is NOT already a break opportunity: the
+    // preceding unit must be text that does not end in whitespace (a trailing
+    // space is a legal break, so the mark may legitimately start the line).
+    if (!('text' in prev) || /\s$/.test(prev.text)) continue;
+    cur.joinPrev = true;
+  }
+
   return segs;
 }
 
