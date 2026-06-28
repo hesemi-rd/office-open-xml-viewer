@@ -1057,6 +1057,16 @@ pub struct ShapeText {
     pub runs: Vec<ShapeTextRun>,
     /// Paragraph alignment ("left" | "center" | "right" | "both").
     pub alignment: String,
+    /// ECMA-376 §17.3.1.33 `<w:spacing w:before>` of this text-box paragraph, in
+    /// pt. Word reserves it ABOVE the paragraph inside the text box (e.g.
+    /// sample-13's "Journal homepage" line sits 50 pt below the box top because
+    /// its txbxContent paragraph carries `w:before="1000"`). 0 when absent.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub space_before: f64,
+    /// ECMA-376 §17.3.1.33 `<w:spacing w:after>` of this text-box paragraph, in
+    /// pt — reserved below the paragraph. 0 when absent.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub space_after: f64,
     /// Embedded zip path of an inline image living inside this text-box
     /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
     /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved
