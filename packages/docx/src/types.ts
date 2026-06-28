@@ -117,9 +117,14 @@ export interface HeaderFooter {
 export interface SectionProps {
   pageWidth: number;   // pt
   pageHeight: number;  // pt
-  marginTop: number;   // pt
+  // ECMA-376 §17.6.11 — top/bottom are ST_SignedTwipsMeasure (§17.18.81) and MAY be
+  // negative (the body is then measured |margin| from the page edge and overlaps the
+  // header/footer). Keep the SIGN here: header/footerOverflowPt need it to decide
+  // overlap-vs-reserve. The renderer's bodyMarginInsetPt derives the body inset (|margin|).
+  // Do NOT Math.abs at the parser or overflow sites. left/right are ST_TwipsMeasure (unsigned).
+  marginTop: number;   // pt — signed (§17.6.11)
   marginRight: number;
-  marginBottom: number;
+  marginBottom: number; // pt — signed (§17.6.11)
   marginLeft: number;
   headerDistance: number;   // pt — top of page to header
   footerDistance: number;   // pt — bottom of page to footer

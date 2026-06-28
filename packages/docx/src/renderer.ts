@@ -194,10 +194,18 @@ export interface RenderState {
   dryRun: boolean;
   /** section left margin in pt — used to convert margin-relative anchor X to page-absolute */
   marginLeft: number;
-  /** section right/top/bottom margins in pt — used by anchor positioning to
-   *  resolve `<wp:positionH/V relativeFrom="margin">` and the
-   *  `*Margin` family containers. */
+  /** section right margin in pt — used by anchor positioning to resolve
+   *  `<wp:positionH relativeFrom="margin">` and the `*Margin` family containers. */
   marginRight: number;
+  /** ECMA-376 §17.6.11: the body's TOP/BOTTOM **inset** from the page edge in pt — the
+   *  margin's MAGNITUDE (|margin|), NOT the signed pgMar value. A negative top/bottom
+   *  margin (ST_SignedTwipsMeasure) measures the body |margin| from the page edge and
+   *  overlaps the header/footer; `bodyMarginInsetPt` derives this at the writers
+   *  (baseState, buildMeasureState). Read as the column region top (renderBodyElements /
+   *  splitParagraphAcrossPages) and as the text-margin container for `relativeFrom=
+   *  "topMargin"/"bottomMargin"/"margin"` anchors/frames (anchor-geometry, frame-geometry;
+   *  §17.18.100 — the text-margin location IS the body edge). Do NOT treat as the signed
+   *  margin: the overflow decision keeps the sign separately (header/footerOverflowPt). */
   marginTop: number;
   marginBottom: number;
   /** Section page width in pt. */
@@ -3335,8 +3343,10 @@ function renderBodyElements(
         // paginator computed and stamped it (`colTopPt`, page-absolute pt); the
         // paint pass consumes it rather than re-deriving the column top. Absent ⇒
         // a page-spanning section ⇒ the page content top, unchanged. A tall header
-        // (§17.6.11) shifts the whole content frame down — `colTopPt` is the bare
-        // margin top, so re-add the reserve, matching column 0's `bodyState.y`.
+        // (§17.6.11) shifts the whole content frame down — `colTopPt`/`state.marginTop`
+        // carry the body inset (|margin|, not the signed margin), so re-add the reserve
+        // to match column 0's `bodyState.y`. A negative top margin reserves 0, so the
+        // re-add is a no-op there (the body already overlaps the header).
         state.y = (el.colTopPt ?? state.marginTop) * state.scale + headerReservePx;
       }
       prevPara = null;
