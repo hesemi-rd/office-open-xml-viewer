@@ -1602,8 +1602,18 @@ fn parse_paragraph_cond(
     // the mark glyph. We keep it in a separate `mark_run` used only for the
     // `default_font_*` (empty-paragraph) metrics below.
     let mut mark_run = base_run.clone();
+    // The paragraph's DIRECT indents (vs ones inherited from its style chain). A direct
+    // indent is honored even when numbering is removed (the numId=0 case below); an
+    // inherited indent is not. Captured for all three axes (start/end/first-line) so the
+    // de-list drop is symmetric for LTR and RTL.
+    let mut direct_indent_left: Option<f64> = None;
+    let mut direct_indent_first: Option<f64> = None;
+    let mut direct_indent_right: Option<f64> = None;
     if let Some(ppr) = ppr_node {
         let direct = parse_para_fmt(ppr);
+        direct_indent_left = direct.indent_left;
+        direct_indent_first = direct.indent_first;
+        direct_indent_right = direct.indent_right;
         apply_direct_para(&mut base_para, &direct);
         if let Some(rpr) = child_w(ppr, "rPr") {
             let direct_run = parse_run_fmt(rpr);
@@ -1617,7 +1627,14 @@ fn parse_paragraph_cond(
         .map(normalize_align)
         .unwrap_or("left")
         .to_string();
-    let indent_right = base_para.indent_right.unwrap_or(0.0);
+    // A de-listed paragraph (numId=0, see the indent_left/first resolution below) drops
+    // its inherited END indent too, honoring only a direct one — symmetric with the
+    // start side so an RTL list item de-lists consistently.
+    let indent_right = if base_para.num_id == Some(0) {
+        direct_indent_right.unwrap_or(0.0)
+    } else {
+        base_para.indent_right.unwrap_or(0.0)
+    };
     let space_before = base_para.space_before.unwrap_or(0.0);
     let space_after = base_para.space_after.unwrap_or(0.0);
     let line_spacing = base_para.line_spacing_val.map(|v| LineSpacing {
@@ -1721,6 +1738,27 @@ fn parse_paragraph_cond(
                 base_para.indent_left.unwrap_or(0.0),
                 base_para.indent_first.unwrap_or(0.0),
             ))
+    } else if base_para.num_id == Some(0) {
+        // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
+        // drops the NUMBERING LEVEL's indent (handled by `numbering` being None here).
+        // It does NOT, per a literal reading of §17.7.2, drop an indent the paragraph
+        // inherits at the paragraph-STYLE level — "the style's paragraph properties shall
+        // override the numbering level's" — so List Paragraph's `ind left=720` would
+        // survive on a de-listed Heading1. WORD, however, suppresses that list indent too:
+        // it renders a de-listed heading at the bare margin/column like a plain paragraph.
+        // This is UNDOCUMENTED Word runtime behavior (no §x governs it) reconstructed
+        // clean-room from Word's output — sample-12's "1. Introduction" (the doc's only
+        // Heading1, basedOn List Paragraph; numbering cancelled; literal "1.") sits at its
+        // column centre, "1." at x=137.1pt, exactly like the sibling Normal-styled
+        // "2. LITERATURE REVIEW", not shifted right by the 36pt list indent.
+        //
+        // Scope: this honors only the paragraph's DIRECT indent and treats ALL inherited
+        // indent as list-derived (a deliberate over-approximation — a removed-numbering
+        // paragraph relying on a non-list inherited indent is not seen in practice).
+        (
+            direct_indent_left.unwrap_or(0.0),
+            direct_indent_first.unwrap_or(0.0),
+        )
     } else {
         (
             base_para.indent_left.unwrap_or(0.0),
@@ -7156,6 +7194,16 @@ mod footnote_tests {
     use crate::xml_util::W_NS;
 
     fn first_para(body_inner: &str) -> crate::types::DocParagraph {
+        first_para_with(body_inner, "", "")
+    }
+
+    /// Like `first_para`, but with a custom styles.xml / numbering.xml (empty = none),
+    /// so style inheritance and numbering resolution can be exercised end-to-end.
+    fn first_para_with(
+        body_inner: &str,
+        styles_xml: &str,
+        numbering_xml: &str,
+    ) -> crate::types::DocParagraph {
         let xml = format!(
             r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
             ns = W_NS,
@@ -7167,8 +7215,12 @@ mod footnote_tests {
             .descendants()
             .find(|n| n.tag_name().name() == "body")
             .unwrap();
-        let style_map = StyleMap::parse("");
-        let mut num_map = NumberingMap::default();
+        let style_map = StyleMap::parse(styles_xml);
+        let mut num_map = if numbering_xml.is_empty() {
+            NumberingMap::default()
+        } else {
+            NumberingMap::parse(numbering_xml, &HashMap::new())
+        };
         let elems = parse_body_elements(
             body_node,
             &style_map,
@@ -7184,6 +7236,107 @@ mod footnote_tests {
             }
         }
         panic!("no paragraph parsed");
+    }
+
+    /// ECMA-376 §17.3.1.19 — `numId=0` explicitly removes numbering, so the paragraph
+    /// is not a list item and drops the indent it would otherwise inherit from a
+    /// numbered-heading style's basedOn chain (List Paragraph, ind left=720). Word
+    /// centres such a de-listed heading at the bare column like a plain paragraph
+    /// (sample-12 "1. Introduction" — a Heading1 whose numbering is cancelled — sits at
+    /// its column centre, not shifted right by the 36pt list indent). A DIRECT indent
+    /// still wins.
+    #[test]
+    fn numid_zero_drops_inherited_list_indent() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="ListParagraph"/><w:pPr><w:numPr><w:numId w:val="4"/></w:numPr><w:jc w:val="center"/></w:pPr></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="21"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="21"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+
+        // De-listed heading (sample-12 shape): Heading1 + numPr numId=0, no direct ind.
+        let delisted = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr></w:pPr><w:r><w:t>1. Introduction</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert_eq!(
+            delisted.indent_left, 0.0,
+            "numId=0 must drop the inherited List Paragraph indent"
+        );
+
+        // Control A — a numbered Heading1 (no numId override) IS a list item: it keeps
+        // the numbering level's indent (720 twips = 36 pt).
+        let numbered = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert!(
+            (numbered.indent_left - 36.0).abs() < 0.01,
+            "a numbered heading keeps the 36pt list indent, got {}",
+            numbered.indent_left
+        );
+
+        // Control B — numId=0 BUT a DIRECT indent is present: the direct indent wins.
+        let direct = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:numId w:val="0"/></w:numPr><w:ind w:left="240"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert!(
+            (direct.indent_left - 12.0).abs() < 0.01,
+            "a direct indent (240 twips = 12 pt) survives numId=0, got {}",
+            direct.indent_left
+        );
+
+        // Control C — the de-list drop is SYMMETRIC: an inherited END (right) indent is
+        // dropped too, so an RTL list item de-lists consistently. List Paragraph here
+        // carries both a left and a right indent; the de-listed heading drops both.
+        let styles_lr = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="720" w:right="480"/></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="ListParagraph"/><w:pPr><w:numPr><w:numId w:val="4"/></w:numPr></w:pPr></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let delisted_lr = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:numId w:val="0"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles_lr,
+            &numbering,
+        );
+        assert_eq!(
+            delisted_lr.indent_left, 0.0,
+            "de-list drops the inherited left indent"
+        );
+        assert_eq!(
+            delisted_lr.indent_right, 0.0,
+            "de-list drops the inherited right indent too (symmetric)"
+        );
+
+        // Control D — a DIRECT hanging indent survives de-list (the direct ind is
+        // authoritative): no direct left ⇒ left 0; hanging 120 twips ⇒ first-line −6pt.
+        let hanging = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:numId w:val="0"/></w:numPr><w:ind w:hanging="120"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert_eq!(hanging.indent_left, 0.0, "no direct left ⇒ 0 on de-list");
+        assert!(
+            (hanging.indent_first + 6.0).abs() < 0.01,
+            "a direct hanging (120 twips) survives as a −6pt first-line indent, got {}",
+            hanging.indent_first
+        );
     }
 
     /// ECMA-376 §17.11.17 — a body `<w:footnoteReference>` becomes a superscript
