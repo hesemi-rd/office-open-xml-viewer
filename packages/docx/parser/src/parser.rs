@@ -192,7 +192,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .filter(|n| n.tag_name().name() == "sectPr");
 
     let (mut section, _body_refs) = parse_section(sect_pr, &rel_map);
-    // §17.10.1 / §17.15.1.41 — the even/odd-headers toggle lives in settings.xml,
+    // §17.10.1 — the even/odd-headers toggle lives in settings.xml,
     // not the sectPr; apply the document-wide flag captured above.
     section.even_and_odd_headers = even_and_odd_headers;
 
@@ -700,7 +700,7 @@ fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
     attr_w(node, "bidi").filter(|s| !s.is_empty())
 }
 
-/// ECMA-376 §17.10.1 / §17.15.1.41 `<w:evenAndOddHeaders/>` — a document-wide
+/// ECMA-376 §17.10.1 `<w:evenAndOddHeaders/>` — a document-wide
 /// (settings.xml) ST_OnOff toggle. When on, even-numbered pages use the
 /// section's `even` header/footer reference instead of the default; when absent
 /// (the common case) it is off and every page uses the default. Surfaced onto
@@ -6639,7 +6639,7 @@ mod theme_cs_tests {
 
     #[test]
     fn even_and_odd_headers_flag_from_settings() {
-        // §17.10.1 / §17.15.1.41 — presence (ST_OnOff) turns it on; an explicit
+        // §17.10.1 — presence (ST_OnOff) turns it on; an explicit
         // w:val="false" turns it off; absence is off.
         let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
         assert!(parse_even_and_odd_headers(&format!(

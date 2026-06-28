@@ -127,7 +127,7 @@ describe('per-section headers/footers (§17.10.1)', () => {
     expect(joined).not.toContain('FOOTER_A_DEFAULT');
   });
 
-  it('evenAndOddHeaders: even page uses the even footer, odd page the default (§17.10.1 / §17.15.1.41)', async () => {
+  it('evenAndOddHeaders: even page uses the even footer, odd page the default (§17.10.1)', async () => {
     // Single section, document-wide even/odd toggle ON, with distinct default and
     // even footers. Two paragraphs split by a page break ⇒ page 0 (odd) → default,
     // page 1 (even) → even. (Parity is the absolute page index here; for a section
