@@ -138,5 +138,28 @@ describe('CJK run + glued non-starter — fill the line instead of pushing the w
     // down whole behind its glued "。". Pre-fix line 1 held 6 cells (only run A).
     expect(line1Chars.length).toBe(10);
     expect(line1Chars).toContain('い'); // run B reached line 1
+    expect(line1Chars).not.toContain('。'); // the non-starter stays with its tail
+  });
+
+  it('keeps the glued "。" off the next line head when the CJK run exactly fills the line', async () => {
+    // The contract the fix leans on: with the pre-flush skipped, a CJK run that
+    // EXACTLY fills the line (10 cells) followed by a standalone "。" must not
+    // orphan "。" at the next line's head — §17.3.1.16 kinsoku retracts the run's
+    // last cell so "。" follows a CJK char ("あ。"), never leading a line.
+    const calls = await render([gluedPara(['ああああああああああ', '。'])], section());
+    expect(calls.length).toBeGreaterThan(0);
+
+    const byY = new Map<number, { text: string; x: number }[]>();
+    for (const c of calls) {
+      const k = Math.round(c.y);
+      (byY.get(k) ?? byY.set(k, []).get(k)!).push({ text: c.text, x: c.x });
+    }
+    // Every line: its leading (min-x) glyph must not be the non-starter "。".
+    for (const [, glyphs] of byY) {
+      const head = glyphs.slice().sort((p, q) => p.x - q.x)[0];
+      expect(head.text).not.toBe('。');
+    }
+    // And "。" is actually present (it was rendered, not dropped).
+    expect(calls.map((c) => c.text).join('')).toContain('。');
   });
 });
