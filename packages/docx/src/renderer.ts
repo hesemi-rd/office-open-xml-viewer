@@ -645,7 +645,7 @@ export async function renderDocumentToCanvas(
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
   const kinsoku = resolveKinsokuRules(doc.settings);
-  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
+  const pages = opts.prebuiltPages ?? paginateWithFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -1064,6 +1064,7 @@ export function computePages(
   fontFamilyClasses: Record<string, string> = {},
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
   footnotes: DocNote[] = [],
+  footerReservePt: number[] = [],
 ): PaginatedBodyElement[][] {
   const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
@@ -1291,7 +1292,7 @@ export function computePages(
   let pageNoteIds = new Set<string>();
   // Effective content height for the current page: the full text column minus
   // the footnote area reserved at the bottom of THIS page.
-  const effContentH = () => fullContentH - (footnoteReservePt[pages.length - 1] ?? 0);
+  const effContentH = () => fullContentH - (footnoteReservePt[pages.length - 1] ?? 0) - (footerReservePt[pages.length - 1] ?? 0);
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
     pageNoteIds = new Set<string>();
@@ -1972,12 +1973,62 @@ export function computePages(
  *  decisions (and thus page breaks) diverge between measurement and paint
  *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
  *  render worker so the two modes can never paginate differently. */
+/**
+ * ECMA-376 §17.10.1 — per-page pt to reserve at the bottom of the content area for
+ * a footer taller than the bottom-margin allowance. A footer sits at
+ * `footerTopY = pageHeight − footerDistance − footerHeight`; when
+ * `footerHeight > marginBottom − footerDistance` its top rises ABOVE the content
+ * bottom (pageHeight − marginBottom) and overlaps body text. Reserve that overflow
+ * so the paginator keeps content clear of the footer (matches Word, which never
+ * lays body text over a footer). A footer that fits the margin reserves 0.
+ */
+function computeFooterReserves(
+  pages: PaginatedBodyElement[][],
+  doc: DocxDocumentModel,
+  measure: RenderState,
+): number[] {
+  const sec = doc.section;
+  const allowance = Math.max(0, sec.marginBottom - sec.footerDistance);
+  return pages.map((_unused, pageIdx) => {
+    const ps = resolvePageSection(pages, pageIdx, doc);
+    const footer = pickHeaderFooter(
+      ps.footers, ps.isFirstPageOfSection, pageIdx % 2 === 1, ps.titlePage, sec.evenAndOddHeaders,
+    );
+    if (!footer) return 0;
+    const footerH = measureHeaderFooterHeight(footer, measure); // pt (measure is scale 1)
+    return Math.max(0, footerH - allowance);
+  });
+}
+
+/**
+ * Paginate with footer-height awareness (ECMA-376 §17.10.1). Pass 1 paginates
+ * without reservation; a tall footer's overflow into the content area is measured
+ * per page (computeFooterReserves) and fed into a second pass so body content
+ * never overlaps the footer. A single re-pass suffices: the only footer that
+ * overflows in practice is a section's FIRST-page footer (e.g. a masthead DOI
+ * block), whose page assignment is stable across the two passes. When no footer
+ * overflows (the common case) pass 1 is returned unchanged. Shared by the main
+ * render path and the worker so the two never paginate differently.
+ */
+function paginateWithFooterReserve(
+  doc: DocxDocumentModel,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string>,
+  kinsoku: KinsokuRules,
+  footnotes: DocNote[],
+): PaginatedBodyElement[][] {
+  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes);
+  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body));
+  const reserves = computeFooterReserves(pass1, doc, measure);
+  if (!reserves.some((r) => r > 0.5)) return pass1;
+  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, reserves);
+}
+
 export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return [doc.body];
-  return computePages(
-    doc.body,
-    doc.section,
+  return paginateWithFooterReserve(
+    doc,
     ctx,
     doc.fontFamilyClasses ?? {},
     resolveKinsokuRules(doc.settings),
