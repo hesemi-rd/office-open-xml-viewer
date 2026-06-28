@@ -2841,6 +2841,15 @@ function isInklessParagraph(p: DocParagraph): boolean {
  * Such a paragraph's spacing-BEFORE is suppressed: it sits flush below the
  * preceding paragraph (it is a section transition, not normal content flow).
  *
+ * Intentionally NOT gated to "continuous" breaks. The break's effective kind is
+ * the FOLLOWING section's start type (§17.6.22), not the marker's own `.kind`
+ * (sample-13's marker is `nextPage` yet renders continuous), so a `kind` check
+ * here would mis-fire. The all-kinds form is safe: for a genuine next-page break
+ * the spacer is the closing section's LAST line, sitting at the page bottom — the
+ * next section resets to a fresh page regardless — so dropping its before can
+ * only shift that one trailing empty mark up by its own before, never the
+ * following content.
+ *
  * NOTE — interop heuristic, not ECMA-376. §17.3.1.33 would apply the `before`
  * normally (a consumer takes `max(prev.after, this.before)`), and no clause —
  * nor any [MS-DOC] / [MS-OI29500] note — suppresses it for a section-break or
