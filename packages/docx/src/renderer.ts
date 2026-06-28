@@ -1121,6 +1121,17 @@ export function computePages(
     return section.sectionStart ?? 'nextPage';
   };
 
+  // Whether `body[idx]` is an empty section-break spacer whose break is CONTINUOUS
+  // — the precise trigger for Word's spacing-before suppression (see
+  // isSectionBreakSpacerAt). The break at idx+1 is governed by the FOLLOWING
+  // section's start type (§17.6.22), so its effective kind is sectionKindFrom of
+  // the section starting at idx+2 (the marker's own `.kind` can read "nextPage"
+  // while the section actually continues — sample-13). A next-page/odd/even break
+  // does NOT suppress (the spacer there is the closing section's trailing line on
+  // a page that is ending anyway).
+  const isContinuousSectionSpacer = (idx: number): boolean =>
+    isSectionBreakSpacerAt(body, idx) && sectionKindFrom(idx + 2) === 'continuous';
+
   // ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag for
   // the section that OWNS the content starting at body index `startIdx`. Mirrors
   // `sectionColumnsFrom`: the owning section's set is carried on the NEXT
@@ -1344,7 +1355,7 @@ export function computePages(
         const p = e as unknown as DocParagraph;
         if (p.pageBreakBefore) return { height: Infinity, terminated: false };
         if (p.framePr) continue; // frame is out of flow (adds no column height)
-        const suppress = contextualSuppressed(prevP, p) || isSectionBreakSpacerAt(body, j);
+        const suppress = contextualSuppressed(prevP, p) || isContinuousSectionSpacer(j);
         const before = suppress ? 0 : p.spaceBefore;
         total += estimateParagraphHeight(ms, p, colWPt, suppress, 0) - Math.min(prevAfter, before);
         prevAfter = p.spaceAfter;
@@ -1615,12 +1626,13 @@ export function computePages(
         continue;
       }
       const contextual = contextualSuppressed(prevPara, para);
-      // An empty section-break spacer drops only ITS OWN before (gap collapses to
-      // prev.after, normally 0) — NOT the previous paragraph's after (see
-      // isSectionBreakSpacerAt). contextualSpacing drops both. Stamp the element so
-      // the paint pass (which gets per-page lists with the sectionBreak already
-      // consumed, so it cannot re-detect the adjacency) applies the same drop.
-      const spacer = isSectionBreakSpacerAt(body, i);
+      // An empty CONTINUOUS-section-break spacer drops only ITS OWN before (gap
+      // collapses to prev.after, normally 0) — NOT the previous paragraph's after
+      // (see isSectionBreakSpacerAt). contextualSpacing drops both. Stamp the
+      // element so the paint pass (which gets per-page lists with the sectionBreak
+      // already consumed, so it cannot re-detect the adjacency) applies the same
+      // drop.
+      const spacer = isContinuousSectionSpacer(i);
       if (spacer) (el as PaginatedBodyElement).sectionBreakSpacer = true;
       const suppressBefore = contextual || spacer;
 
@@ -2838,28 +2850,32 @@ function isInklessParagraph(p: DocParagraph): boolean {
  * emits a sectPr-bearing paragraph as a `Paragraph` followed by a `SectionBreak`,
  * so the spacer paragraph and its break are adjacent siblings.)
  *
- * Such a paragraph's spacing-BEFORE is suppressed: it sits flush below the
- * preceding paragraph (it is a section transition, not normal content flow).
+ * This adjacency is the structural test; the CALLER additionally gates on the
+ * break being CONTINUOUS (isContinuousSectionSpacer) — that is the measured
+ * trigger. When it holds, the spacer's spacing-BEFORE is suppressed: it sits
+ * flush below the preceding paragraph (a section transition, not normal flow).
  *
- * Intentionally NOT gated to "continuous" breaks. The break's effective kind is
- * the FOLLOWING section's start type (§17.6.22), not the marker's own `.kind`
- * (sample-13's marker is `nextPage` yet renders continuous), so a `kind` check
- * here would mis-fire. The all-kinds form is safe: for a genuine next-page break
- * the spacer is the closing section's LAST line, sitting at the page bottom — the
- * next section resets to a fresh page regardless — so dropping its before can
- * only shift that one trailing empty mark up by its own before, never the
- * following content.
- *
- * NOTE — interop heuristic, not ECMA-376. §17.3.1.33 would apply the `before`
- * normally (a consumer takes `max(prev.after, this.before)`), and no clause —
- * nor any [MS-DOC] / [MS-OI29500] note — suppresses it for a section-break or
- * empty paragraph (verified independently). But Microsoft Word AND LibreOffice
- * both render it with NO before: in sample-13 the empty `mSectionBreak` spacer
- * between "Keywords" and "1. INTRODUCTION" carries `w:before="440"` (22pt); with
- * that applied the two-column body started ~22pt too low, while both editors omit
- * it (confirmed by the document author placing a character in the spacer and
- * watching the heading NOT move). This matches that shared behaviour; revisit and
- * cite if a primary source ever surfaces.
+ * NOTE — this matches Microsoft WORD's observed layout, NOT a spec rule. ECMA-376
+ * §17.3.1.33 would apply the `before` normally (a consumer takes
+ * `max(prev.after, this.before)`), and no clause — nor any [MS-DOC] /
+ * [MS-OI29500] note — suppresses it for a section-break or empty paragraph
+ * (verified independently). The model is reconstructed from Word's OWN output:
+ *   - sample-13 has two empty `mSectionBreak` paragraphs (each `w:before="440"`,
+ *     22pt) before a continuous 2-column break. Measuring the Word PDF
+ *     (pdftotext -bbox), Word keeps BOTH empty line boxes but renders them flush
+ *     — i.e. it drops exactly ONE 22pt `before` — so "1. INTRODUCTION" sits at
+ *     64.4pt below "Keywords" instead of our pre-fix 87.3pt.
+ *   - Ablation against Word's output pinned the trigger: removing the section
+ *     break removes the suppression; putting text in the spacer removes it;
+ *     changing the spacer's style does NOT (same-style is irrelevant); 1-col vs
+ *     2-col does NOT (column count is irrelevant). So: an EMPTY paragraph at a
+ *     CONTINUOUS section boundary, with only its own `before` dropped.
+ * So we drop ONLY the spacer's own `before` and keep both line boxes — Word's
+ * decomposition. (LibreOffice independently suppresses here too — corroborating
+ * that this is real, undocumented Word-compat behaviour, tdf#166503 — but via a
+ * DIFFERENT mechanism that collapses a whole paragraph (~33.5pt); we deliberately
+ * do NOT follow its amount, only Word's measured −22pt.) Revisit and cite if a
+ * primary source ever surfaces.
  */
 function isSectionBreakSpacerAt(body: ArrayLike<{ type?: string }>, i: number): boolean {
   const el = body[i] as { type?: string } | undefined;

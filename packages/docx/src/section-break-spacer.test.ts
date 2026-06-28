@@ -118,6 +118,32 @@ describe('section-break spacer suppresses spacing-before (Word/LibreOffice inter
     expect(bControl - bSpacer).toBeCloseTo(SPACER_BEFORE, 1);
   });
 
+  it('suppresses when the break MARKER is nextPage but the section resolves continuous (§17.6.22 — sample-13 shape)', async () => {
+    // sample-13: the sectPr-bearing spacer's break marker is kind="nextPage", yet
+    // the FOLLOWING section starts continuous (docOf sets section.sectionStart),
+    // so the EFFECTIVE break is continuous and the spacer's before is dropped. Two
+    // empty paragraphs like the real doc; the SECOND (immediately before the break)
+    // is the spacer whose before collapses against the first.
+    const body: BodyElement[] = [
+      para('A') as unknown as BodyElement,
+      para('', SPACER_BEFORE) as unknown as BodyElement, // empty 1
+      para('', SPACER_BEFORE) as unknown as BodyElement, // empty 2 = spacer
+      { type: 'sectionBreak', kind: 'nextPage' } as unknown as BodyElement, // marker says nextPage…
+      para('B') as unknown as BodyElement,
+    ];
+    const control: BodyElement[] = [
+      para('A') as unknown as BodyElement,
+      para('', SPACER_BEFORE) as unknown as BodyElement,
+      para('', SPACER_BEFORE) as unknown as BodyElement,
+      para('B') as unknown as BodyElement,
+    ];
+    const bBody = await baselineOf(body, 'B');
+    const bControl = await baselineOf(control, 'B');
+    // …but the section resolves continuous, so the SECOND empty's before is dropped
+    // (gap empty1→empty2 = 0): B is exactly 20pt higher than the no-break control.
+    expect(bControl - bBody).toBeCloseTo(SPACER_BEFORE, 1);
+  });
+
   it('a NON-empty paragraph followed by a section break keeps its before (only empty spacers are suppressed)', async () => {
     // The section-ending paragraph here has text, so it is not an inkless spacer.
     const withText: BodyElement[] = [
