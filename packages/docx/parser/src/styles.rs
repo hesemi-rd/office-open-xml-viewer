@@ -650,15 +650,38 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.widow_control.is_some() {
         dst.widow_control = src.widow_control;
     }
-    if src.para_borders.is_some() {
-        // KNOWN LIMITATION (§17.3.1.24 vs the per-edge entries §17.3.1.4/.7/.17/…):
-        // we replace the whole pBdr wholesale when `src` sets it, rather than
-        // merging edge-by-edge over the inherited set. For a `src` that specifies
-        // only e.g. `<w:bottom>`, this drops an inherited `<w:left>` that Word would
-        // keep (Word merges pBdr per-edge). Harmless for the common case (a fully
-        // specified pBdr, or no inherited pBdr at all); a per-edge merge is tracked
-        // as a follow-up. NOTE: framePr below is intentionally wholesale (§17.3.1.11).
-        dst.para_borders = src.para_borders.clone();
+    if let Some(src_b) = &src.para_borders {
+        // Each pBdr EDGE inherits INDEPENDENTLY across the style hierarchy — bottom
+        // §17.3.1.7, left §17.3.1.17, right §17.3.1.28, top §17.3.1.42, between
+        // §17.3.1.5 each carry the same clause: "if this element is
+        // omitted ... its value is determined by the setting previously set at any
+        // level of the style hierarchy". So merge edge-by-edge over the inherited
+        // box rather than replacing it wholesale: a level that names only
+        // `<w:bottom>` keeps the inherited top/left/right/between. (Contrast
+        // `frame_pr` below, §17.3.1.11 — one grouped element, replaced wholesale.)
+        //
+        // LIMITATION: an EXPLICIT `<w:bottom w:val="nil"/>` meant to CLEAR an
+        // inherited edge currently parses to `None` (parse_para_fmt collapses
+        // nil/none → None), so it inherits instead of removing the edge.
+        // Distinguishing "omitted" from "explicit nil" needs a parser change and is
+        // tracked separately; the common cases (a full pBdr, or none inherited) are
+        // unaffected, and this strictly improves partial overrides.
+        let dst_b = dst.para_borders.get_or_insert_with(Default::default);
+        if src_b.top.is_some() {
+            dst_b.top = src_b.top.clone();
+        }
+        if src_b.bottom.is_some() {
+            dst_b.bottom = src_b.bottom.clone();
+        }
+        if src_b.left.is_some() {
+            dst_b.left = src_b.left.clone();
+        }
+        if src_b.right.is_some() {
+            dst_b.right = src_b.right.clone();
+        }
+        if src_b.between.is_some() {
+            dst_b.between = src_b.between.clone();
+        }
     }
     if src.bidi.is_some() {
         dst.bidi = src.bidi;
@@ -1367,6 +1390,66 @@ mod tests {
         );
         let doc = XmlDoc::parse(&xml).unwrap();
         parse_run_fmt(doc.root_element())
+    }
+
+    fn para_fmt_from(ppr_xml: &str) -> ParaFmt {
+        let xml = format!(
+            r#"<w:pPr xmlns:w="{ns}">{body}</w:pPr>"#,
+            ns = W_NS,
+            body = ppr_xml
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        parse_para_fmt(doc.root_element())
+    }
+
+    #[test]
+    fn pbdr_merges_per_edge_over_inherited_box() {
+        // Each pBdr EDGE inherits independently across the style hierarchy (bottom
+        // §17.3.1.7, left §17.3.1.17, right §17.3.1.28, top §17.3.1.42, between
+        // §17.3.1.5: "if this element is omitted ... its value is
+        // determined by the setting previously set at any level"). So a level that
+        // sets only `<w:bottom>` must KEEP the inherited top/left/right; the old
+        // wholesale-replace dropped them. Mirrors the direct-over-style merge too
+        // (apply_para is shared after PR #613).
+        let mut base = para_fmt_from(
+            r#"<w:pBdr>
+                 <w:top w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:left w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:bottom w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:right w:val="single" w:sz="8" w:color="FF0000"/>
+               </w:pBdr>"#,
+        );
+        let direct = para_fmt_from(
+            r#"<w:pBdr><w:bottom w:val="single" w:sz="24" w:color="0000FF"/></w:pBdr>"#,
+        );
+        apply_para(&mut base, &direct);
+        let b = base.para_borders.expect("borders present after merge");
+        // The three edges the direct level did not touch survive from the inherited box.
+        assert!(b.top.is_some(), "inherited top edge kept");
+        assert!(b.left.is_some(), "inherited left edge kept");
+        assert!(b.right.is_some(), "inherited right edge kept");
+        // The one edge the direct level set takes its value.
+        let bottom = b.bottom.expect("bottom edge present");
+        assert_eq!(
+            bottom.color.as_deref(),
+            Some("0000ff"),
+            "direct bottom overrides the inherited bottom"
+        );
+        assert_eq!(bottom.width, 3.0, "direct bottom sz=24 → 3.0pt");
+    }
+
+    #[test]
+    fn pbdr_with_no_inherited_box_is_unchanged() {
+        // No inherited pBdr: a direct single-edge pBdr is taken as-is (per-edge
+        // merge over an empty box is identical to the old wholesale behavior).
+        let mut base = ParaFmt::default();
+        let direct = para_fmt_from(
+            r#"<w:pBdr><w:bottom w:val="single" w:sz="12" w:color="000000"/></w:pBdr>"#,
+        );
+        apply_para(&mut base, &direct);
+        let b = base.para_borders.expect("borders present");
+        assert!(b.bottom.is_some(), "direct bottom present");
+        assert!(b.top.is_none() && b.left.is_none() && b.right.is_none());
     }
 
     #[test]
