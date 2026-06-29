@@ -888,6 +888,19 @@ pub struct ShapeParagraph {
     /// byte-identical (additive, like the other Phase 0 direction flags).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rtl: bool,
+    /// `<a:pPr@marL>` — left margin (EMU). ECMA-376 §21.1.2.2.7
+    /// (`CT_TextParagraphProperties`). Direct attribute only (xlsx text boxes
+    /// have no lstStyle/level cascade). `None` = unset. Omitted from JSON when
+    /// `None` so existing output stays byte-identical (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mar_l: Option<i64>,
+    /// `<a:pPr@marR>` — right margin (EMU). ECMA-376 §21.1.2.2.7. `None` = unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mar_r: Option<i64>,
+    /// `<a:pPr@indent>` — first-line indent (EMU; negative = hanging). ECMA-376
+    /// §21.1.2.2.7. `None` = unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent: Option<i64>,
     pub runs: Vec<ShapeTextRun>,
 }
 

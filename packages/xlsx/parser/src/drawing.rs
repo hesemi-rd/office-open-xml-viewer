@@ -530,6 +530,9 @@ pub(crate) fn parse_tx_body(
             "p" => {
                 let mut align = String::from("l");
                 let mut rtl = false;
+                let mut mar_l: Option<i64> = None;
+                let mut mar_r: Option<i64> = None;
+                let mut indent: Option<i64> = None;
                 let mut runs: Vec<ShapeTextRun> = Vec::new();
                 for pc in c.children().filter(|n| n.is_element()) {
                     match pc.tag_name().name() {
@@ -543,6 +546,13 @@ pub(crate) fn parse_tx_body(
                                 .attribute("rtl")
                                 .map(|v| v == "1" || v == "true")
                                 .unwrap_or(false);
+                            // ECMA-376 §21.1.2.2.7 (`CT_TextParagraphProperties`)
+                            // direct indent attributes (EMU). `indent` may be
+                            // negative (hanging). Direct-attribute-only — xlsx
+                            // text boxes have no lstStyle/level cascade.
+                            mar_l = pc.attribute("marL").and_then(|v| v.parse().ok());
+                            mar_r = pc.attribute("marR").and_then(|v| v.parse().ok());
+                            indent = pc.attribute("indent").and_then(|v| v.parse().ok());
                         }
                         "r" => {
                             // Run text + run-level formatting.
@@ -609,7 +619,14 @@ pub(crate) fn parse_tx_body(
                     }
                 }
                 if !runs.is_empty() {
-                    paragraphs.push(ShapeParagraph { align, rtl, runs });
+                    paragraphs.push(ShapeParagraph {
+                        align,
+                        rtl,
+                        mar_l,
+                        mar_r,
+                        indent,
+                        runs,
+                    });
                 }
             }
             _ => {}
@@ -1581,6 +1598,59 @@ mod math_tests {
         let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
         assert_eq!(text.paragraphs.len(), 1);
         assert!(!text.paragraphs[0].rtl, "absent @rtl → rtl false");
+    }
+
+    /// `<a:pPr marL marR indent>` (ECMA-376 §21.1.2.2.7,
+    /// `CT_TextParagraphProperties`) are the direct paragraph indent attributes
+    /// in EMU. `indent` may be negative (hanging). They parse onto the
+    /// `ShapeParagraph` as `Option<i64>` so an absent attribute stays `None`.
+    #[test]
+    fn parses_paragraph_indent_attributes() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:pPr marL="457200" marR="91440" indent="-228600"/>
+                <a:r><a:t>indented</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        assert_eq!(text.paragraphs.len(), 1);
+        let p = &text.paragraphs[0];
+        assert_eq!(p.mar_l, Some(457200), "marL parses as EMU i64");
+        assert_eq!(p.mar_r, Some(91440), "marR parses as EMU i64");
+        assert_eq!(
+            p.indent,
+            Some(-228600),
+            "indent parses (negative = hanging)"
+        );
+    }
+
+    /// Absent indent attributes (or absent `<a:pPr>` entirely) leave all three
+    /// fields `None` so the JSON output stays byte-identical (additive).
+    #[test]
+    fn paragraph_indent_defaults_none_when_absent() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r><a:t>plain</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        assert_eq!(text.paragraphs.len(), 1);
+        let p = &text.paragraphs[0];
+        assert_eq!(p.mar_l, None, "absent marL → None");
+        assert_eq!(p.mar_r, None, "absent marR → None");
+        assert_eq!(p.indent, None, "absent indent → None");
+
+        // None of the three keys should appear in the serialized JSON.
+        let v: serde_json::Value = serde_json::to_value(p).unwrap();
+        assert!(v.get("marL").is_none(), "marL omitted when None");
+        assert!(v.get("marR").is_none(), "marR omitted when None");
+        assert!(v.get("indent").is_none(), "indent omitted when None");
     }
 
     /// `ShapeTextRun` uses an enum-level `#[serde(tag = "type", rename_all =

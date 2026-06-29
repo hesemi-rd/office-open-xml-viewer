@@ -3564,7 +3564,11 @@ export function drawShapeText(
   type Seg =
     | { kind: 'text'; text: string; font: string; color: string; w: number }
     | { kind: 'math'; render: MathRender; color: string; w: number; ascent: number; descent: number };
-  type Line = { segs: Seg[]; align: string; height: number; ascent: number; hasMath: boolean };
+  // `leftInset` = px from padX to this line's left edge (paragraph left margin,
+  // plus the first-line indent on a paragraph's first line). `availW` = the
+  // width of the alignment region for this line (paraW, minus the first-line
+  // indent on the first line). ECMA-376 §21.1.2.2.7 (marL/marR/indent).
+  type Line = { segs: Seg[]; align: string; height: number; ascent: number; hasMath: boolean; leftInset: number; availW: number };
 
   // Font string + px size for a text run (math runs have no run-level font).
   const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>): { font: string; px: number } => {
@@ -3579,6 +3583,25 @@ export function drawShapeText(
   const lines: Line[] = [];
   for (const p of txt.paragraphs) {
     const align = p.align || 'l';
+    // ECMA-376 §21.1.2.2.7 direct paragraph indent (EMU → px, scaled by cs).
+    // Mirrors the pptx renderer (marLPx/marRPx/indentPx + firstLineIndent).
+    // Direct-attribute-only: xlsx text boxes have no lstStyle/level cascade, so
+    // the spec's literal implied defaults (marL=347663, indent=−342900) are
+    // deliberately NOT applied — there is no list-style tier to feed them, and
+    // pptx's resolver leaves a plain bulletless paragraph at 0 too. Absent ⇒ 0.
+    const marLpx = ((p.marL ?? 0) / EMU_PER_PX) * cs;
+    const marRpx = ((p.marR ?? 0) / EMU_PER_PX) * cs;
+    const indentPx = ((p.indent ?? 0) / EMU_PER_PX) * cs;
+    // First-line indent eats into available width only when positive; a hanging
+    // (negative) indent has no bullet gutter in xlsx, so it is clamped to 0.
+    const firstLineIndent = Math.max(0, indentPx);
+    const paraW = Math.max(0, innerW - marLpx - marRpx);
+    // First line of the paragraph carries marLpx + firstLineIndent; continuation
+    // lines carry only marLpx. Flipped to true on the first flush within the
+    // paragraph (and on a display-math line, which is its own line).
+    let firstLineDone = false;
+    const lineLeftInset = () => (firstLineDone ? marLpx : marLpx + firstLineIndent);
+    const lineAvailW = () => (firstLineDone ? paraW : paraW - firstLineIndent);
     let segs: Seg[] = [];
     let lineW = 0;
     let lineHeight = 0;
@@ -3598,7 +3621,8 @@ export function drawShapeText(
         lineHeight = fallbackPx * 1.2;
         lineAscent = fallbackPx * 0.85;
       }
-      lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath });
+      lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath, leftInset: lineLeftInset(), availW: lineAvailW() });
+      firstLineDone = true;
       segs = []; lineW = 0; lineHeight = 0; lineAscent = 0; hasMath = false;
     };
     // Nearest preceding text size (pt) in this paragraph — inline math with no
@@ -3618,12 +3642,18 @@ export function drawShapeText(
         const color = run.color ?? '#000000';
         if (run.display) {
           // Block equation occupies its own line (centered per paragraph align).
+          // It takes the paragraph left margin (marLpx) but NOT the first-line
+          // indent — `indent` is a run-in indent for the first line of TEXT, not
+          // for a block equation — so use marLpx/paraW regardless of line position.
           flushLine();
-          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: ascent + descent, ascent, hasMath: true });
+          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: ascent + descent, ascent, hasMath: true, leftInset: marLpx, availW: paraW });
+          firstLineDone = true;
           continue;
         }
-        // Inline equation: treat as an atomic, non-breaking "word".
-        if (wrap && lineW + w > innerW && segs.length > 0) flushLine();
+        // Inline equation: treat as an atomic, non-breaking "word". Budget is
+        // this line's available width (paraW, minus first-line indent on the
+        // first line) rather than the full innerW.
+        if (wrap && lineW + w > lineAvailW() && segs.length > 0) flushLine();
         segs.push({ kind: 'math', render, color, w, ascent, descent });
         lineW += w;
         lineHeight = Math.max(lineHeight, ascent + descent);
@@ -3651,12 +3681,15 @@ export function drawShapeText(
           lineW += w;
           continue;
         }
-        // Greedy character-level wrap (adequate for Latin + CJK).
+        // Greedy character-level wrap (adequate for Latin + CJK). The wrap
+        // budget is the CURRENT line's available width — paraW on continuation
+        // lines, paraW − firstLineIndent on the paragraph's first line — not the
+        // full innerW (ECMA-376 §21.1.2.2.7 marL/marR/indent).
         let buf = '';
         for (const ch of piece) {
           const candidate = buf + ch;
           const cw = ctx.measureText(candidate).width;
-          if (lineW + cw > innerW && (buf.length > 0 || segs.length > 0)) {
+          if (lineW + cw > lineAvailW() && (buf.length > 0 || segs.length > 0)) {
             if (buf) {
               const w = ctx.measureText(buf).width;
               segs.push({ kind: 'text', text: buf, font, color, w });
@@ -3694,9 +3727,13 @@ export function drawShapeText(
   let lineTop = y0;
   for (const line of lines) {
     const totalW = line.segs.reduce((s, seg) => s + seg.w, 0);
-    let x = padX;
-    if (line.align === 'ctr') x = padX + Math.max(0, (innerW - totalW) / 2);
-    else if (line.align === 'r') x = padX + Math.max(0, innerW - totalW);
+    // Per-line region: the left edge is padX + the paragraph's left inset
+    // (marL, plus first-line indent on the first line), and alignment happens
+    // within the line's available width (paraW). ECMA-376 §21.1.2.2.7.
+    const base = padX + line.leftInset;
+    let x = base;
+    if (line.align === 'ctr') x = base + Math.max(0, (line.availW - totalW) / 2);
+    else if (line.align === 'r') x = base + Math.max(0, line.availW - totalW);
 
     if (line.hasMath) {
       // A line containing an equation aligns text AND the math raster to a
