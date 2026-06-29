@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -230,6 +230,12 @@ export interface RenderState {
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
   kinsoku: KinsokuRules;
+  /** ECMA-376 §17.15.1.25 `w:defaultTabStop` — the interval (points) at which
+   *  automatic tab stops are generated after all custom stops. Threaded from
+   *  `doc.settings.defaultTabStop` like `kinsoku` so the MEASURE pass matches
+   *  the DRAW pass; falls back to {@link DEFAULT_TAB_PT} (720 twips = 36pt) when
+   *  the document omits the element. */
+  defaultTabPt: number;
   /** ECMA-376 §22.1.2.30 `m:mathPr/m:defJc` — document-wide default math
    *  justification (ST_Jc math). `undefined` ⇒ spec default `centerGroup`.
    *  Threaded from `doc.settings.mathDefJc` like `kinsoku`; consumed by the
@@ -709,6 +715,9 @@ export async function renderDocumentToCanvas(
     docEastAsian: docEA,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
+    // §17.15.1.25 — automatic tab interval, resolved once and threaded like
+    // `kinsoku` so the measure and draw passes agree.
+    defaultTabPt: resolveDefaultTabPt(doc.settings),
     mathDefJc: doc.settings?.mathDefJc,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
@@ -809,8 +818,10 @@ function measureNoteBlockForDraw(
   fontFamilyClasses: Record<string, string>,
   kinsoku: KinsokuRules,
   docEastAsian: boolean,
+  // §17.15.1.25 — keep the note measure pass on the same automatic tab interval.
+  defaultTabPt: number = DEFAULT_TAB_PT,
 ): { total: number; trailingSpaceAfter: number } {
-  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku, docEastAsian);
+  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku, docEastAsian, defaultTabPt);
   const contentWPt = sec.pageWidth - sec.marginLeft - sec.marginRight;
   return measureFootnoteBlockPt(note, measure, contentWPt);
 }
@@ -854,7 +865,7 @@ function drawPageFootnotes(
   for (const id of ids) {
     const note = noteById.get(id);
     if (!note) continue;
-    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku, baseState.docEastAsian);
+    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku, baseState.docEastAsian, baseState.defaultTabPt);
     totalPt += m.total;
     lastTrailingPt = m.trailingSpaceAfter;
   }
@@ -1107,6 +1118,10 @@ export function computePages(
   /** Per-page tall header/footer reserve (ECMA-376 §17.6.11). Empty ⇒ no reserve
    *  (the common case). Computed by paginateWithHeaderFooterReserve's second pass. */
   pageReserves: PageReserve[] = [],
+  /** ECMA-376 §17.15.1.25 — automatic tab-stop interval (pt). Threaded so the
+   *  pagination measure pass advances tabs identically to the draw pass; defaults
+   *  to the spec absent value when a caller has no document settings. */
+  defaultTabPt: number = DEFAULT_TAB_PT,
 ): PaginatedBodyElement[][] {
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
@@ -1114,7 +1129,7 @@ export function computePages(
   const bodyTopPt = bodyMarginInsetPt(section.marginTop);
   const bodyBottomPt = bodyMarginInsetPt(section.marginBottom);
   const fullContentH = section.pageHeight - bodyTopPt - bodyBottomPt;
-  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body), defaultTabPt);
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -2184,8 +2199,11 @@ function paginateWithHeaderFooterReserve(
   kinsoku: KinsokuRules,
   footnotes: DocNote[],
 ): PaginatedBodyElement[][] {
-  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes);
-  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body));
+  // §17.15.1.25 — resolve once here so both pagination passes and the
+  // reserve-measure state share the document's automatic tab interval.
+  const defaultTabPt = resolveDefaultTabPt(doc.settings);
+  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, [], defaultTabPt);
+  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body), defaultTabPt);
   const footerReserves = computeFooterReserves(pass1, doc, measure);
   const headerReserves = computeHeaderReserves(pass1, doc, measure);
   const overflows = (rs: number[]): boolean => rs.some((r) => r > MIN_MARGIN_OVERFLOW_PT);
@@ -2194,7 +2212,7 @@ function paginateWithHeaderFooterReserve(
     top: headerReserves[i] ?? 0,
     bottom: footerReserves[i] ?? 0,
   }));
-  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves);
+  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves, defaultTabPt);
 }
 
 /** Paginate with a throwaway measure context. Pagination must use the same
@@ -2221,6 +2239,9 @@ function buildMeasureState(
   fontFamilyClasses: Record<string, string> = {},
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
   docEastAsian = false,
+  // §17.15.1.25 — threaded so the measure pass uses the SAME automatic tab
+  // interval as the draw pass; defaults to the spec absent value when no doc.
+  defaultTabPt: number = DEFAULT_TAB_PT,
 ): RenderState {
   return {
     ctx,
@@ -2253,6 +2274,7 @@ function buildMeasureState(
     docEastAsian,
     fontFamilyClasses,
     kinsoku,
+    defaultTabPt,
     showTrackChanges: false,
   };
 }
@@ -2322,7 +2344,7 @@ function estimateParagraphHeight(
       pageH: state.pageH,
       markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1));
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt);
     if (lines.length === 0) {
       // Anchor-only paragraph: no inline content, but the paragraph mark still
       // occupies one (possibly flowed) line (§17.3.1.29).
@@ -2522,7 +2544,7 @@ function splitParagraphAcrossPages(
     pageH: measureState.pageH,
     markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1));
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt);
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -3665,6 +3687,7 @@ function resolveFrameBox(
           0,
           state.kinsoku,
           gridCharDeltaPx(grid, scale),
+          state.defaultTabPt,
         );
   const contentW =
     lines.length === 0
@@ -3731,11 +3754,79 @@ function renderFrameParagraph(
   registerFrameFloat(box, fp, state);
 }
 
-/** Default tab interval (pt) when no explicit stop matches — Word's default is
- *  720 twips = 36 pt (ECMA-376 §17.15.1.25 `defaultTabStop`; this document sets
- *  no override). Shared by the line layout (`layoutLines`) and the numbered-list
- *  marker's trailing-tab advance (`renderParagraph`). */
+/** ECMA-376 §17.15.1.25 — the ABSENT default for `<w:defaultTabStop>`: "If this
+ *  element is omitted, then automatic tab stops should be generated at 720
+ *  twentieths of a point (0.5")", i.e. 36 pt. Used ONLY as the fallback when a
+ *  document carries no `<w:defaultTabStop>`; a document that sets one overrides
+ *  this via {@link resolveDefaultTabPt}. Shared by the line layout
+ *  (`layoutLines`) and the numbered-list marker's trailing-tab advance
+ *  (`renderParagraph`). */
 const DEFAULT_TAB_PT = 36;
+
+/** ECMA-376 §17.15.1.25 — resolve the document's automatic tab-stop interval
+ *  (pt): the explicit `<w:defaultTabStop>` value when present, else the spec
+ *  absent default of 720 twips (36pt). Mirrors {@link resolveKinsokuRules}: the
+ *  resolved value is threaded into both the measure and draw passes so they
+ *  agree. */
+function resolveDefaultTabPt(settings: DocSettings | undefined): number {
+  const v = settings?.defaultTabStop;
+  // §17.15.1.25 defines automatic stops as multiples of the interval, which is
+  // undefined for a non-positive interval; fall back to the documented absent
+  // default (720 twips = 36pt) so the automatic grid always advances.
+  return v != null && v > 0 ? v : DEFAULT_TAB_PT;
+}
+
+/** ECMA-376 §17.3.1.37 (tabs) + §17.15.1.25 (defaultTabStop) — advance from a
+ *  pen position to the next effective tab stop, ALL in text-margin px.
+ *
+ *  The effective stop set is the custom stops PLUS automatic left-aligned stops
+ *  at every multiple of `intervalPx` that occurs AFTER all custom stops
+ *  (§17.15.1.25: "Automatic tab stops refer to the tab stop locations which
+ *  occur after all custom tab stops"; the spec example puts a 0.25" grid at
+ *  2.5"/2.75"/3.0" past a 2.28" custom stop). A tab moves to the smallest
+ *  effective stop strictly greater than `curMarginPx`.
+ *
+ *  @param curMarginPx pen position, measured from the text margin.
+ *  @param customStopsPx custom stops in margin-px (`pos = tabStop.pos * scale`),
+ *    order not assumed; each carries its own alignment + leader.
+ *  @param intervalPx automatic-stop interval = `defaultTabPt * scale`.
+ *  @returns the chosen stop (custom keeps its alignment/leader; an automatic
+ *    stop is `'left'` with no leader), or `null` only when no stop exists. */
+export function nextTabStop(
+  curMarginPx: number,
+  customStopsPx: { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] }[],
+  intervalPx: number,
+): { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] } | null {
+  // Candidate 1 — the nearest custom stop strictly past the pen. The spec set is
+  // unordered, so scan for the minimum rather than assuming sort order.
+  let custom: { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] } | null = null;
+  let maxCustomPx = 0;
+  for (const t of customStopsPx) {
+    if (t.pos > maxCustomPx) maxCustomPx = t.pos;
+    if (t.pos > curMarginPx && (custom === null || t.pos < custom.pos)) custom = t;
+  }
+
+  // Candidate 2 — the nearest automatic multiple of the interval that is BOTH
+  // past the pen AND past the last custom stop (§17.15.1.25: automatic stops
+  // begin only after all custom stops). EPS forces a pen sitting exactly on a
+  // boundary to advance to the NEXT one.
+  let auto: { pos: number; alignment: TabStop['alignment'] } | null = null;
+  if (intervalPx > 0) {
+    const EPS = 1e-6;
+    const from = Math.max(curMarginPx, maxCustomPx);
+    let pos = Math.ceil((from + EPS) / intervalPx) * intervalPx;
+    // Guard against floating-point landing on/under the pen (rounding can yield a
+    // boundary that is not strictly greater): step to the next multiple.
+    if (pos <= curMarginPx) pos += intervalPx;
+    auto = { pos, alignment: 'left' };
+  }
+
+  if (custom && auto) {
+    // Ties → the custom stop wins so its alignment/leader are honoured.
+    return custom.pos <= auto.pos ? custom : auto;
+  }
+  return custom ?? auto;
+}
 
 function renderParagraph(
   para: DocParagraph,
@@ -3867,17 +3958,19 @@ function renderParagraph(
       // markerEndFromIndent (jc-adjusted right edge from paraX) ≤ 0 ⇒ it fits
       // (right-aligned markers always do), leave the body at indentLeft.
       if (markerEndFromIndent > 0) {
-        // Next tab stop strictly past the marker end, in paraX-relative px:
-        // honor the paragraph's explicit stops (measured from the text margin,
-        // hence − indLeft to make them paraX-relative), else the default grid.
-        const defTabPx = DEFAULT_TAB_PT * scale;
+        // Next tab stop strictly past the marker end, resolved in TEXT-MARGIN
+        // coordinates via the SAME helper as line layout (§17.3.1.37 +
+        // §17.15.1.25): honour the paragraph's explicit stops (already in margin
+        // px = pos * scale) plus the document's automatic grid AFTER all custom
+        // stops, then convert back to paraX-relative px (− indLeft).
         const markerEndFromMargin = indLeft + markerEndFromIndent;
-        let nextFromMargin = Math.ceil((markerEndFromMargin + 0.01) / defTabPx) * defTabPx;
-        for (const ts of para.tabStops ?? []) {
-          const p = ts.pos * scale;
-          if (p > markerEndFromMargin && p < nextFromMargin) nextFromMargin = p;
-        }
-        numBodyOffset = nextFromMargin - indLeft;
+        const customStopsPx = (para.tabStops ?? []).map((ts) => ({
+          pos: ts.pos * scale,
+          alignment: ts.alignment,
+          leader: ts.leader,
+        }));
+        const stop = nextTabStop(markerEndFromMargin, customStopsPx, state.defaultTabPt * scale);
+        if (stop) numBodyOffset = stop.pos - indLeft;
       }
     }
   }
@@ -3953,7 +4046,7 @@ function renderParagraph(
   // indent (positive firstLine, or a bare negative hanging without a marker) to
   // the body as usual. RTL lists keep their existing start-edge handling.
   const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
-  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale));
+  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
 
   // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
   // `decimal`) only positions content at a tab stop when an explicit tab
@@ -5364,6 +5457,10 @@ function layoutLines(
   // when inactive). Folded into every advance via `gridWidth` so line breaking
   // packs the grid's char count per line; the draw paths add the SAME delta.
   gridDeltaPx = 0,
+  // ECMA-376 §17.15.1.25 — automatic tab-stop interval (pt). The automatic-stop
+  // grid (`nextTabStop`) multiplies this by `scale`; defaults to the spec absent
+  // value (720 twips = 36pt) for callers without document settings.
+  defaultTabPt: number = DEFAULT_TAB_PT,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -5575,17 +5672,25 @@ function layoutLines(
     if ('isTab' in seg) {
       // Absolute position on the line measured from paraX (line origin for continuation lines)
       const absFromParaX = currentWidth + (isFirst ? firstIndent : 0);
-      // Tab-stop X relative to paraX: stops are measured from the text margin, so
-      // subtract the paragraph's own left indent.
-      const stopXof = (t: TabStop) => t.pos * scale - tabOriginPx;
-      // Find the next tab stop strictly greater than the current position
-      const stop = tabStops.find((t) => stopXof(t) > absFromParaX);
+      // ECMA-376 §17.3.1.37 / §17.15.1.25 — resolve the next stop in TEXT-MARGIN
+      // coordinates (the same origin as custom stops): the current pen position is
+      // `absFromParaX + tabOriginPx`, custom stops are `pos * scale`, and the
+      // automatic grid interval is `defaultTabPt * scale`. Mixing paraX and margin
+      // coordinates is what diverged leading-tab rows from labeled ones; computing
+      // both in margin space and converting back keeps them aligned.
+      const curMarginPx = absFromParaX + tabOriginPx;
+      const customStopsPx = tabStops.map((t) => ({ pos: t.pos * scale, alignment: t.alignment, leader: t.leader }));
+      const stop = nextTabStop(curMarginPx, customStopsPx, defaultTabPt * scale);
+      // Convert the chosen margin-space stop back to paraX-relative px.
+      const stopParaX = stop ? stop.pos - tabOriginPx : absFromParaX;
       // Right/center/decimal tab: place the tab + its trailing content (up to the next
       // tab / line end) so the content ends at / centers on the stop, and commit that
       // content directly so the normal wrap check doesn't push it past the stop
       // (ECMA-376 §17.3.1.37). This is what makes TOC "heading …… page" lines work.
+      // Automatic stops returned by nextTabStop are left-aligned, so they fall
+      // through to the left-tab path below.
       if (stop && stop.alignment !== 'left' && stop.alignment !== 'bar' && stop.alignment !== 'clear') {
-        const stopX = stopXof(stop);
+        const stopX = stopParaX;
         seg.leader = stop.leader;
         let followW = 0;
         for (const q of queue) {
@@ -5620,15 +5725,11 @@ function layoutLines(
         continue;
       }
 
-      let tabWidth: number;
-      if (stop) {
-        tabWidth = stopXof(stop) - absFromParaX;
-        seg.leader = stop.leader;
-      } else {
-        // Round up to the next DEFAULT_TAB_PT boundary
-        const nextDefault = Math.ceil((absFromParaX + 0.01) / (DEFAULT_TAB_PT * scale)) * (DEFAULT_TAB_PT * scale);
-        tabWidth = nextDefault - absFromParaX;
-      }
+      // Left-aligned tab (custom 'left'/'bar'/'clear' or an automatic stop): the
+      // pen moves to the stop's paraX. nextTabStop already applied the §17.15.1.25
+      // "after all custom stops" automatic grid, so there is no separate fallback.
+      let tabWidth = stopParaX - absFromParaX;
+      if (stop) seg.leader = stop.leader;
       // Clamp to avoid negative widths; if tab would overflow the line, wrap instead
       if (tabWidth <= 0) {
         flush();
@@ -7318,7 +7419,7 @@ function measureParaHeight(
   const indLeftPx = para.indentLeft * scale;
   const indRightPx = para.indentRight * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
-  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale));
+  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 

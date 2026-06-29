@@ -1,0 +1,144 @@
+import { describe, it, expect } from 'vitest';
+import { renderDocumentToCanvas } from './renderer.js';
+import type { DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
+
+// ECMA-376 §17.3.1.37 (tabs) + §17.15.1.25 (defaultTabStop): a paragraph's
+// effective tab stops are the explicit (custom) stops PLUS automatic stops at
+// every multiple of `defaultTabStop` that occur AFTER the last custom stop, all
+// measured from the TEXT MARGIN (the same origin as custom stops, NOT the
+// paragraph indent). A tab advances the pen to the next effective stop greater
+// than the current position.
+//
+// sample-16 p.2 (判型/余白 block) relies on this: rows align their value column
+// by using however many tabs reach a shared stop, regardless of label width. A
+// labeled row ("○判型"\t\t value) and a leading-tab row (\t\t\t\t value) must
+// land on the SAME column. Word's PDF puts that column at 72pt from the margin.
+//
+// This reproduces that with the same metrics: indent 9pt, defaultTabStop 18pt,
+// custom left tab at 18pt, body font 9pt (each glyph 9px in the mock canvas).
+
+interface FillCall {
+  text: string;
+  x: number;
+}
+
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] } {
+  let font = '10px serif';
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+  const fills: FillCall[] = [];
+  const ctx = {
+    get font() {
+      return font;
+    },
+    set font(v: string) {
+      font = v;
+    },
+    letterSpacing: '0px',
+    measureText: (s: string) => {
+      const p = px();
+      return {
+        width: [...s].length * p,
+        fontBoundingBoxAscent: p * 0.8,
+        fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8,
+        actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, beginPath() {}, closePath() {},
+    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {}, strokeRect() {},
+    rect() {}, clip() {}, scale() {}, translate() {}, setLineDash() {}, clearRect() {}, arc() {},
+    quadraticCurveTo() {}, bezierCurveTo() {},
+    createLinearGradient() { return { addColorStop() {} }; },
+    drawImage() {},
+    fillText(text: string, x: number) { fills.push({ text, x }); },
+    strokeText() {},
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  (ctx as unknown as { canvas: unknown }).canvas = canvas;
+  return { canvas: canvas as unknown as HTMLCanvasElement, fills };
+}
+
+/** One paragraph carrying a whole "row" of the tab-aligned block. `text` uses
+ *  "\t" for each <w:tab/>. Indent 9pt, one custom left tab at 18pt unless
+ *  `opts` overrides the indent / custom stops. */
+function rowPara(
+  text: string,
+  opts: { indentLeft?: number; tabStops?: { pos: number; alignment: string; leader: string }[] } = {},
+): DocParagraph {
+  return {
+    alignment: 'left',
+    indentLeft: opts.indentLeft ?? 9, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null,
+    tabStops: opts.tabStops ?? [{ pos: 18, alignment: 'left', leader: 'none' }],
+    runs: [{
+      type: 'text', text,
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 9, color: null, fontFamily: 'Times New Roman', fontFamilyEastAsia: 'Times New Roman',
+      isLink: false, background: null, vertAlign: null, hyperlink: null,
+    }],
+    defaultFontSize: 9, defaultFontFamily: 'Times New Roman', widowControl: false,
+  } as unknown as DocParagraph;
+}
+
+function doc(paras: DocParagraph[]): DocxDocumentModel {
+  return {
+    section: {
+      pageWidth: 300, pageHeight: 400,
+      marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps,
+    // §17.15.1.25 defaultTabStop = 360 twips = 18pt.
+    settings: { defaultTabStop: 18 },
+    body: paras.map((p) => ({ type: 'paragraph', ...p })),
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: { 'Times New Roman': 'roman' },
+  } as unknown as DocxDocumentModel;
+}
+
+describe('tab-stop grid (§17.15.1.25 automatic stops, margin-relative)', () => {
+  // scale = width/pageWidth = 300/300 = 1 px/pt; each glyph = fontSize px.
+  const COL = 72; // pt from the text margin (Word PDF: x=123.1 => 72pt from margin)
+
+  it('aligns a labeled row and a leading-tab row on the same column', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      doc([
+        // "abc"(3 glyphs=27px) starts at margin 9 -> ends 36; \t\t -> 54 -> 72.
+        rowPara('abc\t\tV1'),
+        // no label: \t\t\t\t from margin 9 -> 18 -> 36 -> 54 -> 72.
+        rowPara('\t\t\t\tV2'),
+      ]),
+      canvas, 0, { dpr: 1, width: 300 },
+    );
+
+    const v1 = fills.find((f) => f.text === 'V1');
+    const v2 = fills.find((f) => f.text === 'V2');
+    expect(v1, '"V1" must be drawn').toBeDefined();
+    expect(v2, '"V2" must be drawn').toBeDefined();
+    // Both value tokens converge on the same column (the user-reported bug: the
+    // leading-tab row shot ~36pt further right than the labeled row).
+    expect(v2!.x).toBeCloseTo(v1!.x, 3);
+    // ...and that column is the spec-correct stop, 72pt from the margin.
+    expect(v1!.x).toBeCloseTo(COL, 3);
+  });
+
+  it('honors the document defaultTabStop interval (not a hardcoded 36pt)', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    // No custom stops, indent 0 -> pure automatic grid from the margin. With
+    // defaultTabStop=18 two tabs land at 18 then 36; a hardcoded 36pt grid would
+    // instead land at 36 then 72.
+    await renderDocumentToCanvas(
+      doc([rowPara('\t\tW', { indentLeft: 0, tabStops: [] })]),
+      canvas, 0, { dpr: 1, width: 300 },
+    );
+    const w = fills.find((f) => f.text === 'W');
+    expect(w, '"W" must be drawn').toBeDefined();
+    // Two automatic tabs at the 18pt interval: 18 -> 36.
+    expect(w!.x).toBeCloseTo(36, 3);
+  });
+});
