@@ -601,14 +601,19 @@ function paragraphHasBullet(para: Paragraph): boolean {
 }
 
 /** First-line indent (ECMA-376 §21.1.2.2.7 `a:pPr@indent`) resolved to the px
- *  amount the FIRST line is shifted right / narrowed by. A positive indent eats
- *  into the first line's width; a negative ("hanging") indent is the bullet's
- *  gutter, not a text-width reduction, so it is clamped to 0 — we do not extend
- *  the first line left of marL. When the paragraph HAS a bullet the gutter is
- *  handled by the bullet/textX geometry, so the first-line indent contributes
- *  nothing here. Shared by the spAutoFit measurement
- *  ({@link naturalWidthExceedsBbox}), the wrap budget ({@link layoutParagraph})
- *  and the draw-side `textXOffset`, so the three paths can never disagree. */
+ *  amount the FIRST line's TEXT is shifted right / narrowed by. A positive indent
+ *  on a non-bullet paragraph eats into the first line's width and shifts its
+ *  start right. Two cases resolve to 0:
+ *   - a BULLETED paragraph: `indent` is the marker's hanging gutter, positioned
+ *     separately by the bullet/textX geometry (`bulletX = textX + raw indentPx`),
+ *     so it does not reduce the text's first-line width here;
+ *   - a NEGATIVE indent on a NON-bullet paragraph: clamped to 0. (Known gap:
+ *     §21.1.2.2.7 would place such a first line left of marL; honoring that
+ *     leftward overhang into the marL gutter is unimplemented. Clamping keeps
+ *     the wrap budget and the draw offset in agreement rather than split-brain.)
+ *  Shared by the spAutoFit measurement ({@link naturalWidthExceedsBbox}), the
+ *  wrap budget ({@link layoutParagraph}) and the draw-side `textXOffset`, so the
+ *  three paths can never disagree. */
 function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
   return hasBullet ? 0 : Math.max(0, indentPx);
 }
@@ -2170,6 +2175,9 @@ export function renderTextBody(
       ? (bw - lPad - rPad - (numCol - 1) * spcColPx) / numCol
       : bw - lPad - rPad;
     const textX    = bx + lPad + marLPx;
+    // The marker seats at the RAW (signed) indent — a hanging gutter is negative,
+    // so this is deliberately NOT routed through firstLineIndentPxFor (which is
+    // the first-line TEXT shift, clamped ≥ 0). Keep them distinct.
     const bulletX  = bx + lPad + marLPx + indentPx;
     const textMaxW = colWidth - marLPx - marRPx;
 

@@ -8,8 +8,8 @@ import type { TextRunData } from '@silurus/ooxml-core';
 // justify region by the indent. The wrap/layout pass must reduce the FIRST
 // line's wrap budget by the same amount, otherwise the first line wraps too
 // late and overruns the right margin (marR). Continuation lines keep the full
-// width. This mirrors willTextOverflow's `textMaxW - firstLineIndent` and the
-// draw-side `textMaxW - textXOffset`, and matches xlsx PR #620.
+// width. This mirrors naturalWidthExceedsBbox's `textMaxW - firstLineIndent`
+// and the draw-side `textMaxW - textXOffset`, and matches xlsx PR #620.
 
 function mockCtx() {
   let font = '';
