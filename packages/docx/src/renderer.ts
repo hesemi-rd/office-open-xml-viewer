@@ -7647,14 +7647,26 @@ function drawParaBorders(
  *  style, color, size, and space. A `null`/absent edge equals another absent
  *  edge but differs from any present edge. Two paragraphs with NO borders are
  *  not a bordered run (we never merge unbordered paragraphs), so the caller
- *  gates on "both have a non-empty borders object" before calling this. */
+ *  gates on "both have a non-empty borders object" before calling this.
+ *
+ *  A `none`-style edge paints nothing, so for matching it is EQUIVALENT to an
+ *  absent edge: an explicitly-cleared edge (`<w:bottom w:val="nil"/>`, parsed as a
+ *  present `style:"none"` edge so it can override an inherited one — nil/none are
+ *  normalized to "none" by parse_edge) and an omitted edge have the same effective
+ *  border, and §17.3.1.7 compares effective borders. Normalize both to `null`
+ *  before comparing — matching `drawEdge`/`hasAnyBorderEdge`, which also key on
+ *  `style === 'none'`. */
 function sameParaEdge(a: ParaBorderEdge | null, b: ParaBorderEdge | null): boolean {
-  if (a == null || b == null) return a == null && b == null;
+  const eff = (e: ParaBorderEdge | null): ParaBorderEdge | null =>
+    e == null || e.style === 'none' ? null : e;
+  const ea = eff(a);
+  const eb = eff(b);
+  if (ea == null || eb == null) return ea == null && eb == null;
   return (
-    a.style === b.style &&
-    a.width === b.width &&
-    (a.space ?? 0) === (b.space ?? 0) &&
-    (a.color ?? null) === (b.color ?? null)
+    ea.style === eb.style &&
+    ea.width === eb.width &&
+    (ea.space ?? 0) === (eb.space ?? 0) &&
+    (ea.color ?? null) === (eb.color ?? null)
   );
 }
 

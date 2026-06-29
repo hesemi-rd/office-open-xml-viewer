@@ -659,13 +659,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
         // box rather than replacing it wholesale: a level that names only
         // `<w:bottom>` keeps the inherited top/left/right/between. (Contrast
         // `frame_pr` below, §17.3.1.11 — one grouped element, replaced wholesale.)
-        //
-        // LIMITATION: an EXPLICIT `<w:bottom w:val="nil"/>` meant to CLEAR an
-        // inherited edge currently parses to `None` (parse_para_fmt collapses
-        // nil/none → None), so it inherits instead of removing the edge.
-        // Distinguishing "omitted" from "explicit nil" needs a parser change and is
-        // tracked separately; the common cases (a full pBdr, or none inherited) are
-        // unaffected, and this strictly improves partial overrides.
+        // An EXPLICIT `<w:bottom w:val="nil"/>` is a present "cleared" edge (style
+        // "none", emitted by parse_edge — distinct from an OMITTED edge which is
+        // `None` and inherits), so it overrides here and removes the inherited edge.
         let dst_b = dst.para_borders.get_or_insert_with(Default::default);
         if src_b.top.is_some() {
             dst_b.top = src_b.top.clone();
@@ -971,10 +967,23 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     if let Some(pbdr) = child_w(ppr, "pBdr") {
         use crate::types::{ParaBorderEdge, ParagraphBorders};
         let parse_edge = |name: &str| -> Option<ParaBorderEdge> {
+            // An OMITTED edge element → None (it inherits from the style hierarchy,
+            // §17.3.1.7). An edge element that IS present but specifies `val="nil"`
+            // or `val="none"` is NOT omitted: it explicitly says "no border", so it
+            // must CLEAR an inherited edge rather than inherit it. Keep it as a
+            // present "cleared" edge (style normalized to "none" — nil/none are
+            // synonyms) so the per-edge merge in `apply_para` overrides the inherited
+            // edge; the renderer treats a "none" edge as no-paint and as equivalent
+            // to an absent edge for border-box matching.
             let node = child_w(pbdr, name)?;
             let style = attr_w(node, "val").unwrap_or_else(|| "none".to_string());
             if style == "none" || style == "nil" {
-                return None;
+                return Some(ParaBorderEdge {
+                    style: "none".to_string(),
+                    color: None,
+                    width: 0.0,
+                    space: 0.0,
+                });
             }
             // §17.3.4 CT_Border: sz is in eighths of a point; space in points.
             // Neither has a normative default when the attribute is absent (it is
@@ -1450,6 +1459,55 @@ mod tests {
         let b = base.para_borders.expect("borders present");
         assert!(b.bottom.is_some(), "direct bottom present");
         assert!(b.top.is_none() && b.left.is_none() && b.right.is_none());
+    }
+
+    #[test]
+    fn explicit_nil_edge_is_kept_distinct_from_omitted() {
+        // §17.3.1.7: only an OMITTED edge inherits. An EXPLICIT `<w:bottom
+        // w:val="nil"/>` (or "none") is PRESENT and specifies "no border", so it
+        // must survive parsing as a distinct "cleared" edge (style "none") rather
+        // than collapse to None (which is reserved for an omitted edge that
+        // inherits). nil/none are synonyms → normalized to "none".
+        let fmt = para_fmt_from(r#"<w:pBdr><w:bottom w:val="nil"/></w:pBdr>"#);
+        let b = fmt
+            .para_borders
+            .expect("an explicit-nil edge keeps the pBdr alive");
+        let bottom = b
+            .bottom
+            .expect("explicit nil bottom is a present 'cleared' edge");
+        assert_eq!(bottom.style, "none", "nil normalized to none");
+        // The OMITTED edges inherit → None.
+        assert!(b.top.is_none(), "omitted top stays None (inherits)");
+        assert!(b.left.is_none() && b.right.is_none());
+    }
+
+    #[test]
+    fn explicit_nil_edge_clears_an_inherited_edge() {
+        // A level with a full box; a child sets only `<w:bottom w:val="nil"/>` to
+        // REMOVE the inherited bottom. The other inherited edges survive (per-edge),
+        // and the bottom is cleared (becomes a "none" edge), NOT inherited.
+        let mut base = para_fmt_from(
+            r#"<w:pBdr>
+                 <w:top w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:left w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:bottom w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:right w:val="single" w:sz="8" w:color="FF0000"/>
+               </w:pBdr>"#,
+        );
+        let direct = para_fmt_from(r#"<w:pBdr><w:bottom w:val="nil"/></w:pBdr>"#);
+        apply_para(&mut base, &direct);
+        let b = base.para_borders.expect("borders present");
+        assert!(
+            b.top.is_some() && b.left.is_some() && b.right.is_some(),
+            "other edges kept"
+        );
+        let bottom = b
+            .bottom
+            .expect("bottom is the explicit cleared edge, not None");
+        assert_eq!(
+            bottom.style, "none",
+            "inherited bottom was CLEARED, not kept"
+        );
     }
 
     #[test]
