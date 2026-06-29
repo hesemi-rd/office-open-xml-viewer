@@ -2750,11 +2750,19 @@ export function renderTextBody(
           paintHighlight(ctx, tabPenX, baseline, hlW, seg.sizePx, seg.highlight, seg.color);
         }
         if (tabLs > 0 && seg.text.length > 1) {
-          let cx = tabPenX;
-          for (const ch of seg.text) {
-            ctx.fillText(ch, cx, baseline);
-            cx += ctx.measureText(ch).width + tabLs;
-          }
+          // rPr @spc (§21.1.2.3.x): draw the whole CONTEXTUALLY-shaped string in
+          // ONE fillText with canvas letterSpacing, mirroring drawWithFont (PR
+          // #627) / docGrid (docx #626). The old per-glyph `measure(ch)+tabLs`
+          // summed ISOLATED advances and overran the contextual box `tabSegW` at
+          // 約物半角 punctuation (opening brackets collapse to half-width only in
+          // context), pulling later glyphs into the next tab segment. ctx.
+          // letterSpacing keeps the drawn advance == measure(seg.text)[contextual]
+          // + tabLs·codePointCount == tabSegW.
+          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const prev = lctx.letterSpacing;
+          try { lctx.letterSpacing = `${tabLs}px`; } catch { /* older engines */ }
+          ctx.fillText(seg.text, tabPenX, baseline);
+          try { lctx.letterSpacing = prev; } catch { /* ignore */ }
         } else {
           ctx.fillText(seg.text, tabPenX, baseline);
         }
