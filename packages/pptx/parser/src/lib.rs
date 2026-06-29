@@ -2987,7 +2987,7 @@ struct LayoutPlaceholders {
     by_type_level_sizes: HashMap<String, LevelFontSizes>,
     /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) per
     /// placeholder idx — what a paragraph with no own `marL`/`marR`/`indent`
-    /// inherits from the authored list-style cascade (ECMA-376 §21.1.2.4.7),
+    /// inherits from the authored list-style cascade (ECMA-376 §21.1.2.4.13),
     /// used as the fallback before PowerPoint's hardcoded implicit defaults.
     by_idx_level_indents: HashMap<u32, LevelIndents>,
     /// Per-list-level paragraph indents per placeholder type.
@@ -3502,7 +3502,7 @@ fn merge_level_sizes(primary: &LevelFontSizes, fallback: &LevelFontSizes) -> Lev
 }
 
 /// Per-list-level paragraph indents (EMU) — the `marL`/`marR`/`indent` attributes
-/// of a `<a:lvlNpPr>` (ECMA-376 §21.1.2.4.7; `lvlNpPr` is a
+/// of a `<a:lvlNpPr>` (ECMA-376 §21.1.2.4.13; `lvlNpPr` is a
 /// `CT_TextParagraphProperties`, so these are attributes ON the level element
 /// itself, exactly like a paragraph's own `<a:pPr>`). Each axis is `Option` so it
 /// inherits independently: a level that sets only `marL` leaves `marR`/`indent`
@@ -3836,8 +3836,10 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
 /// keyed by ph_type. Mirrors `parse_master_level_font_sizes` exactly (same per-shape
 /// lstStyle then `txStyles` tiers via `MASTER_TXSTYLE_PH_TYPES`): a master body
 /// `<a:lvlNpPr@marL>` is what a slide body paragraph with no own `marL` inherits
-/// (ECMA-376 §21.1.2.4.7). No presentation `defaultTextStyle` tier — kept at parity
-/// with font sizes, which don't read it either.
+/// (ECMA-376 §21.1.2.4.13). KNOWN SHARED GAP: no presentation `defaultTextStyle`
+/// tier (§19.2.1.8, the lowest authored fallback) — the parser reads it for neither
+/// indents nor font sizes nor bullets, so this stays at parity rather than adding a
+/// tier only here; closing it is a separate cross-cutting change.
 fn parse_master_level_indents(master_xml: &str) -> HashMap<String, LevelIndents> {
     let mut map: HashMap<String, LevelIndents> = HashMap::new();
     let doc = match roxmltree::Document::parse(master_xml) {
@@ -4219,7 +4221,7 @@ fn parse_layout_placeholders(
             .map(extract_level_font_sizes)
             .unwrap_or([None; 9]);
         // Per-level indents (marL/marR/indent) from the layout placeholder's own
-        // lstStyle, the inherited list-indent cascade (ECMA-376 §21.1.2.4.7).
+        // lstStyle, the inherited list-indent cascade (ECMA-376 §21.1.2.4.13).
         let layout_level_indents: LevelIndents = child(sp, "txBody")
             .map(extract_level_indents)
             .unwrap_or_default();
@@ -4617,7 +4619,7 @@ fn parse_text_body(
     // Effective per-list-level indents: this shape's own lstStyle wins per
     // axis/level, else the layout/master inherited per-level indents. A paragraph
     // that omits marL/marR/indent picks them by `lvl` from this cascade before
-    // falling back to PowerPoint's hardcoded implicit defaults (§21.1.2.4.7).
+    // falling back to PowerPoint's hardcoded implicit defaults (§21.1.2.4.13).
     let own_level_indents = extract_level_indents(tx_body);
     let effective_level_indents = merge_level_indents(&own_level_indents, &inherited_level_indents);
     // Effective per-level bullets: own lstStyle wins per level, else inherited
@@ -4898,7 +4900,7 @@ fn parse_paragraph(
 
     // marL / marR / indent resolve per axis: direct `<a:pPr>` attribute wins,
     // else the authored list-style level cascade (`level_indents`, from the
-    // shape/layout/master lstStyle per ECMA-376 §21.1.2.4.7), else PowerPoint's
+    // shape/layout/master lstStyle per ECMA-376 §21.1.2.4.13), else PowerPoint's
     // hardcoded implicit list defaults:
     //   Bullet paragraphs:  marL = (lvl+1)*342900, indent = -342900 (hanging)
     //   Plain paragraphs:   marL = lvl*457200 (matches presentation.xml defaultTextStyle)
@@ -6782,7 +6784,7 @@ fn parse_shape(
         [None; 9]
     };
     // Per-level paragraph indents (marL/marR/indent) a paragraph inherits when it
-    // omits them (ECMA-376 §21.1.2.4.7): the layout/master placeholder cascade.
+    // omits them (ECMA-376 §21.1.2.4.13): the layout/master placeholder cascade.
     let inherited_level_indents: LevelIndents = if ph_node.is_some() {
         lph.lookup_level_indents(&ph_type, ph_idx)
     } else {
@@ -10827,7 +10829,7 @@ mod tests {
         assert_eq!(merged[2], Some(20.0)); // only fallback
     }
 
-    /// ECMA-376 §21.1.2.4.7 — `<a:lvlNpPr>` is a `CT_TextParagraphProperties`,
+    /// ECMA-376 §21.1.2.4.13 — `<a:lvlNpPr>` is a `CT_TextParagraphProperties`,
     /// so `marL`/`marR`/`indent` are attributes ON the level element itself.
     /// `parse_master_level_indents` must surface the authored per-level values
     /// (keyed by body/""/obj for bodyStyle) and merge per-axis: a level that
@@ -10883,7 +10885,7 @@ mod tests {
         assert_eq!(merged[1].mar_l, Some(300)); // only fallback
     }
 
-    /// ECMA-376 §21.1.2.4.7 cascade end-to-end: a paragraph whose body lstStyle
+    /// ECMA-376 §21.1.2.4.13 cascade end-to-end: a paragraph whose body lstStyle
     /// authors per-level `marL`/`indent` and whose own `<a:pPr>` omits them must
     /// resolve to the AUTHORED level values (not the hardcoded implicit
     /// `(lvl+1)*342900` / `-342900`). A direct `<a:pPr marL=...>` still wins.
@@ -10955,6 +10957,66 @@ mod tests {
         assert_eq!(implicit.mar_l, 0, "implicit marL default for plain lvl0");
         assert_eq!(implicit.mar_r, 0, "implicit marR default");
         assert_eq!(implicit.indent, 0, "implicit indent default for plain lvl0");
+    }
+
+    /// ECMA-376 §21.1.2.4.13 cross-tier, per-axis inheritance: when a layout
+    /// placeholder's own `lstStyle` and the master `txStyles` each author a
+    /// DIFFERENT axis of the same level, `parse_layout_placeholders` must merge them
+    /// per axis (layout wins per axis, master fills the rest) and expose the result
+    /// through `lookup_level_indents`. This exercises the actual layout↔master
+    /// wiring, not just `merge_level_indents` in isolation.
+    #[test]
+    fn layout_over_master_level_indents_merge_per_axis() {
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+
+        // Master authors only marL on the body level; layout authors only indent.
+        let mut master_indents: HashMap<String, LevelIndents> = HashMap::new();
+        let mut body: LevelIndents = Default::default();
+        body[0].mar_l = Some(1_000_000);
+        master_indents.insert("body".to_string(), body);
+
+        let layout = r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree>
+            <p:sp>
+              <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+              <p:spPr/>
+              <p:txBody><a:lstStyle><a:lvl1pPr indent="-111111"/></a:lstStyle><a:p/></p:txBody>
+            </p:sp>
+          </p:spTree></p:cSld>
+        </p:sldLayout>"#;
+
+        let lph = parse_layout_placeholders(
+            layout,
+            &HashMap::new(),
+            &HashMap::new(),
+            &master_indents,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            &HashMap::new(),
+            &mut zip,
+        );
+
+        let li = lph.lookup_level_indents("body", None);
+        assert_eq!(
+            li[0].indent,
+            Some(-111_111),
+            "indent must come from the LAYOUT lstStyle (primary tier)"
+        );
+        assert_eq!(
+            li[0].mar_l,
+            Some(1_000_000),
+            "marL must fall back to the MASTER per axis (layout left it unset)"
+        );
     }
 
     /// PowerPoint stores equations as `a14:m` inside `mc:AlternateContent`
