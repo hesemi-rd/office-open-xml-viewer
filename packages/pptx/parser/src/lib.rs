@@ -2985,6 +2985,13 @@ struct LayoutPlaceholders {
     by_idx_level_sizes: HashMap<u32, LevelFontSizes>,
     /// Per-list-level default font sizes (pt) per placeholder type.
     by_type_level_sizes: HashMap<String, LevelFontSizes>,
+    /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) per
+    /// placeholder idx — what a paragraph with no own `marL`/`marR`/`indent`
+    /// inherits from the authored list-style cascade (ECMA-376 §21.1.2.4.7),
+    /// used as the fallback before PowerPoint's hardcoded implicit defaults.
+    by_idx_level_indents: HashMap<u32, LevelIndents>,
+    /// Per-list-level paragraph indents per placeholder type.
+    by_type_level_indents: HashMap<String, LevelIndents>,
     /// Per-list-level inherited bullet (buChar/buAutoNum/buNone) per placeholder
     /// idx — what a paragraph with no explicit bullet inherits (ECMA-376 §19.7.10).
     by_idx_level_bullets: HashMap<u32, LevelBullets>,
@@ -3113,6 +3120,30 @@ impl LayoutPlaceholders {
                 }
             })
             .unwrap_or([None; 9])
+    }
+
+    /// Per-list-level inherited paragraph indents (lvl1..lvl9). Same idx-strict
+    /// resolution as `lookup_level_font_sizes`. All-default (every axis None) when
+    /// the placeholder has no authored per-level indent.
+    fn lookup_level_indents(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelIndents {
+        if let Some(i) = ph_idx {
+            return self
+                .by_idx_level_indents
+                .get(&i)
+                .copied()
+                .unwrap_or_default();
+        }
+        self.by_type_level_indents
+            .get(ph_type)
+            .copied()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_level_indents.get("").copied()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     }
 
     /// Per-list-level inherited bullets (lvl1..lvl9). Same idx-strict resolution as
@@ -3470,6 +3501,64 @@ fn merge_level_sizes(primary: &LevelFontSizes, fallback: &LevelFontSizes) -> Lev
     out
 }
 
+/// Per-list-level paragraph indents (EMU) — the `marL`/`marR`/`indent` attributes
+/// of a `<a:lvlNpPr>` (ECMA-376 §21.1.2.4.7; `lvlNpPr` is a
+/// `CT_TextParagraphProperties`, so these are attributes ON the level element
+/// itself, exactly like a paragraph's own `<a:pPr>`). Each axis is `Option` so it
+/// inherits independently: a level that sets only `marL` leaves `marR`/`indent`
+/// `None` and a lower-priority tier supplies them.
+#[derive(Clone, Copy, Default)]
+struct LevelIndent {
+    mar_l: Option<i64>,
+    mar_r: Option<i64>,
+    indent: Option<i64>,
+}
+type LevelIndents = [LevelIndent; 9];
+
+/// Read `<a:lvlNpPr@marL/@marR/@indent>` (EMU) for levels 1..9 from a node that
+/// holds `<a:lvlNpPr>` children — a txBody's `<a:lstStyle>` or a master
+/// `<p:txStyles>` style node. Mirrors `read_level_font_sizes`, but the values are
+/// attributes of the `lvlNpPr` element itself (not of a `<a:defRPr>` child).
+fn read_level_indents(list_style: roxmltree::Node<'_, '_>) -> LevelIndents {
+    let mut out: LevelIndents = Default::default();
+    for (lvl, slot) in out.iter_mut().enumerate() {
+        let tag = format!("lvl{}pPr", lvl + 1);
+        if let Some(lp) = list_style
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == tag)
+        {
+            slot.mar_l = attr_i64(&lp, "marL");
+            slot.mar_r = attr_i64(&lp, "marR");
+            slot.indent = attr_i64(&lp, "indent");
+        }
+    }
+    out
+}
+
+/// Per-level indents from a txBody's own `<a:lstStyle>`.
+fn extract_level_indents(tx_body: roxmltree::Node<'_, '_>) -> LevelIndents {
+    child(tx_body, "lstStyle")
+        .map(read_level_indents)
+        .unwrap_or_default()
+}
+
+/// True when any level carries any indent axis (avoids storing all-None arrays).
+fn has_any_level_indent(s: &LevelIndents) -> bool {
+    s.iter()
+        .any(|li| li.mar_l.is_some() || li.mar_r.is_some() || li.indent.is_some())
+}
+
+/// Per-level, per-axis merge: `primary[lvl].x` wins, else `fallback[lvl].x`.
+fn merge_level_indents(primary: &LevelIndents, fallback: &LevelIndents) -> LevelIndents {
+    let mut out: LevelIndents = Default::default();
+    for lvl in 0..9 {
+        out[lvl].mar_l = primary[lvl].mar_l.or(fallback[lvl].mar_l);
+        out[lvl].mar_r = primary[lvl].mar_r.or(fallback[lvl].mar_r);
+        out[lvl].indent = primary[lvl].indent.or(fallback[lvl].indent);
+    }
+    out
+}
+
 /// Per-list-level bullet definitions (index 0..=8 → lvl1pPr..lvl9pPr).
 /// `None` where the level's `<a:lvlNpPr>` declares no `buChar`/`buAutoNum`/`buNone`
 /// (so the value is still inherited from a lower-priority style tier).
@@ -3734,6 +3823,59 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
                 if has_any_level_size(&sizes) {
                     for ph_type in *ph_types {
                         map.entry(ph_type.to_string()).or_insert(sizes);
+                    }
+                }
+            }
+        }
+    }
+
+    map
+}
+
+/// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) from the master,
+/// keyed by ph_type. Mirrors `parse_master_level_font_sizes` exactly (same per-shape
+/// lstStyle then `txStyles` tiers via `MASTER_TXSTYLE_PH_TYPES`): a master body
+/// `<a:lvlNpPr@marL>` is what a slide body paragraph with no own `marL` inherits
+/// (ECMA-376 §21.1.2.4.7). No presentation `defaultTextStyle` tier — kept at parity
+/// with font sizes, which don't read it either.
+fn parse_master_level_indents(master_xml: &str) -> HashMap<String, LevelIndents> {
+    let mut map: HashMap<String, LevelIndents> = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+
+    // Per-shape lstStyle first (more specific).
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            if let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    let indents = extract_level_indents(tx_body);
+                    if has_any_level_indent(&indents) {
+                        map.entry(ph_type).or_insert(indents);
+                    }
+                }
+            }
+        }
+    }
+
+    // txStyles fallback.
+    if let Some(tx_styles) = child(root, "txStyles") {
+        let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
+        for (style_name, ph_types) in style_ph_map {
+            if let Some(style_node) = child(tx_styles, style_name) {
+                let indents = read_level_indents(style_node);
+                if has_any_level_indent(&indents) {
+                    for ph_type in *ph_types {
+                        map.entry(ph_type.to_string()).or_insert(indents);
                     }
                 }
             }
@@ -4011,6 +4153,7 @@ fn parse_layout_placeholders(
     layout_xml: &str,
     master_font_sizes: &HashMap<String, f64>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
     master_anchors: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
@@ -4075,6 +4218,11 @@ fn parse_layout_placeholders(
         let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
             .map(extract_level_font_sizes)
             .unwrap_or([None; 9]);
+        // Per-level indents (marL/marR/indent) from the layout placeholder's own
+        // lstStyle, the inherited list-indent cascade (ECMA-376 §21.1.2.4.7).
+        let layout_level_indents: LevelIndents = child(sp, "txBody")
+            .map(extract_level_indents)
+            .unwrap_or_default();
         // Per-level bullets from the layout placeholder's own lstStyle. A
         // level's `<a:buBlip>` embed (§21.1.2.4.2) resolves against the layout's
         // rels + part directory, mirroring the layout-spPr blipFill above.
@@ -4178,6 +4326,16 @@ fn parse_layout_placeholders(
                 if has_any_level_size(&level_sizes) {
                     lph.by_idx_level_sizes.entry(idx).or_insert(level_sizes);
                 }
+                // Per-level indents: layout lstStyle wins per axis/level, else master.
+                let level_indents = merge_level_indents(
+                    &layout_level_indents,
+                    master_level_indents
+                        .get(&ph_type)
+                        .unwrap_or(&Default::default()),
+                );
+                if has_any_level_indent(&level_indents) {
+                    lph.by_idx_level_indents.entry(idx).or_insert(level_indents);
+                }
                 // Per-level bullets: layout lstStyle wins per level, else master.
                 let empty_bul = empty_level_bullets();
                 let level_bullets = merge_level_bullets(
@@ -4224,6 +4382,17 @@ fn parse_layout_placeholders(
                 lph.by_type_level_sizes
                     .entry(ph_type.clone())
                     .or_insert(type_level_sizes);
+            }
+            let type_level_indents = merge_level_indents(
+                &layout_level_indents,
+                master_level_indents
+                    .get(&ph_type)
+                    .unwrap_or(&Default::default()),
+            );
+            if has_any_level_indent(&type_level_indents) {
+                lph.by_type_level_indents
+                    .entry(ph_type.clone())
+                    .or_insert(type_level_indents);
             }
             let empty_bul_t = empty_level_bullets();
             let type_level_bullets = merge_level_bullets(
@@ -4317,6 +4486,7 @@ fn parse_text_body(
     rels: &HashMap<String, String>,
     inherited_font_size: Option<f64>,
     inherited_level_font_sizes: LevelFontSizes,
+    inherited_level_indents: LevelIndents,
     inherited_level_bullets: &LevelBullets,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
@@ -4444,6 +4614,12 @@ fn parse_text_body(
     // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
     let own_level_sizes = extract_level_font_sizes(tx_body);
     let effective_level_sizes = merge_level_sizes(&own_level_sizes, &inherited_level_font_sizes);
+    // Effective per-list-level indents: this shape's own lstStyle wins per
+    // axis/level, else the layout/master inherited per-level indents. A paragraph
+    // that omits marL/marR/indent picks them by `lvl` from this cascade before
+    // falling back to PowerPoint's hardcoded implicit defaults (§21.1.2.4.7).
+    let own_level_indents = extract_level_indents(tx_body);
+    let effective_level_indents = merge_level_indents(&own_level_indents, &inherited_level_indents);
     // Effective per-level bullets: own lstStyle wins per level, else inherited
     // layout/master. A paragraph with no explicit bullet resolves its marker (and
     // its hanging-indent defaults) from this by `lvl` (ECMA-376 §19.7.10).
@@ -4514,6 +4690,7 @@ fn parse_text_body(
                 body_default_space_after,
                 body_default_line_spacing,
                 &effective_level_sizes,
+                &effective_level_indents,
                 &effective_level_bullets,
                 zip,
             )
@@ -4653,6 +4830,7 @@ fn parse_paragraph(
     body_default_space_after: Option<i64>,
     body_default_line_spacing: Option<f64>,
     level_font_sizes: &LevelFontSizes,
+    level_indents: &LevelIndents,
     level_bullets: &LevelBullets,
     zip: &mut PptxZip<'_>,
 ) -> Paragraph {
@@ -4718,19 +4896,30 @@ fn parse_paragraph(
         Bullet::Char { .. } | Bullet::AutoNum { .. } | Bullet::Blip { .. }
     );
 
-    // marL / indent defaults follow PowerPoint's implicit list style:
+    // marL / marR / indent resolve per axis: direct `<a:pPr>` attribute wins,
+    // else the authored list-style level cascade (`level_indents`, from the
+    // shape/layout/master lstStyle per ECMA-376 §21.1.2.4.7), else PowerPoint's
+    // hardcoded implicit list defaults:
     //   Bullet paragraphs:  marL = (lvl+1)*342900, indent = -342900 (hanging)
     //   Plain paragraphs:   marL = lvl*457200 (matches presentation.xml defaultTextStyle)
-    let mar_l = p_pr.and_then(|n| attr_i64(&n, "marL")).unwrap_or_else(|| {
-        if has_bullet {
-            (lvl as i64 + 1) * 342900
-        } else {
-            lvl as i64 * 457200
-        }
-    });
-    let mar_r = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
+    let level_indent = level_indents.get(lvl as usize).copied().unwrap_or_default();
+    let mar_l = p_pr
+        .and_then(|n| attr_i64(&n, "marL"))
+        .or(level_indent.mar_l)
+        .unwrap_or_else(|| {
+            if has_bullet {
+                (lvl as i64 + 1) * 342900
+            } else {
+                lvl as i64 * 457200
+            }
+        });
+    let mar_r = p_pr
+        .and_then(|n| attr_i64(&n, "marR"))
+        .or(level_indent.mar_r)
+        .unwrap_or(0);
     let indent = p_pr
         .and_then(|n| attr_i64(&n, "indent"))
+        .or(level_indent.indent)
         .unwrap_or(if has_bullet { -342900 } else { 0 });
 
     let space_before = p_pr
@@ -6592,6 +6781,13 @@ fn parse_shape(
     } else {
         [None; 9]
     };
+    // Per-level paragraph indents (marL/marR/indent) a paragraph inherits when it
+    // omits them (ECMA-376 §21.1.2.4.7): the layout/master placeholder cascade.
+    let inherited_level_indents: LevelIndents = if ph_node.is_some() {
+        lph.lookup_level_indents(&ph_type, ph_idx)
+    } else {
+        Default::default()
+    };
 
     // ECMA-376 §19.3.1.21 / §20.1.4.2: a slide-level `<p:cNvSpPr txBox="1"/>`
     // marks the shape as a true text box, which means the theme's
@@ -6620,6 +6816,7 @@ fn parse_shape(
             rels,
             inherited_font_size,
             inherited_level_font_sizes,
+            inherited_level_indents,
             &inherited_level_bullets,
             inherited_bold,
             inherited_italic,
@@ -7489,6 +7686,7 @@ fn parse_table_cell(
             rels,
             None,
             [None; 9],
+            Default::default(), // inherited_level_indents
             &empty_level_bullets(),
             None,
             None,
@@ -7591,6 +7789,7 @@ fn parse_slide(
         master_bg,
         master_font_sizes,
         master_level_font_sizes,
+        master_level_indents,
         master_level_bullets,
         master_anchors,
         master_transforms,
@@ -7629,6 +7828,7 @@ fn parse_slide(
             x,
             master_font_sizes,
             master_level_font_sizes,
+            master_level_indents,
             master_level_bullets,
             master_anchors,
             master_transforms,
@@ -8737,6 +8937,7 @@ struct MasterBundle {
     master_bg: Option<Fill>,
     master_font_sizes: HashMap<String, f64>,
     master_level_font_sizes: HashMap<String, LevelFontSizes>,
+    master_level_indents: HashMap<String, LevelIndents>,
     master_level_bullets: HashMap<String, LevelBullets>,
     master_anchors: HashMap<String, String>,
     master_transforms: HashMap<String, Transform>,
@@ -8842,6 +9043,10 @@ fn build_master_bundle(
         .as_deref()
         .map(parse_master_level_font_sizes)
         .unwrap_or_default();
+    let master_level_indents = master_xml_opt
+        .as_deref()
+        .map(parse_master_level_indents)
+        .unwrap_or_default();
     let master_level_bullets = master_xml_opt
         .as_deref()
         .map(|xml| parse_master_level_bullets(xml, &theme, &master_rels, &master_dir, zip))
@@ -8884,6 +9089,7 @@ fn build_master_bundle(
         master_bg,
         master_font_sizes,
         master_level_font_sizes,
+        master_level_indents,
         master_level_bullets,
         master_anchors,
         master_transforms,
@@ -10621,6 +10827,136 @@ mod tests {
         assert_eq!(merged[2], Some(20.0)); // only fallback
     }
 
+    /// ECMA-376 §21.1.2.4.7 — `<a:lvlNpPr>` is a `CT_TextParagraphProperties`,
+    /// so `marL`/`marR`/`indent` are attributes ON the level element itself.
+    /// `parse_master_level_indents` must surface the authored per-level values
+    /// (keyed by body/""/obj for bodyStyle) and merge per-axis: a level that
+    /// sets only `marL` leaves `marR`/`indent` None so a lower tier supplies them.
+    #[test]
+    fn master_body_style_per_level_indents() {
+        let master = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:bodyStyle>
+              <a:lvl1pPr marL="1000000" indent="-500000"><a:defRPr sz="2800"/></a:lvl1pPr>
+              <a:lvl2pPr marL="1500000"><a:defRPr sz="2400"/></a:lvl2pPr>
+            </p:bodyStyle>
+            <p:titleStyle><a:lvl1pPr marR="123456"><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let m = parse_master_level_indents(master);
+        let body = m.get("body").expect("body level indents");
+        assert_eq!(body[0].mar_l, Some(1_000_000));
+        assert_eq!(body[0].indent, Some(-500_000));
+        assert_eq!(body[0].mar_r, None); // unspecified axis stays None
+        assert_eq!(body[1].mar_l, Some(1_500_000));
+        assert_eq!(body[1].indent, None); // lvl2 omits indent → None
+        assert_eq!(body[2].mar_l, None); // unspecified level
+                                         // body style also keys the empty placeholder type and "obj".
+        assert_eq!(m.get("").unwrap()[0].mar_l, Some(1_000_000));
+        assert_eq!(m.get("obj").unwrap()[1].mar_l, Some(1_500_000));
+        // title style is captured separately.
+        assert_eq!(m.get("title").unwrap()[0].mar_r, Some(123_456));
+    }
+
+    /// Per-axis, per-level merge: `primary[lvl].x` wins, else `fallback[lvl].x`.
+    #[test]
+    fn merge_level_indents_prefers_primary_per_axis() {
+        let primary: LevelIndents = {
+            let mut a: LevelIndents = Default::default();
+            a[0].mar_l = Some(100);
+            a[1].indent = Some(-200);
+            a
+        };
+        let fallback: LevelIndents = {
+            let mut a: LevelIndents = Default::default();
+            a[0].mar_l = Some(999); // loses to primary
+            a[0].mar_r = Some(50); // only fallback
+            a[1].indent = Some(-999); // loses to primary
+            a[1].mar_l = Some(300); // only fallback
+            a
+        };
+        let merged = merge_level_indents(&primary, &fallback);
+        assert_eq!(merged[0].mar_l, Some(100)); // primary wins
+        assert_eq!(merged[0].mar_r, Some(50)); // only fallback
+        assert_eq!(merged[1].indent, Some(-200)); // primary wins
+        assert_eq!(merged[1].mar_l, Some(300)); // only fallback
+    }
+
+    /// ECMA-376 §21.1.2.4.7 cascade end-to-end: a paragraph whose body lstStyle
+    /// authors per-level `marL`/`indent` and whose own `<a:pPr>` omits them must
+    /// resolve to the AUTHORED level values (not the hardcoded implicit
+    /// `(lvl+1)*342900` / `-342900`). A direct `<a:pPr marL=...>` still wins.
+    /// With nothing authored, the implicit default applies (regression guard).
+    #[test]
+    fn pptx_level_indent_inherited_from_lststyle() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        // `lst_style` sets the body lstStyle (the inherited per-level cascade);
+        // `p_pr` is the paragraph's own pPr. Returns the single paragraph.
+        let mut parse_para = |lst_style: &str, p_pr: &str| -> Paragraph {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{lst_style}<p>{p_pr}<r><t>x</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut tb = parse_text_body(
+                doc.root_element(),
+                &theme,
+                &rels,
+                None,
+                [None; 9],
+                Default::default(), // inherited_level_indents
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                ShapeKind::Sp,
+                &mut zip,
+            );
+            tb.paragraphs.remove(0)
+        };
+
+        // (1) Authored level marL/indent inherited when the paragraph omits them.
+        let lst = r#"<lstStyle><lvl1pPr marL="1000000" indent="-500000"/></lstStyle>"#;
+        let inherited = parse_para(lst, "<pPr/>");
+        assert_eq!(
+            inherited.mar_l, 1_000_000,
+            "marL should inherit the authored lvl1pPr value, not the implicit default"
+        );
+        assert_eq!(
+            inherited.indent, -500_000,
+            "indent should inherit the authored lvl1pPr value, not the implicit default"
+        );
+
+        // (2) A direct pPr marL overrides the inherited level value.
+        let overridden = parse_para(lst, r#"<pPr marL="2000000"/>"#);
+        assert_eq!(
+            overridden.mar_l, 2_000_000,
+            "direct pPr marL must win over the inherited level value"
+        );
+        // indent (not set directly) still inherits the level value.
+        assert_eq!(
+            overridden.indent, -500_000,
+            "indent should still inherit when only marL is set directly"
+        );
+
+        // (3) Regression: nothing authored → hardcoded implicit default for a
+        // plain (non-bullet) paragraph at lvl 0: marL=0, marR=0, indent=0.
+        let implicit = parse_para("", "<pPr/>");
+        assert_eq!(implicit.mar_l, 0, "implicit marL default for plain lvl0");
+        assert_eq!(implicit.mar_r, 0, "implicit marR default");
+        assert_eq!(implicit.indent, 0, "implicit indent default for plain lvl0");
+    }
+
     /// PowerPoint stores equations as `a14:m` inside `mc:AlternateContent`
     /// (ECMA-376 §22.1 OMML + 2010 drawing ext). The Choice branch holds the
     /// live `m:oMathPara`; the Fallback (a rasterized picture/text) must be
@@ -10858,8 +11194,9 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
-                None,      // inherited_font_size
-                [None; 9], // inherited_level_font_sizes
+                None,               // inherited_font_size
+                [None; 9],          // inherited_level_font_sizes
+                Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
                 None, // inherited_bold
                 None, // inherited_italic
@@ -10932,6 +11269,7 @@ mod tests {
                 &rels,
                 None,
                 [None; 9],
+                Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
                 None,
                 None,
