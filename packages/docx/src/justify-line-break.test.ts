@@ -67,11 +67,13 @@ function textRun(text: string): DocxTextRun {
 
 type DocRun = DocParagraph['runs'][number];
 
-/** A `both`-justified paragraph: a short run, a MANUAL line break, then a long
- *  run. The first line (the short run) ends at the break — it must NOT justify. */
-function breakPara(): BodyElement {
+/** A justified paragraph: a short run, a MANUAL line break, then a long run.
+ *  The first line (the short run) ends at the break. For `both` it must NOT
+ *  justify (logical line end → left-aligned); for `distribute` it STILL gets
+ *  filled to the margin (§17.18.44, see the distribute test below). */
+function breakPara(alignment: DocParagraph['alignment'] = 'both'): BodyElement {
   const p: DocParagraph = {
-    alignment: 'both',
+    alignment,
     indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
     runs: [
@@ -136,6 +138,45 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     // Inter-glyph advances stay at the natural pitch (~FONT_PX), not spread wide.
     for (let i = 1; i < line.length; i++) {
       expect(line[i].x - line[i - 1].x).toBeLessThan(FONT_PX * 1.5);
+    }
+  });
+
+  // ECMA-376 §17.18.44 (ST_Jc): `distribute` justifies EVERY line — inter-word
+  // AND inter-character — including the paragraph's final line. So unlike `both`
+  // (which leaves a logical line end left-aligned), a `distribute` line that ends
+  // at a manual `<w:br/>` is STILL stretched to the margin. The renderer encodes
+  // this as the `stretchLastLine = (alignment === 'distribute')` carve-out:
+  //   applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)
+  // This test guards that carve-out: with the SAME content as the `both` case
+  // above, the break-terminated first line must spread toward the right margin.
+  it('still stretches the break-terminated first line under distribute', async () => {
+    const calls = await render([breakPara('distribute')], section());
+    expect(calls.length).toBeGreaterThan(0);
+
+    const byY = new Map<number, { text: string; x: number }[]>();
+    for (const c of calls) {
+      const key = Math.round(c.y);
+      (byY.get(key) ?? byY.set(key, []).get(key)!).push(c);
+    }
+    const firstY = Math.min(...byY.keys());
+    const line = byY.get(firstY)!.slice().sort((p, q) => p.x - q.x);
+
+    // Same first line "ああああ" (4 glyphs) ended by the break.
+    expect(line.length).toBe(4);
+    expect(line[0].x).toBeLessThan(FONT_PX); // still starts at the left margin
+
+    // Stretched: the last glyph is pushed FAR past its natural end (4 × FONT_PX
+    // = 80px) toward the ~210px right margin. Observed last-glyph x is ~190px
+    // (the 4th of 4 glyphs spread across the ~210px line, cell pitch ~63px).
+    // Threshold 120 sits well above the natural 80px and well below the observed
+    // 190px, so it robustly distinguishes "stretched" from "natural width".
+    const naturalRight = 4 * FONT_PX; // 80px
+    expect(line[3].x).toBeGreaterThan(120);
+    expect(line[3].x).toBeGreaterThan(naturalRight);
+    // Inter-glyph advances are spread WIDE (well beyond the natural pitch),
+    // confirming inter-character distribution on the break-terminated line.
+    for (let i = 1; i < line.length; i++) {
+      expect(line[i].x - line[i - 1].x).toBeGreaterThan(FONT_PX * 1.5);
     }
   });
 });
