@@ -631,6 +631,18 @@ export interface ShapeText {
   /** ECMA-376 §17.3.1.33 `<w:spacing w:after>` of this text-box paragraph, in
    *  pt — reserved BELOW the paragraph. Absent/0 ⇒ no offset. */
   spaceAfter?: number;
+  /** ECMA-376 §17.3.1.12 `<w:ind w:left/@start>` — paragraph left indent (pt).
+   *  Absent/0 ⇒ flush to the box's inner left edge. */
+  indentLeft?: number;
+  /** ECMA-376 §17.3.1.12 `<w:ind w:right/@end>` — paragraph right indent (pt).
+   *  Absent/0 ⇒ flush to the box's inner right edge. */
+  indentRight?: number;
+  /** `<w:ind>` first-line indent (pt, SIGNED: `w:firstLine` positive,
+   *  `w:hanging` negative). A negative value hangs the first line further LEFT
+   *  than the continuation lines (the body renderer honors the sign too — Word
+   *  applies a signed hanging first-line list-independently). Absent/0 ⇒ the
+   *  first line aligns with the continuation lines. */
+  indentFirst?: number;
   /** Zip path of an inline image inside this text-box paragraph
    *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
    *  Absent for a text-only paragraph. */

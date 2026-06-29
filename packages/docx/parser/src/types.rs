@@ -1067,6 +1067,17 @@ pub struct ShapeText {
     /// pt — reserved below the paragraph. 0 when absent.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub space_after: f64,
+    /// ECMA-376 §17.3.1.12 `<w:ind w:left/@start>` — paragraph left indent (pt).
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub indent_left: f64,
+    /// ECMA-376 §17.3.1.12 `<w:ind w:right/@end>` — paragraph right indent (pt).
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub indent_right: f64,
+    /// `<w:ind>` first-line indent (pt, SIGNED: w:firstLine positive, w:hanging
+    /// negative). Mirrors the body renderer, which honors a signed hanging
+    /// first-line indent list-independently (Word's behaviour).
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub indent_first: f64,
     /// Embedded zip path of an inline image living inside this text-box
     /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
     /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved

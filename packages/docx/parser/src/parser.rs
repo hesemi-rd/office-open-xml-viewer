@@ -4045,14 +4045,36 @@ fn extract_simple_paragraph_text(
     let style_id = child_w(p, "pPr")
         .and_then(|ppr| child_w(ppr, "pStyle"))
         .and_then(|s| attr_w(s, "val"));
+    // Style-chain-resolved ParaFmt (incl. docDefaults) — reused for BOTH the
+    // alignment fallback and the indent resolution below (resolve_para is called
+    // once, not per attribute).
+    let style_para = style_map.resolve_para(style_id.as_deref(), None).0;
     let alignment = direct_jc
-        .or_else(|| {
-            style_map
-                .resolve_para(style_id.as_deref(), None)
-                .0
-                .alignment
-        })
+        .or_else(|| style_para.alignment.clone())
         .unwrap_or_else(|| "left".to_string());
+
+    // ECMA-376 §17.3.1.12 — paragraph indentation (left/right/first-line) for the
+    // text-box paragraph, resolved with §17.7.2 precedence (a DIRECT `<w:ind>`
+    // overrides the style chain PER ATTRIBUTE). `parse_para_fmt` reads the
+    // paragraph's OWN `<w:pPr>` (firstLine stored positive, hanging negative —
+    // signed, §17.3.1.12); `style_para` carries the style-chain-resolved indent.
+    // The first-line sign is KEPT (no clamp): a hanging indent is honored exactly
+    // as the docx BODY renderer does (Word honors a signed hanging first-line
+    // list-independently), unlike the pptx/xlsx shape paths which clamp because
+    // they have no list marker to hang.
+    let direct_ind = child_w(p, "pPr").map(parse_para_fmt).unwrap_or_default();
+    let indent_left = direct_ind
+        .indent_left
+        .or(style_para.indent_left)
+        .unwrap_or(0.0);
+    let indent_right = direct_ind
+        .indent_right
+        .or(style_para.indent_right)
+        .unwrap_or(0.0);
+    let indent_first = direct_ind
+        .indent_first
+        .or(style_para.indent_first)
+        .unwrap_or(0.0);
 
     // ECMA-376 §17.3.1.33 — the txbxContent paragraph's own `<w:spacing>` is
     // reserved INSIDE the text box (twips → pt). Word offsets the text down by
@@ -4105,6 +4127,9 @@ fn extract_simple_paragraph_text(
         alignment: normalize_align(&alignment).to_string(),
         space_before,
         space_after,
+        indent_left,
+        indent_right,
+        indent_first,
         image_path,
         mime_type,
         svg_image_path,
@@ -8962,6 +8987,86 @@ mod txbx_inline_image_tests {
         .unwrap();
         assert!((block.space_before - 50.0).abs() < 1e-6);
         assert!((block.space_after - 9.0).abs() < 1e-6);
+    }
+
+    /// ECMA-376 §17.3.1.12 — a text-box paragraph surfaces its own `<w:ind>`
+    /// left/right/first-line indent (twips→pt). first-line is SIGNED:
+    /// `w:firstLine` is positive, `w:hanging` is negative. Absent ⇒ all 0.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_indent() {
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &StyleMap::default(),
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+        // left=720 twips = 36 pt, right=360 = 18 pt, hanging=180 = -9 pt (SIGNED).
+        let hanging = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:pPr><w:ind w:left="720" w:right="360" w:hanging="180"/></w:pPr>
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!((hanging.indent_left - 36.0).abs() < 1e-6);
+        assert!((hanging.indent_right - 18.0).abs() < 1e-6);
+        assert!((hanging.indent_first - -9.0).abs() < 1e-6);
+
+        // firstLine is POSITIVE (a positive first-line indent, not a hang).
+        let first_line = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:pPr><w:ind w:firstLine="240"/></w:pPr>
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!((first_line.indent_first - 12.0).abs() < 1e-6);
+
+        // Absent <w:ind> ⇒ all indents 0.
+        let none = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(none.indent_left, 0.0);
+        assert_eq!(none.indent_right, 0.0);
+        assert_eq!(none.indent_first, 0.0);
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box paragraph's indent resolves through the
+    /// paragraph STYLE chain, then a DIRECT `<w:ind>` overrides it PER ATTRIBUTE.
+    /// Here the style sets left/right/firstLine; the paragraph's direct `<w:ind>`
+    /// overrides ONLY left, so the direct left wins while right/firstLine fall to
+    /// the style.
+    #[test]
+    fn extract_simple_paragraph_text_indent_direct_overrides_style_per_attr() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Indented">
+                <w:pPr><w:ind w:left="720" w:right="360" w:firstLine="240"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr>
+                   <w:pStyle w:val="Indented"/>
+                   <w:ind w:left="1440"/>
+                 </w:pPr>
+                 <w:r><w:t>x</w:t></w:r></w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        // Direct left=1440 twips = 72 pt wins over the style's 36 pt.
+        assert!((block.indent_left - 72.0).abs() < 1e-6);
+        // right/firstLine come from the style (no direct override).
+        assert!((block.indent_right - 18.0).abs() < 1e-6);
+        assert!((block.indent_first - 12.0).abs() < 1e-6);
     }
 
     /// A text-box run with NO `<w:rPr>` at all still inherits the document default

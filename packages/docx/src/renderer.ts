@@ -1,6 +1,6 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
@@ -6309,6 +6309,10 @@ function wrapShapeText(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number,
+  // ECMA-376 §17.3.1.12 — the FIRST line wraps to this width (paraW − firstLine
+  // indent); continuation lines use `maxWidth` (paraW). Defaults to `maxWidth`
+  // so a no-indent caller keeps the original single-width wrap exactly.
+  firstLineWidth: number = maxWidth,
 ): string[] {
   if (!text) return [''];
   if (maxWidth <= 0) return [text];
@@ -6316,10 +6320,14 @@ function wrapShapeText(
 
   const lines: string[] = [];
   let cur = '';
+  // The first line being filled uses firstLineWidth; once a line wraps the
+  // remaining lines use maxWidth.
+  let limit = firstLineWidth;
   for (const tok of tokens) {
-    if (cur !== '' && ctx.measureText(cur + tok).width > maxWidth) {
+    if (cur !== '' && ctx.measureText(cur + tok).width > limit) {
       lines.push(cur.replace(/\s+$/, ''));
       cur = tok.replace(/^\s+/, ''); // a wrapped line never starts with a space
+      limit = maxWidth;
     } else {
       cur += tok;
     }
@@ -6352,6 +6360,10 @@ function wrapShapeRuns(
   maxWidth: number,
   scale: number,
   fontFamilyClasses: Record<string, string>,
+  // ECMA-376 §17.3.1.12 — first line wraps to this width (paraW − firstLine
+  // indent); continuation lines use `maxWidth` (paraW). Defaults to `maxWidth`
+  // so a no-indent caller keeps the original single-width wrap exactly.
+  firstLineWidth: number = maxWidth,
 ): RichToken[][] {
   const tokens: RichToken[] = [];
   for (const run of runs) {
@@ -6369,9 +6381,13 @@ function wrapShapeRuns(
   const lines: RichToken[][] = [];
   let cur: RichToken[] = [];
   let curW = 0;
+  // The first line being filled uses firstLineWidth; once a line wraps the
+  // remaining lines use maxWidth.
+  let limit = firstLineWidth;
   for (const tok of tokens) {
-    if (cur.length > 0 && curW + tok.width > maxWidth) {
+    if (cur.length > 0 && curW + tok.width > limit) {
       lines.push(cur);
+      limit = maxWidth;
       // A wrapped line never starts with a space — drop a leading space token.
       if (tok.text.trim() === '') {
         cur = [];
@@ -6436,34 +6452,55 @@ export function renderShapeText(
   const innerY = y + tIns;
   const innerH = Math.max(0, h - tIns - bIns);
 
+  // ECMA-376 §17.3.1.12 — per-paragraph indent (px). `leftPx`/`rightPx` shrink
+  // the text column from the inner box edges; `firstPx` is the SIGNED first-line
+  // indent (positive = first line further right; negative = first line hangs
+  // LEFT, so its width is WIDER). The body renderer honors the sign the same way
+  // (Word applies a signed hanging first-line list-independently); the shape path
+  // mirrors it rather than clamping. `paraW` is the continuation-line width;
+  // `firstLineW` the first line's. When all indents are 0 ⇒ leftPx=rightPx=
+  // firstPx=0 ⇒ paraW=firstLineW=innerW and regionLeft=innerX (no-op).
+  const indentOf = (b: ShapeText) => {
+    const leftPx = (b.indentLeft ?? 0) * scale;
+    const rightPx = (b.indentRight ?? 0) * scale;
+    const firstPx = (b.indentFirst ?? 0) * scale; // SIGNED
+    const paraW = Math.max(0, innerW - leftPx - rightPx);
+    const firstLineW = Math.max(0, paraW - firstPx);
+    return { leftPx, firstPx, paraW, firstLineW };
+  };
+
   // First pass: lay out each block. Text blocks WRAP to the inner width
   // (ECMA-376 §21.1.2.1.1) — a long title/abstract that exceeds the box width
   // breaks onto multiple lines instead of overflowing the page; image blocks
   // reserve their fitted height. The computed layout drives both vertical
   // anchoring (totalH) and the draw pass (no re-wrapping).
+  type BlockIndent = { leftPx: number; firstPx: number; paraW: number; firstLineW: number };
   type BlockLayout =
-    | { kind: 'image'; fitW: number; fitH: number }
-    | { kind: 'text'; lines: string[]; lineH: number }
-    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[] };
+    | { kind: 'image'; fitW: number; fitH: number; ind: BlockIndent }
+    | { kind: 'text'; lines: string[]; lineH: number; ind: BlockIndent }
+    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[]; ind: BlockIndent };
   const layouts: BlockLayout[] = blocks.map((b) => {
+    const ind = indentOf(b);
     if (b.imagePath) {
-      const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, innerW, scale);
-      return { kind: 'image', fitW, fitH };
+      // The image occupies the FIRST line, so it fits to firstLineW (= paraW −
+      // signed first-line indent), not the full inner width.
+      const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, ind.firstLineW, scale);
+      return { kind: 'image', fitW, fitH, ind };
     }
     // Rich path: a paragraph with explicit per-run formatting lays out as mixed
     // fonts. Each line's height is the tallest run on it × 1.2 (ECMA-376 line
     // box ≈ largest font on the line).
     if (b.runs && b.runs.length > 0) {
-      const lines = wrapShapeRuns(ctx, b.runs, innerW, scale, fontFamilyClasses);
+      const lines = wrapShapeRuns(ctx, b.runs, ind.paraW, scale, fontFamilyClasses, ind.firstLineW);
       const lineHeights = lines.map((toks) => {
         const maxPt = toks.reduce((m, t) => Math.max(m, t.run.fontSizePt), 0);
         return (maxPt > 0 ? maxPt : b.fontSizePt) * scale * 1.2;
       });
-      return { kind: 'rich', lines, lineHeights };
+      return { kind: 'rich', lines, lineHeights, ind };
     }
     const fontPx = b.fontSizePt * scale;
     ctx.font = buildFont(b.bold ?? false, b.italic ?? false, fontPx, b.fontFamily ?? null, fontFamilyClasses);
-    return { kind: 'text', lines: wrapShapeText(ctx, b.text, innerW), lineH: fontPx * 1.2 };
+    return { kind: 'text', lines: wrapShapeText(ctx, b.text, ind.paraW, ind.firstLineW), lineH: fontPx * 1.2, ind };
   });
   const blockHeight = (l: BlockLayout): number => {
     if (l.kind === 'image') return l.fitH;
@@ -6503,18 +6540,23 @@ export function renderShapeText(
     cursorY += gapBefore(i);
 
     if (layout.kind === 'image') {
-      // Inline image inside the text box. Fit to inner width, place
-      // horizontally per the paragraph alignment (figures default to centered),
-      // and advance by the reserved height regardless of whether a bitmap is
-      // present (a missing decode must not shift the rest of the layout).
-      const { fitW, fitH } = layout;
+      // Inline image inside the text box. The image is the paragraph's FIRST
+      // (only) line, so it lives in the first-line region: region-left =
+      // innerX + leftPx + firstPx, region-width = firstLineW (ECMA-376
+      // §17.3.1.12). Place horizontally per the paragraph alignment (figures
+      // default to centered), and advance by the reserved height regardless of
+      // whether a bitmap is present (a missing decode must not shift the rest of
+      // the layout).
+      const { fitW, fitH, ind } = layout;
+      const regionLeft = innerX + ind.leftPx + ind.firstPx;
+      const regionW = ind.firstLineW;
       const bmp = block.imagePath ? images.get(imageKey(block.imagePath)) : undefined;
       if (bmp) {
-        let drawX = innerX + Math.max(0, (innerW - fitW) / 2); // default: centered
+        let drawX = regionLeft + Math.max(0, (regionW - fitW) / 2); // default: centered
         if (block.alignment === 'left' || block.alignment === 'both') {
-          drawX = innerX;
+          drawX = regionLeft;
         } else if (block.alignment === 'right') {
-          drawX = innerX + Math.max(0, innerW - fitW);
+          drawX = regionLeft + Math.max(0, regionW - fitW);
         }
         ctx.drawImage(bmp, drawX, cursorY, fitW, fitH);
       }
@@ -6529,20 +6571,28 @@ export function renderShapeText(
       const edgeFor = (rtl: boolean) =>
         block.alignment === 'distribute' ? 'center' : resolveAlignEdge(block.alignment, rtl);
       ctx.textAlign = 'left';
+      const ind = layout.ind;
       for (let li = 0; li < layout.lines.length; li++) {
         const lineToks = layout.lines[li];
         const lineH = layout.lineHeights[li];
         const lineW = lineToks.reduce((s, t) => s + t.width, 0);
+        // ECMA-376 §17.3.1.12 — align within the per-line INDENTED region: the
+        // first line carries the signed first-line indent, continuation lines do
+        // not. region-left = innerX + leftPx (+ firstPx on the first line);
+        // region-width = firstLineW (first) / paraW (continuation).
+        const isFirstLine = li === 0;
+        const regionLeft = innerX + ind.leftPx + (isFirstLine ? ind.firstPx : 0);
+        const regionW = isFirstLine ? ind.firstLineW : ind.paraW;
         // Base direction (first-strong) from the line's own text, matching the
         // single-format path's per-block resolution but resolved per line.
         const lineText = lineToks.map((t) => t.text).join('');
         const baseRtl = resolveBaseDirection(undefined, lineText) === 'rtl';
         const edge = edgeFor(baseRtl);
-        let tx = innerX;
+        let tx = regionLeft;
         if (edge === 'center') {
-          tx = innerX + Math.max(0, (innerW - lineW) / 2);
+          tx = regionLeft + Math.max(0, (regionW - lineW) / 2);
         } else if (edge === 'right') {
-          tx = innerX + Math.max(0, innerW - lineW);
+          tx = regionLeft + Math.max(0, regionW - lineW);
         }
         // Baseline uses the tallest font on the line (lineH / 1.2 × 0.85).
         const lineMaxFontPx = lineH / 1.2;
@@ -6587,13 +6637,22 @@ export function renderShapeText(
       : resolveAlignEdge(block.alignment, baseRtl);
     ctx.textAlign = 'left';
     ctx.direction = baseRtl ? 'rtl' : 'ltr';
-    for (const line of layout.lines) {
+    const ind = layout.ind;
+    for (let li = 0; li < layout.lines.length; li++) {
+      const line = layout.lines[li];
       const m = ctx.measureText(line);
-      let tx = innerX;
+      // ECMA-376 §17.3.1.12 — align within the per-line INDENTED region: the
+      // first line carries the signed first-line indent, continuation lines do
+      // not (region-left = innerX + leftPx (+ firstPx on the first line);
+      // region-width = firstLineW (first) / paraW (continuation)).
+      const isFirstLine = li === 0;
+      const regionLeft = innerX + ind.leftPx + (isFirstLine ? ind.firstPx : 0);
+      const regionW = isFirstLine ? ind.firstLineW : ind.paraW;
+      let tx = regionLeft;
       if (edge === 'center') {
-        tx = innerX + Math.max(0, (innerW - m.width) / 2);
+        tx = regionLeft + Math.max(0, (regionW - m.width) / 2);
       } else if (edge === 'right') {
-        tx = innerX + Math.max(0, innerW - m.width);
+        tx = regionLeft + Math.max(0, regionW - m.width);
       }
       // Baseline = line top + ascent (approx 0.85 of font size for default fonts).
       const baseline = cursorY + fontPx * 0.85;
