@@ -1747,7 +1747,7 @@ fn parse_paragraph_cond(
     let (indent_left, indent_first) = if let Some(l) = level {
         (
             direct_indent_left.unwrap_or(l.indent_left),
-            direct_indent_first.unwrap_or(-l.tab),
+            direct_indent_first.unwrap_or(l.indent_first),
         )
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
@@ -7427,6 +7427,78 @@ mod footnote_tests {
             (direct_hang.indent_first + 12.0).abs() < 0.01,
             "a direct hanging (240 twips → −12 pt) overrides the level's −18, got {}",
             direct_hang.indent_first
+        );
+    }
+
+    /// ECMA-376 §17.3.1.12 — a numbering level's first-line indent keeps its SIGN:
+    /// `w:firstLine` is a POSITIVE (additional) first-line indent, `w:hanging` a
+    /// NEGATIVE one. A level authored with `w:firstLine` must yield a positive
+    /// paragraph `indent_first`. Regression guard: the level's first-line magnitude
+    /// was stored unsigned (`tab`) and always negated at use-site (`-l.tab`), which
+    /// turned a `firstLine` level into a hanging one.
+    #[test]
+    fn numbering_level_firstline_keeps_positive_sign() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+
+        // numId 4 → a level with a POSITIVE first-line indent (w:firstLine, not w:hanging).
+        let numbering_first = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="30"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:firstLine="360"/></w:pPr></w:lvl></w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="30"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let first = first_para_with(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering_first,
+        );
+        assert!(
+            (first.indent_left - 36.0).abs() < 0.01,
+            "level left=720 ⇒ 36 pt, got {}",
+            first.indent_left
+        );
+        assert!(
+            (first.indent_first - 18.0).abs() < 0.01,
+            "a level w:firstLine=360 is a POSITIVE first-line indent (+18 pt), got {}",
+            first.indent_first
+        );
+
+        // Control — a level authored with w:hanging stays NEGATIVE (−18 pt).
+        let numbering_hang = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="30"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="30"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let hang = first_para_with(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering_hang,
+        );
+        assert!(
+            (hang.indent_first + 18.0).abs() < 0.01,
+            "a level w:hanging=360 is a NEGATIVE first-line indent (−18 pt), got {}",
+            hang.indent_first
+        );
+
+        // A direct firstLine on the numbered paragraph still overrides the level's
+        // first-line indent, keeping its own positive sign (per-attribute merge).
+        let direct_first = first_para_with(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr><w:ind w:firstLine="240"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering_hang,
+        );
+        assert!(
+            (direct_first.indent_first - 12.0).abs() < 0.01,
+            "a direct firstLine (240 twips → +12 pt) overrides the level's −18, got {}",
+            direct_first.indent_first
         );
     }
 

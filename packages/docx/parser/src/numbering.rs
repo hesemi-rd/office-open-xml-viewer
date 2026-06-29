@@ -42,7 +42,14 @@ pub struct LevelDef {
     /// pt — w:ind@right ≡ logical END indent (Part 4 §14.11.2). RTL list levels
     /// carry their indent here (the renderer maps it to the physical left side).
     pub indent_right: Option<f64>,
-    pub tab: f64, // pt
+    /// pt — SIGNED first-line indent (§17.3.1.12): `w:hanging` ⇒ negative (the
+    /// marker hangs left of the body), `w:firstLine` ⇒ positive (an additional
+    /// first-line indent). Mirrors how `styles.rs` stores a direct `w:ind`.
+    pub indent_first: f64,
+    /// pt — POSITIVE magnitude of the first-line indent (= `indent_first.abs()`).
+    /// Distinct from `indent_first` because the renderer uses it as the marker's
+    /// tab-advance distance (§17.9.6 + §17.3.1.38, suff=tab), which is unsigned.
+    pub tab: f64,
     /// ECMA-376 §17.9.28 `<w:suff>` — what follows the number text: "tab"
     /// (default), "space", or "nothing". Controls where the body text starts
     /// relative to the marker on the first line.
@@ -97,6 +104,7 @@ impl Default for LevelDef {
             text: "%1.".to_string(),
             indent_left: 36.0,
             indent_right: None,
+            indent_first: -36.0,
             tab: 36.0,
             suff: "tab".to_string(),
             lvl_jc: "left".to_string(),
@@ -243,10 +251,20 @@ impl NumberingMap {
                 let indent_right = ind_node
                     .and_then(|i| attr_w(i, "right"))
                     .map(|v| twips_to_pt(&v));
-                let tab = ind_node
-                    .and_then(|i| attr_w(i, "hanging").or_else(|| attr_w(i, "firstLine")))
-                    .map(|v| twips_to_pt(&v))
-                    .unwrap_or(36.0);
+                // §17.3.1.12: a first-line indent is EITHER `w:hanging` (negative —
+                // the marker hangs left of the body) OR `w:firstLine` (positive — an
+                // additional first-line indent); `hanging` wins when both appear, the
+                // same precedence `styles.rs` applies to a direct `w:ind`. Keep the
+                // SIGN in `indent_first`; `tab` keeps the positive magnitude for the
+                // marker's tab-advance.
+                let indent_first = ind_node
+                    .and_then(|i| {
+                        attr_w(i, "hanging")
+                            .map(|v| -twips_to_pt(&v))
+                            .or_else(|| attr_w(i, "firstLine").map(|v| twips_to_pt(&v)))
+                    })
+                    .unwrap_or(-36.0);
+                let tab = indent_first.abs();
                 // §17.9.28: absent <w:suff> means "tab".
                 let suff = child_w(lvl_node, "suff")
                     .and_then(|n| attr_w(n, "val"))
@@ -273,6 +291,7 @@ impl NumberingMap {
                     text,
                     indent_left,
                     indent_right,
+                    indent_first,
                     tab,
                     suff,
                     lvl_jc,
