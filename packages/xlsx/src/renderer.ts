@@ -3585,7 +3585,10 @@ export function drawShapeText(
     const align = p.align || 'l';
     // ECMA-376 §21.1.2.2.7 direct paragraph indent (EMU → px, scaled by cs).
     // Mirrors the pptx renderer (marLPx/marRPx/indentPx + firstLineIndent).
-    // Direct-attribute-only: xlsx text boxes have no lstStyle/level cascade.
+    // Direct-attribute-only: xlsx text boxes have no lstStyle/level cascade, so
+    // the spec's literal implied defaults (marL=347663, indent=−342900) are
+    // deliberately NOT applied — there is no list-style tier to feed them, and
+    // pptx's resolver leaves a plain bulletless paragraph at 0 too. Absent ⇒ 0.
     const marLpx = ((p.marL ?? 0) / EMU_PER_PX) * cs;
     const marRpx = ((p.marR ?? 0) / EMU_PER_PX) * cs;
     const indentPx = ((p.indent ?? 0) / EMU_PER_PX) * cs;
@@ -3639,8 +3642,11 @@ export function drawShapeText(
         const color = run.color ?? '#000000';
         if (run.display) {
           // Block equation occupies its own line (centered per paragraph align).
+          // It takes the paragraph left margin (marLpx) but NOT the first-line
+          // indent — `indent` is a run-in indent for the first line of TEXT, not
+          // for a block equation — so use marLpx/paraW regardless of line position.
           flushLine();
-          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: ascent + descent, ascent, hasMath: true, leftInset: lineLeftInset(), availW: lineAvailW() });
+          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: ascent + descent, ascent, hasMath: true, leftInset: marLpx, availW: paraW });
           firstLineDone = true;
           continue;
         }
