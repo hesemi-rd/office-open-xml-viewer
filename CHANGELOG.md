@@ -4,6 +4,56 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.69.0 — 2026-06-30
+
+Minor. A CJK text-layout fidelity pass across docx / pptx, plus indent, tab-stop,
+and paragraph-border accuracy. No public API changes; the Feature Support table is
+unchanged (all affected features were already supported — this release sharpens
+their rendering).
+
+**docx**
+
+- **CJK justify / 約物連続:** East Asian runs under a document grid and on
+  fully-distributed justified lines are now drawn as one contiguous `fillText`
+  with canvas letter-spacing, instead of one isolated draw per glyph. This honours
+  the browser's JIS X 4051 約物連続 packing (a closing-class punctuation followed
+  by an opening bracket — `：［`, `、［`, `）（` — packs ~half-em), so an opening
+  bracket no longer overruns the following glyph (§17.6.5, §17.18.44). (#626, #630)
+- **Justify line ends:** a justified (`both`) line terminated by a manual `<w:br/>`
+  is left-aligned (a logical line end), while `distribute` still fills it
+  (§17.18.44 + §17.3.3.1). A breakable CJK run glued after a Latin word is no longer
+  measured as atomic. (#618, #623)
+- **Indents:** a numbered paragraph's direct `<w:ind>` overrides the numbering
+  level per attribute (§17.9.22); a numbering level's `firstLine` keeps its sign
+  (§17.3.1.12); text-box paragraphs honour `<w:ind>` (§17.3.1.12). (#611, #612, #621)
+- **Tab stops:** parse `<w:defaultTabStop>` and compute a spec-correct,
+  margin-relative tab advance (§17.3.1.37 / §17.15.1.25). (#628)
+- **Paragraph borders / shading:** honour a paragraph's *direct* `pPr`
+  borders/shading (an `apply_direct_para` drift dropped them); merge borders
+  per-edge across the style hierarchy; an explicit nil/none edge clears an
+  inherited edge (§17.3.1.7). (#613, #617, #619)
+- **Robustness / internals:** cap paragraph paint at the laid-out line count so a
+  continuation slice never indexes a phantom line; unify `apply_direct_run` with
+  the canonical `apply_run`. (#615, #616)
+
+**pptx**
+
+- **CJK justify / @spc / 約物連続:** `@spc` (rPr letter-spacing) justify pieces,
+  `@spc` tab-stop segments, and fully-distributed justified runs are drawn
+  contiguously with canvas letter-spacing, so 約物連続 opening brackets no longer
+  overlap the next glyph (§21.1.2.3.x, §20.1.10.59). (#627, #629, #631)
+- **Justify line ends:** a justified (`just`) line ended by a manual `<a:br>` is
+  left-aligned, while `dist` / `thaiDist` still fill it (§20.1.10.59 + §21.1.2.2.1). (#624)
+- **First-line indent:** unified across the wrap measurement, wrap budget, and the
+  draw offset; a positive first-line indent narrows the first line's wrap width;
+  list levels inherit `marL` / `marR` / `indent` from the lstStyle cascade
+  (§21.1.2.2.7, §21.1.2.4.13). (#614, #622, #625)
+
+**xlsx**
+
+- **Shape text:** honour paragraph indent (`marL` / `marR` / `indent`) on
+  shape / text-box paragraphs (§21.1.2.2.7). (#620)
+
 ## 0.68.0 — 2026-06-29
 
 Minor. XLSX viewer interactions — drag-to-resize columns/rows, mouse-wheel /
