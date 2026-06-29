@@ -4,6 +4,29 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.68.0 — 2026-06-29
+
+Minor. XLSX viewer interactions — drag-to-resize columns/rows, mouse-wheel /
+trackpad-pinch zoom, and a customizable selection color — all **view-only**: the
+loaded file is never modified. Plus a spec-fidelity and consolidation pass.
+
+- **xlsx (resize):** drag a column or row header border to resize it (`resizable`
+  option, default on; set `false` to disable). The dragged size is written into
+  the in-memory worksheet model only — it never modifies the loaded file. Column
+  widths convert per ECMA-376 §18.3.1.13. (#567, #607, #609)
+- **xlsx (zoom):** Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom, in addition to
+  the Excel-style slider. The step is exponential in the wheel delta, so the
+  total zoom tracks the scroll distance rather than the number of events — a
+  trackpad pinch and a mouse wheel covering the same distance zoom by the same
+  amount. (#607, #609)
+- **xlsx (selection):** customizable cell-selection accent color (`selectionColor`
+  option / `setSelectionColor()`; default Google blue, fill at 8% opacity). (#607)
+- **xlsx (internals):** the column-width px conversion is now ECMA-376
+  §18.3.1.13-exact; the resize hit-test is extracted to a pure, unit-tested
+  helper; the local `hexToRgba` is folded into core's shared version (used by
+  docx/pptx); and `XlsxViewerOptions` extends the shared core `LoadOptions`
+  instead of re-declaring its fields. (#609)
+
 ## 0.67.0 — 2026-06-29
 
 Minor. A large DOCX fidelity pass — journal templates (sample-9/12/13) now match
