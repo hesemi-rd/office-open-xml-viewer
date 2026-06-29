@@ -441,6 +441,11 @@ interface LayoutLine {
     algn: string;
     segments: LayoutSegment[];
   };
+  /** ECMA-376 §21.1.2.2.1 — this line is terminated by a MANUAL line break
+   *  (`<a:br>`). In a `just` paragraph it is the end of a logical line and is
+   *  left-aligned, not stretched — like the paragraph's last line (§20.1.10.59).
+   *  `dist`/`thaiDist` still fill every line, including these. */
+  endsWithBreak?: boolean;
 }
 
 /**
@@ -685,7 +690,8 @@ export function layoutParagraph(
   let tabActive = false;
   let tabStopPx = 0;   // position of tab stop from text area left (px)
 
-  const newLine = () => {
+  const newLine = (endsWithBreak = false) => {
+    if (endsWithBreak) currentLine.endsWithBreak = true;
     lines.push(currentLine);
     currentLine = { segments: [] };
     lineW = 0;
@@ -806,7 +812,9 @@ export function layoutParagraph(
 
   for (const run of para.runs) {
     if (run.type === 'break') {
-      newLine();
+      // The line being closed ends at a MANUAL break (§21.1.2.2.1) — mark it so
+      // a `just` paragraph left-aligns it like its last line (§20.1.10.59).
+      newLine(true);
       continue;
     }
 
@@ -2460,8 +2468,12 @@ export function renderTextBody(
     // justifying it would spread that text across the whole column and overlap
     // the tab-aligned remainder drawn after this loop. Skip justify for it.
     const hasTabStop = !!line.tabStop && line.tabStop.segments.length > 0;
+    // A `just` line ended by a manual <a:br> is left-aligned like the last line
+    // (§20.1.10.59 + §21.1.2.2.1); `dist` ignores this and fills every line
+    // (justifyLine only suppresses the last line for `just`).
+    const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
     const drawSegs = justifyMode && !paraNeedsBidi && !hasTabStop
-      ? justifyLine(line.segments, textMaxW - textXOffset, lineWidth, justifyMode, isLastLine)
+      ? justifyLine(line.segments, textMaxW - textXOffset, lineWidth, justifyMode, endsLogicalLine)
       : null;
     const segs: (LayoutSegment & Partial<Justified>)[] = drawSegs ?? line.segments;
 
