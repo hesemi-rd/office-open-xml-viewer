@@ -553,6 +553,16 @@ export interface ShapeParagraph {
   /** `<a:pPr@rtl>` — whether the paragraph reads right-to-left
    *  (ECMA-376 §21.1.2.2.7). Omitted (undefined) when false. */
   rtl?: boolean;
+  /** `<a:pPr@marL>` — left margin in EMU (ECMA-376 §21.1.2.2.7,
+   *  `CT_TextParagraphProperties`). Direct attribute only — xlsx text boxes
+   *  have no lstStyle/level cascade. Omitted (undefined) when unset. */
+  marL?: number;
+  /** `<a:pPr@marR>` — right margin in EMU (ECMA-376 §21.1.2.2.7).
+   *  Omitted (undefined) when unset. */
+  marR?: number;
+  /** `<a:pPr@indent>` — first-line indent in EMU (negative = hanging),
+   *  ECMA-376 §21.1.2.2.7. Omitted (undefined) when unset. */
+  indent?: number;
   runs: ShapeTextRun[];
 }
 
