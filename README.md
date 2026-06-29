@@ -518,6 +518,9 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Text selection inside cells (transparent overlay) | ✅ |
 | | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
 | | Zoom slider (Excel-style, right of the tab bar, 10–400% with 100% centered; `showZoomSlider` option) | ✅ |
+| | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
+| | Drag-to-resize columns / rows by dragging header borders (`resizable` option, default on) — **view-only: changes the on-screen view only and never modifies the loaded file** | ✅ |
+| | Customizable cell-selection color (`selectionColor` option, `setSelectionColor()`) | ✅ |
 
 ---
 

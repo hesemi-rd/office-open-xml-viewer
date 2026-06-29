@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -197,16 +197,39 @@ export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFont
   return computeMdw(ws.defaultFontFamily, ws.defaultFontSize);
 }
 
+/** Convert a stored column-width value (ECMA-376 §18.3.1.13 `<col width>`, in
+ *  "number of characters" = max digit widths) to CSS pixels.
+ *
+ *  This is the spec's file→pixel formula verbatim:
+ *    `Truncate(((256 * width + Truncate(128 / MDW)) / 256) * MDW)`
+ *  Note both truncations: the `Truncate(128 / MDW)` constant is computed and
+ *  truncated *before* it is folded into the numerator (§18.3.1.13), then the
+ *  whole expression is truncated to an integer pixel. Excel stores integer
+ *  pixel column widths, so this yields exactly the width Excel renders. */
 export function colWidthToPx(w: number, mdw: number = MDW_FALLBACK): number {
-  return Math.trunc(((256 * w + 128 / mdw) / 256) * mdw);
+  return Math.trunc(((256 * w + Math.trunc(128 / mdw)) / 256) * mdw);
 }
 
-/** Inverse of {@link colWidthToPx}: the Excel column-width value (in "max digit
- *  widths") that renders back to exactly `px` logical pixels. Used by the
- *  drag-to-resize handles (issue #567) to store the dragged size in the
- *  worksheet model's native unit. Because `colWidthToPx(w) = trunc(w*mdw + 0.5)`,
- *  picking `w = px / mdw` lands the forward conversion on the requested integer
- *  pixel exactly (`trunc(px + 0.5) === px`). */
+/** Analytic inverse of {@link colWidthToPx}: the internal column-width value (in
+ *  "max digit widths") that renders back to *exactly* `px` logical pixels, so a
+ *  column dragged to N px paints at N px with no drift (WYSIWYG). Used only by
+ *  the drag-to-resize handles (issue #567) to write the dragged size into the
+ *  in-memory worksheet model.
+ *
+ *  This is deliberately NOT the ECMA-376 §18.3.1.13 file px→character formula
+ *  `Truncate((px - 5) / MDW * 100 + 0.5) / 100`, for two reasons:
+ *   (a) this viewer never serializes the workbook, so the model's width unit is
+ *       purely internal — the only contract it must honor is the exact round-trip
+ *       with {@link colWidthToPx}, which `px / MDW` satisfies (the constant
+ *       `Truncate(128/MDW)/256 * MDW` added by the forward formula stays in
+ *       `[0, 1)`, so `trunc(px + c) === px` for integer `px`); and
+ *   (b) the spec formula degenerates below its hard-coded 5 px cell padding —
+ *       for small dragged columns `(px - 5)` goes to zero or negative, producing
+ *       0 / negative character widths that would make drags snap or collapse.
+ *
+ *  If a file-export path is ever added, do NOT reuse this for serialization:
+ *  switch to the spec px→character formula above AND record `customWidth="1"`
+ *  provenance (§18.3.1.13) at the serialization boundary. */
 export function pxToColWidth(px: number, mdw: number = MDW_FALLBACK): number {
   return px / mdw;
 }
@@ -227,14 +250,6 @@ export function rowHeightToPx(h: number): number {
  *  by the drag-to-resize handles (issue #567). */
 export function pxToRowHeight(px: number): number {
   return px / PT_TO_PX;
-}
-
-function hexToRgba(hex: string, alpha = 1): string {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  return alpha === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
 }
 
 /**

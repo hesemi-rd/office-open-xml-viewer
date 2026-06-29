@@ -1,6 +1,6 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { MathRenderer } from '@silurus/ooxml-core';
+import type { LoadOptions } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -32,9 +32,15 @@ const TAB_BAR_H = 30;
 // separates tabs from each other.
 const TAB_GAP = 1;
 
-export interface XlsxViewerOptions {
+export interface XlsxViewerOptions extends LoadOptions {
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
   cellScale?: number;
+  /**
+   * Enable drag-to-resize of column widths / row heights by dragging header
+   * borders. Resizing only changes the on-screen view — it never modifies the
+   * loaded file. Default: true.
+   */
+  resizable?: boolean;
   /** Show the Excel-style zoom slider at the right end of the sheet-tab bar.
    *  Default `true`. Set `false` to hide it (e.g. when the host supplies its
    *  own zoom control). */
@@ -66,28 +72,6 @@ export interface XlsxViewerOptions {
    * via {@link XlsxViewer.setSelectionColor}.
    */
   selectionColor?: string;
-  /**
-   * Opt in to Google-Fonts-hosted, metric-compatible substitutes for the
-   * Office default fonts (Carlito for Calibri, Caladea for Cambria) so
-   * column layouts match Excel on systems without Office installed.
-   * Default `false`. See `XlsxWorkbook.LoadOptions.useGoogleFonts` for the
-   * privacy implications.
-   */
-  useGoogleFonts?: boolean;
-  /**
-   * Override the per-entry ZIP decompression cap (bytes) used by the
-   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Zero / negative
-   * values fall back to the default.
-   */
-  maxZipEntryBytes?: number;
-  /**
-   * Opt-in OMML equation engine for rendering math in shapes/text boxes.
-   * Import it from the separate `@silurus/ooxml/math` entry and pass it in
-   * (`import { math } from '@silurus/ooxml/math'`). When omitted, equations are
-   * skipped and the ~3 MB engine never enters the bundle (tree-shaken). Same
-   * dependency-injection contract as the docx/pptx viewers.
-   */
-  math?: MathRenderer;
   /**
    * `'main'` (default): parse in a worker, render on the main thread. `'worker'`:
    * parse AND render entirely inside the worker and paint the returned
@@ -178,6 +162,36 @@ const DEFAULT_SELECTION_COLOR = '#1a73e8';
  *  dragged to (logical px) so a collapsed band keeps a grabbable border. */
 const RESIZE_GRAB_PX = 4;
 const RESIZE_MIN_PX = 5;
+
+/**
+ * Pure hit predicate for drag-to-resize (issue #567): given a pointer
+ * coordinate `pt` (in the header-strip's CSS-px axis — already RTL-un-mirrored
+ * by the caller) and the candidate band trailing edges `edges`, return the band
+ * index whose edge is within `grabPx` of `pt`, or `null` if none qualifies.
+ *
+ * `edges` is the candidate list the caller builds — for the band the pointer is
+ * over (`hit`) Excel lets you resize the band whose *trailing* border you grab,
+ * so the caller passes both `hit - 1` and `hit` (the neighbour-to-the-far-side
+ * and the band itself); the first edge within the grab zone wins, in the order
+ * given. An edge that sits at or under the header strip (`edge <= headerExtent`,
+ * i.e. scrolled behind the frozen corner) is rejected — you can't grab a border
+ * hidden under the header. Kept pure (no DOM, no `this`) so the off-by-one
+ * geometry — exact-on-edge, within-grab, just-outside, `[hit-1, hit]` neighbour
+ * selection, header rejection — is unit-testable. {@link XlsxViewer.getResizeTarget}
+ * does the DOM/geometry and calls this.
+ */
+export function resizeHitIndex(
+  pt: number,
+  edges: { index: number; edge: number }[],
+  grabPx: number,
+  headerExtent: number,
+): number | null {
+  for (const { index, edge } of edges) {
+    if (edge <= headerExtent) continue; // scrolled behind the header strip
+    if (Math.abs(pt - edge) <= grabPx) return index;
+  }
+  return null;
+}
 
 /**
  * Derive the selection rectangle's `border` and `background` CSS from a single
@@ -932,34 +946,36 @@ export class XlsxViewer {
     if (ptY <= headerH && ptX > headerW) {
       const hit = this.getHeaderHit(clientX, clientY);
       if (hit?.kind !== 'col') return null;
+      const origins = new Map<number, number>(); // index -> fixed LTR origin edge
+      const edges: { index: number; edge: number }[] = [];
       for (const c of [hit.col - 1, hit.col]) {
         if (c < 1) continue;
         const r = this.getCellRect(1, c); // x is independent of the row
         if (!r) continue;
-        const rightEdge = r.x + r.w;
-        if (rightEdge <= headerW) continue; // scrolled behind the row header
-        if (Math.abs(ptX - rightEdge) <= RESIZE_GRAB_PX) {
-          return { kind: 'col', index: c, originScaled: r.x, mdw };
-        }
+        origins.set(c, r.x);
+        edges.push({ index: c, edge: r.x + r.w }); // trailing (right) border
       }
-      return null;
+      const index = resizeHitIndex(ptX, edges, RESIZE_GRAB_PX, headerW);
+      if (index === null) return null;
+      return { kind: 'col', index, originScaled: origins.get(index) as number, mdw };
     }
 
     // Row borders live in the row-header strip, below the corner.
     if (ptX <= headerW && ptY > headerH) {
       const hit = this.getHeaderHit(clientX, clientY);
       if (hit?.kind !== 'row') return null;
+      const origins = new Map<number, number>(); // index -> fixed LTR origin edge
+      const edges: { index: number; edge: number }[] = [];
       for (const rIdx of [hit.row - 1, hit.row]) {
         if (rIdx < 1) continue;
         const r = this.getCellRect(rIdx, 1); // y is independent of the column
         if (!r) continue;
-        const botEdge = r.y + r.h;
-        if (botEdge <= headerH) continue;
-        if (Math.abs(ptY - botEdge) <= RESIZE_GRAB_PX) {
-          return { kind: 'row', index: rIdx, originScaled: r.y, mdw };
-        }
+        origins.set(rIdx, r.y);
+        edges.push({ index: rIdx, edge: r.y + r.h }); // trailing (bottom) border
       }
-      return null;
+      const index = resizeHitIndex(ptY, edges, RESIZE_GRAB_PX, headerH);
+      if (index === null) return null;
+      return { kind: 'row', index, originScaled: origins.get(index) as number, mdw };
     }
 
     return null;
@@ -1516,7 +1532,11 @@ export class XlsxViewer {
 
       // Drag-to-resize a column/row from its header border (issue #567). Checked
       // before selection so grabbing the border never moves the cell selection.
-      const resize = this.getResizeTarget(e.clientX, e.clientY);
+      // Gated by the `resizable` option (default true); when off, a header-border
+      // press falls through to normal selection behavior.
+      const resize = (this.opts.resizable ?? true)
+        ? this.getResizeTarget(e.clientX, e.clientY)
+        : null;
       if (resize) {
         e.preventDefault();
         this.resizeDrag = { ...resize, pointerId: e.pointerId };
@@ -1586,8 +1606,10 @@ export class XlsxViewer {
       }
 
       // Resize-handle affordance: show the col/row-resize cursor when hovering a
-      // header border (mouse only — touch/pen have no hover). Skipped mid-select.
-      if (e.pointerType === 'mouse' && !this.isSelecting) {
+      // header border (mouse only — touch/pen have no hover). Skipped mid-select
+      // and when the `resizable` option (default true) is off, so no resize
+      // cursor is shown when drag-resize is disabled.
+      if (e.pointerType === 'mouse' && !this.isSelecting && (this.opts.resizable ?? true)) {
         const rt = this.getResizeTarget(e.clientX, e.clientY);
         this.scrollHost.style.cursor = rt ? (rt.kind === 'col' ? 'col-resize' : 'row-resize') : '';
         if (rt) {
