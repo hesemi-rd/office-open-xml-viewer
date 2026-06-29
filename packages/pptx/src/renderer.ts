@@ -669,8 +669,13 @@ export function layoutParagraph(
   fontScale: number = 1.0,
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+  firstLineIndentPx: number = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
+  // The first line's wrap budget is narrower by a POSITIVE first-line indent
+  // (it occupies indentPx of the line); continuation lines use the full width.
+  // `lines.length === 0` ⇒ still filling the first line (newLine() pushes to it).
+  const lineMaxW = () => maxWidthPx - (lines.length === 0 ? firstLineIndentPx : 0);
   let currentLine: LayoutLine = { segments: [] };
   let lineW = 0; // current line's accumulated width
   // ECMA-376 §17.18.93 ST_TextWrappingType "square" is whitespace-aware: a
@@ -822,7 +827,7 @@ export function layoutParagraph(
       const descent = render ? render.descentEm * emPx : 0;
       // Block (display) math gets its own line; the draw pass centres it.
       if (run.display && lineW > 0) newLine();
-      else if (lineW + width > maxWidthPx && lineW > 0) newLine();
+      else if (lineW + width > lineMaxW() && lineW > 0) newLine();
       currentLine.segments.push({
         text: '',
         font: `${emPx}px sans-serif`,
@@ -974,7 +979,7 @@ export function layoutParagraph(
           }
           ctx.font = chFont;
           const chW = ctx.measureText(drawCh).width;
-          if (lineW + chW > maxWidthPx && lineW > 0) newLine();
+          if (lineW + chW > lineMaxW() && lineW > 0) newLine();
           push(drawCh, chFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
         continue;
@@ -1015,7 +1020,7 @@ export function layoutParagraph(
           // content and the token would overflow, wrap once before placing it;
           // never break mid-token (an over-wide token simply overflows).
           const tokenW = measured.reduce((acc, m) => acc + m.w, 0);
-          if (lineW > 0 && lineW + tokenW > maxWidthPx) newLine();
+          if (lineW > 0 && lineW + tokenW > lineMaxW()) newLine();
           for (const m of measured) {
             push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
           }
@@ -1023,7 +1028,7 @@ export function layoutParagraph(
         }
         let rest = measured;
         while (rest.length > 0) {
-          const n = fitCjkLine(rest, lineW, maxWidthPx, DEFAULT_KINSOKU_RULES);
+          const n = fitCjkLine(rest, lineW, lineMaxW(), DEFAULT_KINSOKU_RULES);
           if (n === 0) {
             newLine(); // non-empty line can't take the run head → break, retry empty
             continue;
@@ -1038,17 +1043,17 @@ export function layoutParagraph(
         continue;
       }
 
-      if (lineW + tokW <= maxWidthPx) {
+      if (lineW + tokW <= lineMaxW()) {
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         if (isWhitespace) hasWhitespaceOnLine = true;
       } else if (isWhitespace) {
         if (lineW > 0) newLine();
-      } else if (tokW > maxWidthPx) {
+      } else if (tokW > lineMaxW()) {
         if (lineW > 0) newLine();
         for (const ch of token) {
           ctx.font = font;
           const chW = ctx.measureText(ch).width;
-          if (lineW + chW > maxWidthPx && lineW > 0) newLine();
+          if (lineW + chW > lineMaxW() && lineW > 0) newLine();
           push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
       } else if (!hasWhitespaceOnLine) {
@@ -2141,7 +2146,12 @@ export function renderTextBody(
     const textMaxW = colWidth - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc);
+    // A positive first-line indent narrows ONLY the first line's wrap budget,
+    // matching the draw-side `textXOffset` (= indentPx for a non-bullet first
+    // line, §below) and willTextOverflow's measurement. A negative (hanging)
+    // indent is the bullet's gutter, not a text-width reduction → max(0, …)=0.
+    const firstLineIndentPx = !hasBullet ? Math.max(0, indentPx) : 0;
+    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
