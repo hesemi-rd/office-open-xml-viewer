@@ -4060,7 +4060,23 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  for (let li = sliceStart; li < sliceEnd; li++) {
+  // Pagination (paginateWithHeaderFooterReserve) lays a paragraph out at scale 1
+  // (pt space) so its page assignment is width-independent and cacheable across
+  // every render width (opts.prebuiltPages). Painting re-runs layoutLines at the
+  // actual render `scale`, and Canvas ctx.measureText is NOT perfectly
+  // scale-invariant (font hinting / sub-pixel glyph advances differ between the
+  // pt-size and the device-size run). A long, narrow paragraph (e.g. a 70-line
+  // newspaper column, §17.6.4) can therefore wrap to a slightly different line
+  // count here than the slice indices (`lineSlice`, computed at scale 1) assume.
+  // The slice is authoritative for WHICH lines land on this page, but THIS pass's
+  // `lines` array is authoritative for how many lines the text actually occupies
+  // at this scale, so cap the iteration at lines.length: paint every real line and
+  // never index a phantom line that only existed in the scale-1 measurement
+  // (lines[i] would be undefined → "Cannot read properties of undefined"). The
+  // overflow direction is bounded (the wrap differs by at most a line or two), so
+  // all of the paragraph's text is still painted across its slices.
+  const paintEnd = Math.min(sliceEnd, lines.length);
+  for (let li = sliceStart; li < paintEnd; li++) {
     const line = lines[li];
     // First-line indent and numbering prefix only apply to the paragraph's
     // ORIGINAL first line, not the first line of a continuation slice.
