@@ -4,6 +4,41 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.67.0 — 2026-06-29
+
+Minor. A large DOCX fidelity pass — journal templates (sample-9/12/13) now match
+Word across headers/footers, line breaking, justification, and text metrics —
+plus cross-format CJK/Latin line-breaking and XLSX rich-text fixes.
+
+- **docx (headers / footers):** headers and footers are now resolved per active
+  section per page, including first-page (`w:titlePg`, §17.10.6) and even/odd
+  (`w:evenAndOddHeaders`, §17.10.1); a header or footer taller than its page
+  margin reserves space so the body never overlaps it (§17.6.11), across every
+  column of a multi-column section.
+- **docx (line breaking / justification):** a justified (`both` / `distribute`)
+  line spreads slack across every inter-CJK boundary including the line's last
+  segment (§17.18.44); a CJK run followed by a glued non-starter ("。" / "、" in its
+  own run) splits to fill the line instead of being pushed down whole; and a
+  UAX#14 LB13 non-starter authored across a run boundary (a leading "," / "。")
+  stays glued to its word — fixed consistently in docx, pptx, and xlsx with the
+  shared predicate centralized in core.
+- **docx (text metrics / layout):** Times New Roman / Arial line height comes from
+  the hhea design metrics (matching Word's line box); small caps are sized per
+  character so a capital initial stays full size (§17.3.2.33); anchored text-box
+  content renders with correct paragraph spacing, style alignment, and z-order; an
+  empty paragraph mark reserves a full line; heading numbering shares one counter
+  per abstract list (§17.9); a `numId=0` de-listed paragraph drops the inherited
+  list indent; a negative `w:pgMar` top/bottom places the body's `|margin|` inside
+  the page edge (§17.6.11); and continuous-section spacer paragraphs collapse /
+  suppress spacing-before to match Word.
+- **docx (columns / figures):** continuous two-column sections balance at line
+  granularity; EMF figures crop to their `rclFrame`.
+- **xlsx (rich text):** empty shape / cell paragraphs reserve a line; non-wrapped
+  rich text honors `\n`; wrapped super/subscript sizes correctly; and a wrapped
+  rich cell re-resolves the bidi base direction per LF paragraph.
+- **cross-format (core):** `<a:srcRect>` image cropping is unified in core and
+  shared by docx, pptx, and xlsx (including the metafile gate via `isMetafileMime`).
+
 ## 0.66.3 — 2026-06-24
 
 Patch. DOCX cover-page fix — resolves the 0.66.1 hotfix trade-off (sample-5 and
