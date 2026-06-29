@@ -1729,15 +1729,26 @@ fn parse_paragraph_cond(
         None
     };
 
-    // Numbering level's pPr/ind overrides the paragraph style's indent
-    let (indent_left, indent_first) = if let Some(ref num) = numbering {
-        num_map
-            .get_level(num.num_id, num.level)
-            .map(|l| (l.indent_left, -l.tab))
-            .unwrap_or((
-                base_para.indent_left.unwrap_or(0.0),
-                base_para.indent_first.unwrap_or(0.0),
-            ))
+    // Resolve the numbering level once; it backs all three indent axes below.
+    let level = numbering
+        .as_ref()
+        .and_then(|num| num_map.get_level(num.num_id, num.level));
+
+    // Indent precedence (ECMA-376 §17.9.22 + §17.7.2): the paragraph's own DIRECT
+    // `w:ind` overrides the numbering level's `pPr/ind` ("paragraph properties
+    // specified on the numbered paragraph itself override the paragraph properties
+    // specified by pPr elements within a numbering lvl element"), which in turn
+    // overrides the paragraph STYLE. The merge is per-attribute (§17.3.1.12), so a
+    // direct `w:left` that omits `w:hanging`/`w:firstLine` keeps the level's
+    // first-line indent — e.g. sample-15's REFERENCES list: level ind left=720
+    // hanging=360, direct `w:ind w:left="360"` ⇒ body at 18 pt, marker at the margin.
+    // When no level resolves, a de-listed paragraph (numId=0) keeps only its direct
+    // ind and a plain paragraph keeps its style/direct (base) ind.
+    let (indent_left, indent_first) = if let Some(l) = level {
+        (
+            direct_indent_left.unwrap_or(l.indent_left),
+            direct_indent_first.unwrap_or(-l.tab),
+        )
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
         // drops the NUMBERING LEVEL's indent (handled by `numbering` being None here).
@@ -1765,12 +1776,12 @@ fn parse_paragraph_cond(
             base_para.indent_first.unwrap_or(0.0),
         )
     };
-    // Same for the end-side indent (w:ind@right ≡ end): an RTL list level
-    // defines its indent there (e.g. w:right="720" w:hanging="360").
-    let indent_right = numbering
-        .as_ref()
-        .and_then(|num| num_map.get_level(num.num_id, num.level))
-        .and_then(|l| l.indent_right)
+    // The end-side axis (w:ind@right ≡ end) follows the same ladder: direct end
+    // indent, else the level's end indent (an RTL list carries its indent there,
+    // e.g. w:right="720" w:hanging="360"), else the style/de-list (base) value
+    // already resolved into `indent_right` above.
+    let indent_right = direct_indent_right
+        .or_else(|| level.and_then(|l| l.indent_right))
         .unwrap_or(indent_right);
 
     // Parse runs
@@ -7336,6 +7347,86 @@ mod footnote_tests {
             (hanging.indent_first + 6.0).abs() < 0.01,
             "a direct hanging (120 twips) survives as a −6pt first-line indent, got {}",
             hanging.indent_first
+        );
+    }
+
+    /// ECMA-376 §17.7.2 (property precedence) — a paragraph's own DIRECT `w:ind`
+    /// overrides the numbering level's `w:ind`. Direct formatting is more specific
+    /// than the numbering definition, which in turn overrides the paragraph style
+    /// (Control A in `numid_zero_drops_inherited_list_indent`). The merge is
+    /// per-attribute: a direct `w:left` that omits `w:hanging` keeps the level's
+    /// hanging. sample-15's REFERENCES list proves it — numbering level
+    /// `ind left=720 hanging=360`, but each item carries a direct `<w:ind w:left="360"/>`;
+    /// Word renders the body at 18 pt (360 twips) with the "[1]" marker at the
+    /// column margin (direct left wins; the level's hanging survives).
+    #[test]
+    fn numbered_para_direct_ind_overrides_numbering_level() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="21"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="[%1]"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="21"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+
+        // A direct left=360 (18 pt) on a numbered item overrides the level's
+        // left=720 (36 pt); the level's hanging=360 (first-line −18 pt) survives
+        // because the direct ind omits it.
+        let direct = first_para_with(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr><w:ind w:left="360"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert!(
+            (direct.indent_left - 18.0).abs() < 0.01,
+            "a direct left (360 twips = 18 pt) overrides the level's 36 pt, got {}",
+            direct.indent_left
+        );
+        assert!(
+            (direct.indent_first + 18.0).abs() < 0.01,
+            "the level's hanging (−18 pt) survives when the direct ind omits it, got {}",
+            direct.indent_first
+        );
+
+        // Control — no direct ind: the level's indent applies unchanged.
+        let level_only = first_para_with(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert!(
+            (level_only.indent_left - 36.0).abs() < 0.01,
+            "no direct ind ⇒ the level's 36 pt applies, got {}",
+            level_only.indent_left
+        );
+        assert!(
+            (level_only.indent_first + 18.0).abs() < 0.01,
+            "no direct ind ⇒ the level's −18 pt hanging applies, got {}",
+            level_only.indent_first
+        );
+
+        // Control — a direct hanging overrides the level's hanging too (the merge
+        // is per-attribute, not all-or-nothing on the whole `w:ind`).
+        let direct_hang = first_para_with(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr><w:ind w:left="360" w:hanging="240"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+        assert!(
+            (direct_hang.indent_left - 18.0).abs() < 0.01,
+            "direct left wins, got {}",
+            direct_hang.indent_left
+        );
+        assert!(
+            (direct_hang.indent_first + 12.0).abs() < 0.01,
+            "a direct hanging (240 twips → −12 pt) overrides the level's −18, got {}",
+            direct_hang.indent_first
         );
     }
 
