@@ -2627,13 +2627,46 @@ export function renderTextBody(
         splitBefore && splitBefore.length > 0
           ? justifiedPiecePositions([...seg.text], splitBefore, segPerGap, measureCb, ls)
           : null;
-      if (pieces) {
-        for (const { text: pieceText, dx } of pieces) {
-          drawWithFont(pieceText, penX + dx, 'fill');
+
+      // A run is FULLY distributed when justifyLine opened a gap at EVERY internal
+      // inter-glyph boundary (splitBefore.length === cps.length - 1) — e.g. a
+      // pure-CJK `algn="just"/"dist"` line. Drawing one single-glyph piece per code
+      // point (the `pieces` loop) routes through drawWithFont's `else → paint(ch)`:
+      // each piece has text.length === 1, so the `ls > 0 && text.length > 1`
+      // letterSpacing branch never fires, and every glyph is painted ISOLATED even
+      // when ls > 0. That loses the browser's JIS X 4051 約物連続 packing — a
+      // closing-class punct immediately followed by an opening bracket ("：［",
+      // "、［", "）（") packs ~half-em in measureText (a bracket next to a plain
+      // kanji/kana does NOT pack). The isolated full-width bracket then overruns its
+      // successor (the justify analog of docx PR #630). The fix: a gap at EVERY
+      // boundary ⇒ uniform per-glyph pitch (ls + segPerGap), so draw the whole
+      // CONTEXTUALLY-shaped run in ONE paint with ctx.letterSpacing = ls+segPerGap:
+      // glyph i lands at measure(prefix_i)+i·(ls+segPerGap) — the exact justified
+      // position — so the packing is honoured and nothing overlaps; the final glyph
+      // reaches the segment box edge (segW). measureCb already ran (pieces built
+      // above) at the natural advance, so no measureText sees this letterSpacing.
+      const cps = [...seg.text];
+      const fullyDistributed =
+        !!splitBefore && splitBefore.length === cps.length - 1 && cps.length > 1;
+      const drawRun = (op: 'fill' | 'stroke'): void => {
+        if (fullyDistributed) {
+          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const prev = lctx.letterSpacing;
+          try { lctx.letterSpacing = `${ls + segPerGap}px`; } catch { /* older engines */ }
+          (op === 'fill' ? ctx.fillText.bind(ctx) : ctx.strokeText.bind(ctx))(
+            seg.text,
+            penX,
+            segBaseline,
+          );
+          try { lctx.letterSpacing = prev; } catch { /* ignore */ }
+        } else if (pieces) {
+          for (const { text: pieceText, dx } of pieces) drawWithFont(pieceText, penX + dx, op);
+        } else {
+          drawWithFont(seg.text, penX, op);
         }
-      } else {
-        drawWithFont(seg.text, penX, 'fill');
-      }
+      };
+
+      drawRun('fill');
 
       if (segShadow) ctx.restore();
 
@@ -2649,13 +2682,7 @@ export function renderTextBody(
         ctx.lineWidth = Math.max(0.5, emuToPx(segOutline.width, scale));
         ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
         ctx.lineJoin = 'round';
-        if (pieces) {
-          for (const { text: pieceText, dx } of pieces) {
-            drawWithFont(pieceText, penX + dx, 'stroke');
-          }
-        } else {
-          drawWithFont(seg.text, penX, 'stroke');
-        }
+        drawRun('stroke');
         ctx.restore();
       }
 

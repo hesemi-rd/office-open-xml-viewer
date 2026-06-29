@@ -15,17 +15,19 @@ import type { TextRunData } from '@silurus/ooxml-core';
 const SCALE = 1 / 12700; // emuToPx(emu, scale) = emu * scale ⇒ 1pt → 1px
 
 function mockCtx() {
-  const texts: Array<{ text: string; x: number; y: number }> = [];
+  const texts: Array<{ text: string; x: number; y: number; letterSpacing: string }> = [];
   let fillStyle = ''; let font = ''; let direction: CanvasDirection = 'ltr';
+  let letterSpacing = '0px';
   const ctx = {
     get fillStyle() { return fillStyle; }, set fillStyle(v: string) { fillStyle = v; },
     get font() { return font; }, set font(v: string) { font = v; },
     get direction() { return direction; }, set direction(v: CanvasDirection) { direction = v; },
+    get letterSpacing() { return letterSpacing; }, set letterSpacing(v: string) { letterSpacing = v; },
     // 10px advance per glyph (font size ignored) → predictable line widths.
     measureText: (s: string) => ({
       width: [...s].length * 10, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
     }),
-    fillText: (t: string, x: number, y: number) => texts.push({ text: t, x, y }),
+    fillText: (t: string, x: number, y: number) => texts.push({ text: t, x, y, letterSpacing }),
     fillRect: () => {}, drawImage: () => {}, save: () => {}, restore: () => {},
     translate: () => {}, rotate: () => {}, scale: () => {}, beginPath: () => {},
     moveTo: () => {}, lineTo: () => {}, stroke: () => {}, clip: () => {}, rect: () => {},
@@ -101,7 +103,7 @@ describe('pptx justify — a line ended by a manual <a:br> is left-aligned (§20
     renderTextBody(ctx, distBody([run('ああああ'), brk, run('いいいいいいいい')]), 0, 0, 200, 200, SCALE);
     expect(texts.length).toBeGreaterThan(0);
 
-    const byY = new Map<number, { text: string; x: number }[]>();
+    const byY = new Map<number, { text: string; x: number; letterSpacing: string }[]>();
     for (const c of texts) {
       const key = Math.round(c.y);
       (byY.get(key) ?? byY.set(key, []).get(key)!).push(c);
@@ -109,12 +111,22 @@ describe('pptx justify — a line ended by a manual <a:br> is left-aligned (§20
     const firstY = Math.min(...byY.keys());
     const line = byY.get(firstY)!;
 
-    // Filled: the 4-glyph line ("ああああ", natural extent ~40px) is spread toward
-    // the ~185px margin, so its last glyph sits well to the right. The observed
-    // stretched maxX is ~182.8px (≈ the right margin); 120 is a comfortable floor
-    // below that yet far above both the natural ~40px and the `just` carve-out's
-    // < 60px assertion — it cannot pass unless `dist` actually filled the line.
-    const maxX = Math.max(...line.map((c) => c.x));
-    expect(maxX).toBeGreaterThan(120);
+    // "ああああ" is a pure-CJK line ⇒ justifyLine opens a gap at EVERY inter-glyph
+    // boundary (splitBefore = [1,2,3], length 3 = cps.length-1) ⇒ FULLY distributed.
+    // The renderer draws it as ONE contiguous fillText at the line start, carrying
+    // the whole 4-glyph string with ctx.letterSpacing = the justify pitch (the
+    // browser then owns the intra-line glyph positions). So "filled" is now asserted
+    // via the per-glyph pitch on the single draw, not via a stretched per-glyph x.
+    expect(line.length, '`dist` line is one contiguous draw').toBe(1);
+    const drawn = line[0];
+    expect(drawn.text).toBe('ああああ');
+    // availW ≈ 185.6px, natural 40px, slack ≈ 145.6 across 3 gaps ⇒ pitch ≈ 48.5px,
+    // so the drawn extent 40 + 3·pitch ≈ 185.6px reaches the right margin. The pitch
+    // is far above 0 — it cannot be non-zero unless `dist` actually filled the line.
+    expect(drawn.letterSpacing).toMatch(/^-?\d+(\.\d+)?px$/);
+    const pitch = parseFloat(drawn.letterSpacing);
+    expect(pitch, '`dist` break line is stretched (non-zero justify pitch)').toBeGreaterThan(30);
+    const extent = [...drawn.text].length * 10 + ([...drawn.text].length - 1) * pitch;
+    expect(extent, 'the filled line reaches toward the ~185px right margin').toBeGreaterThan(120);
   });
 });

@@ -219,16 +219,27 @@ describe('pptx @spc CJK — 約物半角 brackets are drawn contiguously, never 
     expect(texts.filter((c) => c.text === 'A' || c.text === 'B').length).toBe(0);
   });
 
-  // (4b) No-regression — ls==0 justify: a non-@spc CJK `dist` line still draws via
-  //      single-glyph pieces with letterSpacing left at '0px' (path unchanged).
-  it('leaves letterSpacing 0px for a non-@spc CJK justify line', () => {
-    const { texts } = render(bodyWith('dist', [run('あいうえお')]), 200);
-    const glyphs = [...'あいうえお'];
-    const pieceCalls = texts.filter((c) => glyphs.includes(c.text));
-    expect(pieceCalls.length).toBe(glyphs.length); // 5 single-glyph pieces (4 gaps + 1)
-    for (const c of pieceCalls) expect(c.letterSpacing).toBe('0px');
-    // Strictly increasing x (no overlap / scramble).
-    const xs = pieceCalls.map((c) => c.x);
-    for (let i = 1; i < xs.length; i++) expect(xs[i]).toBeGreaterThan(xs[i - 1]);
+  // (4b) ls==0 fully-distributed justify: a non-@spc pure-CJK `dist` line is FULLY
+  //      distributed (a gap at every inter-glyph boundary), so it takes the
+  //      contiguous fast-path — ONE fillText carrying the whole run with
+  //      ctx.letterSpacing = segPerGap (a non-zero px), NOT N isolated single-glyph
+  //      draws at '0px'. (See justify-bracket-overlap.test.ts §20.1.10.59: the
+  //      isolated per-glyph draw loses the browser's 約物連続 packing, so a closing
+  //      punct + opening bracket would overrun — drawing the whole run contiguously
+  //      with letterSpacing=segPerGap honours the packing.)
+  it('draws a fully-distributed non-@spc CJK justify line as one contiguous fillText (letterSpacing=segPerGap)', () => {
+    const TEXT = 'あいうえお';
+    const { texts } = render(bodyWith('dist', [run(TEXT)]), 200);
+    // Fully distributed ⇒ the whole run is ONE contiguous draw, not per-glyph.
+    const segCalls = texts.filter((c) => c.text === TEXT);
+    expect(segCalls.length, 'one contiguous fillText for the fully-distributed line').toBe(1);
+    // No isolated single-glyph draws of this run's code points.
+    const glyphs = [...TEXT];
+    expect(texts.filter((c) => glyphs.includes(c.text)).length, 'no isolated per-glyph draws').toBe(0);
+    // ls === 0, so the justify pitch carried by letterSpacing is segPerGap alone — a
+    // non-zero positive px (the line was stretched into the 200px box).
+    expect(segCalls[0].letterSpacing).toMatch(/^-?\d+(\.\d+)?px$/);
+    expect(segCalls[0].letterSpacing).not.toBe('0px');
+    expect(parseFloat(segCalls[0].letterSpacing), 'segPerGap is a positive expansion').toBeGreaterThan(0);
   });
 });
