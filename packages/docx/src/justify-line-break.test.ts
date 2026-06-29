@@ -118,7 +118,7 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     const calls = await render([breakPara()], section());
     expect(calls.length).toBeGreaterThan(0);
 
-    // Group glyphs by baseline y; the first (top) line is the break-terminated one.
+    // Group draws by baseline y; the first (top) line is the break-terminated one.
     const byY = new Map<number, { text: string; x: number }[]>();
     for (const c of calls) {
       const key = Math.round(c.y);
@@ -127,18 +127,18 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     const firstY = Math.min(...byY.keys());
     const line = byY.get(firstY)!.slice().sort((p, q) => p.x - q.x);
 
-    // The first line is "ああああ" (4 glyphs) ended by the break.
-    expect(line.length).toBe(4);
+    // A LEFT-aligned (un-justified) line has NO internal distribute gaps, so the
+    // pure-EA grid segment "ああああ" is painted as ONE contiguous fillText (the
+    // contextual-shaping path), NOT four isolated per-glyph draws.
+    expect(line.length).toBe(1);
+    expect(line[0].text).toBe('ああああ');
 
-    // Left-aligned: it starts at the margin and ends at its NATURAL width
-    // (≈ 4 × FONT_PX), NOT stretched toward the 210px right margin.
+    // Left-aligned: it starts at the margin and the segment box ends at its
+    // NATURAL grid width (4 cells ≈ 4 × FONT_PX), NOT stretched toward the 210px
+    // right margin. Cell = 20 + (-2048/4096) = 19.5px ⇒ 4 cells = 78px.
     expect(line[0].x).toBeLessThan(FONT_PX); // starts at the left margin
-    const naturalRight = 4 * FONT_PX;
-    expect(line[3].x).toBeLessThan(naturalRight); // last glyph near natural end
-    // Inter-glyph advances stay at the natural pitch (~FONT_PX), not spread wide.
-    for (let i = 1; i < line.length; i++) {
-      expect(line[i].x - line[i - 1].x).toBeLessThan(FONT_PX * 1.5);
-    }
+    const naturalRight = 4 * FONT_PX; // ≈ box edge upper bound
+    expect(line[0].x + 4 * (FONT_PX - 2048 / 4096)).toBeLessThan(naturalRight + FONT_PX);
   });
 
   // ECMA-376 §17.18.44 (ST_Jc): `distribute` justifies EVERY line — inter-word

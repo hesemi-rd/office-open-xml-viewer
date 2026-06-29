@@ -26,20 +26,21 @@ const FONT_PX = 20; // glyph advance per CJK char in the stub (scale = 1)
  *  Records every fillText so per-glyph draw positions can be asserted. */
 function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
-  fillTextCalls: { text: string; x: number; y: number }[];
+  fillTextCalls: { text: string; x: number; y: number; letterSpacing: string }[];
 } {
   let font = `${FONT_PX}px serif`;
+  let letterSpacing = '0px';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
-  const fillTextCalls: { text: string; x: number; y: number }[] = [];
+  const fillTextCalls: { text: string; x: number; y: number; letterSpacing: string }[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
-    // letterSpacing is intentionally NOT honoured here — the grid draw must not
-    // depend on it (it advances each EA glyph by `measureText(glyph)+Δ` and
-    // measures the SAME way), so a stub that ignores letterSpacing still keeps
-    // measure==draw. A regression that relied on letterSpacing would surface as
-    // overlapping glyph positions against the measured width.
-    letterSpacing: '0px',
+    // measureText models the per-glyph natural advance only (no letterSpacing):
+    // the grid draw applies its per-cell delta Δ via ctx.letterSpacing, and the
+    // renderer measures pieces BEFORE setting letterSpacing, so the stub keeps the
+    // (natural) measure==(box) invariant while letterSpacing carries Δ for draw.
+    get letterSpacing() { return letterSpacing; },
+    set letterSpacing(v: string) { letterSpacing = v; },
     measureText: (s: string) => {
       const p = px();
       return {
@@ -55,7 +56,7 @@ function makeRecordingCanvas(): {
     strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
-    fillText(text: string, x: number, y: number) { fillTextCalls.push({ text, x, y }); },
+    fillText(text: string, x: number, y: number) { fillTextCalls.push({ text, x, y, letterSpacing }); },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
@@ -128,7 +129,10 @@ const sliceOf = (el: PaginatedBodyElement) =>
 async function renderRun(
   body: BodyElement[],
   sec: SectionProps,
-): Promise<{ runs: DocxTextRunInfo[]; fillTextCalls: { text: string; x: number; y: number }[] }> {
+): Promise<{
+  runs: DocxTextRunInfo[];
+  fillTextCalls: { text: string; x: number; y: number; letterSpacing: string }[];
+}> {
   const { canvas, fillTextCalls } = makeRecordingCanvas();
   const runs: DocxTextRunInfo[] = [];
   await renderDocumentToCanvas(doc(body, sec), canvas, 0, {
@@ -141,9 +145,13 @@ async function renderRun(
 
 describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => {
   // THE core anti-corruption guard. For a CJK string under an active char grid,
-  // the measured segment box (onTextRun.w) and the per-glyph draw positions
-  // (fillText x) must be derived from the SAME per-char cell width fontPx + Δpx.
-  it('per-glyph draw positions match the measured box width exactly', async () => {
+  // the measured segment box (onTextRun.w) and the painted advance must be
+  // derived from the SAME per-char cell width fontPx + Δpx. A no-justify pure-EA
+  // segment is now painted as ONE contiguous fillText (contextual shaping ⇒
+  // 約物半角 honoured, no bracket overlap) with the per-cell delta carried by
+  // ctx.letterSpacing = Δ. The painted box edge = measure(whole) + n·Δ = the
+  // measured box, by construction (see justify-positions.ts / grid-bracket-overlap).
+  it('contiguous draw with letterSpacing=Δ matches the measured box width exactly', async () => {
     const charSpace = -1161; // sample-10's value
     const deltaPx = charSpace / 4096; // Δpt × scale(=1)
     const cell = FONT_PX + deltaPx; // per-CJK-glyph cell width
@@ -159,19 +167,23 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     // MEASURE: the segment box width is exactly n cells.
     expect(seg!.w).toBeCloseTo(n * cell, 6);
 
-    // DRAW: under the grid a pure-EA segment is drawn glyph-by-glyph. Collect the
-    // per-glyph fillText calls for this segment's baseline.
-    const glyphs = fillTextCalls.filter((c) => [...text].includes(c.text));
-    expect(glyphs.length).toBe(n); // every glyph drawn individually
-    // Positions are strictly increasing and land on cell starts: x_i = seg.x + i·cell.
-    for (let i = 0; i < n; i++) {
-      expect(glyphs[i].x).toBeCloseTo(seg!.x + i * cell, 6);
-    }
-    // INVARIANT: the last glyph's CELL edge equals the measured box edge, so the
-    // next segment starts exactly where the box ends — no overlap, no gap. This
-    // is the property the previous (corrupting) attempt violated.
-    const lastCellEdge = glyphs[n - 1].x + cell;
-    expect(lastCellEdge).toBeCloseTo(seg!.x + seg!.w, 6);
+    // DRAW: the pure-EA segment is painted as ONE contiguous fillText (not n
+    // isolated per-code-point draws — the previous, bracket-overlapping path).
+    const whole = fillTextCalls.filter((c) => c.text === text);
+    expect(whole.length).toBe(1);
+    // It starts at the segment's measured origin…
+    expect(whole[0].x).toBeCloseTo(seg!.x, 6);
+    // …and the per-cell grid delta is applied via ctx.letterSpacing, so the
+    // browser advances each glyph by measure(glyph)+Δ. With measure(whole) baked
+    // into seg.w and letterSpacing=Δ adding n·Δ, the painted box edge equals the
+    // measured box edge: the next segment abuts with no overlap and no gap. This
+    // is the invariant the previous (corrupting) per-code-point attempt violated.
+    expect(whole[0].letterSpacing).toBe(`${deltaPx}px`);
+    // No isolated single-code-point EA draw exists for this segment.
+    const isolated = fillTextCalls.filter(
+      (c) => [...c.text].length === 1 && [...text].includes(c.text),
+    );
+    expect(isolated.length).toBe(0);
   });
 
   // A space-free MIXED CJK+Latin token (no U+0020, so `splitTextForLayout` keeps

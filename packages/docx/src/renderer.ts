@@ -4474,14 +4474,36 @@ function renderParagraph(
         const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
         if (segGridDelta !== 0) {
           const cps = [...s.text]; // code points (handles surrogate pairs)
-          const justGaps = stretch?.splitBefore ?? [];
-          let g = 0; // justification gaps strictly before the current glyph
-          for (let i = 0; i < cps.length; i++) {
-            while (g < justGaps.length && justGaps[g] <= i) g++;
-            const prefix = cps.slice(0, i).join('');
-            const dx = ctx.measureText(prefix).width + i * drawGridDeltaPx + g * distPerGap;
-            ctx.fillText(cps[i], x + dx, baseline + yOffset);
+          // Draw each CONTIGUOUS piece (sliced only at justify gaps) as ONE
+          // contextually-shaped `fillText`, with the per-EA-glyph grid delta
+          // applied via `ctx.letterSpacing`. The previous per-code-point loop
+          // painted each glyph ISOLATED (no contextual shaping) yet positioned
+          // glyph i by the CONTEXTUAL cumulative `measureText(prefix_i)`. An
+          // opening bracket "［" (約物半角 §17.6.5) collapses to half-width only
+          // INSIDE a multi-char string, so an isolated full-width bracket plus a
+          // collapsed cumulative measure pulled every later glyph half-em left,
+          // OVERLAPPING the bracket. Drawing the piece contiguously makes measure
+          // and draw shape the SAME way (約物半角 honoured ⇒ no overlap), and
+          // `letterSpacing = Δ` reproduces the per-cell delta the box was measured
+          // with. Build `pieces` BEFORE setting letterSpacing: justifiedPiecePositions
+          // is eager and its internal `measure` calls must run at the natural
+          // advance (it adds `from·Δ` itself; the canvas adds Δ between glyphs
+          // WITHIN each piece — together glyph i lands at measure(prefix)+i·Δ, the
+          // same target as before). See @silurus/ooxml-core → justify-positions.ts.
+          const measure = (str: string): number => ctx.measureText(str).width;
+          const pieces = justifiedPiecePositions(
+            cps,
+            stretch?.splitBefore ?? [],
+            distPerGap,
+            measure,
+            drawGridDeltaPx,
+          );
+          const prevLetterSpacing = ctx.letterSpacing;
+          ctx.letterSpacing = `${drawGridDeltaPx}px`;
+          for (const { text: piece, dx } of pieces) {
+            ctx.fillText(piece, x + dx, baseline + yOffset);
           }
+          ctx.letterSpacing = prevLetterSpacing;
         } else if (stretch && stretch.splitBefore.length > 0) {
           // ECMA-376 §17.18.44 `both`/`distribute` inter-CJK justification pitch.
           // Anchor each sliced piece to the WHOLE-string cumulative advance plus
