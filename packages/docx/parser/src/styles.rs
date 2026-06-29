@@ -674,7 +674,15 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     }
 }
 
-fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
+/// Layer the run format `src` OVER `dst`: every property `src` explicitly sets
+/// replaces `dst`'s. The single source of truth for "which run properties
+/// override on merge" — used by the style cascade (docDefaults → style chain →
+/// rStyle) AND, via `parser::apply_direct_run`, for a run's DIRECT rPr. Keep new
+/// `RunFmt` fields here only; the direct path reuses this so the two can never
+/// drift. The trailing `*_set_here` markers are OR-propagated (see below) so a
+/// folded rStyle sub-chain still mirrors `w:sz`→szCs when re-applied; the direct
+/// path resets them afterwards because it is the terminal merge.
+pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.bold.is_some() {
         dst.bold = src.bold;
     }

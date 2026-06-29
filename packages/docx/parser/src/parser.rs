@@ -6,7 +6,7 @@ use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
 use crate::styles::{
-    apply_para, merge_cond_layers, parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder,
+    apply_para, apply_run, merge_cond_layers, parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder,
     RawTblBorders, RunFmt, StyleMap,
 };
 use crate::types::*;
@@ -5404,101 +5404,17 @@ fn normalize_align(s: &str) -> &str {
     }
 }
 
+/// Layer a run's DIRECT rPr (`direct`) over its resolved formatting (`base`).
+/// Reuse the canonical field merge (`styles::apply_run`) so the direct path can
+/// never drift from the style cascade (a drift previously dropped direct
+/// `<w:highlight>` / `<w:bdr>` on styleless body runs); the szCs-mirror rule
+/// (§17.3.2.18) and the auto-breaks-inheritance color rule (§17.3.2.6) both live
+/// there. The ONE divergence: `apply_run` OR-propagates the `*_set_here` markers
+/// so a folded rStyle sub-chain can re-mirror `w:sz`→szCs later, but the direct
+/// rPr is the TERMINAL merge — the szCs mirror is now fully resolved, so reset the
+/// markers to stop them leaking into any subsequent merge.
 fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
-    if direct.bold.is_some() {
-        base.bold = direct.bold;
-    }
-    if direct.italic.is_some() {
-        base.italic = direct.italic;
-    }
-    if direct.underline.is_some() {
-        base.underline = direct.underline;
-    }
-    if direct.strikethrough.is_some() {
-        base.strikethrough = direct.strikethrough;
-    }
-    if direct.font_size.is_some() {
-        base.font_size = direct.font_size;
-    }
-    // Color, with the same auto-breaks-inheritance rule as styles::apply_run:
-    // a direct `w:color="auto"` (§17.3.2.6) clears any inherited concrete color
-    // and defers the final color to background contrast at render time (an
-    // implementation-defined black/white pick; no normative algorithm); a
-    // concrete direct color overrides and clears the auto flag.
-    if direct.color_auto {
-        base.color = None;
-        base.color_auto = true;
-    } else if direct.color.is_some() {
-        base.color = direct.color.clone();
-        base.color_auto = false;
-    }
-    if direct.font_family_ascii.is_some() {
-        base.font_family_ascii = direct.font_family_ascii.clone();
-    }
-    if direct.font_family_east_asia.is_some() {
-        base.font_family_east_asia = direct.font_family_east_asia.clone();
-    }
-    if direct.background.is_some() {
-        base.background = direct.background.clone();
-    }
-    if direct.vert_align.is_some() {
-        base.vert_align = direct.vert_align.clone();
-    }
-    if direct.rtl.is_some() {
-        base.rtl = direct.rtl;
-    }
-    if direct.cs_toggle.is_some() {
-        base.cs_toggle = direct.cs_toggle;
-    }
-    if direct.font_family_cs.is_some() {
-        base.font_family_cs = direct.font_family_cs.clone();
-    }
-    if direct.bold_cs.is_some() {
-        base.bold_cs = direct.bold_cs;
-    }
-    if direct.italic_cs.is_some() {
-        base.italic_cs = direct.italic_cs;
-    }
-    if direct.lang_bidi.is_some() {
-        base.lang_bidi = direct.lang_bidi.clone();
-    }
-    // The following arms must stay in parity with styles::apply_run — this
-    // function is a hand-maintained mirror of it for the direct-rPr path, and
-    // a missing arm silently drops a directly-applied run property (the cause
-    // of `<w:highlight>` / `<w:bdr>` not rendering on styleless body runs).
-    if direct.all_caps.is_some() {
-        base.all_caps = direct.all_caps;
-    }
-    if direct.small_caps.is_some() {
-        base.small_caps = direct.small_caps;
-    }
-    if direct.dstrike.is_some() {
-        base.dstrike = direct.dstrike;
-    }
-    if direct.vanish.is_some() {
-        base.vanish = direct.vanish;
-    }
-    if direct.web_hidden.is_some() {
-        base.web_hidden = direct.web_hidden;
-    }
-    if direct.highlight.is_some() {
-        base.highlight = direct.highlight.clone();
-    }
-    if direct.border.is_some() {
-        base.border = direct.border.clone();
-    }
-
-    // Complex-script font size: a directly-applied `w:sz` without an
-    // accompanying `w:szCs` mirrors into the cs size (ECMA-376 §17.3.2.18 —
-    // see `styles::apply_run` for the full rationale). An explicit `w:szCs`
-    // always wins; otherwise inherited-only szCs is carried unchanged.
-    if direct.font_size_cs_set_here {
-        base.font_size_cs = direct.font_size_cs;
-    } else if direct.font_size_set_here {
-        base.font_size_cs = direct.font_size;
-    } else if direct.font_size_cs.is_some() {
-        base.font_size_cs = direct.font_size_cs;
-    }
+    apply_run(base, direct);
     base.font_size_set_here = false;
     base.font_size_cs_set_here = false;
 }
