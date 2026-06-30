@@ -1,6 +1,14 @@
 import type { RenderOptions, PptxTextRunInfo } from './renderer';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
+import { nextVisibleIndex, resolveVisibleIndex } from './hidden';
+import type { DimOptions } from './types';
+
+/** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
+export type HiddenSlideMode = 'show' | 'skip' | 'dim';
+
+/** Default `'dim'` overlay: 60% white (hidden content shows at 40%). */
+const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   /** Called when a slide finishes rendering */
@@ -20,6 +28,20 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * browser's native text selection works on slide content.
    */
   enableTextSelection?: boolean;
+  /**
+   * How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented:
+   * - `'show'` (default): drawn like any other slide.
+   * - `'skip'`: sequential navigation (`nextSlide`/`prevSlide`, initial load)
+   *   jumps over them; absolute indices are unchanged, and an explicit
+   *   `goToSlide(i)` to a hidden slide is still honored.
+   * - `'dim'`: drawn under a translucent overlay (PowerPoint thumbnail look).
+   */
+  hiddenSlides?: HiddenSlideMode;
+  /**
+   * Overrides for the `'dim'` overlay. Merged over the default
+   * `{ color: '#ffffff', opacity: 0.6 }`.
+   */
+  hiddenSlideDim?: { color?: string; opacity?: number };
 }
 
 /**
@@ -39,6 +61,7 @@ export class PptxViewer {
   private engine: PptxPresentation | null = null;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
+  private _hiddenMode: HiddenSlideMode;
   private handle: PresentationHandle | null = null;
   private readonly _mode: 'main' | 'worker';
   /** The canvas's bitmaprenderer context, used only by the static worker-mode
@@ -51,6 +74,7 @@ export class PptxViewer {
     this.opts = opts;
     this.canvas = canvas;
     this._mode = opts.mode ?? 'main';
+    this._hiddenMode = opts.hiddenSlides ?? 'show';
 
     const parent = canvas.parentElement;
     this.wrapper = document.createElement('div');
@@ -98,7 +122,7 @@ export class PptxViewer {
         math: this.opts.math,
         mode: this._mode,
       });
-      this.currentSlide = 0;
+      this.currentSlide = this._initialSlide();
       await this.renderCurrentSlide();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
@@ -118,11 +142,62 @@ export class PptxViewer {
   }
 
   async nextSlide(): Promise<void> {
-    await this.goToSlide(this.currentSlide + 1);
+    await this.goToSlide(this._step(1));
   }
 
   async prevSlide(): Promise<void> {
-    await this.goToSlide(this.currentSlide - 1);
+    await this.goToSlide(this._step(-1));
+  }
+
+  /** Next index for sequential nav: skip mode jumps over hidden slides. */
+  private _step(dir: 1 | -1): number {
+    if (this._hiddenMode === 'skip' && this.engine) {
+      return nextVisibleIndex(this.currentSlide, dir, (i) => this.engine!.isHidden(i), this.slideCount);
+    }
+    return this.currentSlide + dir;
+  }
+
+  /** Initial slide for load() / mode switch: skip mode lands on a visible one. */
+  private _initialSlide(): number {
+    if (this._hiddenMode === 'skip' && this.engine) {
+      return resolveVisibleIndex(0, (i) => this.engine!.isHidden(i), this.slideCount);
+    }
+    return 0;
+  }
+
+  /** Resolved `'dim'` overlay (defaults merged with the `hiddenSlideDim` option). */
+  private _dim(): DimOptions {
+    return {
+      color: this.opts.hiddenSlideDim?.color ?? DEFAULT_HIDDEN_DIM.color,
+      opacity: this.opts.hiddenSlideDim?.opacity ?? DEFAULT_HIDDEN_DIM.opacity,
+    };
+  }
+
+  /**
+   * Switch the hidden-slide mode at runtime and re-render. Entering `'skip'`
+   * while on a hidden slide advances to the nearest visible slide.
+   */
+  async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
+    this._hiddenMode = mode;
+    if (mode === 'skip' && this.engine) {
+      this.currentSlide = resolveVisibleIndex(
+        this.currentSlide,
+        (i) => this.engine!.isHidden(i),
+        this.slideCount,
+      );
+    }
+    await this.renderCurrentSlide();
+  }
+
+  /** The current hidden-slide mode. */
+  get hiddenSlideMode(): HiddenSlideMode { return this._hiddenMode; }
+
+  /** Number of non-hidden slides (absolute `slideCount` is unchanged). */
+  get visibleSlideCount(): number {
+    if (!this.engine) return 0;
+    let n = 0;
+    for (let i = 0; i < this.slideCount; i++) if (!this.engine.isHidden(i)) n++;
+    return n;
   }
 
   get slideIndex(): number { return this.currentSlide; }
@@ -143,6 +218,10 @@ export class PptxViewer {
 
   private async renderCurrentSlide(): Promise<void> {
     if (!this.engine) return;
+    const dim =
+      this._hiddenMode === 'dim' && this.engine.isHidden(this.currentSlide)
+        ? this._dim()
+        : undefined;
     const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
     const dpr = this.opts.dpr ?? (window.devicePixelRatio || 1);
 
@@ -173,14 +252,15 @@ export class PptxViewer {
         this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
           width: targetWidth,
           dpr,
+          dim,
         });
       } else if (isWorker) {
-        const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr });
+        const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim });
         this.canvas.width = bmp.width;
         this.canvas.height = bmp.height;
         this._bitmapCtx?.transferFromImageBitmap(bmp);
       } else {
-        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun });
+        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun, dim });
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
