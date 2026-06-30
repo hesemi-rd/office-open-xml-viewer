@@ -15,6 +15,8 @@ import {
   resolveFill,
   applyStroke,
   drawArrowHead,
+  lineEndRetract,
+  retractLineEndpoint,
   getConnectorAnchors,
   mathToMathML,
   recolorSvg,
@@ -6279,6 +6281,14 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     preset.startsWith('straightconnector') ||
     preset.startsWith('bentconnector') ||
     preset.startsWith('curvedconnector');
+  // Straight / bent connectors whose leader we re-stroke retracted from filled
+  // line-end decorations (so the line stops at the arrow base). Curved
+  // connectors are excluded — their Bézier leader can't be retracted from a
+  // polyline vertex without straightening it, so they keep the preset leader.
+  const isRetractableLeader =
+    preset === 'line' ||
+    preset.startsWith('straightconnector') ||
+    preset.startsWith('bentconnector');
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
 
@@ -6345,6 +6355,10 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
       fillStyle, strokeCb,
       // docx shapes carry no shadow state, so the clear-shadow hook is a no-op.
       () => {},
+      // A retractable connector leader is re-stroked retracted below; suppress
+      // the preset engine's full-length leader stroke to avoid a double line /
+      // a cap poking through the arrow tip.
+      isRetractableLeader ? { skipTrailingStroke: true } : undefined,
     );
   } else {
     ctx.beginPath();
@@ -6383,6 +6397,25 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     );
     if (anchors) {
       ctx.setLineDash([]);
+      // Re-stroke the leader retracted from any filled decoration so the line
+      // stops at the arrow base instead of poking through its tip (Word /
+      // PowerPoint behaviour). Straight/bent only; curved keeps its preset leader.
+      if (isRetractableLeader && anchors.vertices.length >= 2) {
+        const pts = anchors.vertices.map((v) => ({ x: v.x, y: v.y }));
+        if (coreStroke.tailEnd) {
+          const r = lineEndRetract(coreStroke.tailEnd, coreStroke, scale);
+          pts[pts.length - 1] = retractLineEndpoint(pts[pts.length - 1], pts[pts.length - 2], r);
+        }
+        if (coreStroke.headEnd) {
+          const r = lineEndRetract(coreStroke.headEnd, coreStroke, scale);
+          pts[0] = retractLineEndpoint(pts[0], pts[1], r);
+        }
+        applyStroke(ctx as CanvasRenderingContext2D, coreStroke, scale);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke();
+      }
       if (coreStroke.tailEnd) {
         drawArrowHead(ctx as CanvasRenderingContext2D, anchors.end.x, anchors.end.y, anchors.end.angle, coreStroke.tailEnd, coreStroke, scale);
       }
