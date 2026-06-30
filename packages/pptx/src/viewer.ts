@@ -35,13 +35,17 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    *   jumps over them; absolute indices are unchanged, and an explicit
    *   `goToSlide(i)` to a hidden slide is still honored.
    * - `'dim'`: drawn under a translucent overlay (PowerPoint thumbnail look).
+   *
+   * Named to match the {@link PptxViewer.hiddenSlideMode} getter and
+   * {@link PptxViewer.setHiddenSlideMode} setter.
    */
-  hiddenSlides?: HiddenSlideMode;
+  hiddenSlideMode?: HiddenSlideMode;
   /**
    * Overrides for the `'dim'` overlay. Merged over the default
-   * `{ color: '#ffffff', opacity: 0.6 }`.
+   * `{ color: '#ffffff', opacity: 0.6 }`. A `Partial<DimOptions>` so it stays
+   * in sync if {@link DimOptions} gains a field.
    */
-  hiddenSlideDim?: { color?: string; opacity?: number };
+  hiddenSlideDim?: Partial<DimOptions>;
 }
 
 /**
@@ -74,7 +78,7 @@ export class PptxViewer {
     this.opts = opts;
     this.canvas = canvas;
     this._mode = opts.mode ?? 'main';
-    this._hiddenMode = opts.hiddenSlides ?? 'show';
+    this._hiddenMode = opts.hiddenSlideMode ?? 'show';
 
     const parent = canvas.parentElement;
     this.wrapper = document.createElement('div');

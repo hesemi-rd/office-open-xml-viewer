@@ -7767,7 +7767,9 @@ fn parse_table_cell(
 
 /// `<p:sld show="0">` / `show="false"` marks a slide hidden in the slide show
 /// (ECMA-376 §19.3.1.38 `sld` / `CT_Slide` — `show`, xsd:boolean, default true).
-/// Absent or any truthy value ⇒ shown.
+/// Absent or any truthy value ⇒ shown. NB: this matches the FALSY literals —
+/// the inverse of the codebase's usual `== "1" || == "true"` truthy check —
+/// because `show` defaults to true, so a slide is hidden only on explicit false.
 fn slide_is_hidden(root: roxmltree::Node) -> bool {
     matches!(root.attribute("show"), Some("0") | Some("false"))
 }

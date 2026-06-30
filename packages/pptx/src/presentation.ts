@@ -233,7 +233,7 @@ export class PptxPresentation {
    * (`<p:sld show="0">`, ECMA-376 §19.3.1.38). Like {@link getNotes} the index
    * is NOT clamped — out-of-range / non-integer ⇒ `false`. This is a *fact*
    * about the model; deciding what to do with a hidden slide (skip / dim) is the
-   * caller's policy (see {@link PptxViewer}'s `hiddenSlides` modes).
+   * caller's policy (see {@link PptxViewer}'s `hiddenSlideMode` modes).
    */
   isHidden(slideIndex: number): boolean {
     if (this._meta) {

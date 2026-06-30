@@ -16,7 +16,7 @@ type _Modes = Expect<Equal<HiddenSlideMode, 'show' | 'skip' | 'dim'>>;
 type _SetMode = Expect<Equal<PptxViewer['setHiddenSlideMode'], (mode: HiddenSlideMode) => Promise<void>>>;
 type _ModeGetter = Expect<Equal<PptxViewer['hiddenSlideMode'], HiddenSlideMode>>;
 type _VisibleCount = Expect<Equal<PptxViewer['visibleSlideCount'], number>>;
-const _opts: PptxViewerOptions = { hiddenSlides: 'dim', hiddenSlideDim: { color: '#fff', opacity: 0.5 } };
+const _opts: PptxViewerOptions = { hiddenSlideMode: 'dim', hiddenSlideDim: { color: '#fff', opacity: 0.5 } };
 
 describe('PptxViewer hidden-slide policy (delegated pure helpers)', () => {
   it('skip navigation jumps over hidden slides via the tested helpers', () => {
