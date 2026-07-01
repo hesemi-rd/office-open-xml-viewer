@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -613,9 +613,21 @@ function blendHex(fgHex: string, bgHex: string, fgCoverage: number): string {
  *  cell scale `cs`. `factor` is the line-height / char-height multiplier (1.2
  *  for wrapped lines, 1.1 for stacked chars, 1.0 for decoration/baseline
  *  offsets). Centralizes the `* cs` factor so a new vertical-metric draw site
- *  can't silently omit it. (Glyph SIZE uses buildFont's floored variant.) */
-function vMetricPx(sizePt: number, cs: number, factor = 1): number {
-  return Math.round(sizePt * PT_TO_PX * factor * cs);
+ *  can't silently omit it. (Glyph SIZE uses buildFont's floored variant.)
+ *
+ *  `family` is passed ONLY at the single-line-height sites (factor 1.2) so the
+ *  result is floored to the DOCUMENT font's design single-line height (ECMA-376
+ *  §17.3.1.33, shared with docx/pptx via core's `intendedSingleLinePx`): Excel
+ *  sizes single spacing as a flat 1.2×em, which understates a SUBSTITUTED
+ *  Meiryo (1.596×em) / Sakkal Majalla (1.3965×em) line box and makes rows/lines
+ *  too short. This is a FLOOR — `intendedSingleLinePx` returns 0 for every
+ *  non-tabled family, so `max(base, 0) = base` leaves all other fonts on
+ *  Excel's 1.2×em. Do NOT pass `family` at the base-size (no factor) or the 1.1
+ *  super/sub sites — those must stay on the flat metric. */
+function vMetricPx(sizePt: number, cs: number, factor = 1, family?: string): number {
+  const base = Math.round(sizePt * PT_TO_PX * factor * cs);
+  if (!family) return base;
+  return Math.max(base, Math.round(intendedSingleLinePx(family, sizePt * PT_TO_PX * cs)));
 }
 
 function buildFont(font: CellFont, cs = 1): string {
@@ -834,6 +846,11 @@ interface RichSeg {
 interface RichLine {
   segments: RichSeg[];
   maxFontSize: number; // pt (line-height source)
+  /** Font family (name) of the run that set `maxFontSize` — the height source
+   *  run — so the wrap draw path can floor the single-line height to that
+   *  DOCUMENT font's design line box (Meiryo / Sakkal Majalla) via core's
+   *  `intendedSingleLinePx`. `null` when the height run named no family. */
+  maxFontFamily: string | null;
   /** 0-based index of the LF-delimited paragraph (hard-break region) this line
    *  belongs to. Soft-wrapped continuation lines share their paragraph's index;
    *  it advances only at a hard break. Indexes the per-paragraph bidi base
@@ -867,10 +884,16 @@ export function layoutRichTextLines(
   let cur: RichSeg[] = [];
   let curW = 0;
   let curMaxSize = 0;
+  // Family of the run that currently sets `curMaxSize` on this line — carried so
+  // the line-height floor targets the height run's DOCUMENT font.
+  let curMaxFamily: string | null = null;
   // Size (pt) of the nearest preceding text run — the height source for a blank
   // line, which has no segment of its own. Mirrors drawShapeText's `lastTextPt`
   // seed (PR #583); falls back to the cell's base font.
   let lastTextPt = baseFont.size;
+  // Family paired with `lastTextPt`, so a blank line inherits the nearest
+  // preceding text run's family for its own single-line-height floor.
+  let lastTextFamily: string | null = baseFont.name;
   // 0-based index of the current LF-delimited paragraph. Advances only at a hard
   // break (not at a soft wrap), so every line records which paragraph it belongs
   // to — the wrap draw path resolves a Context base direction per paragraph.
@@ -880,8 +903,8 @@ export function layoutRichTextLines(
   // line carried wholly to the next line must not leave a blank behind.
   const flush = () => {
     if (cur.length === 0) return;
-    lines.push({ segments: cur, maxFontSize: curMaxSize, para: paraIdx });
-    cur = []; curW = 0; curMaxSize = 0;
+    lines.push({ segments: cur, maxFontSize: curMaxSize, maxFontFamily: curMaxFamily, para: paraIdx });
+    cur = []; curW = 0; curMaxSize = 0; curMaxFamily = null;
   };
 
   // `flushRegion` emits an empty region as a blank line — used at a hard break
@@ -890,7 +913,7 @@ export function layoutRichTextLines(
   // reserves one single-line height (the cell analog of PR #583 / docx #582).
   const flushRegion = () => {
     if (cur.length === 0) {
-      lines.push({ segments: [], maxFontSize: lastTextPt || DEFAULT_FONT_SIZE, para: paraIdx });
+      lines.push({ segments: [], maxFontSize: lastTextPt || DEFAULT_FONT_SIZE, maxFontFamily: lastTextFamily, para: paraIdx });
       return;
     }
     flush();
@@ -899,6 +922,7 @@ export function layoutRichTextLines(
   const push = (text: string, font: CellFont) => {
     if (!text) return;
     lastTextPt = font.size; // nearest preceding text size, for the next blank line
+    lastTextFamily = font.name;
     // Measure at the *draw* font so a super/subscript token reserves its reduced
     // (~65%) glyph width; the segment keeps the run's full size for line height.
     ctx.font = buildFont(vertAlignDrawFont(font), cs);
@@ -943,13 +967,13 @@ export function layoutRichTextLines(
       if (carry) {
         cur.push(carry);
         curW += carry.width;
-        if (carry.font.size > curMaxSize) curMaxSize = carry.font.size;
+        if (carry.font.size > curMaxSize) { curMaxSize = carry.font.size; curMaxFamily = carry.font.name; }
       }
       ctx.font = buildFont(vertAlignDrawFont(font), cs); // restore for the incoming token below
     }
     cur.push({ text, font, width: w });
     curW += w;
-    if (font.size > curMaxSize) curMaxSize = font.size;
+    if (font.size > curMaxSize) { curMaxSize = font.size; curMaxFamily = font.name; }
   };
 
   for (const run of runs) {
@@ -1197,21 +1221,25 @@ function drawMultiLineRichText(
     }
   }
 
-  // Per-line height source (pt). A text line uses the max run size on it; a
-  // blank line inherits the nearest preceding text run's size — the same seed
-  // `layoutRichTextLines` / `drawShapeText` use for blank lines (PR #585).
+  // Per-line height source (pt) + the family of that height run. A text line uses
+  // the max run size on it; a blank line inherits the nearest preceding text
+  // run's size AND family — the same seed `layoutRichTextLines` / `drawShapeText`
+  // use for blank lines (PR #585). The family drives the single-line-height floor.
   let lastTextPt = baseFont.size;
+  let lastTextFamily: string | null = baseFont.name;
   const lineSizes = lineRuns.map((lr) => {
-    if (lr.length === 0) return lastTextPt || DEFAULT_FONT_SIZE;
+    if (lr.length === 0) return { pt: lastTextPt || DEFAULT_FONT_SIZE, family: lastTextFamily };
     let m = 0;
+    let family: string | null = null;
     for (const r of lr) {
-      const sz = applyRunFont(baseFont, r).size;
-      if (sz > m) m = sz;
-      lastTextPt = sz; // nearest preceding text size, for a following blank line
+      const rf = applyRunFont(baseFont, r);
+      if (rf.size > m) { m = rf.size; family = rf.name; }
+      lastTextPt = rf.size; // nearest preceding text size, for a following blank line
+      lastTextFamily = rf.name;
     }
-    return m;
+    return { pt: m, family };
   });
-  const lineHeights = lineSizes.map((s) => vMetricPx(s, cs, 1.2));
+  const lineHeights = lineSizes.map((s) => vMetricPx(s.pt, cs, 1.2, s.family ?? undefined));
   const totalH = lineHeights.reduce((a, b) => a + b, 0);
 
   let yy: number;
@@ -1283,7 +1311,7 @@ export function drawWrappedRichText(
 ): void {
   const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
   const rLines = layoutRichTextLines(ctx, runs, baseFont, cs, cellW - leftPad - paddingX);
-  const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2), 0);
+  const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2, l.maxFontFamily ?? undefined), 0);
   let yy: number;
   if (alignV === 'top') yy = cy + paddingY;
   else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
@@ -1303,7 +1331,7 @@ export function drawWrappedRichText(
     else xx = cx + leftPad;
     const { needBidi, baseRtl } = paraBidi[line.para];
     drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
-    yy += vMetricPx(line.maxFontSize, cs, 1.2);
+    yy += vMetricPx(line.maxFontSize, cs, 1.2, line.maxFontFamily ?? undefined);
   }
 }
 
@@ -1861,7 +1889,7 @@ function renderQuadrant(
       );
     } else if (xf.wrapText) {
       const lines = wrapTextLines(ctx, text, cW - leftPad - paddingX);
-      const lineH = vMetricPx(font.size, cs, 1.2);
+      const lineH = vMetricPx(font.size, cs, 1.2, font.name ?? undefined);
       const totalTextH = lines.length * lineH;
       let startY: number;
       if (alignV === 'top') startY = aCy + paddingY;
@@ -2465,7 +2493,7 @@ function renderQuadrant(
         );
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
-        const lineH = vMetricPx(font.size, cs, 1.2);
+        const lineH = vMetricPx(font.size, cs, 1.2, font.name ?? undefined);
         const totalTextH = lines.length * lineH;
         let startY: number;
         if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
@@ -2547,7 +2575,7 @@ function renderQuadrant(
         // when wrapText is false — this matches Excel's behavior.
         if (text.includes('\n')) {
           const lines = text.split('\n');
-          const lineH = vMetricPx(font.size, cs, 1.2);
+          const lineH = vMetricPx(font.size, cs, 1.2, font.name ?? undefined);
           const totalTextH = lines.length * lineH;
           let startY: number;
           if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
