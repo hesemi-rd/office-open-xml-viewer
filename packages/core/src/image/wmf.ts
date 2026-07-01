@@ -18,9 +18,12 @@
 //
 // Implemented records: SETWINDOWORG, SETWINDOWEXT, SETPOLYFILLMODE,
 // CREATEPENINDIRECT, CREATEBRUSHINDIRECT, SELECTOBJECT, DELETEOBJECT,
-// POLYLINE, POLYGON, POLYPOLYGON, RECTANGLE, EOF.
+// POLYLINE, POLYGON, POLYPOLYGON, RECTANGLE, STRETCHDIBITS (embedded raster DIB
+// via the shared decoder in ./dib.ts), EOF.
 // Ignored (no-op, skipped by size): ESCAPE, SETROP2, SETBKMODE, SETTEXTALIGN,
-// SETSTRETCHBLTMODE, SETMAPMODE, and any unrecognized record.
+// SETSTRETCHBLTMODE, SETMAPMODE, DIBBITBLT/DIBSTRETCHBLT (their exact param
+// layout is not decoded here — skipped rather than mis-parsed), and any
+// unrecognized record.
 //
 // Shared across the docx, pptx and xlsx renderers (originally docx-only). The
 // device-boundary edge-suppression heuristic (see `deviceInteriorEdges`) is a
@@ -33,6 +36,7 @@
 // by the sibling player {@link ./emf.ts}#renderEmfToBitmap, routed from
 // {@link decodeRasterOrMetafile}.
 
+import { decodePackedDib, blitDibToCtx } from './dib.js';
 import { renderEmfToBitmap } from './emf.js';
 
 // WMF record function codes (the subset we act on; others are skipped by size).
@@ -49,6 +53,9 @@ const META = {
   RECTANGLE: 0x041b,
   CREATEPENINDIRECT: 0x02fa,
   CREATEBRUSHINDIRECT: 0x02fc,
+  DIBBITBLT: 0x0940,
+  DIBSTRETCHBLT: 0x0b41,
+  STRETCHDIBITS: 0x0f43,
 } as const;
 
 const PLACEABLE_MAGIC = 0x9ac6cdd7; // little-endian bytes D7 CD C6 9A
@@ -559,6 +566,46 @@ export function playWmf(
         ]);
         break;
       }
+      case META.STRETCHDIBITS: {
+        // META_STRETCHDIBITS ([MS-WMF] 2.3.1.6). Params after the 6-byte
+        // size+function header, all little-endian:
+        //   u32 RasterOperation, i16 SrcHeight, i16 SrcWidth, i16 YSrc, i16 XSrc,
+        //   u16 UsageSrc, i16 DestHeight, i16 DestWidth, i16 YDest, i16 XDest,
+        //   then the packed DIB (BITMAPINFOHEADER + palette + pixel bits).
+        // We ignore the raster-op (draw plainly, like the EMF player) and draw
+        // the whole DIB, so Src{Height,Width,X,Y} and UsageSrc are read but unused.
+        c.u32(); // RasterOperation (ignored)
+        c.i16(); // SrcHeight (unused — whole DIB drawn)
+        c.i16(); // SrcWidth
+        c.i16(); // YSrc
+        c.i16(); // XSrc
+        c.u16(); // UsageSrc (unused)
+        const destHeight = c.i16();
+        const destWidth = c.i16();
+        const yDest = c.i16();
+        const xDest = c.i16();
+        // The packed DIB begins at the current cursor position:
+        //   paramStart + 22  (22 = u32 RasterOperation + 9 × i16/u16 = 4 + 18).
+        const dibOff = paramStart + 22;
+        const dibLen = recEnd - dibOff;
+        const dib = decodePackedDib(dv, dibOff, dibLen);
+        if (dib) {
+          const x0 = mapX(s, xDest);
+          const y0 = mapY(s, yDest);
+          const x1 = mapX(s, xDest + destWidth);
+          const y1 = mapY(s, yDest + destHeight);
+          if (blitDibToCtx(s.ctx, dib, x0, y0, x1, y1)) s.drew = true;
+        }
+        break;
+      }
+      case META.DIBSTRETCHBLT:
+      case META.DIBBITBLT:
+        // META_DIBBITBLT / META_DIBSTRETCHBLT ([MS-WMF] 2.3.1.2 / 2.3.1.3) also
+        // carry a packed DIB, but with a different (raster-op-dependent) preamble
+        // whose exact layout we do not decode here. Skipping is safer than
+        // guessing an offset that could mis-parse; STRETCHDIBITS covers the
+        // common embedded-raster case.
+        break;
       default:
         // ESCAPE, SETROP2, SETBKMODE, SETTEXTALIGN, SETSTRETCHBLTMODE,
         // SETMAPMODE, and anything unrecognized: skip by record size.

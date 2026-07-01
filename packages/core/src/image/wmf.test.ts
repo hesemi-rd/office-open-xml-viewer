@@ -105,6 +105,7 @@ const FN = {
   RECTANGLE: 0x041b,
   CREATEPENINDIRECT: 0x02fa,
   CREATEBRUSHINDIRECT: 0x02fc,
+  STRETCHDIBITS: 0x0f43,
 } as const;
 
 // ── recording mock ctx (records the draw calls + style mutations) ───────────
@@ -550,6 +551,68 @@ describe('playWmf — robustness', () => {
   it('returns false for non-WMF bytes', () => {
     const m = makeRecordingCtx();
     expect(playWmf(new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0]), m.ctx, 10, 10)).toBe(false);
+  });
+});
+
+// ── playWmf: STRETCHDIBITS embedded raster DIB ──────────────────────────────
+
+describe('playWmf — STRETCHDIBITS (embedded raster DIB)', () => {
+  // A META_STRETCHDIBITS record wraps a packed DIB. Its params (after the 6-byte
+  // header) are: u32 RasterOp, i16 SrcHeight/SrcWidth/YSrc/XSrc, u16 UsageSrc,
+  // i16 DestHeight/DestWidth/YDest/XDest, then the packed DIB. OffscreenCanvas is
+  // absent in the node test env, so blitDibToCtx returns false (no draw) — we
+  // assert the record parses without throwing and that later records still run.
+
+  /** Append a packed top-down 2×2 24-bit BI_RGB DIB (40-byte header + 16 pixel
+   *  bytes: 2 rows × 8-byte stride). Returns the same Writer for chaining. */
+  function packed2x2Dib24(w: Writer): Writer {
+    // BITMAPINFOHEADER (top-down: height = -2).
+    w.u32(40).u32(2).u32((-2) >>> 0).u16(1).u16(24).u32(0).u32(0).u32(0).u32(0).u32(0).u32(0);
+    // 2 rows, BGR pixels, each row padded to an 8-byte stride.
+    w.raw(0, 0, 255, 0, 255, 0, 0, 0); // row0: red (B0 G0 R255), green (B0 G255 R0), pad
+    w.raw(255, 0, 0, 30, 20, 10, 0, 0); // row1: blue, (10,20,30), pad
+    return w;
+  }
+
+  it('parses a STRETCHDIBITS record without throwing and continues to later records', () => {
+    const m = makeRecordingCtx();
+    const file = concat(
+      wmfHeader(),
+      record(FN.SETWINDOWORG, (w) => w.i16(0).i16(0)),
+      record(FN.SETWINDOWEXT, (w) => w.i16(100).i16(100)),
+      // STRETCHDIBITS: draw the DIB into dest rect (XDest=0,YDest=0, 50×50).
+      record(FN.STRETCHDIBITS, (w) => {
+        w.u32(0x00cc0020); // RasterOperation SRCCOPY (ignored)
+        w.i16(2).i16(2); // SrcHeight, SrcWidth
+        w.i16(0).i16(0); // YSrc, XSrc
+        w.u16(0); // UsageSrc (DIB_RGB_COLORS)
+        w.i16(50).i16(50); // DestHeight, DestWidth
+        w.i16(0).i16(0); // YDest, XDest
+        packed2x2Dib24(w); // packed DIB
+      }),
+      // A polyline AFTER the blt must still execute (proves the loop advanced past
+      // the STRETCHDIBITS record by its size, not by mis-parsing the DIB bytes).
+      record(FN.CREATEPENINDIRECT, (w) => w.u16(0).i16(1).i16(0).u32(0x000000ff)),
+      record(FN.SELECTOBJECT, (w) => w.u16(0)),
+      record(FN.POLYLINE, (w) => w.i16(2).i16(10).i16(10).i16(20).i16(20)),
+      record(FN.EOF, () => {}),
+    );
+
+    // No OffscreenCanvas in the node env ⇒ blitDibToCtx returns false (no draw);
+    // the parse path must still run cleanly and the trailing polyline strokes.
+    let drew = false;
+    expect(() => {
+      drew = playWmf(file, m.ctx, 100, 100);
+    }).not.toThrow();
+    // The trailing polyline drew, so playWmf reports true and the loop advanced
+    // past the STRETCHDIBITS record correctly.
+    expect(drew).toBe(true);
+    const strokes = m.calls.filter((c) => c.op === 'stroke');
+    expect(strokes.length).toBe(1);
+    expect(m.styles.stroke.at(-1)?.toLowerCase()).toBe('#ff0000');
+    // The polyline endpoints mapped ×1 (window 100 → device 100).
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    expect(moves[0].args).toEqual([10, 10]);
   });
 });
 
