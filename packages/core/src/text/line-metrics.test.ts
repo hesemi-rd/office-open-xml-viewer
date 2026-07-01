@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fontWinLineHeightRatio, intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
+import { fontWinLineHeightRatio, intendedSingleLinePx, correctLineMetrics } from './line-metrics.js';
 
 describe('fontWinLineHeightRatio', () => {
   it('returns Meiryo / Meiryo UI win line-height ratio (1.5962 em, from OS/2)', () => {
