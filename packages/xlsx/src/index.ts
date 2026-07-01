@@ -8,6 +8,7 @@ export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
   Workbook,
   SheetMeta,
+  SheetVisibility,
   Worksheet,
   Row,
   Cell,

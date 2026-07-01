@@ -4,6 +4,9 @@ export interface Workbook {
   sheets: SheetMeta[];
 }
 
+/** Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`). */
+export type SheetVisibility = 'visible' | 'hidden' | 'veryHidden';
+
 export interface SheetMeta {
   name: string;
   sheetId: number;

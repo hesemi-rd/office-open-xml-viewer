@@ -8,7 +8,8 @@ import {
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell } from './types.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
+import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
@@ -151,6 +152,27 @@ export class XlsxWorkbook {
    *  `null` for sheets that declare no tab color. */
   get tabColors(): (string | null)[] {
     return this.parsedWorkbook?.workbook.sheets.map((s) => s.tabColor ?? null) ?? [];
+  }
+
+  /**
+   * Full visibility fact for the sheet at `sheetIndex` (0-based):
+   * `'visible'` | `'hidden'` | `'veryHidden'` (`<sheet state>`, ECMA-376
+   * §18.2.19). NOT clamped — out-of-range / non-integer ⇒ `'visible'`. This is a
+   * *fact*; deciding what to do with a hidden sheet (hide/skip/dim its tab) is
+   * {@link XlsxViewer}'s policy. `'veryHidden'` is revealable only
+   * programmatically in Excel; it is surfaced distinctly here.
+   */
+  sheetVisibility(sheetIndex: number): SheetVisibility {
+    return selectSheetVisibility(this.parsedWorkbook?.workbook.sheets ?? [], sheetIndex);
+  }
+
+  /**
+   * Whether the sheet at `sheetIndex` is hidden or veryHidden. Convenience over
+   * {@link sheetVisibility}; mirrors {@link PptxPresentation.isHidden} (non-
+   * clamped: out-of-range / non-integer ⇒ `false`).
+   */
+  isHidden(sheetIndex: number): boolean {
+    return this.sheetVisibility(sheetIndex) !== 'visible';
   }
 
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
