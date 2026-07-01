@@ -85,10 +85,12 @@ describe('text-box paragraph spacing (§17.3.1.33)', () => {
     const b = calls.find((c) => c.text === 'BBB');
     expect(a).toBeDefined();
     expect(b).toBeDefined();
-    // One line of 10 pt text ⇒ block height = 10 * 1.2 = 12. Gap A→B baseline =
-    // blockHeight + max(after=20, before=10) = 12 + 20 = 32 (collapse), NOT
-    // 12 + (20 + 10) = 42 (sum).
+    // One line of 10 pt text ⇒ block height = the font's natural line box (the
+    // mock reports fontBoundingBox = 0.8 + 0.2 = 1.0 em, so 10 px). Gap A→B
+    // baseline = blockHeight + max(after=20, before=10) = 10 + 20 = 30 (collapse),
+    // NOT 10 + (20 + 10) = 40 (sum). The block height is metric-based (the shape
+    // text line box is the font's natural line height, not a flat 1.2× em).
     const gap = (b as Call).y - (a as Call).y;
-    expect(gap).toBeCloseTo(32, 1);
+    expect(gap).toBeCloseTo(30, 1);
   });
 });
