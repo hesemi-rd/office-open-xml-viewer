@@ -152,6 +152,12 @@ export function decodePackedDib(dv: DataView, dibOff: number, dibLen: number): D
     let clrUsed = dv.getUint32(dibOff + 32, true);
     if (clrUsed === 0) clrUsed = 1 << biBitCount;
     palEntries = clrUsed;
+  } else {
+    // A >8bpp DIB carries no indexed palette, but MAY still prepend an OPTIONAL
+    // optimization color table when `biClrUsed > 0` (BITMAPINFOHEADER /
+    // [MS-WMF] 2.2.2.9); the pixel bits then follow AFTER it. Skip those bytes so
+    // the derived `bitsOff` stays aligned (0 = no table, the common case).
+    palEntries = dv.getUint32(dibOff + 32, true);
   }
   const palBytes = palEntries * 4;
   const bmiLen = biSize + palBytes;

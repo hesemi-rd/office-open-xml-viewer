@@ -184,6 +184,31 @@ describe('decodePackedDib — contiguous header+palette+bits (WMF-style)', () =>
     expect(rgbaAt(d, 1, 1)).toEqual([0, 255, 0, 255]); // green
   });
 
+  it('skips an OPTIONAL optimization color table on a >8bpp DIB (biClrUsed > 0)', () => {
+    // A 24-bit DIB carries no indexed palette, but MAY prepend an optional
+    // optimization color table when biClrUsed > 0; the pixel bits then follow
+    // AFTER it ([MS-WMF] 2.2.2.9). clrUsed=2 → 8 palette bytes that must be
+    // skipped, else the bits offset misaligns and the decode is garbage.
+    const w = new Writer();
+    for (const b of bmih(2, -2, 24, 2).build()) w.u8(b); // clrUsed = 2
+    w.u8(1).u8(2).u8(3).u8(0).u8(4).u8(5).u8(6).u8(0);    // 2 RGBQUAD entries (skipped)
+    const px: [number, number, number][] = [
+      [10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120],
+    ];
+    for (let row = 0; row < 2; row++) {
+      for (let col = 0; col < 2; col++) {
+        const [r, g, b] = px[row * 2 + col];
+        w.u8(b).u8(g).u8(r);
+      }
+      w.u8(0).u8(0); // row pad → 8-byte stride
+    }
+    const bytes = w.build();
+    const dib = decodePackedDib(dvOf(bytes), 0, bytes.length);
+    expect(dib).not.toBeNull();
+    expect(rgbaAt(dib as DecodedDib, 0, 0)).toEqual([10, 20, 30, 255]);
+    expect(rgbaAt(dib as DecodedDib, 1, 1)).toEqual([100, 110, 120, 255]);
+  });
+
   it('returns null when dibLen is too small for a header', () => {
     const bytes = new Uint8Array(20);
     expect(decodePackedDib(dvOf(bytes), 0, 20)).toBeNull();
