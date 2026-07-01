@@ -3642,11 +3642,12 @@ export function drawShapeText(
       // single-line height — as tall as a one-character line of the paragraph's
       // effective font. Without this the empty line reserved zero height, so the
       // block under-measured and vertical anchoring ('ctr'/'b') drifted. Mirror
-      // the text-line formula (pxSize * 1.2) using the nearest preceding text
-      // size in this paragraph, falling back to the body default.
+      // the text-line formula (pxSize * 1.2, floored by the font's design line —
+      // see the run sites) using the nearest preceding text size AND face in
+      // this paragraph, falling back to the body default.
       if (lineHeight === 0) {
         const fallbackPx = (lastTextPt || DEFAULT_FONT_SIZE) * PT_TO_PX * cs;
-        lineHeight = fallbackPx * 1.2;
+        lineHeight = Math.max(fallbackPx * 1.2, intendedSingleLinePx(lastTextFace, fallbackPx));
         lineAscent = fallbackPx * 0.85;
       }
       lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath, leftInset: lineLeftInset(), availW: lineAvailW() });
@@ -3656,6 +3657,9 @@ export function drawShapeText(
     // Nearest preceding text size (pt) in this paragraph — inline math with no
     // explicit rPr@sz inherits it (then falls back to the default).
     let lastTextPt = 0;
+    // Nearest preceding text AUTHORED face — used to floor an empty/blank line's
+    // reserved single-line height by that font's design line (intendedSingleLinePx).
+    let lastTextFace: string | undefined;
 
     for (const run of p.runs) {
       if (run.type === 'break') { flushLine(); continue; }
@@ -3692,9 +3696,18 @@ export function drawShapeText(
 
       // Text run.
       lastTextPt = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
+      lastTextFace = run.fontFace;
       const { font, px: pxSize } = textFont(run);
       const color = run.color ?? '#000000';
-      lineHeight = Math.max(lineHeight, pxSize * 1.2);
+      // Floor the natural single line (Excel's flat 1.2×em) by the AUTHORED
+      // font's design line box (OS/2 win metrics, ECMA-376 §21.1.2.1.1) via
+      // core's intendedSingleLinePx — same floor docx/pptx apply. It returns 0
+      // for every untabled face (Calibri etc. stay on 1.2×em); a substituted
+      // Meiryo (1.596×em) / Sakkal Majalla must measure to its taller design
+      // line. Pass run.fontFace (the metric table keys on authored names), NOT
+      // the fallback stack from fontStackFor. Keep it a FLOOR — not a replace.
+      const singleLinePx = Math.max(pxSize * 1.2, intendedSingleLinePx(run.fontFace, pxSize));
+      lineHeight = Math.max(lineHeight, singleLinePx);
       lineAscent = Math.max(lineAscent, pxSize * 0.85);
       ctx.font = font;
       // Defensive: a run's text may still contain a literal "\n".
@@ -3726,7 +3739,9 @@ export function drawShapeText(
             flushLine();
             buf = ch;
             ctx.font = font;
-            lineHeight = Math.max(lineHeight, pxSize * 1.2);
+            // Re-seed this continuation line with the same design-line-floored
+            // single-line height as the run's first line (see singleLinePx above).
+            lineHeight = Math.max(lineHeight, singleLinePx);
             lineAscent = Math.max(lineAscent, pxSize * 0.85);
           } else {
             buf = candidate;
