@@ -735,6 +735,14 @@ pub struct ShapeRun {
     /// "b" (bottom). Read from <wps:bodyPr @anchor>. Default = "t".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_anchor: Option<String>,
+    /// Text auto-fit mode from the `<wps:bodyPr>` child (ECMA-376 §21.1.2.1.1),
+    /// normalized to the shared core vocabulary (core `src/types/common.ts`
+    /// `autoFit`): "none" (`<a:noAutofit/>`, fixed box — overflowing text is
+    /// CLIPPED to the box), "sp" (`<a:spAutoFit/>`, box grows to text), or
+    /// "norm" (`<a:normAutofit/>`, text shrinks to fit). Absent ⇒ None (renderer
+    /// treats as the spec default: overflow visible / no clip).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_autofit: Option<String>,
     /// Body-pr text insets in pt (left/top/right/bottom). Default 0 each.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub text_inset_l: f64,
@@ -1073,6 +1081,15 @@ pub struct ShapeText {
     /// pt — reserved below the paragraph. 0 when absent.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub space_after: f64,
+    /// ECMA-376 §17.3.1.33 `<w:spacing w:line>` line-spacing value, resolved
+    /// through the style chain (incl. docDefaults). Encoded per `line_spacing_rule`:
+    /// "auto" ⇒ a MULTIPLIER on the natural line box (276/240 = 1.15); "exact" /
+    /// "atLeast" ⇒ pt. Absent ⇒ single spacing (natural line box).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_spacing_val: Option<f64>,
+    /// Line-spacing rule: "auto" | "exact" | "atLeast" (see `line_spacing_val`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_spacing_rule: Option<String>,
     /// ECMA-376 §17.3.1.12 `<w:ind w:left/@start>` — paragraph left indent (pt).
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub indent_left: f64,

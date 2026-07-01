@@ -3824,8 +3824,15 @@ fn parse_wsp_shape(
 
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
-    let (text_blocks, text_anchor, text_inset_l, text_inset_t, text_inset_r, text_inset_b) =
-        parse_shape_text_body(style_map, wsp, theme, media_map);
+    let (
+        text_blocks,
+        text_anchor,
+        text_autofit,
+        text_inset_l,
+        text_inset_t,
+        text_inset_r,
+        text_inset_b,
+    ) = parse_shape_text_body(style_map, wsp, theme, media_map);
 
     Some(ShapeRun {
         width_pt,
@@ -3851,6 +3858,7 @@ fn parse_wsp_shape(
         wrap_mode: anchor_meta.wrap_mode.clone(),
         text_blocks,
         text_anchor,
+        text_autofit,
         text_inset_l,
         text_inset_t,
         text_inset_r,
@@ -3874,7 +3882,15 @@ fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
-) -> (Vec<ShapeText>, Option<String>, f64, f64, f64, f64) {
+) -> (
+    Vec<ShapeText>,
+    Option<String>,
+    Option<String>,
+    f64,
+    f64,
+    f64,
+    f64,
+) {
     let txbx = wsp
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "txbx");
@@ -3885,6 +3901,21 @@ fn parse_shape_text_body(
     let anchor = body_pr
         .and_then(|b| b.attribute("anchor"))
         .map(|s| s.to_string());
+    // ECMA-376 §21.1.2.1.1 auto-fit: the bodyPr's autofit is a CHILD element,
+    // one of <a:noAutofit/> / <a:spAutoFit/> / <a:normAutofit/>. Normalize it to
+    // the shared core vocabulary (packages/core src/types/common.ts `autoFit`):
+    // `noAutofit → "none"` (fixed box → the renderer clips overflow),
+    // `spAutoFit → "sp"` (box grows to fit), `normAutofit → "norm"` (text
+    // shrinks to fit). This matches the pptx path so all three formats emit the
+    // same enum; an absent auto-fit ⇒ None (overflow visible).
+    let autofit = body_pr.and_then(|b| {
+        b.children().find_map(|n| match n.tag_name().name() {
+            "noAutofit" if n.is_element() => Some("none".to_string()),
+            "spAutoFit" if n.is_element() => Some("sp".to_string()),
+            "normAutofit" if n.is_element() => Some("norm".to_string()),
+            _ => None,
+        })
+    });
     let emu_to_pt = |v: &str| v.parse::<f64>().ok().map(|e| e / 12700.0).unwrap_or(0.0);
     // ECMA-376 §21.1.2.1.1 defaults: lIns=rIns=91440 EMU, tIns=bIns=45720 EMU
     let l = body_pr
@@ -3917,7 +3948,7 @@ fn parse_shape_text_body(
         })
         .unwrap_or_default();
 
-    (blocks, anchor, l, t, r, b)
+    (blocks, anchor, autofit, l, t, r, b)
 }
 
 /// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
@@ -4092,15 +4123,30 @@ fn extract_simple_paragraph_text(
     // reserved INSIDE the text box (twips → pt). Word offsets the text down by
     // `w:before` (sample-13's "Journal homepage" line carries `w:before="1000"`,
     // i.e. 50 pt, which is why it sits well below the box top). Absent ⇒ 0.
-    let spacing = child_w(p, "pPr").and_then(|ppr| child_w(ppr, "spacing"));
-    let space_before = spacing
-        .and_then(|s| attr_w(s, "before"))
-        .map(|v| twips_to_pt(&v))
+    // Resolved EXACTLY like the indent path above — direct `<w:spacing>` wins
+    // (via `parse_para_fmt`'s `direct_ind`, which reads the paragraph's OWN
+    // `<w:pPr>`), else inherit the style-chain-resolved value (`style_para`,
+    // which folds in docDefaults §17.7.2). `ParaFmt` already carries the
+    // spaceBefore/After and line/lineRule values with the same twips→pt and
+    // auto⇒raw/240 · exact/atLeast⇒raw/20 encoding, so we reuse them instead of
+    // re-parsing `<w:spacing>` here. Without the style fallback a txbxContent
+    // paragraph carrying no direct `<w:spacing>` lost the inter-paragraph gaps
+    // Word applies (sample-6's 3-line box then kept its clipped 3rd line
+    // visible); the docDefault `line=276 lineRule=auto` = 1.15× likewise grows
+    // the 3-line box past its 82 pt bound so Word — and the renderer — clip it.
+    let space_before = direct_ind
+        .space_before
+        .or(style_para.space_before)
         .unwrap_or(0.0);
-    let space_after = spacing
-        .and_then(|s| attr_w(s, "after"))
-        .map(|v| twips_to_pt(&v))
+    let space_after = direct_ind
+        .space_after
+        .or(style_para.space_after)
         .unwrap_or(0.0);
+    let line_spacing_val = direct_ind.line_spacing_val.or(style_para.line_spacing_val);
+    let line_spacing_rule = direct_ind
+        .line_spacing_rule
+        .clone()
+        .or_else(|| style_para.line_spacing_rule.clone());
 
     // Single block-level format fields come from the FIRST text run (kept for
     // backward compatibility with existing consumers and the image-block path).
@@ -4139,6 +4185,8 @@ fn extract_simple_paragraph_text(
         alignment: normalize_align(&alignment).to_string(),
         space_before,
         space_after,
+        line_spacing_val,
+        line_spacing_rule,
         indent_left,
         indent_right,
         indent_first,
@@ -8867,7 +8915,7 @@ mod txbx_inline_image_tests {
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
 
-        let (blocks, _anchor, _l, _t, _r, _b) = parse_shape_text_body(
+        let (blocks, _anchor, _autofit, _l, _t, _r, _b) = parse_shape_text_body(
             &StyleMap::default(),
             doc.root_element(),
             &ThemeColors::default(),
@@ -8905,6 +8953,44 @@ mod txbx_inline_image_tests {
             "caption paragraph carries no image"
         );
         assert_eq!(blocks[1].alignment, "center");
+    }
+
+    /// `parse_shape_text_body` normalizes the bodyPr auto-fit CHILD element
+    /// (§21.1.2.1.1) to the shared core vocabulary: `<a:noAutofit/>` ⇒
+    /// Some("none") (fixed box → the renderer clips overflow), `<a:spAutoFit/>`
+    /// ⇒ Some("sp"), and an absent auto-fit ⇒ None (overflow visible).
+    #[test]
+    fn parse_shape_text_body_records_autofit_mode() {
+        let wsp = |body_pr: &str| {
+            format!(
+                r#"<wps:wsp
+                     xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                     xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                     <wps:txbx><w:txbxContent><w:p><w:r><w:t>x</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                     {body_pr}
+                   </wps:wsp>"#
+            )
+        };
+        let autofit_of = |xml: String| {
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_shape_text_body(
+                &StyleMap::default(),
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .2
+        };
+        assert_eq!(
+            autofit_of(wsp(r#"<wps:bodyPr><a:noAutofit/></wps:bodyPr>"#)).as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            autofit_of(wsp(r#"<wps:bodyPr><a:spAutoFit/></wps:bodyPr>"#)).as_deref(),
+            Some("sp")
+        );
+        assert_eq!(autofit_of(wsp(r#"<wps:bodyPr/>"#)), None);
     }
 
     /// An image-only paragraph (empty text) must NOT be dropped — the prior
@@ -9015,6 +9101,57 @@ mod txbx_inline_image_tests {
         .unwrap();
         assert!((block.space_before - 50.0).abs() < 1e-6);
         assert!((block.space_after - 9.0).abs() < 1e-6);
+    }
+
+    /// A text-box paragraph with NO direct `<w:spacing>` inherits space
+    /// before/after from its style chain (§17.3.1.33 + docDefaults), the same
+    /// way indent resolves. Per attribute: a direct value overrides the style;
+    /// an absent one falls through to the style. (Regression: sample-6's txbx
+    /// paragraphs had no direct spacing, so the 3-line box lost the inter-
+    /// paragraph gaps Word applies and its clipped 3rd line stayed visible.)
+    #[test]
+    fn extract_simple_paragraph_text_inherits_style_spacing() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Spaced">
+                <w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        // No direct spacing → both inherit from the style (240 tw = 12 pt, 120 tw = 6 pt).
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Spaced"/></w:pPr>
+                 <w:r><w:t>x</w:t></w:r></w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!((block.space_before - 12.0).abs() < 1e-6);
+        assert!((block.space_after - 6.0).abs() < 1e-6);
+
+        // A direct `after` overrides the style per-attribute; `before` (absent
+        // on the direct spacing) still inherits.
+        let doc2 = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Spaced"/><w:spacing w:after="360"/></w:pPr>
+                 <w:r><w:t>x</w:t></w:r></w:p>"#,
+        )
+        .unwrap();
+        let block2 = extract_simple_paragraph_text(
+            &styles,
+            doc2.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!((block2.space_before - 12.0).abs() < 1e-6);
+        assert!((block2.space_after - 18.0).abs() < 1e-6);
     }
 
     /// ECMA-376 §17.3.1.12 — a text-box paragraph surfaces its own `<w:ind>`

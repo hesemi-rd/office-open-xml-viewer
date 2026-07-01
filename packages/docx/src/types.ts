@@ -579,6 +579,12 @@ export interface ShapeRun {
   textBlocks?: ShapeText[];
   /** "t" | "ctr" | "b" — vertical anchor for the shape's text body (`<wps:bodyPr @anchor>`). */
   textAnchor?: string | null;
+  /** ECMA-376 §21.1.2.1.1 auto-fit mode from `<wps:bodyPr>`, normalized to the
+   *  shared core `autoFit` vocabulary (core `src/types/common.ts`): "none"
+   *  (`<a:noAutofit/>`, fixed box — overflowing text is CLIPPED to the box),
+   *  "sp" (`<a:spAutoFit/>`, box grows to text), or "norm" (`<a:normAutofit/>`,
+   *  text shrinks). Absent ⇒ overflow visible. */
+  textAutofit?: string | null;
   textInsetL?: number;  // pt
   textInsetT?: number;  // pt
   textInsetR?: number;  // pt
@@ -635,6 +641,12 @@ export interface ShapeText {
   /** ECMA-376 §17.3.1.33 `<w:spacing w:after>` of this text-box paragraph, in
    *  pt — reserved BELOW the paragraph. Absent/0 ⇒ no offset. */
   spaceAfter?: number;
+  /** ECMA-376 §17.3.1.33 line spacing value (style-chain resolved). Encoded per
+   *  {@link lineSpacingRule}: "auto" ⇒ a MULTIPLIER on the natural line box
+   *  (1.15 = 276/240), "exact"/"atLeast" ⇒ pt. Absent ⇒ single (natural). */
+  lineSpacingVal?: number;
+  /** "auto" | "exact" | "atLeast" — see {@link lineSpacingVal}. */
+  lineSpacingRule?: string;
   /** ECMA-376 §17.3.1.12 `<w:ind w:left/@start>` — paragraph left indent (pt).
    *  Absent/0 ⇒ flush to the box's inner left edge. */
   indentLeft?: number;
