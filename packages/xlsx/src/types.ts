@@ -1,4 +1,4 @@
-import type { MathNode } from '@silurus/ooxml-core';
+import type { MathNode, SpaceLine } from '@silurus/ooxml-core';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -552,6 +552,17 @@ export interface ShapeText {
   anchor: string;
   /** `<a:bodyPr@wrap>` — `square` (wrap to width) | `none`. */
   wrap: string;
+  /** `<a:bodyPr>` autofit child — `'sp'` (`spAutoFit`), `'norm'` (`normAutofit`),
+   *  or `'none'` (`noAutofit`/absent). ECMA-376 §21.1.2.1.1-.3. Always present
+   *  (default `'none'`), mirroring the core `TextBody.autoFit`. */
+  autoFit?: string;
+  /** `<a:normAutofit@fontScale>` — stored font-shrink fraction (e.g. 0.625 for
+   *  `fontScale="62500"`). Null/absent when unset. Modeled for parity with
+   *  pptx; the xlsx renderer does not currently apply it. */
+  fontScale?: number | null;
+  /** `<a:normAutofit@lnSpcReduction>` — stored line-spacing reduction fraction
+   *  (e.g. 0.20 for `lnSpcReduction="20000"`). Null/absent when unset. */
+  lnSpcReduction?: number | null;
   paragraphs: ShapeParagraph[];
 }
 
@@ -571,6 +582,9 @@ export interface ShapeParagraph {
   /** `<a:pPr@indent>` — first-line indent in EMU (negative = hanging),
    *  ECMA-376 §21.1.2.2.7. Omitted (undefined) when unset. */
   indent?: number;
+  /** `<a:pPr>/<a:lnSpc>` line spacing (ECMA-376 §21.1.2.2.5). Direct-only;
+   *  omitted when unset. */
+  spaceLine?: SpaceLine | null;
   runs: ShapeTextRun[];
 }
 

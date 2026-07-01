@@ -886,6 +886,19 @@ pub struct ShapeInfo {
     pub text: Option<ShapeText>,
 }
 
+/// Paragraph line spacing (`<a:pPr>/<a:lnSpc>`, ECMA-376 §21.1.2.2.5). Mirrors
+/// the pptx `SpaceLine` JSON shape (and core's TS `SpaceLine`): a percentage of
+/// the natural single line, or an absolute per-line height in points.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SpaceLine {
+    /// `<a:spcPct@val>` (e.g. 100000 = 100%, 150000 = 150%).
+    Pct { val: f64 },
+    /// `<a:spcPts@val>` in points (the raw ST_TextSpacingPoint hundredths-of-a-
+    /// point value is divided by 100 by the parser, matching pptx).
+    Pts { val: f64 },
+}
+
 /// Text body inside a shape (`<xdr:txBody>`, ECMA-376 §20.1.2.2). Holds
 /// the paragraphs plus body-level formatting (`<a:bodyPr>`).
 #[derive(Debug, Serialize)]
@@ -898,6 +911,19 @@ pub struct ShapeText {
     /// `<a:bodyPr@wrap>` — `square` (default = wrap to shape width),
     /// `none` (no wrap).
     pub wrap: String,
+    /// `<a:bodyPr>` autofit child (ECMA-376 §21.1.2.1.1-.3): `sp`
+    /// (`spAutoFit`), `norm` (`normAutofit`), or `none` (`noAutofit`/absent).
+    /// Always emitted (default `none`), mirroring the pptx `TextBody.autoFit`.
+    pub auto_fit: String,
+    /// `<a:normAutofit@fontScale>` — PowerPoint/Excel's stored font-shrink
+    /// fraction (e.g. 0.625 for `fontScale="62500"`). `None` when unset.
+    /// Modeled for parity; the xlsx renderer does not currently apply it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_scale: Option<f64>,
+    /// `<a:normAutofit@lnSpcReduction>` — stored line-spacing reduction fraction
+    /// (e.g. 0.20 for `lnSpcReduction="20000"`). `None` when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ln_spc_reduction: Option<f64>,
     pub paragraphs: Vec<ShapeParagraph>,
 }
 
@@ -924,6 +950,11 @@ pub struct ShapeParagraph {
     /// §21.1.2.2.7. `None` = unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indent: Option<i64>,
+    /// `<a:pPr>/<a:lnSpc>` line spacing (ECMA-376 §21.1.2.2.5). Direct-only.
+    /// `None` = unset. Omitted from JSON when `None` so existing output stays
+    /// byte-identical (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_line: Option<SpaceLine>,
     pub runs: Vec<ShapeTextRun>,
 }
 

@@ -516,6 +516,14 @@ pub(crate) fn parse_tx_body(
 ) -> Option<ShapeText> {
     let mut anchor = String::from("t");
     let mut wrap = String::from("square");
+    // `<a:bodyPr>` autofit child (ECMA-376 §21.1.2.1.1-.3). Default "none"
+    // (xlsx has no theme txDef fallback). Mirrors the pptx parser; for
+    // normAutofit also capture the stored fontScale / lnSpcReduction
+    // (ST_TextFontScalePercentOrPercentString / ST_TextSpacingPercentOrPercentString,
+    // 1000ths of a percent → fraction).
+    let mut auto_fit = String::from("none");
+    let mut font_scale: Option<f64> = None;
+    let mut ln_spc_reduction: Option<f64> = None;
     let mut paragraphs: Vec<ShapeParagraph> = Vec::new();
     for c in tx_body.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
@@ -526,6 +534,25 @@ pub(crate) fn parse_tx_body(
                 if let Some(w) = c.attribute("wrap") {
                     wrap = w.to_string();
                 }
+                // OOXML spelling is `normAutofit` (lowercase f).
+                for bc in c.children().filter(|n| n.is_element()) {
+                    match bc.tag_name().name() {
+                        "spAutoFit" => auto_fit = String::from("sp"),
+                        "normAutofit" => {
+                            auto_fit = String::from("norm");
+                            font_scale = bc
+                                .attribute("fontScale")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .map(|v| v / 100000.0);
+                            ln_spc_reduction = bc
+                                .attribute("lnSpcReduction")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .map(|v| v / 100000.0);
+                        }
+                        "noAutofit" => auto_fit = String::from("none"),
+                        _ => {}
+                    }
+                }
             }
             "p" => {
                 let mut align = String::from("l");
@@ -533,6 +560,7 @@ pub(crate) fn parse_tx_body(
                 let mut mar_l: Option<i64> = None;
                 let mut mar_r: Option<i64> = None;
                 let mut indent: Option<i64> = None;
+                let mut space_line: Option<SpaceLine> = None;
                 let mut runs: Vec<ShapeTextRun> = Vec::new();
                 for pc in c.children().filter(|n| n.is_element()) {
                     match pc.tag_name().name() {
@@ -553,6 +581,34 @@ pub(crate) fn parse_tx_body(
                             mar_l = pc.attribute("marL").and_then(|v| v.parse().ok());
                             mar_r = pc.attribute("marR").and_then(|v| v.parse().ok());
                             indent = pc.attribute("indent").and_then(|v| v.parse().ok());
+                            // ECMA-376 §21.1.2.2.5 `<a:lnSpc>`: spcPct is a
+                            // percentage of the natural single line; spcPts is an
+                            // absolute per-line height (raw @val is hundredths of
+                            // a point → divide by 100, matching pptx SpaceLine).
+                            if let Some(ln_spc) = pc
+                                .children()
+                                .find(|n| n.is_element() && n.tag_name().name() == "lnSpc")
+                            {
+                                let pct = ln_spc
+                                    .children()
+                                    .find(|n| n.is_element() && n.tag_name().name() == "spcPct");
+                                if let Some(v) = pct
+                                    .and_then(|n| n.attribute("val"))
+                                    .and_then(|v| v.parse::<f64>().ok())
+                                {
+                                    space_line = Some(SpaceLine::Pct { val: v });
+                                } else {
+                                    let pts = ln_spc.children().find(|n| {
+                                        n.is_element() && n.tag_name().name() == "spcPts"
+                                    });
+                                    if let Some(v) = pts
+                                        .and_then(|n| n.attribute("val"))
+                                        .and_then(|v| v.parse::<f64>().ok())
+                                    {
+                                        space_line = Some(SpaceLine::Pts { val: v / 100.0 });
+                                    }
+                                }
+                            }
                         }
                         "r" => {
                             // Run text + run-level formatting.
@@ -625,6 +681,7 @@ pub(crate) fn parse_tx_body(
                         mar_l,
                         mar_r,
                         indent,
+                        space_line,
                         runs,
                     });
                 }
@@ -638,6 +695,9 @@ pub(crate) fn parse_tx_body(
         Some(ShapeText {
             anchor,
             wrap,
+            auto_fit,
+            font_scale,
+            ln_spc_reduction,
             paragraphs,
         })
     }
@@ -1651,6 +1711,99 @@ mod math_tests {
         assert!(v.get("marL").is_none(), "marL omitted when None");
         assert!(v.get("marR").is_none(), "marR omitted when None");
         assert!(v.get("indent").is_none(), "indent omitted when None");
+        // spaceLine is additive/omitted when absent; autoFit always present.
+        assert!(p.space_line.is_none(), "absent lnSpc → None");
+        assert!(v.get("spaceLine").is_none(), "spaceLine omitted when None");
+        let vt: serde_json::Value = serde_json::to_value(&text).unwrap();
+        assert_eq!(vt["autoFit"], "none", "no autofit child → autoFit=none");
+        assert!(
+            vt.get("fontScale").is_none(),
+            "fontScale omitted when unset"
+        );
+        assert!(
+            vt.get("lnSpcReduction").is_none(),
+            "lnSpcReduction omitted when unset"
+        );
+    }
+
+    /// `<a:pPr>/<a:lnSpc>` line spacing (ECMA-376 §21.1.2.2.5): spcPct → a
+    /// percent SpaceLine (raw @val), spcPts → a points SpaceLine (raw hundredths
+    /// of a point divided by 100). Mirrors the pptx SpaceLine JSON contract.
+    #[test]
+    fn parses_lnspc_pct_and_pts() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:pPr><a:lnSpc><a:spcPct val="150000"/></a:lnSpc></a:pPr>
+                <a:r><a:t>pct</a:t></a:r>
+              </a:p>
+              <a:p>
+                <a:pPr><a:lnSpc><a:spcPts val="1800"/></a:lnSpc></a:pPr>
+                <a:r><a:t>pts</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        assert_eq!(text.paragraphs.len(), 2);
+
+        let vp0: serde_json::Value = serde_json::to_value(&text.paragraphs[0]).unwrap();
+        assert_eq!(vp0["spaceLine"]["type"], "pct");
+        assert_eq!(vp0["spaceLine"]["val"], 150000.0);
+
+        let vp1: serde_json::Value = serde_json::to_value(&text.paragraphs[1]).unwrap();
+        assert_eq!(vp1["spaceLine"]["type"], "pts");
+        // 1800 hundredths of a point → 18 pt.
+        assert_eq!(vp1["spaceLine"]["val"], 18.0);
+    }
+
+    /// `<a:bodyPr>/<a:normAutofit>` (ECMA-376 §21.1.2.1.3): autoFit="norm" plus
+    /// the stored fontScale / lnSpcReduction (1000ths of a percent → fraction).
+    #[test]
+    fn parses_normautofit_scales() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:bodyPr><a:normAutofit fontScale="62500" lnSpcReduction="20000"/></a:bodyPr>
+              <a:p><a:r><a:t>x</a:t></a:r></a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let v: serde_json::Value = serde_json::to_value(&text).unwrap();
+        assert_eq!(v["autoFit"], "norm");
+        assert_eq!(v["fontScale"], 0.625);
+        assert_eq!(v["lnSpcReduction"], 0.2);
+    }
+
+    /// `<a:bodyPr>/<a:spAutoFit>` → autoFit="sp" (no scales); `<a:noAutofit>` →
+    /// autoFit="none". Both leave rendering unchanged (renderer applies neither).
+    #[test]
+    fn parses_spautofit_and_noautofit() {
+        let sp_xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:bodyPr><a:spAutoFit/></a:bodyPr>
+              <a:p><a:r><a:t>x</a:t></a:r></a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&sp_xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let v: serde_json::Value = serde_json::to_value(&text).unwrap();
+        assert_eq!(v["autoFit"], "sp");
+        assert!(
+            v.get("fontScale").is_none(),
+            "spAutoFit stores no fontScale"
+        );
+
+        let no_xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:bodyPr><a:noAutofit/></a:bodyPr>
+              <a:p><a:r><a:t>x</a:t></a:r></a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&no_xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let v: serde_json::Value = serde_json::to_value(&text).unwrap();
+        assert_eq!(v["autoFit"], "none");
     }
 
     /// `ShapeTextRun` uses an enum-level `#[serde(tag = "type", rename_all =
