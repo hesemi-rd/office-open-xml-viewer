@@ -456,11 +456,17 @@ fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1);
             let r_id = node.attribute((r_ns, "id")).unwrap_or("").to_string();
+            let visibility = match node.attribute("state") {
+                Some("hidden") => SheetVisibility::Hidden,
+                Some("veryHidden") => SheetVisibility::VeryHidden,
+                _ => SheetVisibility::Visible,
+            };
             sheets.push(SheetMeta {
                 name,
                 sheet_id,
                 r_id,
                 tab_color: None,
+                visibility,
             });
         }
     }
@@ -2537,5 +2543,22 @@ mod extract_image_tests {
             w.finish().unwrap();
         }
         assert_eq!(extract_image(&buf, "xl/media/i.png", None).unwrap(), b"X");
+    }
+}
+
+#[cfg(test)]
+mod sheet_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn sheet_state_attr_maps_to_visibility() {
+        // ECMA-376 §18.2.19 ST_SheetState: visible (default) | hidden | veryHidden.
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2" state="hidden"/><sheet name="C" sheetId="3" r:id="rId3" state="veryHidden"/><sheet name="D" sheetId="4" r:id="rId4" state="visible"/></sheets></workbook>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let sheets = parse_workbook_sheets(&doc);
+        assert_eq!(sheets[0].visibility, SheetVisibility::Visible); // absent ⇒ visible
+        assert_eq!(sheets[1].visibility, SheetVisibility::Hidden);
+        assert_eq!(sheets[2].visibility, SheetVisibility::VeryHidden);
+        assert_eq!(sheets[3].visibility, SheetVisibility::Visible);
     }
 }

@@ -7,6 +7,25 @@ pub struct Workbook {
     pub sheets: Vec<SheetMeta>,
 }
 
+/// Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`).
+/// `Hidden` = hidden but user-unhideable via the UI; `VeryHidden` = revealable
+/// only programmatically. Default is `Visible`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SheetVisibility {
+    Visible,
+    Hidden,
+    VeryHidden,
+}
+
+impl SheetVisibility {
+    /// For `skip_serializing_if`: omit the default (`Visible`) so existing
+    /// workbook JSON snapshots are unchanged.
+    pub fn is_visible(&self) -> bool {
+        matches!(self, SheetVisibility::Visible)
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetMeta {
@@ -19,6 +38,10 @@ pub struct SheetMeta {
     /// sheet declares no tab color.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
+    /// Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19). Omitted from JSON
+    /// when `Visible` (the default) so existing snapshots are unchanged.
+    #[serde(skip_serializing_if = "SheetVisibility::is_visible")]
+    pub visibility: SheetVisibility,
 }
 
 #[derive(Debug, Serialize)]
