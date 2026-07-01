@@ -72,6 +72,7 @@ import {
   symbolFontToUnicode,
   isSymbolFontFamily,
   pptxDashArray,
+  intendedSingleLinePx,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -400,6 +401,15 @@ export async function prepareSlideMath(slide: Slide, math: MathRenderer): Promis
 type LayoutSegment = {
   text: string;
   font: string;
+  /**
+   * Raw (normalized) font-family requested for this segment's glyphs, kept
+   * alongside the composed CSS `font` string so the line-height pass can floor
+   * the single-line box to the DOCUMENT font's design line height via core's
+   * `intendedSingleLinePx` (ECMA-376 §17.3.1.33 single spacing). Only the
+   * tabled substituted faces (Meiryo / Sakkal Majalla) raise the floor; every
+   * other family returns 0 and leaves PowerPoint's flat 1.2×em untouched.
+   */
+  fontFamily?: string;
   sizePx: number;
   color: string;
   underline: boolean;
@@ -754,6 +764,8 @@ export function layoutParagraph(
       shadow?: import('@silurus/ooxml-core').Shadow;
       outline?: import('@silurus/ooxml-core').TextOutline;
       highlight?: string;
+      /** Raw normalized family for the design-line-height floor (see LayoutSegment). */
+      fontFamily?: string;
     },
   ) => {
     if (!text) return;
@@ -771,6 +783,7 @@ export function layoutParagraph(
     const shadow = extras?.shadow;
     const outline = extras?.outline;
     const highlight = extras?.highlight;
+    const fontFamily = extras?.fontFamily;
     // Shadow / outline use object identity for merging — adjacent runs share
     // the same object since the run is parsed once. Different objects (or
     // one set / one missing) force a new segment.
@@ -787,14 +800,15 @@ export function layoutParagraph(
       a.baseline === baseline &&
       a.shadow === shadow &&
       a.outline === outline &&
-      (a.highlight ?? '') === (highlight ?? '');
+      (a.highlight ?? '') === (highlight ?? '') &&
+      (a.fontFamily ?? '') === (fontFamily ?? '');
     if (tabActive && currentLine.tabStop) {
       const segs = currentLine.tabStop.segments;
       const last = segs.at(-1);
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
+        segs.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
       }
     } else {
       lineW += w;
@@ -802,7 +816,7 @@ export function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
+        currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
       }
     }
   };
@@ -844,6 +858,7 @@ export function layoutParagraph(
       shadow: seg.shadow,
       outline: seg.outline,
       highlight: seg.highlight,
+      fontFamily: seg.fontFamily,
     });
     return true;
   };
@@ -945,6 +960,10 @@ export function layoutParagraph(
       underlineColor: run.underlineColor ? hexToRgba(run.underlineColor) : undefined,
       shadow: run.shadow,
       outline: run.outline,
+      // Raw latin/primary family for the design-line-height floor. CJK per-char
+      // pushes below override this to `familyEa` when they draw with `fontEa`,
+      // so a Meiryo set only as the East Asian typeface is still floored.
+      fontFamily: family,
       // §21.1.2.3.4 — highlight is a resolved hex (6-char opaque or 8-char
       // RRGGBBAA); hexToRgba handles both, matching how text/underline colours
       // are converted for canvas.
@@ -1050,11 +1069,15 @@ export function layoutParagraph(
         // forbidden-set element (w:noLineBreaksBefore/After are WordprocessingML-only).
         // docx's analogous CJK path (renderer.ts, fitCJKPrefix) is intentionally
         // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
-        const measured: (MeasuredChar & { font: string })[] = [];
+        const measured: (MeasuredChar & { font: string; family: string })[] = [];
         for (const ch of token) {
-          const chFont = isCjkBreakChar(ch.codePointAt(0) ?? 0) ? fontEa : font;
+          const isEa = isCjkBreakChar(ch.codePointAt(0) ?? 0) && familyEa != null;
+          const chFont = isEa ? fontEa : font;
+          // Floor to the family actually rendering this glyph: `familyEa` for
+          // CJK when an East Asian typeface was declared, else the latin family.
+          const chFamily = isEa ? (familyEa as string) : family;
           ctx.font = chFont;
-          measured.push({ ch, w: ctx.measureText(ch).width, font: chFont });
+          measured.push({ ch, w: ctx.measureText(ch).width, font: chFont, family: chFamily });
         }
         if (para.eaLnBrk === false) {
           // Keep the East Asian word whole. If the current line already has
@@ -1063,7 +1086,7 @@ export function layoutParagraph(
           const tokenW = measured.reduce((acc, m) => acc + m.w, 0);
           if (lineW > 0 && lineW + tokenW > lineMaxW()) newLine();
           for (const m of measured) {
-            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
           }
           continue;
         }
@@ -1076,7 +1099,7 @@ export function layoutParagraph(
           }
           for (let i = 0; i < n; i++) {
             const m = rest[i];
-            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
           }
           rest = rest.slice(n);
           if (rest.length > 0) newLine();
@@ -2233,6 +2256,15 @@ export function renderTextBody(
       // defaults like `defRPr sz="30000"` (300pt prompt-text marker) would
       // inflate lineHeight and push real 24pt runs far below the anchor.
       let maxSizePx = 0;
+      // Design single-line-height FLOOR (ECMA-376 §17.3.1.33, shared with docx
+      // via core's `intendedSingleLinePx`). PowerPoint sizes single spacing as a
+      // flat 1.2×em; for a SUBSTITUTED face whose Windows design line height is
+      // taller than that (Meiryo 1.596×em, Sakkal Majalla 1.3965×em) the flat
+      // ratio understates Word/PowerPoint's line box and lines overlap. This is
+      // a FLOOR, not a replacement: `intendedSingleLinePx` returns 0 for every
+      // non-tabled family, so `max(1.2×em, 0)` leaves all other fonts (all Latin,
+      // installed CJK, etc.) exactly on PowerPoint's 1.2×em convention.
+      let designSingle = 0;
       for (const seg of line.segments) {
         // For an equation, the line must be at least as tall as its own font
         // size (so a short label like "y"/"p"/"z" gets the normal font-ascent
@@ -2243,6 +2275,11 @@ export function renderTextBody(
           ? Math.max(seg.sizePx, (seg.math.ascent + seg.math.descent) / 1.2)
           : seg.sizePx;
         if (effSize > maxSizePx) maxSizePx = effSize;
+        // Equations carry no text family; only text segments contribute a floor.
+        if (!seg.math) {
+          const ds = intendedSingleLinePx(seg.fontFamily, seg.sizePx);
+          if (ds > designSingle) designSingle = ds;
+        }
       }
       if (maxSizePx === 0) maxSizePx = paraDefaultFontSizePx;
       // Bullet font size also counts
@@ -2258,16 +2295,22 @@ export function renderTextBody(
         maxSizePx = bulletImage.sizePx;
       }
 
+      // Single-line base with the design-line-height floor applied (see the
+      // `designSingle` loop above). `singleLine` replaces the bare `maxSizePx *
+      // 1.2` everywhere the base is a MULTIPLE of the single line (the pct and
+      // no-spaceLine cases); the exact-pt `spcPts` case is an absolute height
+      // and is deliberately NOT floored.
+      const singleLine = Math.max(maxSizePx * 1.2, designSingle);
       let lineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
           // spcPct 100% = single line spacing = natural font leading ≈ 1.2× em
-          lineHeight = maxSizePx * 1.2 * (para.spaceLine.val / 100000);
+          lineHeight = singleLine * (para.spaceLine.val / 100000);
         } else {
           lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
       } else {
-        lineHeight = maxSizePx * 1.2;
+        lineHeight = singleLine;
       }
       // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
       // each paragraph's line spacing by this fraction alongside the font
