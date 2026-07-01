@@ -2314,8 +2314,12 @@ export function renderTextBody(
       }
       // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
       // each paragraph's line spacing by this fraction alongside the font
-      // shrink. Apply it only when normAutofit actually stored a value.
-      if (body.autoFit === 'norm' && body.lnSpcReduction != null) {
+      // shrink. Apply it only when normAutofit stored a value AND the paragraph
+      // has PERCENTAGE line spacing — the spec's normative note reads "This
+      // attribute applies only to paragraphs with percentage line spacing." pct
+      // and the implicit single (= 100 % percentage) qualify; an absolute
+      // spcPts height does not.
+      if (body.autoFit === 'norm' && body.lnSpcReduction != null && para.spaceLine?.type !== 'pts') {
         lineHeight *= 1 - body.lnSpcReduction;
       }
       const linePx  = lineHeight + (isLast ? spaceAfterPx : 0);
