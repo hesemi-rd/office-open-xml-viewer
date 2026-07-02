@@ -713,15 +713,24 @@ export async function decodeRasterOrMetafile(
   opts: DecodeRasterOptions = {},
 ): Promise<ImageBitmap | null> {
   const { widthPt = 0, heightPt = 0, suppressBoundaryFrame = false } = opts;
-  const bytes = new Uint8Array(await data.arrayBuffer());
 
-  if (isWmf(bytes)) {
+  // Sniff only the header, not the whole blob. `isEmf` reads bytes 40-43 (u32@40
+  // == " EMF") and `isWmf` at most the 18-byte standard header, so 44 bytes is
+  // sufficient for either magic. The overwhelmingly common case — a raster
+  // (PNG/JPEG/GIF/BMP/WEBP) — then hands the Blob straight to createImageBitmap
+  // without ever materializing the full bytes in JS, avoiding a whole-image
+  // arrayBuffer() copy per decode. A metafile pays a 44-byte read plus the full
+  // read below (two reads), but metafiles are small and rare next to the raster
+  // fast path, so the net is a large reduction in copied bytes.
+  const head = new Uint8Array(await data.slice(0, 44).arrayBuffer());
+
+  if (isWmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
-    return renderWmfToBitmap(bytes, w, h, suppressBoundaryFrame);
+    return renderWmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h, suppressBoundaryFrame);
   }
-  if (isEmf(bytes)) {
+  if (isEmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
-    return renderEmfToBitmap(bytes, w, h);
+    return renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h);
   }
   return createImageBitmap(data);
 }

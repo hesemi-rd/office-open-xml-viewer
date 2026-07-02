@@ -775,6 +775,43 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).toHaveBeenCalledWith(blob);
   });
 
+  it('sniffs a ≤44-byte slice for raster: only the header is read, the Blob is handed to createImageBitmap whole', async () => {
+    const fake = { width: 3, height: 4, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async (_blob: Blob) => fake);
+    vi.stubGlobal('createImageBitmap', cib);
+
+    // A raster smaller than the 44-byte sniff window. slice(0,44) must not throw
+    // and the sub-44-byte `isWmf`/`isEmf` length guards must both return false so
+    // the blob falls through to createImageBitmap.
+    const tiny = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]); // 7 bytes, PNG-ish
+    const base = new Blob([tiny as BlobPart], { type: 'image/png' });
+
+    // Spy on the two Blob reads: the raster path must slice (header sniff) but
+    // must NOT read the whole blob via arrayBuffer() — createImageBitmap consumes
+    // the Blob directly.
+    let sliced = 0;
+    let fullRead = 0;
+    const wrapped = {
+      type: base.type,
+      size: base.size,
+      slice(start?: number, end?: number) {
+        sliced++;
+        return base.slice(start, end);
+      },
+      async arrayBuffer() {
+        fullRead++;
+        return base.arrayBuffer();
+      },
+    } as unknown as Blob;
+
+    const bmp = await decodeRasterOrMetafile(wrapped, { widthPt: 50, heightPt: 50 });
+    expect(bmp).toBe(fake);
+    expect(sliced).toBe(1); // header sniff happened
+    expect(fullRead).toBe(0); // no whole-blob copy on the raster fast path
+    expect(cib).toHaveBeenCalledTimes(1);
+    expect(cib).toHaveBeenCalledWith(wrapped);
+  });
+
   it('an empty WMF (no geometry) → null, not a throw', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async (src: { width: number; height: number }) =>
       ({ width: src.width, height: src.height, close() {} }) as unknown as ImageBitmap));
