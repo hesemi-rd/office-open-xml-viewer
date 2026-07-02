@@ -1010,3 +1010,180 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     v.destroy();
   });
 });
+
+describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
+  const PT_TO_PX = 4 / 3;
+  // container fit width 200, page widthPt 100 → base scale = 200/(100*PT_TO_PX)=1.5.
+  // page height px = heightPt * PT_TO_PX * scale = 200 * (4/3) * 1.5 = 400.
+  // (The plan text mislabelled this as 200px; the viewer fits WIDTH, which scales
+  //  height too — verified against the T2/T4 blocks' identical geometry.)
+  const BASE = 200 / (100 * PT_TO_PX);
+  const PAGE_H = 200 * PT_TO_PX * BASE; // 400
+  const GAP = 10;
+  const STRIDE = PAGE_H + GAP; // 410 — the top-to-top distance between pages
+
+  function setup(pageCount = 20, opts = {}) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(
+      pageCount,
+      Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
+    );
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: GAP,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, container, engine };
+  }
+
+  it('scrollToPage sets scrollTop to the page offset and clamps out-of-range', () => {
+    const { v, scrollHost } = setup();
+    v.scrollToPage(3);
+    expect(Math.abs(scrollHost.scrollTop - 3 * STRIDE)).toBeLessThan(2);
+    v.scrollToPage(999); // clamps to last page
+    // Last page's top offset exceeds the max scroll top, so scrollToPage pins to
+    // the max (totalHeight − viewportHeight). Assert we clamped to that bound.
+    const totalHeight = 20 * PAGE_H + 19 * GAP; // Σheights + Σgaps
+    const maxTop = totalHeight - 400; // − viewport height
+    expect(Math.abs(scrollHost.scrollTop - maxTop)).toBeLessThan(2);
+    v.scrollToPage(-5); // clamps to 0
+    expect(scrollHost.scrollTop).toBe(0);
+    v.destroy();
+  });
+
+  it('onVisiblePageChange fires only when topIndex changes', () => {
+    const changes: number[] = [];
+    const { v, scrollHost } = setup(20, { onVisiblePageChange: (i: number) => changes.push(i) });
+    scrollHost.scrollTop = STRIDE; // page 1 top
+    scrollHost.dispatch('scroll');
+    scrollHost.scrollTop = STRIDE + 10; // still within page 1
+    scrollHost.dispatch('scroll');
+    scrollHost.scrollTop = 3 * STRIDE; // page 3 top
+    scrollHost.dispatch('scroll');
+    // Deduped: 0 (initial) → 1 → 3, no repeat for the STRIDE+10 no-op.
+    expect(changes).toEqual([0, 1, 3]);
+    v.destroy();
+  });
+
+  it('scrollToPage does not re-fire onVisiblePageChange for the same top page', () => {
+    const changes: number[] = [];
+    const { v } = setup(20, { onVisiblePageChange: (i: number) => changes.push(i) });
+    // Initial mount fired 0. scrollToPage(0) lands on the same top page — no new fire.
+    v.scrollToPage(0);
+    expect(changes).toEqual([0]);
+    // Navigate to page 5 → one fire; navigate there again → no duplicate.
+    v.scrollToPage(5);
+    v.scrollToPage(5);
+    expect(changes).toEqual([0, 5]);
+    v.destroy();
+  });
+
+  it('ResizeObserver re-fit preserves the zoom multiplier', () => {
+    // zoomMax headroom: base 1.5, 2× zoom → 3.0; after the width doubles the new
+    // base is 3.0 so the preserved scale is 6.0. zoomMin/zoomMax are ABSOLUTE
+    // px-per-pt bounds (design §8.1), so a low zoomMax would legitimately CLAMP
+    // the re-fit and break preservation. Give the multiplier room to survive.
+    const { v, container } = setup(20, { zoomMax: 10 });
+    v.setScale(v.baseScaleForTest() * 2); // 2× zoom
+    const zoomMultiplier = v.scaleForTest() / v.baseScaleForTest();
+    // Container widens; the observer callback re-fits base and re-applies the mult.
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    v.resizeForTest(); // fires the observed resize path
+    expect(v.scaleForTest() / v.baseScaleForTest()).toBeCloseTo(zoomMultiplier, 5);
+    v.destroy();
+  });
+
+  it('ResizeObserver re-fit bumps the render epoch (resize is an epoch event)', () => {
+    const { v, container } = setup();
+    const before = v.renderEpochForTest();
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    v.resizeForTest();
+    // A width change re-fits the base scale (routed through setScale), which bumps
+    // the epoch so any bitmap in flight at the old scale is treated as stale.
+    expect(v.renderEpochForTest()).toBeGreaterThan(before);
+    v.destroy();
+  });
+
+  it('ResizeObserver re-fit with an UNCHANGED width does not re-fit or bump the epoch', () => {
+    const { v } = setup();
+    const scaleBefore = v.scaleForTest();
+    const epochBefore = v.renderEpochForTest();
+    v.resizeForTest(); // same width — no-op re-fit
+    expect(v.scaleForTest()).toBe(scaleBefore);
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    v.destroy();
+  });
+
+  it('zero-width container defers, then lays out on first non-zero resize', () => {
+    installDom();
+    const container = makeContainer(0, 0); // unlaid-out
+    const engine = new FakeDocxEngine(5, Array.from({ length: 5 }, () => ({ widthPt: 100, heightPt: 200 })));
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    expect(v.mountedPageIndicesForTest().length).toBe(0); // deferred
+    container.clientWidth = 300;
+    scrollHost.clientWidth = 300;
+    scrollHost.clientHeight = 400;
+    v.resizeForTest();
+    expect(v.mountedPageIndicesForTest().length).toBeGreaterThan(0);
+    v.destroy();
+  });
+
+  it('empty document: pageCount 0 ⇒ spacer 0, no slots, scrollToPage no-op', () => {
+    installDom();
+    const container = makeContainer(300, 400);
+    const engine = new FakeDocxEngine(0, []);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    v.relayout();
+    const spacer = (container.children[0] as FakeEl).children[0].children[0] as FakeEl;
+    expect(parseFloat(spacer.style.height || '0')).toBe(0);
+    expect(v.mountedPageIndicesForTest().length).toBe(0);
+    v.scrollToPage(0); // no throw
+    v.destroy();
+  });
+
+  it('empty document: resize does not crash and fires no callback', () => {
+    installDom();
+    const container = makeContainer(0, 0);
+    const engine = new FakeDocxEngine(0, []);
+    const changes: number[] = [];
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      onVisiblePageChange: (i: number) => changes.push(i),
+    });
+    container.clientWidth = 300;
+    (container.children[0] as FakeEl).children[0].clientWidth = 300;
+    v.resizeForTest(); // no pages ⇒ no-op
+    expect(v.mountedPageIndicesForTest().length).toBe(0);
+    expect(changes).toEqual([]);
+    v.destroy();
+  });
+
+  it('destroy() disconnects the ResizeObserver', () => {
+    installDom();
+    let disconnected = 0;
+    class SpyRO {
+      cb: () => void;
+      constructor(cb: () => void) {
+        this.cb = cb;
+      }
+      observe(): void {}
+      disconnect(): void {
+        disconnected++;
+      }
+    }
+    vi.stubGlobal('ResizeObserver', SpyRO);
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    v.destroy();
+    expect(disconnected).toBe(1);
+  });
+});

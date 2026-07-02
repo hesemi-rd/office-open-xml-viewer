@@ -123,8 +123,8 @@ export class DocxScrollViewer {
    *  moved epoch ⇒ STALE (close + re-dispatch the live slot). See
    *  `_renderSlotBitmap`. */
   private readonly _bitmapInFlight = new Set<number>();
-  /** Render generation, bumped on every effective `setScale` (and the T6 resize
-   *  re-fit, which routes through `setScale`). Stamped into each async render
+  /** Render generation, bumped on every effective `setScale` (and the resize
+   *  re-fit in `_onResize`, which routes through `setScale`). Stamped into each async render
    *  dispatch; a resolution whose captured epoch ≠ this value is STALE — its
    *  pixels/geometry are at a superseded scale. Worker path: close the orphan
    *  bitmap + re-dispatch the live slot. Main path: skip the (stale) text-layer
@@ -136,6 +136,17 @@ export class DocxScrollViewer {
    *  cannot cross the worker boundary, so an `enableTextSelection` overlay stays
    *  empty. We warn once (parity with `DocxViewer`) rather than per slot. */
   private _warnedNoTextSelection = false;
+  /** Observes the container so a width change re-fits the base scale. Disconnected
+   *  in `destroy()`. */
+  private _resizeObserver: ResizeObserver | null = null;
+  /** The base fit scale at the last established/re-fit layout. `_onResize` divides
+   *  `_scale` by this to recover the current zoom multiplier so a width change
+   *  re-fits the base while preserving the user's zoom (design §11). */
+  private _prevBase = 0;
+  /** The fit width (px) the base scale was last established at. Lets `_onResize`
+   *  skip the re-fit when only the height changed (a ResizeObserver fires on ANY
+   *  box change, but only a WIDTH change alters the fit-to-width base scale). */
+  private _lastFitWidth = 0;
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     this._container = container;
@@ -188,11 +199,19 @@ export class DocxScrollViewer {
       });
     }
 
+    // Re-fit the base scale on a container resize (design §11). A container that
+    // is 0-wide at construction (a common flexbox/tab layout) establishes its
+    // scale on the first non-zero resize — the zero-width deferral is completed
+    // here. `ResizeObserver` may be absent in a non-DOM host; guard for it.
+    if (typeof ResizeObserver !== 'undefined') {
+      this._resizeObserver = new ResizeObserver(() => this._onResize());
+      this._resizeObserver.observe(this._container);
+    }
+
     if (this._injected) {
       // An injected engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
-      // zero-width container (the resize path — T6 — re-runs it once width
-      // appears).
+      // zero-width container (the resize path re-runs it once width appears).
       this.relayout();
     }
   }
@@ -217,8 +236,8 @@ export class DocxScrollViewer {
       });
       // Lay out + mount the first window now that the engine exists (mirrors the
       // injected-engine path in the constructor). relayout() is idempotent and
-      // defers under a zero-width container — the resize path (T6) re-runs it
-      // once width appears.
+      // defers under a zero-width container — `_onResize` re-runs it once width
+      // appears.
       this.relayout();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
@@ -274,6 +293,8 @@ export class DocxScrollViewer {
       const base = this._baseScale();
       if (base > 0) {
         this._scale = base;
+        this._prevBase = base;
+        this._lastFitWidth = this._fitWidthPx();
         this._scaleEstablished = true;
       } else {
         return; // container has no width yet — retry on the next resize
@@ -344,7 +365,10 @@ export class DocxScrollViewer {
         this._positionSlot(this._slots.get(i)!, i, r);
       }
     }
-    // onVisiblePageChange only on change (T6 refines; wired here for topIndex).
+    // onVisiblePageChange fires ONLY when the top visible page actually changes
+    // (change-only latch; `_lastTopIndex` starts at -1 so the first layout fires
+    // once for page 0). Every mount path — scroll, zoom, resize re-fit, and
+    // scrollToPage — funnels through here, so navigation never double-fires.
     if (r.topIndex !== this._lastTopIndex) {
       this._lastTopIndex = r.topIndex;
       this._opts.onVisiblePageChange?.(r.topIndex, this._doc.pageCount);
@@ -668,12 +692,85 @@ export class DocxScrollViewer {
   }
 
   /** Like `_mountVisible` but recycles every live slot first so each re-mounts and
-   *  re-renders at the current scale. Used by `setScale` (and the T6 resize
-   *  re-fit): a slot's canvas px size changes with the scale, so the previously
+   *  re-renders at the current scale. Used by `setScale` (and the resize re-fit
+   *  in `_onResize`, which routes through `setScale`): a slot's canvas px size
+   *  changes with the scale, so the previously
    *  drawn pixels are stale and every visible page must be redrawn. */
   private _mountVisibleForceRerender(): void {
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._mountVisible();
+  }
+
+  /**
+   * Scroll so page `index`'s top edge sits at the viewport top. Clamps `index` to
+   * `[0, pageCount-1]` (the pager convention) and the resulting scrollTop to
+   * `[0, totalHeight − viewportHeight]` so the last pages don't scroll past the
+   * end. A no-op when nothing is loaded or the document is empty.
+   *
+   * `opts.behavior` ('auto' | 'smooth', default 'auto') is honoured via
+   * `scrollHost.scrollTo({ top, behavior })` when the host supports it (a real
+   * browser); the stub-DOM has no `scrollTo`, so the fallback sets `scrollTop`
+   * directly (which is what the tests assert). After moving we re-mount the
+   * visible window synchronously so the target page's slots exist immediately
+   * (a `smooth` scroll's own `scroll` events would otherwise mount them lazily).
+   */
+  scrollToPage(index: number, opts?: { behavior?: 'auto' | 'smooth' }): void {
+    if (!this._doc || this._doc.pageCount === 0 || !this._scaleEstablished) return;
+    const clamped = Math.max(0, Math.min(index, this._doc.pageCount - 1));
+    // Recompute offsets from the current heights (independent of scrollTop).
+    const r = computeVisibleRange(this._heights, this._gap(), 0, this._scrollHost.clientHeight, this._overscan());
+    const target = r.offsets[clamped] ?? 0;
+    const maxTop = Math.max(0, r.totalHeight - this._scrollHost.clientHeight);
+    const top = Math.min(maxTop, Math.max(0, target));
+    const host = this._scrollHost as HTMLDivElement & {
+      scrollTo?: (opts: { top: number; behavior?: 'auto' | 'smooth' }) => void;
+    };
+    if (typeof host.scrollTo === 'function') {
+      host.scrollTo({ top, behavior: opts?.behavior ?? 'auto' });
+    } else {
+      this._scrollHost.scrollTop = top;
+    }
+    this._mountVisible();
+  }
+
+  /**
+   * Re-fit the base scale on a container resize while PRESERVING the current zoom
+   * multiplier (design §11), then re-anchor + re-render. A `ResizeObserver` fires
+   * on any box change, but only a WIDTH change alters the fit-to-width base scale;
+   * a height-only change is ignored (the visible window is recomputed on the next
+   * scroll/relayout anyway). Empty/unloaded ⇒ no-op; a still-zero width ⇒ defer.
+   *
+   * Zero-width recovery: a container that was 0-wide at construction never
+   * established a scale (`_scaleEstablished` is false), so the first non-zero
+   * resize establishes it here via `relayout()` — completing the T2 deferral.
+   *
+   * Re-fit math (zoom multiplier preserved):
+   *   mult      = _scale / _prevBase            (the user's zoom over the old base)
+   *   newScale  = newBase × mult
+   * Routing through `setScale(newScale)` bumps `_renderEpoch` (resize IS an epoch
+   * event — T4 banner) and re-anchors + force-re-renders every slot at the new
+   * geometry, exactly like a zoom. `setScale`'s clamp/no-op guards apply: an
+   * unchanged newScale (identical width) is a no-op there, so we also short-circuit
+   * before it when the width is unchanged to avoid churn.
+   */
+  private _onResize(): void {
+    if (!this._doc || this._doc.pageCount === 0) return;
+    // Zero-width recovery: first non-zero layout establishes the base scale.
+    if (!this._scaleEstablished) {
+      this.relayout();
+      return;
+    }
+    const newBase = this._baseScale();
+    if (newBase <= 0) return; // still unlaid-out — wait for the next resize
+    const newFitWidth = this._fitWidthPx();
+    if (newFitWidth === this._lastFitWidth) return; // height-only change — no re-fit
+    this._lastFitWidth = newFitWidth;
+    // Preserve the zoom multiplier across the re-fit: newScale = newBase × mult.
+    const mult = this._prevBase > 0 ? this._scale / this._prevBase : 1;
+    this._prevBase = newBase;
+    // Route through setScale so the epoch bumps and the re-anchor/force-re-render
+    // path runs identically to a zoom.
+    this.setScale(newBase * mult);
   }
 
   get topVisiblePage(): number {
@@ -695,6 +792,17 @@ export class DocxScrollViewer {
     return this._baseScale();
   }
 
+  /** @internal test hook: the current render epoch (bumped on setScale + resize). */
+  renderEpochForTest(): number {
+    return this._renderEpoch;
+  }
+
+  /** @internal test hook: fire the observed resize path (a real host drives this
+   *  via the constructor's ResizeObserver). */
+  resizeForTest(): void {
+    this._onResize();
+  }
+
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
    * engine) destroy the engine. An injected engine is left intact — the caller
@@ -710,6 +818,8 @@ export class DocxScrollViewer {
       this._scrollHost.removeEventListener('wheel', this._wheelListener as EventListener);
       this._wheelListener = null;
     }
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
     if (!this._injected) {
