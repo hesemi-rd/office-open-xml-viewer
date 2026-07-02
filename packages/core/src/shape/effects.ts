@@ -67,6 +67,14 @@ function get2d(canvas: AuxCanvas): AuxContext | null {
 // same as the region beyond the old full-canvas silhouette — a margin ≥ the blur
 // kernel extent makes the cropped result IDENTICAL, pixel for pixel, to the
 // full-canvas version everywhere the shape+effect actually paints.
+//
+// SCOPE: this applies to innerShadow and softEdge, whose final blit is an
+// INTEGER-offset, identity-transform drawImage — a pure pixel copy, byte-exact
+// for any source canvas size. applyReflection is deliberately EXEMPT: its final
+// blit resamples the aux under a fractional mirror transform, and skia's texture
+// sampling (edge behaviour + fixed-point phase) depends on the source's
+// size/offset — a cropped source produced platform-dependent 1–7/255 diffs on
+// Linux CI (PR #672). See the note inside applyReflection.
 
 /** A sub-rectangle of the device canvas that an effect is confined to. */
 interface EffectCrop {
@@ -366,20 +374,25 @@ export function applyReflection(
   deviceW: number,
   deviceH: number,
 ): void {
-  const blur = emuToPx(reflection.blur, scale);
-
-  // Margin: the shape (⊆ bbox) is optionally blurred by `blur`. CSS `blur(r)`
-  // uses r as the Gaussian STD-DEV, so the kernel bleeds ~3σ = 3·blur beyond the
-  // silhouette (not just `blur` px). The alpha gradient only removes coverage, so
-  // the reflection's blurred edge extends up to 3·blur past the bbox; the mirror
-  // then maps that band next to the shape. +2 px covers the fractional edge.
-  const margin = Math.ceil(3 * blur) + 2;
-  const crop = computeCrop(bbox, margin, deviceW, deviceH);
-  const aux = createAuxCanvas(crop.w, crop.h);
+  // NOT cropped — the A4 bbox-sizing (see innerShadow/softEdge above) is
+  // deliberately not applied here. Those two effects blit their aux back with an
+  // INTEGER-offset, identity-transform drawImage — a pure pixel copy that is
+  // byte-exact for any source canvas size/offset. The reflection's final blit is
+  // different in kind: the mirror transform carries a FRACTIONAL translation
+  // (`dist` in device px, and `bottom` itself is fractional in general), so
+  // drawImage bilinear-RESAMPLES the aux as a texture. Skia's sampling near a
+  // texture edge and its fixed-point sample phase depend on the source image's
+  // size and offset — with a cropped aux, the crop's bottom edge sits right on
+  // the stroke's bbox-overflow (the bbox excludes the stroke half-width), and
+  // Linux CI produced 1–7/255 diffs on the flipped edge row that macOS did not
+  // (PR #672). Feeding the mirror blit the SAME full-canvas source is the only
+  // way byte-exactness holds across skia builds, so the full-size aux stays.
+  const aux = createAuxCanvas(deviceW, deviceH);
   if (!aux) return;
-  const cReal = get2d(aux);
-  if (!cReal) return;
-  const c = offsetPaintCtx(cReal, crop);
+  const c = get2d(aux);
+  if (!c) return;
+
+  const blur = emuToPx(reflection.blur, scale);
 
   // 1. Paint the shape onto the aux canvas, optionally blurred.
   c.save();
@@ -396,12 +409,11 @@ export function applyReflection(
   //    opaque stA band sits at `bottom` (→ reflection top after the flip) and
   //    fades to endA toward `top` — otherwise the visible band lands far below
   //    the shape (off-canvas for tall pictures) and the reflection disappears.
-  //    Gradient endpoints + fillRect are in the CROPPED canvas's local coords.
   c.save();
   c.globalCompositeOperation = 'destination-in';
-  const topLocal = bbox.y - crop.y;
-  const bottomLocal = bbox.y + bbox.h - crop.y;
-  const grad = c.createLinearGradient(0, bottomLocal, 0, topLocal);
+  const top = bbox.y;
+  const bottom = bbox.y + bbox.h;
+  const grad = c.createLinearGradient(0, bottom, 0, top);
   const stPos = clamp01(reflection.stPos);
   const endPos = clamp01(reflection.endPos);
   // Offsets run 0→1 from `bottom` to `top` (the createLinearGradient axis).
@@ -411,7 +423,7 @@ export function applyReflection(
   if (endPos < 1 && endPos > stPos) grad.addColorStop(endPos, `rgba(0,0,0,${reflection.endA})`);
   grad.addColorStop(1, `rgba(0,0,0,${reflection.endA})`);
   c.fillStyle = grad;
-  c.fillRect(0, 0, crop.w, crop.h);
+  c.fillRect(0, 0, deviceW, deviceH);
   c.restore();
 
   // 3. Blit the faded mirror under the shape. Mirror about the shape's bottom
@@ -420,19 +432,15 @@ export function applyReflection(
   const dirRad = (reflection.dir * Math.PI) / 180;
   const offX = Math.cos(dirRad) * dist;
   const offY = Math.sin(dirRad) * dist;
-  const bottomDevice = bbox.y + bbox.h;
 
   liveCtx.save();
-  // Translate to the bottom edge (DEVICE coords on the live canvas), apply sx/sy
-  // scale (sy<0 = mirror), then translate back. Anchoring at the bottom edge
-  // keeps the reflection's top touching the shape's bottom before `dist`
-  // separation. The cropped aux is drawn at its device origin (crop.x, crop.y)
-  // so its content lands where the full-canvas aux would have, under the same
-  // mirror transform.
-  liveCtx.translate(bbox.x + offX, bottomDevice + offY);
+  // Translate to the bottom edge, apply sx/sy scale (sy<0 = mirror), then
+  // translate back. Anchoring at the bottom edge keeps the reflection's top
+  // touching the shape's bottom before `dist` separation.
+  liveCtx.translate(bbox.x + offX, bottom + offY);
   liveCtx.scale(reflection.sx, reflection.sy);
-  liveCtx.translate(-bbox.x, -bottomDevice);
-  liveCtx.drawImage(aux as CanvasImageSource, crop.x, crop.y);
+  liveCtx.translate(-(bbox.x), -bottom);
+  liveCtx.drawImage(aux as CanvasImageSource, 0, 0);
   liveCtx.restore();
 }
 

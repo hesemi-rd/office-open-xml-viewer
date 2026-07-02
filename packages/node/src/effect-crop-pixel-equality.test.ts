@@ -17,16 +17,17 @@ import { loadSkiaForTests } from './test-imports';
 /**
  * A4 pixel-equality oracle — cropped aux canvases vs the full-canvas version.
  *
- * `packages/core/src/shape/effects.ts` was changed (perf: A4) to allocate its
- * auxiliary canvases at the shape's device bbox + effect margin instead of the
- * whole live canvas. The claim is that the on-screen pixels are UNCHANGED, one
- * channel at a time. This suite proves it on real skia-canvas pixels:
+ * `packages/core/src/shape/effects.ts` was changed (perf: A4) to allocate the
+ * innerShadow / softEdge auxiliary canvases at the shape's device bbox + effect
+ * margin instead of the whole live canvas. The claim is that the on-screen
+ * pixels are UNCHANGED, one channel at a time. This suite proves it on real
+ * skia-canvas pixels:
  *
  *   1. Verbatim FULL-CANVAS oracles (`oracleInnerShadow` / `oracleSoftEdge` /
  *      `oracleReflection`) reproduce the pre-A4 code exactly — aux canvas =
  *      deviceW × deviceH, blit at (0,0).
  *   2. The SAME shape + effect is rendered twice into two identical live skia
- *      canvases: once by the real (cropped) core helper, once by the oracle.
+ *      canvases: once by the real core helper, once by the oracle.
  *   3. Every pixel must match to the byte (`expectExactPixels`).
  *
  * The paint callback mimics the pptx renderer: it `setTransform(liveTransform)`
@@ -34,6 +35,15 @@ import { loadSkiaForTests } from './test-imports';
  * the crop's transform-offset proxy must transparently handle. A shape placed
  * OFF-ORIGIN (and, in one case, against the canvas edge to exercise clamping)
  * makes the crop non-trivial, so an off-by-one in the offset or blit would show.
+ *
+ * applyReflection is intentionally NOT cropped (PR #672 CI fix): its final blit
+ * RESAMPLES the aux under a fractional mirror transform, and skia's texture
+ * sampling near a source edge / its fixed-point phase vary with the source's
+ * size+offset — a cropped source diffed by 1–7/255 on Linux CI while matching on
+ * macOS. Byte-exactness is only code-identity there, so the full-size aux stays.
+ * The reflection cases below remain as TRIPWIRES: the real helper vs the
+ * verbatim full-canvas oracle must stay byte-exact on every platform — they fail
+ * if someone re-crops the reflection without solving the resample problem.
  */
 
 const skia = await loadSkiaForTests();
@@ -318,7 +328,12 @@ describe.skipIf(!skia)('A4 effect crop — byte-exact vs full-canvas oracle (rea
     expectExactPixels(pixels(real.ctx), pixels(oracle.ctx), 'softEdge origin');
   });
 
-  it('reflection: cropped output equals full-canvas, interior shape', () => {
+  // TRIPWIRES, not crop proofs: applyReflection stays FULL-CANVAS by design (its
+  // mirror blit resamples the aux under a fractional transform — see the file
+  // header and the note in effects.ts). Real helper vs verbatim oracle is code-
+  // identical today, so these must be byte-exact on EVERY platform; they fail if
+  // the reflection is ever re-cropped without solving the resample problem.
+  it('reflection: full-canvas helper equals the verbatim oracle, interior shape', () => {
     const reflection: Reflection = {
       blur: 19050, dist: 9525, dir: 90, stA: 0.6, stPos: 0, endA: 0, endPos: 0.4, sx: 1, sy: -1,
     };
@@ -329,7 +344,10 @@ describe.skipIf(!skia)('A4 effect crop — byte-exact vs full-canvas oracle (rea
     expectExactPixels(pixels(real.ctx), pixels(oracle.ctx), 'reflection interior');
   });
 
-  it('reflection: cropped output equals full-canvas with no blur (sharp mirror)', () => {
+  it('reflection: full-canvas helper equals the verbatim oracle with no blur (sharp mirror)', () => {
+    // This exact parameter set (fractional dist ≈ 0.5px, stroke bleeding 2px past
+    // the bbox) is the one whose CROPPED variant diffed by up to 7/255 on Linux
+    // CI: the flipped crop edge landed on the stroke's bbox-overflow row.
     const reflection: Reflection = {
       blur: 0, dist: 4762, dir: 90, stA: 0.5, stPos: 0.1, endA: 0.05, endPos: 0.5, sx: 1, sy: -1,
     };
