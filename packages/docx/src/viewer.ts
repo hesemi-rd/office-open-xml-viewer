@@ -22,6 +22,15 @@ export class DocxViewer {
   private _currentPage = 0;
   private _canvas: HTMLCanvasElement;
   private _wrapper: HTMLDivElement;
+  /** The canvas's DOM position BEFORE the constructor reparented it into
+   *  {@link _wrapper}, captured so {@link destroy} can return the caller-owned
+   *  canvas to exactly where it was. `null` parent = canvas was passed
+   *  detached. */
+  private _originalParent: Node | null = null;
+  private _originalNextSibling: Node | null = null;
+  /** The canvas's inline `display` before the constructor forced `block`
+   *  (empty string if it was unset), restored on {@link destroy}. */
+  private _originalDisplay = '';
   private _textLayer: HTMLDivElement | null = null;
   private _opts: DocxViewerOptions;
   private readonly _mode: 'main' | 'worker';
@@ -38,6 +47,11 @@ export class DocxViewer {
 
     // Wrap canvas in a positioned container for the optional text layer overlay
     const parent = canvas.parentElement;
+    // Capture the canvas's DOM position and inline display BEFORE reparenting so
+    // destroy() can put the caller-owned canvas back exactly where it was.
+    this._originalParent = parent;
+    this._originalNextSibling = canvas.nextSibling;
+    this._originalDisplay = canvas.style.display;
     this._wrapper = document.createElement('div');
     // vertical-align:top removes the inline-block baseline descender gap that
     // otherwise lets the host container's background show through below the
@@ -118,10 +132,28 @@ export class DocxViewer {
   async nextPage(): Promise<void> { await this.goToPage(this._currentPage + 1); }
   async prevPage(): Promise<void> { await this.goToPage(this._currentPage - 1); }
 
-  /** Terminate the parser worker and release resources. */
+  /**
+   * Terminate the parser worker and release resources.
+   *
+   * The caller-owned `<canvas>` is returned to the DOM position it held before
+   * the constructor was called (same parent, same next-sibling) and its inline
+   * `display` is restored, so the canvas can be reused — e.g. to construct a new
+   * viewer on the same element. If the canvas was passed detached (no parent) it
+   * is simply removed from the internal wrapper. Safe to call more than once.
+   */
   destroy(): void {
     this._doc?.destroy();
     this._doc = null;
+    // Return the caller-owned canvas to its original DOM slot before discarding
+    // the wrapper. insertBefore still works if the original parent was itself
+    // detached; when there was no original parent the canvas is left detached
+    // (just pulled out of the wrapper).
+    if (this._originalParent) {
+      this._originalParent.insertBefore(this._canvas, this._originalNextSibling);
+    } else if (this._canvas.parentNode) {
+      this._canvas.parentNode.removeChild(this._canvas);
+    }
+    this._canvas.style.display = this._originalDisplay;
     this._wrapper.remove();
   }
 

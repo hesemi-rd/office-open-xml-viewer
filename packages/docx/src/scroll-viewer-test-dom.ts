@@ -14,6 +14,12 @@ export interface FakeEl {
   style: Record<string, string> & { cssText: string };
   children: FakeEl[];
   parentElement: FakeEl | null;
+  /** DOM alias of `parentElement` (viewer destroy reads `canvas.parentNode`). */
+  readonly parentNode: FakeEl | null;
+  /** The element following this one under its parent, or null (viewer destroy
+   *  captures `canvas.nextSibling` so it can re-`insertBefore` at the original
+   *  slot). Computed from the parent's child order, like the real DOM. */
+  readonly nextSibling: FakeEl | null;
   // canvas-only
   width: number;
   height: number;
@@ -58,6 +64,10 @@ export function makeEl(tag: string): FakeEl {
     clientWidth: 0,
     children: [],
     parentElement: null,
+    // Placeholders for the interface; replaced by computed getters below
+    // (Object.defineProperty), mirroring innerHTML/width/height.
+    parentNode: null,
+    nextSibling: null,
     _listeners: new Map(),
     _deviceResizes: [],
     _uid: _uidSeq++,
@@ -79,6 +89,10 @@ export function makeEl(tag: string): FakeEl {
       },
     }),
     appendChild(c: FakeEl) {
+      // Real-DOM move semantics: detach from the current parent first so a
+      // reparent (wrapper.appendChild(canvas)) removes the node from its old
+      // slot rather than duplicating it.
+      c.parentElement?.removeChild(c);
       c.parentElement = this;
       this.children.push(c);
       return c;
@@ -93,6 +107,10 @@ export function makeEl(tag: string): FakeEl {
       this.parentElement?.removeChild(this);
     },
     insertBefore(n: FakeEl, ref: FakeEl | null) {
+      // Real-DOM move semantics: detach from the current parent first (see
+      // appendChild). Detach BEFORE resolving `ref`'s index so re-inserting a
+      // node relative to a sibling under the same parent still lands correctly.
+      n.parentElement?.removeChild(n);
       n.parentElement = this;
       const i = ref ? this.children.indexOf(ref) : -1;
       if (i >= 0) this.children.splice(i, 0, n);
@@ -174,6 +192,26 @@ export function makeEl(tag: string): FakeEl {
     set(value: number) {
       _h = value;
       el._deviceResizes.push({ prop: 'height', value });
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  // DOM-mirroring read-only relations. `parentNode` aliases `parentElement`;
+  // `nextSibling` is derived from the parent's live child order so it reflects
+  // reparent/insertBefore mutations exactly as the browser would.
+  Object.defineProperty(el, 'parentNode', {
+    get() {
+      return el.parentElement;
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(el, 'nextSibling', {
+    get() {
+      const p = el.parentElement;
+      if (!p) return null;
+      const i = p.children.indexOf(el);
+      return i >= 0 && i + 1 < p.children.length ? p.children[i + 1] : null;
     },
     enumerable: true,
     configurable: true,
