@@ -6,6 +6,29 @@ import { buildDocxTextLayer } from './text-layer';
 import type { RenderPageOptions } from './types';
 
 /**
+ * Debounce window (ms) after the last `setScale` in a zoom burst before the
+ * full-resolution settle re-render is dispatched (design §7 "Flicker-free zoom").
+ *
+ * This is a UI-INTERACTION-FEEL policy constant, NOT an ECMA-376 / ISO-29500
+ * value: it exists only so a rapid wheel/pinch gesture (which fires dozens of
+ * `setScale` calls) coalesces into a single high-res render at the end instead of
+ * re-rendering per tick. Each `setScale` shows an immediate CSS preview (the
+ * existing bitmap stretched) and resets this timer; the settle fires once the
+ * gesture pauses for `ZOOM_SETTLE_MS`. Lower = snappier but more redundant renders
+ * mid-gesture; higher = fewer renders but a longer soft-preview tail. Deliberately
+ * duplicated per viewer (a one-line timing constant, not shared logic).
+ */
+const ZOOM_SETTLE_MS = 150;
+
+/**
+ * Default CSS `box-shadow` painted on every page canvas — the soft drop shadow a
+ * PDF reader casts under each sheet (matches the Examples/recipe look, which the
+ * scroll viewer now reproduces with zero config). See
+ * {@link DocxScrollViewerOptions.pageShadow}.
+ */
+const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+
+/**
  * Options for {@link DocxScrollViewer}. Extends `RenderPageOptions` (per-page
  * render knobs, minus `onTextRun`) and `LoadOptions` (parse/worker knobs). See
  * design §8.1.
@@ -63,6 +86,21 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    */
   background?: string;
   /**
+   * CSS `box-shadow` painted on every page CANVAS (not the wrapper — the
+   * text-selection overlay must not cast its own shadow). The soft drop shadow a
+   * PDF reader leaves under each sheet.
+   *
+   * - Default (`undefined`): `'0 1px 3px rgba(0,0,0,0.2)'` — the recipe look, so
+   *   the scroll viewer reproduces the Examples appearance with zero config.
+   * - `false`: NO shadow (flat pages).
+   * - A custom string is applied verbatim. A spread-only ring such as
+   *   `'0 0 0 1px #c8ccd0'` gives a crisp 1px BORDER look — and because
+   *   `box-shadow` never affects layout (unlike `border`, which would grow the
+   *   box and shift every offset), a border and a drop shadow are the SAME knob
+   *   here rather than two competing options.
+   */
+  pageShadow?: string | false;
+  /**
    * Inject an already-loaded engine to share one parse across panes (design §14).
    * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
    * explicitly conflicting `opts.mode` throws at construction, design §11), and
@@ -91,6 +129,12 @@ interface PageSlot {
   textLayer: HTMLDivElement | null;
   /** page index this slot is currently rendering / has rendered, or -1 when free. */
   renderedPage: number;
+  /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
+   *  were last rendered, or -1 when unrendered. The flicker-free CSS preview
+   *  (design §7) stretches that bitmap to the new layout size on `setScale` and
+   *  scales the text overlay by `newScale / renderedScale`; the debounced settle
+   *  re-render then repaints at the new scale and updates this to match. */
+  renderedScale: number;
   /** worker-mode: a transient hold on a just-received ImageBitmap, set only
    *  between receipt from the worker and its `transferFromImageBitmap` (which
    *  consumes it, after which we null the field). Its purpose is the throw path:
@@ -159,6 +203,12 @@ export class DocxScrollViewer {
    *  bitmap + re-dispatch the live slot. Main path: skip the (stale) text-layer
    *  build; the engine's per-canvas token already discards the stale pixels. */
   private _renderEpoch = 0;
+  /** Pending settle-render timer handle (design §7 mechanism 2). Set by
+   *  `_scheduleSettle` after each `setScale`, reset on the next one so a burst
+   *  dispatches ONE settle at the end, and cleared in `destroy()`. `ReturnType`
+   *  of `setTimeout` (a number in the DOM, a Timeout object in node) so the type
+   *  is host-agnostic. */
+  private _settleTimer: ReturnType<typeof setTimeout> | null = null;
   private _wheelListener: ((e: WheelEvent) => void) | null = null;
   /** One-shot latch for the worker-mode text-selection warning. The overlay is a
    *  main-mode-only feature: in worker mode the per-run `onTextRun` geometry
@@ -176,10 +226,21 @@ export class DocxScrollViewer {
    *  skip the re-fit when only the height changed (a ResizeObserver fires on ANY
    *  box change, but only a WIDTH change alters the fit-to-width base scale). */
   private _lastFitWidth = 0;
+  /** Resolved page-canvas `box-shadow` (design: the recipe drop shadow by
+   *  default). Resolved ONCE with `??` — NOT `||` — so `pageShadow: false`
+   *  survives as the "no shadow" sentinel (a `||` would treat `false` as absent
+   *  and wrongly re-apply the default). Applied by `_applyPageShadow` at EVERY
+   *  canvas-creation site (`_acquireSlot` and the double-buffer spare in
+   *  `_settleSlot`) so a recycled/re-mounted slot and a settle-swapped spare all
+   *  carry it. */
+  private readonly _pageShadow: string | false;
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     this._container = container;
     this._opts = opts;
+    // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
+    // fall through to the default.
+    this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
     this._injected = !!opts.document;
     if (this._injected) {
       const engine = opts.document as DocxDocument;
@@ -464,6 +525,16 @@ export class DocxScrollViewer {
     }
   }
 
+  /** Apply the resolved page-canvas shadow (design: recipe drop shadow by
+   *  default, `false` ⇒ none). Single source so `_acquireSlot` and the
+   *  double-buffer spare in `_settleSlot` stay in lock-step — a spare that missed
+   *  this would lose the shadow on the settle swap. `box-shadow` never affects
+   *  layout, so this is safe to (re)set on a live/pooled canvas without shifting
+   *  any offset. */
+  private _applyPageShadow(canvas: HTMLCanvasElement): void {
+    if (this._pageShadow !== false) canvas.style.boxShadow = this._pageShadow;
+  }
+
   private _acquireSlot(): PageSlot {
     const reused = this._free.pop();
     if (reused) {
@@ -478,6 +549,7 @@ export class DocxScrollViewer {
     wrapper.style.cssText = 'position:absolute;';
     const canvas = document.createElement('canvas');
     canvas.style.cssText = 'display:block;background:#fff;';
+    this._applyPageShadow(canvas);
     wrapper.appendChild(canvas);
     let textLayer: HTMLDivElement | null = null;
     if (this._opts.enableTextSelection) {
@@ -488,7 +560,15 @@ export class DocxScrollViewer {
       wrapper.appendChild(textLayer);
     }
     this._scrollHost.appendChild(wrapper);
-    const slot: PageSlot = { wrapper, canvas, textLayer, renderedPage: -1, bitmap: null, bitmapCtx: null };
+    const slot: PageSlot = {
+      wrapper,
+      canvas,
+      textLayer,
+      renderedPage: -1,
+      renderedScale: -1,
+      bitmap: null,
+      bitmapCtx: null,
+    };
     return slot;
   }
 
@@ -503,8 +583,15 @@ export class DocxScrollViewer {
     // stale spans. buildDocxTextLayer also clears on its next build, but an
     // unrendered pooled slot never gets that build, and the detached spans would
     // otherwise linger; drop them here.
-    if (slot.textLayer) slot.textLayer.innerHTML = '';
+    if (slot.textLayer) {
+      slot.textLayer.innerHTML = '';
+      // Drop any preview transform so a pooled slot re-used for another page does
+      // not inherit a stale scale() before its overlay is rebuilt.
+      slot.textLayer.style.transform = '';
+      slot.textLayer.style.transformOrigin = '';
+    }
     slot.renderedPage = -1;
+    slot.renderedScale = -1;
     slot.wrapper.remove();
     this._free.push(slot);
   }
@@ -563,9 +650,10 @@ export class DocxScrollViewer {
     const dpr = this._dpr();
     const widthPx = this._pageWidthPx(i);
     const epoch = this._renderEpoch;
+    const scale = this._scale;
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(i, slot, widthPx, dpr);
+      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale);
       return;
     }
 
@@ -587,6 +675,9 @@ export class DocxScrollViewer {
         // different page / freed it. Either way: skip the (stale) overlay build.
         // The engine's per-canvas token already discards the superseded pixels.
         if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        // This fresh render defines the scale the on-screen bitmap now lives at,
+        // so a subsequent zoom preview stretches from HERE.
+        slot.renderedScale = scale;
         if (wantOverlay && slot.textLayer) {
           buildDocxTextLayer(
             slot.textLayer,
@@ -642,7 +733,13 @@ export class DocxScrollViewer {
    *    happened mid-flight). A moved epoch ⇒ close the orphan + re-dispatch the
    *    live slot at the new scale, never paint the old-scale bitmap.
    */
-  private async _renderSlotBitmap(i: number, slot: PageSlot, widthPx: number, dpr: number): Promise<void> {
+  private async _renderSlotBitmap(
+    i: number,
+    slot: PageSlot,
+    widthPx: number,
+    dpr: number,
+    scale: number,
+  ): Promise<void> {
     // Worker-mode + enableTextSelection: the overlay can't be populated (onTextRun
     // doesn't cross the worker boundary), so warn once (parity with DocxViewer)
     // and leave the overlay empty. Fires before the coalescing guards so it is
@@ -696,6 +793,9 @@ export class DocxScrollViewer {
       slot.canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
       slot.bitmapCtx?.transferFromImageBitmap(bmp);
       slot.bitmap = null; // transfer consumed it
+      // This bitmap now defines the scale the on-screen canvas lives at, so a
+      // later zoom preview stretches from HERE (design §7 renderedScale).
+      slot.renderedScale = scale;
       painted = true;
     } catch (err) {
       this._reportRenderError(err);
@@ -730,7 +830,7 @@ export class DocxScrollViewer {
       ) {
         // live.renderedPage === i already (set by _renderSlot on mount); the fresh
         // dispatch runs at the CURRENT epoch/scale via _pageWidthPx(i).
-        void this._renderSlotBitmap(i, live, this._pageWidthPx(i), this._dpr());
+        void this._renderSlotBitmap(i, live, this._pageWidthPx(i), this._dpr(), this._scale);
       }
     }
   }
@@ -741,6 +841,11 @@ export class DocxScrollViewer {
    * multiples of the base fit; design §3 keeps the clamp in the viewer, not core),
    * then re-anchor VERTICALLY so the page currently under the viewport top stays
    * fixed. A no-op when nothing is loaded or when the clamped scale is unchanged.
+   *
+   * FLICKER-FREE (design §7): this does NOT re-render the visible pages inline.
+   * It shows an immediate CSS preview (stretch the existing bitmaps, scale the
+   * overlays) and DEBOUNCES a full-resolution settle re-render for ZOOM_SETTLE_MS,
+   * so a wheel/pinch burst never blanks a page and coalesces into one crisp render.
    *
    * Re-anchor (written from scratch — XlsxViewer only re-anchors horizontally):
    * capture `top = topIndex` and the intra-page fraction `intraFrac` from the
@@ -797,19 +902,187 @@ export class DocxScrollViewer {
     const wantTop = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
     this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, wantTop));
 
-    // Re-mount at the new geometry, forcing a re-render of every slot (its px
-    // size changed under the new scale, so the cached canvas is stale).
-    this._mountVisibleForceRerender();
+    // FLICKER-FREE ZOOM (design §7). Do NOT recycle + re-render in-window slots
+    // (that blanks each visible page to white every tick). Instead:
+    //  1. CSS-PREVIEW the currently-mounted slots at the new geometry — reposition
+    //     the wrapper, stretch the existing canvas bitmap via style.width/height
+    //     (soft but never blank), and scale the text overlay by the ratio between
+    //     the new scale and the scale the overlay was built at.
+    //  2. DEBOUNCE a full-resolution settle re-render: schedule it ZOOM_SETTLE_MS
+    //     after the LAST setScale so a wheel/pinch burst coalesces into one render.
+    this._previewVisible();
+    this._scheduleSettle();
   }
 
-  /** Like `_mountVisible` but recycles every live slot first so each re-mounts and
-   *  re-renders at the current scale. Used by `setScale` (and the resize re-fit
-   *  in `_onResize`, which routes through `setScale`): a slot's canvas px size
-   *  changes with the scale, so the previously
-   *  drawn pixels are stale and every visible page must be redrawn. */
-  private _mountVisibleForceRerender(): void {
-    for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
-    this._mountVisible();
+  /**
+   * CSS preview of the visible window at the current `_scale` (design §7
+   * mechanism 1), WITHOUT re-rendering. Slots leaving the window recycle normally;
+   * slots ENTERING the window mount fresh (rendered at the current scale directly,
+   * so they never need a preview); slots that STAY are repositioned and their
+   * canvas + text overlay are CSS-transformed to the new size (the device buffer
+   * is untouched — that is the whole point: no synchronous clear, no blank frame).
+   */
+  private _previewVisible(): void {
+    if (!this._doc || this._doc.pageCount === 0) return;
+    const r = this._range();
+    this._lastRange = r;
+
+    // Recycle slots that left [start, end].
+    for (const [idx, slot] of [...this._slots]) {
+      if (idx < r.start || idx > r.end) this._recycleSlot(idx, slot);
+    }
+    // For every index in the window: mount fresh if missing (renders at the current
+    // scale), or CSS-preview if already mounted (no re-render, no device resize).
+    for (let i = r.start; i <= r.end; i++) {
+      const existing = this._slots.get(i);
+      if (!existing) {
+        const slot = this._acquireSlot();
+        this._positionSlot(slot, i, r);
+        this._slots.set(i, slot);
+        this._renderSlot(i, slot);
+      } else {
+        this._previewSlot(existing, i, r);
+      }
+    }
+    // Fire onVisiblePageChange only when the top page actually changed.
+    if (r.topIndex !== this._lastTopIndex) {
+      this._lastTopIndex = r.topIndex;
+      this._opts.onVisiblePageChange?.(r.topIndex, this._doc.pageCount);
+    }
+  }
+
+  /**
+   * CSS-preview a single already-mounted slot at the new geometry (design §7): the
+   * wrapper is repositioned + sized (via `_positionSlot`), the canvas bitmap is
+   * STRETCHED to the new CSS size (no `canvas.width` — the device buffer, and thus
+   * the drawn pixels, are left intact, just scaled by the browser), and the text
+   * overlay is scaled by `newScale / renderedScale` so it tracks the stretched
+   * page. `renderedScale <= 0` means the slot's first render hasn't resolved yet
+   * (nothing to stretch); the pending render captured the current scale, so it
+   * lands correct and no preview is needed.
+   */
+  private _previewSlot(slot: PageSlot, i: number, r: VisibleRange): void {
+    this._positionSlot(slot, i, r);
+    // Stretch the existing bitmap to the new CSS box (device buffer untouched).
+    slot.canvas.style.width = `${this._pageWidthPx(i)}px`;
+    slot.canvas.style.height = `${this._pageHeightPx(i)}px`;
+    if (slot.textLayer && slot.renderedScale > 0) {
+      const ratio = this._scale / slot.renderedScale;
+      slot.textLayer.style.transformOrigin = '0 0';
+      slot.textLayer.style.transform = `scale(${ratio})`;
+    }
+  }
+
+  /** (Re)schedule the debounced settle re-render (design §7 mechanism 2). Resets
+   *  the timer on every call so a burst of `setScale` dispatches ONE settle
+   *  ZOOM_SETTLE_MS after the LAST call. Cleared in `destroy()`. */
+  private _scheduleSettle(): void {
+    if (this._settleTimer !== null) clearTimeout(this._settleTimer);
+    this._settleTimer = setTimeout(() => {
+      this._settleTimer = null;
+      this._settleRender();
+    }, ZOOM_SETTLE_MS);
+  }
+
+  /** Full-resolution settle re-render of the visible window (design §7 mechanisms
+   *  2+3). Re-renders each mounted slot at the current scale via the double-buffer
+   *  swap (main) / same-canvas transfer (worker). Main mode also rebuilds the text
+   *  overlay and clears its preview transform; in worker mode the overlay is
+   *  permanently empty (text selection is main-mode-only), so the transform is
+   *  inert there and is reset on recycle. Dispatched at the CURRENT epoch; the
+   *  existing epoch gate discards it if a later `setScale` supersedes it
+   *  mid-render. */
+  private _settleRender(): void {
+    if (this._destroyed || !this._doc || this._doc.pageCount === 0) return;
+    for (const [i, slot] of [...this._slots]) {
+      // Skip slots already at the current scale (a slot that entered the window
+      // during the burst mounted fresh at the current scale — nothing to settle).
+      if (slot.renderedScale === this._scale) continue;
+      this._settleSlot(i, slot);
+    }
+  }
+
+  /**
+   * Settle-render one slot at the current scale (design §7 mechanism 3).
+   *
+   * WORKER: re-dispatch the bitmap render into the SAME canvas. The worker path
+   * sizes the device buffer and `transferFromImageBitmap`s it in ONE synchronous
+   * step (no await between `canvas.width = …` and the transfer), so the browser
+   * never composites an intermediate blank frame — no spare canvas is needed. The
+   * `renderedScale === _scale` gate in `_settleRender` plus the epoch gate inside
+   * `_renderSlotBitmap` keep this correct and idempotent.
+   *
+   * MAIN: `renderPage` (via renderDocumentToCanvas) synchronously sets
+   * `canvas.width = …` (which CLEARS the backing store to blank) BEFORE its first
+   * await and paints AFTER — so rendering into the on-screen canvas would flash it
+   * white. Render into a SPARE off-DOM canvas instead; only once it resolves at the
+   * current epoch do we swap it into the wrapper (replacing the old canvas, which is
+   * DISCARDED — the pooled unit is the slot, not the canvas). The old canvas keeps
+   * showing the stretched preview until the instant of the swap — blank-free.
+   */
+  private _settleSlot(i: number, slot: PageSlot): void {
+    if (!this._doc) return;
+    const dpr = this._dpr();
+    const widthPx = this._pageWidthPx(i);
+    const scale = this._scale;
+    const epoch = this._renderEpoch;
+
+    if (this._mode === 'worker') {
+      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale);
+      return;
+    }
+
+    // Main mode: double-buffer. Render into a spare canvas kept off-DOM. The
+    // spare REPLACES the on-screen canvas on swap, so it must carry the page
+    // shadow too — otherwise a settle would silently drop it.
+    const spare = document.createElement('canvas');
+    spare.style.cssText = 'display:block;background:#fff;';
+    this._applyPageShadow(spare);
+    const runs: DocxTextRunInfo[] = [];
+    const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
+    const onTextRun = wantOverlay ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
+    this._doc
+      .renderPage(spare, i, {
+        width: widthPx,
+        dpr,
+        defaultTextColor: this._opts.defaultTextColor,
+        showTrackChanges: this._opts.showTrackChanges,
+        onTextRun,
+      })
+      .then(() => {
+        // Discard if superseded: a later setScale bumped the epoch (this spare is
+        // at a stale scale), or the slot recycled / moved to another page. Drop
+        // the spare (it is off-DOM, so GC reclaims it) and do NOT swap.
+        if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        // Swap the freshly-painted spare in for the old (stretched-preview) canvas.
+        // The old canvas was the only child that showed content; replacing it in
+        // one DOM op means the screen goes from preview → crisp with no blank tick.
+        const old = slot.canvas;
+        slot.wrapper.insertBefore(spare, old);
+        old.remove();
+        slot.canvas = spare;
+        // The retired canvas held a 2d context; keep the pool clean by dropping any
+        // bitmaprenderer handle association (main-mode canvases never had one).
+        slot.bitmapCtx = null;
+        slot.renderedScale = scale;
+        // Rebuild the overlay at the full resolution and CLEAR the preview
+        // transform (the crisp render no longer needs the scale()).
+        if (slot.textLayer) {
+          slot.textLayer.style.transform = '';
+          slot.textLayer.style.transformOrigin = '';
+          if (wantOverlay) {
+            buildDocxTextLayer(
+              slot.textLayer,
+              runs,
+              spare.style.width || `${spare.width}px`,
+              spare.style.height || `${spare.height}px`,
+            );
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        this._reportRenderError(err);
+      });
   }
 
   /**
@@ -874,12 +1147,14 @@ export class DocxScrollViewer {
    *   mult      = _scale / _prevBase            (the user's zoom over the old base)
    *   newScale  = newBase × mult
    * Routing through `setScale(newScale)` bumps `_renderEpoch` (resize IS an epoch
-   * event — T4 banner) and re-anchors + force-re-renders every slot at the new
-   * geometry, exactly like a zoom. `setScale`'s clamp/no-op guards apply: an
-   * unchanged newScale (identical width) is a no-op there — so we short-circuit
-   * BEFORE it when the fit-width is unchanged (mounting the revealed window without
-   * a needless force-re-render), and after it we call `_mountVisible` again to cover
-   * the case where the clamp made `setScale` no-op yet the viewport still grew.
+   * event — T4 banner) and re-anchors + CSS-previews + debounces a settle re-render
+   * of every slot at the new geometry, exactly like a zoom (design §7 flicker-free
+   * path — a rapid ResizeObserver burst therefore also coalesces into one settle).
+   * `setScale`'s clamp/no-op guards apply: an unchanged newScale (identical width)
+   * is a no-op there — so we short-circuit BEFORE it when the fit-width is
+   * unchanged (mounting the revealed window without a needless re-render), and
+   * after it we call `_mountVisible` again to cover the case where the clamp made
+   * `setScale` no-op yet the viewport still grew.
    */
   private _onResize(): void {
     if (!this._doc || this._doc.pageCount === 0) return;
@@ -921,10 +1196,10 @@ export class DocxScrollViewer {
     // of using absolute bounds (§8.1) with an unclamped relayout base.
     this.setScale(newBase * mult);
     // `setScale` no-ops when the clamped scale is unchanged (e.g. already pinned at
-    // a clamp boundary), which would skip its `_mountVisibleForceRerender`. A
-    // width+height growth that ends up clamped to the same scale must still reveal
-    // the taller viewport's rows, so mount here too. Idempotent when `setScale` ran:
-    // the window is already mounted and every present slot is a re-position no-op.
+    // a clamp boundary), which would skip its preview + settle. A width+height
+    // growth that ends up clamped to the same scale must still reveal the taller
+    // viewport's rows, so mount here too. Idempotent when `setScale` ran: the
+    // window is already mounted and every present slot is a re-position no-op.
     this._mountVisible();
   }
 
@@ -975,6 +1250,14 @@ export class DocxScrollViewer {
     }
     this._resizeObserver?.disconnect();
     this._resizeObserver = null;
+    // Cancel a pending settle so no re-render is dispatched after teardown
+    // (design §7 mechanism 2). `_destroyed` also guards `_settleRender`, but
+    // clearing the timer avoids the wasted wake-up and keeps fake-timer tests
+    // deterministic.
+    if (this._settleTimer !== null) {
+      clearTimeout(this._settleTimer);
+      this._settleTimer = null;
+    }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
     if (!this._injected) {

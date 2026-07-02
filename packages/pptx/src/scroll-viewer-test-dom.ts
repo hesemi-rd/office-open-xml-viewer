@@ -21,6 +21,14 @@ export interface FakeEl {
   clientWidth: number;
   _listeners: Map<string, Array<(e: unknown) => void>>;
   _bitmapCtx?: { transferFromImageBitmap: (b: unknown) => void; lastBitmap: unknown };
+  /** Records every DEVICE-BUFFER resize (a `canvas.width`/`canvas.height`
+   *  assignment). The flicker-free CSS-preview path must NOT touch the device
+   *  buffer of an in-window slot (it only CSS-resizes via `style.width/height`),
+   *  so a preview leaves this array untouched; a settle/mount render appends. */
+  _deviceResizes: Array<{ prop: 'width' | 'height'; value: number }>;
+  /** Monotonic id assigned at creation, so tests can order operations and tell a
+   *  freshly-created spare canvas from the on-screen one it replaces. */
+  _uid: number;
   appendChild(c: FakeEl): FakeEl;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
@@ -32,6 +40,8 @@ export interface FakeEl {
   /** test-only: fire a recorded listener */
   dispatch(type: string, event?: unknown): void;
 }
+
+let _uidSeq = 0;
 
 export function makeEl(tag: string): FakeEl {
   const style: Record<string, string> = {};
@@ -47,6 +57,8 @@ export function makeEl(tag: string): FakeEl {
     children: [],
     parentElement: null,
     _listeners: new Map(),
+    _deviceResizes: [],
+    _uid: _uidSeq++,
     style: new Proxy(style as Record<string, string> & { cssText: string }, {
       set(target, prop: string, value: string) {
         if (prop === 'cssText') {
@@ -134,6 +146,37 @@ export function makeEl(tag: string): FakeEl {
     enumerable: true,
     configurable: true,
   });
+  // Record device-buffer resizes. A real canvas.width/height assignment resizes
+  // (and CLEARS) the backing store; the flicker-free preview path must never do
+  // this to an on-screen slot (it CSS-resizes instead). Making width/height
+  // recording accessors lets the preview tests assert "no device-buffer resize
+  // happened during the CSS preview" (test a). The value is still stored so the
+  // worker transfer path (`canvas.width = bmp.width`) and the main renderSlide
+  // backing-store sizing read back correctly.
+  let _w = 0;
+  let _h = 0;
+  Object.defineProperty(el, 'width', {
+    get() {
+      return _w;
+    },
+    set(value: number) {
+      _w = value;
+      el._deviceResizes.push({ prop: 'width', value });
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(el, 'height', {
+    get() {
+      return _h;
+    },
+    set(value: number) {
+      _h = value;
+      el._deviceResizes.push({ prop: 'height', value });
+    },
+    enumerable: true,
+    configurable: true,
+  });
   return el;
 }
 
@@ -172,6 +215,10 @@ export interface RenderCall {
    *  §7). pptx slides are uniform, so every value equals the same px width, but
    *  the per-call contract still passes a width per slide. */
   width?: number;
+  /** The canvas element the viewer handed to `renderSlide` (main mode). The
+   *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
+   *  a test confirm the on-screen canvas was NOT the render target until swap. */
+  canvas?: FakeEl;
   resolve: () => void;
   reject: (e: Error) => void;
 }
@@ -208,13 +255,18 @@ export class FakePptxEngine {
     return this._mode;
   }
   renderSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<void> {
+    const canvas = _canvas as FakeEl | undefined;
     // Mirror the real renderer's backing-store sizing so tests can exercise the
     // dpr≠1 path: the real PptxPresentation.renderSlide sets `canvas.width =
     // round(cssWidth × dpr)` (and height to keep the slide aspect). A retina (dpr 2)
     // render leaves canvas.width at 2× the CSS box — the overlay must NOT copy it.
-    if (this._mode === 'main' && opts?.width && opts.width > 0) {
+    // This ALSO mirrors the real renderer's SYNCHRONOUS device-buffer clear (the
+    // whole reason main-mode settle must double-buffer): setting canvas.width up
+    // front blanks the backing store, so a settle rendering into the ON-SCREEN
+    // canvas would flash white. The flicker-free path renders into a spare, so this
+    // recorded resize must land on the spare (test d).
+    if (this._mode === 'main' && canvas && opts?.width && opts.width > 0) {
       const dpr = opts.dpr ?? 1;
-      const canvas = _canvas as { width: number; height: number };
       canvas.width = Math.round(opts.width * dpr);
       canvas.height = this.slideWidth > 0 ? Math.round((canvas.width * this.slideHeight) / this.slideWidth) : 0;
     }
@@ -233,7 +285,7 @@ export class FakePptxEngine {
     // per-slot overlay (mirrors the real renderer emitting run geometry).
     for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
     return new Promise<void>((resolve, reject) => {
-      const call: RenderCall = { slide, width: opts?.width, resolve: () => resolve(), reject };
+      const call: RenderCall = { slide, width: opts?.width, canvas, resolve: () => resolve(), reject };
       this.renderCalls.push(call);
       if (!this.deferred) resolve();
     });

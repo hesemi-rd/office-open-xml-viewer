@@ -1713,6 +1713,414 @@ describe('PptxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
   });
 });
 
+describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
+  // Flicker-free zoom (design §7): setScale must NOT blank a visible slide.
+  // Three mechanisms — CSS preview (immediate, no device-buffer resize / no
+  // recycle of in-window slots), settle re-render (debounced ZOOM_SETTLE_MS),
+  // double-buffer swap (main-mode settle renders into a SPARE off-DOM canvas and
+  // swaps it in). Container 200×400, natural slide 200×120px, flush pads ⇒ base
+  // 1.0, slide height px 120.
+  function setup(slideCount = 20, opts = {}, mode: 'main' | 'worker' = 'main', deferred = false) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU, mode, deferred);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+      overscan: 1,
+      zoomMin: 0.5,
+      zoomMax: 4,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, engine, container };
+  }
+
+  /** The wrapper mounted for the slide currently at top:`top`px. */
+  function slotAtTop(scrollHost: FakeEl, top: string): FakeEl | undefined {
+    return scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === top,
+    ) as FakeEl | undefined;
+  }
+
+  // (a) setScale does NOT unmount in-window slots (same wrapper before/after) and
+  //     does NOT resize any on-screen canvas device buffer during the preview.
+  it('CSS preview: setScale keeps the SAME in-window slot wrappers and never resizes their device buffer', () => {
+    const { v, scrollHost } = setup();
+    const before = slotAtTop(scrollHost, '0px');
+    expect(before).toBeDefined();
+    const beforeCanvas = before!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    const resizesBefore = beforeCanvas._deviceResizes.length;
+
+    v.setScale(v.scaleForTest() * 2); // zoom in
+
+    const after = slotAtTop(scrollHost, '0px');
+    expect(after).toBe(before); // same wrapper (not recycled + re-mounted)
+    const afterCanvas = after!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(afterCanvas).toBe(beforeCanvas); // same canvas element
+    expect(afterCanvas._deviceResizes.length).toBe(resizesBefore); // no device resize
+    v.destroy();
+  });
+
+  it('CSS preview: setScale CSS-resizes the slot canvas (style.width/height) to the new layout size immediately', () => {
+    const { v, scrollHost } = setup();
+    const slot = slotAtTop(scrollHost, '0px')!;
+    const canvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+    // base 1.0 ⇒ slide px 200×120. Zoom ×2 ⇒ CSS 400×240.
+    v.setScale(v.scaleForTest() * 2);
+    expect(canvas.style.width).toBe('400px');
+    expect(canvas.style.height).toBe('240px');
+    v.destroy();
+  });
+
+  it('CSS preview: text layer gets a transform: scale(ratio) matching newScale / renderedScale', async () => {
+    const { v, scrollHost, engine } = setup(20, { enableTextSelection: true });
+    engine.feedTextRuns = [
+      {
+        text: 'Hi',
+        inShapeX: 1,
+        inShapeY: 2,
+        w: 10,
+        h: 12,
+        fontSize: 12,
+        font: '12px serif',
+        shapeX: 0,
+        shapeY: 0,
+        shapeW: 100,
+        shapeH: 40,
+        rotation: 0,
+      },
+    ];
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot = slotAtTop(scrollHost, '0px')!;
+    const textLayer = slot.children.find((k) => k.tag === 'div') as FakeEl;
+    // Zoom ×2 — overlay built at base 1.0; preview scales by newScale/renderedScale
+    // = 2.0/1.0 = 2.
+    v.setScale(v.scaleForTest() * 2);
+    expect(textLayer.style.transform).toBe('scale(2)');
+    expect(textLayer.style.transformOrigin).toBe('0 0');
+    v.destroy();
+  });
+
+  // (c) NO render dispatch during a burst; ONE dispatch after ZOOM_SETTLE_MS.
+  it('debounce: a burst of setScale calls dispatches NO settle render until ZOOM_SETTLE_MS elapses, then exactly one per slot', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, engine } = setup();
+      const dispatchesBefore = engine.renderCalls.length;
+      v.setScale(v.scaleForTest() * 1.1);
+      vi.advanceTimersByTime(50);
+      v.setScale(v.scaleForTest() * 1.1);
+      vi.advanceTimersByTime(50);
+      v.setScale(v.scaleForTest() * 1.1);
+      vi.advanceTimersByTime(50); // timer reset each tick — still inside window
+      expect(engine.renderCalls.length).toBe(dispatchesBefore);
+      vi.advanceTimersByTime(150); // past the settle timeout from the LAST setScale
+      const mounted = v.mountedSlideIndicesForTest();
+      const settleRenders = engine.renderCalls.length - dispatchesBefore;
+      expect(settleRenders).toBe(mounted.length);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // (d) settle resolution swaps the canvas without a blank (main mode double-buffer).
+  it('double-buffer (main): settle renders into a SPARE canvas and swaps it in — the on-screen canvas is never device-resized in place', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, scrollHost, engine } = setup(20, {}, 'main', true);
+      for (const c of engine.renderCalls.slice()) c.resolve();
+      const slot = slotAtTop(scrollHost, '0px')!;
+      const onScreenCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+      const onScreenUid = onScreenCanvas._uid;
+      const resizesOnScreenBefore = onScreenCanvas._deviceResizes.length;
+
+      v.setScale(v.scaleForTest() * 2);
+      vi.advanceTimersByTime(200);
+
+      const settleCall = engine.renderCalls.filter((c) => c.slide === 0).pop()!;
+      expect(settleCall.canvas).toBeDefined();
+      expect(settleCall.canvas!._uid).not.toBe(onScreenUid); // rendered into a spare
+      expect(onScreenCanvas._deviceResizes.length).toBe(resizesOnScreenBefore); // not in-place
+      expect(slot.children).toContain(onScreenCanvas); // still attached (no swap yet)
+
+      settleCall.resolve();
+      return Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => {
+          const nowCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+          expect(nowCanvas._uid).toBe(settleCall.canvas!._uid); // spare swapped in
+          expect(slot.children).not.toContain(onScreenCanvas); // old retired
+          v.destroy();
+        });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('double-buffer (worker): settle renders into the SAME canvas (sync resize+transfer paints no blank frame)', async () => {
+    vi.useFakeTimers();
+    const { v, scrollHost, engine } = setup(20, {}, 'worker', true);
+    for (const c of engine.bitmapCalls.slice()) c.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot = slotAtTop(scrollHost, '0px')!;
+    const canvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+    const canvasUid = canvas._uid;
+    const bitmapsBefore = engine.bitmapCalls.length;
+
+    v.setScale(v.scaleForTest() * 2);
+    vi.advanceTimersByTime(200);
+
+    expect(engine.bitmapCalls.length).toBeGreaterThan(bitmapsBefore);
+    const settleCall = engine.bitmapCalls.filter((c) => c.slide === 0).pop()!;
+    const settleBitmap = engine.createdBitmaps[engine.bitmapCalls.indexOf(settleCall)];
+    settleCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const nowCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(nowCanvas._uid).toBe(canvasUid); // SAME canvas (worker keeps it)
+    expect(nowCanvas._bitmapCtx?.lastBitmap).toBe(settleBitmap);
+    vi.useRealTimers();
+    v.destroy();
+  });
+
+  // (e) stale settle discards per the epoch gate.
+  it('stale settle: an epoch bump during the settle render discards the settle (no swap, spare not attached)', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, scrollHost, engine } = setup(20, {}, 'main', true);
+      for (const c of engine.renderCalls.slice()) c.resolve();
+      const slot = slotAtTop(scrollHost, '0px')!;
+      const onScreenCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+
+      v.setScale(v.scaleForTest() * 2);
+      vi.advanceTimersByTime(200); // settle dispatched (deferred, in flight)
+      const settleCall = engine.renderCalls.filter((c) => c.slide === 0).pop()!;
+
+      v.setScale(v.scaleForTest() * 1.1); // bump epoch mid-settle-render
+
+      settleCall.resolve();
+      return Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => {
+          const nowCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+          expect(nowCanvas).toBe(onScreenCanvas); // stale spare NOT swapped in
+          expect(nowCanvas._uid).not.toBe(settleCall.canvas!._uid);
+          v.destroy();
+        });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // (f) destroy during a pending settle timer / in-flight settle render.
+  it('destroy during a pending settle timer clears it — no post-destroy render dispatch, no crash', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, engine } = setup();
+      const dispatchesBefore = engine.renderCalls.length;
+      v.setScale(v.scaleForTest() * 2); // schedules a settle timer
+      v.destroy();
+      vi.advanceTimersByTime(500);
+      expect(engine.renderCalls.length).toBe(dispatchesBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy during an in-flight settle render does not swap or fire onError post-destroy', () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    try {
+      const { v, scrollHost, engine } = setup(20, { onError }, 'main', true);
+      for (const c of engine.renderCalls.slice()) c.resolve();
+      const slot = slotAtTop(scrollHost, '0px')!;
+      const onScreenCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+      v.setScale(v.scaleForTest() * 2);
+      vi.advanceTimersByTime(200);
+      const settleCall = engine.renderCalls.filter((c) => c.slide === 0).pop()!;
+      v.destroy();
+      settleCall.resolve();
+      return Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => {
+          expect(onError).not.toHaveBeenCalled();
+          expect(slot.children).toContain(onScreenCanvas);
+        });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settle clears the preview transform on the text layer (overlay rebuilt at full resolution)', async () => {
+    vi.useFakeTimers();
+    const { v, scrollHost, engine } = setup(20, { enableTextSelection: true }, 'main', true);
+    engine.feedTextRuns = [
+      {
+        text: 'Hi',
+        inShapeX: 1,
+        inShapeY: 2,
+        w: 10,
+        h: 12,
+        fontSize: 12,
+        font: '12px serif',
+        shapeX: 0,
+        shapeY: 0,
+        shapeW: 100,
+        shapeH: 40,
+        rotation: 0,
+      },
+    ];
+    for (const c of engine.renderCalls.slice()) c.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot = slotAtTop(scrollHost, '0px')!;
+    const textLayer = slot.children.find((k) => k.tag === 'div') as FakeEl;
+
+    v.setScale(v.scaleForTest() * 2);
+    expect(textLayer.style.transform).toBe('scale(2)'); // preview transform applied
+    vi.advanceTimersByTime(200);
+    const settleCall = engine.renderCalls.filter((c) => c.slide === 0).pop()!;
+    settleCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(textLayer.style.transform).toBe(''); // cleared after the crisp render
+    vi.useRealTimers();
+    v.destroy();
+  });
+});
+
+describe('PptxScrollViewer — pageShadow (T9)', () => {
+  // pageShadow paints a CSS box-shadow on every slide CANVAS (not the wrapper).
+  // Default = the recipe drop shadow; `false` disables; a custom string is
+  // honoured verbatim. It must reach EVERY canvas: fresh mounts, the settle
+  // double-buffer SPARE, and recycled+re-mounted slots. Reuses the T8 setup
+  // (deferred engine + fake timers) for the spare-canvas case.
+  const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+
+  function setup(opts = {}, mode: 'main' | 'worker' = 'main', deferred = false) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, mode, deferred);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+      overscan: 1,
+      zoomMin: 0.5,
+      zoomMax: 4,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, engine };
+  }
+
+  /** Every mounted slide canvas (each slot wrapper's canvas child). */
+  function mountedCanvases(scrollHost: FakeEl): FakeEl[] {
+    return scrollHost.children
+      .filter((c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas'))
+      .map((w) => w.children.find((k) => k.tag === 'canvas') as FakeEl);
+  }
+
+  it('applies the default recipe shadow to every mounted slide canvas', () => {
+    const { v, scrollHost } = setup();
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+    v.destroy();
+  });
+
+  it('pageShadow:false sets no box-shadow on the slide canvas', () => {
+    const { v, scrollHost } = setup({ pageShadow: false });
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe('');
+    v.destroy();
+  });
+
+  it('honours a custom pageShadow string verbatim (e.g. a spread-ring border look)', () => {
+    const ring = '0 0 0 1px #c8ccd0';
+    const { v, scrollHost } = setup({ pageShadow: ring });
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe(ring);
+    v.destroy();
+  });
+
+  it('does NOT paint the shadow on the wrapper (only the canvas)', () => {
+    const { v, scrollHost } = setup();
+    const wrapper = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas'),
+    ) as FakeEl;
+    expect(wrapper.style.boxShadow).toBe('');
+    v.destroy();
+  });
+
+  it('the settle double-buffer SPARE canvas carries the shadow (swapped-in canvas keeps it)', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, scrollHost, engine } = setup({}, 'main', true);
+      // Resolve the initial mount renders so the on-screen canvases are painted.
+      for (const c of engine.renderCalls.slice()) c.resolve();
+
+      v.setScale(v.scaleForTest() * 2); // zoom → schedules a settle
+      vi.advanceTimersByTime(200); // past ZOOM_SETTLE_MS → settle dispatched
+
+      // The settle render for slide 0 targets a fresh SPARE canvas — it must
+      // already carry the shadow BEFORE the swap.
+      const settleCall = engine.renderCalls.filter((c) => c.slide === 0).pop()!;
+      const spare = settleCall.canvas as unknown as FakeEl;
+      expect(spare).toBeDefined();
+      expect(spare.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+
+      // Resolve → swap the spare in. The now-on-screen canvas still has the shadow.
+      settleCall.resolve();
+      const slot = scrollHost.children.find(
+        (c) => c.tag === 'div' && c.style.top === '0px' && c.children.some((k) => k.tag === 'canvas'),
+      ) as FakeEl;
+      return Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => {
+          const nowCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+          expect(nowCanvas._uid).toBe(spare._uid); // spare swapped in
+          expect(nowCanvas.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+          v.destroy();
+        });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a recycled + re-mounted slot still carries the shadow', () => {
+    const { v, scrollHost } = setup();
+    // Scroll far down so slide 0's slot recycles into the free pool, then back to
+    // the top so a POOLED slot is re-mounted for slide 0.
+    scrollHost.scrollTop = 5000;
+    scrollHost.dispatch('scroll');
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatch('scroll');
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+    v.destroy();
+  });
+});
+
 describe('PptxScrollViewer — barrel export (T7)', () => {
   it('is exported from the package entry', () => {
     expect(typeof pptxIndex.PptxScrollViewer).toBe('function');

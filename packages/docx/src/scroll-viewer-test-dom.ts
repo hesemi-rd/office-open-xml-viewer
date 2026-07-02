@@ -23,6 +23,14 @@ export interface FakeEl {
   clientWidth: number;
   _listeners: Map<string, Array<(e: unknown) => void>>;
   _bitmapCtx?: { transferFromImageBitmap: (b: unknown) => void; lastBitmap: unknown };
+  /** Records every DEVICE-BUFFER resize (a `canvas.width`/`canvas.height`
+   *  assignment). The flicker-free CSS-preview path must NOT touch the device
+   *  buffer of an in-window slot (it only CSS-resizes via `style.width/height`),
+   *  so a preview leaves this array untouched; a settle/mount render appends. */
+  _deviceResizes: Array<{ prop: 'width' | 'height'; value: number }>;
+  /** Monotonic id assigned at creation, so tests can order operations and tell a
+   *  freshly-created spare canvas from the on-screen one it replaces. */
+  _uid: number;
   appendChild(c: FakeEl): FakeEl;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
@@ -34,6 +42,8 @@ export interface FakeEl {
   /** test-only: fire a recorded listener */
   dispatch(type: string, event?: unknown): void;
 }
+
+let _uidSeq = 0;
 
 export function makeEl(tag: string): FakeEl {
   const style: Record<string, string> = {};
@@ -49,6 +59,8 @@ export function makeEl(tag: string): FakeEl {
     children: [],
     parentElement: null,
     _listeners: new Map(),
+    _deviceResizes: [],
+    _uid: _uidSeq++,
     style: new Proxy(style as Record<string, string> & { cssText: string }, {
       set(target, prop: string, value: string) {
         if (prop === 'cssText') {
@@ -136,6 +148,36 @@ export function makeEl(tag: string): FakeEl {
     enumerable: true,
     configurable: true,
   });
+  // Record device-buffer resizes. A real canvas.width/height assignment resizes
+  // (and CLEARS) the backing store; the flicker-free preview path must never do
+  // this to an on-screen slot (it CSS-resizes instead). Making width/height
+  // recording accessors lets the preview tests assert "no device-buffer resize
+  // happened during the CSS preview" (test a). The value is still stored so the
+  // worker transfer path (`canvas.width = bmp.width`) reads back correctly.
+  let _w = 0;
+  let _h = 0;
+  Object.defineProperty(el, 'width', {
+    get() {
+      return _w;
+    },
+    set(value: number) {
+      _w = value;
+      el._deviceResizes.push({ prop: 'width', value });
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(el, 'height', {
+    get() {
+      return _h;
+    },
+    set(value: number) {
+      _h = value;
+      el._deviceResizes.push({ prop: 'height', value });
+    },
+    enumerable: true,
+    configurable: true,
+  });
   return el;
 }
 
@@ -172,6 +214,10 @@ export interface RenderCall {
   /** The per-call `width` (px) the viewer passed — asserted by T3 to confirm
    *  each page gets its OWN px width (uniform px-per-pt scale, §7). */
   width?: number;
+  /** The canvas element the viewer handed to `renderPage` (main mode). The
+   *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
+   *  a test confirm the on-screen canvas was NOT the render target until swap. */
+  canvas?: FakeEl;
   resolve: () => void;
   reject: (e: Error) => void;
 }
@@ -224,11 +270,25 @@ export class FakeDocxEngine {
         "renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap() and paint it via an ImageBitmapRenderingContext",
       );
     }
+    // Mirror the real renderer's SYNCHRONOUS device-buffer clear: the real
+    // renderDocumentToCanvas sets `canvas.width = round(cssWidth × dpr)` (which
+    // clears the backing store to blank) up front, BEFORE its first await, then
+    // paints after. The flicker-free settle path relies on this happening on a
+    // SPARE off-screen canvas (never the on-screen one), so recording it lets the
+    // double-buffer test assert the clear landed on the spare (test d).
+    const canvas = _canvas as FakeEl | undefined;
+    if (canvas && opts?.width && opts.width > 0) {
+      const dpr = opts.dpr ?? 1;
+      const size = this.pageSize(page);
+      const scale = size.widthPt > 0 ? opts.width / size.widthPt : 0;
+      canvas.width = Math.round(opts.width * dpr);
+      canvas.height = Math.round(size.heightPt * scale * dpr);
+    }
     // Emit any fed runs to the viewer's internal onTextRun so it can build the
     // per-slot overlay (mirrors the real renderer emitting run geometry).
     for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
     return new Promise<void>((resolve, reject) => {
-      const call: RenderCall = { page, width: opts?.width, resolve: () => resolve(), reject };
+      const call: RenderCall = { page, width: opts?.width, canvas, resolve: () => resolve(), reject };
       this.renderCalls.push(call);
       if (!this.deferred) resolve();
     });
