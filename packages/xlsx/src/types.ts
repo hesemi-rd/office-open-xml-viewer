@@ -1002,7 +1002,11 @@ export type WorkerRequest =
   | { type: 'extractImage'; id: number; path: string };
 
 export type WorkerResponse =
-  | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
-  | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
+  // The workbook index / worksheet cross the worker boundary as raw UTF-8 JSON
+  // bytes (transferred, not cloned); the main thread does the single
+  // `TextDecoder.decode` + `JSON.parse` into a `ParsedWorkbook` / `Worksheet`.
+  // See `parse_xlsx` (Rust) for why.
+  | { type: 'parsed'; id: number; workbookJson: ArrayBuffer }
+  | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'error'; id: number; message: string };

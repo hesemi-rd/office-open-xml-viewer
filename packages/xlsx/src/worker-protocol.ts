@@ -1,4 +1,10 @@
-import type { ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
+import type {
+  ViewportRange,
+  RenderViewportOptions,
+  WorkerResponse,
+  ParsedWorkbook,
+  Worksheet,
+} from './types.js';
 
 /** Serializable subset of RenderViewportOptions: drop the callback, the image
  *  cache, and the `fetchImage` loader (all non-cloneable; the worker owns its
@@ -32,9 +38,15 @@ export type RenderWorkerRequest =
   | { type: 'extractImage'; id: number; path: string };
 
 export type RenderWorkerResponse =
-  // `parsed` / `parsedSheet` / `error` are reused from WorkerResponse: xlsx DOES
-  // transfer the (light, workbook-level) ParsedWorkbook back to the proxy, so
-  // synchronous getters (sheetNames, tabColors, …) keep working; per-sheet data
-  // stays worker-side and is parsed there on demand.
-  | WorkerResponse
+  // `imageExtracted` / `error` are reused from WorkerResponse. `parsed` and
+  // `parsedSheet` are NOT reused: the parse-only worker returns those models as
+  // transferred JSON bytes, but the render worker has already decoded them
+  // worker-side (it consumes them to render), so it sends the objects back to
+  // the proxy as structured clones — no re-serialization. The light,
+  // workbook-level ParsedWorkbook keeps synchronous getters (sheetNames,
+  // tabColors, …) working; per-sheet data stays worker-side and is parsed on
+  // demand.
+  | Exclude<WorkerResponse, { type: 'parsed' } | { type: 'parsedSheet' }>
+  | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
+  | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
   | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap };

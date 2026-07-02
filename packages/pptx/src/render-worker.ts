@@ -86,7 +86,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      pres = JSON.parse(parse_pptx(currentBuffer, currentMaxZipEntryBytes)) as Presentation;
+      // `parse_pptx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>). Render
+      // mode consumes the model in-worker, so decode + parse here (one decode,
+      // no passthrough).
+      pres = JSON.parse(
+        new TextDecoder().decode(parse_pptx(currentBuffer, currentMaxZipEntryBytes)),
+      ) as Presentation;
       if (req.useGoogleFonts) {
         // Kick the preload now so it overlaps with main-thread work; renders
         // await `fontsLoaded` so text never rasterizes with fallback metrics.

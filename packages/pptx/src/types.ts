@@ -631,7 +631,10 @@ export type WorkerRequest =
 
 export type WorkerResponse =
   | { kind: 'ready' }
-  | { kind: 'parsed'; id: number; presentation: Presentation }
+  // The model crosses the worker boundary as raw UTF-8 JSON bytes (transferred,
+  // not cloned); the main thread does the single `TextDecoder.decode` +
+  // `JSON.parse` into a `Presentation`. See `parse_pptx` (Rust) for why.
+  | { kind: 'parsed'; id: number; presentationJson: ArrayBuffer }
   | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'error'; id: number; message: string };

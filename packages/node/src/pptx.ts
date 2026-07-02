@@ -26,8 +26,12 @@ export function parsePptx(buffer: ArrayBuffer | Uint8Array | Buffer): Presentati
     buffer instanceof Uint8Array
       ? buffer
       : new Uint8Array(buffer as ArrayBuffer);
-  const json = (pptxWasm as unknown as { parse_pptx: (b: Uint8Array) => string }).parse_pptx(bytes);
-  return JSON.parse(json) as Presentation;
+  // `parse_pptx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
+  // parse once. Matches the browser main-thread receiver.
+  const json = (pptxWasm as unknown as { parse_pptx: (b: Uint8Array) => Uint8Array }).parse_pptx(
+    bytes,
+  );
+  return JSON.parse(new TextDecoder().decode(json)) as Presentation;
 }
 
 /** Extract raw bytes for a single media entry (e.g. `ppt/media/image1.png`)

@@ -168,8 +168,10 @@ export const DebugJson: Story = {
       try {
         await wasmReady;
         const buf = await file.arrayBuffer();
+        // `parse_pptx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>);
+        // decode + parse to inspect the model.
         const json = parse_pptx(new Uint8Array(buf));
-        const parsed = JSON.parse(json);
+        const parsed = JSON.parse(new TextDecoder().decode(json));
         // Print summary: slide count, element count per slide
         const summary = {
           slideWidth: parsed.slideWidth,

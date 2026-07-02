@@ -128,7 +128,12 @@ export class DocxDocument {
     if (this._mode === 'worker') {
       this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
     } else {
-      this._document = (res as Extract<WorkerResponse, { type: 'parsed' }>).document;
+      // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
+      // here (the only serialization on the parse-mode path).
+      const { documentJson } = res as Extract<WorkerResponse, { type: 'parsed' }>;
+      this._document = JSON.parse(
+        new TextDecoder().decode(new Uint8Array(documentJson)),
+      ) as DocxDocumentModel;
     }
   }
 

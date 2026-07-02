@@ -12,13 +12,20 @@ mod table_style_presets;
 //  Public WASM entry points
 // ===========================
 
+/// Parse a pptx archive and return the model as UTF-8 JSON **bytes**.
+///
+/// Returning `Vec<u8>` (a fresh copy on the JS side) instead of `String` keeps
+/// the model out of the JsString/UTF-16 representation: the worker forwards the
+/// resulting `ArrayBuffer` to the main thread as a transferable and the main
+/// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
+/// serializations (Rust String → JsString → structured clone) into one decode.
 #[wasm_bindgen]
-pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
+pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let presentation = parse_presentation(data)
         .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
-    serde_json::to_string(&presentation)
+    serde_json::to_vec(&presentation)
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 

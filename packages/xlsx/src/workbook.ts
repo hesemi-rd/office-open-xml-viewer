@@ -130,8 +130,16 @@ export class XlsxWorkbook {
           } satisfies WorkerRequest),
     );
     // Both modes carry the light, workbook-level ParsedWorkbook back, so
-    // sheetNames / tabColors / resolveValidationList keep working.
-    this.parsedWorkbook = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).workbook;
+    // sheetNames / tabColors / resolveValidationList keep working. In parse mode
+    // it arrives as transferred UTF-8 JSON bytes — decode + parse once here.
+    if (this._mode === 'worker') {
+      this.parsedWorkbook = (parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>).workbook;
+    } else {
+      const { workbookJson } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      this.parsedWorkbook = JSON.parse(
+        new TextDecoder().decode(new Uint8Array(workbookJson)),
+      ) as ParsedWorkbook;
+    }
     if (this._mode === 'main' && opts.useGoogleFonts) {
       await preloadGoogleFonts(
         xlsxFontPreloadNames(this.parsedWorkbook),
@@ -196,7 +204,16 @@ export class XlsxWorkbook {
       sheetName: sheetMeta.name,
       maxZipEntryBytes: this.maxZipEntryBytes,
     }));
-    const ws = (res as Extract<WorkerResponse, { type: 'parsedSheet' }>).worksheet;
+    // Parse mode: the worker forwards the sheet as transferred UTF-8 JSON bytes
+    // — decode + parse once here. Worker (render) mode: the worker already
+    // decoded it and sends the object back as a structured clone.
+    let ws: Worksheet;
+    if (this._mode === 'worker') {
+      ws = (res as Extract<RenderWorkerResponse, { type: 'parsedSheet' }>).worksheet;
+    } else {
+      const { worksheetJson } = res as Extract<WorkerResponse, { type: 'parsedSheet' }>;
+      ws = JSON.parse(new TextDecoder().decode(new Uint8Array(worksheetJson))) as Worksheet;
+    }
     this.sheetCache.set(sheetIndex, ws);
     return ws;
   }

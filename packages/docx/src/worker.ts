@@ -28,14 +28,19 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
       currentBuffer = new Uint8Array(req.data);
-      // `parse_docx` returns the model JSON on success and throws a JS Error on
-      // parse/serialize failure (Result<String, JsValue>), matching pptx/xlsx.
-      // The throw is caught by the outer try/catch below, so no error-field
-      // probe is needed here.
+      // `parse_docx` returns the model as UTF-8 JSON bytes on success and throws
+      // a JS Error on parse/serialize failure (Result<Vec<u8>, JsValue>),
+      // matching pptx/xlsx. The throw is caught by the outer try/catch below, so
+      // no error-field probe is needed here. wasm-bindgen hands back a fresh
+      // Uint8Array (a copy of the Rust Vec), so its buffer is exclusively ours:
+      // forward it to the main thread as a transferable — no clone, no decode
+      // here. The single decode + JSON.parse happens once, on the main thread.
       const json = parse_docx(currentBuffer, currentMaxZipEntryBytes);
-      const document = JSON.parse(json);
-      const res: WorkerResponse = { type: 'parsed', id, document };
-      self.postMessage(res);
+      const documentJson = json.buffer as ArrayBuffer;
+      const res: WorkerResponse = { type: 'parsed', id, documentJson };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
+        documentJson,
+      ]);
       return;
     }
     if (req.type === 'extractImage') {

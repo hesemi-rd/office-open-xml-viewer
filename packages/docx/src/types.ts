@@ -1094,7 +1094,10 @@ export type WorkerRequest =
   | { type: 'extractImage'; id: number; path: string };
 
 export type WorkerResponse =
-  | { type: 'parsed'; id: number; document: DocxDocumentModel }
+  // The model crosses the worker boundary as raw UTF-8 JSON bytes (transferred,
+  // not cloned); the main thread does the single `TextDecoder.decode` +
+  // `JSON.parse` into a `DocxDocumentModel`. See `parse_docx` (Rust) for why.
+  | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'error'; id: number; message: string };
 

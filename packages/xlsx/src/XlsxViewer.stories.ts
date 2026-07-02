@@ -121,8 +121,10 @@ export const DebugJson: Story = {
       try {
         await wasmReady;
         const buf = await file.arrayBuffer();
+        // `parse_xlsx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>);
+        // decode + parse to inspect the model.
         const json = parse_xlsx(new Uint8Array(buf));
-        const parsed = JSON.parse(json);
+        const parsed = JSON.parse(new TextDecoder().decode(json));
         pre.textContent = JSON.stringify(parsed, null, 2);
         console.log('[xlsx debug] full JSON:', parsed);
       } catch (err) {

@@ -20,6 +20,10 @@ export function parseDocx(buffer: ArrayBuffer | Uint8Array | Buffer): DocxDocume
     buffer instanceof Uint8Array
       ? buffer
       : new Uint8Array(buffer as ArrayBuffer);
-  const json = (docxWasm as unknown as { parse_docx: (b: Uint8Array) => string }).parse_docx(bytes);
-  return JSON.parse(json) as DocxDocumentModel;
+  // `parse_docx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
+  // parse once. Matches the browser main-thread receiver.
+  const json = (docxWasm as unknown as { parse_docx: (b: Uint8Array) => Uint8Array }).parse_docx(
+    bytes,
+  );
+  return JSON.parse(new TextDecoder().decode(json)) as DocxDocumentModel;
 }

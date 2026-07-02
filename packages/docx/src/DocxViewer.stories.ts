@@ -172,8 +172,10 @@ export const DebugJson: Story = {
       try {
         await wasmReady;
         const buf = await file.arrayBuffer();
+        // `parse_docx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>);
+        // decode + parse to inspect the model.
         const json = parse_docx(new Uint8Array(buf));
-        const parsed = JSON.parse(json);
+        const parsed = JSON.parse(new TextDecoder().decode(json));
         // Images now carry a short `imagePath` (zip path) + `mimeType` rather
         // than inlined base64, so the JSON is already readable as-is.
         pre.textContent = JSON.stringify(parsed, null, 2);

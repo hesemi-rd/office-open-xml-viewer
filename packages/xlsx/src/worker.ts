@@ -29,10 +29,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
       currentBuffer = new Uint8Array(req.data);
+      // `parse_xlsx` returns the workbook index as UTF-8 JSON bytes
+      // (Result<Vec<u8>, JsValue>). wasm-bindgen hands back a fresh Uint8Array
+      // that owns its buffer, so forward it to main as a transferable — no
+      // clone, no decode here. The single decode + JSON.parse happens on main.
       const json = parse_xlsx(currentBuffer, currentMaxZipEntryBytes);
-      const workbook = JSON.parse(json);
-      const res: WorkerResponse = { type: 'parsed', id, workbook };
-      self.postMessage(res);
+      const workbookJson = json.buffer as ArrayBuffer;
+      const res: WorkerResponse = { type: 'parsed', id, workbookJson };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
+        workbookJson,
+      ]);
     } else if (req.type === 'parseSheet') {
       // Reuse the buffer retained at `parse` instead of re-receiving it — the
       // whole file no longer crosses the worker boundary on every sheet switch
@@ -46,10 +52,14 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      // `parse_sheet` also returns UTF-8 JSON bytes; forward its transferable
+      // buffer to main the same way (single decode + parse on main).
       const json = parse_sheet(currentBuffer, req.sheetIndex, req.sheetName, maxBytes);
-      const worksheet = JSON.parse(json);
-      const res: WorkerResponse = { type: 'parsedSheet', id, worksheet };
-      self.postMessage(res);
+      const worksheetJson = json.buffer as ArrayBuffer;
+      const res: WorkerResponse = { type: 'parsedSheet', id, worksheetJson };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
+        worksheetJson,
+      ]);
     } else if (req.type === 'extractImage') {
       if (!currentBuffer) throw new Error('No xlsx loaded');
       const bytes = extract_image(currentBuffer, req.path, currentMaxZipEntryBytes);
