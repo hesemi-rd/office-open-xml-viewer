@@ -223,6 +223,31 @@ export class DocxDocument {
     return this._pages;
   }
 
+  /**
+   * ECMA-376 §17.6.13 / §17.6.11 — the page size (pt) of page `pageIndex`, per
+   * section (a mixed portrait/landscape document returns different sizes per page).
+   * Available in BOTH modes: worker mode reads the worker-built `pageSizes` meta;
+   * main mode reads the paginated pages' stamped geometry. Returns the body-level
+   * section size for an out-of-range index (clamped) or a page with no stamped
+   * geometry. A 0-page document (empty `pageSizes`/no pages) yields `{ 0, 0 }`.
+   * The recommended way to ask "how big is page i?" for layout.
+   */
+  pageSize(pageIndex: number): { widthPt: number; heightPt: number } {
+    if (this._meta) {
+      const sizes = this._meta.pageSizes;
+      const clamped = Math.max(0, Math.min(pageIndex, sizes.length - 1));
+      return sizes[clamped] ?? { widthPt: 0, heightPt: 0 };
+    }
+    if (!this._document) return { widthPt: 0, heightPt: 0 };
+    const pages = this._getPages();
+    const clamped = Math.max(0, Math.min(pageIndex, pages.length - 1));
+    const g = pages[clamped]?.[0]?.sectionGeom;
+    return {
+      widthPt: g?.pageWidth ?? this._document.section.pageWidth,
+      heightPt: g?.pageHeight ?? this._document.section.pageHeight,
+    };
+  }
+
   renderPage(
     target: HTMLCanvasElement | OffscreenCanvas,
     pageIndex: number,

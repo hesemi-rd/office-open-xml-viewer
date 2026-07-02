@@ -372,3 +372,19 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — renderer', () => {
     expect(canvas.width / canvas.height).toBeCloseTo(300 / 400, 2);
   });
 });
+
+describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom', () => {
+  it('exposes per-page width/height via the first element sectionGeom', () => {
+    // paginateDocument is the shared primitive DocxDocument.pageSize (main mode)
+    // and render-worker's pageSizes[] both read. Each page's first element carries
+    // its section geometry.
+    const doc = mixedDoc();
+    const pages = paginateDocument(doc);
+    const sizeOf = (i: number) => {
+      const g = (pages[i]?.[0] as PaginatedBodyElement | undefined)?.sectionGeom;
+      return { widthPt: g?.pageWidth ?? doc.section.pageWidth, heightPt: g?.pageHeight ?? doc.section.pageHeight };
+    };
+    expect(sizeOf(0)).toEqual({ widthPt: 200, heightPt: 140 });
+    expect(sizeOf(1)).toEqual({ widthPt: 140, heightPt: 200 });
+  });
+});

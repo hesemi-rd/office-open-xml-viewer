@@ -73,11 +73,22 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         );
       }
       pages = paginateDocument(doc);
+      // ECMA-376 §17.6.13 / §17.6.11 — per-page size from each page's first
+      // element's stamped `sectionGeom` (body-level fallback for an empty page).
+      const model = doc;
+      const pageSizes = pages.map((els) => {
+        const g = els[0]?.sectionGeom;
+        return {
+          widthPt: g?.pageWidth ?? model.section.pageWidth,
+          heightPt: g?.pageHeight ?? model.section.pageHeight,
+        };
+      });
       const meta: DocumentMeta = {
         pageCount: pages.length,
         comments: doc.comments ?? [],
         footnotes: doc.footnotes ?? [],
         endnotes: doc.endnotes ?? [],
+        pageSizes,
       };
       post({ type: 'parsedMeta', id, meta });
       return;
