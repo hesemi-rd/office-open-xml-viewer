@@ -1,4 +1,4 @@
-import type { Presentation, WorkerRequest, WorkerResponse } from './types';
+import type { WorkerRequest, WorkerResponse } from './types';
 import init, { parse_pptx, extract_media, extract_image } from './wasm/pptx_parser.js';
 
 let ready = false;
@@ -45,10 +45,16 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      const jsonStr = parse_pptx(bytes, currentMaxZipEntryBytes);
-      const presentation: Presentation = JSON.parse(jsonStr);
-      const msg: WorkerResponse = { kind: 'parsed', id: req.id, presentation };
-      self.postMessage(msg);
+      // `parse_pptx` returns the model as UTF-8 JSON bytes (Result<Vec<u8>,
+      // JsValue>). wasm-bindgen hands back a fresh Uint8Array that owns its
+      // buffer, so forward it to the main thread as a transferable — no clone,
+      // no decode here. The single decode + JSON.parse happens once, on main.
+      const json = parse_pptx(bytes, currentMaxZipEntryBytes);
+      const presentationJson = json.buffer as ArrayBuffer;
+      const msg: WorkerResponse = { kind: 'parsed', id: req.id, presentationJson };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [
+        presentationJson,
+      ]);
     } catch (err) {
       const msg: WorkerResponse = {
         kind: 'error',

@@ -187,7 +187,12 @@ export class PptxPresentation {
     if (this._mode === 'worker') {
       this._meta = (res as Extract<RenderWorkerResponse, { kind: 'parsedMeta' }>).meta;
     } else {
-      this._presentation = (res as Extract<WorkerResponse, { kind: 'parsed' }>).presentation;
+      // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
+      // here (the only serialization on the parse-mode path).
+      const { presentationJson } = res as Extract<WorkerResponse, { kind: 'parsed' }>;
+      this._presentation = JSON.parse(
+        new TextDecoder().decode(new Uint8Array(presentationJson)),
+      ) as Presentation;
     }
   }
 
