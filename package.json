@@ -64,12 +64,14 @@
     "build-storybook": "storybook build",
     "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm",
     "vrt": "pnpm -r vrt",
+    "smoke": "playwright test --config tests/smoke/playwright.config.ts",
     "test": "vitest run",
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests"
   },
   "devDependencies": {
     "@ast-grep/cli": "^0.43.0",
+    "@playwright/test": "^1.59.1",
     "@chromatic-com/storybook": "^5.1.2",
     "@storybook/addon-a11y": "^10.3.5",
     "@storybook/addon-docs": "^10.3.5",
