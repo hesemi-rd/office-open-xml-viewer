@@ -1386,33 +1386,24 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return;
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+  // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
+  // labels categories (one row per slice) so it reserves a wider 0.28 side band
+  // (vs the default 0.22). The h*0.02 gap below the title/legend before centring
+  // is the shared radial gap. Params keep pixels unchanged.
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.28,
+    radialGapFrac: 0.02,
+  });
+  const titleFontPx = frame.title.fontPx;
+  const titleH = frame.title.bandH;
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, titleFontPx);
 
-  // Pie legend labels categories (one row per slice) so reserve a bit more
-  // than the default 22% when placed on the side.
-  const pieLeg: LegendLayout | null = chart.showLegend
-    ? (() => {
-        const pos = chart.legendPos ?? 'r';
-        const side: LegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
-        if (side === 'r' || side === 'l') {
-          return { side, reserveW: Math.max(80, w * 0.28), reserveH: 0 };
-        }
-        return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
-      })()
-    : null;
-  const legRightW  = pieLeg?.side === 'r' ? pieLeg.reserveW : 0;
-  const legLeftW   = pieLeg?.side === 'l' ? pieLeg.reserveW : 0;
-  const legTopH    = pieLeg?.side === 't' ? pieLeg.reserveH : 0;
-  const legBottomH = pieLeg?.side === 'b' ? pieLeg.reserveH : 0;
-
-  const pw = w - legRightW - legLeftW;
-  const ph = h - titleH - legTopH - legBottomH - h * 0.02;
-  const cx2 = x + legLeftW + pw / 2;
-  const cy2 = y + titleH + legTopH + h * 0.02 + ph / 2;
+  const pieLeg = frame.legend;
+  const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
+  const cx2 = frame.center.cx;
+  const cy2 = frame.center.cy;
   const outerR = Math.min(pw, ph) * 0.42;
   const innerR = isDoughnut ? outerR * 0.5 : 0;
 
@@ -1455,10 +1446,9 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // swatches to one color because it folded the series-level fill (`s.color`)
     // into every entry while the slices used the per-index palette.
     const legendSeries: ChartSeries[] = [{ ...s, categories: cats }];
-    const plotLeft = cx2 - pw / 2;
     drawLegendForLayout(
       ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
-      x, y, w, h, plotLeft, cy2 - ph / 2, pw, ph, titleH + 2,
+      x, y, w, h, plotLeft, plotTop, pw, ph, titleH + 2,
     );
   }
 }
