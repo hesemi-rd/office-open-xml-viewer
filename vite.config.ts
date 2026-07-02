@@ -34,6 +34,11 @@ function wasmAssetUrl(): Plugin {
   return {
     name: 'wasm-asset-url',
     enforce: 'pre',
+    // Build-only: emitFile/ROLLUP_FILE_URL are Rollup build machinery and do
+    // not exist on the dev server. In dev, Vite's stock `?url` handling serves
+    // the file directly (the pre-E4 behavior) — intercepting there returned an
+    // unresolvable reference and broke every WASM load (caught by CI smoke).
+    apply: 'build',
     async load(id) {
       if (!id.endsWith(SUFFIX)) return null;
       const filePath = id.slice(0, -'?url'.length);
