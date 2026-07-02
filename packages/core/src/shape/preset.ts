@@ -149,6 +149,21 @@ export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
   'bordercallout1',
   'leftuparrow',
   'quadarrowcallout',
+  // batch 4 — math operators & flowchart shapes
+  // (flowchartAlternateProcess is NOT migrated despite matching at default
+  // adjusts: its legacy body honours an adj1 the spec declares no avLst for,
+  // so rogue <a:avLst> payloads would change silhouettes)
+  'mathequal',
+  'mathplus',
+  'mathminus',
+  'flowchartdecision',
+  'flowchartmanualinput',
+  'flowchartconnector',
+  'flowchartinputoutput',
+  'flowchartmerge',
+  'flowchartextract',
+  'flowchartpreparation',
+  'flowchartcollate',
 ]);
 
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
@@ -824,15 +839,6 @@ export function buildShapePath(
       ctx.roundRect(x, y, w, h, [{ x: r2, y: r2 }]);
       break;
     }
-    case 'flowchartdecision': {
-      // Diamond
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(cx, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
-      break;
-    }
     case 'flowchartterminator': {
       // Stadium / pill shape
       const sr = Math.min(w, h) / 2;
@@ -869,15 +875,6 @@ export function buildShapePath(
       ctx.lineTo(x + w, cy);
       break;
     }
-    case 'flowchartmanualinput': {
-      const sl = h * 0.2;
-      ctx.moveTo(x, y + sl);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
     case 'moon': {
       // Crescent moon
       ctx.arc(cx, cy, Math.min(w, h) / 2, -Math.PI / 2, Math.PI / 2);
@@ -895,21 +892,6 @@ export function buildShapePath(
     }
 
     // ── Math operator shapes (ECMA-376 presets) ───────────────────────────────
-    case 'mathequal': {
-      const a1 = Math.min(36745, Math.max(0, adj ?? 23520));
-      const mAdj2 = 100000 - 2 * a1;
-      const a2 = Math.min(mAdj2, Math.max(0, adj2 ?? 11760));
-      const dy1 = h * a1 / 100000;
-      const dy2 = h * a2 / 200000;
-      const dx1 = w * 73490 / 200000;
-      const x1 = cx - dx1, x2 = cx + dx1;
-      const y2 = cy - dy2, y3 = cy + dy2;
-      const y1 = y2 - dy1, y4 = y3 + dy1;
-      ctx.rect(x1, y1, x2 - x1, y2 - y1);
-      ctx.rect(x1, y3, x2 - x1, y4 - y3);
-      break;
-    }
-
     case 'mathmultiply': {
       // ECMA-376 preset: "×" aligned to bbox diagonals, thickness = ss * a1 / 100000
       const a1 = Math.min(51965, Math.max(0, adj ?? 23520));
@@ -933,40 +915,6 @@ export function buildShapePath(
       break;
     }
 
-    case 'mathplus': {
-      const a1 = Math.min(73490, Math.max(0, adj ?? 23520));
-      const dx1 = w * 73490 / 200000;
-      const dy1 = h * 73490 / 200000;
-      const dx2 = Math.min(w, h) * a1 / 200000;
-      const x1 = cx - dx1, x4 = cx + dx1;
-      const y1 = cy - dy1, y4 = cy + dy1;
-      const x2 = cx - dx2, x3 = cx + dx2;
-      const y2 = cy - dx2, y3 = cy + dx2;
-      ctx.moveTo(x1, y2);
-      ctx.lineTo(x2, y2);
-      ctx.lineTo(x2, y1);
-      ctx.lineTo(x3, y1);
-      ctx.lineTo(x3, y2);
-      ctx.lineTo(x4, y2);
-      ctx.lineTo(x4, y3);
-      ctx.lineTo(x3, y3);
-      ctx.lineTo(x3, y4);
-      ctx.lineTo(x2, y4);
-      ctx.lineTo(x2, y3);
-      ctx.lineTo(x1, y3);
-      ctx.closePath();
-      break;
-    }
-
-    case 'mathminus': {
-      const a1 = Math.min(100000, Math.max(0, adj ?? 23520));
-      const dx1 = w * 73490 / 200000;
-      const dy1 = h * a1 / 200000;
-      const x1 = cx - dx1, x2 = cx + dx1;
-      const y1 = cy - dy1, y2 = cy + dy1;
-      ctx.rect(x1, y1, x2 - x1, y2 - y1);
-      break;
-    }
 
     case 'mathdivide': {
       const a1 = Math.min(36745, Math.max(1000, adj ?? 23520));
@@ -1328,11 +1276,6 @@ export function buildShapePath(
     }
 
     // ── Flowchart: connector (circle) ─────────────────────────────────────────
-    case 'flowchartconnector': {
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
-      break;
-    }
-
     // ── Flowchart: delay (D-shape) ────────────────────────────────────────────
     case 'flowchartdelay': {
       const r = h / 2;
@@ -1357,31 +1300,15 @@ export function buildShapePath(
       break;
     }
 
-    // ── Flowchart: input/output (parallelogram) ───────────────────────────────
-    case 'flowchartinputoutput':
+    // ── Flowchart: punched card (parallelogram approximation) ────────────────
+    // (flowchartInputOutput left this shared body for the spec engine — the
+    // w/5 slant IS its spec geometry; punchedCard's spec shape is a rectangle
+    // with a snipped top-left corner, so this body remains a known diff.)
     case 'flowchartpunchedcard': {
       const sl = w * 0.2;
       ctx.moveTo(x + sl, y);
       ctx.lineTo(x + w, y);
       ctx.lineTo(x + w - sl, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: merge (inverted triangle) ──────────────────────────────────
-    case 'flowchartmerge': {
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(cx, y + h);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: extract (upward triangle) ─────────────────────────────────
-    case 'flowchartextract': {
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, y + h);
       ctx.lineTo(x, y + h);
       ctx.closePath();
       break;
@@ -1840,29 +1767,6 @@ export function buildShapePath(
       ctx.lineTo(x4, y2);
       ctx.lineTo(x + ssd8 * 2, y2);
       ctx.lineTo(x + ssd8 * 2, y1);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: preparation (hexagon with angled sides) ────────────────────
-    case 'flowchartpreparation': {
-      const sl = w * 0.2;
-      ctx.moveTo(x + sl, y);
-      ctx.lineTo(x + w - sl, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(x + w - sl, y + h);
-      ctx.lineTo(x + sl, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: collate (hourglass) ────────────────────────────────────────
-    case 'flowchartcollate': {
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x + w, y + h);
       ctx.closePath();
       break;
     }
