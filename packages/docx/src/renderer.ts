@@ -4139,10 +4139,35 @@ function renderParagraph(
       ? uniformLineH
       : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphIsEastAsian(para));
 
+  // Slice bounds — when the paginator split this paragraph across pages,
+  // only render lines in [sliceStart, sliceEnd). The first line we paint
+  // resets state.y baseline so the slice begins at the page's content top.
+  // Resolved BEFORE the shading fill so the fill height covers exactly the
+  // lines this page paints (see paintedParagraphHeight): a sliced paragraph
+  // must not fill to the full-paragraph height past the slice's bottom border.
+  const sliceStart = lineSlice ? lineSlice.start : 0;
+  const sliceEnd = lineSlice ? lineSlice.end : lines.length;
+  // The slice is authoritative for WHICH lines land on this page, but THIS
+  // pass's `lines` array is authoritative for how many lines the text actually
+  // occupies at this scale (pagination lays out at scale 1; ctx.measureText is
+  // not perfectly scale-invariant, so a long narrow paragraph can wrap to a
+  // slightly different line count here than the scale-1 slice assumed). Cap the
+  // iteration at lines.length so we paint every real line and never index a
+  // phantom line that only existed in the scale-1 measurement (lines[i] would be
+  // undefined → "Cannot read properties of undefined"). The overflow is bounded
+  // (at most a line or two), so all the paragraph's text is still painted across
+  // its slices. `paintEnd` also bounds the shading height below.
+  const paintEnd = Math.min(sliceEnd, lines.length);
+
   if (para.shading && !dryRun) {
-    const totalTextH = lines.reduce((s, l) => s + lineHForLine(l), 0);
+    // Shading is the BACKGROUND (text paints on top), so its height must be known
+    // BEFORE the draw loop. Replay the loop's exact per-line advancement over the
+    // painted slice so the fill height === the post-loop border height
+    // (state.y − textAreaTopY) BY CONSTRUCTION — the fill meets the bottom border
+    // in the float-clearance and page-slice cases too, not just top/left/right.
+    const paintedH = paintedParagraphHeight(lines, sliceStart, paintEnd, textAreaTopY, lineHForLine);
     ctx.fillStyle = `#${para.shading}`;
-    const sb = paraShadingRect(contentX + indLeft, textAreaTopY, paraW, totalTextH, para.borders, borderMerge, scale);
+    const sb = paraShadingRect(contentX + indLeft, textAreaTopY, paraW, paintedH, para.borders, borderMerge, scale);
     ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
 
@@ -4166,11 +4191,6 @@ function renderParagraph(
   const paraNeedsBidi = baseRtl || segmentsHaveRtl(segments);
   const alignEdge = resolveAlignEdge(para.alignment, baseRtl);
 
-  // Slice bounds — when the paginator split this paragraph across pages,
-  // only render lines in [sliceStart, sliceEnd). The first line we paint
-  // resets state.y baseline so the slice begins at the page's content top.
-  const sliceStart = lineSlice ? lineSlice.start : 0;
-  const sliceEnd = lineSlice ? lineSlice.end : lines.length;
   // ECMA-376 §17.6.5 character-grid delta (px per EA glyph) for the DRAW pass —
   // the SAME value layoutLines folded into measuredWidth. A pure-EA segment is
   // drawn so its glyphs occupy exactly `measuredWidth` (= natural + len·Δ): the
@@ -4178,28 +4198,18 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  // Pagination (paginateWithHeaderFooterReserve) lays a paragraph out at scale 1
-  // (pt space) so its page assignment is width-independent and cacheable across
-  // every render width (opts.prebuiltPages). Painting re-runs layoutLines at the
-  // actual render `scale`, and Canvas ctx.measureText is NOT perfectly
-  // scale-invariant (font hinting / sub-pixel glyph advances differ between the
-  // pt-size and the device-size run). A long, narrow paragraph (e.g. a 70-line
-  // newspaper column, §17.6.4) can therefore wrap to a slightly different line
-  // count here than the slice indices (`lineSlice`, computed at scale 1) assume.
-  // The slice is authoritative for WHICH lines land on this page, but THIS pass's
-  // `lines` array is authoritative for how many lines the text actually occupies
-  // at this scale, so cap the iteration at lines.length: paint every real line and
-  // never index a phantom line that only existed in the scale-1 measurement
-  // (lines[i] would be undefined → "Cannot read properties of undefined"). The
-  // overflow direction is bounded (the wrap differs by at most a line or two), so
-  // all of the paragraph's text is still painted across its slices.
-  const paintEnd = Math.min(sliceEnd, lines.length);
   const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
 
   if (para.borders && !dryRun) {
+    // `state.y` started this pass at `textAreaTopY` (captured above, untouched
+    // until the draw loop) and the loop advanced it by exactly the per-line steps
+    // `paintedParagraphHeight` replays (the topY float-clearance max-jump, then
+    // `+= lineHForLine`). So `textH` here equals the `paintedH` the shading fill
+    // used above — the fill meets this bottom border by construction, in the
+    // normal, float-clearance and page-slice cases alike.
     const textH = state.y - textAreaTopY;
     drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr, borderMerge);
   }
@@ -8010,14 +8020,54 @@ interface ParaBorderMerge {
   suppressBottom?: boolean;
 }
 
+/** The exact PAINTED height (px) of the lines a {@link renderParagraph} draw pass
+ *  puts on this page, computed by replaying the per-line advancement the draw loop
+ *  performs — WITHOUT drawing. The shading rect must match the paragraph border's
+ *  height, and the border height is `state.y − textAreaTopY` measured AFTER the
+ *  loop; but shading is the BACKGROUND and must be filled BEFORE the loop (text
+ *  paints on top). So we cannot read the post-loop `state.y` for the fill — we
+ *  re-derive it from the same inputs the loop uses.
+ *
+ *  The loop, for each line `li` in `[sliceStart, paintEnd)`, does exactly:
+ *    if (line.topY !== undefined && line.topY > y) y = line.topY;  // float clearance
+ *    y += lineHForLine(line);                                       // line box advance
+ *  starting from `y = textAreaTopY`. Replaying it here yields H === the loop's final
+ *  `state.y − textAreaTopY` BY CONSTRUCTION (same height source), so the shading
+ *  meets the bottom border in every case:
+ *   - normal (no float/slice): H === Σ lineHForLine over all lines (== the old naive
+ *     `totalTextH`, so no regression);
+ *   - float clearance: a line whose `topY` jumps past the natural flow grows H to
+ *     match the border (previously the naive sum stopped short);
+ *   - page-sliced paragraph: only `[sliceStart, paintEnd)` is summed, so H no longer
+ *     overfills to the full-paragraph height past the slice's bottom border.
+ *  `lineHForLine` is the paragraph-scope resolver (ruby/docGrid/lineSpacing) the
+ *  loop already uses; passing it as a callback keeps this pure and testable. */
+export function paintedParagraphHeight<L extends { topY?: number }>(
+  lines: readonly L[],
+  sliceStart: number,
+  paintEnd: number,
+  textAreaTopY: number,
+  lineHForLine: (line: L) => number,
+): number {
+  let y = textAreaTopY;
+  for (let li = sliceStart; li < paintEnd; li++) {
+    const line = lines[li];
+    if (line.topY !== undefined && line.topY > y) y = line.topY;
+    y += lineHForLine(line);
+  }
+  return y - textAreaTopY;
+}
+
 /** ECMA-376 §17.3.1.31 — paragraph shading fills the border BOX, not just the
- *  text extent: `<w:pBdr>` edges are offset OUTWARD from the content box by their
- *  `w:space` (§17.3.1.7, applied by {@link drawParaBorders}), and the shading
- *  reaches those borders. Return the content box grown by each PRESENT border's
- *  space, using the SAME per-edge conditions as drawParaBorders so the fill meets
- *  the border exactly. Without a bordered edge (or no borders at all) that edge is
- *  not extended. (sample-11: a right border with `space=4` left the gray box
- *  detached from its border because the fill stopped `space` short of it.)
+ *  text extent. §17.3.1.31 itself only says the shading sets the paragraph's
+ *  background color and is SILENT on border geometry; the fill-to-border is
+ *  observed Word behavior: Word fills the border box, and §17.3.1.7 places each
+ *  border's `w:space` OUTSIDE the text box (applied by {@link drawParaBorders}), so
+ *  the shading reaches those borders. Return the content box grown by each PRESENT
+ *  border's space, using the SAME per-edge conditions as drawParaBorders so the
+ *  fill meets the border exactly. Without a bordered edge (or no borders at all)
+ *  that edge is not extended. (sample-11: a right border with `space=4` left the
+ *  gray box detached from its border because the fill stopped `space` short of it.)
  *  Exported for unit testing the per-edge extension. */
 export function paraShadingRect(
   x: number, y: number, w: number, h: number,
