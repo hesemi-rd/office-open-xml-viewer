@@ -178,13 +178,26 @@ describe('applySoftEdge (ECMA-376 §20.1.8.53)', () => {
     expect(composeDraws.length).toBeGreaterThanOrEqual(3); // 2 colour-layer draws + mask draw
     const stretch = composeDraws[0];
     expect(stretch.args).toHaveLength(9);
-    // dst rect is the bbox grown by `radius` (3px) on all sides.
-    expect(stretch.args?.[5]).toBeCloseTo(BBOX.x - 3, 6);   // dx
-    expect(stretch.args?.[6]).toBeCloseTo(BBOX.y - 3, 6);   // dy
-    expect(stretch.args?.[7]).toBeCloseTo(BBOX.w + 6, 6);   // dWidth
-    expect(stretch.args?.[8]).toBeCloseTo(BBOX.h + 6, 6);   // dHeight
+    // The aux canvases are cropped to bbox+margin (perf: A4), so coordinates are
+    // in the CROPPED canvas's LOCAL space. radius=3px → margin=ceil(3)+2=5, so
+    // crop origin = (bbox.x−5, bbox.y−5) = (95, 45); bbox in local space is
+    // (bx,by)=(5,5). The stretch dst is the local bbox grown by `radius` on all
+    // sides = (bx−3, by−3, w+6, h+6) = (2, 2, 206, 86).
+    const CROP_MARGIN = 5;            // ceil(radius)+2 = ceil(3)+2
+    // When the crop is unclamped, crop.x = bbox.x − margin, so bbox in local
+    // space sits exactly `margin` in from the crop edge: bx = by = CROP_MARGIN.
+    const bx = CROP_MARGIN;
+    const by = CROP_MARGIN;
+    expect(stretch.args?.[5]).toBeCloseTo(bx - 3, 6);       // dx (local)
+    expect(stretch.args?.[6]).toBeCloseTo(by - 3, 6);       // dy (local)
+    expect(stretch.args?.[7]).toBeCloseTo(BBOX.w + 6, 6);   // dWidth (unchanged)
+    expect(stretch.args?.[8]).toBeCloseTo(BBOX.h + 6, 6);   // dHeight (unchanged)
     const sharp = composeDraws[1];
     expect(sharp.args).toHaveLength(3);
+    // The final live blit is at the crop origin (95, 45), not (0, 0).
+    const liveBlit = live.ops.find(o => o.op === 'drawImage');
+    expect(liveBlit?.args?.[1]).toBeCloseTo(BBOX.x - CROP_MARGIN, 6);
+    expect(liveBlit?.args?.[2]).toBeCloseTo(BBOX.y - CROP_MARGIN, 6);
 
     // Then the alpha is replaced by the blurred silhouette: a destination-in
     // pass and a blur(...) filter were used on the compose layer.

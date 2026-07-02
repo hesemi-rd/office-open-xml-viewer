@@ -51,6 +51,110 @@ function get2d(canvas: AuxCanvas): AuxContext | null {
   return (canvas.getContext('2d') as AuxContext | null) ?? null;
 }
 
+// ── bbox-sized auxiliary canvases (perf: A4) ────────────────────────────────
+//
+// Historically each effect allocated an aux canvas the size of the WHOLE live
+// canvas (deviceW × deviceH) and painted the shape into it through the live
+// transform (so the silhouette lands at its absolute device-pixel position).
+// For a small shape on a large slide that wastes almost the entire allocation and
+// makes every fill/blur/composite touch full-canvas pixel counts.
+//
+// Instead we crop to the shape's device-space bbox grown by the effect's own
+// spatial reach (blur radius / feather / offset) plus a 2 px safety pad, clamped
+// to the canvas. The shape is painted OFFSET so device (crop.x, crop.y) maps to
+// aux-local (0,0); the final blit puts it back at (crop.x, crop.y). Because CSS
+// `blur()` treats everything outside the canvas as transparent (alpha 0) — the
+// same as the region beyond the old full-canvas silhouette — a margin ≥ the blur
+// kernel extent makes the cropped result IDENTICAL, pixel for pixel, to the
+// full-canvas version everywhere the shape+effect actually paints.
+//
+// SCOPE: this applies to innerShadow and softEdge, whose final blit is an
+// INTEGER-offset, identity-transform drawImage — a pure pixel copy, byte-exact
+// for any source canvas size. applyReflection is deliberately EXEMPT: its final
+// blit resamples the aux under a fractional mirror transform, and skia's texture
+// sampling (edge behaviour + fixed-point phase) depends on the source's
+// size/offset — a cropped source produced platform-dependent 1–7/255 diffs on
+// Linux CI (PR #672). See the note inside applyReflection.
+
+/** A sub-rectangle of the device canvas that an effect is confined to. */
+interface EffectCrop {
+  /** Device-px origin of the crop (top-left) on the live canvas. */
+  x: number;
+  y: number;
+  /** Crop dimensions in device px (already clamped to the canvas). */
+  w: number;
+  h: number;
+}
+
+/**
+ * Crop rectangle = the shape's device bbox grown by `margin` px on every side,
+ * clamped to `[0, deviceW] × [0, deviceH]`. `margin` must cover the effect's
+ * spatial reach (blur kernel extent + any offset), so no painted/blurred pixel
+ * the full-canvas version would have produced falls outside the crop.
+ */
+function computeCrop(
+  bbox: EffectBBox,
+  margin: number,
+  deviceW: number,
+  deviceH: number,
+): EffectCrop {
+  const x0 = Math.max(0, Math.floor(bbox.x - margin));
+  const y0 = Math.max(0, Math.floor(bbox.y - margin));
+  const x1 = Math.min(deviceW, Math.ceil(bbox.x + bbox.w + margin));
+  const y1 = Math.min(deviceH, Math.ceil(bbox.y + bbox.h + margin));
+  return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+}
+
+/** The subset of a 2D affine matrix `setTransform(m)` reads (DOMMatrix-shaped). */
+interface Matrix2D {
+  a: number; b: number; c: number; d: number; e: number; f: number;
+}
+
+/**
+ * Wrap an aux context so that a `setTransform(m)` from the (opaque) paint callback
+ * becomes `setTransform(translate(-crop.x, -crop.y) · m)`. The paint callback sets
+ * the live (absolute-device) transform to position the silhouette; prepending the
+ * crop offset shifts that absolute placement into the cropped canvas's local space
+ * without the callback knowing. Every other property/method forwards unchanged.
+ *
+ * Composition: the CTM `setTransform(a,b,c,d,e,f)` maps (x,y) → (a·x+c·y+e,
+ * b·x+d·y+f). Applying `T(-cx,-cy)` AFTER it just subtracts the crop origin from
+ * the translation components, so the composed matrix is `(a,b,c,d,e-cx,f-cy)`.
+ * Doing the arithmetic by hand avoids depending on a global `DOMMatrix`, which is
+ * absent in some runtimes (plain Node) where core effect code can run.
+ *
+ * The paint callbacks only ever set the transform via the single-matrix
+ * `setTransform(m)` form (they never call `getTransform`, `transform`,
+ * `resetTransform`, or the 6-number `setTransform` overload), so this one trap is
+ * sufficient; a passthrough covers fills, paths, blurs and save/restore.
+ */
+function offsetPaintCtx(real: AuxContext, crop: EffectCrop): AuxContext {
+  if (crop.x === 0 && crop.y === 0) return real; // no shift needed
+  const cx = crop.x;
+  const cy = crop.y;
+  return new Proxy(real as unknown as Record<string | symbol, unknown>, {
+    get(target, prop) {
+      if (prop === 'setTransform') {
+        return (m: Matrix2D) => {
+          (target as unknown as AuxContext).setTransform(
+            m.a, m.b, m.c, m.d, m.e - cx, m.f - cy,
+          );
+        };
+      }
+      const v = Reflect.get(target, prop);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+    set(target, prop, value) {
+      // Forward the write to the TARGET (not the Proxy receiver) so a setter
+      // runs with `this` bound to the real context — required both for host
+      // canvas objects and for class instances with private fields (a mock, or
+      // a polyfilled context) that a receiver-bound setter cannot write.
+      (target as Record<string | symbol, unknown>)[prop] = value;
+      return true;
+    },
+  }) as unknown as AuxContext;
+}
+
 /**
  * innerShdw — ECMA-376 §20.1.8.40. "A shadow is applied within the edges of the
  * object." The shadow colour shows through where the shape's interior is NOT
@@ -74,22 +178,32 @@ function get2d(canvas: AuxCanvas): AuxContext | null {
 export function applyInnerShadow(
   liveCtx: AuxContext,
   paintShape: PaintShape,
-  _bbox: EffectBBox,
+  bbox: EffectBBox,
   shadow: Shadow,
   scale: number,
   deviceW: number,
   deviceH: number,
 ): void {
-  const aux = createAuxCanvas(deviceW, deviceH);
-  if (!aux) return;
-  const c = get2d(aux);
-  if (!c) return;
-
   const blur = emuToPx(shadow.blur, scale);
   const dist = emuToPx(shadow.dist, scale);
   const dirRad = (shadow.dir * Math.PI) / 180;
   const dx = Math.cos(dirRad) * dist;
   const dy = Math.sin(dirRad) * dist;
+
+  // Margin: the destination-out pass blurs an offset copy of the silhouette. The
+  // offset reaches |dist| beyond the bbox and the CSS blur kernel a further ~3σ =
+  // 3·blur px (CSS `blur(r)` takes r as the Gaussian std-dev), so the blurred
+  // offset silhouette near the bbox edge (which carves the shadow just INSIDE the
+  // edge) is fully represented within bbox + (|dist| + 3·blur). +2 px guards the
+  // fractional-pixel silhouette edge. The step-3 destination-in additionally clips
+  // the result to the interior (⊆ bbox), so nothing outside the crop survives.
+  const margin = Math.ceil(3 * blur + Math.abs(dist)) + 2;
+  const crop = computeCrop(bbox, margin, deviceW, deviceH);
+  const aux = createAuxCanvas(crop.w, crop.h);
+  if (!aux) return;
+  const cReal = get2d(aux);
+  if (!cReal) return;
+  const c = offsetPaintCtx(cReal, crop);
 
   // 1. Silhouette in the shadow colour.
   c.save();
@@ -114,9 +228,9 @@ export function applyInnerShadow(
   paintShape(c);
   c.restore();
 
-  // 4. Composite over the live shape.
+  // 4. Composite over the live shape at the crop origin.
   liveCtx.save();
-  liveCtx.drawImage(aux as CanvasImageSource, 0, 0);
+  liveCtx.drawImage(aux as CanvasImageSource, crop.x, crop.y);
   liveCtx.restore();
 }
 
@@ -140,7 +254,7 @@ export function applyInnerShadow(
 export function applySoftEdge(
   liveCtx: AuxContext,
   paintShape: PaintShape,
-  _bbox: EffectBBox,
+  bbox: EffectBBox,
   softEdge: SoftEdge,
   scale: number,
   deviceW: number,
@@ -154,20 +268,31 @@ export function applySoftEdge(
     return;
   }
 
-  const aux = createAuxCanvas(deviceW, deviceH);
+  // Margin: the opaque colour layer is the bbox stretched OUTWARD by `radius`
+  // (edge-clamp bleed), so no soft-edge pixel exists past bbox + radius; the
+  // radius/3-σ mask blur (≤3σ = radius extent) can only carve within that band.
+  // +2 px covers the fractional silhouette edge. So `radius` is the exact reach.
+  const margin = Math.ceil(radius) + 2;
+  const crop = computeCrop(bbox, margin, deviceW, deviceH);
+  // bbox expressed in the cropped canvas's local coordinates.
+  const bx = bbox.x - crop.x;
+  const by = bbox.y - crop.y;
+
+  const aux = createAuxCanvas(crop.w, crop.h);
   if (!aux) {
     paintShape(liveCtx);
     return;
   }
-  const c = get2d(aux);
-  if (!c) {
+  const cReal = get2d(aux);
+  if (!cReal) {
     paintShape(liveCtx);
     return;
   }
+  const c = offsetPaintCtx(cReal, crop);
 
   const mask = paintMask ?? paintShape;
 
-  // 1. Sharp shape (fill + stroke) in device-pixel space.
+  // 1. Sharp shape (fill + stroke) in device-pixel space (cropped).
   paintShape(c);
 
   // PowerPoint's soft edge (ECMA-376 §20.1.8.31) feathers the alpha
@@ -175,13 +300,13 @@ export function applySoftEdge(
   // and fade inward, so the perimeter dissolves smoothly into the background.
   // Masking a hard-clipped image with a feathered silhouette feathers only
   // inward and leaves a hard outer step (the image has no pixels outside the
-  // rect). Compose three device-space layers at identity to get the outward
-  // bleed:
-  const maskAux = createAuxCanvas(deviceW, deviceH);
-  const composeAux = createAuxCanvas(deviceW, deviceH);
-  const mc = maskAux ? get2d(maskAux) : null;
+  // rect). Compose three cropped layers at identity to get the outward bleed:
+  const maskAux = createAuxCanvas(crop.w, crop.h);
+  const composeAux = createAuxCanvas(crop.w, crop.h);
+  const mcReal = maskAux ? get2d(maskAux) : null;
   const cc = composeAux ? get2d(composeAux) : null;
-  if (maskAux && mc && composeAux && cc) {
+  if (maskAux && mcReal && composeAux && cc) {
+    const mc = offsetPaintCtx(mcReal, crop);
     // a. Solid silhouette of the shape (device space; mask applies the live
     //    transform itself). Blurred in step (c) into the alpha ramp.
     mc.fillStyle = '#000';
@@ -189,14 +314,15 @@ export function applySoftEdge(
     // b. Build an OPAQUE colour layer that extends past the geometry: draw the
     //    image's bbox stretched outward by `radius` (edge-clamp → border colours
     //    bleed out), then the sharp image on top to keep the interior crisp.
+    //    Source/dest rects are in the cropped canvas's local space (bx,by).
     //    Because the layer is opaque across the whole feather band, step (c)'s
     //    destination-in yields EXACTLY the blurred-silhouette alpha — a clean,
     //    symmetric Gaussian falloff (PowerPoint's soft edge), not a hard outer
     //    step (image-only) nor a doubly-faded halo (blurred-image bleed).
     cc.drawImage(
       aux as CanvasImageSource,
-      _bbox.x, _bbox.y, _bbox.w, _bbox.h,
-      _bbox.x - radius, _bbox.y - radius, _bbox.w + radius * 2, _bbox.h + radius * 2,
+      bx, by, bbox.w, bbox.h,
+      bx - radius, by - radius, bbox.w + radius * 2, bbox.h + radius * 2,
     );
     cc.drawImage(aux as CanvasImageSource, 0, 0);
     // c. Replace alpha with the blurred silhouette → symmetric feather. The
@@ -209,7 +335,7 @@ export function applySoftEdge(
     cc.filter = 'none';
     cc.globalCompositeOperation = 'source-over';
     liveCtx.save();
-    liveCtx.drawImage(composeAux as CanvasImageSource, 0, 0);
+    liveCtx.drawImage(composeAux as CanvasImageSource, crop.x, crop.y);
     liveCtx.restore();
     return;
   }
@@ -248,6 +374,19 @@ export function applyReflection(
   deviceW: number,
   deviceH: number,
 ): void {
+  // NOT cropped — the A4 bbox-sizing (see innerShadow/softEdge above) is
+  // deliberately not applied here. Those two effects blit their aux back with an
+  // INTEGER-offset, identity-transform drawImage — a pure pixel copy that is
+  // byte-exact for any source canvas size/offset. The reflection's final blit is
+  // different in kind: the mirror transform carries a FRACTIONAL translation
+  // (`dist` in device px, and `bottom` itself is fractional in general), so
+  // drawImage bilinear-RESAMPLES the aux as a texture. Skia's sampling near a
+  // texture edge and its fixed-point sample phase depend on the source image's
+  // size and offset — with a cropped aux, the crop's bottom edge sits right on
+  // the stroke's bbox-overflow (the bbox excludes the stroke half-width), and
+  // Linux CI produced 1–7/255 diffs on the flipped edge row that macOS did not
+  // (PR #672). Feeding the mirror blit the SAME full-canvas source is the only
+  // way byte-exactness holds across skia builds, so the full-size aux stays.
   const aux = createAuxCanvas(deviceW, deviceH);
   if (!aux) return;
   const c = get2d(aux);

@@ -76,7 +76,7 @@ import {
   pptxUnderlineDashArray,
   intendedSingleLinePx,
 } from '@silurus/ooxml-core';
-import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
+import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import {
@@ -3118,14 +3118,37 @@ function projectScene3dPaint(
   paintBody(octx, 0, 0, w, h);
   octx.restore();
 
+  // The body silhouette occupies the offscreen's inner box (device px):
+  // [padDev, padDev + w·devScale] on each axis (the a:ln border, painted inside
+  // paintBody, extends ±half-line-width past it; the pad reserves that room).
+  // Restricting the bevel/extrusion distance-transform + sweep to this box grown
+  // by the effect's reach (perf: A3) skips the transparent pad border. Equivalent
+  // to the whole offscreen because a band pixel is within `bandPx` of the
+  // silhouette (lip inside it) and a wall pixel within `|offset|` of it. When the
+  // offscreen is already shape-tight (the usual case) the region ≈ the whole
+  // canvas and this is a harmless no-op. See BevelRegion.
+  const bodyDevW = Math.ceil(w * devScale);
+  const bodyDevH = Math.ceil(h * devScale);
+  const regionFor = (reachPx: number): BevelRegion => ({
+    x: padDev - reachPx,
+    y: padDev - reachPx,
+    w: bodyDevW + 2 * reachPx,
+    h: bodyDevH + 2 * reachPx,
+  });
+
   // Extrusion side wall first (it sits behind/around the front face), then the
   // bevel lip on the front-face silhouette (§20.1.5.12). Both are baked into the
   // offscreen so they ride the camera warp.
-  if (opts.extrusion) applyExtrusion(octx, opts.extrusion);
+  if (opts.extrusion) {
+    const reach = Math.ceil(Math.hypot(opts.extrusion.offsetX, opts.extrusion.offsetY)) + 2;
+    applyExtrusion(octx, opts.extrusion, regionFor(reach));
+  }
   // Bake bevel lip shading into the body bitmap (device-px band) before the
   // warp so the lit/shadowed rim rides the camera homography (§20.1.5.12).
   if (opts.bevels && opts.bevels.length > 0) {
-    for (const bevel of opts.bevels) applyBevelShading(octx, bevel);
+    for (const bevel of opts.bevels) {
+      applyBevelShading(octx, bevel, regionFor(Math.ceil(bevel.widthPx) + 2));
+    }
   }
 
   // Post-bevel edges (the contour rim) on top of the beveled body, still
@@ -3196,7 +3219,21 @@ function paintBeveledFlat(
   octx.translate(padCss, padCss);
   paintBody(octx, 0, 0, w, h);
   octx.restore();
-  for (const bevel of bevels) applyBevelShading(octx, bevel);
+  // Restrict the bevel distance-transform to the body's inner box grown by the
+  // band width (perf: A3 — skips the transparent pad border). Equivalent because
+  // the lip sits within `bandPx` of the silhouette, which fills this box. No-op
+  // when the offscreen is already shape-tight. See BevelRegion / projectScene3dPaint.
+  const bodyDevW = Math.ceil(w * devScale);
+  const bodyDevH = Math.ceil(h * devScale);
+  for (const bevel of bevels) {
+    const reach = Math.ceil(bevel.widthPx) + 2;
+    applyBevelShading(octx, bevel, {
+      x: padDev - reach,
+      y: padDev - reach,
+      w: bodyDevW + 2 * reach,
+      h: bodyDevH + 2 * reach,
+    });
+  }
   if (paintEdges) {
     octx.save();
     octx.scale(devScale, devScale);

@@ -8,7 +8,7 @@
  */
 
 import presetsJson from './presets.json';
-import { createEvaluator } from './evaluator';
+import { createEvaluator, compileFormula, type CompiledFormula } from './evaluator';
 import { applyPresetPath, type PresetPath } from './path-executor';
 
 interface PresetDef {
@@ -18,6 +18,59 @@ interface PresetDef {
 }
 
 const PRESETS = presetsJson as unknown as Record<string, PresetDef>;
+
+/**
+ * A preset definition's adjust/guide formulas, tokenised once. The raw formula
+ * strings in a {@link PresetDef} are immutable (presets.json ships ~200 fixed
+ * definitions), so splitting each postfix expression into `{op, argTokens}` need
+ * only happen once per preset — not once per shape per render, which is what the
+ * old inline `expr.trim().split(/\s+/)` inside the evaluator did. The `paths` are
+ * NOT part of this: their per-command tokens are resolved directly by the path
+ * executor and vary only by the (already-cheap) `evaluator.resolve` lookup.
+ */
+interface CompiledDef {
+  adj: [string, CompiledFormula][];
+  gd: [string, CompiledFormula][];
+}
+
+/**
+ * Lazily-populated cache of compiled adjust/guide formulas, keyed by the
+ * PresetDef OBJECT IDENTITY. Every def we evaluate is a stable singleton — an
+ * entry of the module-level `PRESETS` map or the module-level `RECT_DEF` — so
+ * identity keying is sound and needs no name plumbing. A def is compiled the
+ * first time it is evaluated and reused thereafter (a used preset is compiled
+ * once for the life of the module; unused presets are never compiled).
+ */
+const COMPILED = new WeakMap<PresetDef, CompiledDef>();
+
+/** Get (compiling on first use) the tokenised adjust/guide formulas for a def. */
+function compiledDefFor(def: PresetDef): CompiledDef {
+  let c = COMPILED.get(def);
+  if (!c) {
+    c = {
+      adj: def.adj.map(([name, fmla]) => [name, compileFormula(fmla)]),
+      gd: def.gd.map(([name, fmla]) => [name, compileFormula(fmla)]),
+    };
+    COMPILED.set(def, c);
+  }
+  return c;
+}
+
+/**
+ * Build an evaluator for a def, drawing its adjust/guide formulas from the
+ * compiled cache. The single choke point every `createEvaluator` call goes
+ * through so the tokenisation is shared across the render / silhouette / anchor
+ * entry points.
+ */
+function evaluatorForDef(
+  def: PresetDef,
+  w: number,
+  h: number,
+  adj: (number | null | undefined)[],
+) {
+  const c = compiledDefFor(def);
+  return createEvaluator({ w, h, adj }, c.adj, c.gd);
+}
 
 export function hasPreset(geom: string): boolean {
   return geom.toLowerCase() in PRESETS;
@@ -50,7 +103,7 @@ export function buildPresetGeometryPath(
 ): boolean {
   const def = PRESETS[geom.toLowerCase()];
   if (!def) return false;
-  const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
+  const evaluator = evaluatorForDef(def, w, h, adj);
   for (const path of def.paths) {
     applyPresetPath(ctx, path, evaluator, x, y, w, h);
   }
@@ -134,7 +187,7 @@ export function renderPresetShape(
     }
   }
 
-  const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
+  const evaluator = evaluatorForDef(def, w, h, adj);
 
   let shadowCleared = false;
 
@@ -221,7 +274,7 @@ export function getConnectorAnchors(
   // So paths[last] picks the leader for callout1/2/3 and is a no-op for the
   // single-path connectors.
   const path = def.paths[def.paths.length - 1];
-  const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
+  const evaluator = evaluatorForDef(def, w, h, adj);
   const sx = path.w != null ? w / path.w : 1;
   const sy = path.h != null ? h / path.h : 1;
   const toAbsX = (v: number) => x + v * sx;
