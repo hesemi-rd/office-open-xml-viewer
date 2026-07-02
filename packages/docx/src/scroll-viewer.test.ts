@@ -505,6 +505,228 @@ describe('DocxScrollViewer — rendering (T3)', () => {
   });
 });
 
+describe('DocxScrollViewer — zoom (T4)', () => {
+  // PT_TO_PX = 4/3. Uniform 100pt×200pt pages, container 200×400, width:undefined
+  // ⇒ base fit maps page-0 width (100pt) to 200px:
+  //   base = 200 / (100 * 4/3) = 1.5
+  //   page height px = 200 * 4/3 * base = 400
+  //   offset[i] = i * (400 + gap) = i * 410
+  const PT_TO_PX = 4 / 3;
+
+  function setup(pageCount = 20, opts = {}) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(
+      pageCount,
+      Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
+    );
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      overscan: 1,
+      zoomMin: 0.5,
+      zoomMax: 3,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, engine, container };
+  }
+
+  it('base fit scale maps the first page width to the container width', () => {
+    const { v } = setup();
+    // base = 200 / (100 * 4/3) = 1.5
+    expect(v.scaleForTest()).toBeCloseTo(1.5, 5);
+    expect(v.baseScaleForTest()).toBeCloseTo(1.5, 5);
+    v.destroy();
+  });
+
+  it('re-anchors so the page under the viewport top stays fixed across a zoom (intraFrac 0)', () => {
+    const { v, scrollHost } = setup();
+    // page 3 top offset at base (1.5): 3 * (400 + 10) = 1230
+    scrollHost.scrollTop = 1230;
+    scrollHost.dispatch('scroll');
+    expect(v.topVisiblePage).toBe(3);
+    const cur = v.scaleForTest(); // 1.5
+    v.setScale(cur * 2); // 3.0 (== zoomMax, no clamp)
+    expect(v.scaleForTest()).toBeCloseTo(3, 5);
+    // page 3 stays the top page; new offset = 3 * (800 + 10) = 2430
+    expect(v.topVisiblePage).toBe(3);
+    expect(Math.abs(scrollHost.scrollTop - 2430)).toBeLessThan(2);
+    v.destroy();
+  });
+
+  it('re-anchors preserving the intra-page fraction (intraFrac ≠ 0)', () => {
+    const { v, scrollHost } = setup();
+    // Scroll so HALF of page 3 (200 of its 400px) has passed above the viewport
+    // top: scrollTop = offset[3] + 0.5*400 = 1230 + 200 = 1430 → intraFrac 0.5.
+    scrollHost.scrollTop = 1430;
+    scrollHost.dispatch('scroll');
+    expect(v.topVisiblePage).toBe(3);
+    v.setScale(v.scaleForTest() * 2); // 1.5 → 3.0; heights' = 800
+    // newScrollTop = offset'[3] + 0.5 * 800 = 2430 + 400 = 2830
+    expect(Math.abs(scrollHost.scrollTop - 2830)).toBeLessThan(2);
+    // Page 3 is still under the viewport top: offset'[3]=2430 <= 2830 < 3240.
+    expect(v.topVisiblePage).toBe(3);
+    v.destroy();
+  });
+
+  it('clamps setScale to the absolute [zoomMin, zoomMax] px-per-pt bounds', () => {
+    const { v } = setup();
+    v.setScale(100); // above zoomMax 3 (absolute, NOT a multiple of base)
+    expect(v.scaleForTest()).toBeCloseTo(3, 5);
+    v.setScale(0.01); // below zoomMin 0.5
+    expect(v.scaleForTest()).toBeCloseTo(0.5, 5);
+    v.destroy();
+  });
+
+  it('setScale defaults clamp to [0.1, 4] when zoomMin/zoomMax are unset', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(5, [{ widthPt: 100, heightPt: 200 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    v.setScale(999);
+    expect(v.scaleForTest()).toBeCloseTo(4, 5); // default zoomMax
+    v.setScale(0.0001);
+    expect(v.scaleForTest()).toBeCloseTo(0.1, 5); // default zoomMin
+    v.destroy();
+  });
+
+  it('Ctrl+wheel zooms in and calls preventDefault; bare wheel does not zoom or preventDefault', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+
+    // Bare wheel: no zoom, native scroll (preventDefault NOT called).
+    const barePrevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: false, metaKey: false, preventDefault: barePrevent });
+    expect(v.scaleForTest()).toBe(before);
+    expect(barePrevent).not.toHaveBeenCalled();
+
+    // Ctrl+wheel (deltaY<0 = zoom in): scale increases, preventDefault called.
+    const ctrlPrevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, metaKey: false, preventDefault: ctrlPrevent });
+    expect(v.scaleForTest()).toBeGreaterThan(before);
+    expect(ctrlPrevent).toHaveBeenCalledTimes(1);
+    v.destroy();
+  });
+
+  it('Cmd(meta)+wheel also zooms', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: false, metaKey: true, preventDefault() {} });
+    expect(v.scaleForTest()).toBeGreaterThan(before);
+    v.destroy();
+  });
+
+  it('positive deltaY (ctrl+wheel down) zooms out', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+    scrollHost.dispatch('wheel', { deltaY: 100, ctrlKey: true, metaKey: false, preventDefault() {} });
+    expect(v.scaleForTest()).toBeLessThan(before);
+    v.destroy();
+  });
+
+  it('enableZoom:false installs no wheel handler — ctrl+wheel is inert', () => {
+    const { v, scrollHost } = setup(20, { enableZoom: false });
+    const before = v.scaleForTest();
+    // No wheel listener was registered at all.
+    expect(scrollHost._listeners.has('wheel')).toBe(false);
+    const prevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, preventDefault: prevent });
+    expect(v.scaleForTest()).toBe(before);
+    expect(prevent).not.toHaveBeenCalled();
+    v.destroy();
+  });
+
+  it('a wheel with deltaY 0 is a no-op even with ctrl held', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+    const prevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: 0, ctrlKey: true, preventDefault: prevent });
+    expect(v.scaleForTest()).toBe(before);
+    v.destroy();
+  });
+
+  // ⚠ MANDATORY render-epoch test (T3 review finding I-3). Worker path, deferred:
+  // dispatch at scale A, setScale(B) mid-flight, resolve — the old-scale bitmap is
+  // closed, NOT painted, and a fresh dispatch at scale B repaints the slot.
+  it('render epoch: a bitmap dispatched at the old scale is dropped (closed, not painted) after setScale, and re-dispatched at the new scale', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(20, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      overscan: 1,
+      zoomMin: 0.5,
+      zoomMax: 3,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+
+    // Page 0's bitmap is dispatched at the base (old) scale but NOT yet resolved.
+    const page0Old = engine.bitmapCalls.find((c) => c.page === 0);
+    expect(page0Old).toBeDefined();
+    const oldDispatchCount = engine.bitmapCalls.filter((c) => c.page === 0).length;
+    expect(oldDispatchCount).toBe(1);
+    const oldWidth = page0Old!.width;
+
+    // Zoom mid-flight: bumps the render epoch and re-mounts. Page 0's re-mount is
+    // coalesced away by the in-flight guard (same index still in flight).
+    v.setScale(v.scaleForTest() * 2);
+    expect(v.mountedPageIndicesForTest()).toContain(0); // page 0 still visible at top
+    expect(engine.bitmapCalls.filter((c) => c.page === 0).length).toBe(1); // no double-dispatch yet
+
+    // The OLD-scale render resolves. Epoch moved ⇒ STALE: close, do not paint,
+    // then re-dispatch page 0 at the NEW scale.
+    const bmpOld = engine.createdBitmaps[engine.bitmapCalls.indexOf(page0Old!)];
+    page0Old!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bmpOld.close.mock.calls.length).toBeGreaterThan(0); // old bitmap closed
+    // A fresh dispatch for page 0 was issued at the new scale.
+    const page0Calls = engine.bitmapCalls.filter((c) => c.page === 0);
+    expect(page0Calls.length).toBeGreaterThanOrEqual(2);
+    const freshCall = page0Calls[page0Calls.length - 1];
+    // The fresh dispatch's width reflects the NEW scale (double the old width).
+    expect(freshCall.width).toBeGreaterThan(oldWidth ?? 0);
+
+    // The stale old bitmap was NOT transferred; only the fresh one paints.
+    freshCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(slot0).toBeDefined();
+    const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas0._bitmapCtx?.lastBitmap).not.toBe(bmpOld); // never painted the stale bitmap
+    expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted the fresh one
+    v.destroy();
+  });
+
+  it('setScale to the SAME scale is a no-op (no re-anchor, no epoch bump churn)', () => {
+    const { v, scrollHost } = setup();
+    scrollHost.scrollTop = 1230;
+    scrollHost.dispatch('scroll');
+    const topBefore = scrollHost.scrollTop;
+    v.setScale(v.scaleForTest()); // identical scale
+    expect(scrollHost.scrollTop).toBe(topBefore); // unchanged
+    v.destroy();
+  });
+});
+
 describe('DocxScrollViewer — self-load path (T7 story)', () => {
   it('load(url) lays out and mounts the first window (relayout wired into load)', async () => {
     installDom();

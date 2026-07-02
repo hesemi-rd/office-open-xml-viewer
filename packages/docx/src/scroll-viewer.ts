@@ -1,4 +1,4 @@
-import { computeVisibleRange, PT_TO_PX, type VisibleRange } from '@silurus/ooxml-core';
+import { computeVisibleRange, PT_TO_PX, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -112,18 +112,25 @@ export class DocxScrollViewer {
    *  page whose first is still in flight — and lets us drop pages that scrolled
    *  out of the window before dispatch (design §11 worker coalescing).
    *
-   *  T4 ZOOM HAZARD (must fix when `setScale` lands): coalescing keys on page
-   *  INDEX only, with no notion of the scale a dispatch was made at. When
-   *  `setScale` changes the zoom mid-flight, an in-flight bitmap dispatched at the
-   *  OLD scale can still pass the on-resolution identity check (`_slots.get(i) ===
-   *  slot && slot.renderedPage === i`) if the same slot is still mounted for page
-   *  `i`, and get painted at the WRONG resolution — with no re-dispatch, because
-   *  the index is (or was) already in this Set. T4 MUST either (a) add a render
-   *  epoch/generation bumped on every `setScale` and fold it into the in-flight
-   *  identity (dispatch at epoch E, drop on resolve if the live epoch moved), or
-   *  (b) on scale change clear `_bitmapInFlight` and force-redispatch the mounted
-   *  window. A same-index Set alone is not enough once scale is mutable. */
+   *  T4 ZOOM HAZARD (RESOLVED by the render epoch below): coalescing keys on page
+   *  INDEX only, with no notion of the scale a dispatch was made at. Once
+   *  `setScale` can change the zoom mid-flight, an in-flight bitmap dispatched at
+   *  the OLD scale can still pass the on-resolution identity check if the SAME
+   *  slot object is re-mounted for page `i` (the pool reuses slot objects, so
+   *  `_slots.get(i) === slot && slot.renderedPage === i` can hold for an old
+   *  dispatch), and get painted at the WRONG resolution. We fix this with a render
+   *  epoch (`_renderEpoch`): each dispatch captures the epoch, and on resolution a
+   *  moved epoch ⇒ STALE (close + re-dispatch the live slot). See
+   *  `_renderSlotBitmap`. */
   private readonly _bitmapInFlight = new Set<number>();
+  /** Render generation, bumped on every effective `setScale` (and the T6 resize
+   *  re-fit, which routes through `setScale`). Stamped into each async render
+   *  dispatch; a resolution whose captured epoch ≠ this value is STALE — its
+   *  pixels/geometry are at a superseded scale. Worker path: close the orphan
+   *  bitmap + re-dispatch the live slot. Main path: skip the (stale) text-layer
+   *  build; the engine's per-canvas token already discards the stale pixels. */
+  private _renderEpoch = 0;
+  private _wheelListener: ((e: WheelEvent) => void) | null = null;
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     this._container = container;
@@ -159,6 +166,22 @@ export class DocxScrollViewer {
 
     this._scrollListener = () => this._onScroll();
     this._scrollHost.addEventListener('scroll', this._scrollListener);
+
+    // Ctrl/Cmd+wheel zoom (design §7). Bare wheel is left untouched so the
+    // scrollHost scrolls natively. `enableZoom:false` installs no handler at all.
+    // `{ passive: false }` is required because we call preventDefault() to stop
+    // the browser's own ctrl+wheel page zoom.
+    if (this._opts.enableZoom !== false) {
+      this._wheelListener = (e: WheelEvent) => {
+        if (!(e.ctrlKey || e.metaKey)) return; // bare wheel scrolls natively
+        e.preventDefault();
+        if (e.deltaY === 0) return;
+        this.setScale(zoomStepScale(this._scale, e.deltaY));
+      };
+      this._scrollHost.addEventListener('wheel', this._wheelListener as EventListener, {
+        passive: false,
+      });
+    }
 
     if (this._injected) {
       // An injected engine is already loaded, so lay out + mount the first
@@ -384,6 +407,16 @@ export class DocxScrollViewer {
    * tracks the page this slot is committed to; we stamp it up-front and bail on
    * resolution if it changed (the engine's own token guard is per-canvas; this is
    * the viewer's per-slot page-identity check).
+   *
+   * Render epoch (main path): pixel staleness after a mid-flight `setScale` is
+   * already handled by the engine's per-canvas token (the newer renderPage on the
+   * same canvas wins) — `setScale` recycles + re-mounts, and the re-mount always
+   * re-dispatches `renderPage` (renderedPage reset to -1), so a fresh render is
+   * always issued. But the viewer-side side effects of a STALE resolution — the
+   * text-layer build (its run geometry is at the OLD scale) and the renderedPage
+   * bookkeeping — must NOT run, or a superseded render would rebuild the overlay
+   * with stale x/y/w/h (the pool reuses slot objects, so the identity check alone
+   * can pass for an old-epoch resolution). We gate them on the captured epoch.
    */
   private _renderSlot(i: number, slot: PageSlot): void {
     if (!this._doc) return;
@@ -393,6 +426,7 @@ export class DocxScrollViewer {
 
     const dpr = this._dpr();
     const widthPx = this._pageWidthPx(i);
+    const epoch = this._renderEpoch;
 
     if (this._mode === 'worker') {
       void this._renderSlotBitmap(i, slot, widthPx, dpr);
@@ -412,9 +446,11 @@ export class DocxScrollViewer {
         onTextRun,
       })
       .then(() => {
-        // A recycle may have re-purposed this slot for a different page (or freed
-        // it) mid-render; bail without painting the stale page.
-        if (this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        // Stale if the epoch moved (a setScale rescaled mid-flight — the run
+        // geometry is at the old scale), or a recycle re-purposed this slot for a
+        // different page / freed it. Either way: skip the (stale) overlay build.
+        // The engine's per-canvas token already discards the superseded pixels.
+        if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
         if (wantOverlay && slot.textLayer) {
           buildDocxTextLayer(
             slot.textLayer,
@@ -451,13 +487,23 @@ export class DocxScrollViewer {
    *    re-mount case a live slot for `i` still awaits a render, so once we clear
    *    the in-flight guard we re-dispatch it — a page that recycled and re-mounted
    *    mid-flight must never stay blank.
+   *  - RENDER EPOCH: the dispatch captures `this._renderEpoch`. `setScale` bumps
+   *    the epoch, so a resolution whose captured epoch ≠ the live epoch is STALE
+   *    even when the SAME slot object is still mounted for page `i` (the pool
+   *    reuses slot objects, so the identity check alone can't catch a zoom that
+   *    happened mid-flight). A moved epoch ⇒ close the orphan + re-dispatch the
+   *    live slot at the new scale, never paint the old-scale bitmap.
    */
   private async _renderSlotBitmap(i: number, slot: PageSlot, widthPx: number, dpr: number): Promise<void> {
     if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this page already scrolled out of the
     // mounted window, don't dispatch at all.
     if (this._slots.get(i) !== slot) return;
+    const epoch = this._renderEpoch;
     this._bitmapInFlight.add(i);
+    // Whether this invocation actually painted its slot. When it did NOT (stale
+    // epoch or moved identity), the `finally` may need to re-dispatch a live slot.
+    let painted = false;
     // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
     // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
     // first worker render (bitmapCtx survives recycle), so we never re-getContext
@@ -474,10 +520,12 @@ export class DocxScrollViewer {
         defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
       });
-      // The slot may have recycled to a different page while the worker ran, or
-      // page `i` may have re-mounted onto a DIFFERENT slot. Either way this bitmap
-      // is stale for THIS slot: close it and skip the paint (drop-stale, §11).
-      if (this._slots.get(i) !== slot || slot.renderedPage !== i) {
+      // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
+      // this bitmap is at a superseded resolution — this catches the case where
+      // the SAME slot object is re-mounted for page `i`, which the identity check
+      // below cannot), or (b) the slot recycled to a different page / page `i`
+      // re-mounted onto a DIFFERENT slot. Either way: close + skip the paint.
+      if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) {
         bmp.close();
         return;
       }
@@ -495,20 +543,88 @@ export class DocxScrollViewer {
       slot.canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
       slot.bitmapCtx?.transferFromImageBitmap(bmp);
       slot.bitmap = null; // transfer consumed it
+      painted = true;
     } catch (err) {
       this._reportRenderError(err);
     } finally {
       this._bitmapInFlight.delete(i);
-      // If a LIVE slot for page `i` still awaits its render (page `i` re-mounted
-      // onto a different slot while this render was in flight, so the re-mount's
-      // dispatch was coalesced away), issue it now that the guard is clear.
+      // Re-dispatch when a LIVE slot for page `i` still awaits a correct render
+      // and this invocation did NOT paint it. Two mid-flight cases produce that:
+      //  - page `i` re-mounted onto a DIFFERENT slot while we ran (identity moved,
+      //    the re-mount's dispatch was coalesced away by the in-flight guard), or
+      //  - a `setScale` bumped the epoch (this bitmap was at the old scale; the
+      //    live slot may be the SAME object reused from the pool, so a `live !==
+      //    slot` test would wrongly skip it).
+      // `!painted` covers both without special-casing which staleness fired; when
+      // we DID paint, `live === slot` and no re-dispatch is needed.
       const live = this._slots.get(i);
-      if (live && live !== slot && !this._bitmapInFlight.has(i)) {
-        // live.renderedPage === i already (set by _renderSlot on mount); the
-        // dispatch was swallowed by the in-flight guard, not the identity guard.
+      if (!painted && live && !this._bitmapInFlight.has(i) && !this._destroyed) {
+        // live.renderedPage === i already (set by _renderSlot on mount); the fresh
+        // dispatch runs at the CURRENT epoch/scale via _pageWidthPx(i).
         void this._renderSlotBitmap(i, live, this._pageWidthPx(i), this._dpr());
       }
     }
+  }
+
+  /**
+   * Set the absolute px-per-pt zoom scale, clamped inline to
+   * `[zoomMin ?? 0.1, zoomMax ?? 4]` (absolute bounds, XlsxViewer convention — NOT
+   * multiples of the base fit; design §3 keeps the clamp in the viewer, not core),
+   * then re-anchor VERTICALLY so the page currently under the viewport top stays
+   * fixed. A no-op when nothing is loaded or when the clamped scale is unchanged.
+   *
+   * Re-anchor (written from scratch — XlsxViewer only re-anchors horizontally):
+   * capture `top = topIndex` and the intra-page fraction `intraFrac` from the
+   * CURRENT range BEFORE rescale; after recomputing heights at the new scale,
+   * `newScrollTop = offsets'[top] + intraFrac × heights'[top]`, clamped to
+   * `[0, totalHeight' − viewportHeight]`. Because a page's height scales linearly
+   * with `_scale`, the same fractional position maps exactly to the new geometry.
+   */
+  setScale(scale: number): void {
+    if (!this._doc || this._doc.pageCount === 0 || !this._scaleEstablished) return;
+    const zoomMin = this._opts.zoomMin ?? 0.1;
+    const zoomMax = this._opts.zoomMax ?? 4;
+    const next = Math.min(zoomMax, Math.max(zoomMin, scale));
+    if (next === this._scale) return;
+
+    // Capture the anchor from the CURRENT layout, before rescale.
+    const r0 = this._range();
+    const top = r0.topIndex;
+    const h0 = this._heights[top] || 0;
+    // intraFrac: the fraction of page `top` that has scrolled above the viewport
+    // top. Clamp to [0,1] — a scrollTop inside the trailing gap after page `top`
+    // is attributed to `top` by computeVisibleRange and would push intraFrac past
+    // 1, which would drift the re-anchor into the gap; pin the page instead.
+    let intraFrac = h0 > 0 ? (this._scrollHost.scrollTop - r0.offsets[top]) / h0 : 0;
+    intraFrac = Math.min(1, Math.max(0, intraFrac));
+
+    // Bump the render epoch BEFORE recycling/re-dispatching so any in-flight
+    // render dispatched at the old scale is recognised as stale on resolution.
+    this._renderEpoch++;
+
+    // Rescale, recompute heights, resize the spacer to the new total height.
+    this._scale = next;
+    this._recomputeHeights();
+    const r1 = computeVisibleRange(this._heights, this._gap(), 0, this._scrollHost.clientHeight, this._overscan());
+    this._spacer.style.height = `${r1.totalHeight}px`;
+
+    // Pin the same fractional position of the same page under the viewport top.
+    const maxTop = Math.max(0, r1.totalHeight - this._scrollHost.clientHeight);
+    const wantTop = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
+    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, wantTop));
+
+    // Re-mount at the new geometry, forcing a re-render of every slot (its px
+    // size changed under the new scale, so the cached canvas is stale).
+    this._mountVisibleForceRerender();
+  }
+
+  /** Like `_mountVisible` but recycles every live slot first so each re-mounts and
+   *  re-renders at the current scale. Used by `setScale` (and the T6 resize
+   *  re-fit): a slot's canvas px size changes with the scale, so the previously
+   *  drawn pixels are stale and every visible page must be redrawn. */
+  private _mountVisibleForceRerender(): void {
+    for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+    this._mountVisible();
   }
 
   get topVisiblePage(): number {
@@ -518,6 +634,16 @@ export class DocxScrollViewer {
   /** @internal test hook: page indices currently mounted. */
   mountedPageIndicesForTest(): number[] {
     return [...this._slots.keys()];
+  }
+
+  /** @internal test hook: the current absolute px-per-pt scale. */
+  scaleForTest(): number {
+    return this._scale;
+  }
+
+  /** @internal test hook: the base fit scale (pre-zoom) at the current width. */
+  baseScaleForTest(): number {
+    return this._baseScale();
   }
 
   /**
@@ -530,6 +656,10 @@ export class DocxScrollViewer {
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;
+    }
+    if (this._wheelListener) {
+      this._scrollHost.removeEventListener('wheel', this._wheelListener as EventListener);
+      this._wheelListener = null;
     }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
