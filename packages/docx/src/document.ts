@@ -5,11 +5,12 @@ import {
   WorkerBridge,
   defaultDpr,
   dropSvgImageCache,
+  dropBitmapCacheByPath,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache } from './renderer';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import type {
   DocumentMeta,
@@ -143,8 +144,13 @@ export class DocxDocument {
     this._meta = null;
     this._pages = null;
     this._imageCache.clear();
-    // Revoke this document's decoded-SVG object URLs (raster bitmaps are decoded
-    // into a per-render-local map, so they have no module cache to drop).
+    // Release this document's three per-fetchImage image caches: the decoded
+    // base raster bitmaps (GPU-backed, shared with pptx/xlsx), the a:clrChange
+    // color-replaced bitmaps (docx-only second layer), and the decoded-SVG
+    // object URLs. All are keyed by `_fetchImage`, so a discarded document frees
+    // its GPU/URL handles promptly rather than waiting for GC.
+    dropBitmapCacheByPath(this._fetchImage);
+    dropColorReplacedCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
   }
 

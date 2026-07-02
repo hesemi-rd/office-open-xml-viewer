@@ -65,7 +65,9 @@ import {
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
   getCachedSvgImageByPath,
-  decodeRasterOrMetafile,
+  getCachedBitmapByPath,
+  peekCachedBitmapByPath,
+  dropBitmapCacheByPath,
   cropSourceRect,
   metafileRasterSize,
   highlightBox,
@@ -1173,12 +1175,14 @@ async function renderBackground(
     try {
       // Size the metafile raster from the fill box (canvasW/H are CSS px;
       // scale is px-per-EMU, so px/scale = EMU, /PT_TO_EMU = pt).
-      const bitmap = await getCachedBitmap(
+      const bitmap = await getCachedBitmapByPath(
         fill.imagePath,
         fill.mimeType,
         fetchImage,
-        canvasW / scale / PT_TO_EMU,
-        canvasH / scale / PT_TO_EMU,
+        {
+          widthPt: canvasW / scale / PT_TO_EMU,
+          heightPt: canvasH / scale / PT_TO_EMU,
+        },
       );
       // A null bitmap (unsupported metafile, e.g. true EMF) → keep the white
       // base painted above as the fallback, exactly like a decode failure.
@@ -2543,7 +2547,7 @@ export function renderTextBody(
     // (or fetchImage is absent), draw nothing — the marker simply appears once
     // the bitmap is ready, never blocking the frame.
     if (bulletImage && fetchImage) {
-      const bmp = peekCachedBitmap(bulletImage.imagePath, fetchImage);
+      const bmp = peekCachedBitmapByPath(bulletImage.imagePath, fetchImage);
       if (bmp) {
         // The bullet HEIGHT is the text-derived size (× buSzPct); the WIDTH is
         // derived from the decoded bitmap's intrinsic aspect ratio so a
@@ -2898,53 +2902,21 @@ export function renderTextBody(
   ctx.restore();
 }
 
-// Decoded-image cache keyed by data URL. Decoding an inlined base64 image to an
-// ImageBitmap is expensive, and the same picture is re-decoded on every render
-// (each scroll / resize / interaction). Cache the decode — the Promise, so
-// concurrent first-renders dedupe — and reuse it. Bounded FIFO so a long
-// session can't grow without limit.
-//
-// Keyed FIRST by the deck's `fetchImage` closure, then by zip path. Different
-// .pptx files reuse the same internal paths (ppt/media/image1.png), so a
-// module-global path→bitmap map would paint deck A's image for deck B's
-// identically-named blip when both are open on the main thread. The WeakMap
-// scopes the cache per byte source (one stable closure per Presentation) and
-// lets a deck's bitmaps be reclaimed with it.
+// The lazy image-byte source closure (one stable identity per Presentation, so
+// it namespaces the shared decoded-bitmap cache per deck).
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
-const IMAGE_BITMAP_CACHE_MAX = 256;
-// Each entry pairs the in-flight/settled decode promise with its resolved bitmap.
-// `bitmap` is populated once the promise resolves (see getCachedBitmap), giving
-// the synchronous draw sites (picture bullets, §21.1.2.4.2) a settled value to
-// read via peekCachedBitmap without awaiting — no separate parallel cache to
-// keep in sync, so eviction/teardown only ever drop the whole entry.
-//
-// The decode can resolve to `null` for a metafile we can't rasterize (a true
-// EMF, or a WMF with no drawable geometry); the null is cached (avoiding a
-// re-fetch+re-sniff every frame) and the draw sites skip a null bitmap.
-type BitmapCacheEntry = { promise: Promise<ImageBitmap | null>; bitmap?: ImageBitmap | null };
-const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, BitmapCacheEntry>>();
 
-function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
-  let cache = bitmapCacheByFetch.get(fetchImage);
-  if (!cache) {
-    cache = new Map();
-    bitmapCacheByFetch.set(fetchImage, cache);
-  }
-  return cache;
-}
-
-/**
- * Synchronously return a bullet image's decoded bitmap if its decode has already
- * resolved (warmed by {@link getCachedBitmap}), else `undefined`. Used by the
- * synchronous text-body draw to paint picture bullets without awaiting. A
- * still-loading image has no `bitmap` on its entry yet, so it's simply skipped.
- */
-export function peekCachedBitmap(
-  imagePath: string,
-  fetchImage: FetchImage,
-): ImageBitmap | null | undefined {
-  return bitmapCacheByFetch.get(fetchImage)?.get(imagePath)?.bitmap;
-}
+// The decoded raster/metafile bitmap cache now lives in core
+// (`getCachedBitmapByPath` / `peekCachedBitmapByPath` / `dropBitmapCacheByPath`),
+// shared verbatim with docx and xlsx. Re-exported under the historical pptx
+// names so the presentation teardown and the bullet-draw tests keep their import
+// surface; the synchronous picture-bullet draw reads a warmed bitmap through
+// `peekCachedBitmap`. See core/src/image/bitmap-image-by-path.ts.
+export {
+  getCachedBitmapByPath as getCachedBitmap,
+  peekCachedBitmapByPath as peekCachedBitmap,
+  dropBitmapCacheByPath as dropImageBitmapCache,
+} from '@silurus/ooxml-core';
 
 
 /** Local view of the parsed `<a:sp3d>` (1:1 with the Sp3d TS type). */
@@ -3244,75 +3216,6 @@ function paintBeveledFlat(
   return true;
 }
 
-/**
- * Decode a raster-or-metafile blip to an ImageBitmap, cached by its zip path.
- * The bytes are fetched lazily via `fetchImage(imagePath, mimeType)` (twin of
- * the audio/video `fetchMedia` path) rather than `fetch`-ing an inlined data
- * URL. LRU(256); evicted bitmaps are `.close()`d to release their GPU backing.
- *
- * Decoding goes through core's {@link decodeRasterOrMetafile}, which content-
- * sniffs the bytes: a WMF (which `createImageBitmap` can't decode) is rasterized
- * by the shared minimal player at a size derived from `widthPt`/`heightPt`; a
- * true EMF (or a WMF with no geometry) resolves to `null` so the draw site skips
- * the picture instead of crashing. `widthPt`/`heightPt` are the picture's
- * intended draw size in points (0 ⇒ a sane fallback square); they only affect
- * metafile raster sharpness, so the path alone keys the cache.
- */
-export function getCachedBitmap(
-  imagePath: string,
-  mimeType: string,
-  fetchImage: FetchImage,
-  widthPt = 0,
-  heightPt = 0,
-): Promise<ImageBitmap | null> {
-  const cache = bitmapCacheFor(fetchImage);
-  const existing = cache.get(imagePath);
-  if (existing) {
-    // Refresh LRU position.
-    cache.delete(imagePath);
-    cache.set(imagePath, existing);
-    return existing.promise;
-  }
-  const promise = fetchImage(imagePath, mimeType).then((b) =>
-    decodeRasterOrMetafile(b, { widthPt, heightPt }),
-  );
-  const entry: BitmapCacheEntry = { promise };
-  // Record the resolved bitmap on the entry so the synchronous bullet draw
-  // (peekCachedBitmap) can read it after the warm pass awaits this promise.
-  // A `null` (unsupported metafile) is recorded too, so the draw skips it. The
-  // `.catch(() => {})` swallows a decode rejection on THIS side-chain (the real
-  // caller still sees it via the returned `promise`): without it a failed decode
-  // — e.g. an empty/undecodable blob — would surface as an unhandled rejection.
-  // On failure `entry.bitmap` simply stays undefined (treated as "not ready").
-  void promise.then((bmp) => {
-    entry.bitmap = bmp;
-  }).catch(() => {});
-  // Don't poison the cache on a transient decode failure.
-  promise.catch(() => cache.delete(imagePath));
-  cache.set(imagePath, entry);
-  if (cache.size > IMAGE_BITMAP_CACHE_MAX) {
-    const oldestKey = cache.keys().next().value as string;
-    const oldest = cache.get(oldestKey);
-    cache.delete(oldestKey);
-    oldest?.promise.then((b) => b?.close()).catch(() => {});
-  }
-  return promise;
-}
-
-/**
- * Close every decoded bitmap for one deck's `fetchImage` and forget the deck.
- * Call from {@link PptxPresentation.destroy} so GPU-backed ImageBitmaps are
- * released promptly rather than waiting for GC. A no-op when the deck decoded no
- * raster blips.
- */
-export function dropImageBitmapCache(fetchImage: FetchImage): void {
-  const cache = bitmapCacheByFetch.get(fetchImage);
-  if (!cache) return;
-  for (const entry of cache.values()) entry.promise.then((b) => b?.close()).catch(() => {});
-  cache.clear();
-  bitmapCacheByFetch.delete(fetchImage);
-}
-
 /** Poster bitmaps decoded once per media element; renderSlide's prefetch pass
  *  warms this so the sequential draw loop never waits on the network. Keyed by
  *  element identity (not posterPath), so the bitmap releases when the slide
@@ -3354,14 +3257,14 @@ async function renderPicture(
     // downstream path stays unchanged.
     // `imagePath` is normally a raster (PNG/JPEG), but for a pure-SVG picture
     // with no raster blip it is the SVG part itself — and `createImageBitmap`
-    // (getCachedBitmap) cannot rasterize SVG in every browser, so such a picture
-    // must also go through the <img>-based SVG decoder (keyed by path).
+    // (getCachedBitmapByPath) cannot rasterize SVG in every browser, so such a
+    // picture must also go through the <img>-based SVG decoder (keyed by path).
     const dataIsSvg = el.mimeType === 'image/svg+xml';
     // The picture's intended draw size in points sizes any metafile raster
     // (el.width/height are EMU; /PT_TO_EMU = pt). Unused by the raster/SVG paths.
     // A cropped metafile rasterizes at its FULL picture frame (scaled up by
     // 1/(1−crop)) so the fractional crop below lands correctly; raster blips and
-    // uncropped metafiles pass through unchanged. NB: getCachedBitmap is keyed by
+    // uncropped metafiles pass through unchanged. NB: getCachedBitmapByPath is keyed by
     // imagePath ("first size wins"), so if one path is referenced both cropped
     // and uncropped on a slide only the first decode's raster size is kept — that
     // affects raster SHARPNESS only; the crop fraction itself is applied per
@@ -3390,7 +3293,7 @@ async function renderPicture(
       } catch {
         bitmap = dataIsSvg
           ? await getCachedSvgImageByPath(el.imagePath, fetchImage)
-          : await getCachedBitmap(el.imagePath, el.mimeType, fetchImage, widthPt, heightPt);
+          : await getCachedBitmapByPath(el.imagePath, el.mimeType, fetchImage, { widthPt, heightPt });
       }
     } else if (dataIsSvg) {
       // SVG-only picture (here either because it has a crop, or — defensively —
@@ -3398,7 +3301,7 @@ async function renderPicture(
       // createImageBitmap can't.
       bitmap = await getCachedSvgImageByPath(el.imagePath, fetchImage);
     } else {
-      bitmap = await getCachedBitmap(el.imagePath, el.mimeType, fetchImage, widthPt, heightPt);
+      bitmap = await getCachedBitmapByPath(el.imagePath, el.mimeType, fetchImage, { widthPt, heightPt });
     }
     // Skip a picture whose blip is an unsupported metafile (null bitmap), the
     // same way an SVG-decode failure that also fails its raster fallback would
@@ -3786,7 +3689,7 @@ async function renderPicture(
     }
 
     ctx.restore();
-    // bitmap is owned by getCachedBitmap's cache — do not close it here.
+    // bitmap is owned by getCachedBitmapByPath's cache — do not close it here.
   } catch {
     // silently skip broken images
   }
@@ -4251,7 +4154,7 @@ export async function renderSlide(
       // starting a serial fetch + decode. Warming the raster for an uncropped
       // SVG-bearing picture would instead leave the hot (SVG) cache cold and
       // waste a fetch + createImageBitmap on a fallback that is never drawn.
-      // (The draw path still falls back to getCachedBitmap on SVG decode
+      // (The draw path still falls back to getCachedBitmapByPath on SVG decode
       // failure, so the raster stays cold only in that rare case.)
       const p = el as PictureElement;
       const pDataIsSvg = p.mimeType === 'image/svg+xml';
@@ -4270,13 +4173,10 @@ export async function renderSlide(
           p.width / PT_TO_EMU,
           p.height / PT_TO_EMU,
         );
-        void getCachedBitmap(
-          p.imagePath,
-          p.mimeType,
-          opts.fetchImage,
-          warm.widthPt,
-          warm.heightPt,
-        ).catch(() => undefined);
+        void getCachedBitmapByPath(p.imagePath, p.mimeType, opts.fetchImage, {
+          widthPt: warm.widthPt,
+          heightPt: warm.heightPt,
+        }).catch(() => undefined);
       }
     } else if (el.type === 'media') {
       const m = el as MediaElement;
@@ -4288,8 +4188,8 @@ export async function renderSlide(
 
   // Picture bullets (`<a:buBlip>`, §21.1.2.4.2) are drawn inside the SYNCHRONOUS
   // text-body layout, which can't await a decode. Resolve every bullet image up
-  // front (deduped by path via getCachedBitmap) and await them so the draw loop's
-  // peekCachedBitmap finds a settled bitmap. Missing/failed decodes resolve to
+  // front (deduped by path via getCachedBitmapByPath) and await them so the draw
+  // loop's peekCachedBitmapByPath finds a settled bitmap. Missing/failed decodes resolve to
   // undefined and the marker is simply skipped — never blocking the frame.
   if (opts.fetchImage) {
     const fetchImage = opts.fetchImage;
@@ -4305,7 +4205,7 @@ export async function renderSlide(
       await Promise.all(
         [...bulletPaths].map((key) => {
           const [path, mime] = key.split(' ');
-          return getCachedBitmap(path, mime, fetchImage).catch(() => undefined);
+          return getCachedBitmapByPath(path, mime, fetchImage).catch(() => undefined);
         }),
       );
       if (superseded()) return canvas;

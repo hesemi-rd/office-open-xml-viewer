@@ -79,6 +79,18 @@ export { drawArrowHead, lineEndRetract, retractLineEndpoint } from './shape/arro
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
 // caller-supplied fetchImage(path, mimeType) and owns the object-URL lifecycle.
 export { getCachedSvgImageByPath, dropSvgImageCache } from './image/svg-image-by-path';
+// Sibling of the SVG cache for raster/metafile blips: a per-document (keyed by
+// `fetchImage`), path-keyed LRU of decoded `ImageBitmap`s shared by all three
+// renderers, so a picture is decoded once per document and reused across
+// re-renders / page revisits instead of re-decoding every frame. `peek…` serves
+// the synchronous picture-bullet draw; `drop…` closes a document's bitmaps on
+// its viewer's `destroy()`.
+export {
+  getCachedBitmapByPath,
+  peekCachedBitmapByPath,
+  dropBitmapCacheByPath,
+  type CachedBitmapOptions,
+} from './image/bitmap-image-by-path';
 // Shared WMF (Windows Metafile) player + the raster/metafile decoder all three
 // renderers route through, so a WMF/EMF blip (which `createImageBitmap` cannot
 // decode) rasterizes or is skipped gracefully instead of throwing and vanishing.

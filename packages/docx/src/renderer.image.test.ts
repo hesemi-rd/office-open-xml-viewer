@@ -1,14 +1,39 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { decodeRaster, preloadImages } from './renderer';
+import { decodeRaster, preloadImages, dropColorReplacedCache } from './renderer';
+import { dropBitmapCacheByPath } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types';
 
 /**
  * docx raster blips decode through `fetchImage(path, mime)` (twin of pptx's
  * lazy-bytes path) instead of `fetch`-ing an inlined data URL. `preloadImages`
  * keys the decoded-image map by `imageKey(imagePath, colorReplaceFrom)` and must
- * decode each distinct key exactly once. SVG vector-優先 + color-replacement
- * behavior is unchanged; this test pins the raster + keying contract.
+ * decode each distinct key exactly once. The base (colour-replacement-free)
+ * bitmap now comes from the shared, per-document, path-keyed core cache, so a
+ * plain + recoloured reference to the same path share ONE fetch/decode; this
+ * test pins that raster + keying + shared-base contract.
  */
+/** Stub OffscreenCanvas + 2D context so applyColorReplacement's
+ *  getImageData/putImageData make-transparent pass runs in the node test env. */
+function stubOffscreen(): void {
+  class FakeOffscreen {
+    width: number;
+    height: number;
+    constructor(w: number, h: number) { this.width = w; this.height = h; }
+    getContext() {
+      return {
+        drawImage: () => {},
+        getImageData: (_x: number, _y: number, w: number, h: number) => ({
+          data: new Uint8ClampedArray(Math.max(1, w) * Math.max(1, h) * 4),
+          width: w,
+          height: h,
+        }),
+        putImageData: () => {},
+      };
+    }
+  }
+  vi.stubGlobal('OffscreenCanvas', FakeOffscreen);
+}
+
 describe('docx lazy image bytes', () => {
   beforeEach(() => {
     // `createImageBitmap` doesn't exist in the node test env; stub it to a
@@ -65,11 +90,14 @@ describe('docx lazy image bytes', () => {
     expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
   });
 
-  it('imageKey appends a colorReplaceFrom suffix so a recoloured ref is a distinct key', () => {
-    // The colorReplaceFrom variant produces a distinct cache key even for the
-    // same path. (The decode of that variant exercises canvas APIs unavailable
-    // in the node test env, so the keying — not the recolour pixels — is pinned
-    // here; the recolour pass itself is unchanged from before this refactor.)
+  it('a recoloured ref reuses the shared base bitmap: distinct map key, ONE fetch/decode', async () => {
+    // The colorReplaceFrom variant is a distinct cache key (its make-transparent
+    // result differs), but its BASE bitmap now comes from the shared path-keyed
+    // core cache — so a plain + recoloured reference to the same path share one
+    // fetch and one decode; only the recolour pass runs per (path, colour).
+    // Stub OffscreenCanvas so applyColorReplacement's getImageData/putImageData
+    // pass actually runs (otherwise it throws and the entry is dropped).
+    stubOffscreen();
     const fetchImage = vi.fn(
       async (_path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
     );
@@ -83,14 +111,42 @@ describe('docx lazy image bytes', () => {
       headers: {},
       footers: {},
     } as unknown as DocxDocumentModel;
-    // Both refs are collected as DISTINCT pairs → two fetch attempts by key.
-    return preloadImages(doc, fetchImage).then(() => {
-      expect(fetchImage).toHaveBeenCalledTimes(2);
-      // The plain key always decodes; the recolour key shares the same fetch
-      // path but a distinct cache key (proven by the 2 fetches above).
-      expect(fetchImage).toHaveBeenNthCalledWith(1, 'word/media/image1.png', 'image/png');
-      expect(fetchImage).toHaveBeenNthCalledWith(2, 'word/media/image1.png', 'image/png');
-    });
+    try {
+      const map = await preloadImages(doc, fetchImage);
+      // Two distinct map keys: the plain path and its recolour suffix.
+      expect(map.has('word/media/image1.png')).toBe(true);
+      expect(map.has('word/media/image1.png|clr:FFFFFF')).toBe(true);
+      // Shared base → ONE fetch and ONE createImageBitmap decode for both refs
+      // (down from two before the shared core cache).
+      expect(fetchImage).toHaveBeenCalledTimes(1);
+      const decodes = (globalThis.createImageBitmap as ReturnType<typeof vi.fn>).mock.calls.length;
+      // One decode for the base blob + one for the recoloured OffscreenCanvas.
+      expect(decodes).toBe(2);
+      // The recolour produced a distinct bitmap, not the base itself.
+      expect(map.get('word/media/image1.png')).not.toBe(map.get('word/media/image1.png|clr:FFFFFF'));
+    } finally {
+      dropColorReplacedCache(fetchImage);
+      dropBitmapCacheByPath(fetchImage);
+    }
+  });
+
+  it('decodeRaster memoizes the recolour per (path, colour): a repeat call re-runs neither decode nor recolour', async () => {
+    stubOffscreen();
+    const fetchImage = vi.fn(
+      async (_path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    try {
+      const a = await decodeRaster('word/media/image1.png', 'image/png', 'FFFFFF', fetchImage);
+      const decodesAfterFirst = (globalThis.createImageBitmap as ReturnType<typeof vi.fn>).mock.calls.length;
+      const b = await decodeRaster('word/media/image1.png', 'image/png', 'FFFFFF', fetchImage);
+      expect(b).toBe(a); // memoized recolour result reused
+      expect(fetchImage).toHaveBeenCalledTimes(1); // base fetched once
+      // No further createImageBitmap on the repeat: neither base decode nor recolour re-ran.
+      expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>).mock.calls.length).toBe(decodesAfterFirst);
+    } finally {
+      dropColorReplacedCache(fetchImage);
+      dropBitmapCacheByPath(fetchImage);
+    }
   });
 
   it('preloadImages with no fetchImage yields an empty map (no byte source)', async () => {

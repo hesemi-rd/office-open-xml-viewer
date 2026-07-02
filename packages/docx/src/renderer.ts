@@ -36,7 +36,8 @@ import {
   isCjkBreakChar,
   classifyFontGeneric,
   isComplexScriptCodePoint,
-  decodeRasterOrMetafile,
+  getCachedBitmapByPath,
+  dropBitmapCacheByPath,
   drawImageCropped,
   metafileRasterSize,
   symbolFontToUnicode,
@@ -371,6 +372,48 @@ function imageKey(imagePath: string, colorReplaceFrom?: string): string {
   return colorReplaceFrom ? `${imagePath}|clr:${colorReplaceFrom}` : imagePath;
 }
 
+type DocxFetchImage = (path: string, mime: string) => Promise<Blob>;
+
+// Second-layer cache for the `a:clrChange` (colorReplaceFrom) result. The core
+// path-keyed cache (getCachedBitmapByPath) holds the color-replacement-FREE
+// bitmap — shared across every reference to a path and reclaimed with the
+// document. The make-transparent pass (getImageData + putImageData, expensive)
+// then runs once per (imagePath, colorReplaceFrom) pair and its ImageBitmap is
+// kept here, so revisiting a page re-runs neither the decode NOR the recolor.
+//
+// Keyed FIRST by the document's `fetchImage` closure (one stable identity per
+// DocxDocument), then by imageKey(imagePath, colorReplaceFrom) — mirroring the
+// core cache's per-document namespacing so two documents sharing a zip path +
+// replace colour don't cross-contaminate, and the whole map is reclaimed with
+// the document. The stored value is an ImageBitmap (a fresh OffscreenCanvas
+// raster), so on destroy it must be closed (see dropColorReplacedCache), the
+// same GPU-lifecycle discipline the core cache follows through its promise.
+const colorReplacedByFetch = new WeakMap<DocxFetchImage, Map<string, Promise<ImageBitmap>>>();
+
+function colorReplacedCacheFor(fetchImage: DocxFetchImage): Map<string, Promise<ImageBitmap>> {
+  let cache = colorReplacedByFetch.get(fetchImage);
+  if (!cache) {
+    cache = new Map();
+    colorReplacedByFetch.set(fetchImage, cache);
+  }
+  return cache;
+}
+
+/**
+ * Close every color-replaced ImageBitmap for one document's `fetchImage` and
+ * forget the document. Call from `DocxDocument.destroy()` alongside
+ * `dropBitmapCacheByPath` (base bitmaps) and `dropSvgImageCache` (SVG object
+ * URLs) so all three per-document image caches release promptly. A no-op when no
+ * clrChange image was decoded.
+ */
+export function dropColorReplacedCache(fetchImage: DocxFetchImage): void {
+  const cache = colorReplacedByFetch.get(fetchImage);
+  if (!cache) return;
+  for (const p of cache.values()) p.then((b) => b.close()).catch(() => {});
+  cache.clear();
+  colorReplacedByFetch.delete(fetchImage);
+}
+
 /** Picks a stable colour for a track-changes author. Mirrors Word's behaviour
  *  of cycling through a fixed palette (Word uses 8 hues then alternates).
  *  An empty / missing author maps to the first colour. */
@@ -528,15 +571,18 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
  * (`colorReplaceFrom`) make-transparent pass when requested — unchanged
  * post-decode behavior.
  *
- * The raster/metafile path delegates to the shared
- * {@link decodeRasterOrMetafile} (the one decoder docx/pptx/xlsx now share):
- * browsers can't decode WMF/EMF via `createImageBitmap`, so it content-sniffs
- * the bytes first (extension/MIME are unreliable — sample-10's chart is a
- * standard WMF mislabeled `.emf`), rasterizing a WMF via the minimal player at a
- * size derived from `widthPt`/`heightPt`, returning `null` for a true EMF (or a
- * geometry-less metafile), else `createImageBitmap`. A `null` result throws so
- * `preloadImages` drops the image (the existing "missing image" behavior, no
- * crash).
+ * Two-layer caching so a page revisit re-runs NEITHER the decode NOR the recolor:
+ *  1. the color-replacement-free bitmap comes from the shared, per-document,
+ *     path-keyed {@link getCachedBitmapByPath} (the raster/metafile cache docx,
+ *     pptx and xlsx now share). It content-sniffs the bytes (extension/MIME are
+ *     unreliable — sample-10's chart is a standard WMF mislabeled `.emf`),
+ *     rasterizing a WMF via the minimal player at a size from `widthPt`/`heightPt`,
+ *     returning `null` for a true EMF (or a geometry-less metafile), else
+ *     `createImageBitmap`. A `null` throws so `preloadImages` drops the image
+ *     (the existing "missing image" behavior, no crash).
+ *  2. when a clrChange is requested, the make-transparent result is memoized per
+ *     (imagePath, colorReplaceFrom) in {@link colorReplacedCacheFor} so the
+ *     expensive getImageData/putImageData pass runs once per document.
  *
  * `suppressBoundaryFrame: true` is REQUIRED: docx's former in-tree player ran the
  * window/device-boundary edge suppression unconditionally (to hide sample-10's
@@ -553,14 +599,27 @@ export async function decodeRaster(
   widthPt = 0,
   heightPt = 0,
 ): Promise<ImageBitmap> {
-  const blob = await fetchImage(imagePath, mimeType);
-  const bmp = await decodeRasterOrMetafile(blob, {
+  // Base bitmap (no colour replacement): shared, path-keyed, per-document cache.
+  const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, {
     widthPt,
     heightPt,
     suppressBoundaryFrame: true,
   });
-  if (!bmp) throw new Error(`${imagePath} produced no drawable output`);
-  return colorReplaceFrom ? applyColorReplacement(bmp, colorReplaceFrom) : bmp;
+  if (!base) throw new Error(`${imagePath} produced no drawable output`);
+  if (!colorReplaceFrom) return base;
+  // Second layer: memoize the make-transparent result per (path, colour). The
+  // recolor reads the SHARED base bitmap and produces a fresh independent raster,
+  // so the base is never mutated and stays reusable for other references / draws.
+  const cache = colorReplacedCacheFor(fetchImage);
+  const key = imageKey(imagePath, colorReplaceFrom);
+  let hit = cache.get(key);
+  if (!hit) {
+    hit = applyColorReplacement(base, colorReplaceFrom);
+    // Don't poison the cache if the recolor pass rejects; let the next call retry.
+    hit.catch(() => cache.delete(key));
+    cache.set(key, hit);
+  }
+  return hit;
 }
 
 /**
