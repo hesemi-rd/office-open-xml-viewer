@@ -830,7 +830,11 @@ pub struct ChartAnchor {
     pub to_col_off: i64,
     pub to_row: u32,
     pub to_row_off: i64,
-    pub chart: ChartData,
+    /// The emitted chart payload — the canonical shared `ChartModel` (adapted
+    /// from the parser-native `ChartData` via `From`, formerly the TS
+    /// `adaptChartData`). `ChartData` itself is now an internal parse
+    /// intermediate and no longer appears on the wire.
+    pub chart: ooxml_common::chart::ChartModel,
 }
 
 /// A grouped-shape anchor (ECMA-376 §20.5.2.17, `<xdr:grpSp>` inside a

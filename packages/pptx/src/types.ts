@@ -18,7 +18,7 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries, SecondaryValueAxis } from '@silurus/ooxml-core';
+import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel } from '@silurus/ooxml-core';
 
 /**
  * Picture bullet — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip r:embed>`. The
@@ -407,117 +407,19 @@ export interface TableCell {
  */
 export interface ChartElement {
   type: 'chart';
+  /** Frame geometry on the slide, in EMU. */
   x: number;
   y: number;
   width: number;
   height: number;
-  chartType: string;
-  title: string | null;
-  categories: string[];
-  series: ChartSeries[];
-  valMax: number | null;
-  valMin: number | null;
-  subtotalIndices: number[];
-  showDataLabels: boolean;
-  catAxisHidden: boolean;
-  valAxisHidden: boolean;
-  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay. */
-  catAxisLineHidden?: boolean;
-  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay. */
-  valAxisLineHidden?: boolean;
-  plotAreaBg: string | null;
-  /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
-  chartBg: string | null;
-  /** True when <c:legend> is declared; false suppresses the legend entirely. */
-  showLegend: boolean;
-  /** catAx crossBetween: "between" (default, 0.5-step padding) or "midCat". */
-  catAxisCrossBetween: 'between' | 'midCat' | string;
-  /** `<c:valAx><c:majorTickMark>`. "cross" (default) | "out" | "in" | "none". */
-  valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
-  /** `<c:catAx><c:majorTickMark>`. */
-  catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
-  /** Title font size in OOXML hundredths of a point (1600 = 16pt). null = default. */
-  titleFontSizeHpt: number | null;
-  /** Title font color as a hex string without '#'. null = default/theme. */
-  titleFontColor?: string | null;
-  /** Title font family (`<a:latin typeface>`). null = default/theme. */
-  titleFontFace?: string | null;
-  /** `<c:catAx><c:txPr>` font size (hpt). null = proportional default. */
-  catAxisFontSizeHpt: number | null;
-  /** `<c:valAx><c:txPr>` font size (hpt). null = proportional default. */
-  valAxisFontSizeHpt: number | null;
-  /** `<c:catAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
-  catAxisFontColor?: string | null;
-  /** `<c:valAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
-  valAxisFontColor?: string | null;
-  /** `<c:catAx><c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
-  catAxisLineColor?: string | null;
-  /** `<c:catAx><c:spPr><a:ln w>` axis-line width in EMU. */
-  catAxisLineWidthEmu?: number | null;
-  /** `<c:valAx><c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
-  valAxisLineColor?: string | null;
-  /** `<c:valAx><c:spPr><a:ln w>` axis-line width in EMU. */
-  valAxisLineWidthEmu?: number | null;
-  /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
-  dataLabelFontSizeHpt: number | null;
-  /** `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr". */
-  legendPos?: 'r' | 'l' | 't' | 'b' | 'tr' | null;
-  /** `<c:barChart><c:gapWidth val>` — % of bar width between category groups (default 150). */
-  barGapWidth?: number | null;
-  /** `<c:barChart><c:overlap val>` — signed % of bar width for cluster overlap. */
-  barOverlap?: number | null;
-  /** `<c:dLbls><c:dLblPos val>` — data label placement ("ctr" | "inEnd" | "outEnd" | …). */
-  dataLabelPosition?: string | null;
-  /** `<c:dLbls><c:txPr>…<a:solidFill>` resolved to hex (no '#'). null = renderer default. */
-  dataLabelFontColor?: string | null;
-  /** `<c:dLbls><c:numFmt formatCode>` — data label number format. */
-  dataLabelFormatCode?: string | null;
-  /** `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format. */
-  valAxisFormatCode?: string | null;
-  /** `<c:plotArea><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.32) — explicit
-   * plot-area placement so bars don't extend past the chart-frame's intended
-   * inner region (sample-2 slide-16 horizontal bar chart). */
-  plotAreaManualLayout?: import('@silurus/ooxml-core').ChartManualLayout | null;
-  /** `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42) — drives
-   * whether scatter charts connect points with straight or smooth lines. */
-  scatterStyle?: string | null;
-  /** `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). */
-  radarStyle?: string | null;
-  /** `<c:catAx><c:title>` plain text (ECMA-376 §21.2.2.6). For scatter the
-   * bottom `<c:valAx>` (axPos b/t) feeds this. null = no title. */
-  catAxisTitle?: string | null;
-  /** `<c:valAx><c:title>` plain text. For scatter the left `<c:valAx>`
-   * (axPos l/r) feeds this. null = no title. */
-  valAxisTitle?: string | null;
-  /** `<c:catAx><c:title>` run-prop font size (hpt). Distinct from
-   * `catAxisFontSizeHpt` (tick labels). null = renderer default. */
-  catAxisTitleSize?: number | null;
-  /** `<c:catAx><c:title>` run-prop bold flag. null = not bold. */
-  catAxisTitleBold?: boolean | null;
-  /** `<c:catAx><c:title>` run-prop color (hex without '#'). null = default. */
-  catAxisTitleColor?: string | null;
-  /** `<c:valAx><c:title>` run-prop font size (hpt). null = renderer default. */
-  valAxisTitleSize?: number | null;
-  /** `<c:valAx><c:title>` run-prop bold flag. null = not bold. */
-  valAxisTitleBold?: boolean | null;
-  /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
-  valAxisTitleColor?: string | null;
-  /** `<c:title>...defRPr@b` chart title bold flag. null = not bold. */
-  titleFontBold?: boolean | null;
-  /** `<c:catAx><c:txPr>...defRPr@b` X-axis tick-label bold flag. null = not bold. */
-  catAxisFontBold?: boolean | null;
-  /** `<c:valAx><c:txPr>...defRPr@b` Y-axis tick-label bold flag. null = not bold. */
-  valAxisFontBold?: boolean | null;
-  /** Explicit chart border color (hex without '#') from
-   * `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
-   * XML explicitly declares a paintable line; null otherwise (no default border). */
-  chartBorderColor?: string | null;
-  /** `<c:chartSpace><c:spPr><a:ln@w>` border width in EMU. null = 1px hairline
-   * when a color is present. */
-  chartBorderWidthEmu?: number | null;
-  /** Secondary value axis for combo charts (bar + line with a right-hand
-   * axis). null/absent for the common single value-axis case. */
-  secondaryValAxis?: SecondaryValueAxis | null;
+  /**
+   * The chart payload, already in the canonical {@link ChartModel} shape emitted
+   * by the Rust parser (`ooxml_common::chart::ChartModel`). Passed straight to
+   * `@silurus/ooxml-core`'s `renderChart` — no per-field adapter. The former
+   * 60-field flat copy on this interface is gone; all chart properties now live
+   * on `chart`.
+   */
+  chart: ChartModel;
 }
 
 export interface PictureElement {

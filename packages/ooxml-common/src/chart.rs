@@ -30,6 +30,350 @@
 //! Charts) unless stated otherwise.
 
 use roxmltree::Node;
+use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// Shared chart data model
+// ============================================================================
+//
+// These structs are the Rust mirror of the TypeScript `ChartModel` in
+// `packages/core/src/types/chart.ts`. Both the pptx and xlsx Rust parsers build
+// a `ChartModel` and emit it as a single nested `chart` object, so the TS
+// renderer (`@silurus/ooxml-core`'s `renderChart`) receives a value that is
+// already `ChartModel`-shaped and needs no per-field adapter.
+//
+// Field-for-field parity with the TS interface is the contract. Serde
+// `rename_all = "camelCase"` matches the TS key names. The REQUIRED TS fields
+// (no `?`) are serialized unconditionally so the wire object always carries
+// them — an `Option<T>` REQUIRED field emits `null` when `None` (matching
+// `T | null`), and a `bool`/`Vec` REQUIRED field emits `false`/`[]`. The
+// OPTIONAL TS fields (`field?: …`) keep `skip_serializing_if` so they drop off
+// the wire when unset; the renderer treats a missing key and an explicit `null`
+// identically (every read is `?? default` / `!= null`), so this is
+// render-equivalent to emitting `null`.
+//
+// All field references are ECMA-376 / ISO-29500 part 1 §21.2 (DrawingML Charts)
+// as documented on the TS side; see that file for the per-field spec citations.
+
+/// Mirror of TS `ChartModel`. Built by each parser and emitted as the single
+/// `chart` object consumed by the core chart renderer.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartModel {
+    // ── Required (always serialized) ────────────────────────────────────────
+    pub chart_type: String,
+    pub title: Option<String>,
+    pub categories: Vec<String>,
+    pub series: Vec<ChartSeries>,
+    pub show_data_labels: bool,
+    pub val_min: Option<f64>,
+    pub val_max: Option<f64>,
+    pub cat_axis_title: Option<String>,
+    pub val_axis_title: Option<String>,
+    pub cat_axis_hidden: bool,
+    pub val_axis_hidden: bool,
+    pub cat_axis_line_hidden: bool,
+    pub val_axis_line_hidden: bool,
+    pub plot_area_bg: Option<String>,
+    pub chart_bg: Option<String>,
+    pub show_legend: bool,
+    pub legend_pos: Option<String>,
+    pub cat_axis_cross_between: String,
+    pub val_axis_major_tick_mark: String,
+    pub cat_axis_major_tick_mark: String,
+    pub title_font_size_hpt: Option<i32>,
+    pub title_font_color: Option<String>,
+    pub title_font_face: Option<String>,
+    pub cat_axis_font_size_hpt: Option<i32>,
+    pub val_axis_font_size_hpt: Option<i32>,
+    pub data_label_font_size_hpt: Option<i32>,
+    pub subtotal_indices: Vec<u32>,
+    // ── Optional (skipped when unset) ───────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_tick_mark: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_minor_tick_mark: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_manual_layout: Option<LegendManualLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar_gap_width: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar_overlap: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_border_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_border_width_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_crosses: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_crosses_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_crosses: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_crosses_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_line_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_line_width_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_line_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_line_width_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_manual_layout: Option<ChartManualLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_area_manual_layout: Option<ChartManualLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scatter_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radar_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_val_axis: Option<SecondaryValueAxis>,
+}
+
+/// Mirror of TS `ChartSeries`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSeries {
+    pub name: String,
+    pub color: Option<String>,
+    pub values: Vec<Option<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_point_colors: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_colors: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_secondary_axis: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_marker: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_line: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_point_overrides: Option<Vec<ChartDataPointOverride>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_overrides: Option<Vec<ChartDataLabelOverride>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_data_labels: Option<ChartSeriesDataLabels>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub err_bars: Option<Vec<ChartErrBars>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_sizes: Option<Vec<Option<f64>>>,
+}
+
+/// Mirror of TS `ChartDataPointOverride`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartDataPointOverride {
+    pub idx: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_line: Option<String>,
+}
+
+/// Mirror of TS `ChartDataLabelOverride`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartDataLabelOverride {
+    pub idx: u32,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_bold: Option<bool>,
+}
+
+/// Mirror of TS `ChartSeriesDataLabels`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSeriesDataLabels {
+    pub show_val: bool,
+    pub show_cat_name: bool,
+    pub show_ser_name: bool,
+    pub show_percent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_hpt: Option<i32>,
+}
+
+/// Mirror of TS `ChartErrBars`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartErrBars {
+    pub dir: String,
+    pub bar_type: String,
+    pub plus: Vec<Option<f64>>,
+    pub minus: Vec<Option<f64>>,
+    pub no_end_cap: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash: Option<String>,
+}
+
+/// Mirror of TS `SecondaryValueAxis`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecondaryValueAxis {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub title: Option<String>,
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
+    pub line_hidden: bool,
+    pub major_tick_mark: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_color: Option<String>,
+}
+
+/// Mirror of TS `ChartManualLayout`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartManualLayout {
+    pub x_mode: String,
+    pub y_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_target: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
+}
+
+/// Mirror of TS `LegendManualLayout`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LegendManualLayout {
+    pub x_mode: String,
+    pub y_mode: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// Combine a chart-type family (`bar` / `line` / `area`) with its bar direction
+/// and grouping into the canonical `ChartModel.chart_type` vocabulary the core
+/// renderer dispatches on.
+///
+/// This is the Rust home of the logic the xlsx TS renderer used to run in
+/// `canonicalChartType` (pptx already emitted the canonical string). `bar_dir`
+/// is ECMA-376 §21.2.3.4 `ST_BarDir`: `"bar"` = horizontal, `"col"` (or any
+/// other value) = vertical. `grouping` is §21.2.3.17 `ST_Grouping`. Non-bar /
+/// non-line / non-area families are returned unchanged.
+pub fn canonical_chart_type(chart_type: &str, bar_dir: &str, grouping: &str) -> String {
+    match chart_type {
+        "bar" => {
+            let is_h = bar_dir == "bar";
+            match (grouping, is_h) {
+                ("stacked", true) => "stackedBarH",
+                ("stacked", false) => "stackedBar",
+                ("percentStacked", true) => "stackedBarHPct",
+                ("percentStacked", false) => "stackedBarPct",
+                (_, true) => "clusteredBarH",
+                (_, false) => "clusteredBar",
+            }
+            .to_string()
+        }
+        "line" => match grouping {
+            "stacked" => "stackedLine",
+            "percentStacked" => "stackedLinePct",
+            _ => "line",
+        }
+        .to_string(),
+        "area" => match grouping {
+            "stacked" => "stackedArea",
+            "percentStacked" => "stackedAreaPct",
+            _ => "area",
+        }
+        .to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// Find a direct child of `parent` whose local name is `name`.
 fn child<'a, 'i>(parent: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
@@ -482,6 +826,183 @@ mod tests {
 
     fn root_of(xml: &str) -> Document<'_> {
         Document::parse(xml).expect("parse fixture")
+    }
+
+    #[test]
+    fn canonical_chart_type_bar_matrix() {
+        // Mirrors the TS `canonicalChartType` bar branch (ST_BarDir "bar" =
+        // horizontal). Every (grouping, dir) pair must map to the same string
+        // the renderer dispatches on.
+        assert_eq!(
+            canonical_chart_type("bar", "col", "clustered"),
+            "clusteredBar"
+        );
+        assert_eq!(
+            canonical_chart_type("bar", "bar", "clustered"),
+            "clusteredBarH"
+        );
+        assert_eq!(canonical_chart_type("bar", "col", "stacked"), "stackedBar");
+        assert_eq!(canonical_chart_type("bar", "bar", "stacked"), "stackedBarH");
+        assert_eq!(
+            canonical_chart_type("bar", "col", "percentStacked"),
+            "stackedBarPct"
+        );
+        assert_eq!(
+            canonical_chart_type("bar", "bar", "percentStacked"),
+            "stackedBarHPct"
+        );
+        // Unknown grouping → clustered fallback (matches the TS default arm).
+        assert_eq!(
+            canonical_chart_type("bar", "col", "standard"),
+            "clusteredBar"
+        );
+    }
+
+    #[test]
+    fn canonical_chart_type_line_area_and_passthrough() {
+        assert_eq!(canonical_chart_type("line", "col", "standard"), "line");
+        assert_eq!(
+            canonical_chart_type("line", "col", "stacked"),
+            "stackedLine"
+        );
+        assert_eq!(
+            canonical_chart_type("line", "col", "percentStacked"),
+            "stackedLinePct"
+        );
+        assert_eq!(canonical_chart_type("area", "col", "standard"), "area");
+        assert_eq!(
+            canonical_chart_type("area", "col", "stacked"),
+            "stackedArea"
+        );
+        assert_eq!(
+            canonical_chart_type("area", "col", "percentStacked"),
+            "stackedAreaPct"
+        );
+        // Families the renderer already names canonically pass through verbatim.
+        for t in ["pie", "doughnut", "scatter", "bubble", "radar", "waterfall"] {
+            assert_eq!(canonical_chart_type(t, "col", "clustered"), t);
+        }
+    }
+
+    /// The wire contract: a `ChartModel` must serialize with the same camelCase
+    /// keys the TS `ChartModel` declares, REQUIRED fields present even when
+    /// `None`/`false`/empty, OPTIONAL fields dropped when unset. This is the
+    /// Rust-side oracle that pins the emitted JSON shape.
+    #[test]
+    fn chart_model_serializes_canonical_shape() {
+        let m = ChartModel {
+            chart_type: "clusteredBar".to_string(),
+            title: None,
+            categories: vec!["A".to_string(), "B".to_string()],
+            series: vec![ChartSeries {
+                name: "S1".to_string(),
+                color: Some("FF0000".to_string()),
+                values: vec![Some(1.0), None, Some(3.0)],
+                data_point_colors: None,
+                data_label_colors: None,
+                label_color: None,
+                series_type: None,
+                use_secondary_axis: None,
+                categories: None,
+                show_marker: None,
+                val_format_code: None,
+                marker_symbol: None,
+                marker_size: None,
+                marker_fill: None,
+                marker_line: None,
+                data_point_overrides: None,
+                data_label_overrides: None,
+                series_data_labels: None,
+                err_bars: None,
+                bubble_sizes: None,
+            }],
+            show_data_labels: false,
+            val_min: None,
+            val_max: None,
+            cat_axis_title: None,
+            val_axis_title: None,
+            cat_axis_hidden: false,
+            val_axis_hidden: false,
+            cat_axis_line_hidden: false,
+            val_axis_line_hidden: false,
+            plot_area_bg: None,
+            chart_bg: Some("FFFFFF".to_string()),
+            show_legend: false,
+            legend_pos: None,
+            cat_axis_cross_between: "between".to_string(),
+            val_axis_major_tick_mark: "out".to_string(),
+            cat_axis_major_tick_mark: "out".to_string(),
+            title_font_size_hpt: None,
+            title_font_color: None,
+            title_font_face: None,
+            cat_axis_font_size_hpt: None,
+            val_axis_font_size_hpt: None,
+            data_label_font_size_hpt: None,
+            subtotal_indices: vec![],
+            val_axis_minor_tick_mark: None,
+            cat_axis_minor_tick_mark: None,
+            cat_axis_font_color: None,
+            val_axis_font_color: None,
+            legend_manual_layout: None,
+            val_axis_format_code: None,
+            bar_gap_width: None,
+            bar_overlap: None,
+            data_label_position: None,
+            data_label_font_color: None,
+            data_label_format_code: None,
+            title_font_bold: None,
+            cat_axis_font_bold: None,
+            val_axis_font_bold: None,
+            cat_axis_title_font_size_hpt: None,
+            cat_axis_title_font_bold: None,
+            cat_axis_title_font_color: None,
+            val_axis_title_font_size_hpt: None,
+            val_axis_title_font_bold: None,
+            val_axis_title_font_color: None,
+            chart_border_color: None,
+            chart_border_width_emu: None,
+            cat_axis_crosses: None,
+            cat_axis_crosses_at: None,
+            val_axis_crosses: None,
+            val_axis_crosses_at: None,
+            cat_axis_line_color: None,
+            cat_axis_line_width_emu: None,
+            val_axis_line_color: None,
+            val_axis_line_width_emu: None,
+            cat_axis_format_code: None,
+            cat_axis_min: None,
+            cat_axis_max: None,
+            title_manual_layout: None,
+            plot_area_manual_layout: None,
+            scatter_style: None,
+            radar_style: None,
+            secondary_val_axis: None,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        let obj = v.as_object().unwrap();
+        // Required scalar keys present with camelCase names, even when None/false.
+        assert_eq!(obj["chartType"], "clusteredBar");
+        assert!(obj["title"].is_null());
+        assert_eq!(obj["showDataLabels"], false);
+        assert_eq!(obj["catAxisHidden"], false);
+        assert_eq!(obj["catAxisCrossBetween"], "between");
+        assert_eq!(obj["valAxisMajorTickMark"], "out");
+        assert!(obj["plotAreaBg"].is_null());
+        assert_eq!(obj["chartBg"], "FFFFFF");
+        assert_eq!(obj["subtotalIndices"], serde_json::json!([]));
+        // Optional unset keys dropped from the wire.
+        assert!(!obj.contains_key("barGapWidth"));
+        assert!(!obj.contains_key("secondaryValAxis"));
+        assert!(!obj.contains_key("catAxisFontColor"));
+        // Series: required present, optional dropped; array null preserved.
+        let s0 = &obj["series"][0];
+        assert_eq!(s0["name"], "S1");
+        assert_eq!(s0["color"], "FF0000");
+        assert_eq!(s0["values"], serde_json::json!([1.0, null, 3.0]));
+        assert!(!s0.as_object().unwrap().contains_key("showMarker"));
+        // Round-trips back to an equal model (Deserialize parity).
+        let back: ChartModel = serde_json::from_value(v).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]

@@ -2,9 +2,9 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
+  Run, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -4138,128 +4138,11 @@ function pickStrongerEdge(
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Chart rendering — delegated to @silurus/ooxml-core's unified renderer.
+//
+// The parser now emits the canonical `ChartModel` directly (see the Rust
+// `From<ChartData> for ChartModel`), so there is no TS adapter here anymore —
+// `anchor.chart` is passed straight to `renderChart`.
 // ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Normalize the XLSX parser's raw `ChartData` (chartType="bar" + barDir + grouping)
- * into the canonical `ChartModel.chartType` vocabulary expected by core.
- */
-function canonicalChartType(chart: ChartData): string {
-  const t = chart.chartType;
-  const g = chart.grouping;
-  if (t === 'bar') {
-    const isH = chart.barDir === 'bar';
-    if (g === 'stacked')        return isH ? 'stackedBarH'    : 'stackedBar';
-    if (g === 'percentStacked') return isH ? 'stackedBarHPct' : 'stackedBarPct';
-    return isH ? 'clusteredBarH' : 'clusteredBar';
-  }
-  if (t === 'line') {
-    if (g === 'stacked')        return 'stackedLine';
-    if (g === 'percentStacked') return 'stackedLinePct';
-    return 'line';
-  }
-  if (t === 'area') {
-    if (g === 'stacked')        return 'stackedArea';
-    if (g === 'percentStacked') return 'stackedAreaPct';
-    return 'area';
-  }
-  return t;
-}
-
-function adaptChartData(chart: ChartData): ChartModel {
-  return {
-    chartType: canonicalChartType(chart),
-    title: chart.title,
-    categories: chart.categories,
-    catAxisFormatCode: chart.catAxisFormatCode ?? null,
-    catAxisMin: chart.catAxisMin ?? null,
-    catAxisMax: chart.catAxisMax ?? null,
-    titleFontBold: chart.titleFontBold ?? null,
-    catAxisFontBold: chart.catAxisFontBold ?? null,
-    valAxisFontBold: chart.valAxisFontBold ?? null,
-    catAxisCrosses: chart.catAxisCrosses ?? null,
-    catAxisCrossesAt: chart.catAxisCrossesAt ?? null,
-    valAxisCrosses: chart.valAxisCrosses ?? null,
-    valAxisCrossesAt: chart.valAxisCrossesAt ?? null,
-    catAxisLineColor: chart.catAxisLineColor ?? null,
-    catAxisLineWidthEmu: chart.catAxisLineWidthEmu ?? null,
-    valAxisLineColor: chart.valAxisLineColor ?? null,
-    valAxisLineWidthEmu: chart.valAxisLineWidthEmu ?? null,
-    series: chart.series.map(s => ({
-      name: s.name,
-      color: s.color ?? null,
-      values: s.values,
-      seriesType: s.seriesType ?? null,
-      categories: s.categories.length > 0 ? s.categories : null,
-      showMarker: s.showMarker ?? null,
-      valFormatCode: s.valFormatCode ?? null,
-      labelColor: s.labelColor ?? null,
-      markerSymbol: s.markerSymbol ?? null,
-      markerSize: s.markerSize ?? null,
-      markerFill: s.markerFill ?? null,
-      markerLine: s.markerLine ?? null,
-      dataPointOverrides: s.dataPointOverrides ?? null,
-      dataLabelOverrides: s.dataLabelOverrides ?? null,
-      seriesDataLabels: s.seriesDataLabels ?? null,
-      errBars: s.errBars ?? null,
-    })),
-    showDataLabels: chart.showDataLabels ?? false,
-    valMin: chart.valAxisMin ?? null,
-    valMax: chart.valAxisMax ?? null,
-    catAxisTitle: chart.catAxisTitle ?? null,
-    valAxisTitle: chart.valAxisTitle ?? null,
-    catAxisTitleFontSizeHpt: chart.catAxisTitleSize ?? null,
-    catAxisTitleFontBold: chart.catAxisTitleBold ?? null,
-    catAxisTitleFontColor: chart.catAxisTitleColor ?? null,
-    valAxisTitleFontSizeHpt: chart.valAxisTitleSize ?? null,
-    valAxisTitleFontBold: chart.valAxisTitleBold ?? null,
-    valAxisTitleFontColor: chart.valAxisTitleColor ?? null,
-    catAxisHidden: chart.catAxisHidden ?? false,
-    valAxisHidden: chart.valAxisHidden ?? false,
-    catAxisLineHidden: chart.catAxisLineHidden ?? false,
-    valAxisLineHidden: chart.valAxisLineHidden ?? false,
-    plotAreaBg: null,
-    // `<c:chartSpace><c:spPr>` resolution: when the spPr element was present
-    // we honor whatever it said (solid hex or `<a:noFill/>` → null =
-    // transparent). When spPr was absent the file is relying on the Excel
-    // default, which is an opaque white chart area — keep that so legacy
-    // charts still get their familiar frame.
-    chartBg: chart.hasChartSpPr ? (chart.chartBg ?? null) : 'FFFFFF',
-    legendManualLayout: chart.legendManualLayout ?? null,
-    // <c:legend> is the authoritative signal: present → show, absent → hide.
-    // A single-series bar chart in Excel typically omits <c:legend>, so we
-    // must honor that rather than deriving from series count.
-    showLegend: chart.showLegend ?? false,
-    legendPos: chart.legendPos ?? null,
-    catAxisCrossBetween: 'between',
-    // Default `out` per ECMA-376 §21.2.2.49 ST_TickMark when the spec
-    // didn't say. (We previously hard-coded `cross` which made every
-    // chart pretend it had crossing ticks even when the file said
-    // none / out.)
-    valAxisMajorTickMark: chart.valAxisMajorTickMark ?? 'out',
-    catAxisMajorTickMark: chart.catAxisMajorTickMark ?? 'out',
-    valAxisMinorTickMark: chart.valAxisMinorTickMark ?? null,
-    catAxisMinorTickMark: chart.catAxisMinorTickMark ?? null,
-    titleFontSizeHpt: chart.titleFontSizeHpt ?? null,
-    titleFontColor: chart.titleFontColor ?? null,
-    titleFontFace: chart.titleFontFace ?? null,
-    catAxisFontSizeHpt: chart.catAxisFontSizeHpt ?? null,
-    valAxisFontSizeHpt: chart.valAxisFontSizeHpt ?? null,
-    dataLabelFontSizeHpt: null,
-    subtotalIndices: [],
-    valAxisFormatCode: chart.valAxisFormatCode ?? null,
-    barGapWidth: chart.barGapWidth ?? null,
-    barOverlap: chart.barOverlap ?? null,
-    dataLabelPosition: chart.dataLabelPosition ?? null,
-    dataLabelFontColor: chart.dataLabelFontColor ?? null,
-    dataLabelFormatCode: chart.dataLabelFormatCode ?? null,
-    titleManualLayout: chart.titleManualLayout ?? null,
-    plotAreaManualLayout: chart.plotAreaManualLayout ?? null,
-    radarStyle: chart.radarStyle ?? null,
-    chartBorderColor: chart.chartBorderColor ?? null,
-    chartBorderWidthEmu: chart.chartBorderWidthEmu ?? null,
-  };
-}
 
 // ── renderCharts ────────────────────────────────────────────────────────────
 
@@ -4310,7 +4193,10 @@ function renderCharts(
     // XLSX natural rendering is device-px at 96 DPI where 1pt = 4/3 px. Scale
     // that by `cs` so OOXML-specified font sizes (title/axes) scale with zoom.
     const ptToPx = PT_TO_PX * cs;
-    renderChart(ctx, adaptChartData(anchor.chart), { x: cx, y: cy, w: cw, h: ch }, ptToPx);
+    // `anchor.chart` is already the canonical ChartModel emitted by the Rust
+    // parser (`ooxml_common::chart::ChartModel`) — the former `adaptChartData`
+    // default/mapping logic now lives in the parser's `From<ChartData>`.
+    renderChart(ctx, anchor.chart, { x: cx, y: cy, w: cw, h: ch }, ptToPx);
     ctx.restore();
   }
 }

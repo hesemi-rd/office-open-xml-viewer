@@ -1,7 +1,248 @@
 use crate::types::*;
 use crate::{parse_rels_map, resolve_fill_color, resolve_zip_path};
+use ooxml_common::chart::{
+    canonical_chart_type, ChartDataLabelOverride as CmDataLabelOverride,
+    ChartDataPointOverride as CmDataPointOverride, ChartErrBars as CmErrBars,
+    ChartManualLayout as CmManualLayout, ChartModel, ChartSeries as CmSeries,
+    ChartSeriesDataLabels as CmSeriesDataLabels, LegendManualLayout as CmLegendManualLayout,
+};
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
+
+// ─── ChartData → shared ChartModel (was the TS `adaptChartData`) ─────────────
+//
+// The xlsx parser builds a `ChartData` (parser-native: `chartType` + `barDir` +
+// `grouping`, always-present series `categories`/`showMarker`/`order`). Emitting
+// the chart to JSON goes through this conversion, which is the Rust home of the
+// former TS `adaptChartData` + `canonicalChartType` renderer helpers: it
+// applies every default and conditional the adapter did so the wire object is
+// already a canonical `ChartModel` and the TS side needs no adapter.
+
+impl From<ManualLayout> for CmManualLayout {
+    fn from(m: ManualLayout) -> Self {
+        CmManualLayout {
+            x_mode: m.x_mode,
+            y_mode: m.y_mode,
+            layout_target: m.layout_target,
+            x: m.x,
+            y: m.y,
+            w: m.w,
+            h: m.h,
+        }
+    }
+}
+
+impl From<LegendManualLayout> for CmLegendManualLayout {
+    fn from(m: LegendManualLayout) -> Self {
+        CmLegendManualLayout {
+            x_mode: m.x_mode,
+            y_mode: m.y_mode,
+            x: m.x,
+            y: m.y,
+            w: m.w,
+            h: m.h,
+        }
+    }
+}
+
+impl From<DataPointOverride> for CmDataPointOverride {
+    fn from(o: DataPointOverride) -> Self {
+        CmDataPointOverride {
+            idx: o.idx,
+            color: o.color,
+            marker_symbol: o.marker_symbol,
+            marker_size: o.marker_size.map(|v| v as f64),
+            marker_fill: o.marker_fill,
+            marker_line: o.marker_line,
+        }
+    }
+}
+
+impl From<DataLabelOverride> for CmDataLabelOverride {
+    fn from(o: DataLabelOverride) -> Self {
+        CmDataLabelOverride {
+            idx: o.idx,
+            text: o.text,
+            position: o.position,
+            font_color: o.font_color,
+            font_size_hpt: o.font_size_hpt,
+            font_bold: o.font_bold,
+        }
+    }
+}
+
+impl From<SeriesDataLabels> for CmSeriesDataLabels {
+    fn from(d: SeriesDataLabels) -> Self {
+        CmSeriesDataLabels {
+            show_val: d.show_val,
+            show_cat_name: d.show_cat_name,
+            show_ser_name: d.show_ser_name,
+            show_percent: d.show_percent,
+            position: d.position,
+            font_color: d.font_color,
+            format_code: d.format_code,
+            font_bold: d.font_bold,
+            font_size_hpt: d.font_size_hpt,
+        }
+    }
+}
+
+impl From<ErrBars> for CmErrBars {
+    fn from(e: ErrBars) -> Self {
+        CmErrBars {
+            dir: e.dir,
+            bar_type: e.bar_type,
+            plus: e.plus,
+            minus: e.minus,
+            no_end_cap: e.no_end_cap,
+            color: e.color,
+            line_width_emu: e.line_width_emu,
+            dash: e.dash,
+        }
+    }
+}
+
+/// Maps `Vec<T>` → `Some(Vec<U>)` when non-empty, `None` when empty — the Rust
+/// form of the adapter's `xs.length > 0 ? xs : null` / `xs ?? null` on the
+/// per-series override / errbar arrays.
+fn some_if_nonempty<T, U: From<T>>(xs: Vec<T>) -> Option<Vec<U>> {
+    if xs.is_empty() {
+        None
+    } else {
+        Some(xs.into_iter().map(U::from).collect())
+    }
+}
+
+impl From<ChartSeries> for CmSeries {
+    fn from(s: ChartSeries) -> Self {
+        CmSeries {
+            name: s.name,
+            color: s.color,
+            values: s.values,
+            // xlsx never resolves these (pptx chartEx-only) — matches the
+            // adapter, which omitted them.
+            data_point_colors: None,
+            data_label_colors: None,
+            label_color: s.label_color,
+            series_type: Some(s.series_type),
+            use_secondary_axis: None,
+            // `categories.length > 0 ? categories : null`.
+            categories: if s.categories.is_empty() {
+                None
+            } else {
+                Some(s.categories)
+            },
+            show_marker: Some(s.show_marker),
+            val_format_code: s.val_format_code,
+            marker_symbol: s.marker_symbol,
+            marker_size: s.marker_size.map(|v| v as f64),
+            marker_fill: s.marker_fill,
+            marker_line: s.marker_line,
+            data_point_overrides: some_if_nonempty(s.data_point_overrides),
+            data_label_overrides: some_if_nonempty(s.data_label_overrides),
+            series_data_labels: s.series_data_labels.map(CmSeriesDataLabels::from),
+            err_bars: some_if_nonempty(s.err_bars),
+            bubble_sizes: None,
+            // `order` is xlsx parse-time only (used for stacking/legend sort
+            // before emit); core `ChartSeries` has no such field.
+        }
+    }
+}
+
+impl From<ChartData> for ChartModel {
+    fn from(c: ChartData) -> Self {
+        // The white-default rule (adapter): when a `<c:chartSpace><c:spPr>` was
+        // present we honor whatever it resolved to (solid hex or noFill→None);
+        // when spPr was absent the file relies on Excel's default opaque-white
+        // chart area, so we substitute white.
+        let chart_bg = if c.has_chart_sp_pr {
+            c.chart_bg
+        } else {
+            Some("FFFFFF".to_string())
+        };
+        ChartModel {
+            chart_type: canonical_chart_type(&c.chart_type, &c.bar_dir, &c.grouping),
+            title: c.title,
+            categories: c.categories,
+            series: c.series.into_iter().map(CmSeries::from).collect(),
+            show_data_labels: c.show_data_labels,
+            // Adapter mapped `valAxisMin/Max` → `valMin/Max`.
+            val_min: c.val_axis_min,
+            val_max: c.val_axis_max,
+            cat_axis_title: c.cat_axis_title,
+            val_axis_title: c.val_axis_title,
+            cat_axis_hidden: c.cat_axis_hidden,
+            val_axis_hidden: c.val_axis_hidden,
+            cat_axis_line_hidden: c.cat_axis_line_hidden,
+            val_axis_line_hidden: c.val_axis_line_hidden,
+            // Adapter hard-coded `plotAreaBg: null` (xlsx never resolves it).
+            plot_area_bg: None,
+            chart_bg,
+            show_legend: c.show_legend,
+            legend_pos: c.legend_pos,
+            // Adapter hard-coded `catAxisCrossBetween: 'between'`.
+            cat_axis_cross_between: "between".to_string(),
+            // Adapter default `?? 'out'` (ECMA-376 §21.2.2.49 ST_TickMark).
+            val_axis_major_tick_mark: c
+                .val_axis_major_tick_mark
+                .unwrap_or_else(|| "out".to_string()),
+            cat_axis_major_tick_mark: c
+                .cat_axis_major_tick_mark
+                .unwrap_or_else(|| "out".to_string()),
+            title_font_size_hpt: c.title_font_size_hpt,
+            title_font_color: c.title_font_color,
+            title_font_face: c.title_font_face,
+            cat_axis_font_size_hpt: c.cat_axis_font_size_hpt,
+            val_axis_font_size_hpt: c.val_axis_font_size_hpt,
+            // Adapter hard-coded `dataLabelFontSizeHpt: null` (xlsx never sets it).
+            data_label_font_size_hpt: None,
+            // Adapter hard-coded `subtotalIndices: []` (waterfall is pptx-only).
+            subtotal_indices: vec![],
+            val_axis_minor_tick_mark: c.val_axis_minor_tick_mark,
+            cat_axis_minor_tick_mark: c.cat_axis_minor_tick_mark,
+            // xlsx never resolves axis tick-label colors → adapter omitted them.
+            cat_axis_font_color: None,
+            val_axis_font_color: None,
+            legend_manual_layout: c.legend_manual_layout.map(CmLegendManualLayout::from),
+            val_axis_format_code: c.val_axis_format_code,
+            bar_gap_width: c.bar_gap_width,
+            bar_overlap: c.bar_overlap,
+            data_label_position: c.data_label_position,
+            data_label_font_color: c.data_label_font_color,
+            data_label_format_code: c.data_label_format_code,
+            title_font_bold: c.title_font_bold,
+            cat_axis_font_bold: c.cat_axis_font_bold,
+            val_axis_font_bold: c.val_axis_font_bold,
+            cat_axis_title_font_size_hpt: c.cat_axis_title_size,
+            cat_axis_title_font_bold: c.cat_axis_title_bold,
+            cat_axis_title_font_color: c.cat_axis_title_color,
+            val_axis_title_font_size_hpt: c.val_axis_title_size,
+            val_axis_title_font_bold: c.val_axis_title_bold,
+            val_axis_title_font_color: c.val_axis_title_color,
+            chart_border_color: c.chart_border_color,
+            chart_border_width_emu: c.chart_border_width_emu,
+            cat_axis_crosses: c.cat_axis_crosses,
+            cat_axis_crosses_at: c.cat_axis_crosses_at,
+            val_axis_crosses: c.val_axis_crosses,
+            val_axis_crosses_at: c.val_axis_crosses_at,
+            cat_axis_line_color: c.cat_axis_line_color,
+            cat_axis_line_width_emu: c.cat_axis_line_width_emu,
+            val_axis_line_color: c.val_axis_line_color,
+            val_axis_line_width_emu: c.val_axis_line_width_emu,
+            cat_axis_format_code: c.cat_axis_format_code,
+            cat_axis_min: c.cat_axis_min,
+            cat_axis_max: c.cat_axis_max,
+            title_manual_layout: c.title_manual_layout.map(CmManualLayout::from),
+            plot_area_manual_layout: c.plot_area_manual_layout.map(CmManualLayout::from),
+            // xlsx combo charts are not implemented → no scatter style / secondary
+            // axis (adapter omitted both). scatterStyle is scatter-only and xlsx
+            // doesn't parse it; secondaryValAxis is pptx-only.
+            scatter_style: None,
+            radar_style: c.radar_style,
+            secondary_val_axis: None,
+        }
+    }
+}
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
 /// its drawing(s) for chart anchors (`<xdr:graphicFrame>` elements).
@@ -186,7 +427,9 @@ pub(crate) fn load_sheet_charts(
                 to_col_off,
                 to_row,
                 to_row_off,
-                chart: chart_data,
+                // Adapt the parser-native `ChartData` into the canonical
+                // `ChartModel` at emit time (was the TS `adaptChartData`).
+                chart: chart_data.into(),
             });
         }
     }
@@ -2155,6 +2398,144 @@ mod pie_doughnut_tests {
             chart.series[0].values,
             vec![Some(30.0), Some(50.0), Some(20.0)]
         );
+    }
+
+    // ── Oracle for the `ChartData → ChartModel` conversion (was adaptChartData) ──
+    //
+    // These pin the adapter defaults / conditionals that moved from TS to Rust.
+    // The emitted `ChartModel` must carry them exactly so chart rendering is
+    // unchanged.
+
+    /// A vertical clustered bar chart, no `<c:chartSpace><c:spPr>` (relies on
+    /// Excel's default opaque-white chart area). Exercises: canonical chartType,
+    /// white chartBg default, `between` crossBetween, `out` tick defaults,
+    /// null plotAreaBg / dataLabelFontSizeHpt, empty subtotalIndices, and the
+    /// series adapter (categories→Some, showMarker→Some, seriesType→Some,
+    /// `order` dropped).
+    fn bar_chart_xml() -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Sales</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+      <c:valAx><c:axId val="1"/><c:scaling><c:max val="30"/><c:min val="0"/></c:scaling><c:axPos val="l"/></c:valAx>
+      <c:catAx><c:axId val="2"/><c:axPos val="b"/></c:catAx>
+    </c:plotArea>
+    <c:legend><c:legendPos val="b"/></c:legend>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        )
+    }
+
+    #[test]
+    fn adapter_bar_defaults_and_series_mapping() {
+        let data = parse_chart_xml(&bar_chart_xml(), C_NS, A_NS, &theme()).expect("bar parses");
+        // `order` exists on the parse-time series but not on the emitted model.
+        assert_eq!(data.series[0].order, 0);
+        let m = ChartModel::from(data);
+
+        // Canonical chartType (bar + col + clustered).
+        assert_eq!(m.chart_type, "clusteredBar");
+        // No `<c:spPr>` on chartSpace → Excel default opaque white.
+        assert_eq!(m.chart_bg.as_deref(), Some("FFFFFF"));
+        // Hard-coded adapter constants.
+        assert_eq!(m.cat_axis_cross_between, "between");
+        assert!(m.plot_area_bg.is_none());
+        assert!(m.data_label_font_size_hpt.is_none());
+        assert!(m.subtotal_indices.is_empty());
+        // Tick-mark default `out` (adapter `?? 'out'`).
+        assert_eq!(m.val_axis_major_tick_mark, "out");
+        assert_eq!(m.cat_axis_major_tick_mark, "out");
+        // valAxisMin/Max → valMin/Max rename.
+        assert_eq!(m.val_min, Some(0.0));
+        assert_eq!(m.val_max, Some(30.0));
+        assert_eq!(m.legend_pos.as_deref(), Some("b"));
+
+        // Series adapter: categories non-empty → Some; showMarker/seriesType
+        // wrapped in Some; the `order` field is gone.
+        assert_eq!(m.series.len(), 1);
+        let s = &m.series[0];
+        assert_eq!(s.name, "Sales");
+        assert_eq!(
+            s.categories.as_deref(),
+            Some(&["Q1".to_string(), "Q2".to_string()][..])
+        );
+        assert_eq!(s.series_type.as_deref(), Some("bar"));
+        assert_eq!(s.show_marker, Some(false));
+        assert_eq!(s.values, vec![Some(10.0), Some(20.0)]);
+        // xlsx never populates these (pptx chartEx-only).
+        assert!(s.data_point_colors.is_none());
+        assert!(s.bubble_sizes.is_none());
+        assert!(s.use_secondary_axis.is_none());
+    }
+
+    /// A horizontal stacked bar → `stackedBarH`, and an explicit
+    /// `<c:chartSpace><c:spPr><a:noFill/>` → transparent chartBg (None), NOT the
+    /// white default. Proves the `has_chart_sp_pr` branch of the adapter.
+    #[test]
+    fn adapter_horizontal_stacked_and_nofill_bg() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea>
+      <c:barChart>
+        <c:barDir val="bar"/>
+        <c:grouping val="stacked"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt></c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+    </c:plotArea>
+  </c:chart>
+  <c:spPr><a:noFill/></c:spPr>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m = ChartModel::from(parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("parses"));
+        assert_eq!(m.chart_type, "stackedBarH");
+        // spPr present but noFill → transparent, so NOT the white default.
+        assert!(
+            m.chart_bg.is_none(),
+            "explicit noFill spPr must yield transparent chartBg, got {:?}",
+            m.chart_bg
+        );
+    }
+
+    /// A series with no `<c:cat>` → empty categories → adapter emits `None`
+    /// (not an empty array), matching `categories.length > 0 ? … : null`.
+    #[test]
+    fn adapter_empty_categories_become_none() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart><c:plotArea><c:lineChart>
+    <c:ser><c:idx val="0"/><c:order val="0"/>
+      <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+    </c:ser>
+  </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m = ChartModel::from(parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("parses"));
+        assert_eq!(m.chart_type, "line");
+        assert!(m.series[0].categories.is_none());
     }
 }
 

@@ -340,12 +340,13 @@ fn render_table_cell_md(cell: &TableCell) -> String {
 
 fn render_chart_md(c: &ChartElement, out: &mut String) {
     use std::fmt::Write as _;
-    let title = c.title.as_deref().unwrap_or("(untitled)");
-    let _ = writeln!(out, "**Chart ({}): {}**\n", c.chart_type, title);
-    if !c.categories.is_empty() {
-        let _ = writeln!(out, "- Categories: {}", c.categories.join(", "));
+    let chart = &c.chart;
+    let title = chart.title.as_deref().unwrap_or("(untitled)");
+    let _ = writeln!(out, "**Chart ({}): {}**\n", chart.chart_type, title);
+    if !chart.categories.is_empty() {
+        let _ = writeln!(out, "- Categories: {}", chart.categories.join(", "));
     }
-    for s in &c.series {
+    for s in &chart.series {
         let values: Vec<String> = s
             .values
             .iter()
@@ -560,92 +561,19 @@ enum SlideElement {
     Media(MediaElement),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ChartSeriesData {
-    name: String,
-    values: Vec<Option<f64>>,
-    color: Option<String>,
-    /// Per-data-point colors (used for pie/doughnut charts). None if all points use series color.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data_point_colors: Option<Vec<Option<String>>>,
-    /// Per-data-point data-label text colors. ChartEx (`<cx:dataLabel idx>`) uses this
-    /// to switch label colour per bar — sample-2's waterfall paints the negative
-    /// △ values in red (accent1) while positive values stay in tx1.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data_label_colors: Option<Vec<Option<String>>>,
-    /// Per-series X values for scatter/bubble charts (ECMA-376 §21.2.2.43 `<c:xVal>`).
-    /// Emitted as strings so the core ChartSeries.categories field can stay
-    /// string-typed across both category-axis and value-axis charts. None for
-    /// non-scatter charts (they use the chart-level `categories`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    categories: Option<Vec<String>>,
-    /// Per-point bubble sizes from `<c:bubbleSize>` (ECMA-376 §21.2.2.4) —
-    /// drives marker radius (sqrt-scaled) on bubble charts. None for
-    /// non-bubble series.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bubble_sizes: Option<Vec<Option<f64>>>,
-    /// `<c:val><c:numRef><c:numCache><c:formatCode>` — the series value number
-    /// format (ECMA-376 §21.2.2.121). Drives data-label formatting (thousands
-    /// separators, decimals, etc.) when the `<c:dLbls>` block has no explicit
-    /// `<c:numFmt>` of its own. `None` for "General" / unformatted series.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_format_code: Option<String>,
-    /// `<c:ser><c:dLbls><c:txPr>…<a:solidFill>` — series-level data-label text
-    /// colour (ECMA-376 §21.2.2.216). Stacked bars colour each segment's label
-    /// independently (e.g. white on the dark segment, black on the light one),
-    /// so a single chart-level colour cannot represent both series.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label_color: Option<String>,
-    /// Renderer series-type override derived from the series' chart group
-    /// (ECMA-376 §21.2.2.* `<c:barChart>`/`<c:lineChart>`). "line" when the
-    /// series sits in a `<c:lineChart>` group of a combo chart whose primary
-    /// type is bar, so the renderer draws it as a line over the columns. None =
-    /// render with the chart's primary type.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    series_type: Option<String>,
-    /// True when this series' chart group references the SECONDARY value axis
-    /// (the `<c:valAx>` with `axPos="r"` / `<c:crosses val="max">`). The
-    /// renderer plots it against `ChartElement::secondary_val_axis`'s
-    /// independent scale, drawn on the right edge of the plot.
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    use_secondary_axis: bool,
-}
+// Chart data-model structs now live in `ooxml_common::chart` (the Rust mirror
+// of core's TS `ChartModel`). The parser builds a `ChartModel` and emits it as
+// the single nested `chart` field of `ChartElement` — the pptx JSON shape the
+// TS renderer consumes without a per-field adapter. `ChartSeriesData` /
+// `SecondaryValueAxis` / `ChartManualLayout` (formerly defined here) are the
+// shared `ChartSeries` / `SecondaryValueAxis` / `ChartManualLayout`.
+use ooxml_common::chart::{
+    ChartManualLayout, ChartModel, ChartSeries as ChartSeriesData, SecondaryValueAxis,
+};
 
-/// A secondary value axis for combo charts — a second `<c:valAx>` with
-/// `axPos="r"` and `<c:crosses val="max">` (ECMA-376 §21.2.2.160 scaling,
-/// §21.2.2.33 crosses / ST_Crosses §21.2.3.8). Series whose chart group
-/// references this axis are
-/// plotted against its independent scale and the axis is drawn on the right
-/// edge of the plot. Fields mirror the primary value axis but live in a nested
-/// struct so the flat primary-axis fields stay untouched (and the whole block
-/// is absent on the wire for the common single-axis case).
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct SecondaryValueAxis {
-    min: Option<f64>,
-    max: Option<f64>,
-    title: Option<String>,
-    hidden: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    font_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    font_size_hpt: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    line_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    line_width_emu: Option<u32>,
-    line_hidden: bool,
-    major_tick_mark: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title_font_size_hpt: Option<i32>,
-    title_font_bold: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title_font_color: Option<String>,
-}
-
+/// A chart graphic frame on a slide. The chart payload itself is the shared
+/// [`ChartModel`]; only the frame geometry (`x`/`y`/`width`/`height`, in EMU)
+/// and the `type` discriminant are pptx-specific.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChartElement {
@@ -653,184 +581,7 @@ struct ChartElement {
     y: i64,
     width: i64,
     height: i64,
-    chart_type: String,
-    title: Option<String>,
-    categories: Vec<String>,
-    series: Vec<ChartSeriesData>,
-    val_max: Option<f64>,
-    val_min: Option<f64>,
-    subtotal_indices: Vec<u32>,
-    /// Whether to render data value labels on bars/segments
-    show_data_labels: bool,
-    /// True when <c:catAx><c:delete val="1"/> — hide category axis labels/ticks
-    cat_axis_hidden: bool,
-    /// True when <c:valAx><c:delete val="1"/> — hide value axis labels/ticks
-    val_axis_hidden: bool,
-    /// Plot area background color from <c:plotArea><c:spPr><a:solidFill> (hex without #)
-    plot_area_bg: Option<String>,
-    /// Outer chartSpace background (hex without #). None when chartSpace spPr is
-    /// noFill or absent — in which case the slide background shows through.
-    chart_bg: Option<String>,
-    /// True when <c:legend> is present; false means no legend should render.
-    show_legend: bool,
-    /// <c:catAx><c:crossBetween val="..."/>. "between" → inset category positions
-    /// by half a step so the first/last point aren't flush against the axes.
-    /// "midCat" → points sit exactly on the axes. Defaults to "between" when absent.
-    cat_axis_cross_between: String,
-    /// <c:valAx><c:majorTickMark val="..."/>: "out" | "cross" | "in" | "none".
-    val_axis_major_tick_mark: String,
-    /// <c:catAx><c:majorTickMark val="..."/>.
-    cat_axis_major_tick_mark: String,
-    /// Title rPr@sz in OOXML hundredths of a point (e.g. 1600 = 16pt). None
-    /// falls back to a proportional default.
-    title_font_size_hpt: Option<i32>,
-    /// <c:catAx><c:txPr>…defRPr@sz — category-axis label font size (hpt).
-    cat_axis_font_size_hpt: Option<i32>,
-    /// <c:valAx><c:txPr>…defRPr@sz — value-axis label font size (hpt).
-    val_axis_font_size_hpt: Option<i32>,
-    /// `<c:catAx><c:txPr>…<a:solidFill>` resolved to hex (no #) — category-axis
-    /// tick-label text color. None falls back to the renderer's default gray.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_font_color: Option<String>,
-    /// `<c:valAx><c:txPr>…<a:solidFill>` resolved to hex (no #) — value-axis
-    /// tick-label text color.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_font_color: Option<String>,
-    /// `<c:catAx><c:spPr><a:ln><a:solidFill>` resolved to hex (no #) — the
-    /// category-axis line color (ECMA-376 §21.2.2.*). None → renderer default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_line_color: Option<String>,
-    /// `<c:catAx><c:spPr><a:ln w>` width in EMU.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_line_width_emu: Option<u32>,
-    /// `<c:catAx><c:spPr><a:ln><a:noFill>` — suppress just the category-axis rule.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    cat_axis_line_hidden: bool,
-    /// `<c:valAx><c:spPr><a:ln><a:solidFill>` resolved to hex (no #).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_line_color: Option<String>,
-    /// `<c:valAx><c:spPr><a:ln w>` width in EMU.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_line_width_emu: Option<u32>,
-    /// `<c:valAx><c:spPr><a:ln><a:noFill>` — suppress just the value-axis rule.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    val_axis_line_hidden: bool,
-    /// <c:dLbls><c:txPr>…defRPr@sz — data-label font size (hpt).
-    data_label_font_size_hpt: Option<i32>,
-    /// `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr".
-    /// None when `<c:legend>` is absent (then `show_legend` is also false).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    legend_pos: Option<String>,
-    /// `<c:barChart><c:gapWidth val>` — percent of bar width between category
-    /// groups (ECMA-376 §21.2.2.13). Default 150 if absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bar_gap_width: Option<i32>,
-    /// `<c:barChart><c:overlap val>` — signed percent of bar width for cluster
-    /// overlap (ECMA-376 §21.2.2.25). Negative = gap; +100 = full overlap (stacked).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bar_overlap: Option<i32>,
-    /// `<c:dLbls><c:dLblPos val>` — data label position relative to bar/marker
-    /// ("ctr" | "inEnd" | "outEnd" | "inBase" | …). None falls back to renderer default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data_label_position: Option<String>,
-    /// `<c:dLbls><c:txPr>…<a:solidFill>` resolved to hex (no #) — data label text color.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data_label_font_color: Option<String>,
-    /// `<c:dLbls><c:numFmt formatCode>` — data label number format (e.g. "0.0%").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data_label_format_code: Option<String>,
-    /// `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_format_code: Option<String>,
-    /// `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area placement
-    /// (ECMA-376 §21.2.2.32). Templates use this to keep the chart's bars from
-    /// occupying the full chart-frame width when callout text sits beside the
-    /// frame; without honouring it the bars overflow into the side annotations
-    /// (sample-2 slide-16's horizontal bar chart).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    plot_area_manual_layout: Option<ChartManualLayout>,
-    /// `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42). Values:
-    /// "marker" | "line" | "lineMarker" | "lineNoMarker" | "smooth" |
-    /// "smoothMarker" | "smoothNoMarker". None for non-scatter charts;
-    /// renderer falls back to "marker" when absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scatter_style: Option<String>,
-    /// `<c:catAx><c:title>` plain text (ECMA-376 §21.2.2.6). For scatter charts
-    /// (two `<c:valAx>`, no `<c:catAx>`) the bottom `<c:valAx>` (axPos b/t) is
-    /// the horizontal axis, so its title is recorded here. None = no title.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_title: Option<String>,
-    /// `<c:valAx><c:title>` plain text. For scatter the left `<c:valAx>`
-    /// (axPos l/r) is the vertical axis. None = no title.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_title: Option<String>,
-    /// `<c:catAx><c:title>` run-property font size in hundredths of a point
-    /// (first `a:defRPr@sz`/`a:rPr@sz` inside the axis title). Distinct from
-    /// `cat_axis_font_size_hpt` (tick-label size). None = renderer default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_title_size: Option<i32>,
-    /// `<c:catAx><c:title>` run-property bold flag. None = inherit (not bold).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_title_bold: Option<bool>,
-    /// `<c:catAx><c:title>` run-property color (hex without `#`) from the first
-    /// `a:solidFill/a:srgbClr@val`. None = renderer default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_title_color: Option<String>,
-    /// `<c:valAx><c:title>` run-property font size in hundredths of a point.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_title_size: Option<i32>,
-    /// `<c:valAx><c:title>` run-property bold flag. None = inherit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_title_bold: Option<bool>,
-    /// `<c:valAx><c:title>` run-property color (hex without `#`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_title_color: Option<String>,
-    /// `<c:title>...defRPr@b` / `rPr@b` — bold flag for the CHART title.
-    /// None = inherit (renderer treats as not bold). Parsed already but
-    /// previously never serialized — now wired through for parity with xlsx.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title_font_bold: Option<bool>,
-    /// `<c:catAx><c:txPr>...defRPr@b>` — bold flag for category-axis tick labels.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cat_axis_font_bold: Option<bool>,
-    /// `<c:valAx><c:txPr>...defRPr@b>` — bold flag for value-axis tick labels.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    val_axis_font_bold: Option<bool>,
-    /// `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr@val>` — explicit
-    /// chart border color (hex without `#`). Only populated when the XML
-    /// explicitly declares a paintable line; `<a:noFill/>` or an absent `<a:ln>`
-    /// leaves this None (no default border). schemeClr is not resolved here
-    /// (kept in lockstep with the xlsx parser's locked policy).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chart_border_color: Option<String>,
-    /// `<c:chartSpace><c:spPr><a:ln@w>` — explicit chart border width in EMU.
-    /// None = unset (renderer uses a 1px hairline when a color is present).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chart_border_width_emu: Option<u32>,
-    /// Secondary value axis for combo charts (bar + line with a right-hand
-    /// axis). None for the common single value-axis case. See
-    /// `SecondaryValueAxis`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    secondary_val_axis: Option<SecondaryValueAxis>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ChartManualLayout {
-    /// "edge" = x/y are absolute fractions from top-left of chart space;
-    /// "factor" = fractions offset from the renderer's default placement.
-    x_mode: String,
-    y_mode: String,
-    /// "inner" (excludes axes / tick labels) | "outer" (includes them).
-    /// Only meaningful for plotArea — title/legend ignore it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    layout_target: Option<String>,
-    x: f64,
-    y: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    w: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    h: Option<f64>,
+    chart: ChartModel,
 }
 
 // ===== Table data model =====
@@ -5929,7 +5680,23 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                 val_format_code,
                 label_color,
                 series_type,
-                use_secondary_axis,
+                // Shared `ChartSeries.use_secondary_axis` is `Option<bool>`; the
+                // legacy default (false) is expressed as `None` so it drops off
+                // the wire exactly as the old `skip_serializing_if = "Not::not"`
+                // did.
+                use_secondary_axis: if use_secondary_axis { Some(true) } else { None },
+                // Fields the legacy `<c:chart>` path doesn't populate (marker
+                // styling, per-point overrides, per-series dLbls, error bars) —
+                // pptx renders these from the series color today.
+                show_marker: None,
+                marker_symbol: None,
+                marker_size: None,
+                marker_fill: None,
+                marker_line: None,
+                data_point_overrides: None,
+                data_label_overrides: None,
+                series_data_labels: None,
+                err_bars: None,
             }
         })
         .collect();
@@ -6209,57 +5976,79 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         y: 0,
         width: 0,
         height: 0,
-        chart_type,
-        title,
-        categories,
-        series,
-        val_max,
-        val_min,
-        subtotal_indices: vec![],
-        show_data_labels,
-        cat_axis_hidden,
-        val_axis_hidden,
-        plot_area_bg,
-        chart_bg,
-        show_legend,
-        cat_axis_cross_between,
-        val_axis_major_tick_mark,
-        cat_axis_major_tick_mark,
-        title_font_size_hpt,
-        cat_axis_font_size_hpt,
-        val_axis_font_size_hpt,
-        cat_axis_font_color,
-        val_axis_font_color,
-        cat_axis_line_color,
-        cat_axis_line_width_emu,
-        cat_axis_line_hidden,
-        val_axis_line_color,
-        val_axis_line_width_emu,
-        val_axis_line_hidden,
-        data_label_font_size_hpt,
-        legend_pos,
-        bar_gap_width,
-        bar_overlap,
-        data_label_position,
-        data_label_font_color,
-        data_label_format_code,
-        val_axis_format_code,
-        plot_area_manual_layout,
-        scatter_style,
-        cat_axis_title,
-        val_axis_title,
-        cat_axis_title_size,
-        cat_axis_title_bold,
-        cat_axis_title_color,
-        val_axis_title_size,
-        val_axis_title_bold,
-        val_axis_title_color,
-        title_font_bold,
-        cat_axis_font_bold,
-        val_axis_font_bold,
-        chart_border_color,
-        chart_border_width_emu,
-        secondary_val_axis,
+        chart: ChartModel {
+            chart_type,
+            title,
+            categories,
+            series,
+            val_max,
+            val_min,
+            subtotal_indices: vec![],
+            show_data_labels,
+            cat_axis_hidden,
+            val_axis_hidden,
+            plot_area_bg,
+            chart_bg,
+            show_legend,
+            cat_axis_cross_between,
+            val_axis_major_tick_mark,
+            cat_axis_major_tick_mark,
+            title_font_size_hpt,
+            title_font_color: None,
+            title_font_face: None,
+            cat_axis_font_size_hpt,
+            val_axis_font_size_hpt,
+            cat_axis_font_color,
+            val_axis_font_color,
+            cat_axis_line_color,
+            cat_axis_line_width_emu,
+            cat_axis_line_hidden,
+            val_axis_line_color,
+            val_axis_line_width_emu,
+            val_axis_line_hidden,
+            data_label_font_size_hpt,
+            legend_pos,
+            bar_gap_width,
+            bar_overlap,
+            data_label_position,
+            data_label_font_color,
+            data_label_format_code,
+            val_axis_format_code,
+            plot_area_manual_layout,
+            scatter_style,
+            cat_axis_title,
+            val_axis_title,
+            // TS `ChartElement` renamed the axis-title run-prop fields to the
+            // core `ChartModel` names (`…TitleFontSizeHpt/Bold/Color`); the
+            // parser locals keep the shorter legacy names.
+            cat_axis_title_font_size_hpt: cat_axis_title_size,
+            cat_axis_title_font_bold: cat_axis_title_bold,
+            cat_axis_title_font_color: cat_axis_title_color,
+            val_axis_title_font_size_hpt: val_axis_title_size,
+            val_axis_title_font_bold: val_axis_title_bold,
+            val_axis_title_font_color: val_axis_title_color,
+            title_font_bold,
+            cat_axis_font_bold,
+            val_axis_font_bold,
+            chart_border_color,
+            chart_border_width_emu,
+            secondary_val_axis,
+            // ChartModel fields the legacy pptx `<c:chart>` path leaves unset
+            // (they were never in the pptx `ChartElement` copy, so they defaulted
+            // to `undefined` on the TS side and stay absent on the wire).
+            val_axis_minor_tick_mark: None,
+            cat_axis_minor_tick_mark: None,
+            legend_manual_layout: None,
+            title_manual_layout: None,
+            cat_axis_crosses: None,
+            cat_axis_crosses_at: None,
+            val_axis_crosses: None,
+            val_axis_crosses_at: None,
+            cat_axis_format_code: None,
+            cat_axis_min: None,
+            cat_axis_max: None,
+            radar_style: None,
+        },
     })
 }
 
@@ -6404,7 +6193,16 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         val_format_code: None,
         label_color: None,
         series_type: None,
-        use_secondary_axis: false,
+        use_secondary_axis: None,
+        show_marker: None,
+        marker_symbol: None,
+        marker_size: None,
+        marker_fill: None,
+        marker_line: None,
+        data_point_overrides: None,
+        data_label_overrides: None,
+        series_data_labels: None,
+        err_bars: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
@@ -6430,59 +6228,75 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         y: 0,
         width: 0,
         height: 0,
-        chart_type,
-        title: None,
-        categories,
-        series,
-        val_max: None,
-        val_min: None,
-        subtotal_indices,
-        show_data_labels: false,
-        cat_axis_hidden,
-        val_axis_hidden,
-        plot_area_bg: None,
-        chart_bg: None,
-        show_legend: false,
-        cat_axis_cross_between: "between".to_string(),
-        val_axis_major_tick_mark: "cross".to_string(),
-        cat_axis_major_tick_mark: "cross".to_string(),
-        title_font_size_hpt: None,
-        cat_axis_font_size_hpt: None,
-        val_axis_font_size_hpt: None,
-        cat_axis_font_color: None,
-        val_axis_font_color: None,
-        cat_axis_line_color: None,
-        cat_axis_line_width_emu: None,
-        cat_axis_line_hidden: false,
-        val_axis_line_color: None,
-        val_axis_line_width_emu: None,
-        val_axis_line_hidden: false,
-        data_label_font_size_hpt: None,
-        legend_pos: None,
-        bar_gap_width,
-        bar_overlap: None,
-        data_label_position: None,
-        data_label_font_color: None,
-        data_label_format_code: None,
-        val_axis_format_code: None,
-        plot_area_manual_layout: None,
-        scatter_style: None,
-        // chartEx (waterfall/treemap/etc.) has its own axis model and is not
-        // wired for axis titles or an explicit chartSpace border yet.
-        cat_axis_title: None,
-        val_axis_title: None,
-        cat_axis_title_size: None,
-        cat_axis_title_bold: None,
-        cat_axis_title_color: None,
-        val_axis_title_size: None,
-        val_axis_title_bold: None,
-        val_axis_title_color: None,
-        title_font_bold: None,
-        cat_axis_font_bold: None,
-        val_axis_font_bold: None,
-        chart_border_color: None,
-        chart_border_width_emu: None,
-        secondary_val_axis: None,
+        chart: ChartModel {
+            chart_type,
+            title: None,
+            categories,
+            series,
+            val_max: None,
+            val_min: None,
+            subtotal_indices,
+            show_data_labels: false,
+            cat_axis_hidden,
+            val_axis_hidden,
+            plot_area_bg: None,
+            chart_bg: None,
+            show_legend: false,
+            cat_axis_cross_between: "between".to_string(),
+            val_axis_major_tick_mark: "cross".to_string(),
+            cat_axis_major_tick_mark: "cross".to_string(),
+            title_font_size_hpt: None,
+            title_font_color: None,
+            title_font_face: None,
+            cat_axis_font_size_hpt: None,
+            val_axis_font_size_hpt: None,
+            cat_axis_font_color: None,
+            val_axis_font_color: None,
+            cat_axis_line_color: None,
+            cat_axis_line_width_emu: None,
+            cat_axis_line_hidden: false,
+            val_axis_line_color: None,
+            val_axis_line_width_emu: None,
+            val_axis_line_hidden: false,
+            data_label_font_size_hpt: None,
+            legend_pos: None,
+            bar_gap_width,
+            bar_overlap: None,
+            data_label_position: None,
+            data_label_font_color: None,
+            data_label_format_code: None,
+            val_axis_format_code: None,
+            plot_area_manual_layout: None,
+            scatter_style: None,
+            // chartEx (waterfall/treemap/etc.) has its own axis model and is not
+            // wired for axis titles or an explicit chartSpace border yet.
+            cat_axis_title: None,
+            val_axis_title: None,
+            cat_axis_title_font_size_hpt: None,
+            cat_axis_title_font_bold: None,
+            cat_axis_title_font_color: None,
+            val_axis_title_font_size_hpt: None,
+            val_axis_title_font_bold: None,
+            val_axis_title_font_color: None,
+            title_font_bold: None,
+            cat_axis_font_bold: None,
+            val_axis_font_bold: None,
+            chart_border_color: None,
+            chart_border_width_emu: None,
+            secondary_val_axis: None,
+            val_axis_minor_tick_mark: None,
+            cat_axis_minor_tick_mark: None,
+            legend_manual_layout: None,
+            title_manual_layout: None,
+            cat_axis_crosses: None,
+            cat_axis_crosses_at: None,
+            val_axis_crosses: None,
+            val_axis_crosses_at: None,
+            cat_axis_format_code: None,
+            cat_axis_min: None,
+            cat_axis_max: None,
+            radar_style: None,
+        },
     })
 }
 
@@ -9744,11 +9558,11 @@ mod tests {
 </c:chartSpace>"#;
         let chart = parse_legacy_chart(xml, &HashMap::new())
             .expect("area chart with multi-level cat should parse");
-        assert_eq!(chart.chart_type, "area");
-        assert_eq!(chart.categories, vec!["Jan", "Feb", "Mar"]);
-        assert_eq!(chart.series.len(), 1);
+        assert_eq!(chart.chart.chart_type, "area");
+        assert_eq!(chart.chart.categories, vec!["Jan", "Feb", "Mar"]);
+        assert_eq!(chart.chart.series.len(), 1);
         assert_eq!(
-            chart.series[0].values,
+            chart.chart.series[0].values,
             vec![Some(10.0), Some(20.0), Some(30.0)],
             "all three points must survive — a multi-level cat must not truncate the series"
         );
@@ -9776,8 +9590,8 @@ mod tests {
  </c:pieChart></c:plotArea></c:chart>
 </c:chartSpace>"#;
         let chart = parse_legacy_chart(xml, &HashMap::new()).expect("pie should parse");
-        assert_eq!(chart.chart_type, "pie");
-        let dpc = chart.series[0]
+        assert_eq!(chart.chart.chart_type, "pie");
+        let dpc = chart.chart.series[0]
             .data_point_colors
             .as_ref()
             .expect("per-slice dPt colours must be captured");
@@ -9807,7 +9621,7 @@ mod tests {
 </c:chartSpace>"#;
         let chart = parse_legacy_chart(xml, &HashMap::new()).expect("pie should parse");
         assert!(
-            chart.show_data_labels,
+            chart.chart.show_data_labels,
             "showPercent=1 must enable data labels even when showVal=0"
         );
     }
@@ -10047,13 +9861,13 @@ mod tests {
         let result = parse_chartex(&xml, &theme);
         println!("parse_chartex result: {:?}", result.is_some());
         if let Some(ref c) = result {
-            println!("  chart_type: {}", c.chart_type);
-            println!("  categories: {:?}", c.categories);
-            println!("  series len: {}", c.series.len());
-            if !c.series.is_empty() {
-                println!("  values: {:?}", c.series[0].values);
+            println!("  chart_type: {}", c.chart.chart_type);
+            println!("  categories: {:?}", c.chart.categories);
+            println!("  series len: {}", c.chart.series.len());
+            if !c.chart.series.is_empty() {
+                println!("  values: {:?}", c.chart.series[0].values);
             }
-            println!("  subtotal_indices: {:?}", c.subtotal_indices);
+            println!("  subtotal_indices: {:?}", c.chart.subtotal_indices);
         }
         assert!(result.is_some(), "parse_chartex should succeed");
     }
@@ -10120,8 +9934,8 @@ mod tests {
                 SlideElement::Chart(c) => println!(
                     "  [{}] CHART type={} cats={}",
                     i,
-                    c.chart_type,
-                    c.categories.len()
+                    c.chart.chart_type,
+                    c.chart.categories.len()
                 ),
                 SlideElement::Shape(s) => println!("  [{}] shape x={}", i, s.x),
                 SlideElement::Table(_) => println!("  [{}] table", i),
@@ -13936,16 +13750,17 @@ mod tests {
         let theme = HashMap::new();
         let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
             .expect("legacy chart should parse");
+        let c = &c.chart;
 
         assert_eq!(c.cat_axis_title.as_deref(), Some("Category Axis"));
-        assert_eq!(c.cat_axis_title_size, Some(1000));
-        assert_eq!(c.cat_axis_title_bold, Some(true));
-        assert_eq!(c.cat_axis_title_color.as_deref(), Some("FF0000"));
+        assert_eq!(c.cat_axis_title_font_size_hpt, Some(1000));
+        assert_eq!(c.cat_axis_title_font_bold, Some(true));
+        assert_eq!(c.cat_axis_title_font_color.as_deref(), Some("FF0000"));
 
         assert_eq!(c.val_axis_title.as_deref(), Some("Value Axis"));
-        assert_eq!(c.val_axis_title_size, Some(1200));
-        assert_eq!(c.val_axis_title_bold, Some(false));
-        assert_eq!(c.val_axis_title_color.as_deref(), Some("00FF00"));
+        assert_eq!(c.val_axis_title_font_size_hpt, Some(1200));
+        assert_eq!(c.val_axis_title_font_bold, Some(false));
+        assert_eq!(c.val_axis_title_font_color.as_deref(), Some("00FF00"));
     }
 
     #[test]
@@ -13953,6 +13768,7 @@ mod tests {
         let theme = HashMap::new();
         let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
             .expect("legacy chart should parse");
+        let c = &c.chart;
 
         assert_eq!(c.chart_border_color.as_deref(), Some("1B4332"));
         assert_eq!(c.chart_border_width_emu, Some(19050));
@@ -13981,7 +13797,7 @@ mod tests {
         let theme = HashMap::new();
         let c = parse_legacy_chart(xml, &theme).expect("legacy chart should parse");
         // noFill explicitly turns the border OFF → no color, even though @w is set.
-        assert_eq!(c.chart_border_color, None);
+        assert_eq!(c.chart.chart_border_color, None);
     }
 
     #[test]
@@ -14005,10 +13821,10 @@ mod tests {
 </c:chartSpace>"#;
         let theme = HashMap::new();
         let c = parse_legacy_chart(xml, &theme).expect("legacy chart should parse");
-        assert_eq!(c.cat_axis_title, None);
-        assert_eq!(c.val_axis_title, None);
-        assert_eq!(c.chart_border_color, None);
-        assert_eq!(c.chart_border_width_emu, None);
+        assert_eq!(c.chart.cat_axis_title, None);
+        assert_eq!(c.chart.val_axis_title, None);
+        assert_eq!(c.chart.chart_border_color, None);
+        assert_eq!(c.chart.chart_border_width_emu, None);
     }
 
     /// A combo chart: `<c:barChart>` (Revenue, primary left axis) +
@@ -14083,6 +13899,7 @@ mod tests {
         let theme = HashMap::new();
         let c = parse_legacy_chart(combo_bar_line_secondary_axis_xml(), &theme)
             .expect("combo chart should parse");
+        let c = &c.chart;
 
         // Primary type is bar (bar group wins).
         assert_eq!(c.chart_type, "clusteredBar");
@@ -14091,12 +13908,12 @@ mod tests {
         // Bar series: primary axis, no line override.
         assert_eq!(c.series[0].name, "Revenue ($M)");
         assert_eq!(c.series[0].series_type, None);
-        assert!(!c.series[0].use_secondary_axis);
+        assert_eq!(c.series[0].use_secondary_axis, None);
 
         // Line series: tagged "line" + bound to the secondary axis.
         assert_eq!(c.series[1].name, "Gross margin (%)");
         assert_eq!(c.series[1].series_type.as_deref(), Some("line"));
-        assert!(c.series[1].use_secondary_axis);
+        assert_eq!(c.series[1].use_secondary_axis, Some(true));
 
         // Primary value-axis fields stay the Revenue (left) axis.
         assert_eq!(c.val_axis_title.as_deref(), Some("Revenue ($M)"));
@@ -14116,9 +13933,9 @@ mod tests {
         let theme = HashMap::new();
         let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
             .expect("legacy chart should parse");
-        assert!(c.secondary_val_axis.is_none());
-        assert_eq!(c.series[0].series_type, None);
-        assert!(!c.series[0].use_secondary_axis);
+        assert!(c.chart.secondary_val_axis.is_none());
+        assert_eq!(c.chart.series[0].series_type, None);
+        assert_eq!(c.chart.series[0].use_secondary_axis, None);
     }
 
     #[test]
@@ -14161,11 +13978,11 @@ mod tests {
 </c:chartSpace>"#;
         let theme = HashMap::new();
         let c = parse_legacy_chart(xml, &theme).expect("scatter chart should parse");
-        assert_eq!(c.chart_type, "scatter");
+        assert_eq!(c.chart.chart_type, "scatter");
         // Bottom valAx → X → cat-axis title.
-        assert_eq!(c.cat_axis_title.as_deref(), Some("X Bottom"));
+        assert_eq!(c.chart.cat_axis_title.as_deref(), Some("X Bottom"));
         // Left valAx → Y → val-axis title.
-        assert_eq!(c.val_axis_title.as_deref(), Some("Y Left"));
+        assert_eq!(c.chart.val_axis_title.as_deref(), Some("Y Left"));
     }
 
     #[test]
@@ -14199,9 +14016,9 @@ mod tests {
 </c:chartSpace>"#;
         let theme = HashMap::new();
         let c = parse_legacy_chart(xml, &theme).expect("legacy chart should parse");
-        assert_eq!(c.title_font_bold, Some(true));
-        assert_eq!(c.cat_axis_font_bold, Some(true));
-        assert_eq!(c.val_axis_font_bold, Some(false));
+        assert_eq!(c.chart.title_font_bold, Some(true));
+        assert_eq!(c.chart.cat_axis_font_bold, Some(true));
+        assert_eq!(c.chart.val_axis_font_bold, Some(false));
     }
 
     /// Regression for the `PathCmd::ArcTo` serde naming bug: the enum-level

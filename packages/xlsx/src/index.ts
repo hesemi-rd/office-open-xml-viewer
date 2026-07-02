@@ -65,13 +65,23 @@ export type {
   ShapeTextRun,
   PathInfo,
   PathCmd,
-  // Embedded chart model sub-types.
-  ChartData,
+  // Canonical chart model (shared with core / pptx). `ChartAnchor.chart` is a
+  // `ChartModel`.
+  ChartModel,
+  ChartSeries,
+  ChartSeriesDataLabels,
+  ChartDataLabelOverride,
+  ChartDataPointOverride,
+  ChartErrBars,
+  ChartManualLayout,
+  LegendManualLayout,
+  // Back-compat aliases for the former XLSX-local chart types (now the core
+  // sub-types). `ChartData` is removed — it described the pre-adapter parse
+  // shape, which is no longer emitted.
   XlsxChartSeries,
   SeriesDataLabels,
   DataLabelOverride,
   DataPointOverride,
   ErrBars,
   ManualLayout,
-  LegendManualLayout,
 } from './types.js';

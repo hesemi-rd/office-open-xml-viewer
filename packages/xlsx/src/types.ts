@@ -1,4 +1,4 @@
-import type { MathNode, SpaceLine } from '@silurus/ooxml-core';
+import type { ChartModel, MathNode, SpaceLine } from '@silurus/ooxml-core';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -261,257 +261,59 @@ export interface DataValidation {
 }
 
 // ─── Chart types ─────────────────────────────────────────────────────────────
-
+//
+// The chart payload on `ChartAnchor` is the canonical {@link ChartModel} emitted
+// by the Rust parser (`ooxml_common::chart::ChartModel`) — a single source of
+// truth shared with the pptx parser and the core renderer. The former
+// XLSX-local chart interfaces (`ChartData`, `XlsxChartSeries`, `ManualLayout`,
+// etc.) that duplicated the core sub-types are gone; the parser now applies the
+// old `adaptChartData` defaults in Rust before emit. The core sub-types are
+// re-exported below (with back-compat aliases) so downstream code keeps a stable
+// import surface.
+export type {
+  ChartModel,
+  ChartSeries,
+  ChartSeriesDataLabels,
+  ChartDataLabelOverride,
+  ChartDataPointOverride,
+  ChartErrBars,
+  ChartManualLayout,
+  LegendManualLayout,
+} from '@silurus/ooxml-core';
+import type {
+  ChartSeries as CoreChartSeries,
+  ChartSeriesDataLabels as CoreSeriesDataLabels,
+  ChartDataLabelOverride as CoreDataLabelOverride,
+  ChartDataPointOverride as CoreDataPointOverride,
+  ChartErrBars as CoreErrBars,
+  ChartManualLayout as CoreManualLayout,
+} from '@silurus/ooxml-core';
 /**
- * XLSX parser's raw chart series (includes XLSX-only `seriesType` for mixed
- * charts). Adapted to `ChartSeries` from @silurus/ooxml-core before rendering.
+ * @deprecated Chart series are now the core {@link ChartModel}'s `ChartSeries`.
+ * Kept as an alias for backward-compatible imports.
  */
-export interface XlsxChartSeries {
-  name: string;
-  /** Chart sub-type for this series (allows mixed charts). */
-  seriesType: string;
-  categories: string[];
-  values: (number | null)[];
-  /** Explicit fill color hex (from c:spPr). Undefined = use palette. */
-  color?: string | null;
-  /** Marker visibility resolved from `<c:marker>`/chart-level default
-   *  (ECMA-376 §21.2.2.32). */
-  showMarker?: boolean;
-  /** `<c:val>/<c:numRef>/<c:formatCode>` — Excel number format for series
-   *  values (ECMA-376 §21.2.2.37). */
-  valFormatCode?: string | null;
-  /** `<c:ser><c:dLbls><c:txPr>…solidFill` — per-series data-label text color
-   *  (ECMA-376 §21.2.2.216). Takes precedence over the chart-level color so
-   *  each series can color its labels independently. */
-  labelColor?: string | null;
-  /** `<c:ser><c:order>` — stacking/legend display order (§21.2.2.28). */
-  order?: number;
-  /** `<c:marker><c:symbol val>` — point marker shape (ECMA-376 §21.2.2.32). */
-  markerSymbol?: string;
-  /** `<c:marker><c:size val>` — point marker side length in pt (§21.2.2.34). */
-  markerSize?: number;
-  /** `<c:marker><c:spPr>` resolved fill (no `#`). */
-  markerFill?: string;
-  /** `<c:marker><c:spPr><a:ln>` resolved stroke (no `#`). */
-  markerLine?: string;
-  /** `<c:dPt>` per-data-point overrides (§21.2.2.39). */
-  dataPointOverrides?: DataPointOverride[];
-  /** Per-idx custom data labels (`<c:dLbl idx>`, §21.2.2.45). Custom rich
-   *  text is flattened to plain string at parse time; CELLRANGE field
-   *  placeholders are resolved against the series' `<c15:datalabelsRange>`
-   *  cache. */
-  dataLabelOverrides?: DataLabelOverride[];
-  /** Series-level `<c:dLbls>` defaults applied to every point lacking its
-   *  own override. */
-  seriesDataLabels?: SeriesDataLabels;
-  /** `<c:errBars>` (§21.2.2.20). At parse time, plus / minus deltas are
-   *  resolved into absolute per-point values regardless of `errValType`. */
-  errBars?: ErrBars[];
-}
-
-export interface DataPointOverride {
-  idx: number;
-  color?: string;
-  markerSymbol?: string;
-  markerSize?: number;
-  markerFill?: string;
-  markerLine?: string;
-}
-
-export interface DataLabelOverride {
-  idx: number;
-  text: string;
-  /** "l"|"r"|"t"|"b"|"ctr"|"outEnd"|"bestFit" or undefined → inherit. */
-  position?: string;
-  fontColor?: string;
-  fontSizeHpt?: number;
-  fontBold?: boolean;
-}
-
-export interface SeriesDataLabels {
-  showVal: boolean;
-  showCatName: boolean;
-  showSerName: boolean;
-  showPercent: boolean;
-  position?: string;
-  fontColor?: string;
-  formatCode?: string;
-  fontBold?: boolean;
-  fontSizeHpt?: number;
-}
-
-export interface ErrBars {
-  /** "x" | "y". */
-  dir: string;
-  /** "plus" | "minus" | "both". */
-  barType: string;
-  plus: (number | null)[];
-  minus: (number | null)[];
-  noEndCap: boolean;
-  /** Resolved RGB hex (no `#`). */
-  color?: string;
-  lineWidthEmu?: number;
-  dash?: string;
-}
-
-/**
- * XLSX parser's raw chart output. Retains parser-native `barDir` + `grouping`
- * which the renderer combines into a canonical `ChartModel.chartType` (e.g.
- * `clusteredBarH`, `stackedBarPct`) at render time.
- */
-export interface ChartData {
-  /** Primary chart type: "bar"|"line"|"area"|"pie"|"doughnut"|"radar"|"scatter" */
-  chartType: string;
-  /** "col" (vertical bars) | "row" (horizontal bars) */
-  barDir: string;
-  /** "clustered"|"stacked"|"standard"|"percentStacked" */
-  grouping: string;
-  title: string | null;
-  categories: string[];
-  series: XlsxChartSeries[];
-  /** Whether data labels are enabled (c:dLbls showVal/showPercent). */
-  showDataLabels?: boolean;
-  /** Category axis title (c:catAx/c:title). */
-  catAxisTitle?: string | null;
-  /** Value axis title (c:valAx/c:title). */
-  valAxisTitle?: string | null;
-  /** `<c:catAx><c:title>` run-prop font size (hpt), from the parser's
-   *  catAxisTitleSize. Distinct from `catAxisFontSizeHpt` (tick labels). */
-  catAxisTitleSize?: number | null;
-  /** `<c:catAx><c:title>` run-prop bold flag. */
-  catAxisTitleBold?: boolean | null;
-  /** `<c:catAx><c:title>` run-prop color (hex without '#'). */
-  catAxisTitleColor?: string | null;
-  /** `<c:valAx><c:title>` run-prop font size (hpt). */
-  valAxisTitleSize?: number | null;
-  /** `<c:valAx><c:title>` run-prop bold flag. */
-  valAxisTitleBold?: boolean | null;
-  /** `<c:valAx><c:title>` run-prop color (hex without '#'). */
-  valAxisTitleColor?: string | null;
-  /** True when <c:legend> is present. Absence means the legend is hidden. */
-  showLegend?: boolean;
-  /** `<c:legendPos val>` — "r"|"l"|"t"|"b"|"tr". null/undefined = default ("r"). */
-  legendPos?: 'r' | 'l' | 't' | 'b' | 'tr' | null;
-  /** Chart title font size in OOXML hundredths of a point (e.g. 1400 = 14pt). */
-  titleFontSizeHpt?: number | null;
-  /** Chart title font color as a hex string without '#' (srgbClr only). */
-  titleFontColor?: string | null;
-  /** Chart title font family from `<a:latin typeface>` (ECMA-376 §20.1.4.2.24). */
-  titleFontFace?: string | null;
-  /** Category axis tick-label font size in hpt (ECMA-376 §21.2.2.17 c:txPr). */
-  catAxisFontSizeHpt?: number | null;
-  /** Value axis tick-label font size in hpt. */
-  valAxisFontSizeHpt?: number | null;
-  /** Outer chartSpace background (ECMA-376 §21.2.2.5 `<c:spPr>`). Hex without
-   *  '#' for a solid fill, undefined for `<a:noFill/>` or an absent spPr.
-   *  Combine with `hasChartSpPr` to distinguish explicit-transparent from
-   *  default-opaque-white. */
-  chartBg?: string | null;
-  /** True when the parser saw a `<c:chartSpace><c:spPr>` element. Lets the
-   *  adapter tell "spec said noFill → transparent" from "no spPr → default". */
-  hasChartSpPr?: boolean;
-  /** `<c:legend><c:manualLayout>` fractions of chart space (§21.2.2.31). */
-  legendManualLayout?: LegendManualLayout | null;
-  /** `<c:catAx><c:delete val="1"/>` — hide the category axis (§21.2.2.40). */
-  catAxisHidden?: boolean;
-  /** `<c:valAx><c:delete val="1"/>` — hide the value axis (§21.2.2.40). */
-  valAxisHidden?: boolean;
-  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — line-only hide (labels stay). */
-  catAxisLineHidden?: boolean;
-  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — line-only hide (labels stay). */
-  valAxisLineHidden?: boolean;
-  /** `<c:radarChart><c:radarStyle val>` — "standard" (line only, default),
-   *  "marker" (line + markers), "filled" (closed polygon with area fill).
-   *  Sample-1 "Biodiversity Index" uses "marker" — Excel renders no area
-   *  fill, but our renderer was filling at 25 % opacity regardless. */
-  radarStyle?: string | null;
-  /** `<c:valAx><c:numFmt@formatCode>` — number format for value-axis tick
-   *  labels (ECMA-376 §21.2.2.21). */
-  valAxisFormatCode?: string | null;
-  /** `<c:barChart><c:gapWidth>` — space between category groups as a percent
-   *  of bar width (§21.2.2.13). */
-  barGapWidth?: number | null;
-  /** `<c:barChart><c:overlap>` — signed percent overlap between bars in a
-   *  cluster (§21.2.2.25). Negative = gap. */
-  barOverlap?: number | null;
-  /** `<c:dLbls><c:dLblPos>` — data label position (§21.2.2.16). */
-  dataLabelPosition?: string | null;
-  /** Hex (no `#`) for data label text color, resolved from `<c:dLbls><c:txPr>`. */
-  dataLabelFontColor?: string | null;
-  /** `<c:dLbls><c:numFmt@formatCode>` — chart-level override for data label
-   *  number format (§21.2.2.35). */
-  dataLabelFormatCode?: string | null;
-  /** `<c:title>...defRPr@b>` chart title bold flag. */
-  titleFontBold?: boolean;
-  /** `<c:catAx><c:txPr>...defRPr@b>` X-axis tick label bold flag. */
-  catAxisFontBold?: boolean;
-  /** `<c:valAx><c:txPr>...defRPr@b>` Y-axis tick label bold flag. */
-  valAxisFontBold?: boolean;
-  /** `<c:catAx><c:crosses val>` (`autoZero` | `min` | `max`). Drives where
-   *  the X axis sits along the Y axis. Default `autoZero`. */
-  catAxisCrosses?: string;
-  /** `<c:catAx><c:crossesAt val>` explicit numeric crossing. */
-  catAxisCrossesAt?: number;
-  valAxisCrosses?: string;
-  valAxisCrossesAt?: number;
-  /** Axis line color (hex without `#`) and width in EMU, from
-   *  `<c:catAx|valAx><c:spPr><a:ln>`. */
-  catAxisLineColor?: string;
-  catAxisLineWidthEmu?: number;
-  valAxisLineColor?: string;
-  valAxisLineWidthEmu?: number;
-  /** Explicit chart border color (hex without '#') from
-   *  `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
-   *  XML explicitly declares a paintable line (no default border). */
-  chartBorderColor?: string | null;
-  /** `<c:chartSpace><c:spPr><a:ln@w>` border width in EMU. */
-  chartBorderWidthEmu?: number | null;
-  /** `<c:catAx | valAx><c:majorTickMark val>` / `<c:minorTickMark val>` —
-   *  one of `none`/`out`/`in`/`cross` (ECMA-376 §21.2.2.49). */
-  catAxisMajorTickMark?: string;
-  catAxisMinorTickMark?: string;
-  valAxisMajorTickMark?: string;
-  valAxisMinorTickMark?: string;
-  /** `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). */
-  catAxisFormatCode?: string;
-  /** `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. */
-  catAxisMin?: number;
-  catAxisMax?: number;
-  /** `<c:valAx><c:scaling><c:min/max>` — explicit Y-axis range. */
-  valAxisMin?: number;
-  valAxisMax?: number;
-  /** `<c:title><c:layout><c:manualLayout>` (§21.2.2.27) absolute placement. */
-  titleManualLayout?: ManualLayout;
-  /** `<c:plotArea><c:layout><c:manualLayout>` — `layoutTarget=inner` /
-   *  `outer` controls whether axes are inside the rect or outside. */
-  plotAreaManualLayout?: ManualLayout;
-}
-
-export interface ManualLayout {
-  xMode: string;
-  yMode: string;
-  layoutTarget?: string;
-  x: number;
-  y: number;
-  w?: number;
-  h?: number;
-}
-
-export interface LegendManualLayout {
-  xMode: string;
-  yMode: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
+export type XlsxChartSeries = CoreChartSeries;
+/** @deprecated Use `ChartSeriesDataLabels` from @silurus/ooxml-core. */
+export type SeriesDataLabels = CoreSeriesDataLabels;
+/** @deprecated Use `ChartDataLabelOverride` from @silurus/ooxml-core. */
+export type DataLabelOverride = CoreDataLabelOverride;
+/** @deprecated Use `ChartDataPointOverride` from @silurus/ooxml-core. */
+export type DataPointOverride = CoreDataPointOverride;
+/** @deprecated Use `ChartErrBars` from @silurus/ooxml-core. */
+export type ErrBars = CoreErrBars;
+/** @deprecated Use `ChartManualLayout` from @silurus/ooxml-core. */
+export type ManualLayout = CoreManualLayout;
 
 export interface ChartAnchor {
   fromCol: number; fromColOff: number;
   fromRow: number; fromRowOff: number;
   toCol: number;   toColOff: number;
   toRow: number;   toRowOff: number;
-  chart: ChartData;
+  /** The chart payload, already in the canonical {@link ChartModel} shape the
+   *  Rust parser emits. The parser adapts its internal parse structure into
+   *  `ChartModel` (formerly the TS `adaptChartData`); this is passed straight
+   *  to `renderChart`. */
+  chart: ChartModel;
 }
 
 export interface ShapeAnchor {

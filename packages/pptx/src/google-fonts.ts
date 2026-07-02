@@ -47,9 +47,9 @@ function* pptxTextRuns(pres: Presentation): Generator<string> {
           for (const cell of row.cells) yield* textBodyRuns(cell.textBody);
         }
       } else if (el.type === 'chart') {
-        if (el.title) yield el.title;
-        for (const c of el.categories) yield c;
-        for (const s of el.series) if (s.name) yield s.name;
+        if (el.chart.title) yield el.chart.title;
+        for (const c of el.chart.categories) yield c;
+        for (const s of el.chart.series) if (s.name) yield s.name;
       }
     }
   }
