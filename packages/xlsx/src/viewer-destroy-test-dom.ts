@@ -162,6 +162,12 @@ export function makeEl(tag: string): FakeEl {
       this.parentElement?.removeChild(this);
     },
     insertBefore(n: FakeEl, ref: FakeEl | null) {
+      // Real-DOM pre-insert validity: a non-null reference that is not a child
+      // of this node throws NotFoundError (kept consistent with the pptx/docx
+      // test DOMs so no fake is more permissive than a browser).
+      if (ref && !this.children.includes(ref)) {
+        throw new Error('NotFoundError: the node before which the new node is to be inserted is not a child of this node');
+      }
       n.parentElement?.removeChild(n);
       n.parentElement = this;
       const i = ref ? this.children.indexOf(ref) : -1;

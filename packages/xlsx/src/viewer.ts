@@ -76,7 +76,7 @@ const VIEWER_STYLE_CSS =
  * not a per-instance leak).
  */
 function ensureViewerStyleInjected(): void {
-  if (typeof document === 'undefined') return;
+  if (typeof document === 'undefined' || !document.head) return;
   if (document.head.querySelector(`style[${VIEWER_STYLE_ATTR}]`)) return;
   const style = document.createElement('style');
   style.setAttribute(VIEWER_STYLE_ATTR, '');

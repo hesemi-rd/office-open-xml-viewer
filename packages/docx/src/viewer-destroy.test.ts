@@ -86,4 +86,16 @@ describe('DocxViewer.destroy() — canvas reparent return', () => {
     v.destroy();
     expect(() => v.destroy()).not.toThrow();
   });
+
+  it('falls back to appending when the recorded next-sibling was removed before destroy()', () => {
+    const { parent, before, canvas, after } = mount();
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement);
+    // The caller removes the recorded next-sibling while the viewer is alive.
+    // insertBefore with that stale reference would throw NotFoundError in a
+    // real browser — destroy() must detect it and append at the end instead.
+    parent.removeChild(after);
+    expect(() => v.destroy()).not.toThrow();
+    expect(canvas.parentElement).toBe(parent);
+    expect(parent.children).toEqual([before, canvas]);
+  });
 });

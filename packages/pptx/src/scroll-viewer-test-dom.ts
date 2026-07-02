@@ -105,6 +105,12 @@ export function makeEl(tag: string): FakeEl {
       this.parentElement?.removeChild(this);
     },
     insertBefore(n: FakeEl, ref: FakeEl | null) {
+      // Real-DOM pre-insert validity: a non-null reference that is not a child
+      // of this node throws NotFoundError. Modelled so viewer code cannot
+      // silently rely on a stale sibling reference (real browsers would throw).
+      if (ref && !this.children.includes(ref)) {
+        throw new Error('NotFoundError: the node before which the new node is to be inserted is not a child of this node');
+      }
       // Real-DOM move semantics: detach from the current parent first (see
       // appendChild). Detach BEFORE resolving `ref`'s index so re-inserting a
       // node relative to a sibling under the same parent still lands correctly.

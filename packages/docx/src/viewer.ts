@@ -147,9 +147,16 @@ export class DocxViewer {
     // Return the caller-owned canvas to its original DOM slot before discarding
     // the wrapper. insertBefore still works if the original parent was itself
     // detached; when there was no original parent the canvas is left detached
-    // (just pulled out of the wrapper).
+    // (just pulled out of the wrapper). The recorded next-sibling may have been
+    // removed or moved by the caller since construction — insertBefore throws
+    // NotFoundError for a reference that is no longer a child of the parent, so
+    // fall back to appending at the end in that case.
     if (this._originalParent) {
-      this._originalParent.insertBefore(this._canvas, this._originalNextSibling);
+      const ref =
+        this._originalNextSibling && this._originalNextSibling.parentNode === this._originalParent
+          ? this._originalNextSibling
+          : null;
+      this._originalParent.insertBefore(this._canvas, ref);
     } else if (this._canvas.parentNode) {
       this._canvas.parentNode.removeChild(this._canvas);
     }
