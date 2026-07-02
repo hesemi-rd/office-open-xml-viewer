@@ -1045,23 +1045,25 @@ function renderLineChart(
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  // Shared frame bands. The line family uses title pads 0.045 / 0.035 and the
+  // default 0.22 side-legend reserve — passed as params so pixels are unchanged.
   // PowerPoint's auto-layout reserves a title band with air above and below
-  // the text; pinning the title to y+0 and the plot to y+titleFontPx+2 is too
-  // tight. Use proportional pads so scaling preserves the same feel.
-  const titleTopPad    = chart.title ? h * 0.045 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
+  // the text; the proportional pads preserve that feel across scaling.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.045, 0.035);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   // Axis-title bands use the real title font (XML @sz when set), independent of
   // the tick-label sizes above, so 18pt titles get a wide enough gutter.
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -1073,8 +1075,12 @@ function renderLineChart(
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const px0 = x + pad.l; const py0 = y + pad.t;
-  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.045,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    pad,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
