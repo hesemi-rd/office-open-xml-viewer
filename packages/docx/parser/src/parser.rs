@@ -531,68 +531,30 @@ impl ThemeColors {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut fonts: HashMap<String, String> = HashMap::new();
         let theme_xml = Some(xml.to_string());
-        let doc = match XmlDoc::parse(xml) {
-            Ok(d) => d,
-            Err(_) => {
-                return Self {
-                    map,
-                    fonts,
-                    theme_xml,
-                    ..Default::default()
-                }
-            }
-        };
-        let root = doc.root_element();
-        if let Some(scheme) = root
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "clrScheme")
-        {
-            for child in scheme.children().filter(|n| n.is_element()) {
-                let name = child.tag_name().name().to_string();
-                let hex = child.children().filter(|n| n.is_element()).find_map(|n| {
-                    match n.tag_name().name() {
-                        "srgbClr" => n.attribute("val").map(|v| v.to_uppercase()),
-                        "sysClr" => n.attribute("lastClr").map(|v| v.to_uppercase()),
-                        _ => None,
-                    }
-                });
-                if let Some(h) = hex {
-                    map.insert(name, h);
+
+        // Color slots: shared clrScheme parse; docx uppercases each hex and keys
+        // by slot name. prstClr now resolves through the shared preset table
+        // (previously dropped), so a preset scheme slot contributes its color.
+        for (slot, hex) in ooxml_common::theme::ThemeColorScheme::parse(xml).iter() {
+            map.insert(slot.to_string(), hex.to_uppercase());
+        }
+
+        // Font scheme: shared parse mapped onto docx's "{group}/{axis}" keys
+        // (e.g. "minor/latin"). Empty typefaces are already dropped by the
+        // shared parser.
+        let theme_fonts = ooxml_common::theme::ThemeFonts::parse(xml);
+        for (group, prefix) in [(&theme_fonts.major, "major"), (&theme_fonts.minor, "minor")] {
+            for (face, axis) in [
+                (&group.latin, "latin"),
+                (&group.ea, "ea"),
+                (&group.cs, "cs"),
+            ] {
+                if let Some(typeface) = face {
+                    fonts.insert(format!("{prefix}/{axis}"), typeface.clone());
                 }
             }
         }
-        if let Some(font_scheme) = root
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "fontScheme")
-        {
-            for group_name in &["majorFont", "minorFont"] {
-                let prefix = if *group_name == "majorFont" {
-                    "major"
-                } else {
-                    "minor"
-                };
-                if let Some(group) = font_scheme
-                    .children()
-                    .find(|n| n.is_element() && n.tag_name().name() == *group_name)
-                {
-                    for child in group.children().filter(|n| n.is_element()) {
-                        let typ = match child.tag_name().name() {
-                            "latin" => Some("latin"),
-                            "ea" => Some("ea"),
-                            "cs" => Some("cs"),
-                            _ => None,
-                        };
-                        if let Some(t) = typ {
-                            if let Some(face) = child.attribute("typeface") {
-                                if !face.is_empty() {
-                                    fonts.insert(format!("{prefix}/{t}"), face.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+
         Self {
             map,
             fonts,

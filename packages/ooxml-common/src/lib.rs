@@ -12,4 +12,5 @@ pub mod color;
 pub mod math;
 pub mod rels;
 pub mod text;
+pub mod theme;
 pub mod zip;

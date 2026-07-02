@@ -289,71 +289,28 @@ pub(crate) fn parse_theme_ln_widths(archive: &mut XlsxZip) -> Vec<i64> {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
-        return Vec::new();
-    };
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    let mut widths: Vec<i64> = Vec::new();
-    for node in doc.descendants() {
-        if node.tag_name().name() == "lnStyleLst" && node.tag_name().namespace() == Some(a_ns) {
-            for ln in node
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "ln")
-            {
-                widths.push(
-                    ln.attribute("w")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(9525),
-                );
-            }
-            break;
-        }
-    }
-    widths
+    // Shared parse: reference line widths (EMU) in declaration order, filling the
+    // CT_LineProperties 9525 default for a bare `<a:ln>` — matching xlsx's prior
+    // behavior exactly (ECMA-376 §20.1.4.2.19 / §20.1.2.2.24).
+    ooxml_common::theme::parse_ln_style_widths(&xml)
 }
 
 fn parse_theme_colors(archive: &mut XlsxZip) -> Vec<String> {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
-        return Vec::new();
-    };
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
-
-    // Find clrScheme node and collect child color elements in order
-    // OOXML order: dk1, lt1, dk2, lt2, accent1, accent2, accent3, accent4, accent5, accent6, hlink, folHlink
-    let mut colors: Vec<String> = Vec::new();
-    for node in doc.descendants() {
-        if node.tag_name().name() == "clrScheme" && node.tag_name().namespace() == Some(a_ns) {
-            for child in node.children() {
-                if !child.is_element() {
-                    continue;
-                }
-                // Each child is a color slot; its first child element holds the actual color
-                for color_node in child.children() {
-                    if !color_node.is_element() {
-                        continue;
-                    }
-                    let hex = match color_node.tag_name().name() {
-                        "srgbClr" => color_node
-                            .attribute("val")
-                            .map(|v| format!("#{}", v.to_uppercase())),
-                        "sysClr" => color_node
-                            .attribute("lastClr")
-                            .map(|v| format!("#{}", v.to_uppercase())),
-                        _ => None,
-                    };
-                    if let Some(h) = hex {
-                        colors.push(h);
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-    }
-    colors
+    // Shared clrScheme parse; xlsx keeps its own `#RRGGBB` uppercase formatting
+    // and positional (spec-order) Vec. Slots are emitted in the canonical order
+    // dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink; a slot with no readable
+    // color is skipped (compacting the Vec), preserving the prior contract.
+    // prstClr now resolves through the shared preset table (previously dropped),
+    // so a preset scheme slot contributes its color instead of being skipped.
+    ooxml_common::theme::ThemeColorScheme::parse(&xml)
+        .slots_in_order()
+        .into_iter()
+        .flatten()
+        .map(|hex| format!("#{}", hex.to_uppercase()))
+        .collect()
 }
 
 /// Convert hex color + tint to resulting hex color using HLS model.

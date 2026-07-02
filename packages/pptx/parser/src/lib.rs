@@ -2007,42 +2007,46 @@ fn resolve_path(base_dir: &str, target: &str) -> String {
 
 /// Parse the color scheme from a theme XML file.
 /// Returns a map: scheme slot name (e.g. "dk1", "lt1", "acc1") → hex string.
+///
+/// The clrScheme and fontScheme are parsed by the shared
+/// [`ooxml_common::theme`] grammar; this function keeps pptx's flat merged-map
+/// storage (colors, `+mj-lt`/`+mn-*` font keys, `+lnRef-N` line widths and
+/// `+txDef`/`+spDef` object defaults all in one `HashMap<String, String>`)
+/// because ~30 call sites look these up by string key. The lnStyleLst and
+/// objectDefaults handling stays local — the former's "record only entries with
+/// an explicit `w`, as a raw string" contract differs from the shared
+/// default-filling `parse_ln_style_widths`, and the latter is pptx-specific.
 fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
+
+    // Color slots: shared parse, kept RAW (pptx applies no case-folding, unlike
+    // docx/xlsx). prstClr is now resolved via the shared preset table.
+    for (slot, hex) in ooxml_common::theme::ThemeColorScheme::parse(xml).iter() {
+        map.insert(slot.to_owned(), hex.to_owned());
+    }
+
+    // Font scheme: shared parse, mapped onto pptx's `+mj-*` / `+mn-*` keys.
+    let fonts = ooxml_common::theme::ThemeFonts::parse(xml);
+    for (group, prefix) in [(&fonts.major, "+mj"), (&fonts.minor, "+mn")] {
+        for (face, axis) in [(&group.latin, "lt"), (&group.ea, "ea"), (&group.cs, "cs")] {
+            if let Some(typeface) = face {
+                map.insert(format!("{prefix}-{axis}"), typeface.clone());
+            }
+        }
+    }
+
     let doc = match roxmltree::Document::parse(xml) {
         Ok(d) => d,
         Err(_) => return map,
     };
     let root = doc.root_element();
 
-    let clr_scheme = match root
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "clrScheme")
-    {
-        Some(n) => n,
-        None => return map,
-    };
-    // Each child of clrScheme is a slot: dk1, lt1, dk2, lt2, acc1–acc6, hlink, folHlink
-    for slot in clr_scheme.children().filter(|n| n.is_element()) {
-        let name = slot.tag_name().name().to_owned();
-        // The slot contains exactly one color child; parse it without theme context
-        for c in slot.children().filter(|n| n.is_element()) {
-            let hex = match c.tag_name().name() {
-                "srgbClr" => attr(&c, "val"),
-                "sysClr" => attr(&c, "lastClr"),
-                "prstClr" => preset_color(attr(&c, "val").unwrap_or_default().as_str()),
-                _ => None,
-            };
-            if let Some(h) = hex {
-                map.insert(name, h);
-                break;
-            }
-        }
-    }
-
     // Parse fmtScheme > lnStyleLst so lnRef idx="N" can resolve to the theme's
     // canonical stroke width (9525 is wrong; theme defines 12700 / 19050 / 25400).
-    // Stored under "+lnRef-1", "+lnRef-2", "+lnRef-3".
+    // Stored under "+lnRef-1", "+lnRef-2", "+lnRef-3". Kept local: only entries
+    // that declare an explicit `w` get a key (a bare `<a:ln/>` is skipped, unlike
+    // the shared helper which fills the CT_LineProperties 9525 default), and the
+    // value is the raw `w` string the consumer re-parses.
     if let Some(fmt_scheme) = root
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")
@@ -2055,32 +2059,6 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
             {
                 if let Some(w) = attr(&ln, "w") {
                     map.insert(format!("+lnRef-{}", i + 1), w);
-                }
-            }
-        }
-    }
-
-    // Parse font scheme: majorFont (+mj-lt, +mj-ea, +mj-cs) and minorFont (+mn-lt, +mn-ea, +mn-cs)
-    // Store as special keys in the theme map so the renderer can resolve +mj-lt → actual typeface.
-    if let Some(font_scheme) = root
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "fontScheme")
-    {
-        let pairs: &[(&str, &[&str])] = &[
-            ("majorFont", &["+mj-lt", "+mj-ea", "+mj-cs"]),
-            ("minorFont", &["+mn-lt", "+mn-ea", "+mn-cs"]),
-        ];
-        let scripts = ["latin", "ea", "cs"];
-        for (element_name, keys) in pairs {
-            if let Some(font_node) = child(font_scheme, element_name) {
-                for (script, key) in scripts.iter().zip(keys.iter()) {
-                    if let Some(typeface) =
-                        child(font_node, script).and_then(|n| attr(&n, "typeface"))
-                    {
-                        if !typeface.is_empty() {
-                            map.insert(key.to_string(), typeface.to_string());
-                        }
-                    }
                 }
             }
         }
@@ -2342,23 +2320,11 @@ fn parse_color_node_tint(
     None
 }
 
+/// Resolve a DrawingML `<a:prstClr>` preset name to hex. Thin alias for the
+/// shared [`ooxml_common::theme::preset_color`] (the single source of truth),
+/// kept as a local name so the `prstClr` call sites read unchanged.
 fn preset_color(name: &str) -> Option<String> {
-    let hex = match name {
-        "black" => "000000",
-        "white" => "FFFFFF",
-        "red" => "FF0000",
-        "green" => "008000",
-        "blue" => "0000FF",
-        "yellow" => "FFFF00",
-        "cyan" => "00FFFF",
-        "magenta" => "FF00FF",
-        "orange" => "FFA500",
-        "gray" | "grey" => "808080",
-        "darkGray" | "darkGrey" => "404040",
-        "lightGray" | "lightGrey" => "D3D3D3",
-        _ => return None,
-    };
-    Some(hex.to_owned())
+    ooxml_common::theme::preset_color(name)
 }
 
 // ===========================
