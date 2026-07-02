@@ -56,4 +56,46 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     expect(v.pageCount).toBe(0);
     v.destroy();
   });
+
+  // O1 (design §11): an injected engine's own `mode` is authoritative. An
+  // EXPLICITLY conflicting opts.mode is a mis-configuration rejected at
+  // construction; a matching or absent opts.mode constructs fine.
+  it('throws when opts.mode conflicts with an injected worker-mode engine', () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }], 'worker');
+    expect(
+      () =>
+        new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {
+          document: engine.asDoc(),
+          mode: 'main',
+        }),
+    ).toThrow(/mode/i);
+  });
+
+  it('does NOT throw when opts.mode matches an injected worker-mode engine', () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }], 'worker');
+    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      mode: 'worker',
+    });
+    expect(v.pageCount).toBe(1);
+    v.destroy();
+    // Injected engine is caller-owned even in the worker case: destroy() leaves it intact.
+    expect(engine.destroyed).toBe(false);
+  });
+
+  it('constructs a default-main injected engine with absent opts.mode (load still rejects; destroy preserves engine)', async () => {
+    installDom();
+    // Default mode is 'main'; opts.mode is absent ⇒ no conflict, resolved path is main.
+    const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
+    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {
+      document: engine.asDoc(),
+    });
+    expect(v.pageCount).toBe(2);
+    await expect(v.load('x.docx')).rejects.toThrow(/injected/i);
+    v.destroy();
+    // Injected engine is caller-owned: destroy() must not tear it down.
+    expect(engine.destroyed).toBe(false);
+  });
 });

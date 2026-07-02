@@ -164,12 +164,21 @@ export class FakeDocxEngine {
   createdBitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
   constructor(
     private _pageCount: number,
+    // Uniform-page convention: a single-element `_sizes` array means EVERY page
+    // is that size (pageSize clamps the index). T2 variable-height tests pass a
+    // full per-page array instead.
     private _sizes: Array<{ widthPt: number; heightPt: number }>,
-    public throwOnRenderPage = false, // simulate a worker-mode engine
+    private _mode: 'main' | 'worker' = 'main',
     private deferred = false,
   ) {}
   get pageCount(): number {
     return this._pageCount;
+  }
+  /** Mirrors the real `DocxDocument.mode` fact (document.ts) — the exact fact the
+   *  viewer constructor reads to decide the render path (main ⇒ renderPage,
+   *  worker ⇒ renderPageToBitmap). Design §11: no probing / no silent mis-pathing. */
+  get mode(): 'main' | 'worker' {
+    return this._mode;
   }
   pageSize(i: number): { widthPt: number; heightPt: number } {
     const clamped = Math.max(0, Math.min(i, this._sizes.length - 1));
@@ -177,9 +186,15 @@ export class FakeDocxEngine {
     return { widthPt: s.widthPt, heightPt: s.heightPt };
   }
   renderPage(_canvas: unknown, page: number, _opts?: RenderPageOptions): Promise<void> {
-    if (this.throwOnRenderPage) {
-      return Promise.reject(
-        new Error("renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap()"),
+    if (this._mode === 'worker') {
+      // Record the attempt BEFORE throwing so a test can assert the viewer never
+      // routes a worker-mode engine through renderPage (and detect wrong-path
+      // routing). The real DocxDocument.renderPage is a non-async method that
+      // THROWS synchronously in worker mode — mirror that exactly (do NOT return
+      // Promise.reject), reusing the real error text (document.ts).
+      this.renderCalls.push({ page, resolve: () => {}, reject: () => {} });
+      throw new Error(
+        "renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap() and paint it via an ImageBitmapRenderingContext",
       );
     }
     return new Promise<void>((resolve, reject) => {
