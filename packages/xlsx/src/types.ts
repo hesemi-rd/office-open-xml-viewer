@@ -603,6 +603,18 @@ export type ShapeTextRun =
       size: number;
       color?: string;
       fontFace?: string;
+      /** East-Asian typeface (`<a:ea@typeface>`, ECMA-376 §21.1.2.3.1). The
+       *  common Japanese encoding sets Meiryo here while leaving `<a:latin>`
+       *  default; the renderer floors the line box by this face's design line
+       *  too (see `drawShapeText`). Undefined when the run declares no `<a:ea>`. */
+      fontFaceEa?: string;
+      /** Complex-script typeface (`<a:cs@typeface>`, ECMA-376 §21.1.2.3.1).
+       *  Parsed/modeled but NOT used in the line-box floor: the cs face renders
+       *  only complex-script glyphs (Arabic/Hebrew/Thai), so flooring the whole
+       *  line box by it would over-grow Latin/CJK runs (deferred to per-glyph
+       *  handling — see `drawShapeText`). Undefined when the run declares no
+       *  `<a:cs>`. */
+      fontFaceCs?: string;
     }
   | { type: 'break' }
   | {

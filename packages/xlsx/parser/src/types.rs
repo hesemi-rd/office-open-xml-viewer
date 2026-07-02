@@ -977,6 +977,17 @@ pub enum ShapeTextRun {
         color: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         font_face: Option<String>,
+        /// East-Asian typeface (`<a:ea@typeface>`, ECMA-376 §21.1.2.3.1). The
+        /// common encoding for Japanese shape text sets Meiryo here while
+        /// leaving `<a:latin>` default. The renderer floors the line box by
+        /// this face's design line too. Additive — omitted from JSON when None
+        /// so shapes without `<a:ea>` stay byte-identical.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_face_ea: Option<String>,
+        /// Complex-script typeface (`<a:cs@typeface>`, ECMA-376 §21.1.2.3.1).
+        /// Additive — omitted from JSON when None.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_face_cs: Option<String>,
     },
     /// Soft line break (`<a:br>`).
     Break,
