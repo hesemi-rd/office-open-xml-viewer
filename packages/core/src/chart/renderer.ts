@@ -1619,16 +1619,18 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  // Shared frame bands. Scatter uses title pads 0.035 / 0.035 and default 0.22
+  // side-legend reserve.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
 
   // Title placement — manual layout overrides the auto position.
   if (chart.title) {
@@ -1645,24 +1647,21 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // Plot area placement: honor `<c:plotArea><c:manualLayout>` when present.
   // ECMA-376: layoutTarget="inner" (default) describes the inner plot rect
   // (no axes / labels); "outer" includes axes. For scatter we treat both
-  // identically (the inner padding stays the same).
-  const pml = chart.plotAreaManualLayout;
-  let px0: number, py0: number, pw: number, ph: number;
-  if (pml && pml.w != null && pml.h != null) {
-    px0 = x + pml.x * w;
-    py0 = y + pml.y * h;
-    pw  = pml.w * w;
-    ph  = pml.h * h;
-  } else {
-    const pad = {
-      t: titleH + legTopH + h * 0.02,
-      r: legRightW + w * 0.05,
-      b: (chart.catAxisHidden ? h * 0.04 : h * 0.12) + catTitleH + legBottomH,
-      l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
-    };
-    px0 = x + pad.l; py0 = y + pad.t;
-    pw = w - pad.l - pad.r; ph = h - pad.t - pad.b;
-  }
+  // identically (the inner padding stays the same). The pad is pure arithmetic
+  // and is ignored by computeChartFrame when the manual layout applies.
+  const pad = {
+    t: titleBand.bandH + legTopH + h * 0.02,
+    r: legRightW + w * 0.05,
+    b: (chart.catAxisHidden ? h * 0.04 : h * 0.12) + catTitleH + legBottomH,
+    l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
+  };
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    pad,
+    honorPlotAreaManualLayout: true,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -1917,7 +1916,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     drawSeriesDataLabels(ctx, s, cats, useIndexX, toX, toY, ph, ptToPx);
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
