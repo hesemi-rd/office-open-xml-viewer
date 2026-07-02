@@ -57,8 +57,40 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # A tag must never publish code whose unit tests are red. WASM was built
+      # above, so the renderer/parser probe suites have their .wasm available.
+      - name: Unit tests
+        run: pnpm test
+
       - name: Build library
         run: pnpm build
+
+      # ── Verify the package that is about to be published ──────────────────────
+      # publint checks packaging correctness (exports ordering, file presence,
+      # module/type field sanity). attw checks that every entrypoint resolves to
+      # type declarations under each module-resolution mode. Both run against the
+      # real `npm pack` tarball, so a broken `exports` map fails the release
+      # instead of shipping. `--profile esm-only` acknowledges this package is
+      # intentionally ESM-only: it ignores the node10 and node16-from-CJS
+      # resolutions (which cannot succeed without a legacy CJS build we do not
+      # ship) while still failing on any regression in the ESM / bundler columns.
+      - name: Verify package exports (publint + attw)
+        run: |
+          npx --yes publint
+          npx --yes @arethetypeswrong/cli --pack . --profile esm-only
+
+      # Smoke test the actual tarball a consumer would install: pack it, install
+      # it into a throwaway project, and import each subpath in a DOM-less Node
+      # process. This proves the published entrypoints resolve AND that importing
+      # them has no top-level side effect (a stray `document` touch would throw
+      # `ReferenceError` here), which is the contract behind `sideEffects: false`.
+      - name: Smoke test the packed tarball
+        run: |
+          npm pack
+          mkdir -p /tmp/pack-smoke && cd /tmp/pack-smoke
+          npm init -y
+          npm i "$GITHUB_WORKSPACE"/silurus-ooxml-*.tgz
+          node --input-type=module -e "const m = await import('@silurus/ooxml/docx'); if (!m.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@silurus/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@silurus/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); console.log('pack smoke OK');"
 
       # ── Publish ──────────────────────────────────────────────────────────────
       - name: Publish to npm

@@ -30,29 +30,35 @@
     "provenance": true
   },
   "type": "module",
+  "sideEffects": false,
   "files": [
     "dist"
   ],
   "exports": {
     ".": {
+      "types": "./dist/types/index.d.ts",
       "import": "./dist/index.mjs",
-      "types": "./dist/types/index.d.ts"
+      "default": "./dist/index.mjs"
     },
     "./docx": {
+      "types": "./dist/types/docx.d.ts",
       "import": "./dist/docx.mjs",
-      "types": "./dist/types/docx.d.ts"
+      "default": "./dist/docx.mjs"
     },
     "./xlsx": {
+      "types": "./dist/types/xlsx.d.ts",
       "import": "./dist/xlsx.mjs",
-      "types": "./dist/types/xlsx.d.ts"
+      "default": "./dist/xlsx.mjs"
     },
     "./pptx": {
+      "types": "./dist/types/pptx.d.ts",
       "import": "./dist/pptx.mjs",
-      "types": "./dist/types/pptx.d.ts"
+      "default": "./dist/pptx.mjs"
     },
     "./math": {
+      "types": "./dist/types/math.d.ts",
       "import": "./dist/math.mjs",
-      "types": "./dist/types/math.d.ts"
+      "default": "./dist/math.mjs"
     }
   },
   "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
