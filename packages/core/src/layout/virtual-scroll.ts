@@ -8,11 +8,17 @@
  * (docs/dev-notes/2026-07-01-scroll-viewer-design.md).
  */
 export interface VisibleRange {
-  /** First index to mount (inclusive, includes overscan). Empty ⇒ 0 with end -1. */
+  /** First index to mount (inclusive, includes overscan). `start > end` ⇒ nothing
+   *  to mount (empty input, or a 0-height viewport whose top sits exactly on an
+   *  item boundary) — mount loops over `[start, end]` naturally run zero times. */
   start: number;
-  /** Last index to mount (inclusive, includes overscan). Empty ⇒ -1. */
+  /** Last index to mount (inclusive, includes overscan). Empty input ⇒ -1. */
   end: number;
-  /** First item intersecting the viewport top (EXCLUDES overscan) — for onVisiblePageChange. */
+  /** First item intersecting the viewport top (EXCLUDES overscan) — for
+   *  onVisiblePageChange. A viewport top strictly inside the gap BETWEEN items i
+   *  and i+1 is attributed to item i (gap = trailing padding of the preceding
+   *  item — the standard virtualization convention; mount-safe, and flips to i+1
+   *  exactly at `offsets[i+1]`). */
   topIndex: number;
   /** Top offset (px) of every item i: Σ heights[0..i-1] + i*gap. length = heights.length. */
   offsets: number[];

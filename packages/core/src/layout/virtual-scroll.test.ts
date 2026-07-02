@@ -127,4 +127,16 @@ describe('computeVisibleRange — degenerate inputs', () => {
     expect(r.topIndex).toBe(0);
     expect(r.start).toBe(0);
   });
+
+  it('viewport top inside a gap is attributed to the PRECEDING item', () => {
+    // offsets = [0, 110, 220]; scrollTop 105 is strictly inside the gap 100..110
+    // between items 0 and 1. Convention (pinned): the gap is trailing padding of
+    // the preceding item ⇒ topIndex 0 (mount-safe; flips to 1 exactly at 110).
+    const r = computeVisibleRange([100, 100, 100], 10, 105, 50, 0);
+    expect(r.topIndex).toBe(0);
+    expect(r.start).toBe(0);
+    expect(r.end).toBe(1); // item 1 begins (110) before the viewport bottom (155)
+    // Exactly at the next item's offset the attribution flips.
+    expect(computeVisibleRange([100, 100, 100], 10, 110, 50, 0).topIndex).toBe(1);
+  });
 });
