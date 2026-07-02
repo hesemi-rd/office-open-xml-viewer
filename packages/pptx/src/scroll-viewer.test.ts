@@ -13,7 +13,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   it('builds the wrapper → scrollHost → spacer DOM inside the container', () => {
     installDom();
     const container = makeContainer();
-    const engine = new FakePptxEngine(3, 1000, 600);
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     // container → wrapper
     const wrapper = container.children[0];
@@ -30,7 +30,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
 
   it('exposes slideCount from the injected engine', () => {
     installDom();
-    const engine = new FakePptxEngine(5, 1000, 600);
+    const engine = new FakePptxEngine(5, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, { presentation: engine.asPres() });
     expect(v.slideCount).toBe(5);
     v.destroy();
@@ -38,7 +38,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
 
   it('load() is unsupported when an engine is injected', async () => {
     installDom();
-    const engine = new FakePptxEngine(1, 1000, 600);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, { presentation: engine.asPres() });
     await expect(v.load('x.pptx')).rejects.toThrow(/injected/i);
     v.destroy();
@@ -47,7 +47,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   it('destroy() removes the DOM and does NOT destroy an injected engine', () => {
     installDom();
     const container = makeContainer();
-    const engine = new FakePptxEngine(1, 1000, 600);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     expect(container.children.length).toBe(1); // wrapper mounted
     v.destroy();
@@ -67,7 +67,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   // construction; a matching or absent opts.mode constructs fine.
   it('throws when opts.mode conflicts with an injected worker-mode engine', () => {
     installDom();
-    const engine = new FakePptxEngine(1, 1000, 600, 'worker');
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     expect(
       () =>
         new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {
@@ -79,7 +79,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
 
   it('does NOT throw when opts.mode matches an injected worker-mode engine', () => {
     installDom();
-    const engine = new FakePptxEngine(1, 1000, 600, 'worker');
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {
       presentation: engine.asPres(),
       mode: 'worker',
@@ -93,7 +93,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   it('constructs a default-main injected engine with absent opts.mode (load still rejects; destroy preserves engine)', async () => {
     installDom();
     // Default mode is 'main'; opts.mode is absent ⇒ no conflict, resolved path is main.
-    const engine = new FakePptxEngine(2, 1000, 600);
+    const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {
       presentation: engine.asPres(),
     });
@@ -109,7 +109,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   it('applies opts.background to the scrollHost element', () => {
     installDom();
     const container = makeContainer();
-    const engine = new FakePptxEngine(1, 1000, 600);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       background: '#525659',
@@ -122,7 +122,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   it('sets no background on the scrollHost by default (transparent — container shows through)', () => {
     installDom();
     const container = makeContainer();
-    const engine = new FakePptxEngine(1, 1000, 600);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
     });
@@ -132,14 +132,29 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
   });
 });
 
+// Fake slide geometry, chosen so the DIMENSIONLESS base scale is a clean 1.0 and
+// arithmetic stays tidy. `_scale` is now a multiplier over the 96-dpi natural
+// size (natural px = EMU / EMU_PER_PX, EMU_PER_PX = 9525), mirroring docx.
+//   slide width  = 9525 × 200 = 1,905,000 EMU ⇒ natural 200px
+//   slide height = 9525 × 120 = 1,143,000 EMU ⇒ natural 120px
+// Container width 200 ⇒ base = 200 / 200 = 1.0 ⇒ slide 200×120px at base.
+// (Old geometry was 1000×600 EMU with a px-per-EMU scale of 0.2; that yielded the
+// same 200×120px slide, so the stride math below — 120px tall, gap 10, stride 130
+// — is unchanged. Only the SCALE VALUE changes: base 0.2 → 1.0, zoom ×2 → 2.0.)
+const SLIDE_W_EMU = 9525 * 200; // 1,905,000 ⇒ natural 200px
+const SLIDE_H_EMU = 9525 * 120; // 1,143,000 ⇒ natural 120px
+// Tall variant used by the worker recycle/re-mount test: natural 400px tall ⇒
+// 200×400px at base 1.0, so the visible window is exactly one slide + overscan.
+// (Was 1000×2000 EMU with the old 0.2 px/EMU scale — the same 200×400px slide.)
+const SLIDE_H_TALL_EMU = 9525 * 400; // 3,810,000 ⇒ natural 400px
+
 describe('PptxScrollViewer — layout + virtualization (T2)', () => {
-  // Uniform 1000×600 EMU slides; `_scale` is px-per-EMU (no PT_TO_PX). Fit the
-  // slide width to the container: base scale = clientWidth / slideWidth. With
-  // clientWidth 200 → base 0.2 ⇒ each slide is 200px wide, 120px tall.
+  // See the SLIDE_W_EMU/SLIDE_H_EMU note above: container 200 ⇒ dimensionless base
+  // scale 1.0 ⇒ each slide is 200px wide, 120px tall.
   function setup(slideCount: number, opts = {}) {
     const dom = installDom();
     const container = makeContainer(200, 400); // clientWidth 200, clientHeight 400
-    const engine = new FakePptxEngine(slideCount, 1000, 600);
+    const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -150,8 +165,8 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
     const wrapper = container.children[0] as FakeEl;
     const scrollHost = wrapper.children[0] as FakeEl;
     const spacer = scrollHost.children[0] as FakeEl;
-    // Drive layout: container width 200, slide width 1000 EMU → base scale maps
-    // 1000 EMU to 200px (0.2 px/EMU). Provide the viewport height.
+    // Drive layout: container width 200, natural slide width 200px → dimensionless
+    // base scale 1.0. Provide the viewport height.
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     return { dom, container, engine, v, wrapper, scrollHost, spacer };
@@ -174,7 +189,7 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
   it('spacer height is exact for uniform slide heights + gap', () => {
     const dom = installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(3, 1000, 600);
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -185,9 +200,9 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     v.relayout();
-    // base scale = 200 / 1000 = 0.2 px/EMU ⇒ slide height px = 600 * 0.2 = 120.
-    const scale = 200 / 1000;
-    const slideH = 600 * scale; // 120
+    // Dimensionless base scale = 200 / 200 (natural width) = 1.0 ⇒ slide height px =
+    // (SLIDE_H_EMU / 9525) * 1.0 = 120.
+    const slideH = SLIDE_H_EMU / 9525; // 120
     const n = 3;
     const expected = n * slideH + (n - 1) * 10;
     expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
@@ -252,7 +267,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
   it("main mode: calls renderSlide once per mounted slot with that slide's px width", () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(10, 1000, 600);
+    const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -266,9 +281,9 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const rendered = engine.renderCalls.map((c) => c.slide).sort((a, b) => a - b);
     expect(rendered).toEqual(mounted);
     // Each renderSlide call carried the per-call px width. pptx slides are uniform,
-    // so every width equals the same fit-width (base scale = 200/1000 = 0.2 px/EMU;
-    // slide width px = 1000 * 0.2 = 200), but the per-call width contract still
-    // passes a width per slide (mirrors docx's per-page width assertion, §7).
+    // so every width equals the same fit-width (dimensionless base scale 1.0 over
+    // the natural 200px width ⇒ slide width px = 200), but the per-call width
+    // contract still passes a width per slide (mirrors docx's per-page width, §7).
     const widths = engine.renderSlideWidths();
     expect(widths.length).toBe(mounted.length);
     for (const w of widths) expect(w).toBeCloseTo(200, 3);
@@ -281,7 +296,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // pptx slide size is UNIFORM deck-wide, so unlike docx (mixed page sizes) every
     // slide renders at the SAME px width. The per-call width contract still holds:
     // each mounted slide receives its own width argument, equal to the uniform px.
-    const engine = new FakePptxEngine(2, 1000, 600);
+    const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -290,8 +305,8 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     v.relayout();
-    // Both slides mount (slide 0 height px = 600*0.2 = 120; slide 1 top 130 within
-    // the 400px viewport), so both get exactly one render.
+    // Both slides mount (slide 0 height px = 120 at base scale 1.0; slide 1 top 130
+    // within the 400px viewport), so both get exactly one render.
     const mounted = v.mountedSlideIndicesForTest().sort((a, b) => a - b);
     expect(mounted).toEqual([0, 1]);
     // Per-slide px widths in call order: uniform 200 each.
@@ -307,7 +322,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
   it('does not re-render a mounted slot for the same slide on a no-op scroll', () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(10, 1000, 600);
+    const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -329,7 +344,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // mode:'worker' — the real PptxPresentation.renderSlide THROWS synchronously in
     // worker mode; a viewer that mis-routed would blow up (and renderCalls would
     // record the attempt). The direct _mode routing must never touch renderSlide.
-    const engine = new FakePptxEngine(10, 1000, 600, 'worker');
+    const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -351,7 +366,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
   it('worker mode: paints a resolved bitmap into the slot canvas (transfer)', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(10, 1000, 600, 'worker');
+    const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -381,7 +396,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // stale-check closes the orphan (design §11).
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -409,7 +424,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const container = makeContainer(200, 400);
     // Deferred: renderSlideToBitmap resolves only when the test calls resolve(),
     // so we can scroll a slot's slide out of the window BEFORE the bitmap arrives.
-    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -442,13 +457,13 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // re-dispatch the live slot's render so the slide never stays blank.
     installDom();
     const container = makeContainer(200, 400);
-    // Tall slides (1000×2000 EMU ⇒ 200×400px at base scale 0.2, stride 410) so the
+    // Tall slides (natural 200×400px ⇒ 200×400px at base scale 1.0, stride 410) so the
     // visible window is exactly one slide + overscan = [0,1], mirroring the docx
     // recycle/re-mount pool dynamics: the re-mounted slide-0 slot is a DIFFERENT
     // pooled object than the in-flight one, so `live !== slot` triggers the
     // re-dispatch. (A short-slide window packs several slots, whose LIFO reuse can
     // hand slide 0 back its own in-flight slot — an epoch-only case not under test.)
-    const engine = new FakePptxEngine(50, 1000, 2000, 'worker', true);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_TALL_EMU, 'worker', true);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -501,7 +516,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // →3→4 with onError every round). The onError contract leaves the slide blank.
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const onError = vi.fn();
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -540,7 +555,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     // Deferred so a render is genuinely in flight when we destroy the viewer.
-    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const onError = vi.fn();
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -571,13 +586,13 @@ describe('PptxScrollViewer — rendering (T3)', () => {
   it('render epoch: a bitmap dispatched at the old scale is dropped (closed, not painted) after setScale, and re-dispatched at the new scale', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(20, 1000, 600, 'worker', true);
+    const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       overscan: 1,
-      zoomMin: 0.05,
-      zoomMax: 3,
+      // REAL defaults [0.1, 4]: base fit is 1.0, and setScale(×2)=2.0 is inside them
+      // (the old `zoomMin: 0.05, zoomMax: 3` dodged the px-per-EMU unit bug — WS4b-2).
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
@@ -633,14 +648,14 @@ describe('PptxScrollViewer — rendering (T3)', () => {
   it('render epoch: rejecting the OLD-scale dispatch after setScale still yields exactly ONE fresh dispatch at the new scale (bounded)', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(20, 1000, 600, 'worker', true);
+    const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const onError = vi.fn();
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       overscan: 1,
-      zoomMin: 0.05,
-      zoomMax: 3,
+      // REAL defaults [0.1, 4]: base fit is 1.0, and setScale(×2)=2.0 is inside them
+      // (the old `zoomMin: 0.05, zoomMax: 3` dodged the px-per-EMU unit bug — WS4b-2).
       onError,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
@@ -683,26 +698,25 @@ describe('PptxScrollViewer — rendering (T3)', () => {
 });
 
 describe('PptxScrollViewer — zoom (T4)', () => {
-  // Uniform 1000×600 EMU slides; `_scale` is px-per-EMU (no PT_TO_PX). Container
-  // 200×400, width:undefined ⇒ base fit maps the slide width (1000 EMU) to 200px:
-  //   base = 200 / 1000 = 0.2 px/EMU
-  //   slide height px = 600 * 0.2 = 120
+  // `_scale` is a DIMENSIONLESS multiplier over the 96-dpi natural slide size
+  // (mirrors docx). Container 200×400, width:undefined ⇒ base fit maps the natural
+  // 200px slide width (SLIDE_W_EMU / 9525) to the 200px container:
+  //   base = 200 / 200 = 1.0
+  //   slide height px = (SLIDE_H_EMU / 9525) * 1.0 = 120
   //   offset[i] = i * (120 + gap) = i * 130
-  // Zoom ×2 ⇒ scale 0.4, height 240, stride 250. The two MANDATORY render-epoch
-  // tests (resolve + reject) live in the T3 rendering block above (already covered
-  // by WS4b-1), so they are not repeated here.
+  // Zoom ×2 ⇒ scale 2.0, height 240, stride 250. Because base is now 1.0, base×2 =
+  // 2.0 sits inside the DEFAULT [0.1, 4] bounds, so setup uses REAL defaults — the
+  // old `zoomMin: 0.05, zoomMax: 3` workarounds only existed to dodge the px-per-EMU
+  // base of 0.2 (WS4b-2 review finding) and are removed. The two MANDATORY render-
+  // epoch tests (resolve + reject) live in the T3 rendering block above.
   function setup(slideCount = 20, opts = {}) {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(slideCount, 1000, 600);
+    const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       overscan: 1,
-      // Give the base fit (0.2) headroom: base ×2 = 0.4 stays within these bounds
-      // so the re-anchor tests exercise the zoom path, not the clamp.
-      zoomMin: 0.05,
-      zoomMax: 3,
       ...opts,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
@@ -714,21 +728,21 @@ describe('PptxScrollViewer — zoom (T4)', () => {
 
   it('base fit scale maps the slide width to the container width', () => {
     const { v } = setup();
-    // base = 200 / 1000 = 0.2
-    expect(v.scaleForTest()).toBeCloseTo(0.2, 6);
-    expect(v.baseScaleForTest()).toBeCloseTo(0.2, 6);
+    // base = 200 / 200 (natural width) = 1.0
+    expect(v.scaleForTest()).toBeCloseTo(1.0, 6);
+    expect(v.baseScaleForTest()).toBeCloseTo(1.0, 6);
     v.destroy();
   });
 
   it('re-anchors so the slide under the viewport top stays fixed across a zoom (intraFrac 0)', () => {
     const { v, scrollHost } = setup();
-    // slide 3 top offset at base (0.2): 3 * (120 + 10) = 390
+    // slide 3 top offset at base (1.0): 3 * (120 + 10) = 390
     scrollHost.scrollTop = 390;
     scrollHost.dispatch('scroll');
     expect(v.topVisibleSlide).toBe(3);
-    const cur = v.scaleForTest(); // 0.2
-    v.setScale(cur * 2); // 0.4 (within [0.05, 3], no clamp)
-    expect(v.scaleForTest()).toBeCloseTo(0.4, 6);
+    const cur = v.scaleForTest(); // 1.0
+    v.setScale(cur * 2); // 2.0 (within default [0.1, 4], no clamp)
+    expect(v.scaleForTest()).toBeCloseTo(2.0, 6);
     // slide 3 stays the top slide; new offset = 3 * (240 + 10) = 750
     expect(v.topVisibleSlide).toBe(3);
     expect(Math.abs(scrollHost.scrollTop - 750)).toBeLessThan(2);
@@ -742,7 +756,7 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     scrollHost.scrollTop = 450;
     scrollHost.dispatch('scroll');
     expect(v.topVisibleSlide).toBe(3);
-    v.setScale(v.scaleForTest() * 2); // 0.2 → 0.4; heights' = 240
+    v.setScale(v.scaleForTest() * 2); // 1.0 → 2.0; heights' = 240
     // newScrollTop = offset'[3] + 0.5 * 240 = 750 + 120 = 870
     expect(Math.abs(scrollHost.scrollTop - 870)).toBeLessThan(2);
     // Slide 3 is still under the viewport top: offset'[3]=750 <= 870 < 1000.
@@ -750,19 +764,20 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     v.destroy();
   });
 
-  it('clamps setScale to the absolute [zoomMin, zoomMax] px-per-EMU bounds', () => {
-    const { v } = setup();
+  it('clamps setScale to the absolute [zoomMin, zoomMax] dimensionless bounds', () => {
+    // Explicit bounds so the clamp is unambiguous (base fit is 1.0, inside them).
+    const { v } = setup(20, { zoomMin: 0.5, zoomMax: 3 });
     v.setScale(100); // above zoomMax 3 (absolute, NOT a multiple of base)
     expect(v.scaleForTest()).toBeCloseTo(3, 6);
-    v.setScale(0.001); // below zoomMin 0.05
-    expect(v.scaleForTest()).toBeCloseTo(0.05, 6);
+    v.setScale(0.001); // below zoomMin 0.5
+    expect(v.scaleForTest()).toBeCloseTo(0.5, 6);
     v.destroy();
   });
 
   it('setScale defaults clamp to [0.1, 4] when zoomMin/zoomMax are unset', () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(5, 1000, 600);
+    const engine = new FakePptxEngine(5, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
@@ -775,6 +790,59 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     expect(v.scaleForTest()).toBeCloseTo(4, 5); // default zoomMax
     v.setScale(0.0001);
     expect(v.scaleForTest()).toBeCloseTo(0.1, 5); // default zoomMin
+    v.destroy();
+  });
+
+  // ⚠ MANDATORY real-magnitude regression (WS4b review finding A). Before the
+  // dimensionless-scale fix, `_scale` was px-per-EMU (~6.6e-5 for a real 12.192M-EMU
+  // deck), which the DEFAULT [0.1, 4] clamp then inflated by ~1000× on the first
+  // Ctrl+wheel or resize (spacer 6,274px → 6,172,330px). With the dimensionless
+  // scale, a real 16:9 deck's base fit lands INSIDE the default bounds and a wheel
+  // tick multiplies it by ~e, never explodes.
+  it('real 16:9 deck: base fit is inside [0.1, 4] (NOT clamped) and one wheel tick multiplies the spacer by ~e, not ~1000×', () => {
+    installDom();
+    // A real PowerPoint 16:9 deck: 13.333in × 7.5in = 12,192,000 × 6,858,000 EMU.
+    // Natural width px = 12,192,000 / 9525 = 1280. Container ~1200px.
+    const container = makeContainer(1200, 800);
+    const engine = new FakePptxEngine(10, 12192000, 6858000);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 16,
+      // No zoomMin/zoomMax ⇒ REAL defaults [0.1, 4].
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    const spacer = scrollHost.children[0] as FakeEl;
+    scrollHost.clientHeight = 800;
+    scrollHost.clientWidth = 1200;
+    v.relayout();
+
+    // base = 1200 / 1280 = 0.9375 — INSIDE [0.1, 4], so relayout did NOT clamp.
+    const base = v.scaleForTest();
+    expect(base).toBeCloseTo(0.9375, 6);
+    expect(base).toBeGreaterThan(0.1);
+    expect(base).toBeLessThan(4);
+    const spacerBase = parseFloat(spacer.style.height);
+    expect(spacerBase).toBeGreaterThan(0);
+
+    // One Ctrl+wheel tick up (deltaY −100): zoomStepScale multiplies by exp(1) ≈
+    // 2.71828, so 0.9375 × e ≈ 2.548 — still inside [0.1, 4], NOT clamped to 4.
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, metaKey: false, preventDefault() {} });
+    const zoomed = v.scaleForTest();
+    expect(zoomed).toBeCloseTo(0.9375 * Math.E, 4); // ≈ 2.548, not the clamped 4
+    expect(zoomed).toBeLessThan(4);
+
+    // The spacer grew by the scale ratio (≈ e), NOT by ~1000× (the old px-per-EMU
+    // clamp explosion). Slide height px ∝ _scale, so the spacer's slide-height
+    // portion scales by (zoomed / base); with the fixed gap term the total ratio is
+    // very close to e. Bound it well below the old 1000× blowup.
+    const spacerZoomed = parseFloat(spacer.style.height);
+    const ratio = spacerZoomed / spacerBase;
+    expect(ratio).toBeGreaterThan(2.5); // grew ~e×
+    expect(ratio).toBeLessThan(3); // and NOT ~1000× (the pre-fix explosion)
+
+    // setScale(999) still clamps hard to the default zoomMax 4.
+    v.setScale(999);
+    expect(v.scaleForTest()).toBeCloseTo(4, 5);
     v.destroy();
   });
 
@@ -853,7 +921,7 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     // Mock the static loader so load() resolves to a fake engine WITHOUT touching
     // a real Worker / WASM. The viewer must call relayout() after assignment so a
     // self-loaded (non-injected) viewer is not left blank (I-2).
-    const engine = new FakePptxEngine(10, 1000, 600);
+    const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const loadSpy = vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
@@ -900,7 +968,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
   it('main mode: builds a shape div with a nested run span for each visible slot', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(3, 1000, 600);
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -932,7 +1000,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
   it('main mode: a rotated shape gets a CSS rotate() on its shape div', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(1, 1000, 600);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     // Rotated shape frame: buildPptxTextLayer applies transform:rotate(totalRot).
     engine.feedTextRuns = [{ ...RUN, rotation: 30 }];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
@@ -955,10 +1023,41 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     v.destroy();
   });
 
-  it('main mode: sizes the overlay to the slot canvas size (number args)', async () => {
-    installDom();
+  it('main mode: sizes the overlay to the slot CSS box (literal px, dpr 1)', async () => {
+    installDom(); // window.devicePixelRatio = 1
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(1, 1000, 600);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.feedTextRuns = [RUN];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    const wrapper = findSlotWrapper(scrollHost);
+    const textLayer = findTextLayer(wrapper);
+    // Finding B: the overlay is sized to the CSS box (round(widthPx)/round(
+    // slideHeightPx)), NOT the canvas backing store. At base scale 1.0 the slide is
+    // 200px wide, 120px tall — assert those LITERAL numbers, not a fallback echo.
+    expect(textLayer.style.width).toBe('200px');
+    expect(textLayer.style.height).toBe('120px');
+    v.destroy();
+  });
+
+  it('main mode (dpr 2): overlay is the CSS box, NOT the 2× backing store', async () => {
+    // Finding B regression: on retina (dpr 2) the real renderer sets canvas.width =
+    // cssWidth × 2, so a slot canvas is 400×240 for a 200×120 CSS box. The overlay
+    // must stay 200×120 (the CSS box); copying canvas.width would size it 2× and
+    // overflow the wrapper (inflating the scroll area). The fake renderSlide mirrors
+    // the real backing-store sizing when dpr is passed.
+    installDom();
+    vi.stubGlobal('window', { devicePixelRatio: 2 });
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -973,20 +1072,19 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const wrapper = findSlotWrapper(scrollHost);
     const canvas = wrapper.children.find((c) => c.tag === 'canvas') as FakeEl;
     const textLayer = findTextLayer(wrapper);
-    // buildPptxTextLayer takes NUMBERS and writes `${n}px`. The viewer passes
-    // canvas.width || round(widthPx) and canvas.height || round(slideHeightPx).
-    // base scale = 200/1000 = 0.2 ⇒ widthPx 200, slideHeightPx 120.
-    const expectW = canvas.width || 200;
-    const expectH = canvas.height || 120;
-    expect(textLayer.style.width).toBe(`${expectW}px`);
-    expect(textLayer.style.height).toBe(`${expectH}px`);
+    // The canvas backing store IS 2× (dpr 2): 400×240.
+    expect(canvas.width).toBe(400);
+    expect(canvas.height).toBe(240);
+    // …but the overlay is the CSS box, 200×120 — half the backing store.
+    expect(textLayer.style.width).toBe('200px');
+    expect(textLayer.style.height).toBe('120px');
     v.destroy();
   });
 
   it('main mode: recycling a slot clears its overlay so the free pool holds no stale spans', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(50, 1000, 600);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -1015,7 +1113,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     installDom();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(3, 1000, 600, 'worker');
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
@@ -1045,14 +1143,14 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     // Deferred main mode: the test resolves renderSlide manually so setScale can
     // move the epoch WHILE slide 0's first render is in flight.
-    const engine = new FakePptxEngine(20, 1000, 600, 'main', true);
+    const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
     engine.feedTextRuns = [RUN];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
-      zoomMin: 0.05,
-      zoomMax: 4,
+      // REAL defaults [0.1, 4]: base fit is 1.0, and setScale(×2)=2.0 is inside them
+      // (the old `zoomMin: 0.05` dodged the px-per-EMU unit bug — WS4b-2).
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
@@ -1079,17 +1177,18 @@ describe('PptxScrollViewer — text selection (T5)', () => {
 });
 
 describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
-  // container fit width 200, slide 1000×600 EMU → base scale = 200/1000 = 0.2.
-  // slide height px = 600 * 0.2 = 120. gap 10 ⇒ stride 130.
-  const BASE = 200 / 1000; // 0.2
-  const SLIDE_H = 600 * BASE; // 120
+  // container fit width 200, natural slide width 200px → DIMENSIONLESS base scale
+  // 200/200 = 1.0. slide height px = (SLIDE_H_EMU / 9525) * 1.0 = 120. gap 10 ⇒
+  // stride 130. (Only the base VALUE moved 0.2 → 1.0; the px geometry is identical.)
+  const BASE = 1.0;
+  const SLIDE_H = SLIDE_H_EMU / 9525; // 120 (natural height px at base 1.0)
   const GAP = 10;
   const STRIDE = SLIDE_H + GAP; // 130 — the top-to-top distance between slides
 
   function setup(slideCount = 20, opts = {}) {
     installDom();
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(slideCount, 1000, 600);
+    const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: GAP,
@@ -1160,9 +1259,9 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
   });
 
   it('ResizeObserver re-fit preserves the zoom multiplier', () => {
-    // zoomMax headroom: base 0.2, 2× zoom → 0.4; after the width doubles the new
-    // base is 0.4 so the preserved scale is 0.8. zoomMin/zoomMax are ABSOLUTE
-    // px-per-EMU bounds (design §8.2), so a low zoomMax would legitimately CLAMP
+    // zoomMax headroom: base 1.0, 2× zoom → 2.0; after the width doubles the new
+    // base is 2.0 so the preserved scale is 4.0. zoomMin/zoomMax are ABSOLUTE
+    // dimensionless bounds (design §8.2), so a low zoomMax would legitimately CLAMP
     // the re-fit and break preservation. Give the multiplier room to survive.
     const { v, container } = setup(20, { zoomMax: 10 });
     v.setScale(v.baseScaleForTest() * 2); // 2× zoom
@@ -1232,11 +1331,11 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     // F1 clamped-path variant: pin zoomMax to the current base so a width grow's
     // re-fit (newBase × mult) clamps back to the SAME scale, making setScale a no-op
     // (which skips its own force-re-render mount). The post-setScale `_mountVisible`
-    // must still mount the rows the taller viewport revealed. base = 0.2, no user
-    // zoom ⇒ mult 1; after width→400 newBase 0.4 clamps to zoomMax 0.2 (== _scale).
+    // must still mount the rows the taller viewport revealed. base = 1.0, no user
+    // zoom ⇒ mult 1; after width→400 newBase 2.0 clamps to zoomMax 1.0 (== _scale).
     const changes: number[] = [];
     const { v, scrollHost, container } = setup(20, {
-      zoomMax: BASE, // 0.2 — clamps the re-fit back to the current scale
+      zoomMax: BASE, // 1.0 — clamps the re-fit back to the current scale
       onVisibleSlideChange: (i: number) => changes.push(i),
     });
     expect(v.scaleForTest()).toBe(BASE);
@@ -1267,7 +1366,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
   it('zero-width container defers, then lays out on first non-zero resize', () => {
     installDom();
     const container = makeContainer(0, 0); // unlaid-out
-    const engine = new FakePptxEngine(5, 1000, 600);
+    const engine = new FakePptxEngine(5, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     expect(v.mountedSlideIndicesForTest().length).toBe(0); // deferred
@@ -1282,7 +1381,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
   it('empty deck: slideCount 0 ⇒ spacer 0, no slots, scrollToSlide no-op', () => {
     installDom();
     const container = makeContainer(300, 400);
-    const engine = new FakePptxEngine(0, 1000, 600);
+    const engine = new FakePptxEngine(0, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     v.relayout();
     const spacer = (container.children[0] as FakeEl).children[0].children[0] as FakeEl;
@@ -1295,7 +1394,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
   it('empty deck: resize does not crash and fires no callback', () => {
     installDom();
     const container = makeContainer(0, 0);
-    const engine = new FakePptxEngine(0, 1000, 600);
+    const engine = new FakePptxEngine(0, SLIDE_W_EMU, SLIDE_H_EMU);
     const changes: number[] = [];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -1324,7 +1423,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     }
     vi.stubGlobal('ResizeObserver', SpyRO);
     const container = makeContainer(200, 400);
-    const engine = new FakePptxEngine(3, 1000, 600);
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     v.destroy();
     expect(disconnected).toBe(1);

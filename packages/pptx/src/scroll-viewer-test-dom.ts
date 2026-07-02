@@ -208,6 +208,16 @@ export class FakePptxEngine {
     return this._mode;
   }
   renderSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<void> {
+    // Mirror the real renderer's backing-store sizing so tests can exercise the
+    // dpr≠1 path: the real PptxPresentation.renderSlide sets `canvas.width =
+    // round(cssWidth × dpr)` (and height to keep the slide aspect). A retina (dpr 2)
+    // render leaves canvas.width at 2× the CSS box — the overlay must NOT copy it.
+    if (this._mode === 'main' && opts?.width && opts.width > 0) {
+      const dpr = opts.dpr ?? 1;
+      const canvas = _canvas as { width: number; height: number };
+      canvas.width = Math.round(opts.width * dpr);
+      canvas.height = this.slideWidth > 0 ? Math.round((canvas.width * this.slideHeight) / this.slideWidth) : 0;
+    }
     if (this._mode === 'worker') {
       // Record the attempt BEFORE throwing so a test can assert the viewer never
       // routes a worker-mode engine through renderSlide (and detect wrong-path

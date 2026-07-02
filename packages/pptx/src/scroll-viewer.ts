@@ -1,4 +1,4 @@
-import { computeVisibleRange, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
@@ -31,9 +31,10 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  in worker mode `onTextRun` cannot cross the worker boundary, so the overlay
    *  stays empty and the viewer logs one warning (design §11). */
   enableTextSelection?: boolean;
-  /** Minimum zoom scale (px-per-EMU multiplier floor). Default 0.1. */
+  /** Minimum zoom scale — a DIMENSIONLESS multiplier over the 96-dpi natural
+   *  slide size (10% = 0.1), matching `DocxScrollViewer`. Default 0.1. */
   zoomMin?: number;
-  /** Maximum zoom scale. Default 4. */
+  /** Maximum zoom scale (dimensionless multiplier, 400% = 4). Default 4. */
   zoomMax?: number;
   /** Enable `Ctrl`/`Cmd`+wheel zoom. Default true. */
   enableZoom?: boolean;
@@ -99,8 +100,11 @@ export class PptxScrollViewer {
    *  loading, `opts.mode` decides and `load()` passes it to `PptxPresentation.load`. */
   private _mode: 'main' | 'worker';
 
-  /** px-per-EMU zoom multiplier. Base fit maps the (uniform) slide width to the
-   *  container width (or opts.width). Zoom multiplies this (design §7). */
+  /** Dimensionless zoom multiplier over the 96-dpi natural slide size (mirrors
+   *  `DocxScrollViewer`, whose `_scale` multiplies `widthPt × PT_TO_PX`). The
+   *  natural (1×) slide width in CSS px is `slideEmu / EMU_PER_PX`; the base fit
+   *  sets `_scale` so that natural width maps to the container width, and zoom
+   *  multiplies it further (design §7). */
   private _scale = 1;
   /** Whether the base fit scale has been established. Set true the first time
    *  `relayout()` resolves a positive base scale. We use an explicit flag rather
@@ -270,14 +274,16 @@ export class PptxScrollViewer {
     return this._pres?.slideCount ?? 0;
   }
 
-  /** Uniform slide width in CSS px at the current scale. `_scale` is px-per-EMU. */
+  /** Uniform slide width in CSS px at the current scale. `_scale` is a
+   *  dimensionless multiplier over the natural 96-dpi width (`slideEmu /
+   *  EMU_PER_PX`), mirroring docx's `widthPt × PT_TO_PX × _scale`. */
   private _slideWidthPx(): number {
-    return this._pres!.slideWidth * this._scale;
+    return (this._pres!.slideWidth / EMU_PER_PX) * this._scale;
   }
 
   /** Uniform slide height in CSS px at the current scale. */
   private _slideHeightPx(): number {
-    return this._pres!.slideHeight * this._scale;
+    return (this._pres!.slideHeight / EMU_PER_PX) * this._scale;
   }
 
   /** The container (fit) width, deferring when the container is unlaid-out. */
@@ -287,14 +293,16 @@ export class PptxScrollViewer {
     return cw > 0 ? cw : 0; // 0 ⇒ defer (design §11 zero-width deferral)
   }
 
-  /** Base scale: fit the (uniform) slide width to the fit-width. Here `_scale`
-   *  is CSS-px-per-EMU. Returns 0 when the container has no width yet (deferral). */
+  /** Base scale: the DIMENSIONLESS multiplier that fits the (uniform) slide
+   *  width to the fit-width. `natural = slideWidthEmu / EMU_PER_PX` is the 96-dpi
+   *  CSS-px width; `base = fitWidth / natural` (mirrors docx's `w / (widthPt ×
+   *  PT_TO_PX)`). Returns 0 when the container has no width yet (deferral). */
   private _baseScale(): number {
     if (!this._pres || this._pres.slideCount === 0) return 0;
     const w = this._fitWidthPx();
-    const slideW = this._pres.slideWidth;
-    if (w <= 0 || slideW <= 0) return 0;
-    return w / slideW; // px per EMU
+    const naturalW = this._pres.slideWidth / EMU_PER_PX;
+    if (w <= 0 || naturalW <= 0) return 0;
+    return w / naturalW; // dimensionless multiplier over the natural width
   }
 
   /**
@@ -510,16 +518,14 @@ export class PptxScrollViewer {
         // The engine's per-canvas token already discards the superseded pixels.
         if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedSlide !== i) return;
         if (wantOverlay && slot.textLayer) {
-          // buildPptxTextLayer takes NUMBERS (not strings) for width/height. In
-          // main mode renderSlide sets the canvas backing-store size to width*dpr
-          // and the CSS width to `width`; the overlay must match the CSS box, so
-          // compute cssHeight from the uniform slide height (rounded px).
-          buildPptxTextLayer(
-            slot.textLayer,
-            runs,
-            slot.canvas.width || Math.round(widthPx),
-            slot.canvas.height || Math.round(this._slideHeightPx()),
-          );
+          // buildPptxTextLayer takes NUMBERS (not strings) for width/height. The
+          // overlay must match the slot's CSS box, NOT the canvas backing store:
+          // renderSlide sets `canvas.width = cssWidth × dpr`, so on a retina (dpr 2)
+          // display the backing store is 2× the CSS box. Passing it would size the
+          // overlay 2× too large (overflowing the wrapper + inflating the scroll
+          // area). Pass the CSS px directly — the uniform slide width/height at the
+          // current scale (rounded).
+          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()));
         }
       })
       .catch((err: unknown) => {
@@ -665,7 +671,8 @@ export class PptxScrollViewer {
   }
 
   /**
-   * Set the absolute px-per-EMU zoom scale, clamped inline to
+   * Set the absolute (dimensionless) zoom scale — a multiplier over the 96-dpi
+   * natural slide size, matching `DocxScrollViewer` — clamped inline to
    * `[zoomMin ?? 0.1, zoomMax ?? 4]` (absolute bounds, XlsxViewer convention — NOT
    * multiples of the base fit; design §3 keeps the clamp in the viewer, not core),
    * then re-anchor VERTICALLY so the slide currently under the viewport top stays
@@ -824,9 +831,9 @@ export class PptxScrollViewer {
     // path runs identically to a zoom.
     //
     // zoomMin RATCHET (design §8.2 caveat, see setScale JSDoc): `zoomMin`/`zoomMax`
-    // are ABSOLUTE px-per-EMU bounds, but the re-fit base (`newBase × mult`) is
-    // computed UNCLAMPED. A resize that transits the scale below `zoomMin × slideWidth`
-    // (a wide slide in a container that briefly narrows) is clamped UP by `setScale`,
+    // are ABSOLUTE dimensionless bounds, but the re-fit base (`newBase × mult`) is
+    // computed UNCLAMPED. A resize that transits the scale below `zoomMin` (a wide
+    // slide in a container that briefly narrows) is clamped UP by `setScale`,
     // which permanently inflates the implied multiplier even with zero user zoom —
     // the next re-fit reads back the clamped `_scale` as `mult`. This is bounded and
     // converges (the clamp floor is fixed), but it means the preserved multiplier can
@@ -850,7 +857,7 @@ export class PptxScrollViewer {
     return [...this._slots.keys()];
   }
 
-  /** @internal test hook: the current absolute px-per-EMU scale. */
+  /** @internal test hook: the current absolute (dimensionless) zoom scale. */
   scaleForTest(): number {
     return this._scale;
   }
