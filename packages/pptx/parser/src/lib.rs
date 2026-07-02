@@ -8,6 +8,26 @@ use wasm_bindgen::prelude::*;
 
 mod table_style_presets;
 
+// Test-only counter for `roxmltree::Document::parse` calls on the D4 hot paths
+// (slide master build, layout, slide XML + decorations). It exists ONLY under
+// `cfg(test)` — `note_layout_master_parse()` compiles to nothing in release, so
+// this is zero-cost for shipped builds. A regression test uses it to assert that
+// a deck whose slides share one layout + one master parses each of those parts a
+// bounded number of times (see `parse_count_scales_with_distinct_parts`),
+// guarding against re-introducing the per-slide re-parses this change removed.
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_MASTER_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Increment the D4 parse counter (no-op unless `cfg(test)`). Call immediately
+/// before parsing a slide-master / layout / slide XML on the pagination path.
+#[inline(always)]
+fn note_layout_master_parse() {
+    #[cfg(test)]
+    LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(c.get() + 1));
+}
+
 // ===========================
 //  Public WASM entry points
 // ===========================
@@ -4485,6 +4505,7 @@ fn parse_layout(
     layout_rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
 ) -> ParsedLayout {
+    note_layout_master_parse();
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
         // Unparseable layout → same as no layout: default placeholders/bg and
@@ -7959,6 +7980,7 @@ fn parse_slide(
             .or_insert(c.clone());
     }
 
+    note_layout_master_parse();
     let doc = roxmltree::Document::parse(xml)?;
     let root = doc.root_element(); // <p:sld>
     let hidden = slide_is_hidden(root);
@@ -8029,6 +8051,7 @@ fn parse_slide(
     if show_master_sp {
         if eff.is_some() {
             if let Some(mxml) = master_xml {
+                note_layout_master_parse();
                 if let Ok(mdoc) = roxmltree::Document::parse(mxml) {
                     extract_decorative_shapes(
                         mdoc.root_element(),
@@ -8050,6 +8073,7 @@ fn parse_slide(
     // These are decorative background elements defined in the slide layout
     // (e.g. coloured bands, logos) that are not placeholder anchors.
     if let Some(lxml) = layout_xml {
+        note_layout_master_parse();
         if let Ok(ldoc) = roxmltree::Document::parse(lxml) {
             let lroot = ldoc.root_element();
             if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
@@ -9124,9 +9148,10 @@ fn build_master_bundle(
     // `master_xml_opt`, so it lives only for the extraction scope; all owned maps
     // are computed before it is dropped. When the master has no XML (missing part)
     // every map defaults to empty, exactly as the prior `Option::map` chain did.
-    let master_doc: Option<roxmltree::Document<'_>> = master_xml_opt
-        .as_deref()
-        .and_then(|xml| roxmltree::Document::parse(xml).ok());
+    let master_doc: Option<roxmltree::Document<'_>> = master_xml_opt.as_deref().and_then(|xml| {
+        note_layout_master_parse();
+        roxmltree::Document::parse(xml).ok()
+    });
     let master_root: Option<roxmltree::Node<'_, '_>> =
         master_doc.as_ref().map(|d| d.root_element());
 
@@ -9455,10 +9480,10 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             // colors, per-level bullet colors) flip with the override. Parse the
             // master XML ONCE here and share the root across all three re-resolutions
             // (previously each re-parsed the same string — 3 parses per override slide).
-            let master_doc = bundle
-                .master_xml
-                .as_deref()
-                .and_then(|xml| roxmltree::Document::parse(xml).ok());
+            let master_doc = bundle.master_xml.as_deref().and_then(|xml| {
+                note_layout_master_parse();
+                roxmltree::Document::parse(xml).ok()
+            });
             let master_root = master_doc.as_ref().map(|d| d.root_element());
             let master_bg: Option<Fill> = master_root.and_then(|root| {
                 let c_sld = child(root, "cSld")?;
@@ -11352,6 +11377,118 @@ mod tests {
         assert_eq!(
             flipped.placeholders.by_type.get("body").map(|t| t.x),
             Some(123456)
+        );
+    }
+
+    /// Build a deck with `n_slides` slides that ALL reference the same single
+    /// layout + single master (no clrMapOvr, no master/layout decorative shapes).
+    /// Used to assert the D4 slide-master/layout parse count stays bounded.
+    fn build_shared_layout_deck(n_slides: usize) -> Vec<u8> {
+        let sld_ids: String = (0..n_slides)
+            .map(|i| format!("<p:sldId id=\"{}\" r:id=\"rIdSlide{}\"/>", 256 + i, i))
+            .collect();
+        let presentation_xml = format!(
+            r#"<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster"/></p:sldMasterIdLst>
+  <p:sldIdLst>{sld_ids}</p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#
+        );
+        let mut pres_rel_entries = String::from(
+            r#"<Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>"#,
+        );
+        for i in 0..n_slides {
+            pres_rel_entries.push_str(&format!(
+                "\n  <Relationship Id=\"rIdSlide{i}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{i}.xml\"/>"
+            ));
+        }
+        let pres_rels =
+            format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{pres_rel_entries}</Relationships>");
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="FF0000"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2><a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4><a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6><a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#;
+        // Master + layout carry ONLY placeholder shapes (no decorative), so the
+        // master-decorative pre-extraction stores an empty vec and the layout
+        // decorative walk finds nothing — the parse count reflects the pagination
+        // path alone.
+        let master_xml = r#"<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout"/></p:sldLayoutIdLst></p:sldMaster>"#;
+        let master_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let layout_xml = r#"<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sldLayout>"#;
+        let layout_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
+        let slide_xml = r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>"#;
+        let slide_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+
+        let mut parts: Vec<(String, Vec<u8>)> = vec![
+            ("ppt/presentation.xml".into(), presentation_xml.into_bytes()),
+            (
+                "ppt/_rels/presentation.xml.rels".into(),
+                pres_rels.into_bytes(),
+            ),
+            ("ppt/theme/theme1.xml".into(), theme_xml.as_bytes().to_vec()),
+            (
+                "ppt/slideMasters/slideMaster1.xml".into(),
+                master_xml.as_bytes().to_vec(),
+            ),
+            (
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels".into(),
+                master_rels.as_bytes().to_vec(),
+            ),
+            (
+                "ppt/slideLayouts/slideLayout1.xml".into(),
+                layout_xml.as_bytes().to_vec(),
+            ),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(),
+                layout_rels.as_bytes().to_vec(),
+            ),
+        ];
+        for i in 0..n_slides {
+            parts.push((
+                format!("ppt/slides/slide{i}.xml"),
+                slide_xml.as_bytes().to_vec(),
+            ));
+            parts.push((
+                format!("ppt/slides/_rels/slide{i}.xml.rels"),
+                slide_rels.as_bytes().to_vec(),
+            ));
+        }
+        let borrowed: Vec<(&str, &[u8])> = parts
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_slice()))
+            .collect();
+        zip_with_parts(&borrowed)
+    }
+
+    /// D4 regression guard: the slide-master + layout `Document::parse` count on
+    /// the pagination path must be BOUNDED — not `k · slides`. With every slide
+    /// sharing one layout + one master (no clrMapOvr, no decorations), the master
+    /// is built once (1 parse) and the layout is parsed once for the cache, so
+    /// the total is `2 + 2·slides` (per slide: its own XML + the layout decorative
+    /// walk). Crucially the master/layout parse count does NOT grow by the 12+
+    /// (master) or 4 (layout) per-slide factor this change removed. Asserting the
+    /// slope across two slide counts pins the optimization: master build and the
+    /// layout cache each fire exactly once regardless of N.
+    #[test]
+    fn parse_count_scales_with_distinct_parts() {
+        let count_for = |n: usize| -> usize {
+            let data = build_shared_layout_deck(n);
+            LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(0));
+            let pres = parse_presentation(&data).expect("parse");
+            assert_eq!(pres.slides.len(), n);
+            LAYOUT_MASTER_PARSE_COUNT.with(|c| c.get())
+        };
+        let c3 = count_for(3);
+        let c7 = count_for(7);
+        // Exact model: 1 (master build) + 1 (layout cache build) + 2·N
+        // (per-slide: slide XML + layout decorative walk).
+        assert_eq!(c3, 2 + 2 * 3, "3-slide deck D4 parse count");
+        assert_eq!(c7, 2 + 2 * 7, "7-slide deck D4 parse count");
+        // Slope check: exactly 2 extra parses per added slide (NOT 12+ or 4·k),
+        // i.e. the master build + layout parse are amortized to O(1), not O(N).
+        assert_eq!(
+            (c7 - c3) / (7 - 3),
+            2,
+            "per-slide D4 parse slope must be 2 (slide + layout-decorative), \
+             proving master/layout parses are cached, not per-slide"
         );
     }
 
