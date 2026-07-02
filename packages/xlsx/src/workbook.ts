@@ -113,21 +113,24 @@ export class XlsxWorkbook {
     // In worker mode the worker preloads fonts before its first render
     // (rendering measures text), so the flag is forwarded; in main mode fonts
     // are loaded here after parse.
-    const parsed = await this.bridge.request((id) =>
-      this._mode === 'worker'
-        ? ({
-            type: 'parse',
-            id,
-            data: data.slice(0),
-            maxZipEntryBytes: this.maxZipEntryBytes,
-            useGoogleFonts: !!opts.useGoogleFonts,
-          } satisfies RenderWorkerRequest)
-        : ({
-            type: 'parse',
-            id,
-            data: data.slice(0),
-            maxZipEntryBytes: this.maxZipEntryBytes,
-          } satisfies WorkerRequest),
+    const parsed = await this.bridge.request(
+      (id) =>
+        this._mode === 'worker'
+          ? ({
+              type: 'parse',
+              id,
+              data: data.slice(0),
+              maxZipEntryBytes: this.maxZipEntryBytes,
+              useGoogleFonts: !!opts.useGoogleFonts,
+            } satisfies RenderWorkerRequest)
+          : ({
+              type: 'parse',
+              id,
+              data: data.slice(0),
+              maxZipEntryBytes: this.maxZipEntryBytes,
+            } satisfies WorkerRequest),
+      undefined,
+      { timeoutMs: opts.workerTimeoutMs },
     );
     // Both modes carry the light, workbook-level ParsedWorkbook back, so
     // sheetNames / tabColors / resolveValidationList keep working. In parse mode

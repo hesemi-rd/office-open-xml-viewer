@@ -29,6 +29,16 @@ export interface LoadOptions {
    */
   maxZipEntryBytes?: number;
   /**
+   * Reject the parse request if the parser worker does not answer within this
+   * many milliseconds. Opt-in safety net for a wedged or crashed worker that
+   * would otherwise leave `load()` pending forever. **Default: unlimited** —
+   * parsing a large document with heavy embedded media can legitimately take
+   * tens of seconds, so no timeout is imposed unless you set one. A worker that
+   * throws or fails to load already rejects immediately regardless of this
+   * value; this bound only covers the "silent, never-responds" case.
+   */
+  workerTimeoutMs?: number;
+  /**
    * Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Inject it
    * **once** here and every render of this document / presentation / workbook
    * uses it — the same dependency-injection contract across all three formats

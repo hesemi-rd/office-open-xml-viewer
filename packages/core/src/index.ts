@@ -208,6 +208,7 @@ export {
   WorkerBridge,
   type WorkerLike,
   type WorkerBridgeOptions,
+  type WorkerRequestOptions,
   decodeDataUrl,
 } from './worker';
 export {

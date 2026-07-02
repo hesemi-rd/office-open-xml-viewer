@@ -324,6 +324,7 @@ export class DocxScrollViewer {
       this._doc = await DocxDocument.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
+        workerTimeoutMs: this._opts.workerTimeoutMs,
         math: this._opts.math,
         mode: this._mode,
       });

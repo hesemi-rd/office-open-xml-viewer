@@ -138,6 +138,7 @@ export class PptxViewer {
       this.engine = await PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
+        workerTimeoutMs: this.opts.workerTimeoutMs,
         math: this.opts.math,
         mode: this._mode,
       });

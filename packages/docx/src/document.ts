@@ -97,6 +97,7 @@ export class DocxDocument {
       buffer,
       opts.maxZipEntryBytes,
       mode === 'worker' ? !!opts.useGoogleFonts : false,
+      opts.workerTimeoutMs,
     );
     if (mode === 'main' && opts.useGoogleFonts && doc._document) {
       await preloadGoogleFonts(
@@ -118,6 +119,7 @@ export class DocxDocument {
     buffer: ArrayBuffer,
     maxZipEntryBytes?: number,
     useGoogleFonts = false,
+    timeoutMs?: number,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
@@ -125,6 +127,7 @@ export class DocxDocument {
           ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, maxZipEntryBytes } satisfies WorkerRequest),
       [buffer],
+      { timeoutMs },
     );
     if (this._mode === 'worker') {
       this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;

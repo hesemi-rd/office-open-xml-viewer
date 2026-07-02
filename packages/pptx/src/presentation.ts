@@ -156,6 +156,7 @@ export class PptxPresentation {
       buffer,
       opts.maxZipEntryBytes,
       mode === 'worker' ? !!opts.useGoogleFonts : false,
+      opts.workerTimeoutMs,
     );
     if (mode === 'main' && opts.useGoogleFonts && pres._presentation) {
       await preloadGoogleFonts(
@@ -175,6 +176,7 @@ export class PptxPresentation {
     buffer: ArrayBuffer,
     maxZipEntryBytes?: number,
     useGoogleFonts = false,
+    timeoutMs?: number,
   ): Promise<void> {
     await this._waitForWorker();
     const res = await this._bridge.request(
@@ -183,6 +185,7 @@ export class PptxPresentation {
           ? ({ kind: 'parse', id, buffer, maxZipEntryBytes, useGoogleFonts } satisfies RenderWorkerRequest)
           : ({ kind: 'parse', id, buffer, maxZipEntryBytes } satisfies WorkerRequest),
       [buffer],
+      { timeoutMs },
     );
     if (this._mode === 'worker') {
       this._meta = (res as Extract<RenderWorkerResponse, { kind: 'parsedMeta' }>).meta;
