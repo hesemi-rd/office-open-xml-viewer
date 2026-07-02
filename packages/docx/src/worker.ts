@@ -28,9 +28,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
       currentBuffer = new Uint8Array(req.data);
+      // `parse_docx` returns the model JSON on success and throws a JS Error on
+      // parse/serialize failure (Result<String, JsValue>), matching pptx/xlsx.
+      // The throw is caught by the outer try/catch below, so no error-field
+      // probe is needed here.
       const json = parse_docx(currentBuffer, currentMaxZipEntryBytes);
       const document = JSON.parse(json);
-      if (document.error) throw new Error(`Parse error: ${document.error}`);
       const res: WorkerResponse = { type: 'parsed', id, document };
       self.postMessage(res);
       return;

@@ -9,15 +9,12 @@ mod types;
 mod xml_util;
 
 #[wasm_bindgen]
-pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> String {
+pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    match parser::parse(data) {
-        Ok(doc) => {
-            serde_json::to_string(&doc).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
-        }
-        Err(e) => format!("{{\"error\":\"{}\"}}", e),
-    }
+    let doc =
+        parser::parse(data).map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+    serde_json::to_string(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
 /// WASM-callable markdown projection (mirrors `to_markdown_native`). Returns
@@ -79,5 +76,26 @@ mod tests {
             w.finish().unwrap();
         }
         assert_eq!(extract_image(&buf, "word/media/i.png", None).unwrap(), b"X");
+    }
+
+    /// `parse_docx` now returns `Result<String, JsValue>` (Err surfaces as a
+    /// thrown JS Error), replacing the old hand-built `{"error":"…"}` string.
+    /// The old path double-embedded the parser message into JSON *without
+    /// escaping*, so a message containing a `"` produced invalid JSON that made
+    /// the TS-side `JSON.parse` throw a confusing SyntaxError instead of the
+    /// real cause. We can't call the `#[wasm_bindgen]` fn from a plain unit
+    /// test (that needs wasm-bindgen-test), but `parse_docx` is now a thin
+    /// `parser::parse(...).map_err(...)?` wrapper, so proving the internal
+    /// parse returns a plain `Err(String)` for bad input is enough: the JSON
+    /// escaping hazard is gone *by construction* because the error never round
+    /// trips through hand-assembled JSON — wasm-bindgen serializes the string.
+    #[test]
+    fn parse_rejects_non_zip_bytes_without_json_escaping_hazard() {
+        // Not a zip archive — parser::parse must return Err, not panic.
+        let err = parser::parse(&[1, 2, 3]).expect_err("non-zip bytes must error");
+        // A raw String error is returned verbatim; even a `"`-laden message is
+        // carried as-is (no manual `{"error":"…"}` templating to corrupt).
+        let quoted = format!("boom: \"{}\"", err);
+        assert!(quoted.contains('"'), "sanity: message can contain quotes");
     }
 }

@@ -61,8 +61,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
       currentBuffer = new Uint8Array(req.data);
+      // `parse_docx` throws on parse/serialize failure (Result<String,
+      // JsValue>); the outer try/catch converts it into an error response, so
+      // the JSON here is always the success model — no error-field probe.
       const parsed = JSON.parse(parse_docx(currentBuffer, currentMaxZipEntryBytes));
-      if (parsed.error) throw new Error(`Parse error: ${parsed.error}`);
       doc = parsed as DocxDocumentModel;
       if (req.useGoogleFonts) {
         // Pagination measures text, so fonts must land BEFORE computePages —
