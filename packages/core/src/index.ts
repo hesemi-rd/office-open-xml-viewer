@@ -137,6 +137,12 @@ export {
 export { drawProjected, expandProjectedQuad } from './shape/scene3d-draw';
 // DrawingML 3D bevel shading (Phase B). ECMA-376 §20.1.5.12 (sp3d) /
 // §20.1.5.3 (bevel) / §20.1.10.9 (ST_BevelPresetType) / §20.1.5.9 (lightRig).
+// `edt1d` / `shadePixel` / `shadeParamsFor` / `fillDirFromKey` are internal
+// bevel-shading helpers with no cross-package consumer — only bevel-shading.test.ts
+// exercises them, and it deep-imports them from './bevel-shading' directly, so they
+// are intentionally NOT re-exported here (they stay `export`ed from their module for
+// that deep import). `materialClass` / `lightDirFromRig` ARE re-exported: the pptx
+// renderer consumes them through this barrel.
 export {
   applyBevelShading,
   applyExtrusion,
@@ -144,11 +150,7 @@ export {
   computeBevelNormals,
   bevelHeightProfile,
   distanceToEdge,
-  edt1d,
-  shadePixel,
-  shadeParamsFor,
   lightDirFromRig,
-  fillDirFromKey,
   materialClass,
   type BevelMaterial,
   type BevelShadeParams,

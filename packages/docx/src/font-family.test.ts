@@ -115,3 +115,45 @@ describe('normalizeFontFamily — CJK language-specific Noto ordering', () => {
     expect(normalizeFontFamily('MS Mincho')).toContain('"Noto Serif JP"');
   });
 });
+
+// B6: normalizeFontFamily is memoized per-document (keyed on the
+// fontFamilyClasses object identity). These pin that memoization is transparent
+// — identical inputs give identical results, and two different fontFamilyClasses
+// objects never share a cache entry (so the fontTable §17.8.3.10 classification,
+// which lives in fontFamilyClasses, still switches the chain).
+describe('normalizeFontFamily — per-document memoization is transparent', () => {
+  it('returns the identical string on repeated calls with the same classes object', () => {
+    const classes = { Arial: 'roman' };
+    const a = normalizeFontFamily('Arial', classes);
+    const b = normalizeFontFamily('Arial', classes);
+    expect(b).toBe(a);
+    // roman ⇒ serif tail, so the cached result is the serif chain.
+    expect(a).toContain('"Arial"');
+    expect(a).toContain('serif');
+  });
+
+  it('does not mix results across different fontFamilyClasses objects', () => {
+    // Same family, two different fontTable classifications: `swiss` (sans) vs
+    // `roman` (serif). The memo must not serve one doc's result to the other.
+    const asSwiss = normalizeFontFamily('Calibri', { Calibri: 'swiss' });
+    const asRoman = normalizeFontFamily('Calibri', { Calibri: 'roman' });
+    expect(asSwiss).not.toBe(asRoman);
+    expect(asSwiss.endsWith('serif')).toBe(true); // sans tail ends "…, sans-serif"
+    expect(asSwiss).not.toContain('Noto Serif');
+    expect(asRoman).toContain('Noto Serif');
+    // Re-querying the first object still yields the swiss (sans) chain, proving
+    // the second object's entry did not overwrite it.
+    expect(normalizeFontFamily('Calibri', { Calibri: 'swiss' })).not.toBe(asRoman);
+  });
+
+  it('handles a null family through the cache without colliding with a real "null" family', () => {
+    const classes = {};
+    const nullChain = normalizeFontFamily(null, classes);
+    // Stable across calls.
+    expect(normalizeFontFamily(null, classes)).toBe(nullChain);
+    // A real face literally named "null" must not be served the null-family result.
+    const namedNull = normalizeFontFamily('null', classes);
+    expect(namedNull).toContain('"null"');
+    expect(namedNull).not.toBe(nullChain);
+  });
+});

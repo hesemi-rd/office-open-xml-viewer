@@ -1,5 +1,11 @@
 import type { Shadow, SoftEdge, Reflection } from '../types/common';
 import { hexToRgba } from './paint';
+import { createAuxCanvas, type AuxCanvas, type AuxContext } from '../canvas/aux-canvas';
+
+// createAuxCanvas moved to canvas/aux-canvas.ts so the image/ metafile players
+// can share it without an image → shape dependency. Re-exported here to preserve
+// the historical import path (`shape/effects` / the core barrel).
+export { createAuxCanvas };
 
 /**
  * Canvas 2D rendering of the three DrawingML edge/blur effects that the
@@ -22,9 +28,6 @@ import { hexToRgba } from './paint';
 
 export type PaintShape = (ctx: AuxContext) => void;
 
-type AuxCanvas = HTMLCanvasElement | OffscreenCanvas;
-type AuxContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-
 /** Bounding box of the shape in device pixels (post-scale). */
 export interface EffectBBox {
   x: number;
@@ -40,27 +43,6 @@ export interface EffectBBox {
  */
 function emuToPx(emu: number, scale: number): number {
   return emu * scale;
-}
-
-/**
- * Allocate an auxiliary canvas. Prefers OffscreenCanvas (no DOM pollution, works
- * inside a worker); falls back to a detached <canvas>; returns null when neither
- * is available (e.g. a headless unit-test environment) so callers can no-op.
- * Dimensions are clamped to >=1 to avoid zero-size canvas errors.
- */
-export function createAuxCanvas(w: number, h: number): AuxCanvas | null {
-  const cw = Math.max(1, Math.ceil(w));
-  const ch = Math.max(1, Math.ceil(h));
-  if (typeof OffscreenCanvas !== 'undefined') {
-    return new OffscreenCanvas(cw, ch);
-  }
-  if (typeof document !== 'undefined') {
-    const c = document.createElement('canvas');
-    c.width = cw;
-    c.height = ch;
-    return c;
-  }
-  return null;
 }
 
 function get2d(canvas: AuxCanvas): AuxContext | null {

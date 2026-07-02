@@ -10,6 +10,8 @@
 // implementation-specific in practice, and falling back to the foreground
 // colour is a safer default than guessing.
 
+import { createAuxCanvas } from '../canvas/aux-canvas.js';
+
 const PATTERN_BITMAPS: Record<string, number[]> = {
   // ── Percentage shading ────────────────────────────────────────────────
   // Sparse-to-dense dot patterns. Bit positions follow the canonical
@@ -79,7 +81,8 @@ export function buildPatternBitmap(
   const rows = PATTERN_BITMAPS[preset];
   if (!rows) return null;
 
-  const tile = createTileCanvas(8, 8);
+  // 8×8 positive-integer tile, so createAuxCanvas's ceil/≥1 clamp is a no-op.
+  const tile = createAuxCanvas(8, 8);
   if (!tile) return null;
   const tctx = tile.getContext('2d') as CanvasRenderingContext2D | null;
   if (!tctx) return null;
@@ -94,21 +97,6 @@ export function buildPatternBitmap(
     }
   }
   return tile;
-}
-
-function createTileCanvas(w: number, h: number): HTMLCanvasElement | OffscreenCanvas | null {
-  // Prefer OffscreenCanvas — same shape, but doesn't pollute the DOM and
-  // is cheaper to allocate per pattern.
-  if (typeof OffscreenCanvas !== 'undefined') {
-    return new OffscreenCanvas(w, h);
-  }
-  if (typeof document !== 'undefined') {
-    const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    return c;
-  }
-  return null;
 }
 
 function hexToCss(hex: string): string {

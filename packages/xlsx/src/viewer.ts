@@ -216,6 +216,34 @@ class AxisMetrics {
     }
     return { index: lo, partial: offset - this.offsetOf(lo) };
   }
+
+  /**
+   * Resolve the 1-based index a hit-test lands on in the *scrollable* region,
+   * given `content` = the logical-px distance from the START of `firstScrollable`
+   * (i.e. `innerPos - frozenExtent + logicalScroll`). Returns `null` when the
+   * point falls at or past the end of the very last cell (`maxIndex`), exactly
+   * like the previous linear scan that walked `r = firstScrollable … maxIndex`
+   * accumulating sizes and returned `null` if none satisfied `content < acc`.
+   *
+   * O(log n) via {@link indexAt}: shifting `content` by `offsetOf(firstScrollable)`
+   * expresses it in the absolute (index-1-origin) coordinate `indexAt` uses. The
+   * only place the linear scan and `indexAt` disagree is past the last cell —
+   * `indexAt` clamps to `maxIndex`, the scan returned `null` — so we reproduce the
+   * null by testing whether the absolute offset reaches the end of `maxIndex`.
+   */
+  scrollableIndexAt(content: number, firstScrollable: number): number | null {
+    const absOffset = content + this.offsetOf(firstScrollable);
+    // Past the end of the last cell ⇒ the old scan found no `content < acc`.
+    if (absOffset >= this.offsetOf(this.maxIndex) + this.sizeOf(this.maxIndex)) {
+      return null;
+    }
+    return this.indexAt(absOffset).index;
+  }
+
+  /** Logical-px span of `index` (1-based): its custom size if any, else default. */
+  private sizeOf(index: number): number {
+    return this.offsetOf(index + 1) - this.offsetOf(index);
+  }
 }
 
 /** Default cell-selection accent (Google blue), used when no `selectionColor`
@@ -753,13 +781,10 @@ export class XlsxViewer {
       if (row === -1) return null;
     } else {
       const contentY = innerY - frozenH + this.scrollHost.scrollTop / cs;
-      row = -1;
-      let acc = 0;
-      for (let r = freezeRows + 1; r <= 1048576; r++) {
-        acc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-        if (contentY < acc) { row = r; break; }
-      }
-      if (row === -1) return null;
+      const axes = getSheetAxes(ws, getMdwForWorksheet(ws));
+      const r = axes.row.scrollableIndexAt(contentY, freezeRows + 1);
+      if (r === null) return null;
+      row = r;
     }
 
     // Find col
@@ -774,13 +799,10 @@ export class XlsxViewer {
       if (col === -1) return null;
     } else {
       const contentX = innerX - frozenW + this.effectiveScrollLeft / cs;
-      col = -1;
-      let acc = 0;
-      for (let c = freezeCols + 1; c <= 16384; c++) {
-        acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-        if (contentX < acc) { col = c; break; }
-      }
-      if (col === -1) return null;
+      const axes = getSheetAxes(ws, getMdwForWorksheet(ws));
+      const c = axes.col.scrollableIndexAt(contentX, freezeCols + 1);
+      if (c === null) return null;
+      col = c;
     }
 
     return { row, col };
@@ -931,12 +953,9 @@ export class XlsxViewer {
         return null;
       }
       const contentY = innerY - frozenH + this.scrollHost.scrollTop / cs;
-      let acc = 0;
-      for (let r = freezeRows + 1; r <= 1048576; r++) {
-        acc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-        if (contentY < acc) return { kind: 'row', row: r };
-      }
-      return null;
+      const axes = getSheetAxes(ws, getMdwForWorksheet(ws));
+      const r = axes.row.scrollableIndexAt(contentY, freezeRows + 1);
+      return r === null ? null : { kind: 'row', row: r };
     }
 
     // inColHeader
@@ -957,12 +976,9 @@ export class XlsxViewer {
       return null;
     }
     const contentX = innerX - frozenW + this.effectiveScrollLeft / cs;
-    let acc = 0;
-    for (let c = freezeCols + 1; c <= 16384; c++) {
-      acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      if (contentX < acc) return { kind: 'col', col: c };
-    }
-    return null;
+    const axes = getSheetAxes(ws, getMdwForWorksheet(ws));
+    const c = axes.col.scrollableIndexAt(contentX, freezeCols + 1);
+    return c === null ? null : { kind: 'col', col: c };
   }
 
   /**

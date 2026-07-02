@@ -7,6 +7,8 @@
 // META_DIBBITBLT / META_DIBSTRETCHBLT, which store the DIB *packed* — header +
 // palette + pixels contiguously — via {@link decodePackedDib}).
 
+import { createAuxCanvas } from '../canvas/aux-canvas.js';
+
 /** A decoded DIB as top-down RGBA (what `ImageData`/`putImageData` expects). */
 export interface DecodedDib {
   width: number;
@@ -182,10 +184,12 @@ export function blitDibToCtx(
   x1: number,
   y1: number,
 ): boolean {
-  if (typeof OffscreenCanvas === 'undefined') return false;
   try {
-    const tmp = new OffscreenCanvas(dib.width, dib.height);
-    const tctx = tmp.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
+    // Shared aux canvas (OffscreenCanvas, else a detached <canvas>); null in a
+    // headless env ⇒ skip the blit and keep rendering, as before.
+    const tmp = createAuxCanvas(dib.width, dib.height);
+    if (!tmp) return false;
+    const tctx = tmp.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     if (!tctx) return false;
     // Allocate via createImageData (avoids the ImageData-constructor typed-array
     // overload mismatch) and copy the decoded RGBA in.

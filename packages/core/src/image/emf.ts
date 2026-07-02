@@ -42,6 +42,7 @@
 
 import { decodeDib, blitDibToCtx, type DecodedDib } from './dib.js';
 import { colorRefToCss, isEmf } from './wmf.js';
+import { createAuxCanvas } from '../canvas/aux-canvas.js';
 
 // EMF record type codes ([MS-EMF] 2.1.1 EMR enumeration; the subset we act on,
 // others are skipped by nSize).
@@ -1237,12 +1238,13 @@ export async function renderEmfToBitmap(
 ): Promise<ImageBitmap | null> {
   if (!isEmf(bytes)) return null;
   if (targetW <= 0 || targetH <= 0) return null;
-  // Rasterizing needs an OffscreenCanvas; absent (e.g. a headless test / SSR
-  // runtime without the shim) ⇒ degrade gracefully to null, exactly as the
-  // caller already handles an unsupported metafile — never throw.
-  if (typeof OffscreenCanvas === 'undefined') return null;
-  const canvas = new OffscreenCanvas(targetW, targetH);
-  const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
+  // Rasterize on a shared aux canvas (OffscreenCanvas, else a detached <canvas>).
+  // Absent both (e.g. a headless test / SSR runtime without either) ⇒ degrade
+  // gracefully to null, exactly as the caller already handles an unsupported
+  // metafile — never throw.
+  const canvas = createAuxCanvas(targetW, targetH);
+  if (!canvas) return null;
+  const ctx = canvas.getContext('2d') as AnyCtx | null;
   if (!ctx) return null;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';

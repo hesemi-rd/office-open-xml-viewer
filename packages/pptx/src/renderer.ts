@@ -4164,6 +4164,15 @@ export function applyDimOverlay(
 type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
 
 /**
+ * Per-canvas monotonic render token for the {@link renderSlide} cancellation
+ * guard. A WeakMap keyed on the canvas replaces the previous property monkey-
+ * patch (`canvas.__pptxRenderToken`), so no non-standard field is written onto
+ * the caller's canvas and the `as unknown as` cast is gone. WeakMap keys are
+ * held weakly, so a discarded canvas is collected normally.
+ */
+const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
+
+/**
  * Render a single slide onto a <canvas> element.
  * Returns the canvas for convenience.
  */
@@ -4181,9 +4190,9 @@ export async function renderSlide(
   // draws interleave at the await points — ghosting multiple slides together.
   // Stamp a per-canvas token; once a newer render supersedes us, stop drawing at
   // the next await so only the latest render's output survives.
-  const tokenHost = canvas as unknown as { __pptxRenderToken?: number };
-  const myToken = (tokenHost.__pptxRenderToken = (tokenHost.__pptxRenderToken ?? 0) + 1);
-  const superseded = () => tokenHost.__pptxRenderToken !== myToken;
+  const myToken = (renderTokens.get(canvas) ?? 0) + 1;
+  renderTokens.set(canvas, myToken);
+  const superseded = () => renderTokens.get(canvas) !== myToken;
 
   const targetWidth = opts.width ?? ((isHTMLCanvas(canvas) ? canvas.offsetWidth : 0) || 960);
   const scale = targetWidth / slideWidth;
