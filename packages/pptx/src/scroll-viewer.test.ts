@@ -204,7 +204,9 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
     // (SLIDE_H_EMU / 9525) * 1.0 = 120.
     const slideH = SLIDE_H_EMU / 9525; // 120
     const n = 3;
-    const expected = n * slideH + (n - 1) * 10;
+    // New default: paddingTop/paddingBottom each default to `gap` (10), so the
+    // spacer is padTop + Σheights + (n-1)*gap + padBottom.
+    const expected = 10 + n * slideH + (n - 1) * 10 + 10;
     expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
     v.destroy();
     void dom;
@@ -467,6 +469,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
+      paddingTop: 0, // flush top so slide 0's slot sits at top:0px (asserted below)
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
@@ -590,6 +593,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
+      paddingTop: 0, // flush top so slide 0's slot sits at top:0px (asserted below)
       overscan: 1,
       // REAL defaults [0.1, 4]: base fit is 1.0, and setScale(×2)=2.0 is inside them
       // (the old `zoomMin: 0.05, zoomMax: 3` dodged the px-per-EMU unit bug — WS4b-2).
@@ -653,6 +657,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
+      paddingTop: 0, // flush top so slide 0's slot sits at top:0px (asserted below)
       overscan: 1,
       // REAL defaults [0.1, 4]: base fit is 1.0, and setScale(×2)=2.0 is inside them
       // (the old `zoomMin: 0.05, zoomMax: 3` dodged the px-per-EMU unit bug — WS4b-2).
@@ -716,6 +721,11 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
+      // Flush top/bottom (paddingTop/Bottom default to `gap`; the T4 offset
+      // arithmetic below is written for offset[0]===0). This exercises the
+      // "explicit 0 ⇒ old flush behavior reachable" contract.
+      paddingTop: 0,
+      paddingBottom: 0,
       overscan: 1,
       ...opts,
     });
@@ -1192,6 +1202,11 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: GAP,
+      // Flush top/bottom: the T6 STRIDE/offset arithmetic assumes offset[0]===0.
+      // paddingTop/Bottom default to `gap`; pinning them to 0 keeps the pre-padding
+      // geometry (and exercises the "explicit 0 ⇒ old flush behavior" contract).
+      paddingTop: 0,
+      paddingBottom: 0,
       ...opts,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
@@ -1427,6 +1442,101 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     v.destroy();
     expect(disconnected).toBe(1);
+  });
+});
+
+describe('PptxScrollViewer — paddingTop/paddingBottom (desk margin)', () => {
+  const SLIDE_H = SLIDE_H_EMU / 9525; // 120 (natural height px at base 1.0)
+  const GAP = 10;
+  const STRIDE = SLIDE_H + GAP; // 130
+
+  function setup(opts = {}, slideCount = 20) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: GAP,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, container, engine };
+  }
+
+  /** The wrapper currently mounted for slide `i` (identified by its top offset). */
+  function slotTopFor(scrollHost: FakeEl, i: number, stride: number, padTop: number): FakeEl | undefined {
+    const want = `${padTop + i * stride}px`;
+    return scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === want,
+    ) as FakeEl | undefined;
+  }
+
+  it('explicit paddingTop mounts the first slot at top = paddingTop px', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24 });
+    expect(v.mountedSlideIndicesForTest()).toContain(0);
+    expect(slotTopFor(scrollHost, 0, STRIDE, 24)).toBeDefined();
+    v.destroy();
+  });
+
+  it('spacer height = padTop + Σheights + (n-1)*gap + padBottom', () => {
+    const { scrollHost } = setup({ paddingTop: 24, paddingBottom: 40 });
+    const spacer = scrollHost.children[0] as FakeEl;
+    const expected = 24 + 20 * SLIDE_H + 19 * GAP + 40;
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+  });
+
+  it('DEFAULT paddingTop/paddingBottom = gap (uniform rhythm: no options ⇒ first slot at gap px)', () => {
+    // No paddingTop/paddingBottom → each defaults to `gap` (10). Slide 0 sits at
+    // top:10px, NOT flush 0 (this is the sanctioned pre-release default change).
+    const { v, scrollHost } = setup();
+    expect(v.mountedSlideIndicesForTest()).toContain(0);
+    expect(slotTopFor(scrollHost, 0, STRIDE, GAP)).toBeDefined();
+    const spacer = scrollHost.children[0] as FakeEl;
+    const expected = GAP + 20 * SLIDE_H + 19 * GAP + GAP;
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+    v.destroy();
+  });
+
+  it('explicit 0 ⇒ flush (old behavior reachable): first slot at top 0, spacer has no pad', () => {
+    const { v, scrollHost } = setup({ paddingTop: 0, paddingBottom: 0 });
+    expect(slotTopFor(scrollHost, 0, STRIDE, 0)).toBeDefined();
+    const spacer = scrollHost.children[0] as FakeEl;
+    const expected = 20 * SLIDE_H + 19 * GAP; // no pad
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+    v.destroy();
+  });
+
+  it('scrollToSlide(0) lands on offsets[0] (= paddingTop, not 0)', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24 });
+    scrollHost.scrollTop = 3 * STRIDE;
+    scrollHost.dispatch('scroll');
+    v.scrollToSlide(0);
+    expect(scrollHost.scrollTop).toBe(24);
+    v.destroy();
+  });
+
+  it('scrollToSlide(k) lands on paddingTop + k*stride', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24 });
+    v.scrollToSlide(3);
+    expect(Math.abs(scrollHost.scrollTop - (24 + 3 * STRIDE))).toBeLessThan(2);
+    v.destroy();
+  });
+
+  it('re-anchor keeps the slide under the viewport top fixed WITH padding intact after setScale', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24, zoomMin: 0.5, zoomMax: 3 });
+    // Scroll so slide 3's top sits at the viewport top: offset[3] = 24 + 3*130 = 414.
+    scrollHost.scrollTop = 24 + 3 * STRIDE;
+    scrollHost.dispatch('scroll');
+    expect(v.topVisibleSlide).toBe(3);
+    v.setScale(v.scaleForTest() * 2); // 1.0 → 2.0; SLIDE_H' = 240, STRIDE' = 250
+    expect(v.scaleForTest()).toBeCloseTo(2, 5);
+    // Slide 3 stays the top slide; padding is intact so offset'[3] = 24 + 3*250 = 774.
+    expect(v.topVisibleSlide).toBe(3);
+    expect(Math.abs(scrollHost.scrollTop - (24 + 3 * 250))).toBeLessThan(2);
+    v.destroy();
   });
 });
 

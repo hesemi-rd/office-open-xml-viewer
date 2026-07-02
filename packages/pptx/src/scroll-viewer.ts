@@ -25,6 +25,14 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
   width?: number;
   /** Vertical gap (px) between consecutive slides. Default 16. */
   gap?: number;
+  /** Desk padding (px) ABOVE the FIRST slide — the margin a presentation viewer
+   *  leaves between the top of the scroll surface and the first slide. Default:
+   *  `gap` (uniform desk rhythm — the first slide sits the same distance from the
+   *  top as slides sit from each other). Pass `0` for a flush-top layout. */
+  paddingTop?: number;
+  /** Desk padding (px) BELOW the LAST slide — the margin below the final slide.
+   *  Default: `gap`. Pass `0` for a flush-bottom layout. */
+  paddingBottom?: number;
   /** Slides kept mounted beyond the viewport on each side. Default 1. */
   overscan?: number;
   /** Per-slide transparent text-selection overlay. MAIN render mode only:
@@ -356,6 +364,15 @@ export class PptxScrollViewer {
     return this._opts.overscan ?? 1;
   }
 
+  /** Desk padding fed to `computeVisibleRange`: `paddingTop`/`paddingBottom`,
+   *  each defaulting to `gap` (uniform rhythm). Resolved here (not stored) to
+   *  mirror `_gap()`/`_overscan()`, and consumed at EVERY `computeVisibleRange`
+   *  call site so the padded offsets are the single source of geometry. */
+  private _pad(): { leading: number; trailing: number } {
+    const gap = this._gap();
+    return { leading: this._opts.paddingTop ?? gap, trailing: this._opts.paddingBottom ?? gap };
+  }
+
   private _range(): VisibleRange {
     return computeVisibleRange(
       this._heights,
@@ -363,6 +380,7 @@ export class PptxScrollViewer {
       this._scrollHost.scrollTop,
       this._scrollHost.clientHeight,
       this._overscan(),
+      this._pad(),
     );
   }
 
@@ -716,7 +734,14 @@ export class PptxScrollViewer {
     // Rescale, recompute heights, resize the spacer to the new total height.
     this._scale = next;
     this._recomputeHeights();
-    const r1 = computeVisibleRange(this._heights, this._gap(), 0, this._scrollHost.clientHeight, this._overscan());
+    const r1 = computeVisibleRange(
+      this._heights,
+      this._gap(),
+      0,
+      this._scrollHost.clientHeight,
+      this._overscan(),
+      this._pad(),
+    );
     this._spacer.style.height = `${r1.totalHeight}px`;
 
     // Pin the same fractional position of the same slide under the viewport top.
@@ -762,7 +787,14 @@ export class PptxScrollViewer {
     if (!this._pres || this._pres.slideCount === 0 || !this._scaleEstablished) return;
     const clamped = Math.max(0, Math.min(index, this._pres.slideCount - 1));
     // Recompute offsets from the current heights (independent of scrollTop).
-    const r = computeVisibleRange(this._heights, this._gap(), 0, this._scrollHost.clientHeight, this._overscan());
+    const r = computeVisibleRange(
+      this._heights,
+      this._gap(),
+      0,
+      this._scrollHost.clientHeight,
+      this._overscan(),
+      this._pad(),
+    );
     const target = r.offsets[clamped] ?? 0;
     const maxTop = Math.max(0, r.totalHeight - this._scrollHost.clientHeight);
     const top = Math.min(maxTop, Math.max(0, target));

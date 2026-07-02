@@ -135,6 +135,8 @@ export const ScrollViewer: LayoutStory = {
 
     const viewer = new PptxScrollViewer(container, {
       gap: 16,
+      paddingTop: 24, // desk margin above the first slide (defaults to gap when omitted)
+      paddingBottom: 24, // desk margin below the last slide
       overscan: 1,
       enableTextSelection: true,
       useGoogleFonts: true,
