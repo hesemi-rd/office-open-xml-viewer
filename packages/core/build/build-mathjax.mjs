@@ -1,8 +1,13 @@
 // Pre-bundle the MathJax v4 + STIX Two Math converter into a single opaque
-// asset (`assets/mathjax-stix2.js`). Run via `pnpm --filter @silurus/ooxml-core
-// build:mathjax`. The renderer loads this asset lazily; keeping it pre-bundled
-// (rather than importing @mathjax/src directly) stops the consuming app's
-// bundler from re-bundling — and over-including — the MathJax source.
+// asset (`assets/mathjax-stix2.js`). The renderer loads this asset lazily;
+// keeping it pre-bundled (rather than importing @mathjax/src directly) stops the
+// consuming app's bundler from re-bundling — and over-including — the MathJax
+// source.
+//
+// The generated bundle is ~3 MB of minified IIFE, so — like the WASM parsers —
+// it is NOT committed (see .gitignore) and is instead regenerated from source.
+// This script runs automatically on install via core's `prepare` script; run it
+// by hand with `pnpm --filter @silurus/ooxml-core build:mathjax`.
 import { build } from 'esbuild';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

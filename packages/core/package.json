@@ -27,7 +27,8 @@
   "scripts": {
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
-    "build:mathjax": "node build/build-mathjax.mjs"
+    "build:mathjax": "node build/build-mathjax.mjs",
+    "prepare": "node build/build-mathjax.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
