@@ -10,6 +10,7 @@
 - 参照画像の更新（`UPDATE_REFS=1`）はユーザー明示指示のみ。
 - 横断修正（Phase 3）は CLAUDE.md の規定どおり core / ooxml-common を含む 1 本の協調 PR にまとめてよい。commit は 1 関心ずつ。
 - Phase 2 の各項目は **PR にベンチ前後比較を記載**（大型 docx / 200 スライド級 pptx / 多シート xlsx で計測）。
+- **レビュー実施後に `DocxScrollViewer` / `PptxScrollViewer`（#650 系〜#656）が main に追加された。** 本計画の viewer 系指摘（C5/C6 の destroy ライフサイクル、C4 のスクロール描画、C7 の共有化）は着手時に ScrollViewer 系クラスも同じ観点で点検し、同種の穴があれば同一 PR で修正する。
 
 ## 検証コマンド early reference
 
@@ -40,6 +41,7 @@ cargo test
 
 - [ ] C6: pptx `viewer.ts` `destroy()` — `wrapper.remove()` 前に caller の canvas を `insertBefore` で返還。検証: destroy → 同一 canvas で再生成
 - [ ] C5: xlsx `viewer.ts` `destroy()` — wrapper subtree と注入 `<style>` を除去（style は module-wide 1 回注入への変更でも可）。検証: Storybook で mount/unmount 繰り返し
+- [ ] C5/C6 追補: `DocxScrollViewer` / `PptxScrollViewer` の `destroy()` を同観点（caller 所有 DOM の返還・注入 style/listener の除去）で点検し、同種の穴があれば同一 PR で修正
 - [ ] A6: dash テーブル統合 — `core/src/draw/dash.ts` を正とし `paint.ts` の `DASH_PATTERNS` を消す。ST_PresetLineDashVal（§20.1.10.49）の全キーで両者の出力差を先に一覧化（`lgDash`→solid バグの確認）
 - [ ] D11: `parse_docx` を `Result<String, JsValue>` に統一（エラー JSON の手組み format! 廃止）。TS 側の catch パス確認
 - [ ] D9(部分): xlsx `lib.rs` の `serde_json::to_string(&wb).unwrap()` を `map_err` に
