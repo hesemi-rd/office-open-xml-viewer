@@ -27,7 +27,17 @@ npm install @silurus/ooxml
 pnpm add @silurus/ooxml
 ```
 
-> **Bundler note**: this package embeds `.wasm` files. With Vite add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm); with webpack use [`experiments.asyncWebAssembly`](https://webpack.js.org/configuration/experiments/).
+> **Bundler note**: the Rust parsers ship as real `.wasm` asset files next to the
+> JavaScript, referenced with the standard `new URL('…', import.meta.url)` form
+> and fetched (streaming-compiled) at load time. Vite, webpack 5, Rollup,
+> esbuild and Parcel detect that reference and copy the asset automatically — no
+> extra WebAssembly plugin is required. If your bundler cannot emit the asset (or
+> you want to serve the parser WASM from a CDN or a path you control), pass its
+> URL via the `wasmUrl` load option:
+>
+> ```typescript
+> new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });
+> ```
 
 > **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~4 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine tree-shake the ~4 MB away entirely.
 
@@ -291,7 +301,7 @@ All three formats follow the same shape: the worker parses the `.docx` / `.xlsx`
 <summary><strong>React 19</strong></summary>
 
 ```tsx
-// React 19.1 — vite-plugin-wasm required in vite.config.ts
+// React 19.1 — Vite copies the parser .wasm asset automatically; no extra plugin needed.
 import { useEffect, useRef, useState } from 'react';
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
