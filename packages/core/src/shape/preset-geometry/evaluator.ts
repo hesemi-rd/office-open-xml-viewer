@@ -27,16 +27,40 @@ export interface EvalInputs {
 export interface Evaluator {
   /** Get a value by name. Throws if unknown. */
   v(name: string): number;
-  /** Evaluate a raw formula expression. */
-  fmla(expr: string): number;
+  /** Evaluate an already-compiled formula. */
+  fmla(f: CompiledFormula): number;
   /** Evaluate a token that is either a guide name, built-in, or literal number. */
   resolve(token: string): number;
 }
 
+/**
+ * A preset formula split into its operator + operand tokens. Each `gdLst`/`avLst`
+ * entry is a postfix expression such as the multiply-divide `mul-div w 3 4`;
+ * splitting it on whitespace is pure text work that depends only on the preset
+ * definition (presets.json is immutable, ~200 entries), so it is done ONCE per
+ * preset — see {@link compileFormula} — instead of on every shape × every render.
+ */
+export interface CompiledFormula {
+  /** The operator token (`val`, the multiply-divide op, `pin`, `sin`, …). */
+  op: string;
+  /** The operand tokens (guide names, built-ins, or numeric literals). */
+  argTokens: string[];
+}
+
+/**
+ * Split a raw formula expression into `{op, argTokens}`. Verbatim the tokenisation
+ * `evaluateFormula` used to do inline on every call (`expr.trim().split(/\s+/)`),
+ * lifted out so it runs once per preset formula rather than per shape per render.
+ */
+export function compileFormula(expr: string): CompiledFormula {
+  const parts = expr.trim().split(/\s+/);
+  return { op: parts[0], argTokens: parts.slice(1) };
+}
+
 export function createEvaluator(
   inputs: EvalInputs,
-  adjDefaults: [string, string][],
-  gdList: [string, string][],
+  adjDefaults: readonly [string, CompiledFormula][],
+  gdList: readonly [string, CompiledFormula][],
 ): Evaluator {
   const { w, h, adj } = inputs;
   const ss = Math.min(w, h);
@@ -93,14 +117,12 @@ export function createEvaluator(
     throw new Error(`preset-shape: cannot resolve "${token}"`);
   }
 
-  function evaluateFormula(expr: string): number {
-    const parts = expr.trim().split(/\s+/);
-    const op = parts[0];
-    const args = parts.slice(1).map(resolve);
-    return applyOp(op, args, expr);
+  function evaluateFormula(f: CompiledFormula): number {
+    const args = f.argTokens.map(resolve);
+    return applyOp(f.op, args, f);
   }
 
-  function applyOp(op: string, a: number[], original: string): number {
+  function applyOp(op: string, a: number[], original: CompiledFormula): number {
     switch (op) {
       case 'val': return a[0];
       case '*/':  return (a[0] * a[1]) / a[2];
@@ -122,7 +144,9 @@ export function createEvaluator(
       case 'cat2': return a[0] * Math.cos(Math.atan2(a[2], a[1]));
       case 'sat2': return a[0] * Math.sin(Math.atan2(a[2], a[1]));
       default:
-        throw new Error(`preset-shape: unknown operator "${op}" in "${original}"`);
+        throw new Error(
+          `preset-shape: unknown operator "${op}" in "${[original.op, ...original.argTokens].join(' ')}"`,
+        );
     }
   }
 }
