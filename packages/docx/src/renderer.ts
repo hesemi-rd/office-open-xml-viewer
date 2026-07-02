@@ -6772,13 +6772,29 @@ export function renderShapeText(
     italic: boolean,
     fontPx: number,
     b: ShapeText,
+    familyEa?: string | null | undefined,
   ): { lineH: number; baselineOffset: number } => {
     ctx.font = buildFont(bold, italic, fontPx, family ?? null, fontFamilyClasses);
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
     const c = correctLineMetrics(family ?? null, fontPx, rawAsc, rawDesc);
-    const intended = intendedSingleLinePx(family ?? null, fontPx);
+    // Floor the single-line box by the TALLEST design line among the run's
+    // declared faces (ascii §17.3.2.26 + eastAsia). The canvas measurement /
+    // correctLineMetrics above stay on the ascii `family` (the substituted-face
+    // natural box), but the line box must fit whichever face renders the glyphs:
+    // the common Japanese encoding sets Meiryo (1.596×em) / Sakkal Majalla
+    // (1.3965×em) ONLY on `<w:rFonts w:eastAsia>` while `<w:rFonts w:ascii>`
+    // stays an untabled Latin default, so an ascii-only floor would leave the
+    // box flat (intendedSingleLinePx(untabledAscii)=0). This is a FLOOR, not a
+    // replace — intendedSingleLinePx returns 0 for every untabled face, so
+    // non-Meiryo/Sakkal text boxes are unchanged. Mirrors the xlsx shape-text
+    // floor (PR #646) and the docx BODY per-eastAsia-segment floor. It is NOT
+    // per-glyph CJK font switching (a larger change deferred here).
+    const intended = Math.max(
+      intendedSingleLinePx(family ?? null, fontPx),
+      intendedSingleLinePx(familyEa ?? null, fontPx),
+    );
     const natural = Math.max(c.ascent + c.descent, intended);
     const ls: LineSpacing | null = b.lineSpacingRule
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
@@ -6812,7 +6828,18 @@ export function renderShapeText(
         );
         const run = tallest?.run;
         const fontPx = (run?.fontSizePt ?? b.fontSizePt) * scale;
-        return shapeLineMetrics(run?.fontFamily ?? b.fontFamily, run?.bold ?? false, run?.italic ?? false, fontPx, b);
+        return shapeLineMetrics(
+          run?.fontFamily ?? b.fontFamily,
+          run?.bold ?? false,
+          run?.italic ?? false,
+          fontPx,
+          b,
+          // eastAsia axis (§17.3.2.26) of the tallest run — floors the line box
+          // to Meiryo/Sakkal's design line even when only `<w:rFonts w:eastAsia>`
+          // names a tabled face (ascii left default). Rich runs carry this on the
+          // model (ShapeTextRun.fontFamilyEastAsia); no parser change needed.
+          run?.fontFamilyEastAsia,
+        );
       });
       return {
         kind: 'rich',
@@ -6823,6 +6850,20 @@ export function renderShapeText(
       };
     }
     const fontPx = b.fontSizePt * scale;
+    // Single-format (legacy, run-less) fallback. SCOPED OUT of the eastAsia
+    // line-box floor: block-level `ShapeText` carries only the CONFLATED
+    // `fontFamily` (ascii → eastAsia → default, parser.rs resolve_font_with_default)
+    // and has NO block-level eastAsia field on the Rust `ShapeText` struct
+    // (types.rs) or the TS interface (types.ts) — so there is no untabled-ascii /
+    // tabled-eastAsia split to floor against here. In practice the parser emits a
+    // `ShapeTextRun` for every `<w:r>` with text (parser.rs, extract loop), so a
+    // TEXT paragraph always takes the rich path above; this branch only serves
+    // image-less legacy blocks. Wiring an eastAsia floor here would need a new
+    // block-level `font_family_east_asia` field threaded through types.rs + the
+    // parser + types.ts + a WASM rebuild — nontrivial plumbing for a path the
+    // current parser never feeds text into. Deferred as a follow-up rather than
+    // half-plumbed. The rich path (ShapeTextRun.fontFamilyEastAsia) fixes the
+    // common case (PR #646 mirror).
     const { lineH, baselineOffset } = shapeLineMetrics(b.fontFamily, b.bold ?? false, b.italic ?? false, fontPx, b);
     return { kind: 'text', lines: wrapShapeText(ctx, b.text, ind.paraW, ind.firstLineW), lineH, baselineOffset, ind };
   });
