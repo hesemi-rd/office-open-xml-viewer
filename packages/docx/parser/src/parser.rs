@@ -1,7 +1,7 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
 use ooxml_common::zip::read_zip_string;
 use roxmltree::Document as XmlDoc;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
@@ -531,68 +531,30 @@ impl ThemeColors {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut fonts: HashMap<String, String> = HashMap::new();
         let theme_xml = Some(xml.to_string());
-        let doc = match XmlDoc::parse(xml) {
-            Ok(d) => d,
-            Err(_) => {
-                return Self {
-                    map,
-                    fonts,
-                    theme_xml,
-                    ..Default::default()
-                }
-            }
-        };
-        let root = doc.root_element();
-        if let Some(scheme) = root
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "clrScheme")
-        {
-            for child in scheme.children().filter(|n| n.is_element()) {
-                let name = child.tag_name().name().to_string();
-                let hex = child.children().filter(|n| n.is_element()).find_map(|n| {
-                    match n.tag_name().name() {
-                        "srgbClr" => n.attribute("val").map(|v| v.to_uppercase()),
-                        "sysClr" => n.attribute("lastClr").map(|v| v.to_uppercase()),
-                        _ => None,
-                    }
-                });
-                if let Some(h) = hex {
-                    map.insert(name, h);
+
+        // Color slots: shared clrScheme parse; docx uppercases each hex and keys
+        // by slot name. prstClr now resolves through the shared preset table
+        // (previously dropped), so a preset scheme slot contributes its color.
+        for (slot, hex) in ooxml_common::theme::ThemeColorScheme::parse(xml).iter() {
+            map.insert(slot.to_string(), hex.to_uppercase());
+        }
+
+        // Font scheme: shared parse mapped onto docx's "{group}/{axis}" keys
+        // (e.g. "minor/latin"). Empty typefaces are already dropped by the
+        // shared parser.
+        let theme_fonts = ooxml_common::theme::ThemeFonts::parse(xml);
+        for (group, prefix) in [(&theme_fonts.major, "major"), (&theme_fonts.minor, "minor")] {
+            for (face, axis) in [
+                (&group.latin, "latin"),
+                (&group.ea, "ea"),
+                (&group.cs, "cs"),
+            ] {
+                if let Some(typeface) = face {
+                    fonts.insert(format!("{prefix}/{axis}"), typeface.clone());
                 }
             }
         }
-        if let Some(font_scheme) = root
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "fontScheme")
-        {
-            for group_name in &["majorFont", "minorFont"] {
-                let prefix = if *group_name == "majorFont" {
-                    "major"
-                } else {
-                    "minor"
-                };
-                if let Some(group) = font_scheme
-                    .children()
-                    .find(|n| n.is_element() && n.tag_name().name() == *group_name)
-                {
-                    for child in group.children().filter(|n| n.is_element()) {
-                        let typ = match child.tag_name().name() {
-                            "latin" => Some("latin"),
-                            "ea" => Some("ea"),
-                            "cs" => Some("cs"),
-                            _ => None,
-                        };
-                        if let Some(t) = typ {
-                            if let Some(face) = child.attribute("typeface") {
-                                if !face.is_empty() {
-                                    fonts.insert(format!("{prefix}/{t}"), face.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+
         Self {
             map,
             fonts,
@@ -825,8 +787,8 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// this map as the primary source of serif/sans-serif classification, falling
 /// back to name-pattern matching only when the font is absent or classified
 /// as `auto`.
-fn parse_font_table(xml: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
     let Ok(doc) = XmlDoc::parse(xml) else {
         return map;
     };
@@ -1330,11 +1292,14 @@ fn load_media_map(
     let mut media_map: HashMap<String, String> = HashMap::new();
     for (rid, target) in rel_map {
         if target.contains("media/") || target.contains("image") {
-            let path = if target.starts_with('/') {
-                target.trim_start_matches('/').to_string()
-            } else {
-                format!("{}{}", base_dir, target)
-            };
+            // Resolve the Target against the source part's directory via the
+            // shared OPC resolver (ECMA-376 Part 2 §9.3): this handles
+            // root-absolute Targets (`/word/media/...`) AND normalizes `..`
+            // segments, so a chart/footnote media ref like
+            // `../media/image.png` (base_dir `word/charts/`) resolves to
+            // `word/media/image.png` instead of the unresolved
+            // `word/charts/../media/image.png` the old `format!` left behind.
+            let path = ooxml_common::rels::resolve_target(base_dir, target);
             // Confirm the part exists before mapping the rId (keeps the lazy
             // pipeline honest: a path in the map is always extractable).
             // `index_for_name` consults only the central directory — no inflate,
@@ -5565,25 +5530,16 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     base.font_size_cs_set_here = false;
 }
 
+/// id → target map for a `.rels` part. Thin adapter over
+/// [`ooxml_common::rels::parse_rels`] that flattens each `RelTarget` to its raw
+/// target string (both Internal part names and External hyperlink URLs are kept
+/// verbatim; part-name resolution happens later in [`load_media_map`]),
+/// preserving this parser's `HashMap<rId, Target>` shape.
 fn parse_rels(xml: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    if xml.is_empty() {
-        return map;
-    }
-    let doc = match XmlDoc::parse(xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    for rel in doc
-        .root_element()
-        .children()
-        .filter(|n| n.tag_name().name() == "Relationship")
-    {
-        if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
-            map.insert(id.to_string(), target.to_string());
-        }
-    }
-    map
+    ooxml_common::rels::parse_rels(xml)
+        .into_iter()
+        .map(|(id, rel)| (id, rel.target))
+        .collect()
 }
 
 #[cfg(test)]
@@ -7990,6 +7946,45 @@ mod svg_blip_tests {
         assert!(
             !has_image,
             "an rId whose media part is absent must be dropped, yielding no ImageRun"
+        );
+    }
+
+    /// `load_media_map` must normalize `..` segments in a relationship Target
+    /// (ECMA-376 Part 2 §9.3). A media ref that walks up out of a nested part's
+    /// directory — e.g. `../media/footnote.png` resolved against
+    /// `word/charts/` — must become the canonical part name
+    /// `word/media/footnote.png`, so the existence check finds the entry and the
+    /// rId is mapped. Before the shared `ooxml_common::rels::resolve_target`
+    /// migration, docx concatenated `base_dir + target` verbatim, leaving the
+    /// unresolved `word/charts/../media/footnote.png`; whether that matched a
+    /// zip entry was left to the zip lib's leniency. This pins the fix.
+    #[test]
+    fn load_media_map_normalizes_dotdot_target() {
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            let mut put = |name: &str, bytes: &[u8]| {
+                use std::io::Write;
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            };
+            // The media part lives at the canonical (normalized) name.
+            put("word/media/footnote.png", PNG_1X1);
+            zw.finish().unwrap();
+        }
+        let mut zip: Zip = ZipArchive::new(Cursor::new(buf)).unwrap();
+
+        // A part at word/charts/chart1.xml references the media one directory up.
+        let mut rel_map: HashMap<String, String> = HashMap::new();
+        rel_map.insert("rIdImg".to_string(), "../media/footnote.png".to_string());
+        let media_map = load_media_map(&mut zip, &rel_map, "word/charts/");
+
+        assert_eq!(
+            media_map.get("rIdImg").map(String::as_str),
+            Some("word/media/footnote.png"),
+            "`..` must be normalized so the resolved path is the canonical part name"
         );
     }
 

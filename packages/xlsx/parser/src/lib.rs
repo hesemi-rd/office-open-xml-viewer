@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
 
@@ -289,71 +289,28 @@ pub(crate) fn parse_theme_ln_widths(archive: &mut XlsxZip) -> Vec<i64> {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
-        return Vec::new();
-    };
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    let mut widths: Vec<i64> = Vec::new();
-    for node in doc.descendants() {
-        if node.tag_name().name() == "lnStyleLst" && node.tag_name().namespace() == Some(a_ns) {
-            for ln in node
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "ln")
-            {
-                widths.push(
-                    ln.attribute("w")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(9525),
-                );
-            }
-            break;
-        }
-    }
-    widths
+    // Shared parse: reference line widths (EMU) in declaration order, filling the
+    // CT_LineProperties 9525 default for a bare `<a:ln>` — matching xlsx's prior
+    // behavior exactly (ECMA-376 §20.1.4.2.19 / §20.1.2.2.24).
+    ooxml_common::theme::parse_ln_style_widths(&xml)
 }
 
 fn parse_theme_colors(archive: &mut XlsxZip) -> Vec<String> {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
-        return Vec::new();
-    };
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
-
-    // Find clrScheme node and collect child color elements in order
-    // OOXML order: dk1, lt1, dk2, lt2, accent1, accent2, accent3, accent4, accent5, accent6, hlink, folHlink
-    let mut colors: Vec<String> = Vec::new();
-    for node in doc.descendants() {
-        if node.tag_name().name() == "clrScheme" && node.tag_name().namespace() == Some(a_ns) {
-            for child in node.children() {
-                if !child.is_element() {
-                    continue;
-                }
-                // Each child is a color slot; its first child element holds the actual color
-                for color_node in child.children() {
-                    if !color_node.is_element() {
-                        continue;
-                    }
-                    let hex = match color_node.tag_name().name() {
-                        "srgbClr" => color_node
-                            .attribute("val")
-                            .map(|v| format!("#{}", v.to_uppercase())),
-                        "sysClr" => color_node
-                            .attribute("lastClr")
-                            .map(|v| format!("#{}", v.to_uppercase())),
-                        _ => None,
-                    };
-                    if let Some(h) = hex {
-                        colors.push(h);
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-    }
-    colors
+    // Shared clrScheme parse; xlsx keeps its own `#RRGGBB` uppercase formatting
+    // and positional (spec-order) Vec. Slots are emitted in the canonical order
+    // dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink; a slot with no readable
+    // color is skipped (compacting the Vec), preserving the prior contract.
+    // prstClr now resolves through the shared preset table (previously dropped),
+    // so a preset scheme slot contributes its color instead of being skipped.
+    ooxml_common::theme::ThemeColorScheme::parse(&xml)
+        .slots_in_order()
+        .into_iter()
+        .flatten()
+        .map(|hex| format!("#{}", hex.to_uppercase()))
+        .collect()
 }
 
 /// Convert hex color + tint to resulting hex color using HLS model.
@@ -712,8 +669,8 @@ fn parse_worksheet(
     let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     let mut rows = Vec::new();
-    let mut col_widths: HashMap<u32, f64> = HashMap::new();
-    let mut row_heights: HashMap<u32, f64> = HashMap::new();
+    let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
+    let mut row_heights: BTreeMap<u32, f64> = BTreeMap::new();
     let mut merge_cells: Vec<MergeCell> = Vec::new();
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
@@ -1323,17 +1280,16 @@ fn parse_worksheet(
 }
 
 /// Parse a .rels file into rId → Target map.
+/// id → target map for a `.rels` part. Thin adapter over
+/// [`ooxml_common::rels::parse_rels`] that flattens each `RelTarget` to its raw
+/// target string (both Internal part names and External hyperlink URLs are kept
+/// verbatim; part-name resolution happens later via [`resolve_zip_path`]),
+/// preserving this parser's `HashMap<rId, Target>` shape.
 pub(crate) fn parse_rels_map(xml: &str) -> HashMap<String, String> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
-        return HashMap::new();
-    };
-    let mut map = HashMap::new();
-    for rel in doc.root_element().children().filter(|n| n.is_element()) {
-        if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
-            map.insert(id.to_string(), target.to_string());
-        }
-    }
-    map
+    ooxml_common::rels::parse_rels(xml)
+        .into_iter()
+        .map(|(id, rel)| (id, rel.target))
+        .collect()
 }
 
 /// Parse xl/comments{N}.xml referenced from the sheet's rels and collect the
@@ -1640,28 +1596,13 @@ fn load_hyperlinks(
         .collect()
 }
 
-/// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
+/// Resolve a relative path ("../media/image1.png") against a base dir
+/// ("xl/drawings"). Thin alias for the shared
+/// [`ooxml_common::rels::resolve_target`], which handles root-absolute Targets
+/// (openpyxl's `/xl/...`) and `..` normalization uniformly (ECMA-376 Part 2
+/// §9.3). Kept as a local name so existing call sites read unchanged.
 pub(crate) fn resolve_zip_path(base_dir: &str, target: &str) -> String {
-    // An absolute Target (leading "/", e.g. openpyxl's
-    // `/xl/drawings/drawing1.xml`) is package-root-relative and must ignore
-    // `base_dir`; otherwise the base would be prepended, producing a path that
-    // doesn't exist in the archive (ECMA-376 / OPC part names are root-anchored
-    // when they start with "/").
-    let mut parts: Vec<&str> = if target.starts_with('/') {
-        Vec::new()
-    } else {
-        base_dir.split('/').filter(|s| !s.is_empty()).collect()
-    };
-    for seg in target.split('/') {
-        match seg {
-            ".." => {
-                parts.pop();
-            }
-            "." | "" => {}
-            s => parts.push(s),
-        }
-    }
-    parts.join("/")
+    ooxml_common::rels::resolve_target(base_dir, target)
 }
 
 pub(crate) fn resolve_fill_color(
@@ -2375,6 +2316,39 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+
+    /// The serialized worksheet JSON is deterministic: `colWidths` keys come out
+    /// in ascending column order regardless of `<col>` declaration order, and
+    /// two serializations of the same parse are byte-identical. This is the
+    /// BTreeMap guarantee — with the former `HashMap` field the key order
+    /// followed the randomized hash seed, so identical input could serialize to
+    /// different byte streams across runs.
+    #[test]
+    fn worksheet_json_is_deterministic_and_key_ordered() {
+        // Columns declared out of order (3, then 1, then 2).
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols>
+                 <col customWidth="1" min="3" max="3" width="30"/>
+                 <col customWidth="1" min="1" max="1" width="10"/>
+                 <col customWidth="1" min="2" max="2" width="20"/>
+               </cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        let json = serde_json::to_string(&ws).expect("serialize");
+        // Two serializations of the same value are byte-identical.
+        assert_eq!(json, serde_json::to_string(&ws).expect("serialize"));
+
+        // colWidths keys appear in ascending column order in the JSON string.
+        let widths = &json[json.find("\"colWidths\"").expect("colWidths present")..];
+        let p1 = widths.find("\"1\"").expect("col 1 key");
+        let p2 = widths.find("\"2\"").expect("col 2 key");
+        let p3 = widths.find("\"3\"").expect("col 3 key");
+        assert!(
+            p1 < p2 && p2 < p3,
+            "colWidths keys must serialize in ascending order (1,2,3), got positions {p1},{p2},{p3} in {widths}"
+        );
     }
 }
 

@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,8 +58,11 @@ pub struct MergeCell {
 pub struct Worksheet {
     pub name: String,
     pub rows: Vec<Row>,
-    pub col_widths: HashMap<u32, f64>,
-    pub row_heights: HashMap<u32, f64>,
+    /// Serialized as `BTreeMap`s so JSON key order is deterministic (columns /
+    /// rows in ascending index order), making the parser output byte-stable for
+    /// identical input.
+    pub col_widths: BTreeMap<u32, f64>,
+    pub row_heights: BTreeMap<u32, f64>,
     pub default_col_width: f64,
     pub default_row_height: f64,
     pub merge_cells: Vec<MergeCell>,
