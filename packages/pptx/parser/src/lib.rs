@@ -43,7 +43,7 @@ fn note_layout_master_parse() {
 pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let presentation = parse_presentation(data)
+    let presentation = parse_presentation_from_bytes(data)
         .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
     serde_json::to_vec(&presentation)
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
@@ -56,21 +56,14 @@ pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u
 pub fn pptx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let pres = parse_presentation(data)
+    let pres = parse_presentation_from_bytes(data)
         .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
-    let mut out = String::new();
-    for (i, slide) in pres.slides.iter().enumerate() {
-        if i > 0 {
-            out.push_str("\n---\n\n");
-        }
-        render_slide_md(slide, &mut out);
-    }
-    Ok(out)
+    Ok(render_presentation_md(&pres))
 }
 
 /// Native equivalent of `parse_pptx` for use from the MCP server.
 pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
-    let presentation = parse_presentation(data).map_err(|e| e.to_string())?;
+    let presentation = parse_presentation_from_bytes(data).map_err(|e| e.to_string())?;
     serde_json::to_string(&presentation).map_err(|e| e.to_string())
 }
 
@@ -81,15 +74,8 @@ pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
 /// need to read content efficiently — typical 10-30× token reduction vs. the
 /// raw JSON of `parse_pptx_native`.
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
-    let pres = parse_presentation(data).map_err(|e| e.to_string())?;
-    let mut out = String::new();
-    for (i, slide) in pres.slides.iter().enumerate() {
-        if i > 0 {
-            out.push_str("\n---\n\n");
-        }
-        render_slide_md(slide, &mut out);
-    }
-    Ok(out)
+    let pres = parse_presentation_from_bytes(data).map_err(|e| e.to_string())?;
+    Ok(render_presentation_md(&pres))
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -398,6 +384,96 @@ pub fn extract_image(
 ) -> Result<Vec<u8>, JsValue> {
     ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
         .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Project a parsed presentation to GitHub-flavoured markdown. Slides are joined
+/// by a `---` rule. Shared by `pptx_to_markdown`, `to_markdown_native`, and
+/// `PptxArchive::to_markdown` so every markdown path stays in lock-step.
+fn render_presentation_md(pres: &Presentation) -> String {
+    let mut out = String::new();
+    for (i, slide) in pres.slides.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n---\n\n");
+        }
+        render_slide_md(slide, &mut out);
+    }
+    out
+}
+
+/// A stateful handle over an opened pptx archive.
+///
+/// The free functions above (`parse_pptx` / `pptx_to_markdown` / `extract_media`
+/// / `extract_image`) each re-copy the whole file into WASM and re-scan the ZIP
+/// central directory on every call. A `PptxArchive` copies the bytes into WASM
+/// **once** (in `new`) and keeps the opened [`PptxZip`] alive, so a `parse`
+/// followed by any number of `extract_media` / `extract_image` calls (the
+/// viewer's parse-then-lazily-load-media pattern) pays the copy + open cost a
+/// single time. `ZipArchive<Cursor<Vec<u8>>>` is self-contained (it owns its
+/// bytes and holds no borrow into the input), which is what lets it live in a
+/// `#[wasm_bindgen]` struct field.
+///
+/// The retained `max` mirrors the per-call `scoped_max` guard the free functions
+/// install: every method re-installs it for its own scope so the zip-bomb entry
+/// cap is honored identically whether callers use the handle or the free
+/// functions.
+#[wasm_bindgen]
+pub struct PptxArchive {
+    archive: PptxZip,
+    max: Option<u64>,
+}
+
+#[wasm_bindgen]
+impl PptxArchive {
+    /// Copy `data` into WASM once and open the ZIP central directory once.
+    /// `max_zip_entry_bytes` is retained and applied on every subsequent method
+    /// call (identical semantics to the free functions' `scoped_max` guard).
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<PptxArchive, JsValue> {
+        console_error_panic_hook::set_once();
+        let archive = zip::ZipArchive::new(Cursor::new(data.to_vec()))
+            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        Ok(PptxArchive {
+            archive,
+            max: max_zip_entry_bytes,
+        })
+    }
+
+    /// Parse the retained archive and return the model as UTF-8 JSON bytes.
+    /// Byte-for-byte identical to `parse_pptx` on the same file.
+    pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let presentation = parse_presentation(&mut self.archive)
+            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        serde_json::to_vec(&presentation)
+            .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+    }
+
+    /// Extract raw bytes for one media entry (e.g. "ppt/media/media2.mp4") from
+    /// the retained archive. Twin of the free `extract_media`, but reads through
+    /// the already-open archive instead of re-opening it.
+    pub fn extract_media(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Extract raw bytes for one embedded image entry (e.g.
+    /// "ppt/media/image1.png") from the retained archive. Twin of the free
+    /// `extract_image`.
+    pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
+    /// free `pptx_to_markdown`.
+    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let pres = parse_presentation(&mut self.archive)
+            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        Ok(render_presentation_md(&pres))
+    }
 }
 
 // ===========================
@@ -1738,9 +1814,16 @@ struct TextOutline {
 //  ZIP helpers
 // ===========================
 
-type PptxZip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
+/// The parser's ZIP archive type. Owns its backing bytes (`Cursor<Vec<u8>>`)
+/// rather than borrowing them, so a `PptxArchive` handle can keep a single
+/// opened archive alive across `parse` / `extract_media` / `extract_image` /
+/// `to_markdown` calls — the central directory is scanned once and the bytes are
+/// copied into WASM once. `ZipArchive<Cursor<Vec<u8>>>` is fully self-contained
+/// (no borrow into the input), which is what lets a `#[wasm_bindgen]` handle
+/// store it as a field.
+type PptxZip = zip::ZipArchive<Cursor<Vec<u8>>>;
 
-fn read_zip_str(zip: &mut PptxZip<'_>, path: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn read_zip_str(zip: &mut PptxZip, path: &str) -> Result<String, Box<dyn std::error::Error>> {
     let max = ooxml_common::zip::current_max();
     let mut file = zip
         .by_name(path)
@@ -1852,7 +1935,7 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
 /// Pair diagramData rels with diagramDrawing rels in a slide's rels XML by filename
 /// number (data1.xml ↔ drawing1.xml, data2.xml ↔ drawing2.xml, ...), then load each
 /// drawing XML from the zip. Returns dm_rid → drawing_xml_content.
-fn build_smartart_drawings(rels_xml: &str, zip: &mut PptxZip<'_>) -> HashMap<String, String> {
+fn build_smartart_drawings(rels_xml: &str, zip: &mut PptxZip) -> HashMap<String, String> {
     let mut result: HashMap<String, String> = HashMap::new();
     let doc = match roxmltree::Document::parse(rels_xml) {
         Ok(d) => d,
@@ -3890,7 +3973,7 @@ fn parse_master_level_bullets(
     theme: &HashMap<String, String>,
     master_rels: &HashMap<String, String>,
     master_dir: &str,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> HashMap<String, LevelBullets> {
     let mut map: HashMap<String, LevelBullets> = HashMap::new();
 
@@ -4141,7 +4224,7 @@ fn parse_layout_placeholders(
     theme: &HashMap<String, String>,
     layout_dir: &str,
     layout_rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders {
         master_by_type: master_transforms.clone(),
@@ -4503,7 +4586,7 @@ fn parse_layout(
     theme: &HashMap<String, String>,
     layout_dir: &str,
     layout_rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> ParsedLayout {
     note_layout_master_parse();
     let doc = match roxmltree::Document::parse(layout_xml) {
@@ -4597,7 +4680,7 @@ fn parse_text_body(
     inherited_space_after: Option<i64>,
     inherited_line_spacing: Option<f64>,
     shape_kind: ShapeKind,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
     // ECMA-376 §20.1.6.7 objectDefaults. The theme-level `<a:txDef>` (and
@@ -4923,7 +5006,7 @@ fn parse_paragraph(
     level_font_sizes: &LevelFontSizes,
     level_indents: &LevelIndents,
     level_bullets: &LevelBullets,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
@@ -6591,7 +6674,7 @@ fn parse_shape(
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
     group_fill: Option<&Fill>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> Option<ShapeElement> {
     // --- Placeholder info (for layout fallback) ---
     let ph_node = sp_node
@@ -7024,7 +7107,7 @@ fn svg_blip_path(
     blip: roxmltree::Node<'_, '_>,
     slide_dir: &str,
     rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> Option<String> {
     let svg_rid = svg_blip_rid(blip)?;
     let svg_target = rels.get(&svg_rid)?;
@@ -7041,7 +7124,7 @@ fn parse_picture(
     slide_dir: &str,
     rels: &HashMap<String, String>,
     theme: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> Option<PictureElement> {
     let sp_pr = child(pic_node, "spPr")?;
     let xfrm_node = child(sp_pr, "xfrm")?;
@@ -7490,7 +7573,7 @@ fn parse_table(
     t: &Transform,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> Option<TableElement> {
     // Parse tblPr attributes and look up table style
     let tbl_pr = child(tbl, "tblPr");
@@ -7745,7 +7828,7 @@ fn parse_table_row(
     tr: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> TableRow {
     let height = attr_i64(&tr, "h").unwrap_or(0);
     let cells: Vec<TableCell> = tr
@@ -7760,7 +7843,7 @@ fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> TableCell {
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
@@ -7869,7 +7952,7 @@ fn extract_decorative_shapes(
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
     theme: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
     out: &mut Vec<SlideElement>,
 ) {
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
@@ -7912,7 +7995,7 @@ fn parse_slide(
     index: usize,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     // Destructure the per-slide master bundle into the local names the rest of
     // this function uses. `theme` here is the slide's effective theme (the
@@ -8130,7 +8213,7 @@ fn parse_slide(
 /// Resolve the slide's `notesSlide` relationship, read the notes part, and
 /// return its plain text (paragraphs joined by '\n'). Returns `None` when
 /// the slide has no notes part or the part can't be read.
-fn load_notes_slide(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Option<String> {
+fn load_notes_slide(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Option<String> {
     // rels here is the slide's _rels map (rId → Target) parsed by the caller.
     // The relationship Type ends with "/notesSlide". The cleanest way to find
     // the right entry is to look at every value in the map and pick the one
@@ -8173,7 +8256,7 @@ fn load_notes_slide(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Op
 /// Resolve and parse the slide's `comments` relationship (legacy
 /// `<p:cmLst>` format). Modern threaded comments live in a different
 /// namespace and are not yet supported.
-fn load_pptx_comments(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Vec<PptxComment> {
+fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<PptxComment> {
     let Some(target) = rels.values().find(|t| t.contains("comments/")) else {
         return Vec::new();
     };
@@ -8237,7 +8320,7 @@ fn parse_sp_tree_node(
     slide_dir: &str,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
     theme: &HashMap<String, String>,
     out: &mut Vec<SlideElement>,
     skip_placeholders: bool,
@@ -8720,7 +8803,7 @@ fn parse_smartart_drawing(
     gf_xfrm: &Transform,
     theme: &HashMap<String, String>,
     out: &mut Vec<SlideElement>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) {
     let doc = match roxmltree::Document::parse(drawing_xml) {
         Ok(d) => d,
@@ -9104,7 +9187,7 @@ struct EffectiveMaster {
 fn build_master_bundle(
     master_path: &str,
     fallback_theme: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
+    zip: &mut PptxZip,
 ) -> MasterBundle {
     let master_xml_opt: Option<String> = read_zip_str(zip, master_path).ok();
 
@@ -9236,12 +9319,20 @@ fn build_master_bundle(
     }
 }
 
-fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::Error>> {
-    let cursor = Cursor::new(data);
-    let mut zip = zip::ZipArchive::new(cursor)?;
+/// Parse a presentation from raw archive bytes. Thin wrapper that opens a fresh
+/// owned [`PptxZip`] (copying `data`) and delegates to [`parse_presentation`].
+/// Kept so the free `parse_pptx` / `pptx_to_markdown` WASM entry points and the
+/// native `parse_pptx_native` path keep their `&[u8]` signature; the stateful
+/// `PptxArchive` handle calls [`parse_presentation`] directly on its retained
+/// archive to avoid re-opening it per call.
+fn parse_presentation_from_bytes(data: &[u8]) -> Result<Presentation, Box<dyn std::error::Error>> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(data.to_vec()))?;
+    parse_presentation(&mut zip)
+}
 
+fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::error::Error>> {
     // --- presentation.xml ---
-    let pres_xml = read_zip_str(&mut zip, "ppt/presentation.xml")?;
+    let pres_xml = read_zip_str(zip, "ppt/presentation.xml")?;
     let pres_doc = roxmltree::Document::parse(&pres_xml)?;
     let pres_root = pres_doc.root_element();
 
@@ -9260,7 +9351,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .unwrap_or_default();
 
     // --- ppt/_rels/presentation.xml.rels ---
-    let pres_rels_xml = read_zip_str(&mut zip, "ppt/_rels/presentation.xml.rels")?;
+    let pres_rels_xml = read_zip_str(zip, "ppt/_rels/presentation.xml.rels")?;
     let pres_rels = parse_rels(&pres_rels_xml);
 
     // --- Presentation-level theme colors ---
@@ -9269,7 +9360,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     // master that declares no /theme relationship of its own.
     let theme_xml = find_rel_target_by_type(&pres_rels_xml, "/theme")
         .map(|t| resolve_path("ppt", &t))
-        .and_then(|path| read_zip_str(&mut zip, &path).ok())
+        .and_then(|path| read_zip_str(zip, &path).ok())
         .unwrap_or_default();
     let theme = parse_theme_colors(&theme_xml);
 
@@ -9292,10 +9383,10 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     // presentation-master bundle.
     let no_master_bundle: Option<MasterBundle> = match pres_master_path.as_deref() {
         Some(p) => {
-            master_cache.insert(p.to_owned(), build_master_bundle(p, &theme, &mut zip));
+            master_cache.insert(p.to_owned(), build_master_bundle(p, &theme, zip));
             None
         }
-        None => Some(build_master_bundle("", &theme, &mut zip)),
+        None => Some(build_master_bundle("", &theme, zip)),
     };
 
     // Cache of the layout single-pass extraction (`ParsedLayout`) keyed by layout
@@ -9350,10 +9441,10 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             .to_owned();
         let rels_path = format!("ppt/slides/_rels/{slide_file}.rels");
 
-        let slide_xml = read_zip_str(&mut zip, &slide_path)?;
-        let slide_rels_xml = read_zip_str(&mut zip, &rels_path).unwrap_or_default();
+        let slide_xml = read_zip_str(zip, &slide_path)?;
+        let slide_rels_xml = read_zip_str(zip, &rels_path).unwrap_or_default();
         let slide_rels = parse_rels(&slide_rels_xml);
-        let smartart_drawings = build_smartart_drawings(&slide_rels_xml, &mut zip);
+        let smartart_drawings = build_smartart_drawings(&slide_rels_xml, zip);
 
         // Layout XML
         let layout_path = find_rel_target_by_type(&slide_rels_xml, "/slideLayout")
@@ -9361,7 +9452,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
 
         let layout_xml = layout_path
             .as_deref()
-            .and_then(|path| read_zip_str(&mut zip, path).ok());
+            .and_then(|path| read_zip_str(zip, path).ok());
 
         let layout_dir = layout_path
             .as_deref()
@@ -9376,7 +9467,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             .and_then(|path| {
                 let file = path.split('/').next_back().unwrap_or("layout.xml");
                 let rels_p = format!("ppt/slideLayouts/_rels/{file}.rels");
-                read_zip_str(&mut zip, &rels_p).ok()
+                read_zip_str(zip, &rels_p).ok()
             })
             .unwrap_or_default();
         let layout_rels = parse_rels(&layout_rels_xml);
@@ -9407,7 +9498,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let bundle: &MasterBundle = match raw.master_path.as_deref() {
             Some(mp) if !mp.is_empty() => {
                 if !master_cache.contains_key(mp) {
-                    let b = build_master_bundle(mp, &theme, &mut zip);
+                    let b = build_master_bundle(mp, &theme, zip);
                     master_cache.insert(mp.to_owned(), b);
                 }
                 &master_cache[mp]
@@ -9470,7 +9561,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         // Built fully here (in `parse_presentation`, where `zip` is available — the
         // master `<p:bg>` may reference a blip) BEFORE `parse_slide`; `EffectiveMaster`
         // owns its data and holds no `zip` borrow, so the mutable borrow taken to
-        // resolve `master_bg` ends before `parse_slide(&mut zip)` is called.
+        // resolve `master_bg` ends before `parse_slide(zip)` is called.
         let effective_master: Option<EffectiveMaster> = clr_map_ovr.map(|ovr| {
             let mut theme = bundle.theme.clone();
             apply_clr_map(&mut theme, Some(&ovr));
@@ -9507,7 +9598,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                         &theme,
                         &bundle.master_rels,
                         &bundle.master_dir,
-                        &mut zip,
+                        zip,
                     )
                 })
                 .unwrap_or_default();
@@ -9534,7 +9625,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         };
         // Build a `ParsedLayout` from a layout XML string with the resolved
         // theme/bullets and this bundle's remaining (theme-independent) maps.
-        let build_parsed_layout = |lx: &str, zip: &mut PptxZip<'_>| -> ParsedLayout {
+        let build_parsed_layout = |lx: &str, zip: &mut PptxZip| -> ParsedLayout {
             parse_layout(
                 lx,
                 &bundle.master_font_sizes,
@@ -9566,12 +9657,12 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         ) {
             (true, Some(lx), Some(lp)) => {
                 if !layout_cache.contains_key(lp) {
-                    let pl = build_parsed_layout(lx, &mut zip);
+                    let pl = build_parsed_layout(lx, zip);
                     layout_cache.insert(lp.to_owned(), pl);
                 }
                 None // borrowed from the cache below
             }
-            (_, Some(lx), _) => Some(build_parsed_layout(lx, &mut zip)),
+            (_, Some(lx), _) => Some(build_parsed_layout(lx, zip)),
             (_, None, _) => Some(ParsedLayout::default()),
         };
         let parsed_layout: &ParsedLayout = match &fresh_layout {
@@ -9592,7 +9683,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             raw.index,
             &raw.slide_rels,
             &raw.smartart_drawings,
-            &mut zip,
+            zip,
         )?;
         slides.push(slide);
     }
@@ -10031,7 +10122,7 @@ mod tests {
             eprintln!("skipping test_parse_chartex: local sample not found");
             return;
         };
-        let cursor = std::io::Cursor::new(data.as_slice());
+        let cursor = std::io::Cursor::new(data.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let mut xml = String::new();
         zip.by_name("ppt/charts/chartEx1.xml")
@@ -10059,7 +10150,7 @@ mod tests {
             eprintln!("skipping test_slide8_chart_rid: local sample not found");
             return;
         };
-        let cursor = std::io::Cursor::new(data.as_slice());
+        let cursor = std::io::Cursor::new(data.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let mut slide_xml = String::new();
         zip.by_name("ppt/slides/slide8.xml")
@@ -10107,7 +10198,7 @@ mod tests {
             eprintln!("skipping test_slide8_full_parse: local sample not found");
             return;
         };
-        let pres = parse_presentation(&data).unwrap();
+        let pres = parse_presentation_from_bytes(&data).unwrap();
         let slide = &pres.slides[7]; // 0-indexed, slide 8
         println!("Slide 8 elements: {}", slide.elements.len());
         for (i, el) in slide.elements.iter().enumerate() {
@@ -10132,7 +10223,7 @@ mod tests {
             eprintln!("skipping test_slide8_chartex_pipeline: local sample not found");
             return;
         };
-        let cursor = std::io::Cursor::new(data.as_slice());
+        let cursor = std::io::Cursor::new(data.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
         let mut rels_xml = String::new();
@@ -10584,7 +10675,7 @@ mod tests {
         // Archive deliberately LACKS ppt/media/missing.png (it holds an unrelated
         // part so it isn't empty). index_for_name(missing.png) → None.
         let bytes = zip_with_parts(&[("ppt/media/other.png", b"\x89PNG")]);
-        let cursor = Cursor::new(bytes.as_slice());
+        let cursor = Cursor::new(bytes.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
         let master_doc = roxmltree::Document::parse(master).unwrap();
@@ -10616,7 +10707,7 @@ mod tests {
         // bullet resolves to Bullet::Blip — proving the test distinguishes
         // presence from absence rather than always inheriting.
         let bytes_ok = zip_with_parts(&[("ppt/media/missing.png", b"\x89PNG")]);
-        let cursor_ok = Cursor::new(bytes_ok.as_slice());
+        let cursor_ok = Cursor::new(bytes_ok.clone());
         let mut zip_ok = zip::ZipArchive::new(cursor_ok).unwrap();
         let m_ok = parse_master_level_bullets(
             master_root,
@@ -11019,7 +11110,7 @@ mod tests {
         let master_rels = HashMap::new();
         // Char bullets only — no media part lookups, so an empty archive suffices.
         let bytes = empty_zip_bytes();
-        let cursor = Cursor::new(bytes.as_slice());
+        let cursor = Cursor::new(bytes.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let master_doc = roxmltree::Document::parse(master).unwrap();
         let m = parse_master_level_bullets(
@@ -11142,7 +11233,7 @@ mod tests {
         let theme = HashMap::new();
         let rels = HashMap::new();
         let bytes = empty_zip_bytes();
-        let cursor = Cursor::new(bytes.as_slice());
+        let cursor = Cursor::new(bytes.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         // `lst_style` sets the body lstStyle (the inherited per-level cascade);
         // `p_pr` is the paragraph's own pPr. Returns the single paragraph.
@@ -11215,7 +11306,7 @@ mod tests {
     #[test]
     fn layout_over_master_level_indents_merge_per_axis() {
         let bytes = empty_zip_bytes();
-        let cursor = Cursor::new(bytes.as_slice());
+        let cursor = Cursor::new(bytes.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
         // Master authors only marL on the body level; layout authors only indent.
@@ -11306,7 +11397,7 @@ mod tests {
             let mut theme: HashMap<String, String> = HashMap::new();
             theme.insert("accent1".to_string(), accent1_hex.to_string());
             let bytes = empty_zip_bytes();
-            let cursor = Cursor::new(bytes.as_slice());
+            let cursor = Cursor::new(bytes.clone());
             let mut zip = zip::ZipArchive::new(cursor).unwrap();
             parse_layout(
                 layout,
@@ -11472,7 +11563,7 @@ mod tests {
         let count_for = |n: usize| -> usize {
             let data = build_shared_layout_deck(n);
             LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(0));
-            let pres = parse_presentation(&data).expect("parse");
+            let pres = parse_presentation_from_bytes(&data).expect("parse");
             assert_eq!(pres.slides.len(), n);
             LAYOUT_MASTER_PARSE_COUNT.with(|c| c.get())
         };
@@ -11718,7 +11809,7 @@ mod tests {
         // parse_text_body now takes a &mut PptxZip (to verify buBlip parts). This
         // body declares no picture bullets, so an empty archive is sufficient.
         let bytes = empty_zip_bytes();
-        let cursor = Cursor::new(bytes.as_slice());
+        let cursor = Cursor::new(bytes.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let mut parse = |body_pr: &str| -> TextBody {
             let xml = format!(
@@ -11789,7 +11880,7 @@ mod tests {
         // parse_text_body now takes a &mut PptxZip (to verify buBlip parts). No
         // picture bullets here, so an empty archive is sufficient.
         let bytes = empty_zip_bytes();
-        let cursor = Cursor::new(bytes.as_slice());
+        let cursor = Cursor::new(bytes.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         // `lst_style` lets a test set the body lvl1pPr default; `p_pr` is the
         // paragraph's own pPr. Returns the single paragraph's ea_ln_brk.
@@ -11896,7 +11987,7 @@ mod tests {
             let theme: HashMap<String, String> = HashMap::new();
             let rels: HashMap<String, String> = HashMap::new();
             let bytes = empty_zip_bytes();
-            let cursor = Cursor::new(bytes.as_slice());
+            let cursor = Cursor::new(bytes.clone());
             let mut zip = zip::ZipArchive::new(cursor).unwrap();
             parse_table(tbl, &t, &theme, &rels, &mut zip).unwrap()
         }
@@ -12405,7 +12496,7 @@ mod tests {
     #[test]
     fn master_sptree_pic_appears_on_slide() {
         let data = build_master_sp_pptx(None);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
         let pic = slide.elements.iter().find_map(|e| match e {
@@ -12436,7 +12527,7 @@ mod tests {
     #[test]
     fn master_sptree_hidden_when_layout_show_master_sp_false() {
         let data = build_master_sp_pptx(Some(false));
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
         let has_master_pic = slide
@@ -12459,7 +12550,7 @@ mod tests {
     #[test]
     fn master_sptree_shown_when_layout_show_master_sp_true() {
         let data = build_master_sp_pptx(Some(true));
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
         assert!(
             slide
@@ -12601,7 +12692,7 @@ mod tests {
     }
 
     fn master_band_fill_hex(data: &[u8]) -> String {
-        let pres = parse_presentation(data).expect("parse");
+        let pres = parse_presentation_from_bytes(data).expect("parse");
         let slide = &pres.slides[0];
         let shape = slide
             .elements
@@ -12771,7 +12862,7 @@ mod tests {
     #[test]
     fn slide_inherits_master_blip_background() {
         let data = build_master_bg_blip_pptx();
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         let bg = pres.slides[0]
             .background
             .as_ref()
@@ -12874,7 +12965,7 @@ mod tests {
 
         let theme = HashMap::new();
         let data = build_blip_media_zip(PNG_1X1, SVG);
-        let cursor = Cursor::new(data.as_slice());
+        let cursor = Cursor::new(data.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
         let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
@@ -12931,7 +13022,7 @@ mod tests {
         rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
         let theme = HashMap::new();
         let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
-        let cursor = Cursor::new(data.as_slice());
+        let cursor = Cursor::new(data.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
             .expect("parse_picture should succeed");
@@ -12985,7 +13076,7 @@ mod tests {
         let theme = HashMap::new();
         // Only the .svg part is referenced; the PNG arg is unused here.
         let data = build_blip_media_zip(b"", SVG);
-        let cursor = Cursor::new(data.as_slice());
+        let cursor = Cursor::new(data.clone());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
         let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
@@ -13252,7 +13343,7 @@ mod tests {
     fn theme_resolved_per_slide_via_layout_master_chain() {
         let default_clr_map = r#"<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         let data = build_two_master_pptx(default_clr_map);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 2, "expected two slides");
 
         let s1 = first_shape_fill_color(&pres.slides[0]);
@@ -13278,7 +13369,7 @@ mod tests {
         // Swap bg1<->tx1 on masterA only.
         let swapped = r#"<p:clrMap bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         let data = build_two_master_pptx(swapped);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
 
         // slide2 (masterB, default clrMap) has the Tx1Rect: tx1 -> dk1 (#222222).
         let tx1_default = shape_fill_color_by_name(&pres.slides[1], "Tx1Rect");
@@ -13308,7 +13399,7 @@ mod tests {
     fn clr_map_tx1_resolves_to_lt1_on_swapped_master() {
         let swapped = r#"<p:clrMap bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         let data = build_two_master_pptx_with_tx1_on_a(swapped);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         // slide1 (masterA, swapped) has the Tx1Rect: tx1 -> lt1 (#FAFAFA).
         let tx1_swapped = shape_fill_color_by_name(&pres.slides[0], "Tx1Rect");
         assert_eq!(
@@ -13592,7 +13683,7 @@ mod tests {
     fn clr_map_ovr_override_remaps_logical_scheme_names() {
         let override_inner = r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         let data = build_clr_map_ovr_pptx(override_inner);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 1, "expected one slide");
 
         // tx1 under the override → lt1 (#FAFAFA), NOT the master's dk1 (#222222).
@@ -13615,7 +13706,7 @@ mod tests {
         let layout_override = r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         let data =
             build_clr_map_ovr_pptx_with_layout("<a:masterClrMapping/>", Some(layout_override));
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 1, "expected one slide");
 
         let tx1 = shape_fill_color_by_name(&pres.slides[0], "Tx1Rect");
@@ -13634,7 +13725,7 @@ mod tests {
         let layout_override = r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         // Empty slide-level inner ⇒ the builder omits <p:clrMapOvr> on the slide.
         let data = build_clr_map_ovr_pptx_with_layout("", Some(layout_override));
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 1, "expected one slide");
 
         let tx1 = shape_fill_color_by_name(&pres.slides[0], "Tx1Rect");
@@ -13654,7 +13745,7 @@ mod tests {
     #[test]
     fn slide_master_clr_mapping_without_layout_override_uses_master() {
         let data = build_clr_map_ovr_pptx_with_layout("<a:masterClrMapping/>", None);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 1, "expected one slide");
 
         let tx1 = shape_fill_color_by_name(&pres.slides[0], "Tx1Rect");
@@ -13804,7 +13895,7 @@ mod tests {
     fn clr_map_ovr_flips_master_inherited_background() {
         let override_inner = r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#;
         let data = build_clr_map_ovr_master_bg_pptx(override_inner);
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 1, "expected one slide");
 
         let bg = slide_bg_color(&pres.slides[0]);
@@ -13821,7 +13912,7 @@ mod tests {
     #[test]
     fn master_inherited_background_default_without_override() {
         let data = build_clr_map_ovr_master_bg_pptx("<a:masterClrMapping/>");
-        let pres = parse_presentation(&data).expect("parse");
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
         assert_eq!(pres.slides.len(), 1, "expected one slide");
 
         let bg = slide_bg_color(&pres.slides[0]);
