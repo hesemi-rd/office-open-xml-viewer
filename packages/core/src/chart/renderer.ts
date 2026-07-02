@@ -1208,16 +1208,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const n = cats.length; if (n === 0) return;
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  // Shared frame bands. Area uses title pads 0.035 / 0.035 and default 0.22
+  // side-legend reserve — params keep pixels unchanged.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.05,
@@ -1227,8 +1230,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const px0 = x + pad.l; const py0 = y + pad.t;
-  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    pad,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
