@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { buildViewerUI } from './DocxViewer.stories';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
+import { buildDocxTextLayer } from './text-layer';
 import type { DocxTextRunInfo } from './renderer';
 
 type DemoArgs = { width: number };
@@ -52,18 +53,6 @@ function makeStatus(root: HTMLElement): HTMLDivElement {
   return s;
 }
 
-function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
-  layer.innerHTML = '';
-  for (const run of runs) {
-    const span = document.createElement('span');
-    span.textContent = run.text;
-    span.style.cssText =
-      `position:absolute;left:${run.x}px;top:${run.y}px;` +
-      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
-    layer.appendChild(span);
-  }
-}
-
 export const ScrollView: LayoutStory = {
   name: 'ScrollView — stack all pages',
   render() {
@@ -105,7 +94,7 @@ export const ScrollView: LayoutStory = {
 
           const runs: DocxTextRunInfo[] = [];
           await doc.renderPage(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
-          buildDocxTextLayer(textLayer, runs);
+          buildDocxTextLayer(textLayer, runs, '100%', '100%');
         }
         status.textContent = `Loaded ${doc.pageCount} pages`;
       })

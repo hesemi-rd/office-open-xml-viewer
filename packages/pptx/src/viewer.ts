@@ -1,4 +1,5 @@
 import type { RenderOptions, PptxTextRunInfo } from './renderer';
+import { buildPptxTextLayer } from './text-layer';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
@@ -276,48 +277,7 @@ export class PptxViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-    layer.innerHTML = '';
-    layer.style.width = `${cssWidth}px`;
-    layer.style.height = `${cssHeight}px`;
-
-    // Group runs by shape (same shapeX/shapeY/rotation)
-    type ShapeKey = string;
-    const shapeMap = new Map<ShapeKey, { div: HTMLDivElement; x: number; y: number; w: number; h: number; rot: number }>();
-
-    for (const run of runs) {
-      const totalRot = run.rotation + (run.textBodyRotation ?? 0);
-      const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
-      if (!shapeMap.has(key)) {
-        const div = document.createElement('div');
-        div.style.cssText =
-          `position:absolute;` +
-          `left:${run.shapeX}px;top:${run.shapeY}px;` +
-          `width:${run.shapeW}px;height:${run.shapeH}px;` +
-          `pointer-events:all;overflow:hidden;`;
-        if (totalRot !== 0) {
-          div.style.transformOrigin = 'center center';
-          div.style.transform = `rotate(${totalRot}deg)`;
-        }
-        shapeMap.set(key, { div, x: run.shapeX, y: run.shapeY, w: run.shapeW, h: run.shapeH, rot: totalRot });
-        layer.appendChild(div);
-      }
-
-      const shape = shapeMap.get(key)!;
-      const span = document.createElement('span');
-      span.textContent = run.text;
-      // The `font` shorthand must precede `line-height` because the shorthand
-      // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
-      // CSS rule cannot drift the trailing edge of the selection. Kerning /
-      // ligatures are left at the browser default ('auto') because canvas
-      // `measureText` / `fillText` also apply them by default — forcing them
-      // off here would make the span wider than the drawn text.
-      span.style.cssText =
-        `position:absolute;` +
-        `left:${run.inShapeX}px;top:${run.inShapeY}px;` +
-        `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
-        `white-space:pre;color:transparent;cursor:text;`;
-      shape.div.appendChild(span);
-    }
+    buildPptxTextLayer(layer, runs, cssWidth, cssHeight);
   }
 
   /** Clean up the viewer and terminate the background worker. */

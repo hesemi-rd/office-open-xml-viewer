@@ -3,6 +3,7 @@ import { buildViewerUI } from './PptxViewer.stories';
 import { PptxPresentation } from './presentation';
 import { PptxViewer } from './viewer';
 import type { PptxTextRunInfo } from './renderer';
+import { buildPptxTextLayer } from './text-layer';
 
 type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
@@ -48,37 +49,6 @@ function makeStatus(root: HTMLElement): HTMLDivElement {
   s.textContent = 'Loading…';
   root.appendChild(s);
   return s;
-}
-
-function buildPptxTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-  layer.innerHTML = '';
-  layer.style.width = `${cssWidth}px`;
-  layer.style.height = `${cssHeight}px`;
-
-  const shapeMap = new Map<string, HTMLDivElement>();
-  for (const run of runs) {
-    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
-    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
-    if (!shapeMap.has(key)) {
-      const div = document.createElement('div');
-      div.style.cssText =
-        `position:absolute;left:${run.shapeX}px;top:${run.shapeY}px;` +
-        `width:${run.shapeW}px;height:${run.shapeH}px;pointer-events:all;overflow:hidden;`;
-      if (totalRot !== 0) {
-        div.style.transformOrigin = 'center center';
-        div.style.transform = `rotate(${totalRot}deg)`;
-      }
-      shapeMap.set(key, div);
-      layer.appendChild(div);
-    }
-    const shape = shapeMap.get(key) as HTMLDivElement;
-    const span = document.createElement('span');
-    span.textContent = run.text;
-    span.style.cssText =
-      `position:absolute;left:${run.inShapeX}px;top:${run.inShapeY}px;` +
-      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;`;
-    shape.appendChild(span);
-  }
 }
 
 export const ScrollView: LayoutStory = {

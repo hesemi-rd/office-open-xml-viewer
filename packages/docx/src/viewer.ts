@@ -2,6 +2,7 @@ import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { RenderPageOptions } from './types';
 import type { DocxTextRunInfo } from './renderer';
+import { buildDocxTextLayer } from './text-layer';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -164,25 +165,11 @@ export class DocxViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
-    layer.innerHTML = '';
-    layer.style.width = `${this._canvas.style.width || this._canvas.width + 'px'}`;
-    layer.style.height = `${this._canvas.style.height || this._canvas.height + 'px'}`;
-
-    for (const run of runs) {
-      const span = document.createElement('span');
-      span.textContent = run.text;
-      // The `font` shorthand must precede `line-height` because the shorthand
-      // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
-      // CSS rule cannot drift the trailing edge of the selection. Kerning /
-      // ligatures are left at the browser default ('auto') because canvas
-      // `measureText` / `fillText` also apply them by default — forcing them
-      // off here would make the span wider than the drawn text.
-      span.style.cssText =
-        `position:absolute;` +
-        `left:${run.x}px;top:${run.y}px;` +
-        `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
-        `white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
-      layer.appendChild(span);
-    }
+    buildDocxTextLayer(
+      layer,
+      runs,
+      this._canvas.style.width || this._canvas.width + 'px',
+      this._canvas.style.height || this._canvas.height + 'px',
+    );
   }
 }

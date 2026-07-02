@@ -6,6 +6,7 @@ export {
   type RenderSlideToBitmapOptions,
 } from './presentation';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
+export { buildPptxTextLayer } from './text-layer';
 export type { PresentationHandle } from './presentation-handle';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
