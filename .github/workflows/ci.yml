@@ -56,6 +56,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            packages/pptx/parser
+            packages/xlsx/parser
+            packages/docx/parser
+
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
@@ -69,18 +77,56 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      # Unit tests for pure-logic modules (formula engine, number formats).
-      # No WASM needed.
-      - name: Unit tests
-        run: pnpm test
-
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
       - name: Build WASM
         run: pnpm build:wasm
+
+      # Unit tests. Most cover pure-logic modules, but the packages/node canvas
+      # probes dynamically import the WASM parsers (built above) and skia-canvas,
+      # so they run AFTER Build WASM. OOXML_REQUIRE_SKIA=1 turns a missing binding
+      # from a silent skip into a hard failure, guaranteeing the probes execute.
+      - name: Unit tests
+        run: pnpm test
+        env:
+          OOXML_REQUIRE_SKIA: '1'
 
       - name: Typecheck
         run: pnpm typecheck
 
       - name: Build packages
         run: pnpm build:packages
+
+  # Rendering smoke: boots Storybook, drives the Layouts stories in a real
+  # Chrome, and asserts every canvas receives ink. The only CI job that
+  # exercises the full parse -> render pipeline in a browser.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            packages/pptx/parser
+            packages/xlsx/parser
+            packages/docx/parser
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build WASM
+        run: pnpm build:wasm
+      - name: Install Playwright Chrome
+        run: pnpm exec playwright install chrome --with-deps
+      - name: Smoke tests
+        run: pnpm smoke
