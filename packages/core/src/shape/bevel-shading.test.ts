@@ -804,6 +804,133 @@ describe('applyBevelShading (end-to-end on a filled square)', () => {
   });
 });
 
+/**
+ * A region-honouring ImageData-backed ctx: `getImageData(sx,sy,sw,sh)` returns a
+ * copy of exactly that window, and `putImageData(img,dx,dy)` writes it back at the
+ * offset — so it exercises the A3 sub-region path (the simple `fakeCtx` above
+ * ignores the coordinates, which is fine for the full-canvas callers). Tracks the
+ * getImageData window so the test can assert the region actually shrank.
+ */
+function regionCtx(
+  w: number,
+  h: number,
+  fill: (x: number, y: number) => [number, number, number, number],
+): BevelCtx & { data: Uint8ClampedArray; lastGet: { x: number; y: number; w: number; h: number } | null } {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const [r, g, b, a] = fill(x, y);
+      const o = (y * w + x) * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b; data[o + 3] = a;
+    }
+  const state = { lastGet: null as { x: number; y: number; w: number; h: number } | null };
+  return {
+    data,
+    get lastGet() { return state.lastGet; },
+    canvas: { width: w, height: h },
+    getImageData(sx: number, sy: number, sw: number, sh: number) {
+      state.lastGet = { x: sx, y: sy, w: sw, h: sh };
+      const out = new Uint8ClampedArray(sw * sh * 4);
+      for (let y = 0; y < sh; y++)
+        for (let x = 0; x < sw; x++) {
+          const src = ((sy + y) * w + (sx + x)) * 4;
+          const dst = (y * sw + x) * 4;
+          out[dst] = data[src]; out[dst + 1] = data[src + 1];
+          out[dst + 2] = data[src + 2]; out[dst + 3] = data[src + 3];
+        }
+      return { data: out, width: sw, height: sh } as unknown as ImageData;
+    },
+    putImageData(img: ImageData, dx: number, dy: number) {
+      const sw = img.width, sh = img.height;
+      for (let y = 0; y < sh; y++)
+        for (let x = 0; x < sw; x++) {
+          const src = (y * sw + x) * 4;
+          const dst = ((dy + y) * w + (dx + x)) * 4;
+          data[dst] = img.data[src]; data[dst + 1] = img.data[src + 1];
+          data[dst + 2] = img.data[src + 2]; data[dst + 3] = img.data[src + 3];
+        }
+    },
+  };
+}
+
+describe('A3 region limit — bbox-restricted equals full-canvas, byte for byte', () => {
+  // A small opaque shape parked OFF-ORIGIN on a much larger canvas (the case A3
+  // optimises: the silhouette occupies a fraction of the offscreen). Running the
+  // effect over just `bbox ⊕ reach` must yield the SAME pixels as over the whole
+  // canvas, because every band pixel (dist < bandPx) / wall pixel (within |offset|)
+  // lies inside that window and its edge sits in transparent territory — matching
+  // `distanceToEdge`'s out-of-bounds-is-transparent boundary.
+  const CANVAS_W = 200;
+  const CANVAS_H = 160;
+  // Opaque rounded-ish block at (60..140, 40..110) — an 80×70 silhouette with a
+  // wide transparent margin on all sides.
+  const BX = 60, BY = 40, BW = 80, BH = 70;
+  const shapeFill = (x: number, y: number): [number, number, number, number] =>
+    x >= BX && x < BX + BW && y >= BY && y < BY + BH ? [130, 130, 130, 255] : [0, 0, 0, 0];
+
+  function diffCount(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+    let n = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++;
+    return n;
+  }
+
+  it('applyBevelShading: region == full canvas output (interior shape, band 8px)', () => {
+    const band = 8;
+    const bevel = {
+      widthPx: band, heightPx: 6, prst: 'circle', material: 'matte' as const,
+      light: lightDirFromRig('threePt', 't'),
+    };
+    const full = regionCtx(CANVAS_W, CANVAS_H, shapeFill);
+    applyBevelShading(full, bevel); // whole canvas
+
+    const reach = Math.ceil(band) + 2;
+    const region = { x: BX - reach, y: BY - reach, w: BW + 2 * reach, h: BH + 2 * reach };
+    const cropped = regionCtx(CANVAS_W, CANVAS_H, shapeFill);
+    applyBevelShading(cropped, bevel, region);
+
+    // The region genuinely shrank the read window (proves it isn't secretly full).
+    expect(cropped.lastGet).not.toBeNull();
+    expect(cropped.lastGet!.w).toBeLessThan(CANVAS_W);
+    expect(cropped.lastGet!.h).toBeLessThan(CANVAS_H);
+    // …and the pixels are byte-identical to the full-canvas run.
+    expect(diffCount(full.data, cropped.data)).toBe(0);
+  });
+
+  it('applyExtrusion: region == full canvas output (offset 6,4)', () => {
+    const ext = { offsetX: 6, offsetY: 4, rgb: [40, 40, 40] as [number, number, number] };
+    const full = regionCtx(CANVAS_W, CANVAS_H, shapeFill);
+    applyExtrusion(full, ext);
+
+    const reach = Math.ceil(Math.hypot(ext.offsetX, ext.offsetY)) + 2;
+    const region = { x: BX - reach, y: BY - reach, w: BW + 2 * reach, h: BH + 2 * reach };
+    const cropped = regionCtx(CANVAS_W, CANVAS_H, shapeFill);
+    applyExtrusion(cropped, ext, region);
+
+    expect(cropped.lastGet!.w).toBeLessThan(CANVAS_W);
+    expect(diffCount(full.data, cropped.data)).toBe(0);
+  });
+
+  it('applyBevelShading: a region clamped to the canvas edge still matches full', () => {
+    // Shape touching the canvas edge (BX2=0) so the region clamps at x=0 — the
+    // clamped window must still reproduce the full-canvas result exactly.
+    const band = 6;
+    const edgeFill = (x: number, y: number): [number, number, number, number] =>
+      x < 70 && y >= 40 && y < 110 ? [130, 130, 130, 255] : [0, 0, 0, 0];
+    const bevel = {
+      widthPx: band, heightPx: 5, prst: 'circle', material: 'matte' as const,
+      light: lightDirFromRig('threePt', 't'),
+    };
+    const full = regionCtx(CANVAS_W, CANVAS_H, edgeFill);
+    applyBevelShading(full, bevel);
+    const reach = Math.ceil(band) + 2;
+    const region = { x: 0 - reach, y: 40 - reach, w: 70 + 2 * reach, h: 70 + 2 * reach };
+    const cropped = regionCtx(CANVAS_W, CANVAS_H, edgeFill);
+    applyBevelShading(cropped, bevel, region);
+    expect(cropped.lastGet!.x).toBe(0); // clamped
+    expect(diffCount(full.data, cropped.data)).toBe(0);
+  });
+});
+
 function normalize(x: number, y: number, z: number) {
   const m = Math.hypot(x, y, z) || 1;
   return { x: x / m, y: y / m, z: z / m };

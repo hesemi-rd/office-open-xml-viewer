@@ -159,6 +159,7 @@ export {
   applyBevelShading,
   applyExtrusion,
   type ExtrusionInput,
+  type BevelRegion,
   computeBevelNormals,
   bevelHeightProfile,
   distanceToEdge,

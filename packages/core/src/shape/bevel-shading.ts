@@ -834,6 +834,42 @@ export interface BevelCtx {
   putImageData(data: ImageData, dx: number, dy: number): void;
 }
 
+/**
+ * A sub-rectangle of the body bitmap that the shading actually touches (perf: A3).
+ * The distance transform + normal loop are O(w·h); when the painted silhouette
+ * occupies only part of a large offscreen, restricting the `getImageData` window
+ * and the loop to `bbox ⊕ effect-reach` (clamped to the canvas) avoids running
+ * the whole thing over transparent margin.
+ *
+ * CORRECTNESS: `distanceToEdge` treats the area OUTSIDE the passed alpha plane as
+ * transparent (below-threshold), so a silhouette flush with the plane edge still
+ * gets a finite edge distance. Passing a sub-window therefore gives IDENTICAL
+ * results to the full canvas **provided the window edge lies in transparent
+ * territory** — i.e. the window must contain the silhouette grown by the effect's
+ * spatial reach (the bevel band, or the extrusion offset). Callers size the
+ * region that way; when omitted the whole canvas is used (unchanged behaviour).
+ */
+export interface BevelRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Clamp a requested region to the canvas bounds; returns null if it collapses. */
+function clampRegion(
+  region: BevelRegion | undefined,
+  canvasW: number,
+  canvasH: number,
+): { x: number; y: number; w: number; h: number } {
+  if (!region) return { x: 0, y: 0, w: canvasW, h: canvasH };
+  const x0 = Math.max(0, Math.floor(region.x));
+  const y0 = Math.max(0, Math.floor(region.y));
+  const x1 = Math.min(canvasW, Math.ceil(region.x + region.w));
+  const y1 = Math.min(canvasH, Math.ceil(region.y + region.h));
+  return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+}
+
 export interface BevelInput {
   /** Bevel band width in device px (EMU `w` × scale × devScale). */
   widthPx: number;
@@ -866,14 +902,22 @@ export interface BevelInput {
  *
  * No-op when the band is sub-pixel (nothing visible to shade).
  */
-export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-  if (w <= 0 || h <= 0) return;
+export function applyBevelShading(ctx: BevelCtx, input: BevelInput, region?: BevelRegion): void {
+  const canvasW = ctx.canvas.width;
+  const canvasH = ctx.canvas.height;
+  if (canvasW <= 0 || canvasH <= 0) return;
   const bandPx = input.widthPx;
   if (bandPx < 0.75) return; // sub-pixel lip — skip.
 
-  const img = ctx.getImageData(0, 0, w, h);
+  // Restrict the distance-transform + normal loop to the region the lip can
+  // occupy (perf: A3). Equivalent to the full canvas because the region contains
+  // the silhouette ⊕ bandPx, so every band pixel (dist < bandPx) is inside it and
+  // the region edge sits in transparent territory — matching `distanceToEdge`'s
+  // out-of-bounds-is-transparent boundary. See BevelRegion.
+  const { x: rx, y: ry, w, h } = clampRegion(region, canvasW, canvasH);
+  if (w <= 0 || h <= 0) return;
+
+  const img = ctx.getImageData(rx, ry, w, h);
   const px = img.data;
   // Alpha plane for the distance transform.
   const alpha = new Uint8ClampedArray(w * h);
@@ -937,7 +981,7 @@ export function applyBevelShading(ctx: BevelCtx, input: BevelInput): void {
       px[o + 2] = Math.max(0, px[o + 2] * f);
     }
   }
-  ctx.putImageData(img, 0, 0);
+  ctx.putImageData(img, rx, ry);
 }
 
 export interface ExtrusionInput {
@@ -964,18 +1008,27 @@ export interface ExtrusionInput {
  * extrusion under a strong perspective. When the offset is sub-pixel (face-on
  * camera) there is no visible wall and this is a no-op.
  */
-export function applyExtrusion(ctx: BevelCtx, input: ExtrusionInput): void {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-  if (w <= 0 || h <= 0) return;
+export function applyExtrusion(ctx: BevelCtx, input: ExtrusionInput, region?: BevelRegion): void {
+  const canvasW = ctx.canvas.width;
+  const canvasH = ctx.canvas.height;
+  if (canvasW <= 0 || canvasH <= 0) return;
   const dx = input.offsetX;
   const dy = input.offsetY;
   const len = Math.hypot(dx, dy);
   if (len < 0.75) return; // sub-pixel — no visible side wall.
 
-  const img = ctx.getImageData(0, 0, w, h);
+  // Restrict to the region the wall can occupy (perf: A3). A wall pixel is a
+  // transparent pixel within `len` px of the front silhouette along the depth
+  // vector, so it lies inside the silhouette bbox ⊕ |offset|. When the region
+  // contains that (callers size it so), the result is identical to the full
+  // canvas: the walk-back always moves TOWARD the silhouette (into the region),
+  // so no in-region wall pixel needs an out-of-region sample. See BevelRegion.
+  const { x: rx, y: ry, w, h } = clampRegion(region, canvasW, canvasH);
+  if (w <= 0 || h <= 0) return;
+
+  const img = ctx.getImageData(rx, ry, w, h);
   const px = img.data;
-  // Source alpha snapshot (the front face silhouette).
+  // Source alpha snapshot (the front face silhouette), region-local.
   const srcA = new Uint8ClampedArray(w * h);
   for (let i = 0; i < w * h; i++) srcA[i] = px[i * 4 + 3];
 
@@ -987,6 +1040,7 @@ export function applyExtrusion(ctx: BevelCtx, input: ExtrusionInput): void {
       if (srcA[i] >= 128) continue; // covered by the front face — wall hidden.
       // Walk back toward the front face along the depth vector; if any sample
       // along the sweep lands on the front silhouette, this pixel is side wall.
+      // Coords are region-local (the walk stays in-region — see the note above).
       let onWall = false;
       for (let s = 1; s <= steps; s++) {
         const t = s / steps;
@@ -1006,5 +1060,5 @@ export function applyExtrusion(ctx: BevelCtx, input: ExtrusionInput): void {
       px[o + 3] = 255;
     }
   }
-  ctx.putImageData(img, 0, 0);
+  ctx.putImageData(img, rx, ry);
 }
