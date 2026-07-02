@@ -372,6 +372,29 @@ function drawAxisTick(
   ctx.lineWidth = prevW;
 }
 
+/** Stroke one horizontal value-axis gridline spanning the plot width at `gy`.
+ *  Verbatim extraction of the identical stroke that the column-bar, line and
+ *  area renderers each emitted inline: the baseline (value 0) gridline is a
+ *  darker `#aaa` 1px rule, every other gridline is a faint `#e0e0e0` 0.5px
+ *  hairline. `isZero` is the caller's "this is the value-0 line" predicate
+ *  (`si === 0` / `v === 0`). Callers set their own font/label BEFORE/AFTER this
+ *  call, which is why those (drifted) parts stay at the call sites. Scatter is
+ *  deliberately NOT a caller — it has no baseline special-case. */
+function strokeValueGridlineH(
+  ctx: CanvasRenderingContext2D,
+  px0: number,
+  pw: number,
+  gy: number,
+  isZero: boolean,
+): void {
+  ctx.strokeStyle = isZero ? '#aaa' : '#e0e0e0';
+  ctx.lineWidth = isZero ? 1 : 0.5;
+  ctx.beginPath();
+  ctx.moveTo(px0, gy);
+  ctx.lineTo(px0 + pw, gy);
+  ctx.stroke();
+}
+
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
  *  fallback. ptToPx comes from the host renderer (EMU/px scale at display). */
 function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
@@ -669,9 +692,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         : formatChartValWithCode(val, chart.valAxisFormatCode);
       if (!isH) {
         const gy = py0 + ph - (val / axMax) * ph;
-        ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
-        ctx.lineWidth = si === 0 ? 1 : 0.5;
-        ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+        strokeValueGridlineH(ctx, px0, pw, gy, si === 0);
         ctx.textAlign = 'right';
         ctx.fillText(label, px0 - 12, gy);
       } else {
@@ -1058,9 +1079,7 @@ function renderLineChart(
     for (let si = 0; si <= steps; si++) {
       const v = axMin + si * step;
       const gy = toY(v);
-      ctx.strokeStyle = v === 0 ? '#aaa' : '#e0e0e0';
-      ctx.lineWidth = v === 0 ? 1 : 0.5;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
@@ -1255,9 +1274,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const steps = Math.round(axMax / step);
     for (let si = 0; si <= steps; si++) {
       const v = si * step; const gy = toY(v);
-      ctx.strokeStyle = si === 0 ? '#aaa' : '#e0e0e0';
-      ctx.lineWidth = si === 0 ? 1 : 0.5;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      strokeValueGridlineH(ctx, px0, pw, gy, si === 0);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
