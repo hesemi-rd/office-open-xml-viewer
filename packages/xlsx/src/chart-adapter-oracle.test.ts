@@ -228,7 +228,7 @@ function rustFromChartData(c: XlsxChartDataLike): ChartModel {
       seriesType: s.seriesType,
       useSecondaryAxis: null,
       categories: s.categories.length > 0 ? s.categories : null,
-      showMarker: s.showMarker ?? false,
+      showMarker: s.showMarker ?? null,
       valFormatCode: s.valFormatCode ?? null,
       markerSymbol: s.markerSymbol ?? null,
       markerSize: s.markerSize ?? null,
