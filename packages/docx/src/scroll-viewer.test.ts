@@ -1914,6 +1914,133 @@ describe('DocxScrollViewer — flicker-free zoom (T8)', () => {
   });
 });
 
+describe('DocxScrollViewer — pageShadow (T9)', () => {
+  // pageShadow paints a CSS box-shadow on every page CANVAS (not the wrapper).
+  // Default = the recipe drop shadow; `false` disables; a custom string is
+  // honoured verbatim. It must reach EVERY canvas: fresh mounts, the settle
+  // double-buffer SPARE, and recycled+re-mounted slots. Reuses the T8 setup
+  // (deferred engine + fake timers) for the spare-canvas case.
+  const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+
+  function setup(opts = {}, mode: 'main' | 'worker' = 'main', deferred = false) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(
+      20,
+      Array.from({ length: 20 }, () => ({ widthPt: 100, heightPt: 200 })),
+      mode,
+      deferred,
+    );
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+      overscan: 1,
+      zoomMin: 0.5,
+      zoomMax: 4,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, engine };
+  }
+
+  /** Every mounted page canvas (each slot wrapper's canvas child). */
+  function mountedCanvases(scrollHost: FakeEl): FakeEl[] {
+    return scrollHost.children
+      .filter((c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas'))
+      .map((w) => w.children.find((k) => k.tag === 'canvas') as FakeEl);
+  }
+
+  it('applies the default recipe shadow to every mounted page canvas', () => {
+    const { v, scrollHost } = setup();
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+    v.destroy();
+  });
+
+  it('pageShadow:false sets no box-shadow on the page canvas', () => {
+    const { v, scrollHost } = setup({ pageShadow: false });
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe('');
+    v.destroy();
+  });
+
+  it('honours a custom pageShadow string verbatim (e.g. a spread-ring border look)', () => {
+    const ring = '0 0 0 1px #c8ccd0';
+    const { v, scrollHost } = setup({ pageShadow: ring });
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe(ring);
+    v.destroy();
+  });
+
+  it('does NOT paint the shadow on the wrapper (only the canvas)', () => {
+    const { v, scrollHost } = setup();
+    const wrapper = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas'),
+    ) as FakeEl;
+    expect(wrapper.style.boxShadow).toBe('');
+    v.destroy();
+  });
+
+  it('the settle double-buffer SPARE canvas carries the shadow (swapped-in canvas keeps it)', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, scrollHost, engine } = setup({}, 'main', true);
+      // Resolve the initial mount renders so the on-screen canvases are painted.
+      for (const c of engine.renderCalls.slice()) c.resolve();
+
+      v.setScale(v.scaleForTest() * 2); // zoom → schedules a settle
+      vi.advanceTimersByTime(200); // past ZOOM_SETTLE_MS → settle dispatched
+
+      // The settle render for page 0 targets a fresh SPARE canvas — it must
+      // already carry the shadow BEFORE the swap.
+      const settleCall = engine.renderCalls.filter((c) => c.page === 0).pop()!;
+      const spare = settleCall.canvas as unknown as FakeEl;
+      expect(spare).toBeDefined();
+      expect(spare.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+
+      // Resolve → swap the spare in. The now-on-screen canvas still has the shadow.
+      settleCall.resolve();
+      const slot = scrollHost.children.find(
+        (c) => c.tag === 'div' && c.style.top === '0px' && c.children.some((k) => k.tag === 'canvas'),
+      ) as FakeEl;
+      return Promise.resolve()
+        .then(() => Promise.resolve())
+        .then(() => {
+          const nowCanvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+          expect(nowCanvas._uid).toBe(spare._uid); // spare swapped in
+          expect(nowCanvas.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+          v.destroy();
+        });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a recycled + re-mounted slot still carries the shadow', () => {
+    const { v, scrollHost } = setup();
+    // Scroll far down so page 0's slot recycles into the free pool, then back to
+    // the top so a POOLED slot is re-mounted for page 0.
+    scrollHost.scrollTop = 5000;
+    scrollHost.dispatch('scroll');
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatch('scroll');
+    const canvases = mountedCanvases(scrollHost);
+    expect(canvases.length).toBeGreaterThan(0);
+    for (const c of canvases) expect(c.style.boxShadow).toBe(DEFAULT_PAGE_SHADOW);
+    v.destroy();
+  });
+});
+
 describe('DocxScrollViewer — barrel export (T7)', () => {
   it('is exported from the package entry', () => {
     expect(typeof docxIndex.DocxScrollViewer).toBe('function');

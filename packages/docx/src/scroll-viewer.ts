@@ -21,6 +21,14 @@ import type { RenderPageOptions } from './types';
 const ZOOM_SETTLE_MS = 150;
 
 /**
+ * Default CSS `box-shadow` painted on every page canvas — the soft drop shadow a
+ * PDF reader casts under each sheet (matches the Examples/recipe look, which the
+ * scroll viewer now reproduces with zero config). See
+ * {@link DocxScrollViewerOptions.pageShadow}.
+ */
+const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+
+/**
  * Options for {@link DocxScrollViewer}. Extends `RenderPageOptions` (per-page
  * render knobs, minus `onTextRun`) and `LoadOptions` (parse/worker knobs). See
  * design §8.1.
@@ -77,6 +85,21 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    * background shows through (non-breaking).
    */
   background?: string;
+  /**
+   * CSS `box-shadow` painted on every page CANVAS (not the wrapper — the
+   * text-selection overlay must not cast its own shadow). The soft drop shadow a
+   * PDF reader leaves under each sheet.
+   *
+   * - Default (`undefined`): `'0 1px 3px rgba(0,0,0,0.2)'` — the recipe look, so
+   *   the scroll viewer reproduces the Examples appearance with zero config.
+   * - `false`: NO shadow (flat pages).
+   * - A custom string is applied verbatim. A spread-only ring such as
+   *   `'0 0 0 1px #c8ccd0'` gives a crisp 1px BORDER look — and because
+   *   `box-shadow` never affects layout (unlike `border`, which would grow the
+   *   box and shift every offset), a border and a drop shadow are the SAME knob
+   *   here rather than two competing options.
+   */
+  pageShadow?: string | false;
   /**
    * Inject an already-loaded engine to share one parse across panes (design §14).
    * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
@@ -203,10 +226,21 @@ export class DocxScrollViewer {
    *  skip the re-fit when only the height changed (a ResizeObserver fires on ANY
    *  box change, but only a WIDTH change alters the fit-to-width base scale). */
   private _lastFitWidth = 0;
+  /** Resolved page-canvas `box-shadow` (design: the recipe drop shadow by
+   *  default). Resolved ONCE with `??` — NOT `||` — so `pageShadow: false`
+   *  survives as the "no shadow" sentinel (a `||` would treat `false` as absent
+   *  and wrongly re-apply the default). Applied by `_applyPageShadow` at EVERY
+   *  canvas-creation site (`_acquireSlot` and the double-buffer spare in
+   *  `_settleSlot`) so a recycled/re-mounted slot and a settle-swapped spare all
+   *  carry it. */
+  private readonly _pageShadow: string | false;
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     this._container = container;
     this._opts = opts;
+    // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
+    // fall through to the default.
+    this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
     this._injected = !!opts.document;
     if (this._injected) {
       const engine = opts.document as DocxDocument;
@@ -491,6 +525,16 @@ export class DocxScrollViewer {
     }
   }
 
+  /** Apply the resolved page-canvas shadow (design: recipe drop shadow by
+   *  default, `false` ⇒ none). Single source so `_acquireSlot` and the
+   *  double-buffer spare in `_settleSlot` stay in lock-step — a spare that missed
+   *  this would lose the shadow on the settle swap. `box-shadow` never affects
+   *  layout, so this is safe to (re)set on a live/pooled canvas without shifting
+   *  any offset. */
+  private _applyPageShadow(canvas: HTMLCanvasElement): void {
+    if (this._pageShadow !== false) canvas.style.boxShadow = this._pageShadow;
+  }
+
   private _acquireSlot(): PageSlot {
     const reused = this._free.pop();
     if (reused) {
@@ -505,6 +549,7 @@ export class DocxScrollViewer {
     wrapper.style.cssText = 'position:absolute;';
     const canvas = document.createElement('canvas');
     canvas.style.cssText = 'display:block;background:#fff;';
+    this._applyPageShadow(canvas);
     wrapper.appendChild(canvas);
     let textLayer: HTMLDivElement | null = null;
     if (this._opts.enableTextSelection) {
@@ -984,9 +1029,12 @@ export class DocxScrollViewer {
       return;
     }
 
-    // Main mode: double-buffer. Render into a spare canvas kept off-DOM.
+    // Main mode: double-buffer. Render into a spare canvas kept off-DOM. The
+    // spare REPLACES the on-screen canvas on swap, so it must carry the page
+    // shadow too — otherwise a settle would silently drop it.
     const spare = document.createElement('canvas');
     spare.style.cssText = 'display:block;background:#fff;';
+    this._applyPageShadow(spare);
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const onTextRun = wantOverlay ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
