@@ -92,6 +92,8 @@ describe('buildPptxTextLayer (extracted from PptxViewer._buildTextLayer)', () =>
     expect(spanA.style.position).toBe('absolute');
     expect(spanA.style.left).toBe('2px');
     expect(spanA.style.top).toBe('4px');
+    expect(spanA.style.font).toBe('12px serif');
+    expect(spanA.style['line-height']).toBe('12px');
     expect(spanA.style['letter-spacing']).toBe('0');
     expect(spanA.style.color).toBe('transparent');
   });
