@@ -117,7 +117,7 @@ function para(text: string, over: Partial<DocParagraph> = {}): DocParagraph {
   } as unknown as DocParagraph;
 }
 
-function doc(body: BodyElement[], pageHeight = 60): DocxDocumentModel {
+function doc(body: BodyElement[], pageHeight = 60, settings?: Record<string, unknown>): DocxDocumentModel {
   const section: SectionProps = {
     pageWidth: 200, pageHeight,
     marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
@@ -130,6 +130,7 @@ function doc(body: BodyElement[], pageHeight = 60): DocxDocumentModel {
     footers: { default: null, first: null, even: null },
     fontFamilyClasses: { 'Times New Roman': 'roman' },
     footnotes: [],
+    ...(settings ? { settings } : {}),
   } as unknown as DocxDocumentModel;
 }
 
@@ -151,7 +152,7 @@ async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElem
  *  report how many measureText calls each variant made so the caller can pin
  *  whether the reuse actually fired (fewer measures) or the gate rejected it
  *  (equal measures). */
-async function assertReuseIdentical(model: DocxDocumentModel): Promise<{ pages: number; drawn: number; split: boolean; measuresOn: number; measuresOff: number }> {
+async function assertReuseIdentical(model: DocxDocumentModel): Promise<{ pages: number; drawn: number; split: boolean; measuresOn: number; measuresOff: number; streams: Call[][] }> {
   const pages = paginateDocument(model);
   // Sanity: this document actually split a paragraph, so stamped lines exist.
   const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
@@ -169,7 +170,7 @@ async function assertReuseIdentical(model: DocxDocumentModel): Promise<{ pages: 
     expect(on.perPage[p]).toEqual(off.perPage[p]);
     drawn += on.perPage[p].filter((c) => c.op !== 'img').length;
   }
-  return { pages: pages.length, drawn, split, measuresOn: on.measures, measuresOff: off.measures };
+  return { pages: pages.length, drawn, split, measuresOn: on.measures, measuresOff: off.measures, streams: on.perPage };
 }
 
 describe('compute-once line reuse — pixel identity (Phase 4-1 B2 Stage 1)', () => {
@@ -220,6 +221,44 @@ describe('compute-once line reuse — pixel identity (Phase 4-1 B2 Stage 1)', ()
     // proves the reuse did NOT silently fire on a paragraph whose measure lines
     // would have painted wrong.
     expect(r.measuresOn).toBe(r.measuresOff);
+  });
+
+  it('NUMPAGES field in a splitting paragraph: never stamped — field text resolves against the real page context', async () => {
+    // resolveFieldText is paint-state-dependent: numPages → state.totalPages,
+    // which is 1 in the paginator's measure state but the real count at paint.
+    // Stamped measure-time lines would freeze the stale "1" into the drawn text,
+    // so paragraphSegsStateSensitive excludes such paragraphs from stamping —
+    // they stay on the recompute path (the pre-reuse behaviour).
+    const text = Array.from({ length: 120 }, () => 'w').join(' ');
+    const p = para(text);
+    (p.runs as unknown[]).push({
+      type: 'field', fieldType: 'numPages', instruction: 'NUMPAGES', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const r = await assertReuseIdentical(doc([p as unknown as BodyElement]));
+    expect(r.pages).toBeGreaterThan(1);
+    expect(r.split).toBe(true);
+    // No stamp → no reuse: ON and OFF recomputed identically.
+    expect(r.measuresOn).toBe(r.measuresOff);
+    // And the CURRENT total page count was drawn (not the measure-time "1" —
+    // with pages > 1 the real count is distinguishable from the stale value).
+    const drewTotal = r.streams.some((page) => page.some((c) => c.text === String(r.pages)));
+    expect(drewTotal).toBe(true);
+  });
+
+  it('custom kinsoku settings: fresh-but-value-equal rule objects still reuse (=== alone would reject)', async () => {
+    // The prebuiltPages production path resolves resolveKinsokuRules(doc.settings)
+    // TWICE — once in paginateDocument, once in renderDocumentToCanvas — and the
+    // resolver builds fresh Set objects per call. With custom settings the rules
+    // are non-default on both sides yet reference-distinct; the gate's value
+    // equivalence must still let the reuse fire.
+    const text = Array.from({ length: 120 }, () => 'w').join(' ');
+    const model = doc([para(text) as unknown as BodyElement], 60,
+      { kinsoku: true, noLineBreaksBefore: '、。！' , noLineBreaksAfter: '（「' });
+    const r = await assertReuseIdentical(model);
+    expect(r.pages).toBeGreaterThan(1);
+    expect(r.measuresOn).toBeLessThan(r.measuresOff); // reuse fired across fresh rule objects
   });
 
   it('same page rendered twice is identical (shared stamped array is never mutated)', async () => {

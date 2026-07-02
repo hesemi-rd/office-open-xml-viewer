@@ -2395,12 +2395,24 @@ function paginateWithHeaderFooterReserve(
   return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves, defaultTabPt);
 }
 
-/** Paginate with a throwaway measure context. Pagination must use the same
- *  fontFamilyClasses + kinsoku rules as the render path, otherwise line-break
- *  decisions (and thus page breaks) diverge between measurement and paint
- *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
- *  render worker so the two modes can never paginate differently. */
-
+/** Paginate with a throwaway measure context (a fresh OffscreenCanvas, scale 1).
+ *  Pagination must use the same fontFamilyClasses + kinsoku rules as the render
+ *  path, otherwise line-break decisions (and thus page breaks) diverge between
+ *  measurement and paint (ECMA-376 §17.15.1.58–.60). Shared by the main-thread
+ *  DocxDocument and the render worker so the two modes can never paginate
+ *  differently.
+ *
+ *  FONT-LOADING PRECONDITION: the OffscreenCanvas measurement here uses whatever
+ *  fonts are loaded AT CALL TIME. Callers must ensure font loading has completed
+ *  (e.g. await `document.fonts.ready` / the relevant `FontFace.load()`) before
+ *  paginating — paginating against fallback metrics and painting after the real
+ *  fonts arrive yields stale page breaks. This has always been true for the
+ *  lineSlice indices; since the compute-once reuse (Phase 4-1 B2 Stage 1) it
+ *  also covers the stamped line GEOMETRY: at paint scale 1 the renderer reuses
+ *  the lines measured here verbatim (renderParagraph's reuse gate assumes
+ *  measure-time and paint-time text metrics are identical), where the old
+ *  recompute path would at least have re-wrapped the within-page text under the
+ *  late-loaded fonts. */
 export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return [doc.body];
@@ -2755,6 +2767,12 @@ function splitParagraphAcrossPages(
   }
   const paraHasRuby = paragraphHasRuby(para);
 
+  // Compute-once eligibility, once per paragraph: a paragraph whose segment
+  // TEXT depends on the paint state (page/numPages fields, note references)
+  // must not ship its measure-time lines — the stamped text would be stale.
+  // See paragraphSegsStateSensitive.
+  const stampLines = !paragraphSegsStateSensitive(para);
+
   const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para));
   const uniformH = paraHasRuby
     ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
@@ -2821,28 +2839,34 @@ function splitParagraphAcrossPages(
     }
     const isFinalSlice = lastFitting === lines.length;
     if (isFinalSlice) usedH += spaceAfter;
-    pages[pages.length - 1].push(stamp({
+    const sliceEl = {
       ...(para as object),
       type: 'paragraph',
       lineSlice: { start: firstFitting, end: lastFitting },
-      // Phase 4-1 B2 Stage 1 — hand the paint pass the scale-1 lines this split
-      // already computed so it can skip re-running layoutLines (compute-once).
-      // The FULL array is stamped on every slice (not `lines.slice(...)`) because
-      // the paint loop indexes by absolute line number; `lineSlice` still selects
-      // the sub-range to paint. The same immutable array is shared across slices
-      // and across repeated renderPage calls — the draw path only reads it. The
-      // recorded inputs let the paint pass verify its own layout would be
-      // identical before reusing (see renderParagraph's reuse gate).
-      layoutLines: lines,
-      layoutLinesInputs: {
+    } as PaginatedElementWithLines;
+    // Phase 4-1 B2 Stage 1 — hand the paint pass the scale-1 lines this split
+    // already computed so it can skip re-running layoutLines (compute-once).
+    // The FULL array is stamped on every slice (not `lines.slice(...)`) because
+    // the paint loop indexes by absolute line number; `lineSlice` still selects
+    // the sub-range to paint. The same immutable array is shared across slices
+    // and across repeated renderPage calls — the draw path only reads it. The
+    // recorded inputs let the paint pass verify its own layout would be
+    // identical before reusing (see renderParagraph's reuse gate). Skipped for
+    // state-sensitive segments (stampLines above): those keep the recompute
+    // path so field text resolves against the real page context.
+    if (stampLines) {
+      sliceEl.layoutLines = lines;
+      sliceEl.layoutLinesInputs = {
         scale: 1,
         paraW,
         firstIndent: para.indentFirst,
         tabOriginPx: indLeft,
         gridDeltaPx: gridCharDeltaPx(paraGrid(para, measureState), 1),
         hasFloats: wrapCtx !== undefined,
-      },
-    } as PaginatedElementWithLines));
+        kinsoku: measureState.kinsoku,
+      };
+    }
+    pages[pages.length - 1].push(stamp(sliceEl));
     lineIdx = lastFitting;
     cursorY += usedH;
     if (!isFinalSlice) {
@@ -4313,6 +4337,16 @@ function renderParagraph(
   // (whole-paragraph, first-page) lines do not carry. Rescaling to scale ≠ 1 is
   // deferred to Stage 2 (it changes the line PARTITION under real font hinting —
   // see layout-lines-scale-invariance.test.ts — i.e. a behaviour change).
+  //
+  // Segment stability: the reuse also assumes buildSegments(para.runs, ·) yields
+  // the SAME segments under the paginator's measure state and this paint state.
+  // buildSegments is pure over `para.runs` (both passes read the same paragraph
+  // object) EXCEPT for two paint-context text sources — page/numPages fields and
+  // noteRef labels — and paragraphs carrying those are never stamped in the
+  // first place (paragraphSegsStateSensitive, checked at the stamp site), so no
+  // per-segment gate comparison is needed here. If buildSegments ever gains a
+  // new state-dependent text source, extend that predicate — this gate cannot
+  // see inside the stamped segments.
   const stamped = para as unknown as PaginatedElementWithLines;
   const reuse =
     lineReuseEnabled &&
@@ -4325,7 +4359,13 @@ function renderParagraph(
     stamped.layoutLinesInputs.paraW === paraW &&
     stamped.layoutLinesInputs.firstIndent === firstLineIndent &&
     stamped.layoutLinesInputs.tabOriginPx === indLeft &&
-    stamped.layoutLinesInputs.gridDeltaPx === paintGridDeltaPx;
+    stamped.layoutLinesInputs.gridDeltaPx === paintGridDeltaPx &&
+    // §17.3.1.16 / §17.15.1.58–.59 — kinsoku governs CJK retract decisions in
+    // layoutLines, so differing rules mean a (potentially) different partition.
+    // Value equivalence, NOT `===`: the prebuiltPages path resolves the rules
+    // independently in paginateDocument and here (fresh Sets per call), so the
+    // references legitimately differ while the rules are identical.
+    kinsokuRulesEquivalent(stamped.layoutLinesInputs.kinsoku, state.kinsoku);
   const lines = reuse
     ? (stamped.layoutLines as LayoutLine[])
     : layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt);
@@ -5265,8 +5305,62 @@ type PaginatedElementWithLines = PaginatedBodyElement & {
     tabOriginPx: number; // pt (== indLeft at scale 1)
     gridDeltaPx: number; // pt
     hasFloats: boolean;  // a float context changes wrap → never reuse across it
+    /** The kinsoku rules the paginator laid out with (§17.3.1.16 / §17.15.1.58–.59).
+     *  Compared by {@link kinsokuRulesEquivalent} in the paint gate. NOTE this is
+     *  usually NOT reference-identical to the paint state's rules: the production
+     *  path resolves `resolveKinsokuRules(doc.settings)` once in paginateDocument
+     *  and again in renderDocumentToCanvas, and the resolver builds fresh Set
+     *  objects per call — so the gate needs value equivalence, not `===` alone. */
+    kinsoku: KinsokuRules;
   };
 };
+
+/** Value equivalence of two resolved kinsoku rule sets, with a reference fast
+ *  path. The reuse gate cannot rely on `===` alone: `resolveKinsokuRules` builds
+ *  a FRESH object (fresh Sets) on every call, and the prebuiltPages production
+ *  path (DocxDocument.renderPage) resolves it independently in paginateDocument
+ *  and in renderDocumentToCanvas — same `doc.settings`, different references.
+ *  Both derive from the same immutable settings so they are value-equal there;
+ *  this check is pure defense so a genuinely different rule set (which would
+ *  change CJK retract decisions in layoutLines) can never reuse stale lines. */
+function kinsokuRulesEquivalent(a: KinsokuRules, b: KinsokuRules): boolean {
+  if (a === b) return true;
+  if (a.enabled !== b.enabled) return false;
+  const setEq = (x: Set<number>, y: Set<number>): boolean => {
+    if (x.size !== y.size) return false;
+    for (const cp of x) if (!y.has(cp)) return false;
+    return true;
+  };
+  return setEq(a.lineStartForbidden, b.lineStartForbidden) && setEq(a.lineEndForbidden, b.lineEndForbidden);
+}
+
+/** True when {@link buildSegments} would produce DIFFERENT segments for this
+ *  paragraph under the paginator's measure state versus the paint state — i.e.
+ *  the segment text depends on per-page render context rather than on the runs
+ *  alone. Exactly two sources exist today:
+ *    - `field` runs of type page / numPages: {@link resolveFieldText} returns
+ *      `state.pageIndex + 1` / `state.totalPages`, and the measure state is
+ *      frozen at pageIndex 0 / totalPages 1 (buildMeasureState);
+ *    - `noteRef` text runs: the label resolves via `state.noteNumbers` /
+ *      `state.currentNoteNumber`, which only the paint state carries
+ *      (renderDocumentToCanvas builds the map; the measure state never does).
+ *  Such a paragraph must NOT stamp its measured lines: the stamped segments
+ *  would carry the measure-time text (a stale page number / note label) and the
+ *  paint pass would draw it verbatim. Skipping the stamp keeps those paragraphs
+ *  on the recompute path, which resolves fields against the real page context —
+ *  the pre-reuse behaviour. Extend this predicate if buildSegments ever gains a
+ *  new state-dependent text source. */
+function paragraphSegsStateSensitive(para: DocParagraph): boolean {
+  for (const run of para.runs) {
+    if (run.type === 'field') {
+      const ft = (run as unknown as FieldRun).fieldType;
+      if (ft === 'page' || ft === 'numPages') return true;
+    } else if (run.type === 'text' && (run as unknown as DocxTextRun).noteRef) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Phase 4-1 B2 Stage 1 — master switch for the compute-once line reuse. Always
  *  ON in production; the pixel-identity characterization test flips it OFF to
