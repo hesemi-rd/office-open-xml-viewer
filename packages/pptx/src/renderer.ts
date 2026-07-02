@@ -68,6 +68,7 @@ import {
   getCachedBitmapByPath,
   peekCachedBitmapByPath,
   dropBitmapCacheByPath,
+  preferVectorBlip,
   cropSourceRect,
   metafileRasterSize,
   highlightBox,
@@ -3315,16 +3316,17 @@ async function renderPicture(
     // `null` is reachable when the raster path resolves to an unsupported
     // metafile (a true EMF, or a WMF with no geometry); guarded below.
     let bitmap: ImageBitmap | HTMLImageElement | null;
-    if (el.svgImagePath != null && !el.srcRect) {
-      // No crop: prefer the vector original. With an a:srcRect crop we skip this
-      // branch — the crop math below multiplies fractional srcRect edges by the
-      // source's pixel dims, and an SVG HTMLImageElement that declares only a
-      // viewBox (no intrinsic width/height) reports the 300×150 default rather
-      // than its logical size, so a 9-arg drawImage with a source rect samples
-      // the wrong basis. When a real raster exists it has exact pixel dims that
-      // make the ECMA-376 §20.1.8.55 fractional crop well-defined (handled in
-      // the final branch); when only the SVG exists the `dataIsSvg` branch below
-      // still draws it (uncropped is the overwhelmingly common case for icons).
+    if (preferVectorBlip(el)) {
+      // No crop: prefer the vector original (shared gate; see preferVectorBlip).
+      // With an a:srcRect crop we skip this branch — the crop math below
+      // multiplies fractional srcRect edges by the source's pixel dims, and an
+      // SVG HTMLImageElement that declares only a viewBox (no intrinsic
+      // width/height) reports the 300×150 default rather than its logical size,
+      // so a 9-arg drawImage with a source rect samples the wrong basis. When a
+      // real raster exists it has exact pixel dims that make the ECMA-376
+      // §20.1.8.55 fractional crop well-defined (handled in the final branch);
+      // when only the SVG exists the `dataIsSvg` branch below still draws it
+      // (uncropped is the overwhelmingly common case for icons).
       try {
         bitmap = await getCachedSvgImageByPath(el.svgImagePath, fetchImage);
       } catch {
@@ -4195,7 +4197,7 @@ export async function renderSlide(
       // failure, so the raster stays cold only in that rare case.)
       const p = el as PictureElement;
       const pDataIsSvg = p.mimeType === 'image/svg+xml';
-      if (p.svgImagePath != null && !p.srcRect) {
+      if (preferVectorBlip(p)) {
         void getCachedSvgImageByPath(p.svgImagePath, opts.fetchImage).catch(() => undefined);
       } else if (pDataIsSvg) {
         void getCachedSvgImageByPath(p.imagePath, opts.fetchImage).catch(() => undefined);

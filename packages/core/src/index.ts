@@ -120,6 +120,11 @@ export {
   metafileRasterSize,
   type SrcRect,
 } from './image/crop';
+// Shared vector-vs-raster blip gate: prefer the Microsoft asvg:svgBlip vector
+// original except when an <a:srcRect> crop is present (then the raster's native
+// pixel grid is required for the fractional crop math). Used by all three
+// renderers' picture-decode paths.
+export { preferVectorBlip } from './image/blip-gate';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /

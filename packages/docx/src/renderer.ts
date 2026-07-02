@@ -10,6 +10,7 @@ import {
   renderPresetShape,
   hasPreset,
   getCachedSvgImageByPath,
+  preferVectorBlip,
   hexToRgba,
   autoContrastColor,
   resolveFill,
@@ -644,17 +645,21 @@ export async function preloadImages(
       // keyed by the raster `imagePath` regardless of which source we picked, so
       // every draw site finds it via imageKey(imagePath, …) unchanged.
       const dataIsSvg = pair.mimeType === 'image/svg+xml';
+      // Shared vector-vs-raster gate (see core preferVectorBlip). `hasCrop` is
+      // this format's already-aggregated "any reference to this key is cropped"
+      // flag, so it stands in for srcRect presence (`|| null` normalises the
+      // undefined case). When true, `blip.svgImagePath` is narrowed to string.
+      const blip = { svgImagePath: pair.svgImagePath, srcRect: pair.hasCrop || null };
       try {
         let img: DecodedImage;
-        if (pair.svgImagePath != null && !pair.hasCrop) {
+        if (preferVectorBlip(blip)) {
           // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
           // fall back to the raster on any SVG decode failure. With an
           // `<a:srcRect>` crop (§20.1.8.55) we skip this branch and decode the
           // raster instead, because the crop math (drawImageCropped) needs the
-          // bitmap's native pixel grid — an SVG element has none. Mirrors the
-          // pptx `!srcRect` / xlsx `hasCrop` vector gate.
+          // bitmap's native pixel grid — an SVG element has none.
           try {
-            img = await getCachedSvgImageByPath(pair.svgImagePath, fetch);
+            img = await getCachedSvgImageByPath(blip.svgImagePath, fetch);
           } catch {
             img = dataIsSvg
               ? await getCachedSvgImageByPath(pair.imagePath, fetch)

@@ -2,6 +2,7 @@ import {
   defaultDpr,
   isHTMLCanvas,
   getCachedSvgImageByPath,
+  preferVectorBlip,
   decodeRasterOrMetafile,
   metafileRasterSize,
   EMU_PER_PT,
@@ -33,10 +34,10 @@ interface ImageRef {
  *  (MS-ODRAWXML). Unified across the top-level twoCellAnchor picture
  *  (`ImageAnchor`) and the `<xdr:grpSp>` leaf (`ShapeGeom` image) — both carry a
  *  raster `imagePath` fallback plus an optional `svgImagePath`. The svgBlip
- *  vector branch applies only when the picture is NOT cropped: with an
- *  `<a:srcRect>` crop (`hasCrop`) we force the raster, because the renderer's
- *  crop math needs the decoded bitmap's native pixel grid (an SVG element has
- *  none). Mirrors the pptx renderer's `!srcRect` vector gate.
+ *  vector branch applies only when the picture is NOT cropped (shared
+ *  `preferVectorBlip` gate): with an `<a:srcRect>` crop we force the raster,
+ *  because the renderer's crop math needs the decoded bitmap's native pixel grid
+ *  (an SVG element has none).
  *
  *  Raster decodes to an `ImageBitmap` through core's
  *  {@link decodeRasterOrMetafile} (which content-sniffs the bytes: a WMF, which
@@ -60,7 +61,6 @@ export async function decodeImageSource(
   heightPt = 0,
   srcRect: SrcRect | null = null,
 ): Promise<CanvasImageSource | null> {
-  const hasCrop = srcRect != null;
   const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource | null> => {
     // A cropped metafile must rasterize at its FULL picture frame, not the
     // visible sub-rect, so the fractional crop lands correctly; raster blips and
@@ -72,13 +72,16 @@ export async function decodeImageSource(
     });
   };
   const dataIsSvg = mimeType === 'image/svg+xml';
-  if (svgImagePath != null && !hasCrop) {
+  // Shared vector-vs-raster gate (see core preferVectorBlip). When it returns
+  // true, `blip.svgImagePath` is narrowed to string.
+  const blip = { svgImagePath, srcRect };
+  if (preferVectorBlip(blip)) {
     // No crop: prefer the vector original; fall back to the raster on decode
     // failure (or, when `imagePath` is itself the SVG, the SVG decoder again).
     // A cropped picture skips this branch so the crop math (below, in the
     // renderer) runs on the raster bitmap's native pixel dimensions.
     try {
-      return await getCachedSvgImageByPath(svgImagePath, fetchImage);
+      return await getCachedSvgImageByPath(blip.svgImagePath, fetchImage);
     } catch {
       return dataIsSvg
         ? getCachedSvgImageByPath(imagePath, fetchImage)
