@@ -1,5 +1,6 @@
 import type { Fill, PatternFill, Stroke } from '../types/common';
 import { buildPatternBitmap } from './pattern-bitmaps';
+import { pptxPresetDashArray } from '../draw/dash';
 
 /**
  * Convert a 6- or 8-char hex colour to a CSS `rgba()` string.
@@ -118,21 +119,13 @@ function resolvePatternFill(
   return pat;
 }
 
-const DASH_PATTERNS: Record<string, number[]> = {
-  dash:         [6, 3],
-  dot:          [1.5, 3],
-  dashDot:      [6, 3, 1.5, 3],
-  lgDash:       [10, 4],
-  lgDashDot:    [10, 4, 1.5, 4],
-  lgDashDotDot: [10, 4, 1.5, 4, 1.5, 4],
-  sysDash:      [4, 2],
-  sysDot:       [1, 2],
-  sysDashDot:   [4, 2, 1, 2],
-};
-
 /**
  * Apply a Stroke to ctx. `emuPerPx` converts stroke width from EMU to px
  * (e.g. scale factor from pptx's emuToPx).
+ *
+ * The dash pattern comes from `pptxPresetDashArray` (§20.1.10.49
+ * ST_PresetLineDashVal), which already scales by the pixel line width and
+ * returns `[]` for solid / unknown styles.
  */
 export function applyStroke(
   ctx: CanvasRenderingContext2D,
@@ -148,6 +141,5 @@ export function applyStroke(
   ctx.strokeStyle = hexToRgba(stroke.color);
   const lw = Math.max(0.5, stroke.width * emuPerPx);
   ctx.lineWidth = lw;
-  const pat = stroke.dashStyle ? DASH_PATTERNS[stroke.dashStyle] : null;
-  ctx.setLineDash(pat ? pat.map((v) => v * lw) : []);
+  ctx.setLineDash(stroke.dashStyle ? pptxPresetDashArray(stroke.dashStyle, lw) : []);
 }

@@ -175,15 +175,16 @@ export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';
 export { isHTMLCanvas, defaultDpr } from './canvas/env';
 export { crispOffset } from './canvas/crisp';
 // Shared border / line dash-pattern core (§17.18.2 ST_Border / §18.18.3
-// ST_BorderStyle / §20.1.10.49 ST_PresetLineDashVal). One logical vocabulary +
-// the [on, off, …].map(x => x*unit) helper + per-format relative tables; each
-// format keeps its own multipliers (output is byte-identical to the old inline
-// implementations).
+// ST_BorderStyle / §20.1.10.49 ST_PresetLineDashVal shape borders /
+// §20.1.10.82 ST_TextUnderlineType run underlines). The
+// [on, off, …].map(x => x*unit) helper + per-format relative tables; each
+// format keeps its own multipliers. pptxPresetDashArray is intentionally not
+// exported — applyStroke consumes it internally.
 export {
   dashArray,
   docxBorderDashArray,
   xlsxBorderDashArray,
-  pptxDashArray,
+  pptxUnderlineDashArray,
   type RelativeDashPattern,
 } from './draw/dash';
 // Shared `double` border rail geometry (§17.18.2 / §18.18.3): floored-thirds

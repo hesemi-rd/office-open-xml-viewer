@@ -71,7 +71,7 @@ import {
   highlightBox,
   symbolFontToUnicode,
   isSymbolFontFamily,
-  pptxDashArray,
+  pptxUnderlineDashArray,
   intendedSingleLinePx,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
@@ -232,8 +232,10 @@ function drawUnderline(
   ctx.setLineDash([]);
 
   // Dash patterns scaled by lineW so they stay proportional at any font size,
-  // computed via core's shared pptxDashArray (§20.1.10.49 ST_PresetLineDashVal,
-  // whose shape names the underline enum reuses) at the call site below.
+  // computed via core's shared pptxUnderlineDashArray (§20.1.10.82
+  // ST_TextUnderlineType — the run-underline enum, distinct from the
+  // §20.1.10.49 preset line dash though it reuses a few shape names) at the
+  // call site below.
 
   if (style && style.startsWith('wavy')) {
     // Sine wave with amplitude ≈ lineW and wavelength ≈ 6×lineW.
@@ -274,7 +276,7 @@ function drawUnderline(
     return;
   }
 
-  ctx.setLineDash(pptxDashArray(style ?? 'sng', lineW));
+  ctx.setLineDash(pptxUnderlineDashArray(style ?? 'sng', lineW));
   ctx.beginPath();
   ctx.moveTo(x, y + crispY);
   ctx.lineTo(x + width, y + crispY);

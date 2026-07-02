@@ -3,7 +3,8 @@ import {
   dashArray,
   docxBorderDashArray,
   xlsxBorderDashArray,
-  pptxDashArray,
+  pptxUnderlineDashArray,
+  pptxPresetDashArray,
 } from './dash.js';
 
 describe('dashArray (generic on/off × unit helper)', () => {
@@ -65,25 +66,72 @@ describe('xlsxBorderDashArray (§18.18.3 ST_BorderStyle, static px)', () => {
   });
 });
 
-// Byte-for-byte equivalence with the former inline pptx implementation
-// (§20.1.10.49 ST_PresetLineDashVal, lineW-relative — the *Heavy variants share
+// Byte-for-byte equivalence with the former inline pptx underline implementation
+// (§20.1.10.82 ST_TextUnderlineType, lineW-relative — the *Heavy variants share
 // the base cadence). The old call site did `dashFor(s).map(v => v*lineW)`.
-describe('pptxDashArray (§20.1.10.49 ST_PresetLineDashVal)', () => {
+describe('pptxUnderlineDashArray (§20.1.10.82 ST_TextUnderlineType)', () => {
   const lineW = 2;
-  it('maps the preset dash names to lineW-scaled patterns', () => {
-    expect(pptxDashArray('dotted', lineW)).toEqual([3, 6]);
-    expect(pptxDashArray('dottedHeavy', lineW)).toEqual([3, 6]);
-    expect(pptxDashArray('dash', lineW)).toEqual([12, 6]);
-    expect(pptxDashArray('dashHeavy', lineW)).toEqual([12, 6]);
-    expect(pptxDashArray('dashLong', lineW)).toEqual([20, 8]);
-    expect(pptxDashArray('dashLongHeavy', lineW)).toEqual([20, 8]);
-    expect(pptxDashArray('dotDash', lineW)).toEqual([12, 6, 3, 6]);
-    expect(pptxDashArray('dotDashHeavy', lineW)).toEqual([12, 6, 3, 6]);
-    expect(pptxDashArray('dotDotDash', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
-    expect(pptxDashArray('dotDotDashHeavy', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
+  it('maps the underline dash names to lineW-scaled patterns', () => {
+    expect(pptxUnderlineDashArray('dotted', lineW)).toEqual([3, 6]);
+    expect(pptxUnderlineDashArray('dottedHeavy', lineW)).toEqual([3, 6]);
+    expect(pptxUnderlineDashArray('dash', lineW)).toEqual([12, 6]);
+    expect(pptxUnderlineDashArray('dashHeavy', lineW)).toEqual([12, 6]);
+    expect(pptxUnderlineDashArray('dashLong', lineW)).toEqual([20, 8]);
+    expect(pptxUnderlineDashArray('dashLongHeavy', lineW)).toEqual([20, 8]);
+    expect(pptxUnderlineDashArray('dotDash', lineW)).toEqual([12, 6, 3, 6]);
+    expect(pptxUnderlineDashArray('dotDashHeavy', lineW)).toEqual([12, 6, 3, 6]);
+    expect(pptxUnderlineDashArray('dotDotDash', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
+    expect(pptxUnderlineDashArray('dotDotDashHeavy', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
   });
-  it('returns [] for solid styles (sng / unknown)', () => {
-    expect(pptxDashArray('sng', lineW)).toEqual([]);
-    expect(pptxDashArray('solid', lineW)).toEqual([]);
+  it('returns [] for solid underline types (sng / unknown)', () => {
+    expect(pptxUnderlineDashArray('sng', lineW)).toEqual([]);
+    expect(pptxUnderlineDashArray('solid', lineW)).toEqual([]);
+  });
+});
+
+// Byte-for-byte equivalence with the former inline shape-stroke implementation
+// (paint.ts DASH_PATTERNS, §20.1.10.49 ST_PresetLineDashVal, lw-relative). The
+// old applyStroke did `DASH_PATTERNS[style].map(v => v * lw)`. All 10 non-solid
+// enum members map to a non-empty pattern; solid / unknown map to [].
+describe('pptxPresetDashArray (§20.1.10.49 ST_PresetLineDashVal, shape borders)', () => {
+  const lw = 2;
+  // The exact relative table that used to live inline in paint.ts.
+  const RELATIVE: Record<string, number[]> = {
+    dash: [6, 3],
+    dot: [1.5, 3],
+    dashDot: [6, 3, 1.5, 3],
+    lgDash: [10, 4],
+    lgDashDot: [10, 4, 1.5, 4],
+    lgDashDotDot: [10, 4, 1.5, 4, 1.5, 4],
+    sysDash: [4, 2],
+    sysDot: [1, 2],
+    sysDashDot: [4, 2, 1, 2],
+    sysDashDotDot: [4, 2, 1, 2, 1, 2],
+  };
+
+  it.each(Object.entries(RELATIVE))(
+    'maps %s to the lw-scaled pattern (byte-identical to the old inline map)',
+    (style, relative) => {
+      expect(pptxPresetDashArray(style, lw)).toEqual(relative.map((v) => v * lw));
+    },
+  );
+
+  it('covers all 10 non-solid ST_PresetLineDashVal members', () => {
+    // Regression guard for the table's completeness (sysDashDotDot was missing,
+    // which rendered that border as solid). solid is filtered upstream ⇒ [].
+    expect(Object.keys(RELATIVE)).toHaveLength(10);
+    for (const style of Object.keys(RELATIVE)) {
+      expect(pptxPresetDashArray(style, lw).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns [] for solid / unknown styles', () => {
+    expect(pptxPresetDashArray('solid', lw)).toEqual([]);
+    expect(pptxPresetDashArray('notARealStyle', lw)).toEqual([]);
+  });
+
+  it('scales with the line width', () => {
+    expect(pptxPresetDashArray('sysDash', 3)).toEqual([12, 6]);
+    expect(pptxPresetDashArray('dash', 1)).toEqual([6, 3]);
   });
 });

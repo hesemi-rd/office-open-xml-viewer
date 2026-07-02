@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { hexToRgba, relativeLuma, autoContrastColor } from './paint.js';
+import { hexToRgba, relativeLuma, autoContrastColor, applyStroke } from './paint.js';
+import type { Stroke } from '../types/common.js';
 
 // hexToRgba is the colour pipeline's exit point: the pptx parser resolves a
 // run's a:highlight (§21.1.2.3.4) to either a 6-char opaque hex or, when an
@@ -79,5 +80,92 @@ describe('autoContrastColor (impl-defined; §17.3.2.6 w:color auto)', () => {
   it('tolerates a leading # (same normalisation as hexToRgba)', () => {
     expect(autoContrastColor('#000000')).toBe('#FFFFFF');
     expect(autoContrastColor('#ffffff')).toBe('#000000');
+  });
+});
+
+// applyStroke turns a Stroke's prstDash value (ST_PresetLineDashVal, §20.1.10.49)
+// into a setLineDash pattern. A minimal mock records the last setLineDash
+// argument so we can assert dashed vs continuous (solid) output.
+function makeStrokeMock(): {
+  ctx: CanvasRenderingContext2D;
+  lastDash: () => number[];
+} {
+  let dash: number[] = [];
+  const ctx = {
+    strokeStyle: '',
+    lineWidth: 0,
+    setLineDash(segments: number[]) {
+      dash = segments;
+    },
+  };
+  return {
+    ctx: ctx as unknown as CanvasRenderingContext2D,
+    lastDash: () => dash,
+  };
+}
+
+function strokeWith(dashStyle: string): Stroke {
+  // width is in EMU; with emuPerPx = 1 the pixel line width lw = max(0.5, 2) = 2.
+  return { color: '#000000', width: 2, dashStyle };
+}
+
+// The Rust parsers filter out "solid" from prstDash @val at parse time, so
+// applyStroke only ever sees the remaining 10 ST_PresetLineDashVal members —
+// each of which must produce a NON-empty setLineDash pattern (a table miss
+// would silently render them as a solid line, which is the bug this guards).
+const PRESET_DASH_STYLES = [
+  'dot',
+  'dash',
+  'lgDash',
+  'dashDot',
+  'lgDashDot',
+  'lgDashDotDot',
+  'sysDash',
+  'sysDot',
+  'sysDashDot',
+  'sysDashDotDot',
+] as const;
+
+describe('applyStroke dash patterns (§20.1.10.49 ST_PresetLineDashVal)', () => {
+  it('renders sysDashDotDot with a non-empty dash pattern (not solid)', () => {
+    const { ctx, lastDash } = makeStrokeMock();
+    applyStroke(ctx, strokeWith('sysDashDotDot'), 1);
+    expect(lastDash().length).toBeGreaterThan(0);
+  });
+
+  it('covers every non-solid ST_PresetLineDashVal value with a dash pattern', () => {
+    for (const style of PRESET_DASH_STYLES) {
+      const { ctx, lastDash } = makeStrokeMock();
+      applyStroke(ctx, strokeWith(style), 1);
+      expect(
+        lastDash().length,
+        `dash style "${style}" should not render as solid`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it('renders solid (no dashStyle) and unknown styles as a continuous line', () => {
+    for (const stroke of [
+      { color: '#000000', width: 2 } as Stroke,
+      { color: '#000000', width: 2, dashStyle: 'solid' } as Stroke,
+      { color: '#000000', width: 2, dashStyle: 'notARealStyle' } as Stroke,
+    ]) {
+      const { ctx, lastDash } = makeStrokeMock();
+      applyStroke(ctx, stroke, 1);
+      expect(lastDash()).toEqual([]);
+    }
+  });
+
+  it('handles a null stroke as a continuous (empty-dash) line', () => {
+    const { ctx, lastDash } = makeStrokeMock();
+    applyStroke(ctx, null, 1);
+    expect(lastDash()).toEqual([]);
+  });
+
+  it('scales the dash pattern by the pixel line width', () => {
+    // sysDash relative pattern is [4, 2]; lw = width(2) * emuPerPx(3) = 6.
+    const { ctx, lastDash } = makeStrokeMock();
+    applyStroke(ctx, strokeWith('sysDash'), 3);
+    expect(lastDash()).toEqual([24, 12]);
   });
 });
