@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -1128,9 +1128,14 @@ export function computePages(
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
   // header/footer — see bodyMarginInsetPt). Identity for the non-negative common case.
-  const bodyTopPt = bodyMarginInsetPt(section.marginTop);
-  const bodyBottomPt = bodyMarginInsetPt(section.marginBottom);
-  const fullContentH = section.pageHeight - bodyTopPt - bodyBottomPt;
+  // ECMA-376 §17.6.11 — the body inset (|margin|) and §17.6.13 full content height
+  // are PER-SECTION now: a section break can change the page size/margins. These
+  // read the ACTIVE section (`currentSectionGeom`, reassigned at every break) so a
+  // landscape section paginates against its own (wider/shorter) page. For a
+  // single-section document `currentSectionGeom` never changes ⇒ identical values.
+  const bodyTopPt = () => bodyMarginInsetPt(currentSectionGeom.marginTop);
+  const bodyBottomPt = () => bodyMarginInsetPt(currentSectionGeom.marginBottom);
+  const fullContentH = () => currentSectionGeom.pageHeight - bodyTopPt() - bodyBottomPt();
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body), defaultTabPt);
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
@@ -1245,6 +1250,33 @@ export function computePages(
     return undefined;
   };
 
+  // ECMA-376 §17.6.13 / §17.6.11 — the page geometry (size + margins) of the
+  // section that OWNS the content starting at body index `startIdx`. Mirrors
+  // `sectionColumnsFrom` / `sectionHFFrom`: the owning section's geometry is on the
+  // NEXT `SectionBreak` marker's `geom` at/after `startIdx` (the marker ENDS that
+  // section); if there is none, the content belongs to the FINAL (body-level)
+  // section whose geometry lives on `section`. A `geom`-less marker (a section that
+  // inherits pgSz/pgMar) also falls back to the body-level geometry. For a
+  // single-section document there are no markers, so every element gets the
+  // body-level geometry — behaviour-neutral.
+  const bodySectionGeom: SectionGeom = {
+    pageWidth: section.pageWidth,
+    pageHeight: section.pageHeight,
+    marginTop: section.marginTop,
+    marginRight: section.marginRight,
+    marginBottom: section.marginBottom,
+    marginLeft: section.marginLeft,
+    headerDistance: section.headerDistance,
+    footerDistance: section.footerDistance,
+  };
+  const sectionGeomFrom = (startIdx: number): SectionGeom => {
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak') return e.geom ?? bodySectionGeom;
+    }
+    return bodySectionGeom;
+  };
+
   // The active section's column geometry. Reassigned (a) here for the first
   // section and (b) at every `SectionBreak` as the flow enters the next section.
   // `colIndex` tracks which column we are filling; `colX()`/`colW()` give its
@@ -1262,6 +1294,11 @@ export function computePages(
   // on each element so the renderer picks the active section's header/footer per
   // page. `undefined` for the final section ⇒ the renderer's body-level fallback.
   let currentSectionHF = sectionHFFrom(0);
+  // ECMA-376 §17.6.13 / §17.6.11 — the active section's page geometry, tracked in
+  // lockstep with `columns`/`currentSectionHF` (reassigned at every SectionBreak).
+  // Stamped on each element so the renderer sizes each page from its own section.
+  // For a single-section document this stays the body-level geometry throughout.
+  let currentSectionGeom = sectionGeomFrom(0);
   // ECMA-376 §17.6.4 / §17.18.79 — the CURRENT multi-column region's vertical
   // extent on the current page, in content-relative pt (0 = page content top,
   // i.e. the same frame as `y`). A region tiled into N newspaper columns is a
@@ -1288,7 +1325,7 @@ export function computePages(
   // Page-absolute pt of the current region top, stamped on elements so the paint
   // pass resets a column's cursor to the region top (front-loaded layout: the
   // renderer consumes this instead of independently deciding the column top).
-  const colTopAbsPt = () => bodyTopPt + colTopY;
+  const colTopAbsPt = () => bodyTopPt() + colTopY;
 
   // Run `fn` with the measure state's content band temporarily re-pointed at the
   // CURRENT newspaper column (#513). The paint pass (renderBodyElements) sets
@@ -1330,7 +1367,7 @@ export function computePages(
   // like the real renderer does. floatParaSeq is reset together with floats so
   // the paraId採番 matches the renderer, which starts each page at 0 (a fresh
   // RenderState per page in renderDocumentToCanvas).
-  measureState.y = bodyTopPt;
+  measureState.y = bodyTopPt();
   measureState.floats = [];
   measureState.floatParaSeq = 0;
   // ECMA-376 §20.4.3.2/§20.4.3.5: a wp:anchor whose positionV relativeFrom is
@@ -1369,7 +1406,7 @@ export function computePages(
     pageReserves.length === 0 ? ZERO_RESERVE : (pageReserves[Math.min(i, pageReserves.length - 1)] ?? ZERO_RESERVE);
   const effContentH = () => {
     const r = reserveAt(pages.length - 1);
-    return fullContentH - (footnoteReservePt[pages.length - 1] ?? 0) - r.bottom - r.top;
+    return fullContentH() - (footnoteReservePt[pages.length - 1] ?? 0) - r.bottom - r.top;
   };
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
@@ -1391,7 +1428,7 @@ export function computePages(
       balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
-      measureState.y = bodyTopPt;
+      measureState.y = bodyTopPt();
       // Floats are PAGE-scoped (ECMA-376 §20.4.2.x): a new page starts with a
       // clean float set. Columns of the SAME page share floats (see nextColumn).
       measureState.floats = [];
@@ -1420,7 +1457,7 @@ export function computePages(
     y = colTopY;
     prevPara = null;
     prevSpaceAfter = 0;
-    measureState.y = bodyTopPt + colTopY;
+    measureState.y = bodyTopPt() + colTopY;
   };
   // Overflow handler shared by element placement and paragraph/table splitting:
   // move to the next column if one remains on this page, otherwise to a new page.
@@ -1445,7 +1482,7 @@ export function computePages(
     startIdx: number,
     colWPt: number,
   ): { height: number; terminated: boolean } => {
-    const ms: RenderState = { ...measureState, y: bodyTopPt, floats: [], floatParaSeq: 0 };
+    const ms: RenderState = { ...measureState, y: bodyTopPt(), floats: [], floatParaSeq: 0 };
     let total = 0;
     let prevAfter = 0;
     let prevP: DocParagraph | null = null;
@@ -1575,6 +1612,7 @@ export function computePages(
     el.colGeom = columns;
     el.colTopPt = colTopAbsPt();
     el.sectionHF = currentSectionHF;
+    el.sectionGeom = currentSectionGeom;
     pages[pages.length - 1].push(el);
   };
 
@@ -1603,7 +1641,7 @@ export function computePages(
       balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
-      measureState.y = bodyTopPt;
+      measureState.y = bodyTopPt();
       measureState.floats = [];
       measureState.floatParaSeq = 0;
       // Pre-register page-level wrap floats from the next body element onward
@@ -1633,6 +1671,8 @@ export function computePages(
       // ECMA-376 §17.10.1 — the section starting at i+1 owns the following pages'
       // headers/footers (resolved from the NEXT marker, or the body-level set).
       currentSectionHF = sectionHFFrom(i + 1);
+      // ECMA-376 §17.6.13 / §17.6.11 — and its page geometry (size + margins).
+      currentSectionGeom = sectionGeomFrom(i + 1);
       // The break is governed by the UPCOMING section's start type (§17.6.22),
       // not this marker's own kind (the section it closes). See sectionKindFrom.
       // The sample-5 cover overprint that prompted the 0.66.1 hotfix is now fixed
@@ -1654,7 +1694,7 @@ export function computePages(
         // this clears the overprint and the page-fill error regardless.
         const regionBottom = Math.max(maxColBottomY, y);
         y = regionBottom;
-        measureState.y = bodyTopPt + regionBottom;
+        measureState.y = bodyTopPt() + regionBottom;
         colTopY = regionBottom;
         maxColBottomY = regionBottom;
         prevPara = null;
@@ -1674,7 +1714,7 @@ export function computePages(
         balanceColH = null;
         prevPara = null;
         prevSpaceAfter = 0;
-        measureState.y = bodyTopPt;
+        measureState.y = bodyTopPt();
         measureState.floats = [];
         measureState.floatParaSeq = 0;
         // Pre-register page-level wrap floats from the next body element onward
@@ -1942,13 +1982,14 @@ export function computePages(
           () => colTopY,
           columnBottomLimit,
           () => currentSectionHF,
+          () => currentSectionGeom,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
         // filled their column/page exactly, so the break callback ran between
         // them).
         y = placed.endY;
-        measureState.y = bodyTopPt + placed.endY;
+        measureState.y = bodyTopPt() + placed.endY;
         // A split footnote-bearing paragraph reserves on the page where it
         // ends. Rare; the separator region re-applies if that page had none.
         if (haveFootnotes && newRefIds.length > 0) {
@@ -2031,11 +2072,12 @@ export function computePages(
           () => colIndex,
           columns,
           () => colTopY,
-          bodyTopPt,
+          bodyTopPt(),
           () => currentSectionHF,
+          () => currentSectionGeom,
         );
         y = endY;
-        measureState.y = bodyTopPt + endY;
+        measureState.y = bodyTopPt() + endY;
       } else {
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
@@ -2495,6 +2537,11 @@ function splitParagraphAcrossPages(
    *  stamped so the renderer picks the right section's header/footer per page.
    *  Omitted ⇒ the renderer's body-level fallback. */
   tagSectionHF?: () => PaginatedBodyElement['sectionHF'],
+  /** ECMA-376 §17.6.13 / §17.6.11 — the active SECTION's page geometry (size +
+   *  margins). A paragraph never spans a section boundary, so this is constant for
+   *  all slices; stamped so the renderer sizes each page from the right section.
+   *  Omitted ⇒ the renderer's body-level fallback. */
+  tagSectionGeom?: () => SectionGeom,
 ): { endY: number } {
   const colTop = columnTop ?? (() => 0);
   const colBot = columnBottom ?? (() => contentH);
@@ -2505,6 +2552,7 @@ function splitParagraphAcrossPages(
     // pass resets this slice's column cursor to it instead of the page top.
     if (columnTop) el.colTopPt = measureState.marginTop + colTop();
     if (tagSectionHF) el.sectionHF = tagSectionHF();
+    if (tagSectionGeom) el.sectionGeom = tagSectionGeom();
     return el;
   };
   const indLeft = para.indentLeft;
@@ -3011,6 +3059,10 @@ export function splitTableAcrossPages(
    *  across the split). Stamped so the renderer picks the right section's header/
    *  footer per page. Omitted ⇒ the renderer's body-level fallback. */
   tagSectionHF?: () => PaginatedBodyElement['sectionHF'],
+  /** ECMA-376 §17.6.13 / §17.6.11 — the active SECTION's page geometry (size +
+   *  margins; constant across the split). Stamped so the renderer sizes each page
+   *  from the right section. Omitted ⇒ the renderer's body-level fallback. */
+  tagSectionGeom?: () => SectionGeom,
 ): number {
   const colTop = columnTop ?? (() => 0);
   const n = table.rows.length;
@@ -3046,6 +3098,7 @@ export function splitTableAcrossPages(
     // pass resets this slice's column cursor to it instead of the page top.
     if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
     if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
+    if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
     pages[pages.length - 1].push(sliceEl);
 
     y += used;
