@@ -9,8 +9,45 @@
 // Functions are pure path-builders: they assume the caller has already
 // called `ctx.beginPath()` and will call `ctx.fill()` / `ctx.stroke()`
 // after this returns.
+//
+// PARTIALLY UNIFIED with the spec engine (Phase 4 A2): body rendering is
+// already driven by the spec engine (shape/preset-geometry, presets.json)
+// everywhere; this legacy switch remains reachable only as (a) the silhouette
+// tracer for pptx effect masks and (b) the fallback for names the spec engine
+// doesn't carry (`rect`). Presets whose hand-written case was proven
+// coordinate-identical to the spec engine (see preset-parity.test.ts) have
+// had their case DELETED and are routed through the engine via
+// SPEC_MIGRATED_PRESETS below.
+//
+// Every case still in the switch is a KNOWN DIFFERENCE from the spec engine,
+// kept verbatim so no rendered pixel moves. Nature of the differences
+// (details per preset in the parity harness's PRESET_PARITY_REPORT table):
+//  - geometry approximations — the legacy math deviates from the ECMA-376
+//    guide formulas (regular-polygon rings for pentagon…dodecagon and
+//    star5/6/7/10; fixed-ratio instead of ss-based arrows/chevron/homeplate;
+//    quadratic instead of circular corner arcs for the round*/snip2* rects;
+//    simplified moon/teardrop/pie/chord/blockarc/wave/… constructions). The
+//    spec engine is the ECMA-faithful side; converging means adopting its
+//    geometry and re-approving VRT references.
+//  - structural — the legacy body emits fewer/merged subpaths (single-outline
+//    cloud/cloudCallout, no 3D highlight overlays for can/cube/bevel, merged
+//    contours for plus/mathMultiply/mathNotEqual/arrow-callouts, missing
+//    decorative strokes on flowchart* variants, donut hole winding). Six of
+//    these are fill-equivalent (identical silhouettes; only decorative stroke
+//    lines differ): accentCallout1, accentBorderCallout1,
+//    flowchartPredefinedProcess, flowchartSort, flowchartInternalStorage,
+//    flowchartSummingJunction — the cheapest future convergence batch.
+//  - intentional — `arc` (the engine's spec shape is pie-wedge fill + open
+//    arc stroke; the legacy open arc is kept for effect-mask semantics, see
+//    the pptx renderer's paintShapeBody) and the bent/curved connectors
+//    (legacy draws a straight diagonal, engine the spec elbow/curve).
+//  - `flowchartAlternateProcess` matches at default adjusts but honours an
+//    adj1 the spec declares no avLst for; kept so rogue avLst payloads don't
+//    change effect-mask silhouettes.
 
 /* eslint-disable */
+
+import { buildPresetGeometryPath } from './preset-geometry';
 
 // ── Star helper ──────────────────────────────────────────────────────────────
 export function drawStar(
@@ -85,6 +122,74 @@ export function ooxmlArcTo(
   ctx.ellipse(cx, cy, Math.abs(wR), Math.abs(hR), 0, stP, endP, swAng < 0);
   return { x: cx + wR * Math.cos(endP), y: cy + hR * Math.sin(endP) };
 }
+/**
+ * Non-spec alias labels the legacy switch historically accepted, mapped to
+ * the canonical ECMA-376 preset whose case body they shared (or duplicated).
+ * Only aliases whose canonical target has MIGRATED to the spec engine live
+ * here — aliases of still-legacy presets keep their `case` labels below.
+ */
+const LEGACY_SPEC_ALIASES: Record<string, string> = {
+  oval: 'ellipse',
+  rtriangle: 'rttriangle',
+  roundrectangle: 'roundrect',
+};
+
+/**
+ * Presets whose hand-written case was verified coordinate-identical to the
+ * spec-driven engine (preset-parity.test.ts: subpath structure, closed flags,
+ * winding, and ≤5e-3 px symmetric deviation on square/wide/tall boxes at
+ * default AND perturbed adjust values) and therefore deleted from the switch.
+ * `buildShapePath` routes them through `buildPresetGeometryPath`, so the
+ * silhouette/fallback callers keep emitting bit-identical geometry while the
+ * spec engine becomes the single source of truth for these shapes.
+ */
+export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
+  // batch 1 — basic solids & rectangles
+  'ellipse',
+  'rttriangle',
+  'triangle',
+  'diamond',
+  'trapezoid',
+  'roundrect',
+  'snip1rect',
+  'frame',
+  'irregularseal1',
+  'irregularseal2',
+  // batch 2 — stars (star5/6/7/10 stay legacy: their inner-vertex rings
+  // deviate from the spec guide formulas — see the parity table)
+  'star4',
+  'star8',
+  'star12',
+  'star16',
+  'star24',
+  'star32',
+  // batch 3 — straight connectors, plain callout1 pair, matched arrows
+  // (bent/curved connectors stay legacy: their case draws a straight
+  // diagonal, not the spec elbow/curve; accent callouts stay: accent-bar
+  // placement differs)
+  'line',
+  'straightconnector1',
+  'callout1',
+  'bordercallout1',
+  'leftuparrow',
+  'quadarrowcallout',
+  // batch 4 — math operators & flowchart shapes
+  // (flowchartAlternateProcess is NOT migrated despite matching at default
+  // adjusts: its legacy body honours an adj1 the spec declares no avLst for,
+  // so rogue <a:avLst> payloads would change silhouettes)
+  'mathequal',
+  'mathplus',
+  'mathminus',
+  'flowchartdecision',
+  'flowchartmanualinput',
+  'flowchartconnector',
+  'flowchartinputoutput',
+  'flowchartmerge',
+  'flowchartextract',
+  'flowchartpreparation',
+  'flowchartcollate',
+]);
+
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
  *
  * The caller is responsible for `ctx.beginPath()` / `ctx.fill()` /
@@ -110,6 +215,17 @@ export function buildShapePath(
   const cx = x + w / 2;
   const cy = y + h / 2;
 
+  // Migrated presets: the spec-driven engine is the single implementation.
+  // (Guarded by SPEC_MIGRATED_PRESETS so unmigrated engine-known presets keep
+  // their legacy output — including the plain-rect default — untouched.)
+  {
+    const raw = geom.toLowerCase();
+    const key = LEGACY_SPEC_ALIASES[raw] ?? raw;
+    if (SPEC_MIGRATED_PRESETS.has(key)) {
+      if (buildPresetGeometryPath(ctx, key, x, y, w, h, [adj, adj2, adj3, adj4])) return;
+    }
+  }
+
   // OOXML preset names are camelCase (e.g. `straightConnector1`, `roundRect`,
   // `rtTriangle`), but every `case` below is lowercase. Normalize here so the
   // catalog is matched case-insensitively — otherwise camelCase presets fall
@@ -117,38 +233,7 @@ export function buildShapePath(
   // lower-cases at its call site; this makes the function correct for every
   // caller, e.g. the docx renderer which passes the raw `prst` value.)
   switch (geom.toLowerCase()) {
-    // ── Ellipses ──────────────────────────────────────────────────────────────
-    case 'ellipse':
-    case 'oval':
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
-      break;
-
-    // ── Triangles ─────────────────────────────────────────────────────────────
-    case 'rtriangle':
-      ctx.moveTo(x, y + h);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y);
-      ctx.closePath();
-      break;
-
-    case 'triangle': {
-      const apexX = x + (adj ?? 50000) / 100000 * w;
-      ctx.moveTo(apexX, y);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-
     // ── Quadrilaterals ────────────────────────────────────────────────────────
-    case 'diamond':
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(cx, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
-      break;
-
     case 'parallelogram': {
       // adj controls horizontal slant; default 25000 = 25% of width
       const offset = w * Math.min(0.5, (adj ?? 25000) / 100000);
@@ -157,27 +242,6 @@ export function buildShapePath(
       ctx.lineTo(x + w - offset, y + h);
       ctx.lineTo(x, y + h);
       ctx.closePath();
-      break;
-    }
-
-    case 'trapezoid': {
-      const ss = Math.min(w, h);
-      const inset = Math.min(w / 2, (adj ?? 25000) / 100000 * ss);
-      ctx.moveTo(x + inset, y);
-      ctx.lineTo(x + w - inset, y);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-
-    case 'roundrect':
-    case 'roundrectangle': {
-      // OOXML: circular corners — r = min(w,h) * adj / 100000
-      // adj range 0–50000 (default 16667); at adj=50000 r=min(w,h)/2 (stadium)
-      const a = Math.min(50000, Math.max(0, adj ?? 16667));
-      const r = Math.min(w, h) * a / 100000;
-      ctx.roundRect(x, y, w, h, r);
       break;
     }
 
@@ -203,9 +267,6 @@ export function buildShapePath(
 
     // ── Stars ─────────────────────────────────────────────────────────────────
     // Inner-radius defaults from ECMA-376 prstGeom avLst: adj / 50000 = innerR / outerR.
-    case 'star4':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 4, (adj ?? 12500) / 50000);
-      break;
     case 'star5':
     case 'star':
       drawStar(ctx, cx, cy, w / 2, h / 2, 5, (adj ?? 19098) / 50000);
@@ -216,23 +277,8 @@ export function buildShapePath(
     case 'star7':
       drawStar(ctx, cx, cy, w / 2, h / 2, 7, (adj ?? 34142) / 50000);
       break;
-    case 'star8':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 8, (adj ?? 37500) / 50000, -Math.PI / 2);
-      break;
     case 'star10':
       drawStar(ctx, cx, cy, w / 2, h / 2, 10, (adj ?? 41421) / 50000);
-      break;
-    case 'star12':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 12, (adj ?? 37500) / 50000, 0);
-      break;
-    case 'star16':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 16, (adj ?? 37500) / 50000, -Math.PI / 2);
-      break;
-    case 'star24':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 24, (adj ?? 37500) / 50000, 0);
-      break;
-    case 'star32':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 32, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
 
     // ── Arrows ────────────────────────────────────────────────────────────────
@@ -417,8 +463,6 @@ export function buildShapePath(
     // callout2 / callout3 require adj5..adj8 which exceed this function's
     // 4-adjustment signature, so they go through the generic preset engine
     // (`renderPresetShape`) that reads the full presets.json definition.
-    case 'callout1':
-    case 'bordercallout1':
     case 'accentcallout1':
     case 'accentbordercallout1': {
       // ECMA-376 callout1 gd block (presets.json):
@@ -507,8 +551,6 @@ export function buildShapePath(
     }
 
     // ── Connectors ────────────────────────────────────────────────────────────
-    case 'line':
-    case 'straightconnector1':
     case 'bentconnector2':
     case 'bentconnector3':
     case 'bentconnector4':
@@ -519,6 +561,9 @@ export function buildShapePath(
     case 'curvedconnector5':
       // Connectors run diagonally from top-left to bottom-right of their bounding box.
       // Flip transforms (already applied to ctx) handle other orientations.
+      // (Straight `line`/`straightConnector1` migrated to the spec engine; the
+      // bent/curved ones stay because this legacy body draws a straight
+      // diagonal, not the spec elbow/curve geometry.)
       ctx.moveTo(x, y);
       ctx.lineTo(x + w, y + h);
       break;
@@ -570,8 +615,7 @@ export function buildShapePath(
     }
 
     // ── Wedge / pie slice ─────────────────────────────────────────────────────
-    case 'pie':
-    case 'pieWedge': {
+    case 'pie': {
       const stAng = (adj  ?? 0)        / 21600000 * Math.PI * 2;
       const enAng = (adj2 ?? 16200000) / 21600000 * Math.PI * 2;
       ctx.moveTo(cx, cy);
@@ -642,18 +686,6 @@ export function buildShapePath(
     }
 
     // ── Snipped-corner rectangles ─────────────────────────────────────────────
-    case 'snip1rect': {
-      // One snipped top-right corner; adj = snip size (default 16667)
-      const a = Math.min(50000, Math.max(0, adj ?? 16667));
-      const s = Math.min(w, h) * a / 100000;
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w - s, y);
-      ctx.lineTo(x + w, y + s);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
     case 'snip2samerect': {
       // Two snipped corners (top-right + bottom-left); adj = snip size
       const a = Math.min(50000, Math.max(0, adj ?? 16667));
@@ -682,7 +714,6 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-    case 'snipRoundRect':
     case 'sniproundrect': {
       // One snipped + one rounded corner
       const a = Math.min(50000, Math.max(0, adj ?? 16667));
@@ -823,61 +854,11 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-    case 'irregularSeal1':
-    case 'irregularseal1': {
-      // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
-      // 爆発1: 24-point irregular explosion / jagged starburst.
-      const s1: [number, number][] = [
-        [10800,  5800], [14522,     0], [14155,  5325], [18380,  4457],
-        [16702,  7315], [21097,  8137], [17607, 10475], [21600, 13290],
-        [16837, 12942], [18145, 18095], [14020, 14457], [13247, 19737],
-        [10532, 14935], [ 8485, 21600], [ 7715, 15627], [ 4762, 17617],
-        [ 5667, 13937], [  135, 14587], [ 3722, 11775], [    0,  8615],
-        [ 4627,  7617], [  370,  2295], [ 7312,  6320], [ 8352,  2295],
-      ];
-      s1.forEach(([px, py], i) => {
-        const sx = x + w * px / 21600;
-        const sy = y + h * py / 21600;
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      });
-      ctx.closePath();
-      break;
-    }
-    case 'irregularSeal2':
-    case 'irregularseal2': {
-      // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
-      // 爆発2: 28-point irregular explosion / jagged starburst (more spikes than seal1).
-      const s2: [number, number][] = [
-        [11462,  4342], [14790,     0], [14525,  5777], [18007,  3172],
-        [16380,  6532], [21600,  6645], [16985,  9402], [18270, 11290],
-        [16380, 12310], [18877, 15632], [14640, 14350], [14942, 17370],
-        [12180, 15935], [11612, 18842], [ 9872, 17370], [ 8700, 19712],
-        [ 7527, 18125], [ 4917, 21600], [ 4805, 18240], [ 1285, 17825],
-        [ 3330, 15370], [    0, 12877], [ 3935, 11592], [ 1172,  8270],
-        [ 5372,  7817], [ 4502,  3625], [ 8550,  6382], [ 9722,  1887],
-      ];
-      s2.forEach(([px, py], i) => {
-        const sx = x + w * px / 21600;
-        const sy = y + h * py / 21600;
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      });
-      ctx.closePath();
-      break;
-    }
     case 'flowchartalternateprocess':
     case 'flowchartprocess': {
       const a2 = Math.min(50000, Math.max(0, adj ?? 16667));
       const r2 = Math.min(w, h) * a2 / 100000;
       ctx.roundRect(x, y, w, h, [{ x: r2, y: r2 }]);
-      break;
-    }
-    case 'flowchartdecision': {
-      // Diamond
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(cx, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
       break;
     }
     case 'flowchartterminator': {
@@ -916,15 +897,6 @@ export function buildShapePath(
       ctx.lineTo(x + w, cy);
       break;
     }
-    case 'flowchartmanualinput': {
-      const sl = h * 0.2;
-      ctx.moveTo(x, y + sl);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
     case 'moon': {
       // Crescent moon
       ctx.arc(cx, cy, Math.min(w, h) / 2, -Math.PI / 2, Math.PI / 2);
@@ -942,21 +914,6 @@ export function buildShapePath(
     }
 
     // ── Math operator shapes (ECMA-376 presets) ───────────────────────────────
-    case 'mathequal': {
-      const a1 = Math.min(36745, Math.max(0, adj ?? 23520));
-      const mAdj2 = 100000 - 2 * a1;
-      const a2 = Math.min(mAdj2, Math.max(0, adj2 ?? 11760));
-      const dy1 = h * a1 / 100000;
-      const dy2 = h * a2 / 200000;
-      const dx1 = w * 73490 / 200000;
-      const x1 = cx - dx1, x2 = cx + dx1;
-      const y2 = cy - dy2, y3 = cy + dy2;
-      const y1 = y2 - dy1, y4 = y3 + dy1;
-      ctx.rect(x1, y1, x2 - x1, y2 - y1);
-      ctx.rect(x1, y3, x2 - x1, y4 - y3);
-      break;
-    }
-
     case 'mathmultiply': {
       // ECMA-376 preset: "×" aligned to bbox diagonals, thickness = ss * a1 / 100000
       const a1 = Math.min(51965, Math.max(0, adj ?? 23520));
@@ -980,40 +937,6 @@ export function buildShapePath(
       break;
     }
 
-    case 'mathplus': {
-      const a1 = Math.min(73490, Math.max(0, adj ?? 23520));
-      const dx1 = w * 73490 / 200000;
-      const dy1 = h * 73490 / 200000;
-      const dx2 = Math.min(w, h) * a1 / 200000;
-      const x1 = cx - dx1, x4 = cx + dx1;
-      const y1 = cy - dy1, y4 = cy + dy1;
-      const x2 = cx - dx2, x3 = cx + dx2;
-      const y2 = cy - dx2, y3 = cy + dx2;
-      ctx.moveTo(x1, y2);
-      ctx.lineTo(x2, y2);
-      ctx.lineTo(x2, y1);
-      ctx.lineTo(x3, y1);
-      ctx.lineTo(x3, y2);
-      ctx.lineTo(x4, y2);
-      ctx.lineTo(x4, y3);
-      ctx.lineTo(x3, y3);
-      ctx.lineTo(x3, y4);
-      ctx.lineTo(x2, y4);
-      ctx.lineTo(x2, y3);
-      ctx.lineTo(x1, y3);
-      ctx.closePath();
-      break;
-    }
-
-    case 'mathminus': {
-      const a1 = Math.min(100000, Math.max(0, adj ?? 23520));
-      const dx1 = w * 73490 / 200000;
-      const dy1 = h * a1 / 200000;
-      const x1 = cx - dx1, x2 = cx + dx1;
-      const y1 = cy - dy1, y2 = cy + dy1;
-      ctx.rect(x1, y1, x2 - x1, y2 - y1);
-      break;
-    }
 
     case 'mathdivide': {
       const a1 = Math.min(36745, Math.max(1000, adj ?? 23520));
@@ -1074,71 +997,6 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-
-    // ── Quad-arrow callout ────────────────────────────────────────────────────
-    // ECMA-376 prstGeom quadArrowCallout:
-    //   adj1 = shaft half-thickness (default 18515)
-    //   adj2 = arrowhead half-width (default 18515)
-    //   adj3 = arrowhead length (default 18515)
-    //   adj4 = inner square size (default 48123)
-    case 'quadarrowcallout': {
-      const ss = Math.min(w, h);
-      const a2 = Math.min(50000, Math.max(0, adj2 ?? 18515));
-      const maxAdj1 = a2 * 2;
-      const a1 = Math.min(maxAdj1, Math.max(0, adj  ?? 18515));
-      const maxAdj3 = 50000 - a2;
-      const a3 = Math.min(maxAdj3, Math.max(0, adj3 ?? 18515));
-      const maxAdj4 = 100000 - 2 * a3;
-      const a4 = Math.min(maxAdj4, Math.max(a1, adj4 ?? 48123));
-      const dx2 = ss * a2 / 100000;
-      const dx3 = ss * a1 / 200000;
-      const ah  = ss * a3 / 100000;
-      const dx1 = w * a4 / 200000;
-      const dy1 = h * a4 / 200000;
-      const x2a = cx - dx1, x7a = cx + dx1;
-      const x3a = cx - dx2, x6a = cx + dx2;
-      const x4a = cx - dx3, x5a = cx + dx3;
-      const x8a = x + w - ah;
-      const y2a = cy - dy1, y7a = cy + dy1;
-      const y3a = cy - dx2, y6a = cy + dx2;
-      const y4a = cy - dx3, y5a = cy + dx3;
-      const y8a = y + h - ah;
-      ctx.moveTo(x,          cy);
-      ctx.lineTo(x + ah,     y3a);
-      ctx.lineTo(x + ah,     y4a);
-      ctx.lineTo(x2a,        y4a);
-      ctx.lineTo(x2a,        y2a);
-      ctx.lineTo(x4a,        y2a);
-      ctx.lineTo(x4a,        y + ah);
-      ctx.lineTo(x3a,        y + ah);
-      ctx.lineTo(cx,         y);
-      ctx.lineTo(x6a,        y + ah);
-      ctx.lineTo(x5a,        y + ah);
-      ctx.lineTo(x5a,        y2a);
-      ctx.lineTo(x7a,        y2a);
-      ctx.lineTo(x7a,        y4a);
-      ctx.lineTo(x8a,        y4a);
-      ctx.lineTo(x8a,        y3a);
-      ctx.lineTo(x + w,      cy);
-      ctx.lineTo(x8a,        y6a);
-      ctx.lineTo(x8a,        y5a);
-      ctx.lineTo(x7a,        y5a);
-      ctx.lineTo(x7a,        y7a);
-      ctx.lineTo(x5a,        y7a);
-      ctx.lineTo(x5a,        y8a);
-      ctx.lineTo(x6a,        y8a);
-      ctx.lineTo(cx,         y + h);
-      ctx.lineTo(x3a,        y8a);
-      ctx.lineTo(x4a,        y8a);
-      ctx.lineTo(x4a,        y7a);
-      ctx.lineTo(x2a,        y7a);
-      ctx.lineTo(x2a,        y5a);
-      ctx.lineTo(x + ah,     y5a);
-      ctx.lineTo(x + ah,     y6a);
-      ctx.closePath();
-      break;
-    }
-
     // ── Wave ──────────────────────────────────────────────────────────────────
     // OOXML: wavy top and bottom filling the bounding box. adj=12500 (12.5% amplitude).
     case 'wave': {
@@ -1205,14 +1063,6 @@ export function buildShapePath(
       ctx.lineTo(x + w, cy + h * 0.05);
       ctx.lineTo(cx - w * 0.05, cy + h * 0.05);
       ctx.closePath();
-      break;
-    }
-
-    // ── Frame (hollow rectangle) ──────────────────────────────────────────────
-    case 'frame': {
-      const th = Math.min(w, h) * (adj ?? 12500) / 100000;
-      ctx.rect(x, y, w, h);
-      ctx.rect(x + th, y + th, w - 2 * th, h - 2 * th);
       break;
     }
 
@@ -1367,41 +1217,6 @@ export function buildShapePath(
     //   adj1 (default 25000): arrow-head overhang (shaft width control; dx3 = ss*a1/200000)
     //   adj2 (default 25000): shaft offset from bbox edge (= head half-width; dx4 = ss*a2/100000)
     //   adj3 (default 25000): arrow-head length along arm (x1 = ss*a3/100000)
-    case 'leftuparrow': {
-      const ss = Math.min(w, h);
-      const a2 = Math.min(50000, Math.max(0, adj2 ?? 25000));
-      const maxAdj1 = a2 * 2;
-      const a1 = Math.min(maxAdj1, Math.max(0, adj ?? 25000));
-      const maxAdj3 = 100000 - maxAdj1;
-      const a3 = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
-      const x1  = ss * a3 / 100000;
-      const dx2 = ss * a2 / 50000;
-      const x2  = w - dx2;
-      const y2  = h - dx2;
-      const dx4 = ss * a2 / 100000;
-      const x4  = w - dx4;
-      const y4  = h - dx4;
-      const dx3 = ss * a1 / 200000;
-      const x3  = x4 - dx3;
-      const x5  = x4 + dx3;
-      const y3  = y4 - dx3;
-      const y5  = y4 + dx3;
-      ctx.moveTo(x,      y + y4);
-      ctx.lineTo(x + x1, y + y2);
-      ctx.lineTo(x + x1, y + y3);
-      ctx.lineTo(x + x3, y + y3);
-      ctx.lineTo(x + x3, y + x1);
-      ctx.lineTo(x + x2, y + x1);
-      ctx.lineTo(x + x4, y);
-      ctx.lineTo(x + w,  y + x1);
-      ctx.lineTo(x + x5, y + x1);
-      ctx.lineTo(x + x5, y + y5);
-      ctx.lineTo(x + x1, y + y5);
-      ctx.lineTo(x + x1, y + h);
-      ctx.closePath();
-      break;
-    }
-
     // ── U-turn arrow ──────────────────────────────────────────────────────────
     // Spec (ECMA-376): outer half-arc on top, arrowhead on right side pointing down
     case 'uturnarrow': {
@@ -1483,11 +1298,6 @@ export function buildShapePath(
     }
 
     // ── Flowchart: connector (circle) ─────────────────────────────────────────
-    case 'flowchartconnector': {
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
-      break;
-    }
-
     // ── Flowchart: delay (D-shape) ────────────────────────────────────────────
     case 'flowchartdelay': {
       const r = h / 2;
@@ -1512,31 +1322,15 @@ export function buildShapePath(
       break;
     }
 
-    // ── Flowchart: input/output (parallelogram) ───────────────────────────────
-    case 'flowchartinputoutput':
+    // ── Flowchart: punched card (parallelogram approximation) ────────────────
+    // (flowchartInputOutput left this shared body for the spec engine — the
+    // w/5 slant IS its spec geometry; punchedCard's spec shape is a rectangle
+    // with a snipped top-left corner, so this body remains a known diff.)
     case 'flowchartpunchedcard': {
       const sl = w * 0.2;
       ctx.moveTo(x + sl, y);
       ctx.lineTo(x + w, y);
       ctx.lineTo(x + w - sl, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: merge (inverted triangle) ──────────────────────────────────
-    case 'flowchartmerge': {
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(cx, y + h);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: extract (upward triangle) ─────────────────────────────────
-    case 'flowchartextract': {
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, y + h);
       ctx.lineTo(x, y + h);
       ctx.closePath();
       break;
@@ -1995,29 +1789,6 @@ export function buildShapePath(
       ctx.lineTo(x4, y2);
       ctx.lineTo(x + ssd8 * 2, y2);
       ctx.lineTo(x + ssd8 * 2, y1);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: preparation (hexagon with angled sides) ────────────────────
-    case 'flowchartpreparation': {
-      const sl = w * 0.2;
-      ctx.moveTo(x + sl, y);
-      ctx.lineTo(x + w - sl, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(x + w - sl, y + h);
-      ctx.lineTo(x + sl, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
-      break;
-    }
-
-    // ── Flowchart: collate (hourglass) ────────────────────────────────────────
-    case 'flowchartcollate': {
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x + w, y + h);
       ctx.closePath();
       break;
     }
