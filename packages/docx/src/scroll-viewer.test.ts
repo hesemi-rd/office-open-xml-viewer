@@ -103,6 +103,33 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     // Injected engine is caller-owned: destroy() must not tear it down.
     expect(engine.destroyed).toBe(false);
   });
+
+  // `background` paints the scroll surface (the "desk") visible behind/between
+  // pages. It applies to the viewer-owned scrollHost; pages keep their own white.
+  it('applies opts.background to the scrollHost element', () => {
+    installDom();
+    const container = makeContainer();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      background: '#525659',
+    });
+    const scrollHost = container.children[0].children[0]; // wrapper → scrollHost
+    expect(scrollHost.style.background).toBe('#525659');
+    v.destroy();
+  });
+
+  it('sets no background on the scrollHost by default (transparent — container shows through)', () => {
+    installDom();
+    const container = makeContainer();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+    });
+    const scrollHost = container.children[0].children[0];
+    expect(scrollHost.style.background).toBe('');
+    v.destroy();
+  });
 });
 
 describe('DocxScrollViewer — layout + virtualization (T2)', () => {
@@ -125,6 +152,12 @@ describe('DocxScrollViewer — layout + virtualization (T2)', () => {
       gap: 10,
       overscan: 1,
       width: undefined, // fit container width (200) → base scale below
+      // Flush horizontal gutters: paddingLeft/Right default to `gap`, which would
+      // shrink the fit width to 180 and break the base-scale-1.5 geometry the T2
+      // assertions assume (page width px = 200). Pin them to 0 so the fit is the
+      // full 200 container width (same pattern the vertical commit used).
+      paddingLeft: 0,
+      paddingRight: 0,
       ...opts,
     });
     const wrapper = container.children[0] as FakeEl;
@@ -164,6 +197,8 @@ describe('DocxScrollViewer — layout + virtualization (T2)', () => {
       document: engine.asDoc(),
       gap: 10,
       overscan: 1,
+      paddingLeft: 0, // full-width fit (see T2 setup note) → base scale 1.5
+      paddingRight: 0,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     const spacer = scrollHost.children[0] as FakeEl;
@@ -174,7 +209,9 @@ describe('DocxScrollViewer — layout + virtualization (T2)', () => {
     const PT_TO_PX = 4 / 3;
     const scale = 200 / (100 * PT_TO_PX);
     const heights = sizes.map((s) => s.heightPt * PT_TO_PX * scale);
-    const expected = heights.reduce((a, b) => a + b, 0) + (sizes.length - 1) * 10;
+    // New default: paddingTop/paddingBottom each default to `gap` (10), so the
+    // spacer is padTop + Σheights + (n-1)*gap + padBottom.
+    const expected = 10 + heights.reduce((a, b) => a + b, 0) + (sizes.length - 1) * 10 + 10;
     expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
     v.destroy();
     void dom;
@@ -242,6 +279,8 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
+      paddingLeft: 0, // full-width fit → page width px = 200 (asserted below)
+      paddingRight: 0,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
@@ -273,6 +312,8 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
+      paddingLeft: 0, // full-width fit → base scale 1.5 (page widths 200 / 400)
+      paddingRight: 0,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
@@ -436,6 +477,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
+      paddingTop: 0, // flush top so page 0's slot sits at top:0px (asserted below)
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
@@ -568,6 +610,14 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
+      // Flush top/bottom (paddingTop/Bottom default to `gap`; the T4 offset
+      // arithmetic below is written for offset[0]===0). This exercises the
+      // "explicit 0 ⇒ old flush behavior reachable" contract.
+      paddingTop: 0,
+      paddingBottom: 0,
+      // Flush left/right so the fit width is the full 200 container ⇒ base 1.5.
+      paddingLeft: 0,
+      paddingRight: 0,
       overscan: 1,
       zoomMin: 0.5,
       zoomMax: 3,
@@ -711,6 +761,7 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
+      paddingTop: 0, // flush top so page 0's slot sits at top:0px (asserted below)
       overscan: 1,
       zoomMin: 0.5,
       zoomMax: 3,
@@ -774,6 +825,7 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
+      paddingTop: 0, // flush top so page 0's slot sits at top:0px (asserted below)
       overscan: 1,
       zoomMin: 0.5,
       zoomMax: 3,
@@ -1033,6 +1085,15 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: GAP,
+      // Flush top/bottom: the T6 STRIDE/offset arithmetic assumes offset[0]===0.
+      // paddingTop/Bottom default to `gap`; pinning them to 0 keeps the pre-padding
+      // geometry (and exercises the "explicit 0 ⇒ old flush behavior" contract).
+      paddingTop: 0,
+      paddingBottom: 0,
+      // Flush left/right: the fit width must be the full 200 container so BASE = 1.5
+      // and PAGE_H/STRIDE hold (the default `gap` gutters would shrink the fit).
+      paddingLeft: 0,
+      paddingRight: 0,
       ...opts,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
@@ -1274,6 +1335,278 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
     v.destroy();
     expect(disconnected).toBe(1);
+  });
+});
+
+describe('DocxScrollViewer — paddingTop/paddingBottom (desk margin)', () => {
+  const PT_TO_PX = 4 / 3;
+  const BASE = 200 / (100 * PT_TO_PX); // 1.5
+  const PAGE_H = 200 * PT_TO_PX * BASE; // 400
+  const GAP = 10;
+  const STRIDE = PAGE_H + GAP; // 410
+
+  function setup(opts = {}, pageCount = 20) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(
+      pageCount,
+      Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
+    );
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: GAP,
+      // This block tests the VERTICAL desk margin; pin the horizontal gutters to 0
+      // so the fit width is the full 200 container ⇒ BASE 1.5 / PAGE_H 400 / STRIDE
+      // 410 (the default `gap` gutters would otherwise shrink the fit).
+      paddingLeft: 0,
+      paddingRight: 0,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, container, engine };
+  }
+
+  /** The wrapper currently mounted for page `i` (identified by its top offset). */
+  function slotTopFor(scrollHost: FakeEl, i: number, stride: number, padTop: number): FakeEl | undefined {
+    const want = `${padTop + i * stride}px`;
+    return scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === want,
+    ) as FakeEl | undefined;
+  }
+
+  it('explicit paddingTop mounts the first slot at top = paddingTop px', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24 });
+    expect(v.mountedPageIndicesForTest()).toContain(0);
+    // Page 0's wrapper sits at top = paddingTop (not flush 0).
+    expect(slotTopFor(scrollHost, 0, STRIDE, 24)).toBeDefined();
+    v.destroy();
+  });
+
+  it('spacer height = padTop + Σheights + (n-1)*gap + padBottom', () => {
+    const { scrollHost } = setup({ paddingTop: 24, paddingBottom: 40 });
+    const spacer = scrollHost.children[0] as FakeEl;
+    const expected = 24 + 20 * PAGE_H + 19 * GAP + 40; // 8254
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+  });
+
+  it('DEFAULT paddingTop/paddingBottom = gap (uniform rhythm: no options ⇒ first slot at gap px)', () => {
+    // No paddingTop/paddingBottom → each defaults to `gap` (10). Page 0 sits at
+    // top:10px, NOT flush 0 (this is the sanctioned pre-release default change).
+    const { v, scrollHost } = setup();
+    expect(v.mountedPageIndicesForTest()).toContain(0);
+    expect(slotTopFor(scrollHost, 0, STRIDE, GAP)).toBeDefined();
+    // And the spacer includes both default pads.
+    const spacer = scrollHost.children[0] as FakeEl;
+    const expected = GAP + 20 * PAGE_H + 19 * GAP + GAP;
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+    v.destroy();
+  });
+
+  it('explicit 0 ⇒ flush (old behavior reachable): first slot at top 0, spacer has no pad', () => {
+    const { v, scrollHost } = setup({ paddingTop: 0, paddingBottom: 0 });
+    expect(slotTopFor(scrollHost, 0, STRIDE, 0)).toBeDefined();
+    const spacer = scrollHost.children[0] as FakeEl;
+    const expected = 20 * PAGE_H + 19 * GAP; // no pad
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+    v.destroy();
+  });
+
+  it('scrollToPage(0) lands on offsets[0] (= paddingTop, not 0)', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24 });
+    // Move away first, then navigate to page 0.
+    scrollHost.scrollTop = 3 * STRIDE;
+    scrollHost.dispatch('scroll');
+    v.scrollToPage(0);
+    // offsets[0] = paddingTop (24), so the top edge of page 0 sits below the pad.
+    expect(scrollHost.scrollTop).toBe(24);
+    v.destroy();
+  });
+
+  it('scrollToPage(k) lands on paddingTop + k*stride', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24 });
+    v.scrollToPage(3);
+    expect(Math.abs(scrollHost.scrollTop - (24 + 3 * STRIDE))).toBeLessThan(2);
+    v.destroy();
+  });
+
+  it('re-anchor keeps the page under the viewport top fixed WITH padding intact after setScale', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24, zoomMin: 0.5, zoomMax: 3 });
+    // Scroll so page 3's top sits at the viewport top: offset[3] = 24 + 3*410 = 1254.
+    scrollHost.scrollTop = 24 + 3 * STRIDE;
+    scrollHost.dispatch('scroll');
+    expect(v.topVisiblePage).toBe(3);
+    v.setScale(v.scaleForTest() * 2); // 1.5 → 3.0; PAGE_H' = 800, STRIDE' = 810
+    expect(v.scaleForTest()).toBeCloseTo(3, 5);
+    // Page 3 stays the top page; padding is intact so offset'[3] = 24 + 3*810 = 2454.
+    expect(v.topVisiblePage).toBe(3);
+    expect(Math.abs(scrollHost.scrollTop - (24 + 3 * 810))).toBeLessThan(2);
+    v.destroy();
+  });
+});
+
+describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters)', () => {
+  const PT_TO_PX = 4 / 3;
+
+  /** Build a viewer over a container of `cw`×400, uniform 100pt×200pt pages. */
+  function setup(cw: number, opts = {}, pageCount = 20) {
+    installDom();
+    const container = makeContainer(cw, 400);
+    const engine = new FakeDocxEngine(
+      pageCount,
+      Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
+    );
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 16,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = cw;
+    v.relayout();
+    return { v, scrollHost, container, engine };
+  }
+
+  /** The wrapper mounted for page 0 (flush top ⇒ it sits at top:0px unless a
+   *  vertical pad is set; callers that keep the default gap pass the expected top). */
+  function slot(scrollHost: FakeEl, top: string): FakeEl | undefined {
+    return scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === top,
+    ) as FakeEl | undefined;
+  }
+
+  it('fit subtracts the DEFAULT gutters: container 232 with default gap-16 gutters ⇒ fit 200 ⇒ base 1.5', () => {
+    // 232 − 16 (padL) − 16 (padR) = 200, the same fit the old 200-container tests
+    // used, so the base scale matches their 1.5 (page widthPt 100 → 200/(100×4/3)).
+    const { v } = setup(232);
+    expect(v.baseScaleForTest()).toBeCloseTo(1.5, 5);
+    expect(v.scaleForTest()).toBeCloseTo(1.5, 5);
+    v.destroy();
+  });
+
+  it('explicit paddingLeft:0/paddingRight:0 ⇒ old full-width fit reachable (base uses the FULL container width)', () => {
+    // With the gutters pinned to 0 the fit is the full 200 container width ⇒ base
+    // 1.5, exactly the pre-feature behavior.
+    const { v } = setup(200, { paddingLeft: 0, paddingRight: 0 });
+    expect(v.baseScaleForTest()).toBeCloseTo(1.5, 5);
+    v.destroy();
+  });
+
+  it('explicit opts.width is NOT reduced by the gutters (it is the page CSS-width contract)', () => {
+    // opts.width 150 stays 150 regardless of the gutters: base = 150/(100×4/3) =
+    // 1.125. The gutters still apply to PLACEMENT (asserted in the centering test),
+    // just not to the width.
+    const { v } = setup(400, { width: 150, paddingLeft: 24, paddingRight: 24 });
+    expect(v.baseScaleForTest()).toBeCloseTo(150 / (100 * PT_TO_PX), 5);
+    v.destroy();
+  });
+
+  it('slot left = paddingLeft when the page fills the fit exactly (symmetric gutters ⇒ centre lands on the floor)', () => {
+    // Container 232, default gutters 16 ⇒ fit 200, page px = 200. scrollHost
+    // clientWidth 232, so centre = (232 − 200)/2 = 16 = padL ⇒ left pinned at padL.
+    const { v, scrollHost } = setup(232);
+    // Default vertical padding = gap 16 ⇒ page 0 sits at top:16px.
+    const s0 = slot(scrollHost, '16px');
+    expect(s0).toBeDefined();
+    expect(s0!.style.left).toBe('16px'); // = paddingLeft
+    v.destroy();
+  });
+
+  it('slot is CENTERED when the page is narrower than the viewport (left = (cw − pw)/2 > paddingLeft)', () => {
+    // Explicit width 100 (NOT reduced) ⇒ page px = 100, far narrower than the 400
+    // viewport. centre = (400 − 100)/2 = 150, which exceeds padL 16, so the page is
+    // centred at 150 rather than pinned to the gutter floor.
+    const { v, scrollHost } = setup(400, { width: 100, paddingLeft: 16, paddingRight: 16 });
+    const s0 = slot(scrollHost, '16px'); // default vertical pad = gap 16
+    expect(s0).toBeDefined();
+    expect(parseFloat(s0!.style.left)).toBeCloseTo(150, 3);
+    expect(parseFloat(s0!.style.left)).toBeGreaterThan(16);
+    v.destroy();
+  });
+
+  it('zoomed-in (page wider than viewport): left pins to paddingLeft and the spacer width = pageW + padL + padR', () => {
+    // Explicit width 400 in a 200 viewport ⇒ page px 400 > cw 200. centre =
+    // (200 − 400)/2 = −100, so the floor pins left at padL 24. The horizontal scroll
+    // extent (spacer width) is the page width plus both gutters: 400 + 24 + 24 = 448.
+    const { v, scrollHost } = setup(200, { width: 400, paddingLeft: 24, paddingRight: 24 });
+    const s0 = slot(scrollHost, '16px'); // default vertical pad = gap 16
+    expect(s0).toBeDefined();
+    expect(s0!.style.left).toBe('24px'); // pinned to paddingLeft
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.width)).toBeCloseTo(400 + 24 + 24, 3);
+    v.destroy();
+  });
+
+  it('a Ctrl+wheel zoom that widens the page past the viewport updates the spacer width and pins left to paddingLeft', () => {
+    // Container 200 pinned gutters 0 ⇒ fit 200, base 1.5, page px 200 (== viewport).
+    // Zoom ×2 ⇒ page px 400 > 200 viewport. left floors to padL (0 here) and the
+    // spacer width tracks the new page width + gutters (400 + 0 + 0 = 400).
+    const { v, scrollHost } = setup(200, {
+      paddingLeft: 0,
+      paddingRight: 0,
+      paddingTop: 0,
+      zoomMin: 0.5,
+      zoomMax: 4,
+    });
+    expect(v.scaleForTest()).toBeCloseTo(1.5, 5);
+    v.setScale(v.scaleForTest() * 2); // page px 200 → 400
+    const s0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(s0).toBeDefined();
+    expect(s0!.style.left).toBe('0px'); // paddingLeft 0
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.width)).toBeCloseTo(400, 3);
+    v.destroy();
+  });
+
+  it('spacer width uses the WIDEST page over mixed page widths (+ both gutters)', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Page 0 100pt wide (base fit target), page 1 200pt wide (twice as wide).
+    const engine = new FakeDocxEngine(2, [
+      { widthPt: 100, heightPt: 100 },
+      { widthPt: 200, heightPt: 100 },
+    ]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      paddingLeft: 12,
+      paddingRight: 12,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // fit = 200 − 12 − 12 = 176, base = 176/(100×4/3) = 1.32. Page widths px: page 0
+    // = 176, page 1 = 200×4/3×1.32 = 352 (the widest). Spacer width = 352 + 12 + 12.
+    const base = 176 / (100 * PT_TO_PX);
+    const widest = 200 * PT_TO_PX * base; // 352
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.width)).toBeCloseTo(widest + 12 + 12, 3);
+    v.destroy();
+  });
+
+  it('gutters wider than the container defer layout (non-positive fit ⇒ zero-width deferral)', () => {
+    // padL + padR = 300 > container 200 ⇒ fit ≤ 0 ⇒ deferred (no slots mounted),
+    // mirroring the zero-width container deferral.
+    const { v } = setup(200, { paddingLeft: 150, paddingRight: 150 });
+    expect(v.mountedPageIndicesForTest().length).toBe(0);
+    v.destroy();
+  });
+
+  it('the slot wrapper carries NO CSS auto-centering (explicit JS left replaces margin:0 auto)', () => {
+    // The old wrapper used `left:0;right:0;margin:0 auto`; that would fight the
+    // explicit per-mount `left`. Assert the auto-centering margin is gone.
+    const { v, scrollHost } = setup(232);
+    const s0 = slot(scrollHost, '16px');
+    expect(s0).toBeDefined();
+    expect(s0!.style.margin).toBe(''); // no `0 auto`
+    expect(s0!.style.right).toBe(''); // no right:0 pinning
+    v.destroy();
   });
 });
 

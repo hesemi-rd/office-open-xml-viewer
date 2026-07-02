@@ -1,4 +1,5 @@
 export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './viewer';
+export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
 export {
   PptxPresentation,
   type LoadOptions,

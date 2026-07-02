@@ -200,6 +200,14 @@ export class PptxPresentation {
   /** Slide height in EMU. */
   get slideHeight(): number { return this._presentation?.slideHeight ?? this._meta?.slideHeight ?? 0; }
 
+  /** The render mode this engine was loaded with ('main' | 'worker'). A fact for
+   *  integrators and the scroll viewer: an injected engine's mode decides whether
+   *  slides render via renderSlide (main) or renderSlideToBitmap (worker) — no
+   *  probing (design §11: no silent mis-pathing). */
+  get mode(): 'main' | 'worker' {
+    return this._mode;
+  }
+
   /**
    * Speaker-notes text for a slide (`ppt/notesSlides/notesSlideN.xml`,
    * ECMA-376 §13.3.5 — Notes Slide). Returns the notes-body text as a single

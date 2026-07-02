@@ -136,8 +136,13 @@ export const ScrollViewer: LayoutStory = {
 
     const viewer = new DocxScrollViewer(container, {
       gap: 16,
+      paddingTop: 24, // desk margin above the first page (defaults to gap when omitted)
+      paddingBottom: 24, // desk margin below the last page
+      paddingLeft: 24, // horizontal desk gutter left of the pages
+      paddingRight: 24, // horizontal desk gutter right of the pages
       overscan: 1,
       enableTextSelection: true,
+      background: '#f5f5f5', // light desk behind/between pages (matches the ScrollView recipe)
       onVisiblePageChange: (top, total) => {
         status.textContent = `Page ${top + 1} / ${total}`;
       },

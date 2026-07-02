@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { buildViewerUI } from './PptxViewer.stories';
 import { PptxPresentation } from './presentation';
 import { PptxViewer } from './viewer';
+import { PptxScrollViewer } from './scroll-viewer';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
 
@@ -96,6 +97,65 @@ export const ScrollView: LayoutStory = {
           buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
         }
         status.textContent = `Loaded ${pres.slideCount} slides`;
+      })
+      .catch((e: Error) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      });
+
+    return root;
+  },
+};
+
+// The scroll viewer owns a live scroll subscription, a ResizeObserver, and a
+// per-slot canvas pool, so a stale instance left mounted across a Storybook
+// re-render (args change / HMR) would keep observing a detached container and
+// leak canvases. Hold the last instance module-side and destroy it before
+// building a fresh one.
+let scrollViewerInstance: PptxScrollViewer | null = null;
+
+export const ScrollViewer: LayoutStory = {
+  name: 'PptxScrollViewer — virtualized continuous scroll',
+  render() {
+    scrollViewerInstance?.destroy();
+    scrollViewerInstance = null;
+
+    const root = document.createElement('div');
+    root.style.cssText = 'font-family:sans-serif;padding:16px;';
+    const heading = document.createElement('h3');
+    heading.textContent = 'PptxScrollViewer — virtualized (Ctrl/⌘+wheel to zoom)';
+    heading.style.cssText = 'margin:0 0 8px;font-size:14px;';
+    root.appendChild(heading);
+    const status = makeStatus(root);
+
+    // The viewer owns a container-sized scroll surface; give it a fixed box.
+    const container = document.createElement('div');
+    container.style.cssText = 'height:720px;border:1px solid #ccc;background:#f5f5f5;';
+    root.appendChild(container);
+
+    const viewer = new PptxScrollViewer(container, {
+      gap: 16,
+      paddingTop: 24, // desk margin above the first slide (defaults to gap when omitted)
+      paddingBottom: 24, // desk margin below the last slide
+      paddingLeft: 24, // horizontal desk gutter left of the slides
+      paddingRight: 24, // horizontal desk gutter right of the slides
+      overscan: 1,
+      enableTextSelection: true,
+      useGoogleFonts: true,
+      background: '#f5f5f5', // light desk behind/between slides (matches the ScrollView recipe)
+      onVisibleSlideChange: (top, total) => {
+        status.textContent = `Slide ${top + 1} / ${total}`;
+      },
+      onError: (e) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      },
+    });
+    scrollViewerInstance = viewer;
+    viewer
+      .load(SAMPLE_URL)
+      .then(() => {
+        status.textContent = `Loaded ${viewer.slideCount} slides`;
       })
       .catch((e: Error) => {
         status.textContent = `Error: ${e.message}`;
