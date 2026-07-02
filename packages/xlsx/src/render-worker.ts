@@ -57,8 +57,10 @@ function parseSheetLocally(sheetIndex: number): Worksheet {
   if (!workbook || !rawData) throw new Error('Workbook not loaded');
   const sheetMeta = workbook.workbook.sheets[sheetIndex];
   if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
+  // `parse_sheet` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); the
+  // render worker consumes the model in-worker, so decode + parse here.
   const json = parse_sheet(new Uint8Array(rawData), sheetIndex, sheetMeta.name, maxZipEntryBytes);
-  const ws = JSON.parse(json) as Worksheet;
+  const ws = JSON.parse(new TextDecoder().decode(json)) as Worksheet;
   sheetCache.set(sheetIndex, ws);
   return ws;
 }
@@ -82,8 +84,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      // `parse_xlsx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode
+      // + parse the workbook index here (consumed in-worker, then a light copy
+      // is sent to the proxy as an object).
       const json = parse_xlsx(new Uint8Array(req.data), maxZipEntryBytes);
-      workbook = JSON.parse(json) as ParsedWorkbook;
+      workbook = JSON.parse(new TextDecoder().decode(json)) as ParsedWorkbook;
       rawData = req.data;
       if (req.useGoogleFonts) {
         // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for

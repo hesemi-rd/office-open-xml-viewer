@@ -18,8 +18,12 @@ function ensureInit(): void {
 export function parseXlsx(buffer: ArrayBuffer | Uint8Array | Buffer): ParsedWorkbook {
   ensureInit();
   const bytes = toUint8(buffer);
-  const json = (xlsxWasm as unknown as { parse_xlsx: (b: Uint8Array) => string }).parse_xlsx(bytes);
-  return JSON.parse(json) as ParsedWorkbook;
+  // `parse_xlsx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
+  // parse once. Matches the browser main-thread receiver.
+  const json = (xlsxWasm as unknown as { parse_xlsx: (b: Uint8Array) => Uint8Array }).parse_xlsx(
+    bytes,
+  );
+  return JSON.parse(new TextDecoder().decode(json)) as ParsedWorkbook;
 }
 
 /** Parse a single sheet's cell data and layout. The browser path does this
@@ -32,10 +36,12 @@ export function parseSheet(
 ): Worksheet {
   ensureInit();
   const bytes = toUint8(buffer);
+  // `parse_sheet` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
+  // parse once.
   const json = (xlsxWasm as unknown as {
-    parse_sheet: (b: Uint8Array, idx: number, name: string) => string;
+    parse_sheet: (b: Uint8Array, idx: number, name: string) => Uint8Array;
   }).parse_sheet(bytes, sheetIndex, sheetName);
-  return JSON.parse(json) as Worksheet;
+  return JSON.parse(new TextDecoder().decode(json)) as Worksheet;
 }
 
 /** Eagerly parse every sheet referenced by the workbook. Useful for batch

@@ -40,21 +40,30 @@ const INDEXED_COLORS: &[&str] = &[
     "#333333", // 56-63
 ];
 
+/// Parse a xlsx archive's workbook index and return it as UTF-8 JSON **bytes**.
+///
+/// Returning `Vec<u8>` (a fresh copy on the JS side) instead of `String` keeps
+/// the model out of the JsString/UTF-16 representation: the worker forwards the
+/// resulting `ArrayBuffer` to the main thread as a transferable and the main
+/// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
+/// serializations (Rust String → JsString → structured clone) into one decode.
 #[wasm_bindgen]
-pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
+pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let wb = parse_xlsx_inner(data).map_err(|e| JsValue::from_str(&e))?;
-    serde_json::to_string(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+    serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// Parse one worksheet's cell data + layout and return it as UTF-8 JSON
+/// **bytes** (see `parse_xlsx` for the bytes-return rationale).
 #[wasm_bindgen]
 pub fn parse_sheet(
     data: &[u8],
     sheet_index: u32,
     name: &str,
     max_zip_entry_bytes: Option<u64>,
-) -> Result<String, JsValue> {
+) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let cursor = Cursor::new(data);
@@ -97,7 +106,7 @@ pub fn parse_sheet(
     ws.default_font_family = df_family;
     ws.default_font_size = df_size;
 
-    serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
+    serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
