@@ -125,6 +125,97 @@ Notes:
   transferred back as an `ImageBitmap`, so a single render can be marginally
   slower than `mode: 'main'`. Choose it for non-blocking UI, not raw speed.
 
+### Continuous scroll viewers
+
+`DocxScrollViewer` and `PptxScrollViewer` render the whole document as one
+vertically-scrolling, PDF-reader-style surface instead of a single page/slide at
+a time. Unlike `DocxViewer` / `PptxViewer` (which take a `<canvas>`), the scroll
+viewers take a **container** `<div>` — they own the scroll host, virtualize the
+page/slide list (only the visible window plus a small overscan is mounted), and
+recycle canvases as you scroll.
+
+```typescript
+import { DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const container = document.getElementById('docx-scroll') as HTMLElement;
+const viewer = new DocxScrollViewer(container);
+await viewer.load('/document.docx');
+// viewer.scrollToPage(3);
+// viewer.pageCount, viewer.topVisiblePage
+```
+
+```typescript
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+
+const container = document.getElementById('pptx-scroll') as HTMLElement;
+const viewer = new PptxScrollViewer(container);
+await viewer.load('/deck.pptx');
+// viewer.scrollToSlide(2);
+// viewer.slideCount, viewer.topVisibleSlide
+```
+
+The container must have a bounded height (e.g. `height: 100vh` or a flex child)
+so the viewer can size its scroll host to it. Base zoom fits the first page/slide
+width to the container width and re-fits on resize; a `0`-width container defers
+layout until it has width. Call `destroy()` to tear down (a self-loaded engine is
+destroyed with it; an injected one is not — see below).
+
+**Desk appearance.** The viewer paints each page/slide on its own white canvas
+with a soft drop shadow, over a transparent "desk". Style the desk and the sheet
+gaps without any wrapper CSS:
+
+```typescript
+const viewer = new DocxScrollViewer(container, {
+  background: '#f3f4f6',            // the desk behind / between pages
+  gap: 24,                          // vertical gap between pages
+  paddingTop: 32,                   // desk padding above the first page
+  pageShadow: '0 0 0 1px #c8ccd0',  // crisp 1px "border" look (box-shadow never shifts layout)
+  // pageShadow: false,             // flat pages, no shadow
+});
+```
+
+`paddingBottom`, `paddingLeft` and `paddingRight` each default to `gap`, so the
+sheet sits inside a uniform desk margin; pass `0` for a flush edge.
+
+**Zoom.** `Ctrl`/`⌘` + mouse-wheel (and trackpad pinch) zooms the surface;
+bare-wheel still scrolls natively. Zoom is flicker-free — a rapid gesture shows a
+CSS preview and settles into a crisp re-render when it pauses. Bounds are the
+absolute scale factors `zoomMin` / `zoomMax` (default `0.1` / `4`), and
+`setScale(scale)` sets it programmatically. Pass `enableZoom: false` to disable.
+
+**Text selection** (main mode only). Pass `enableTextSelection: true` to overlay
+a transparent, selectable text layer per page/slide for native copy. In
+`mode: 'worker'` the overlay stays empty (the per-run geometry cannot cross the
+worker boundary) and the viewer logs one warning — use the default `mode: 'main'`
+for selectable text.
+
+**Master–detail / shared engine.** Inject an already-loaded headless engine so a
+paged viewer and a scroll viewer (or several panes) share **one** parse. When you
+inject, `load()` is unsupported (the engine is already loaded), the engine's own
+`mode` wins, and `destroy()` leaves the injected engine intact — the caller owns
+its lifecycle:
+
+```typescript
+import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const doc = await DocxDocument.load('/document.docx'); // parse once
+const scroll = new DocxScrollViewer(container, { document: doc });
+// ...also drive a thumbnail grid, a paged view, etc. from the same `doc`.
+scroll.destroy(); // the injected `doc` is NOT destroyed — you own it
+doc.destroy();    // release it yourself when every pane is gone
+```
+
+`PptxScrollViewer` takes the same shape with `{ presentation: pres }`
+(`await PptxPresentation.load(...)`).
+
+Both viewers also expose `relayout()` (force a re-fit when the container resizes
+in a way a `ResizeObserver` cannot see — e.g. a late web-font load),
+`onVisiblePageChange` / `onVisibleSlideChange` (fires when the top-most visible
+page/slide changes), and `onError` (async per-page render failures are routed
+here instead of crashing the scroll loop). The parse/render knobs from the
+headless engines (`mode`, `useGoogleFonts`, `maxZipEntryBytes`, `math`, `dpr`)
+are accepted too.
+
 ---
 
 <details>
@@ -468,6 +559,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Comments — author / date / text via the document model (`doc.comments`, §17.13.4; not drawn on the page) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
 
 ---
 
@@ -612,6 +704,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
 
 ---
 
