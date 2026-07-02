@@ -100,7 +100,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // XlsxWorkbook.getWorksheet / resolveValidationList resolve in worker
       // mode instead of hanging forever. Reuses parseSheetLocally (which parses
       // from the worker's stored rawData and cache); the main-mode message's
-      // `data` / `sheetName` fields are ignored. Reply shape matches worker.ts.
+      // `sheetName` field is ignored. Reply shape matches worker.ts.
       if (!workbook) throw new Error('Workbook not loaded');
       const worksheet = parseSheetLocally(req.sheetIndex);
       post({ type: 'parsedSheet', id, worksheet });
