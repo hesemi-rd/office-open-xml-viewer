@@ -22,6 +22,21 @@ export interface LoadOptions {
    */
   useGoogleFonts?: boolean;
   /**
+   * Override the URL the parser worker fetches the WebAssembly module from.
+   *
+   * By default each format resolves the `.wasm` asset that ships next to its
+   * bundle (relative to the module URL), so no configuration is needed. Set
+   * this to serve the parser WASM from a CDN or a self-hosted path instead — a
+   * relative value is resolved against the current document URL. The same
+   * dependency-injection contract across docx / pptx / xlsx.
+   *
+   * The referenced file must be the matching format's `*_parser_bg.wasm`
+   * artifact (the one wasm-bindgen emitted for that parser); pointing it at a
+   * mismatched or missing file makes `load()` reject when the worker
+   * instantiates it.
+   */
+  wasmUrl?: string | URL;
+  /**
    * Override the per-entry ZIP decompression cap (bytes) used by the zip-bomb
    * guard in the Rust parser. Defaults to 512 MiB. Raise it to load documents
    * with very large embedded media, or lower it to tighten the budget for

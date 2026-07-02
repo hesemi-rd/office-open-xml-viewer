@@ -325,6 +325,7 @@ export class DocxScrollViewer {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         workerTimeoutMs: this._opts.workerTimeoutMs,
+        wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
         mode: this._mode,
       });

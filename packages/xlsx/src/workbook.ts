@@ -65,14 +65,17 @@ export class XlsxWorkbook {
   private math: MathRenderer | undefined;
   private _mode: 'main' | 'worker' = 'main';
 
-  private constructor(worker: Worker, mode: 'main' | 'worker') {
+  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this.worker = worker;
     this._mode = mode;
     this.bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this.worker, {
       correlate: (res) => res.id,
       toError: (res) => (res.type === 'error' ? res.message : undefined),
     });
-    const wasmUrl = new URL(wasmAssetUrl, location.href).href;
+    // Default: the parser WASM emitted next to this bundle, resolved relative to
+    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
+    // relative override is still resolved against `location.href`.
+    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
     this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
@@ -88,7 +91,7 @@ export class XlsxWorkbook {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const wb = new XlsxWorkbook(worker, mode);
+    const wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
     await wb._load(source, opts);
     return wb;
   }

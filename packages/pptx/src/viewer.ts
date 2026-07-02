@@ -139,6 +139,7 @@ export class PptxViewer {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         workerTimeoutMs: this.opts.workerTimeoutMs,
+        wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,
         mode: this._mode,
       });

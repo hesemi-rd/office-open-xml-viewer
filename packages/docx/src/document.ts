@@ -54,14 +54,17 @@ export class DocxDocument {
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImage(path, mime);
 
-  private constructor(worker: Worker, mode: 'main' | 'worker') {
+  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this._worker = worker;
     this._mode = mode;
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) => res.id,
       toError: (res) => (res.type === 'error' ? res.message : undefined),
     });
-    const wasmUrl = new URL(wasmAssetUrl, location.href).href;
+    // Default: the parser WASM emitted next to this bundle, resolved relative to
+    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
+    // relative override is still resolved against `location.href`.
+    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
     this._bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
@@ -76,7 +79,7 @@ export class DocxDocument {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const doc = new DocxDocument(worker, mode);
+    const doc = new DocxDocument(worker, mode, opts.wasmUrl);
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
       const res = await fetch(source);
