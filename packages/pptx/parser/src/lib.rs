@@ -3897,8 +3897,10 @@ fn parse_master_level_bullets(
         let path = resolve_path(master_dir, target);
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
-        // comment), mirroring the master background resolver.
-        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        // comment), mirroring the master background resolver. `index_for_name`
+        // checks the central directory only (no inflate), unlike the former
+        // `read_zip_bytes` which decompressed the entry just to discard it.
+        zip.index_for_name(&path)?;
         Some(path)
     };
 
@@ -4218,7 +4220,9 @@ fn parse_layout_placeholders(
             // Verify the part exists so a listed-but-missing rId yields None and
             // the bullet falls through to Bullet::Inherit (matches the variant's
             // doc comment), mirroring the master/layout background resolvers.
-            ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+            // `index_for_name` reads the central directory only (no inflate),
+            // unlike the former `read_zip_bytes` which decompressed and discarded.
+            zip.index_for_name(&path)?;
             Some(path)
         };
         let layout_level_bullets: LevelBullets = child(sp, "txBody")
@@ -4280,8 +4284,10 @@ fn parse_layout_placeholders(
             let rel_target = layout_rels.get(&rid)?;
             let image_path = resolve_path(layout_dir, rel_target);
             // Verify the part exists so a dangling rId yields None (no inherited
-            // fill), preserving the prior data-URL behaviour.
-            ooxml_common::zip::read_zip_bytes(zip, &image_path).ok()?;
+            // fill), preserving the prior data-URL behaviour. `index_for_name`
+            // reads the central directory only (no inflate), unlike the former
+            // `read_zip_bytes` which decompressed the entry just to discard it.
+            zip.index_for_name(&image_path)?;
             let mime_type = mime_from_ext(&image_path).to_owned();
             Some(InheritedBlipFill {
                 image_path,
@@ -4608,8 +4614,10 @@ fn parse_text_body(
         let path = resolve_path("ppt/slides", target);
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
-        // comment), mirroring the slide picture-fill resolvers.
-        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        // comment), mirroring the slide picture-fill resolvers. `index_for_name`
+        // reads the central directory only (no inflate), unlike the former
+        // `read_zip_bytes` which decompressed the entry just to discard it.
+        zip.index_for_name(&path)?;
         Some(path)
     };
     let own_level_bullets = extract_level_bullets(tx_body, theme, &mut resolve_slide_blip);
@@ -4851,8 +4859,10 @@ fn parse_paragraph(
         let path = resolve_path("ppt/slides", target);
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
-        // comment), mirroring the slide picture-fill resolvers.
-        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        // comment), mirroring the slide picture-fill resolvers. `index_for_name`
+        // reads the central directory only (no inflate), unlike the former
+        // `read_zip_bytes` which decompressed the entry just to discard it.
+        zip.index_for_name(&path)?;
         Some(path)
     };
     let bullet = match parse_bullet(p_pr, theme, &mut resolve_para_blip) {
@@ -6912,7 +6922,10 @@ fn svg_blip_path(
     let svg_rid = svg_blip_rid(blip)?;
     let svg_target = rels.get(&svg_rid)?;
     let svg_path = resolve_path(slide_dir, svg_target);
-    ooxml_common::zip::read_zip_bytes(zip, &svg_path).ok()?;
+    // Existence check only — `index_for_name` reads the central directory
+    // without inflating, unlike the former `read_zip_bytes` which decompressed
+    // the whole SVG part just to discard the bytes.
+    zip.index_for_name(&svg_path)?;
     Some(svg_path)
 }
 
@@ -7857,7 +7870,9 @@ fn parse_slide(
             // Resolve to the zip path; verify the part exists so a dangling
             // rId still yields None (the bg chain then falls through to the
             // next level), preserving the prior data-URL behaviour.
-            ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+            // `index_for_name` reads the central directory only (no inflate),
+            // unlike the former `read_zip_bytes` which decompressed to discard.
+            zip.index_for_name(&path)?;
             Some(path)
         };
         background = parse_background(n, theme, &mut resolve);
@@ -7871,7 +7886,9 @@ fn parse_slide(
                     let mut resolve = |rid: &str| -> Option<String> {
                         let target = layout_rels.get(rid)?;
                         let path = resolve_path(layout_dir, target);
-                        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+                        // Existence check only — central-directory lookup, no
+                        // inflate (former `read_zip_bytes` decompressed to discard).
+                        zip.index_for_name(&path)?;
                         Some(path)
                     };
                     background = parse_background(n, theme, &mut resolve);
@@ -9010,7 +9027,9 @@ fn build_master_bundle(
         let mut resolve = |rid: &str| -> Option<String> {
             let target = master_rels.get(rid)?;
             let path = resolve_path(&master_dir, target);
-            ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+            // Existence check only — central-directory lookup, no inflate
+            // (former `read_zip_bytes` decompressed the entry just to discard it).
+            zip.index_for_name(&path)?;
             Some(path)
         };
         parse_background(c_sld, &theme, &mut resolve)
@@ -9316,7 +9335,9 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 let mut resolve = |rid: &str| -> Option<String> {
                     let target = bundle.master_rels.get(rid)?;
                     let path = resolve_path(&bundle.master_dir, target);
-                    ooxml_common::zip::read_zip_bytes(&mut zip, &path).ok()?;
+                    // Existence check only — central-directory lookup, no inflate
+                    // (former `read_zip_bytes` decompressed the entry to discard it).
+                    zip.index_for_name(&path)?;
                     Some(path)
                 };
                 parse_background(c_sld, &theme, &mut resolve)
@@ -9402,7 +9423,7 @@ mod tests {
 
     /// Build an in-memory zip containing exactly `parts` (path → bytes). Used to
     /// prove a `<a:buBlip>` whose rId resolves to a part that ISN'T in the
-    /// archive falls through to Bullet::Inherit (read_zip_bytes returns None).
+    /// archive falls through to Bullet::Inherit (index_for_name returns None).
     fn zip_with_parts(parts: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::Write;
         let mut buf = Vec::new();
@@ -10322,7 +10343,7 @@ mod tests {
     /// ECMA-376 §21.1.2.4.2 — a `<a:buBlip>` whose `r:embed` IS listed in the
     /// part's rels (so `resolve_path` succeeds) but whose target part is NOT in
     /// the package must NOT emit a `Bullet::Blip` carrying a dangling path. The
-    /// resolver verifies part existence with `read_zip_bytes`, so a missing part
+    /// resolver verifies part existence with `index_for_name`, so a missing part
     /// yields `None` and the level falls through to `Bullet::Inherit` (the empty
     /// `LevelBullets` slot), matching the variant's doc comment. Exercised
     /// end-to-end through `parse_master_level_bullets` (one of the now-`zip`-
@@ -10347,7 +10368,7 @@ mod tests {
         master_rels.insert("rId7".to_owned(), "../media/missing.png".to_owned());
 
         // Archive deliberately LACKS ppt/media/missing.png (it holds an unrelated
-        // part so it isn't empty). read_zip_bytes(missing.png) → None.
+        // part so it isn't empty). index_for_name(missing.png) → None.
         let bytes = zip_with_parts(&[("ppt/media/other.png", b"\x89PNG")]);
         let cursor = Cursor::new(bytes.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();

@@ -15,5 +15,10 @@ roxmltree = { workspace = true }
 console_error_panic_hook = { workspace = true }
 ooxml-common = { workspace = true }
 
+# `-Oz` optimizes the wasm binary for size (over the default `-O`), shrinking
+# the artifact browsers download. wasm-pack runs this pass after wasm-bindgen.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
+
 [package.metadata.wasm-pack.profile.release.wasm-bindgen]
 omit-default-module-path = true

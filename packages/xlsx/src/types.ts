@@ -984,10 +984,14 @@ export interface RenderViewportOptions {
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
+   *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
+   *  it here would structured-clone the entire file per sheet switch for no
+   *  gain. `parseSheet` is therefore only valid AFTER a `parse` (a `parseSheet`
+   *  with no retained buffer is a protocol violation). */
   | {
       type: 'parseSheet';
       id: number;
-      data: ArrayBuffer;
       sheetIndex: number;
       sheetName: string;
       maxZipEntryBytes?: number;

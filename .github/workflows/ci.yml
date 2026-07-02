@@ -19,6 +19,7 @@ jobs:
   # skip themselves when the fixtures are absent.
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -41,6 +42,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -102,6 +104,7 @@ jobs:
   # exercises the full parse -> render pipeline in a browser.
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -126,7 +129,18 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build WASM
         run: pnpm build:wasm
-      - name: Install Playwright Chrome
-        run: pnpm exec playwright install chrome --with-deps
+      # ubuntu-latest ships Google Chrome (the `channel: 'chrome'` browser the
+      # smoke config uses), so install only when it is genuinely absent. The
+      # unconditional `playwright install chrome --with-deps` stalled >30min
+      # twice in a row (apt/CDN hang inside --with-deps); the guard skips that
+      # network path entirely and the step timeout bounds the fallback.
+      - name: Install Playwright Chrome (only if missing)
+        timeout-minutes: 5
+        run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "Google Chrome preinstalled: $(google-chrome --version)"
+          else
+            pnpm exec playwright install chrome --with-deps
+          fi
       - name: Smoke tests
         run: pnpm smoke

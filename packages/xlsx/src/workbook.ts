@@ -178,17 +178,20 @@ export class XlsxWorkbook {
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
     const cached = this.sheetCache.get(sheetIndex);
     if (cached) return cached;
+    // `!this.rawData` guards that `parse` has run: the worker retained the
+    // whole-workbook buffer at parse time, and `parseSheet` reuses it. We no
+    // longer re-send the buffer here (it previously structured-cloned the entire
+    // file per sheet switch); the retained `rawData` is still kept for
+    // `getImage`'s route-through-worker path.
     if (!this.parsedWorkbook || !this.rawData) {
       throw new Error('Workbook not loaded');
     }
-    const rawData = this.rawData;
     const sheetMeta = this.parsedWorkbook.workbook.sheets[sheetIndex];
     if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
 
     const res = await this.bridge.request((id) => ({
       type: 'parseSheet',
       id,
-      data: rawData.slice(0),
       sheetIndex,
       sheetName: sheetMeta.name,
       maxZipEntryBytes: this.maxZipEntryBytes,

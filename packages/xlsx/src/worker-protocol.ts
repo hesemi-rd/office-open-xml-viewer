@@ -19,10 +19,11 @@ export type RenderWorkerRequest =
   // resolveValidationList range path that awaits it) work, mirroring how the
   // pptx render worker handles `extractMedia` for getMedia. The render worker
   // already holds `rawData` + `workbook` from `parse`, so only `sheetIndex` is
-  // load-bearing here; `data` / `sheetName` are carried for shape-compat with
-  // the main-mode message getWorksheet posts but are ignored (the worker parses
-  // from its own `rawData` and derives the sheet name from `workbook`).
-  | { type: 'parseSheet'; id: number; data?: ArrayBuffer; sheetIndex: number; sheetName?: string; maxZipEntryBytes?: number }
+  // load-bearing here; `sheetName` is carried for shape-compat with the
+  // main-mode message getWorksheet posts but is ignored (the worker derives the
+  // sheet name from its own `workbook`). No `data`: like main-mode `parseSheet`,
+  // the buffer retained at `parse` is reused — never re-sent per sheet.
+  | { type: 'parseSheet'; id: number; sheetIndex: number; sheetName?: string; maxZipEntryBytes?: number }
   | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage

@@ -34,11 +34,19 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       const res: WorkerResponse = { type: 'parsed', id, workbook };
       self.postMessage(res);
     } else if (req.type === 'parseSheet') {
+      // Reuse the buffer retained at `parse` instead of re-receiving it — the
+      // whole file no longer crosses the worker boundary on every sheet switch
+      // (twin of the `extractImage` reuse below). A `parseSheet` before any
+      // `parse` has no buffer to work with: that is a protocol violation, so
+      // fail loudly rather than silently returning an empty sheet.
+      if (!currentBuffer) {
+        throw new Error('parseSheet before parse: no buffer retained');
+      }
       const maxBytes =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      const json = parse_sheet(new Uint8Array(req.data), req.sheetIndex, req.sheetName, maxBytes);
+      const json = parse_sheet(currentBuffer, req.sheetIndex, req.sheetName, maxBytes);
       const worksheet = JSON.parse(json);
       const res: WorkerResponse = { type: 'parsedSheet', id, worksheet };
       self.postMessage(res);
