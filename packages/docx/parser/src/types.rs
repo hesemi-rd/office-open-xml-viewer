@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -25,8 +25,10 @@ pub struct Document {
     /// correct CSS generic family (roman→serif, swiss→sans-serif, modern→monospace)
     /// without relying on name-pattern heuristics. Empty when fontTable.xml
     /// is absent or malformed.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub font_family_classes: HashMap<String, String>,
+    /// Serialized as a `BTreeMap` so JSON key order is deterministic (font names
+    /// sorted), making the parser output byte-stable for identical input.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub font_family_classes: BTreeMap<String, String>,
     /// ECMA-376 §17.13.5 — track-changes events found in the body. Each entry
     /// is one `<w:ins>` or `<w:del>` block, with the change author / date /
     /// text content. Empty when the document has no tracked changes.

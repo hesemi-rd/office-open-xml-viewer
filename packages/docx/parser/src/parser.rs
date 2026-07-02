@@ -1,7 +1,7 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
 use ooxml_common::zip::read_zip_string;
 use roxmltree::Document as XmlDoc;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
@@ -787,8 +787,8 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// this map as the primary source of serif/sans-serif classification, falling
 /// back to name-pattern matching only when the font is absent or classified
 /// as `auto`.
-fn parse_font_table(xml: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
     let Ok(doc) = XmlDoc::parse(xml) else {
         return map;
     };

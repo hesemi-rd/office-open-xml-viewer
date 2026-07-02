@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
 
@@ -669,8 +669,8 @@ fn parse_worksheet(
     let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     let mut rows = Vec::new();
-    let mut col_widths: HashMap<u32, f64> = HashMap::new();
-    let mut row_heights: HashMap<u32, f64> = HashMap::new();
+    let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
+    let mut row_heights: BTreeMap<u32, f64> = BTreeMap::new();
     let mut merge_cells: Vec<MergeCell> = Vec::new();
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
@@ -2316,6 +2316,39 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+
+    /// The serialized worksheet JSON is deterministic: `colWidths` keys come out
+    /// in ascending column order regardless of `<col>` declaration order, and
+    /// two serializations of the same parse are byte-identical. This is the
+    /// BTreeMap guarantee — with the former `HashMap` field the key order
+    /// followed the randomized hash seed, so identical input could serialize to
+    /// different byte streams across runs.
+    #[test]
+    fn worksheet_json_is_deterministic_and_key_ordered() {
+        // Columns declared out of order (3, then 1, then 2).
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols>
+                 <col customWidth="1" min="3" max="3" width="30"/>
+                 <col customWidth="1" min="1" max="1" width="10"/>
+                 <col customWidth="1" min="2" max="2" width="20"/>
+               </cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        let json = serde_json::to_string(&ws).expect("serialize");
+        // Two serializations of the same value are byte-identical.
+        assert_eq!(json, serde_json::to_string(&ws).expect("serialize"));
+
+        // colWidths keys appear in ascending column order in the JSON string.
+        let widths = &json[json.find("\"colWidths\"").expect("colWidths present")..];
+        let p1 = widths.find("\"1\"").expect("col 1 key");
+        let p2 = widths.find("\"2\"").expect("col 2 key");
+        let p3 = widths.find("\"3\"").expect("col 3 key");
+        assert!(
+            p1 < p2 && p2 < p3,
+            "colWidths keys must serialize in ascending order (1,2,3), got positions {p1},{p2},{p3} in {widths}"
+        );
     }
 }
 
