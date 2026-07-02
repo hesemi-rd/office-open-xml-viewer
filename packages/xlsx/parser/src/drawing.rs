@@ -413,10 +413,13 @@ pub(crate) fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
 /// Parse `<xdr:txBody>` into a `ShapeText`. Returns `None` if the body
 /// contains no visible runs. Run formatting follows ECMA-376 §21.1.2.3.1
 /// (`<a:rPr>`): `sz` is hundredths of a point, `b="1"` = bold, `i="1"`
-/// = italic, `<a:solidFill>` overrides shape-level font color, and
-/// `<a:latin@typeface>` selects the Latin font face (we don't yet
-/// distinguish East-Asian / complex-script fonts — `<a:ea>` and `<a:cs>`
-/// are ignored for typeface).
+/// = italic, `<a:solidFill>` overrides shape-level font color,
+/// `<a:latin@typeface>` selects the Latin font face, and `<a:ea@typeface>` /
+/// `<a:cs@typeface>` the East-Asian / complex-script faces. The renderer
+/// floors the line box by whichever of these declares a tabled (Meiryo /
+/// Sakkal Majalla) design line — the common Japanese encoding sets Meiryo on
+/// `<a:ea>` while leaving `<a:latin>` default. Per-glyph font switching is
+/// still not modeled (a larger change); only the line-box floor uses ea/cs.
 /// Point size for an equation: the first `a:rPr@sz` on an actual math RUN
 /// (`m:r`), in pt. Scoped to `m:r` so the size on `<m:ctrlPr>` (control
 /// properties — structural delimiters, not visible glyphs) is ignored.
@@ -589,6 +592,12 @@ pub(crate) fn parse_tx_body(
                             let mut size: f64 = 0.0;
                             let mut color: Option<String> = None;
                             let mut font_face: Option<String> = None;
+                            // ECMA-376 §21.1.2.3.1 `<a:ea>` / `<a:cs>` typefaces.
+                            // Parsed alongside `<a:latin>` so the renderer can
+                            // floor the line box by a tabled East-Asian face
+                            // (e.g. Meiryo set only on `<a:ea>`).
+                            let mut font_face_ea: Option<String> = None;
+                            let mut font_face_cs: Option<String> = None;
                             for rc in pc.children().filter(|n| n.is_element()) {
                                 match rc.tag_name().name() {
                                     "rPr" => {
@@ -607,6 +616,14 @@ pub(crate) fn parse_tx_body(
                                                 }
                                                 "latin" => {
                                                     font_face =
+                                                        rpc.attribute("typeface").map(String::from);
+                                                }
+                                                "ea" => {
+                                                    font_face_ea =
+                                                        rpc.attribute("typeface").map(String::from);
+                                                }
+                                                "cs" => {
+                                                    font_face_cs =
                                                         rpc.attribute("typeface").map(String::from);
                                                 }
                                                 _ => {}
@@ -629,6 +646,8 @@ pub(crate) fn parse_tx_body(
                                     size,
                                     color,
                                     font_face,
+                                    font_face_ea,
+                                    font_face_cs,
                                 });
                             }
                         }
@@ -1814,6 +1833,92 @@ mod math_tests {
         assert!(
             v.get("font_face").is_none(),
             "snake_case `font_face` must not appear"
+        );
+    }
+
+    /// ECMA-376 §21.1.2.3.1 `<a:ea>` (East-Asian) / `<a:cs>` (complex-script)
+    /// typefaces parse onto the run alongside `<a:latin>`. The common Japanese
+    /// encoding sets Meiryo on `<a:ea>` while leaving `<a:latin>` default; the
+    /// renderer floors the line box by the tabled face. They serialize as
+    /// camelCase `fontFaceEa` / `fontFaceCs` and are additive (omitted when
+    /// absent), so shapes without ea/cs stay byte-identical.
+    #[test]
+    fn parses_ea_and_cs_typefaces() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r>
+                  <a:rPr sz="1400">
+                    <a:ea typeface="Meiryo"/>
+                    <a:cs typeface="Sakkal Majalla"/>
+                  </a:rPr>
+                  <a:t>あ</a:t>
+                </a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let run = &text.paragraphs[0].runs[0];
+        match run {
+            ShapeTextRun::Text {
+                font_face,
+                font_face_ea,
+                font_face_cs,
+                ..
+            } => {
+                assert!(font_face.is_none(), "latin left default → font_face None");
+                assert_eq!(
+                    font_face_ea.as_deref(),
+                    Some("Meiryo"),
+                    "<a:ea> → fontFaceEa"
+                );
+                assert_eq!(
+                    font_face_cs.as_deref(),
+                    Some("Sakkal Majalla"),
+                    "<a:cs> → fontFaceCs"
+                );
+            }
+            other => panic!("expected Text run, got {other:?}"),
+        }
+
+        let v: serde_json::Value = serde_json::to_value(run).unwrap();
+        assert_eq!(
+            v["fontFaceEa"], "Meiryo",
+            "serializes as camelCase fontFaceEa"
+        );
+        assert_eq!(
+            v["fontFaceCs"], "Sakkal Majalla",
+            "serializes as camelCase fontFaceCs"
+        );
+    }
+
+    /// Additive guarantee: a run with no `<a:ea>` / `<a:cs>` omits both keys
+    /// from JSON entirely (serde `skip_serializing_if = "Option::is_none"`), so
+    /// existing shape JSON stays byte-identical.
+    #[test]
+    fn omits_ea_and_cs_when_absent() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r>
+                  <a:rPr sz="1400"><a:latin typeface="Calibri"/></a:rPr>
+                  <a:t>hi</a:t>
+                </a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let run = &text.paragraphs[0].runs[0];
+        let v: serde_json::Value = serde_json::to_value(run).unwrap();
+        assert!(
+            v.get("fontFaceEa").is_none(),
+            "fontFaceEa omitted when absent"
+        );
+        assert!(
+            v.get("fontFaceCs").is_none(),
+            "fontFaceCs omitted when absent"
         );
     }
 
