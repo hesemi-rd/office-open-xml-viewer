@@ -1023,3 +1023,256 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     v.destroy();
   });
 });
+
+describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
+  // container fit width 200, slide 1000×600 EMU → base scale = 200/1000 = 0.2.
+  // slide height px = 600 * 0.2 = 120. gap 10 ⇒ stride 130.
+  const BASE = 200 / 1000; // 0.2
+  const SLIDE_H = 600 * BASE; // 120
+  const GAP = 10;
+  const STRIDE = SLIDE_H + GAP; // 130 — the top-to-top distance between slides
+
+  function setup(slideCount = 20, opts = {}) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(slideCount, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: GAP,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, container, engine };
+  }
+
+  it('scrollToSlide sets scrollTop to the slide offset and clamps out-of-range', () => {
+    const { v, scrollHost } = setup();
+    // Pick a clientHeight that makes maxTop STRICTLY LESS than the last slide's top
+    // offset, so the `Math.min(maxTop, target)` clamp is actually exercised.
+    // totalHeight = 20*120 + 19*10 = 2590; offsets[19] = 19*130 = 2470.
+    scrollHost.clientHeight = 200; // maxTop = 2590 − 200 = 2390 < offsets[19] 2470
+    v.scrollToSlide(3);
+    expect(Math.abs(scrollHost.scrollTop - 3 * STRIDE)).toBeLessThan(2);
+    v.scrollToSlide(999); // clamps to last slide index (19)
+    const totalHeight = 20 * SLIDE_H + 19 * GAP; // 2590
+    const maxTop = totalHeight - 200; // 2390
+    const lastOffset = 19 * STRIDE; // 2470
+    expect(maxTop).toBeLessThan(lastOffset); // precondition: clamp is exercised
+    expect(Math.abs(scrollHost.scrollTop - maxTop)).toBeLessThan(2);
+    v.scrollToSlide(-5); // clamps to 0
+    expect(scrollHost.scrollTop).toBe(0);
+    v.destroy();
+  });
+
+  it('scrollToSlide: viewport taller than total content ⇒ scrollTop pinned to 0 (negative maxTop guard)', () => {
+    // A 2-slide deck is shorter than a very tall viewport, so
+    // totalHeight − clientHeight is NEGATIVE; the `Math.max(0, …)` maxTop guard must
+    // pin scrollTop to 0 rather than a negative top.
+    const { v, scrollHost } = setup(2);
+    scrollHost.clientHeight = 5000; // >> totalHeight (2*120 + 10 = 250)
+    v.scrollToSlide(1); // last slide; its offset (130) is above maxTop (0)
+    expect(scrollHost.scrollTop).toBe(0);
+    v.destroy();
+  });
+
+  it('onVisibleSlideChange fires only when topIndex changes', () => {
+    const changes: number[] = [];
+    const { v, scrollHost } = setup(20, { onVisibleSlideChange: (i: number) => changes.push(i) });
+    scrollHost.scrollTop = STRIDE; // slide 1 top
+    scrollHost.dispatch('scroll');
+    scrollHost.scrollTop = STRIDE + 10; // still within slide 1
+    scrollHost.dispatch('scroll');
+    scrollHost.scrollTop = 3 * STRIDE; // slide 3 top
+    scrollHost.dispatch('scroll');
+    // Deduped: 0 (initial) → 1 → 3, no repeat for the STRIDE+10 no-op.
+    expect(changes).toEqual([0, 1, 3]);
+    v.destroy();
+  });
+
+  it('scrollToSlide does not re-fire onVisibleSlideChange for the same top slide', () => {
+    const changes: number[] = [];
+    const { v } = setup(20, { onVisibleSlideChange: (i: number) => changes.push(i) });
+    // Initial mount fired 0. scrollToSlide(0) lands on the same top slide — no new fire.
+    v.scrollToSlide(0);
+    expect(changes).toEqual([0]);
+    // Navigate to slide 5 → one fire; navigate there again → no duplicate.
+    v.scrollToSlide(5);
+    v.scrollToSlide(5);
+    expect(changes).toEqual([0, 5]);
+    v.destroy();
+  });
+
+  it('ResizeObserver re-fit preserves the zoom multiplier', () => {
+    // zoomMax headroom: base 0.2, 2× zoom → 0.4; after the width doubles the new
+    // base is 0.4 so the preserved scale is 0.8. zoomMin/zoomMax are ABSOLUTE
+    // px-per-EMU bounds (design §8.2), so a low zoomMax would legitimately CLAMP
+    // the re-fit and break preservation. Give the multiplier room to survive.
+    const { v, container } = setup(20, { zoomMax: 10 });
+    v.setScale(v.baseScaleForTest() * 2); // 2× zoom
+    const zoomMultiplier = v.scaleForTest() / v.baseScaleForTest();
+    // Container widens; the observer callback re-fits base and re-applies the mult.
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    v.resizeForTest(); // fires the observed resize path
+    expect(v.scaleForTest() / v.baseScaleForTest()).toBeCloseTo(zoomMultiplier, 5);
+    v.destroy();
+  });
+
+  it('ResizeObserver re-fit bumps the render epoch (resize is an epoch event)', () => {
+    const { v, container } = setup();
+    const before = v.renderEpochForTest();
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    v.resizeForTest();
+    // A width change re-fits the base scale (routed through setScale), which bumps
+    // the epoch so any bitmap in flight at the old scale is treated as stale.
+    expect(v.renderEpochForTest()).toBeGreaterThan(before);
+    v.destroy();
+  });
+
+  it('ResizeObserver re-fit with an UNCHANGED width does not re-fit or bump the epoch', () => {
+    const { v } = setup();
+    const scaleBefore = v.scaleForTest();
+    const epochBefore = v.renderEpochForTest();
+    v.resizeForTest(); // same width — no-op re-fit
+    expect(v.scaleForTest()).toBe(scaleBefore);
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    v.destroy();
+  });
+
+  it('height-only resize (width unchanged) re-mounts the newly-revealed window without a scroll, no epoch bump, no callback', () => {
+    // F1 regression: a height-only grow used to early-return before `_mountVisible`,
+    // leaving the newly-revealed rows blank until the user scrolled. At scrollTop 0
+    // the initially-mounted window is [0..3] (viewport 400 / stride 130 ≈ 3 slides;
+    // +1 overscan). Growing the viewport must mount more purely from the resize —
+    // no scroll event, no epoch bump (geometry/scale unchanged so cached canvases
+    // stay valid), and no onVisibleSlideChange fire (topIndex stays 0).
+    const changes: number[] = [];
+    const { v, scrollHost } = setup(20, { onVisibleSlideChange: (i: number) => changes.push(i) });
+    const mountedBefore = v.mountedSlideIndicesForTest().slice().sort((a, b) => a - b);
+    expect(mountedBefore.length).toBeGreaterThan(0);
+    expect(changes).toEqual([0]); // initial mount fired 0
+    const epochBefore = v.renderEpochForTest();
+    const scaleBefore = v.scaleForTest();
+
+    // Grow HEIGHT only; width (and thus the fit-width base scale) is unchanged.
+    scrollHost.clientHeight = 1600;
+    v.resizeForTest(); // NO scroll event dispatched
+
+    const mountedAfter = v.mountedSlideIndicesForTest().slice().sort((a, b) => a - b);
+    // The revealed window strictly grows (taller viewport intersects more slides).
+    expect(mountedAfter.length).toBeGreaterThan(mountedBefore.length);
+    expect(Math.max(...mountedAfter)).toBeGreaterThan(Math.max(...mountedBefore));
+    // No epoch bump — nothing was re-scaled, so no in-flight render is stale.
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    expect(v.scaleForTest()).toBe(scaleBefore);
+    // topIndex is still 0 at scrollTop 0 ⇒ callback did NOT fire again.
+    expect(changes).toEqual([0]);
+    v.destroy();
+  });
+
+  it('clamped resize (zoomMax clamp + width & height grow) still refreshes the revealed window', () => {
+    // F1 clamped-path variant: pin zoomMax to the current base so a width grow's
+    // re-fit (newBase × mult) clamps back to the SAME scale, making setScale a no-op
+    // (which skips its own force-re-render mount). The post-setScale `_mountVisible`
+    // must still mount the rows the taller viewport revealed. base = 0.2, no user
+    // zoom ⇒ mult 1; after width→400 newBase 0.4 clamps to zoomMax 0.2 (== _scale).
+    const changes: number[] = [];
+    const { v, scrollHost, container } = setup(20, {
+      zoomMax: BASE, // 0.2 — clamps the re-fit back to the current scale
+      onVisibleSlideChange: (i: number) => changes.push(i),
+    });
+    expect(v.scaleForTest()).toBe(BASE);
+    const mountedBefore = v.mountedSlideIndicesForTest().slice().sort((a, b) => a - b);
+    expect(mountedBefore.length).toBeGreaterThan(0);
+    const epochBefore = v.renderEpochForTest();
+
+    // Grow BOTH width and height. The width grow triggers the re-fit branch, but the
+    // clamp pins the scale unchanged ⇒ setScale no-ops. Heights are therefore
+    // unchanged (scale unchanged), so the taller viewport reveals more of the SAME
+    // geometry.
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    scrollHost.clientWidth = 400;
+    scrollHost.clientHeight = 1600;
+    v.resizeForTest();
+
+    const mountedAfter = v.mountedSlideIndicesForTest().slice().sort((a, b) => a - b);
+    expect(mountedAfter.length).toBeGreaterThan(mountedBefore.length);
+    // Scale stayed pinned at the clamp, so setScale no-oped ⇒ no epoch bump.
+    expect(v.scaleForTest()).toBe(BASE);
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    // topIndex still 0 ⇒ no extra callback.
+    expect(changes).toEqual([0]);
+    v.destroy();
+  });
+
+  it('zero-width container defers, then lays out on first non-zero resize', () => {
+    installDom();
+    const container = makeContainer(0, 0); // unlaid-out
+    const engine = new FakePptxEngine(5, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    expect(v.mountedSlideIndicesForTest().length).toBe(0); // deferred
+    container.clientWidth = 300;
+    scrollHost.clientWidth = 300;
+    scrollHost.clientHeight = 400;
+    v.resizeForTest();
+    expect(v.mountedSlideIndicesForTest().length).toBeGreaterThan(0);
+    v.destroy();
+  });
+
+  it('empty deck: slideCount 0 ⇒ spacer 0, no slots, scrollToSlide no-op', () => {
+    installDom();
+    const container = makeContainer(300, 400);
+    const engine = new FakePptxEngine(0, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    v.relayout();
+    const spacer = (container.children[0] as FakeEl).children[0].children[0] as FakeEl;
+    expect(parseFloat(spacer.style.height || '0')).toBe(0);
+    expect(v.mountedSlideIndicesForTest().length).toBe(0);
+    v.scrollToSlide(0); // no throw
+    v.destroy();
+  });
+
+  it('empty deck: resize does not crash and fires no callback', () => {
+    installDom();
+    const container = makeContainer(0, 0);
+    const engine = new FakePptxEngine(0, 1000, 600);
+    const changes: number[] = [];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      onVisibleSlideChange: (i: number) => changes.push(i),
+    });
+    container.clientWidth = 300;
+    (container.children[0] as FakeEl).children[0].clientWidth = 300;
+    v.resizeForTest(); // no slides ⇒ no-op
+    expect(v.mountedSlideIndicesForTest().length).toBe(0);
+    expect(changes).toEqual([]);
+    v.destroy();
+  });
+
+  it('destroy() disconnects the ResizeObserver', () => {
+    installDom();
+    let disconnected = 0;
+    class SpyRO {
+      cb: () => void;
+      constructor(cb: () => void) {
+        this.cb = cb;
+      }
+      observe(): void {}
+      disconnect(): void {
+        disconnected++;
+      }
+    }
+    vi.stubGlobal('ResizeObserver', SpyRO);
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(3, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    v.destroy();
+    expect(disconnected).toBe(1);
+  });
+});
