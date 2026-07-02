@@ -10,4 +10,5 @@ pub mod blip;
 pub mod chart;
 pub mod color;
 pub mod math;
+pub mod text;
 pub mod zip;

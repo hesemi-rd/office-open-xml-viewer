@@ -886,18 +886,10 @@ pub struct ShapeInfo {
     pub text: Option<ShapeText>,
 }
 
-/// Paragraph line spacing (`<a:pPr>/<a:lnSpc>`, ECMA-376 §21.1.2.2.5). Mirrors
-/// the pptx `SpaceLine` JSON shape (and core's TS `SpaceLine`): a percentage of
+/// Paragraph line spacing (`<a:pPr>/<a:lnSpc>`, ECMA-376 §21.1.2.2.5). Shared
+/// with the pptx parser (and mirroring core's TS `SpaceLine`): a percentage of
 /// the natural single line, or an absolute per-line height in points.
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum SpaceLine {
-    /// `<a:spcPct@val>` (e.g. 100000 = 100%, 150000 = 150%).
-    Pct { val: f64 },
-    /// `<a:spcPts@val>` in points (the raw ST_TextSpacingPoint hundredths-of-a-
-    /// point value is divided by 100 by the parser, matching pptx).
-    Pts { val: f64 },
-}
+pub use ooxml_common::text::SpaceLine;
 
 /// Text body inside a shape (`<xdr:txBody>`, ECMA-376 §20.1.2.2). Holds
 /// the paragraphs plus body-level formatting (`<a:bodyPr>`).

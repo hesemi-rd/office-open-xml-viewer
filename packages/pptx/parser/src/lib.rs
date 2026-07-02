@@ -1,5 +1,6 @@
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid, SrcRect};
 use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
+use ooxml_common::text::{parse_autofit, parse_lnspc, SpaceLine};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -1494,16 +1495,6 @@ fn is_zero_i64(n: &i64) -> bool {
 }
 fn is_false(b: &bool) -> bool {
     !*b
-}
-
-/// Line spacing specification
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum SpaceLine {
-    /// Percentage of the font height (val: e.g. 100000 = 100%, 150000 = 150%)
-    Pct { val: f64 },
-    /// Fixed points (val in pt)
-    Pts { val: f64 },
 }
 
 /// Bullet / list-item marker for a paragraph
@@ -4565,26 +4556,16 @@ fn parse_text_body(
     // For normAutofit, also capture PowerPoint's stored fontScale /
     // lnSpcReduction (ECMA-376 §21.1.2.1.3) — ST_Percentage in 1000ths of a
     // percent, so 62500 → 0.625. The renderer applies these directly.
-    let mut font_scale: Option<f64> = None;
-    let mut ln_spc_reduction: Option<f64> = None;
-    let auto_fit = if let Some(n) = body_pr {
-        if child(n, "spAutoFit").is_some() {
-            "sp".to_owned()
-        }
-        // OOXML uses lowercase 'f': normAutofit (not normAutoFit).
-        else if let Some(na) = child(n, "normAutofit") {
-            font_scale = attr_f64(&na, "fontScale").map(|v| v / 100000.0);
-            ln_spc_reduction = attr_f64(&na, "lnSpcReduction").map(|v| v / 100000.0);
-            "norm".to_owned()
-        } else if child(n, "noAutofit").is_some() {
-            "none".to_owned()
-        } else {
-            // bodyPr present but no autofit child — fall back to theme.
-            theme_auto_fit().unwrap_or_else(|| "none".to_owned())
-        }
-    } else {
-        theme_auto_fit().unwrap_or_else(|| "none".to_owned())
-    };
+    // parse_autofit returns None when there is no bodyPr, or a bodyPr with no
+    // autofit child, so both fall through to the theme txDef default.
+    let (auto_fit, font_scale, ln_spc_reduction) =
+        body_pr.and_then(parse_autofit).unwrap_or_else(|| {
+            (
+                theme_auto_fit().unwrap_or_else(|| "none".to_owned()),
+                None,
+                None,
+            )
+        });
     // ECMA-376 §20.1.10.34: numCol on <a:bodyPr> tells the renderer to
     // distribute paragraphs across N columns within the shape. Default 1.
     // spcCol is the inter-column gutter in EMU (default 0). Both fall back
@@ -4944,16 +4925,8 @@ fn parse_paragraph(
         .or(body_default_space_after);
 
     let space_line = p_pr
-        .and_then(|n| {
-            let spc = child(n, "lnSpc")?;
-            if let Some(pct) = child(spc, "spcPct") {
-                attr_f64(&pct, "val").map(|v| SpaceLine::Pct { val: v })
-            } else {
-                child(spc, "spcPts")
-                    .and_then(|pts| attr_f64(&pts, "val"))
-                    .map(|v| SpaceLine::Pts { val: v / 100.0 }) // hundredths of pt → pt
-            }
-        })
+        .and_then(|n| child(n, "lnSpc"))
+        .and_then(parse_lnspc)
         .or_else(|| body_default_line_spacing.map(|v| SpaceLine::Pct { val: v }));
 
     // Tab stops from pPr > tabLst

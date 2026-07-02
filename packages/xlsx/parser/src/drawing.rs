@@ -534,24 +534,13 @@ pub(crate) fn parse_tx_body(
                 if let Some(w) = c.attribute("wrap") {
                     wrap = w.to_string();
                 }
-                // OOXML spelling is `normAutofit` (lowercase f).
-                for bc in c.children().filter(|n| n.is_element()) {
-                    match bc.tag_name().name() {
-                        "spAutoFit" => auto_fit = String::from("sp"),
-                        "normAutofit" => {
-                            auto_fit = String::from("norm");
-                            font_scale = bc
-                                .attribute("fontScale")
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .map(|v| v / 100000.0);
-                            ln_spc_reduction = bc
-                                .attribute("lnSpcReduction")
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .map(|v| v / 100000.0);
-                        }
-                        "noAutofit" => auto_fit = String::from("none"),
-                        _ => {}
-                    }
+                // Autofit child (spAutoFit / normAutofit / noAutofit). Shared
+                // with pptx; xlsx keeps the "none" default when there is no
+                // autofit child (parse_autofit returns None).
+                if let Some((af, fs, lsr)) = ooxml_common::text::parse_autofit(c) {
+                    auto_fit = af;
+                    font_scale = fs;
+                    ln_spc_reduction = lsr;
                 }
             }
             "p" => {
@@ -584,30 +573,12 @@ pub(crate) fn parse_tx_body(
                             // ECMA-376 §21.1.2.2.5 `<a:lnSpc>`: spcPct is a
                             // percentage of the natural single line; spcPts is an
                             // absolute per-line height (raw @val is hundredths of
-                            // a point → divide by 100, matching pptx SpaceLine).
+                            // a point → divide by 100). Shared with pptx.
                             if let Some(ln_spc) = pc
                                 .children()
                                 .find(|n| n.is_element() && n.tag_name().name() == "lnSpc")
                             {
-                                let pct = ln_spc
-                                    .children()
-                                    .find(|n| n.is_element() && n.tag_name().name() == "spcPct");
-                                if let Some(v) = pct
-                                    .and_then(|n| n.attribute("val"))
-                                    .and_then(|v| v.parse::<f64>().ok())
-                                {
-                                    space_line = Some(SpaceLine::Pct { val: v });
-                                } else {
-                                    let pts = ln_spc.children().find(|n| {
-                                        n.is_element() && n.tag_name().name() == "spcPts"
-                                    });
-                                    if let Some(v) = pts
-                                        .and_then(|n| n.attribute("val"))
-                                        .and_then(|v| v.parse::<f64>().ok())
-                                    {
-                                        space_line = Some(SpaceLine::Pts { val: v / 100.0 });
-                                    }
-                                }
+                                space_line = ooxml_common::text::parse_lnspc(ln_spc);
                             }
                         }
                         "r" => {
