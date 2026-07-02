@@ -10,13 +10,14 @@ use crate::fill::{
     parse_fill, parse_scene3d, parse_shadow, parse_sp3d, parse_stroke, parse_table_style_fill,
     parse_xfrm, EffectLst,
 };
+use crate::master::LayoutPlaceholders;
 use crate::text::{
     empty_level_bullets, parse_text_body, LevelBullets, LevelFontSizes, LevelIndents, ShapeKind,
 };
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, child, read_zip_str, resolve_path, table_style_presets,
-    LayoutPlaceholders, PptxZip, TableStyleDef,
+    PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid};
 use std::collections::HashMap;
