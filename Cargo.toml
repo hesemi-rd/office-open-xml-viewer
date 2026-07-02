@@ -21,3 +21,16 @@ ooxml-common = { path = "packages/ooxml-common" }
 [profile.release]
 opt-level = "s"
 lto = true
+# One codegen unit lets LLVM optimize (and dead-strip) across the whole crate
+# instead of per-unit, trading longer compile time for a smaller, faster .wasm.
+codegen-units = 1
+# wasm has no stack unwinding (wasm-bindgen builds effectively abort on panic
+# already); making it explicit drops the unwind tables and landing pads from
+# every parser's binary. The console_error_panic_hook each parser installs
+# still fires — the panic hook runs during panic handling, before the process
+# aborts — so a panic message + JS stack is still logged to the console; only
+# Rust-level unwinding (which wasm never performed usefully) is gone.
+panic = "abort"
+# Strip DWARF debuginfo from the release artifact (the .wasm ships to browsers;
+# symbol names for panics come from the panic hook, not embedded debuginfo).
+strip = "debuginfo"
