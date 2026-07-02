@@ -7,6 +7,9 @@ export type {
   DocxDocumentModel,
   DocSettings,
   SectionProps,
+  // Per-section page geometry (reachable via the BodyElement sectionBreak arm's
+  // `geom` and PaginatedBodyElement's `sectionGeom`, ECMA-376 §17.6.13/§17.6.11).
+  SectionGeom,
   // Multi-column section sub-types (reachable via SectionProps.columns).
   ColumnsSpec,
   ColSpec,
