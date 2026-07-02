@@ -1,0 +1,2772 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderChart draw-call signature (characterization) > is stable for: area+legend 1`] = `
+"set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Area" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+beginPath
+moveTo 105.0667,307.6
+lineTo 105.0667,251.45
+lineTo 137.6,214.0167
+lineTo 170.1333,232.7333
+lineTo 202.6667,195.3
+lineTo 235.2,176.5833
+lineTo 267.7333,214.0167
+lineTo 300.2667,157.8667
+lineTo 332.8,195.3
+lineTo 365.3333,139.15
+lineTo 397.8667,176.5833
+lineTo 430.4,120.4333
+lineTo 462.9333,157.8667
+lineTo 462.9333,307.6
+closePath
+set fillStyle=rgba(68,114,196,0.6)
+fill fs=rgba(68,114,196,0.6) ga=1
+set strokeStyle=#4472C4
+set lineWidth=1.5
+setLineDash 
+stroke ss=#4472C4 lw=1.5 dash=
+set font=11px sans-serif
+set textBaseline=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 88.8,307.6
+lineTo 479.2,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 84.8,307.6
+lineTo 88.8,307.6
+stroke ss=#aaa lw=1 dash=
+set fillStyle=#555
+set textAlign=right
+fillText "0" 82.8,307.6 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,270.1667
+lineTo 479.2,270.1667
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,270.1667
+lineTo 88.8,270.1667
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "2" 82.8,270.1667 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,232.7333
+lineTo 479.2,232.7333
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,232.7333
+lineTo 88.8,232.7333
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "4" 82.8,232.7333 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,195.3
+lineTo 479.2,195.3
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,195.3
+lineTo 88.8,195.3
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "6" 82.8,195.3 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,157.8667
+lineTo 479.2,157.8667
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,157.8667
+lineTo 88.8,157.8667
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "8" 82.8,157.8667 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,120.4333
+lineTo 479.2,120.4333
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,120.4333
+lineTo 88.8,120.4333
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "10" 82.8,120.4333 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,83
+lineTo 479.2,83
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,83
+lineTo 88.8,83
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "12" 82.8,83 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 88.8,307.6
+lineTo 479.2,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 88.8,311.6
+lineTo 88.8,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 121.3333,311.6
+lineTo 121.3333,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 153.8667,311.6
+lineTo 153.8667,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 186.4,311.6
+lineTo 186.4,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 218.9333,311.6
+lineTo 218.9333,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 251.4667,311.6
+lineTo 251.4667,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 284,311.6
+lineTo 284,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 316.5333,311.6
+lineTo 316.5333,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 349.0667,311.6
+lineTo 349.0667,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 381.6,311.6
+lineTo 381.6,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 414.1333,311.6
+lineTo 414.1333,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 446.6667,311.6
+lineTo 446.6667,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 479.2,311.6
+lineTo 479.2,307.6
+stroke ss=#aaa lw=1 dash=
+set textAlign=center
+set textBaseline=top
+fillText "Jan" 105.0667,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Feb" 137.6,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Mar" 170.1333,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Apr" 202.6667,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "May" 235.2,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Jun" 267.7333,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Jul" 300.2667,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Aug" 332.8,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Sep" 365.3333,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Oct" 397.8667,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Nov" 430.4,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Dec" 462.9333,310.6 fs=#555 font=11px sans-serif al=center bl=top
+set font=12px sans-serif
+set textBaseline=middle
+set fillStyle=#4472C4
+fillRect 515.2,187.3,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "A" 529.2,193.3 fs=#333 font=12px sans-serif al=left bl=middle
+save
+set font=bold 10px sans-serif
+set fillStyle=#555
+set textAlign=center
+fillText "Month" 284,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: bubble 1`] = `
+"set font=11px sans-serif
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,336.8
+lineTo 620,336.8
+stroke ss=#e0e0e0 lw=0.5 dash=
+set fillStyle=#555
+set textAlign=right
+set textBaseline=middle
+fillText "0" 84.8,336.8 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 84.8,336.8
+lineTo 88.8,336.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,274.88
+lineTo 620,274.88
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "1" 84.8,274.88 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 84.8,274.88
+lineTo 88.8,274.88
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,212.96
+lineTo 620,212.96
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "2" 84.8,212.96 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 84.8,212.96
+lineTo 88.8,212.96
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,151.04
+lineTo 620,151.04
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "3" 84.8,151.04 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 84.8,151.04
+lineTo 88.8,151.04
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,89.12
+lineTo 620,89.12
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "4" 84.8,89.12 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 84.8,89.12
+lineTo 88.8,89.12
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,27.2
+lineTo 620,27.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "5" 84.8,27.2 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 84.8,27.2
+lineTo 88.8,27.2
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+save
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 88.8,336.8
+lineTo 620,336.8
+stroke ss=#888 lw=1 dash=
+restore
+save
+beginPath
+moveTo 88.8,27.2
+lineTo 88.8,336.8
+stroke ss=#888 lw=1 dash=
+restore
+set textAlign=center
+set textBaseline=top
+fillText "1" 88.8,340.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 88.8,340.8
+lineTo 88.8,336.8
+stroke ss=#888 lw=1 dash=
+fillText "1.5" 221.6,340.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 221.6,340.8
+lineTo 221.6,336.8
+stroke ss=#888 lw=1 dash=
+fillText "2" 354.4,340.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 354.4,340.8
+lineTo 354.4,336.8
+stroke ss=#888 lw=1 dash=
+fillText "2.5" 487.2,340.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 487.2,340.8
+lineTo 487.2,336.8
+stroke ss=#888 lw=1 dash=
+fillText "3" 620,340.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 620,340.8
+lineTo 620,336.8
+stroke ss=#888 lw=1 dash=
+save
+set fillStyle=#4472C4
+beginPath
+arc 88.8,212.96,27.365,0,6.2832
+fill fs=#4472C4 ga=1
+restore
+save
+beginPath
+arc 354.4,89.12,38.7,0,6.2832
+fill fs=#4472C4 ga=1
+restore
+save
+beginPath
+arc 620,151.04,32.3787,0,6.2832
+fill fs=#4472C4 ga=1
+restore"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: clusteredBar+title+legendR+dataLabels+axisTitles 1`] = `
+"set font=11px sans-serif
+set font=10px sans-serif
+set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Quarterly" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set textBaseline=middle
+set font=11px sans-serif
+set fillStyle=#555
+set strokeStyle=#aaa
+beginPath
+moveTo 68,307.6
+lineTo 492,307.6
+stroke ss=#aaa lw=1 dash=
+set textAlign=right
+fillText "0" 56,307.6 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 68,268.6667
+lineTo 492,268.6667
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "5" 56,268.6667 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 68,229.7333
+lineTo 492,229.7333
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "10" 56,229.7333 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 68,190.8
+lineTo 492,190.8
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "15" 56,190.8 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 68,151.8667
+lineTo 492,151.8667
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "20" 56,151.8667 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 68,112.9333
+lineTo 492,112.9333
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "25" 56,112.9333 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 68,74
+lineTo 492,74
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "30" 56,74 fs=#555 font=11px sans-serif al=right bl=middle
+set fillStyle=#4472C4
+fillRect 98.2857,229.7333,40.381,77.8667 fs=#4472C4
+set font=bold 11px sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=bottom
+fillText "10" 118.4762,228.7333 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+fillRect 138.6667,245.3067,40.381,62.2933 fs=#ED7D31
+set fillStyle=#333
+fillText "8" 158.8571,244.3067 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+fillRect 239.619,120.72,40.381,186.88 fs=#4472C4
+set fillStyle=#333
+fillText "24" 259.8095,119.72 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+fillRect 280,190.8,40.381,116.8 fs=#ED7D31
+set fillStyle=#333
+fillText "15" 300.1905,189.8 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+fillRect 380.9524,175.2267,40.381,132.3733 fs=#4472C4
+set fillStyle=#333
+fillText "17" 401.1429,174.2267 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+fillRect 421.3333,136.2933,40.381,171.3067 fs=#ED7D31
+set fillStyle=#333
+fillText "22" 441.5238,135.2933 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+set fillStyle=#555
+set font=11px sans-serif
+set textBaseline=top
+fillText "Q1" 138.6667,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 280,310.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 421.3333,310.6 fs=#555 font=11px sans-serif al=center bl=top
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 68,307.6
+lineTo 492,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,307.6
+lineTo 68,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,268.6667
+lineTo 68,268.6667
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,229.7333
+lineTo 68,229.7333
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,190.8
+lineTo 68,190.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,151.8667
+lineTo 68,151.8667
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,112.9333
+lineTo 68,112.9333
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 64,74
+lineTo 68,74
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 68,311.6
+lineTo 68,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 209.3333,311.6
+lineTo 209.3333,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 350.6667,311.6
+lineTo 350.6667,307.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 492,311.6
+lineTo 492,307.6
+stroke ss=#aaa lw=1 dash=
+set font=12px sans-serif
+set textBaseline=middle
+set fillStyle=#4472C4
+fillRect 515.2,174.8,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Alpha" 529.2,180.8 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 515.2,190.8,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Beta" 529.2,196.8 fs=#333 font=12px sans-serif al=left bl=middle
+save
+set font=bold 10px sans-serif
+set fillStyle=#555
+translate 29.8,190.8
+rotate -1.5708
+set textAlign=center
+fillText "Units" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
+save
+fillText "Quarter" 280,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: clusteredBarH+dataLabels 1`] = `
+"set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Horizontal" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set textBaseline=middle
+set font=11px sans-serif
+set fillStyle=#555
+set strokeStyle=#aaa
+beginPath
+moveTo 152.8,74
+lineTo 152.8,351.2
+stroke ss=#aaa lw=1 dash=
+fillText "0" 152.8,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 178.8923,74
+lineTo 178.8923,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "2" 178.8923,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 204.9846,74
+lineTo 204.9846,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "4" 204.9846,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 231.0769,74
+lineTo 231.0769,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "6" 231.0769,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 257.1692,74
+lineTo 257.1692,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "8" 257.1692,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 283.2615,74
+lineTo 283.2615,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "10" 283.2615,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 309.3538,74
+lineTo 309.3538,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "12" 309.3538,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 335.4462,74
+lineTo 335.4462,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "14" 335.4462,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 361.5385,74
+lineTo 361.5385,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "16" 361.5385,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 387.6308,74
+lineTo 387.6308,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "18" 387.6308,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 413.7231,74
+lineTo 413.7231,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "20" 413.7231,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 439.8154,74
+lineTo 439.8154,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "22" 439.8154,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 465.9077,74
+lineTo 465.9077,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "24" 465.9077,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+beginPath
+moveTo 492,74
+lineTo 492,351.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "26" 492,361.2 fs=#555 font=11px sans-serif al=center bl=middle
+set fillStyle=#4472C4
+fillRect 152.8,305,130.4615,26.4 fs=#4472C4
+set font=bold 11px sans-serif
+set fillStyle=#333
+set textAlign=left
+fillText "10" 285.2615,318.2 fs=#333 font=bold 11px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 152.8,278.6,104.3692,26.4 fs=#ED7D31
+set fillStyle=#333
+fillText "8" 259.1692,291.8 fs=#333 font=bold 11px sans-serif al=left bl=middle
+set fillStyle=#4472C4
+fillRect 152.8,212.6,313.1077,26.4 fs=#4472C4
+set fillStyle=#333
+fillText "24" 467.9077,225.8 fs=#333 font=bold 11px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 152.8,186.2,195.6923,26.4 fs=#ED7D31
+set fillStyle=#333
+fillText "15" 350.4923,199.4 fs=#333 font=bold 11px sans-serif al=left bl=middle
+set fillStyle=#4472C4
+fillRect 152.8,120.2,221.7846,26.4 fs=#4472C4
+set fillStyle=#333
+fillText "17" 376.5846,133.4 fs=#333 font=bold 11px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 152.8,93.8,287.0154,26.4 fs=#ED7D31
+set fillStyle=#333
+fillText "22" 441.8154,107 fs=#333 font=bold 11px sans-serif al=left bl=middle
+set fillStyle=#555
+set font=11px sans-serif
+set textAlign=right
+fillText "Q1" 148.8,305 fs=#555 font=11px sans-serif al=right bl=middle
+fillText "Q2" 148.8,212.6 fs=#555 font=11px sans-serif al=right bl=middle
+fillText "Q3" 148.8,120.2 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 152.8,74
+lineTo 152.8,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 152.8,355.2
+lineTo 152.8,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 178.8923,355.2
+lineTo 178.8923,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 204.9846,355.2
+lineTo 204.9846,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 231.0769,355.2
+lineTo 231.0769,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 257.1692,355.2
+lineTo 257.1692,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 283.2615,355.2
+lineTo 283.2615,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 309.3538,355.2
+lineTo 309.3538,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 335.4462,355.2
+lineTo 335.4462,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 361.5385,355.2
+lineTo 361.5385,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 387.6308,355.2
+lineTo 387.6308,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 413.7231,355.2
+lineTo 413.7231,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 439.8154,355.2
+lineTo 439.8154,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 465.9077,355.2
+lineTo 465.9077,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 492,355.2
+lineTo 492,351.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 148.8,74
+lineTo 152.8,74
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 148.8,166.4
+lineTo 152.8,166.4
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 148.8,258.8
+lineTo 152.8,258.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 148.8,351.2
+lineTo 152.8,351.2
+stroke ss=#aaa lw=1 dash=
+set font=12px sans-serif
+set fillStyle=#4472C4
+fillRect 515.2,196.6,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Beta" 529.2,202.6 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 515.2,212.6,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Alpha" 529.2,218.6 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: clusteredBarH+valAxisHidden(manual-ish) 1`] = `
+"set textBaseline=middle
+set font=11px sans-serif
+set fillStyle=#555
+set fillStyle=#4472C4
+fillRect 31.2,292.16,143.2381,46.08 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 174.4381,292.16,114.5905,46.08 fs=#ED7D31
+set fillStyle=#4472C4
+fillRect 31.2,176.96,343.7714,46.08 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 374.9714,176.96,214.8571,46.08 fs=#ED7D31
+set fillStyle=#4472C4
+fillRect 31.2,61.76,243.5048,46.08 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 274.7048,61.76,315.1238,46.08 fs=#ED7D31"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: combo bar+line secondary 1`] = `
+"set font=11px sans-serif
+set font=10px sans-serif
+set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Combo" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set textBaseline=middle
+set font=11px sans-serif
+set fillStyle=#555
+set strokeStyle=#aaa
+beginPath
+moveTo 47.8,329.6
+lineTo 434.8,329.6
+stroke ss=#aaa lw=1 dash=
+set textAlign=right
+fillText "0" 35.8,329.6 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 47.8,297.65
+lineTo 434.8,297.65
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "20" 35.8,297.65 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,265.7
+lineTo 434.8,265.7
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "40" 35.8,265.7 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,233.75
+lineTo 434.8,233.75
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "60" 35.8,233.75 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,201.8
+lineTo 434.8,201.8
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "80" 35.8,201.8 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,169.85
+lineTo 434.8,169.85
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "100" 35.8,169.85 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,137.9
+lineTo 434.8,137.9
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "120" 35.8,137.9 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,105.95
+lineTo 434.8,105.95
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "140" 35.8,105.95 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 47.8,74
+lineTo 434.8,74
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "160" 35.8,74 fs=#555 font=11px sans-serif al=right bl=middle
+set fillStyle=#4472C4
+fillRect 86.5,169.85,51.6,159.75 fs=#4472C4
+fillRect 215.5,105.95,51.6,223.65 fs=#4472C4
+fillRect 344.5,137.9,51.6,191.7 fs=#4472C4
+set fillStyle=#555
+set textAlign=center
+set textBaseline=top
+fillText "Q1" 112.3,332.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 241.3,332.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 370.3,332.6 fs=#555 font=11px sans-serif al=center bl=top
+set strokeStyle=#ED7D31
+set lineWidth=2
+setLineDash 
+beginPath
+moveTo 112.3,176.24
+lineTo 241.3,99.56
+lineTo 370.3,137.9
+stroke ss=#ED7D31 lw=2 dash=
+set fillStyle=#ED7D31
+beginPath
+arc 112.3,176.24,3,0,6.2832
+fill fs=#ED7D31 ga=1
+beginPath
+arc 241.3,99.56,3,0,6.2832
+fill fs=#ED7D31 ga=1
+beginPath
+arc 370.3,137.9,3,0,6.2832
+fill fs=#ED7D31 ga=1
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 47.8,329.6
+lineTo 434.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,329.6
+lineTo 47.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,297.65
+lineTo 47.8,297.65
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,265.7
+lineTo 47.8,265.7
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,233.75
+lineTo 47.8,233.75
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,201.8
+lineTo 47.8,201.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,169.85
+lineTo 47.8,169.85
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,137.9
+lineTo 47.8,137.9
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,105.95
+lineTo 47.8,105.95
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 43.8,74
+lineTo 47.8,74
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 47.8,333.6
+lineTo 47.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 176.8,333.6
+lineTo 176.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 305.8,333.6
+lineTo 305.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 434.8,333.6
+lineTo 434.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 434.8,74
+lineTo 434.8,329.6
+stroke ss=#aaa lw=1 dash=
+set fillStyle=#555
+set textAlign=left
+set textBaseline=middle
+beginPath
+moveTo 438.8,329.6
+lineTo 434.8,329.6
+stroke ss=#aaa lw=1 dash=
+fillText "0" 448.8,329.6 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,304.04
+lineTo 434.8,304.04
+stroke ss=#aaa lw=1 dash=
+fillText "2" 448.8,304.04 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,278.48
+lineTo 434.8,278.48
+stroke ss=#aaa lw=1 dash=
+fillText "4" 448.8,278.48 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,252.92
+lineTo 434.8,252.92
+stroke ss=#aaa lw=1 dash=
+fillText "6" 448.8,252.92 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,227.36
+lineTo 434.8,227.36
+stroke ss=#aaa lw=1 dash=
+fillText "8" 448.8,227.36 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,201.8
+lineTo 434.8,201.8
+stroke ss=#aaa lw=1 dash=
+fillText "10" 448.8,201.8 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,176.24
+lineTo 434.8,176.24
+stroke ss=#aaa lw=1 dash=
+fillText "12" 448.8,176.24 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,150.68
+lineTo 434.8,150.68
+stroke ss=#aaa lw=1 dash=
+fillText "14" 448.8,150.68 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,125.12
+lineTo 434.8,125.12
+stroke ss=#aaa lw=1 dash=
+fillText "16" 448.8,125.12 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,99.56
+lineTo 434.8,99.56
+stroke ss=#aaa lw=1 dash=
+fillText "18" 448.8,99.56 fs=#555 font=11px sans-serif al=left bl=middle
+beginPath
+moveTo 438.8,74
+lineTo 434.8,74
+stroke ss=#aaa lw=1 dash=
+fillText "20" 448.8,74 fs=#555 font=11px sans-serif al=left bl=middle
+save
+set font=18px sans-serif
+set textAlign=center
+translate 476.8,201.8
+rotate 1.5708
+fillText "Margin %" 0,0 fs=#555 font=18px sans-serif al=center bl=middle
+restore
+set font=12px sans-serif
+set fillStyle=#4472C4
+fillRect 515.2,185.8,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Rev" 529.2,191.8 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 515.2,201.8,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Margin" 529.2,207.8 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: doughnut+legendBottom 1`] = `
+"beginPath
+moveTo 332,189.2
+arc 332,189.2,136.08,-1.5708,0.3142
+closePath
+set fillStyle=#AA0000
+fill fs=#AA0000 ga=1
+set strokeStyle=#fff
+stroke ss=#fff lw=1 dash=
+set font=bold 13.607999999999999px sans-serif
+set fillStyle=#fff
+set textAlign=center
+set textBaseline=middle
+fillText "30%" 414.5683,129.2106 fs=#fff font=bold 13.607999999999999px sans-serif al=center bl=middle
+beginPath
+moveTo 332,189.2
+arc 332,189.2,136.08,0.3142,3.1416
+closePath
+set fillStyle=#ED7D31
+fill fs=#ED7D31 ga=1
+stroke ss=#fff lw=1 dash=
+set fillStyle=#fff
+fillText "45%" 316.0343,290.0035 fs=#fff font=bold 13.607999999999999px sans-serif al=center bl=middle
+beginPath
+moveTo 332,189.2
+arc 332,189.2,136.08,3.1416,4.7124
+closePath
+set fillStyle=#CC0000
+fill fs=#CC0000 ga=1
+stroke ss=#fff lw=1 dash=
+set fillStyle=#fff
+fillText "25%" 259.8327,117.0327 fs=#fff font=bold 13.607999999999999px sans-serif al=center bl=middle
+beginPath
+arc 332,189.2,68.04,0,6.2832
+fill fs=#fff ga=1
+set font=12px sans-serif
+set fillStyle=#AA0000
+fillRect 277.4,359.6,10,12 fs=#AA0000
+set fillStyle=#333
+set textAlign=left
+fillText "Q1" 291.4,365.6 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 317.8,359.6,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Q2" 331.8,365.6 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#CC0000
+fillRect 358.2,359.6,10,12 fs=#CC0000
+set fillStyle=#333
+fillText "Q3" 372.2,365.6 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: line+markers+legend+axisTitles+12cats 1`] = `
+"set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Trend" 332,36.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set font=16.2px sans-serif
+set textBaseline=middle
+set strokeStyle=#aaa
+beginPath
+moveTo 84.44,329.8
+lineTo 479.2,329.8
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#888
+beginPath
+moveTo 80.44,329.8
+lineTo 84.44,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#aaa
+set fillStyle=#555
+set textAlign=right
+fillText "0" 78.44,329.8 fs=#555 font=16.2px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 84.44,289.75
+lineTo 479.2,289.75
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 80.44,289.75
+lineTo 84.44,289.75
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "2" 78.44,289.75 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 84.44,249.7
+lineTo 479.2,249.7
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 80.44,249.7
+lineTo 84.44,249.7
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "4" 78.44,249.7 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 84.44,209.65
+lineTo 479.2,209.65
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 80.44,209.65
+lineTo 84.44,209.65
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "6" 78.44,209.65 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 84.44,169.6
+lineTo 479.2,169.6
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 80.44,169.6
+lineTo 84.44,169.6
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "8" 78.44,169.6 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 84.44,129.55
+lineTo 479.2,129.55
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 80.44,129.55
+lineTo 84.44,129.55
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "10" 78.44,129.55 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 84.44,89.5
+lineTo 479.2,89.5
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 80.44,89.5
+lineTo 84.44,89.5
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "12" 78.44,89.5 fs=#555 font=16.2px sans-serif al=right bl=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.44,329.8
+lineTo 479.2,329.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 84.44,89.5
+lineTo 84.44,329.8
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#4472C4
+set lineWidth=2.3625
+setLineDash 
+beginPath
+moveTo 100.8883,269.725
+lineTo 133.785,229.675
+lineTo 166.6817,249.7
+lineTo 199.5783,209.65
+lineTo 232.475,189.625
+lineTo 265.3717,229.675
+lineTo 298.2683,169.6
+lineTo 331.165,209.65
+lineTo 364.0617,149.575
+lineTo 396.9583,189.625
+lineTo 429.855,129.55
+lineTo 462.7517,169.6
+stroke ss=#4472C4 lw=2.3625 dash=
+set fillStyle=#4472C4
+beginPath
+arc 100.8883,269.725,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+set textAlign=center
+set textBaseline=bottom
+fillText "3" 100.8883,266.1 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 133.785,229.675,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "5" 133.785,226.05 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 166.6817,249.7,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "4" 166.6817,246.075 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 199.5783,209.65,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "6" 199.5783,206.025 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 232.475,189.625,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "7" 232.475,186 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 265.3717,229.675,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "5" 265.3717,226.05 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 298.2683,169.6,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "8" 298.2683,165.975 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 331.165,209.65,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "6" 331.165,206.025 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 364.0617,149.575,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "9" 364.0617,145.95 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 396.9583,189.625,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "7" 396.9583,186 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 429.855,129.55,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "10" 429.855,125.925 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+beginPath
+arc 462.7517,169.6,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set fillStyle=#333
+fillText "8" 462.7517,165.975 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#4472C4
+set strokeStyle=#ED7D31
+setLineDash 
+beginPath
+moveTo 100.8883,289.75
+lineTo 133.785,269.725
+lineTo 166.6817,229.675
+lineTo 199.5783,249.7
+lineTo 232.475,209.65
+lineTo 265.3717,169.6
+lineTo 298.2683,189.625
+lineTo 331.165,149.575
+lineTo 364.0617,209.65
+lineTo 396.9583,169.6
+lineTo 429.855,189.625
+lineTo 462.7517,149.575
+stroke ss=#ED7D31 lw=2.3625 dash=
+set fillStyle=#ED7D31
+beginPath
+arc 100.8883,289.75,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "2" 100.8883,286.125 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 133.785,269.725,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "3" 133.785,266.1 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 166.6817,229.675,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "5" 166.6817,226.05 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 199.5783,249.7,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "4" 199.5783,246.075 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 232.475,209.65,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "6" 232.475,206.025 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 265.3717,169.6,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "8" 265.3717,165.975 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 298.2683,189.625,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "7" 298.2683,186 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 331.165,149.575,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "9" 331.165,145.95 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 364.0617,209.65,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "6" 364.0617,206.025 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 396.9583,169.6,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "8" 396.9583,165.975 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 429.855,189.625,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "7" 429.855,186 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+beginPath
+arc 462.7517,149.575,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#333
+fillText "9" 462.7517,145.95 fs=#333 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#ED7D31
+set fillStyle=#555
+set textBaseline=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 100.8883,333.8
+lineTo 100.8883,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Jan" 100.8883,334.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 166.6817,333.8
+lineTo 166.6817,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Mar" 166.6817,334.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 232.475,333.8
+lineTo 232.475,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "May" 232.475,334.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 298.2683,333.8
+lineTo 298.2683,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Jul" 298.2683,334.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 364.0617,333.8
+lineTo 364.0617,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Sep" 364.0617,334.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 429.855,333.8
+lineTo 429.855,329.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Nov" 429.855,334.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set font=12px sans-serif
+set textBaseline=middle
+set fillStyle=#4472C4
+set strokeStyle=#4472C4
+set lineWidth=1.8
+beginPath
+moveTo 515.2,199.65
+lineTo 525.2,199.65
+stroke ss=#4472C4 lw=1.8 dash=
+set lineWidth=2.3625
+set fillStyle=#333
+set textAlign=left
+fillText "A" 529.2,199.65 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+set strokeStyle=#ED7D31
+set lineWidth=1.8
+beginPath
+moveTo 515.2,215.65
+lineTo 525.2,215.65
+stroke ss=#ED7D31 lw=1.8 dash=
+set lineWidth=2.3625
+set fillStyle=#333
+fillText "B" 529.2,215.65 fs=#333 font=12px sans-serif al=left bl=middle
+save
+set font=bold 10px sans-serif
+set fillStyle=#555
+translate 29.8,209.65
+rotate -1.5708
+set textAlign=center
+fillText "Value" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
+save
+fillText "Month" 281.82,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: no-data 1`] = `
+"set fillStyle=#888
+set font=12px sans-serif
+set textAlign=center
+set textBaseline=middle
+fillText "(no data)" 332,200 fs=#888 font=12px sans-serif al=center bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: pie+legendR+dataLabels 1`] = `
+"set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Share" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+beginPath
+moveTo 242.4,231.5
+arc 242.4,231.5,124.74,-1.5708,0.3142
+closePath
+set fillStyle=#4472C4
+fill fs=#4472C4 ga=1
+set strokeStyle=#fff
+stroke ss=#fff lw=1 dash=
+set font=bold 12.474px sans-serif
+set fillStyle=#fff
+set textBaseline=middle
+fillText "30%" 302.9501,187.5078 fs=#fff font=bold 12.474px sans-serif al=center bl=middle
+beginPath
+moveTo 242.4,231.5
+arc 242.4,231.5,124.74,0.3142,3.1416
+closePath
+set fillStyle=#ED7D31
+fill fs=#ED7D31 ga=1
+stroke ss=#fff lw=1 dash=
+set fillStyle=#fff
+fillText "45%" 230.6918,305.4225 fs=#fff font=bold 12.474px sans-serif al=center bl=middle
+beginPath
+moveTo 242.4,231.5
+arc 242.4,231.5,124.74,3.1416,4.7124
+closePath
+set fillStyle=#A9D18E
+fill fs=#A9D18E ga=1
+stroke ss=#fff lw=1 dash=
+set fillStyle=#fff
+fillText "25%" 189.4773,178.5773 fs=#fff font=bold 12.474px sans-serif al=center bl=middle
+set font=12px sans-serif
+set fillStyle=#4472C4
+fillRect 476.8,207.5,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Q1" 490.8,213.5 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 476.8,223.5,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Q2" 490.8,229.5 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#A9D18E
+fillRect 476.8,239.5,10,12 fs=#A9D18E
+set fillStyle=#333
+fillText "Q3" 490.8,245.5 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: radar+filled+legend 1`] = `
+"set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Profile" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set strokeStyle=#ddd
+set lineWidth=0.5
+beginPath
+moveTo 261.6,212.69
+lineTo 279.4894,225.6874
+lineTo 272.6562,246.7176
+lineTo 250.5438,246.7176
+lineTo 243.7106,225.6874
+closePath
+stroke ss=#ddd lw=0.5 dash=
+beginPath
+moveTo 261.6,193.88
+lineTo 297.3787,219.8748
+lineTo 283.7125,261.9352
+lineTo 239.4875,261.9352
+lineTo 225.8213,219.8748
+closePath
+stroke ss=#ddd lw=0.5 dash=
+beginPath
+moveTo 261.6,175.07
+lineTo 315.2681,214.0622
+lineTo 294.7687,277.1528
+lineTo 228.4313,277.1528
+lineTo 207.9319,214.0622
+closePath
+stroke ss=#ddd lw=0.5 dash=
+beginPath
+moveTo 261.6,156.26
+lineTo 333.1575,208.2496
+lineTo 305.825,292.3704
+lineTo 217.375,292.3704
+lineTo 190.0425,208.2496
+closePath
+stroke ss=#ddd lw=0.5 dash=
+beginPath
+moveTo 261.6,137.45
+lineTo 351.0469,202.437
+lineTo 316.8812,307.588
+lineTo 206.3188,307.588
+lineTo 172.1531,202.437
+closePath
+stroke ss=#ddd lw=0.5 dash=
+beginPath
+moveTo 261.6,118.64
+lineTo 368.9362,196.6243
+lineTo 327.9374,322.8057
+lineTo 195.2626,322.8057
+lineTo 154.2638,196.6243
+closePath
+stroke ss=#ddd lw=0.5 dash=
+set strokeStyle=#bbb
+beginPath
+moveTo 261.6,231.5
+lineTo 261.6,118.64
+stroke ss=#bbb lw=0.5 dash=
+beginPath
+moveTo 261.6,231.5
+lineTo 368.9362,196.6243
+stroke ss=#bbb lw=0.5 dash=
+beginPath
+moveTo 261.6,231.5
+lineTo 327.9374,322.8057
+stroke ss=#bbb lw=0.5 dash=
+beginPath
+moveTo 261.6,231.5
+lineTo 195.2626,322.8057
+stroke ss=#bbb lw=0.5 dash=
+beginPath
+moveTo 261.6,231.5
+lineTo 154.2638,196.6243
+stroke ss=#bbb lw=0.5 dash=
+set font=16.2px sans-serif
+set fillStyle=#555
+set textAlign=right
+set textBaseline=middle
+fillText "1" 258.6,212.69 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "2" 258.6,193.88 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "3" 258.6,175.07 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "4" 258.6,156.26 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "5" 258.6,137.45 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "6" 258.6,118.64 fs=#555 font=16.2px sans-serif al=right bl=middle
+set font=11px sans-serif
+set fillStyle=#444
+set textAlign=center
+fillText "A" 261.6,106.64 fs=#444 font=11px sans-serif al=center bl=middle
+set textAlign=left
+fillText "B" 380.3489,192.9161 fs=#444 font=11px sans-serif al=left bl=middle
+fillText "C" 334.9909,332.5139 fs=#444 font=11px sans-serif al=left bl=middle
+set textAlign=right
+fillText "D" 188.2091,332.5139 fs=#444 font=11px sans-serif al=right bl=middle
+fillText "E" 142.8511,192.9161 fs=#444 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 261.6,156.26
+lineTo 315.2681,214.0622
+lineTo 316.8812,307.588
+lineTo 239.4875,261.9352
+lineTo 190.0425,208.2496
+closePath
+set fillStyle=rgba(68,114,196,0.25)
+fill fs=rgba(68,114,196,0.25) ga=1
+set strokeStyle=#4472C4
+set lineWidth=2
+stroke ss=#4472C4 lw=2 dash=
+beginPath
+moveTo 261.6,193.88
+lineTo 351.0469,202.437
+lineTo 294.7687,277.1528
+lineTo 217.375,292.3704
+lineTo 207.9319,214.0622
+closePath
+set fillStyle=rgba(237,125,49,0.25)
+fill fs=rgba(237,125,49,0.25) ga=1
+set strokeStyle=#ED7D31
+stroke ss=#ED7D31 lw=2 dash=
+set font=12px sans-serif
+set fillStyle=#4472C4
+set strokeStyle=#4472C4
+set lineWidth=1.8
+beginPath
+moveTo 515.2,221.5
+lineTo 525.2,221.5
+stroke ss=#4472C4 lw=1.8 dash=
+set lineWidth=2
+set fillStyle=#333
+set textAlign=left
+fillText "X" 529.2,221.5 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+set strokeStyle=#ED7D31
+set lineWidth=1.8
+beginPath
+moveTo 515.2,237.5
+lineTo 525.2,237.5
+stroke ss=#ED7D31 lw=1.8 dash=
+set lineWidth=2
+set fillStyle=#333
+fillText "Y" 529.2,237.5 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: scatter+lineMarker+axisTitles 1`] = `
+"set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "XY" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set font=11px sans-serif
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,314.8
+lineTo 479.2,314.8
+stroke ss=#e0e0e0 lw=0.5 dash=
+set fillStyle=#555
+set textAlign=right
+set textBaseline=middle
+fillText "0" 111.6,314.8 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,314.8
+lineTo 115.6,314.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,281.6857
+lineTo 479.2,281.6857
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "1" 111.6,281.6857 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,281.6857
+lineTo 115.6,281.6857
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,248.5714
+lineTo 479.2,248.5714
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "2" 111.6,248.5714 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,248.5714
+lineTo 115.6,248.5714
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,215.4571
+lineTo 479.2,215.4571
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "3" 111.6,215.4571 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,215.4571
+lineTo 115.6,215.4571
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,182.3429
+lineTo 479.2,182.3429
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "4" 111.6,182.3429 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,182.3429
+lineTo 115.6,182.3429
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,149.2286
+lineTo 479.2,149.2286
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "5" 111.6,149.2286 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,149.2286
+lineTo 115.6,149.2286
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,116.1143
+lineTo 479.2,116.1143
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "6" 111.6,116.1143 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,116.1143
+lineTo 115.6,116.1143
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 115.6,83
+lineTo 479.2,83
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "7" 111.6,83 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 111.6,83
+lineTo 115.6,83
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+save
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 115.6,314.8
+lineTo 479.2,314.8
+stroke ss=#888 lw=1 dash=
+restore
+save
+beginPath
+moveTo 115.6,83
+lineTo 115.6,314.8
+stroke ss=#888 lw=1 dash=
+restore
+set textAlign=center
+set textBaseline=top
+fillText "1" 115.6,318.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 115.6,318.8
+lineTo 115.6,314.8
+stroke ss=#888 lw=1 dash=
+fillText "2" 206.5,318.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 206.5,318.8
+lineTo 206.5,314.8
+stroke ss=#888 lw=1 dash=
+fillText "3" 297.4,318.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 297.4,318.8
+lineTo 297.4,314.8
+stroke ss=#888 lw=1 dash=
+fillText "4" 388.3,318.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 388.3,318.8
+lineTo 388.3,314.8
+stroke ss=#888 lw=1 dash=
+fillText "5" 479.2,318.8 fs=#555 font=11px sans-serif al=center bl=top
+beginPath
+moveTo 479.2,318.8
+lineTo 479.2,314.8
+stroke ss=#888 lw=1 dash=
+save
+set strokeStyle=#4472C4
+set lineWidth=1.5
+beginPath
+moveTo 115.6,248.5714
+lineTo 206.5,182.3429
+lineTo 297.4,215.4571
+lineTo 388.3,149.2286
+lineTo 479.2,116.1143
+stroke ss=#4472C4 lw=1.5 dash=
+restore
+save
+set fillStyle=#4472C4
+beginPath
+moveTo 115.6,245.9464
+lineTo 118.225,248.5714
+lineTo 115.6,251.1964
+lineTo 112.975,248.5714
+closePath
+fill fs=#4472C4 ga=1
+restore
+save
+beginPath
+moveTo 206.5,179.7179
+lineTo 209.125,182.3429
+lineTo 206.5,184.9679
+lineTo 203.875,182.3429
+closePath
+fill fs=#4472C4 ga=1
+restore
+save
+beginPath
+moveTo 297.4,212.8321
+lineTo 300.025,215.4571
+lineTo 297.4,218.0821
+lineTo 294.775,215.4571
+closePath
+fill fs=#4472C4 ga=1
+restore
+save
+beginPath
+moveTo 388.3,146.6036
+lineTo 390.925,149.2286
+lineTo 388.3,151.8536
+lineTo 385.675,149.2286
+closePath
+fill fs=#4472C4 ga=1
+restore
+save
+beginPath
+moveTo 479.2,113.4893
+lineTo 481.825,116.1143
+lineTo 479.2,118.7393
+lineTo 476.575,116.1143
+closePath
+fill fs=#4472C4 ga=1
+restore
+set font=12px sans-serif
+set textBaseline=middle
+set lineWidth=1.8
+beginPath
+moveTo 515.2,196.9
+lineTo 525.2,196.9
+stroke ss=#4472C4 lw=1.8 dash=
+set lineWidth=1.5
+set fillStyle=#333
+set textAlign=left
+fillText "S1" 529.2,196.9 fs=#333 font=12px sans-serif al=left bl=middle
+save
+set font=bold 10px sans-serif
+set fillStyle=#555
+translate 29.8,198.9
+rotate -1.5708
+set textAlign=center
+fillText "Y" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
+save
+fillText "X" 297.4,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: stackedArea 1`] = `
+"beginPath
+moveTo 177.3333,280.96
+lineTo 354.4,238.4
+lineTo 531.4667,195.84
+lineTo 531.4667,329.6
+lineTo 354.4,329.6
+lineTo 177.3333,329.6
+closePath
+set fillStyle=rgba(237,125,49,0.6)
+fill fs=rgba(237,125,49,0.6) ga=1
+set strokeStyle=#ED7D31
+set lineWidth=1.5
+setLineDash 
+stroke ss=#ED7D31 lw=1.5 dash=
+beginPath
+moveTo 177.3333,220.16
+lineTo 354.4,92.48
+lineTo 531.4667,92.48
+lineTo 531.4667,195.84
+lineTo 354.4,238.4
+lineTo 177.3333,280.96
+closePath
+set fillStyle=rgba(68,114,196,0.6)
+fill fs=rgba(68,114,196,0.6) ga=1
+set strokeStyle=#4472C4
+setLineDash 
+stroke ss=#4472C4 lw=1.5 dash=
+set font=11px sans-serif
+set textBaseline=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 88.8,329.6
+lineTo 620,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 84.8,329.6
+lineTo 88.8,329.6
+stroke ss=#aaa lw=1 dash=
+set fillStyle=#555
+set textAlign=right
+fillText "0" 82.8,329.6 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 88.8,299.2
+lineTo 620,299.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,299.2
+lineTo 88.8,299.2
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "5" 82.8,299.2 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,268.8
+lineTo 620,268.8
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,268.8
+lineTo 88.8,268.8
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "10" 82.8,268.8 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,238.4
+lineTo 620,238.4
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,238.4
+lineTo 88.8,238.4
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "15" 82.8,238.4 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,208
+lineTo 620,208
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,208
+lineTo 88.8,208
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "20" 82.8,208 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,177.6
+lineTo 620,177.6
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,177.6
+lineTo 88.8,177.6
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "25" 82.8,177.6 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,147.2
+lineTo 620,147.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,147.2
+lineTo 88.8,147.2
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "30" 82.8,147.2 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,116.8
+lineTo 620,116.8
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,116.8
+lineTo 88.8,116.8
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "35" 82.8,116.8 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,86.4
+lineTo 620,86.4
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,86.4
+lineTo 88.8,86.4
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "40" 82.8,86.4 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 88.8,56
+lineTo 620,56
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 84.8,56
+lineTo 88.8,56
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "45" 82.8,56 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 88.8,329.6
+lineTo 620,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 88.8,333.6
+lineTo 88.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 265.8667,333.6
+lineTo 265.8667,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 442.9333,333.6
+lineTo 442.9333,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 620,333.6
+lineTo 620,329.6
+stroke ss=#aaa lw=1 dash=
+set textAlign=center
+set textBaseline=top
+fillText "Q1" 177.3333,332.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 354.4,332.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 531.4667,332.6 fs=#555 font=11px sans-serif al=center bl=top
+set font=12px sans-serif
+set textBaseline=middle
+set fillStyle=#4472C4
+fillRect 302,30.4,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Alpha" 316,36.4 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 364,30.4,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Beta" 378,36.4 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: stackedBar+legendBottom 1`] = `
+"set font=11px sans-serif
+set font=10px sans-serif
+set font=bold 30.6px Calibri, Arial, sans-serif
+set fillStyle=#333
+set textAlign=center
+set textBaseline=top
+fillText "Stacked" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+set textBaseline=middle
+set font=11px sans-serif
+set fillStyle=#555
+set strokeStyle=#aaa
+beginPath
+moveTo 41.2,300.8
+lineTo 632.8,300.8
+stroke ss=#aaa lw=1 dash=
+set textAlign=right
+fillText "0" 29.2,300.8 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 41.2,255.44
+lineTo 632.8,255.44
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "10" 29.2,255.44 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 41.2,210.08
+lineTo 632.8,210.08
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "20" 29.2,210.08 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 41.2,164.72
+lineTo 632.8,164.72
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "30" 29.2,164.72 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 41.2,119.36
+lineTo 632.8,119.36
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "40" 29.2,119.36 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 41.2,74
+lineTo 632.8,74
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "50" 29.2,74 fs=#555 font=11px sans-serif al=right bl=middle
+set fillStyle=#4472C4
+fillRect 100.36,255.44,78.88,45.36 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 100.36,219.152,78.88,36.288 fs=#ED7D31
+set fillStyle=#4472C4
+fillRect 297.56,191.936,78.88,108.864 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 297.56,123.896,78.88,68.04 fs=#ED7D31
+set fillStyle=#4472C4
+fillRect 494.76,223.688,78.88,77.112 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 494.76,123.896,78.88,99.792 fs=#ED7D31
+set fillStyle=#555
+set textAlign=center
+set textBaseline=top
+fillText "Q1" 139.8,303.8 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 337,303.8 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 534.2,303.8 fs=#555 font=11px sans-serif al=center bl=top
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 41.2,300.8
+lineTo 632.8,300.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 37.2,300.8
+lineTo 41.2,300.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 37.2,255.44
+lineTo 41.2,255.44
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 37.2,210.08
+lineTo 41.2,210.08
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 37.2,164.72
+lineTo 41.2,164.72
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 37.2,119.36
+lineTo 41.2,119.36
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 37.2,74
+lineTo 41.2,74
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 41.2,304.8
+lineTo 41.2,300.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 238.4,304.8
+lineTo 238.4,300.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 435.6,304.8
+lineTo 435.6,300.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 632.8,304.8
+lineTo 632.8,300.8
+stroke ss=#aaa lw=1 dash=
+set font=12px sans-serif
+set textBaseline=middle
+set fillStyle=#4472C4
+fillRect 284.6,359.6,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Alpha" 298.6,365.6 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 346.6,359.6,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Beta" 360.6,365.6 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: stackedBarPct+legendLeft 1`] = `
+"set font=11px sans-serif
+set font=10px sans-serif
+set textBaseline=middle
+set font=11px sans-serif
+set fillStyle=#555
+set strokeStyle=#aaa
+beginPath
+moveTo 195.2,329.6
+lineTo 632.8,329.6
+stroke ss=#aaa lw=1 dash=
+set textAlign=right
+fillText "0%" 183.2,329.6 fs=#555 font=11px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 195.2,302.1091
+lineTo 632.8,302.1091
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "10%" 183.2,302.1091 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,274.6182
+lineTo 632.8,274.6182
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "20%" 183.2,274.6182 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,247.1273
+lineTo 632.8,247.1273
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "30%" 183.2,247.1273 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,219.6364
+lineTo 632.8,219.6364
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "40%" 183.2,219.6364 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,192.1455
+lineTo 632.8,192.1455
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "50%" 183.2,192.1455 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,164.6545
+lineTo 632.8,164.6545
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "60%" 183.2,164.6545 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,137.1636
+lineTo 632.8,137.1636
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "70%" 183.2,137.1636 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,109.6727
+lineTo 632.8,109.6727
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "80%" 183.2,109.6727 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,82.1818
+lineTo 632.8,82.1818
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "90%" 183.2,82.1818 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,54.6909
+lineTo 632.8,54.6909
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "100%" 183.2,54.6909 fs=#555 font=11px sans-serif al=right bl=middle
+beginPath
+moveTo 195.2,27.2
+lineTo 632.8,27.2
+stroke ss=#e0e0e0 lw=0.5 dash=
+fillText "110%" 183.2,27.2 fs=#555 font=11px sans-serif al=right bl=middle
+set fillStyle=#4472C4
+fillRect 238.96,176.8727,58.3467,152.7273 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 238.96,54.6909,58.3467,122.1818 fs=#ED7D31
+set fillStyle=#4472C4
+fillRect 384.8267,160.4252,58.3467,169.1748 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 384.8267,54.6909,58.3467,105.7343 fs=#ED7D31
+set fillStyle=#4472C4
+fillRect 530.6933,209.7678,58.3467,119.8322 fs=#4472C4
+set fillStyle=#ED7D31
+fillRect 530.6933,54.6909,58.3467,155.0769 fs=#ED7D31
+set fillStyle=#555
+set textAlign=center
+set textBaseline=top
+fillText "Q1" 268.1333,332.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 414,332.6 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 559.8667,332.6 fs=#555 font=11px sans-serif al=center bl=top
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 195.2,329.6
+lineTo 632.8,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,329.6
+lineTo 195.2,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,302.1091
+lineTo 195.2,302.1091
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,274.6182
+lineTo 195.2,274.6182
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,247.1273
+lineTo 195.2,247.1273
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,219.6364
+lineTo 195.2,219.6364
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,192.1455
+lineTo 195.2,192.1455
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,164.6545
+lineTo 195.2,164.6545
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,137.1636
+lineTo 195.2,137.1636
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,109.6727
+lineTo 195.2,109.6727
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,82.1818
+lineTo 195.2,82.1818
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,54.6909
+lineTo 195.2,54.6909
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 191.2,27.2
+lineTo 195.2,27.2
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 195.2,333.6
+lineTo 195.2,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 341.0667,333.6
+lineTo 341.0667,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 486.9333,333.6
+lineTo 486.9333,329.6
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 632.8,333.6
+lineTo 632.8,329.6
+stroke ss=#aaa lw=1 dash=
+set font=12px sans-serif
+set textBaseline=middle
+set fillStyle=#4472C4
+fillRect 16,162.4,10,12 fs=#4472C4
+set fillStyle=#333
+set textAlign=left
+fillText "Alpha" 30,168.4 fs=#333 font=12px sans-serif al=left bl=middle
+set fillStyle=#ED7D31
+fillRect 16,178.4,10,12 fs=#ED7D31
+set fillStyle=#333
+fillText "Beta" 30,184.4 fs=#333 font=12px sans-serif al=left bl=middle"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: stackedLine+midCat 1`] = `
+"set font=16.2px sans-serif
+set textBaseline=middle
+set strokeStyle=#aaa
+beginPath
+moveTo 57.64,351.8
+lineTo 620,351.8
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#888
+beginPath
+moveTo 53.64,351.8
+lineTo 57.64,351.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#aaa
+set fillStyle=#555
+set textAlign=right
+fillText "0" 51.64,351.8 fs=#555 font=16.2px sans-serif al=right bl=middle
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+beginPath
+moveTo 57.64,327.0538
+lineTo 620,327.0538
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,327.0538
+lineTo 57.64,327.0538
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "2" 51.64,327.0538 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,302.3077
+lineTo 620,302.3077
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,302.3077
+lineTo 57.64,302.3077
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "4" 51.64,302.3077 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,277.5615
+lineTo 620,277.5615
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,277.5615
+lineTo 57.64,277.5615
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "6" 51.64,277.5615 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,252.8154
+lineTo 620,252.8154
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,252.8154
+lineTo 57.64,252.8154
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "8" 51.64,252.8154 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,228.0692
+lineTo 620,228.0692
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,228.0692
+lineTo 57.64,228.0692
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "10" 51.64,228.0692 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,203.3231
+lineTo 620,203.3231
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,203.3231
+lineTo 57.64,203.3231
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "12" 51.64,203.3231 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,178.5769
+lineTo 620,178.5769
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,178.5769
+lineTo 57.64,178.5769
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "14" 51.64,178.5769 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,153.8308
+lineTo 620,153.8308
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,153.8308
+lineTo 57.64,153.8308
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "16" 51.64,153.8308 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,129.0846
+lineTo 620,129.0846
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,129.0846
+lineTo 57.64,129.0846
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "18" 51.64,129.0846 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,104.3385
+lineTo 620,104.3385
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,104.3385
+lineTo 57.64,104.3385
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "20" 51.64,104.3385 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,79.5923
+lineTo 620,79.5923
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,79.5923
+lineTo 57.64,79.5923
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "22" 51.64,79.5923 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,54.8462
+lineTo 620,54.8462
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,54.8462
+lineTo 57.64,54.8462
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "24" 51.64,54.8462 fs=#555 font=16.2px sans-serif al=right bl=middle
+beginPath
+moveTo 57.64,30.1
+lineTo 620,30.1
+stroke ss=#e0e0e0 lw=0.5 dash=
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 53.64,30.1
+lineTo 57.64,30.1
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#e0e0e0
+set lineWidth=0.5
+fillText "26" 51.64,30.1 fs=#555 font=16.2px sans-serif al=right bl=middle
+set strokeStyle=#aaa
+set lineWidth=1
+beginPath
+moveTo 57.64,351.8
+lineTo 620,351.8
+stroke ss=#aaa lw=1 dash=
+beginPath
+moveTo 57.64,30.1
+lineTo 57.64,351.8
+stroke ss=#aaa lw=1 dash=
+set strokeStyle=#4472C4
+set lineWidth=2.3625
+setLineDash 
+beginPath
+moveTo 57.64,228.0692
+lineTo 338.82,54.8462
+lineTo 620,141.4577
+stroke ss=#4472C4 lw=2.3625 dash=
+set fillStyle=#4472C4
+beginPath
+arc 57.64,228.0692,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+beginPath
+arc 338.82,54.8462,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+beginPath
+arc 620,141.4577,2.625,0,6.2832
+fill fs=#4472C4 ga=1
+set strokeStyle=#ED7D31
+setLineDash 
+beginPath
+moveTo 57.64,252.8154
+lineTo 338.82,166.2038
+lineTo 620,79.5923
+stroke ss=#ED7D31 lw=2.3625 dash=
+set fillStyle=#ED7D31
+beginPath
+arc 57.64,252.8154,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+beginPath
+arc 338.82,166.2038,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+beginPath
+arc 620,79.5923,2.625,0,6.2832
+fill fs=#ED7D31 ga=1
+set fillStyle=#555
+set textAlign=center
+set textBaseline=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 57.64,355.8
+lineTo 57.64,351.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Q1" 57.64,356.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 338.82,355.8
+lineTo 338.82,351.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Q2" 338.82,356.8 fs=#555 font=16.2px sans-serif al=center bl=top
+set strokeStyle=#888
+set lineWidth=1
+beginPath
+moveTo 620,355.8
+lineTo 620,351.8
+stroke ss=#888 lw=1 dash=
+set strokeStyle=#ED7D31
+set lineWidth=2.3625
+fillText "Q3" 620,356.8 fs=#555 font=16.2px sans-serif al=center bl=top"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: waterfall 1`] = `
+"save
+set font=15px sans-serif
+set strokeStyle=#e8e8e8
+set lineWidth=0.7
+set fillStyle=#666
+set textAlign=right
+set textBaseline=middle
+beginPath
+moveTo 82.4,329.6
+lineTo 645.6,329.6
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "0" 78.4,329.6 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,292.3413
+lineTo 645.6,292.3413
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "20" 78.4,292.3413 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,255.0825
+lineTo 645.6,255.0825
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "40" 78.4,255.0825 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,217.8238
+lineTo 645.6,217.8238
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "60" 78.4,217.8238 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,180.565
+lineTo 645.6,180.565
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "80" 78.4,180.565 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,143.3063
+lineTo 645.6,143.3063
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "100" 78.4,143.3063 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,106.0476
+lineTo 645.6,106.0476
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "120" 78.4,106.0476 fs=#666 font=15px sans-serif al=right bl=middle
+beginPath
+moveTo 82.4,68.7888
+lineTo 645.6,68.7888
+stroke ss=#e8e8e8 lw=0.7 dash=
+fillText "140" 78.4,68.7888 fs=#666 font=15px sans-serif al=right bl=middle
+set strokeStyle=#bbb
+set lineWidth=1
+beginPath
+moveTo 82.4,63.2
+lineTo 82.4,329.6
+lineTo 645.6,329.6
+stroke ss=#bbb lw=1 dash=
+set fillStyle=#196ECA
+fillRect 124.64,143.3063,56.32,186.2937 fs=#196ECA
+set strokeStyle=#ccc
+set lineWidth=0.8
+setLineDash 3,3
+beginPath
+moveTo 180.96,143.3063
+lineTo 265.44,143.3063
+stroke ss=#ccc lw=0.8 dash=3,3
+setLineDash 
+set fillStyle=#595959
+set font=bold 16px sans-serif
+set textAlign=center
+set textBaseline=bottom
+fillText "100" 152.8,140.3063 fs=#595959 font=bold 16px sans-serif al=center bl=bottom
+set strokeStyle=#5BA4E6
+set lineWidth=1.5
+strokeRect 266.19,88.1682,54.82,54.3881 ss=#5BA4E6 lw=1.5
+set strokeStyle=#ccc
+set lineWidth=0.8
+setLineDash 3,3
+beginPath
+moveTo 321.76,87.4182
+lineTo 406.24,87.4182
+stroke ss=#ccc lw=0.8 dash=3,3
+setLineDash 
+fillText "30" 293.6,84.4182 fs=#595959 font=bold 16px sans-serif al=center bl=bottom
+set strokeStyle=#E46970
+set lineWidth=1.5
+strokeRect 406.99,88.1682,54.82,35.7587 ss=#E46970 lw=1.5
+set strokeStyle=#ccc
+set lineWidth=0.8
+setLineDash 3,3
+beginPath
+moveTo 462.56,124.6769
+lineTo 547.04,124.6769
+stroke ss=#ccc lw=0.8 dash=3,3
+setLineDash 
+set textBaseline=top
+fillText "△ 20" 434.4,127.6769 fs=#595959 font=bold 16px sans-serif al=center bl=top
+set fillStyle=#196ECA
+fillRect 547.04,124.6769,56.32,204.9231 fs=#196ECA
+set fillStyle=#595959
+set textBaseline=bottom
+fillText "110" 575.2,121.6769 fs=#595959 font=bold 16px sans-serif al=center bl=bottom
+set textBaseline=top
+set fillStyle=#666
+set font=14px sans-serif
+fillText "Start" 152.8,333.6 fs=#666 font=14px sans-serif al=center bl=top
+fillText "Q1" 293.6,333.6 fs=#666 font=14px sans-serif al=center bl=top
+fillText "Q2" 434.4,333.6 fs=#666 font=14px sans-serif al=center bl=top
+fillText "End" 575.2,333.6 fs=#666 font=14px sans-serif al=center bl=top
+restore"
+`;
+
+exports[`renderChart draw-call signature (characterization) > is stable for: waterfall+valAxisHidden 1`] = `
+"save
+set font=15px sans-serif
+set strokeStyle=#bbb
+beginPath
+moveTo 18.4,329.6
+lineTo 645.6,329.6
+stroke ss=#bbb lw=1 dash=
+set fillStyle=#196ECA
+fillRect 65.44,143.3063,62.72,186.2937 fs=#196ECA
+set strokeStyle=#ccc
+set lineWidth=0.8
+setLineDash 3,3
+beginPath
+moveTo 128.16,143.3063
+lineTo 222.24,143.3063
+stroke ss=#ccc lw=0.8 dash=3,3
+setLineDash 
+set fillStyle=#595959
+set font=bold 16px sans-serif
+set textAlign=center
+set textBaseline=bottom
+fillText "100" 96.8,140.3063 fs=#595959 font=bold 16px sans-serif al=center bl=bottom
+set strokeStyle=#5BA4E6
+set lineWidth=1.5
+strokeRect 222.99,88.1682,61.22,54.3881 ss=#5BA4E6 lw=1.5
+set strokeStyle=#ccc
+set lineWidth=0.8
+setLineDash 3,3
+beginPath
+moveTo 284.96,87.4182
+lineTo 379.04,87.4182
+stroke ss=#ccc lw=0.8 dash=3,3
+setLineDash 
+fillText "30" 253.6,84.4182 fs=#595959 font=bold 16px sans-serif al=center bl=bottom
+set strokeStyle=#E46970
+set lineWidth=1.5
+strokeRect 379.79,88.1682,61.22,35.7587 ss=#E46970 lw=1.5
+set strokeStyle=#ccc
+set lineWidth=0.8
+setLineDash 3,3
+beginPath
+moveTo 441.76,124.6769
+lineTo 535.84,124.6769
+stroke ss=#ccc lw=0.8 dash=3,3
+setLineDash 
+set textBaseline=top
+fillText "△ 20" 410.4,127.6769 fs=#595959 font=bold 16px sans-serif al=center bl=top
+set fillStyle=#196ECA
+fillRect 535.84,124.6769,62.72,204.9231 fs=#196ECA
+set fillStyle=#595959
+set textBaseline=bottom
+fillText "110" 567.2,121.6769 fs=#595959 font=bold 16px sans-serif al=center bl=bottom
+set textBaseline=top
+set fillStyle=#666
+set font=14px sans-serif
+fillText "Start" 96.8,333.6 fs=#666 font=14px sans-serif al=center bl=top
+fillText "Q1" 253.6,333.6 fs=#666 font=14px sans-serif al=center bl=top
+fillText "Q2" 410.4,333.6 fs=#666 font=14px sans-serif al=center bl=top
+fillText "End" 567.2,333.6 fs=#666 font=14px sans-serif al=center bl=top
+restore"
+`;

@@ -1,0 +1,290 @@
+// Shared chart-frame layout (Phase 4 A1). Before this module, every chart
+// family (bar/line/area/pie/radar/scatter/waterfall) recomputed the same
+// outer-frame structure — title band → legend reserve → axis-title / label
+// gutters → plot rectangle — inline, and the constants had DRIFTED between
+// families (e.g. the title top pad is `h*0.02` for bar but `h*0.045` for line,
+// the side legend reserve is `w*0.22` everywhere except pie's `w*0.28`).
+//
+// `computeChartFrame` centralises the frame math. It does NOT unify the drifted
+// constants: each family passes its current numbers via `FrameParams`, so the
+// pixels are byte-for-byte unchanged. The drift is now visible in ONE place
+// (each call site's params object) as a prerequisite for a later, VRT-gated
+// decision to converge them. See docs/dev-notes / the A1 report for the table.
+//
+// Two frame shapes are produced:
+//   • cartesian (bar/line/area/scatter): a `plotRect` derived from a
+//     `{t,r,b,l}` pad, itself built from the shared title/legend/axis-title
+//     bands plus family-specific extras the caller resolves and passes in.
+//   • radial (pie/radar): no pad; the plot is centred in the space left after
+//     the title and legend bands, and the caller reads `plotRect` + `center`.
+//
+// The per-family MARK drawing (bars, lines, slices, points) stays in
+// renderer.ts; only the frame is shared.
+
+import type { ChartModel } from '../types/chart';
+
+// ─── Public types ────────────────────────────────────────────────────────────
+
+/** Which side the legend occupies, or null when hidden. Mirrors the private
+ *  `LegendSide` in renderer.ts (kept in sync; not exported from there). */
+export type ChartLegendSide = 'r' | 'l' | 't' | 'b';
+
+/** Legend band reserved out of the chart space. `reserveW` > 0 for left/right
+ *  placement, `reserveH` > 0 for top/bottom. `null` = no legend. */
+export interface ChartLegendReserve {
+  side: ChartLegendSide;
+  reserveW: number;
+  reserveH: number;
+}
+
+/** Per-side reserved legend widths/heights, split out of a
+ *  {@link ChartLegendReserve} for convenient consumption. Exactly one of the
+ *  four is non-zero (or all zero when there is no legend). */
+export interface ChartLegendBands {
+  legRightW: number;
+  legLeftW: number;
+  legTopH: number;
+  legBottomH: number;
+}
+
+/** Title band metrics. `bandH` is the total vertical space the title reserves
+ *  (`fontPx + topPad + bottomPad`, or 0 when there is no title). `topPad` is
+ *  also the y-offset at which the title text is drawn (`y + topPad`). */
+export interface ChartTitleBand {
+  fontPx: number;
+  topPad: number;
+  bottomPad: number;
+  bandH: number;
+}
+
+/** Axis-title bands (cartesian only). `catBandH` is reserved at the bottom
+ *  (under the tick labels), `valBandW` at the left; both 0 when the respective
+ *  title is absent. `catFontPx`/`valFontPx` are the title font sizes used both
+ *  to size the bands and to draw the titles. Identical shape to the private
+ *  `AxisTitleLayout` in renderer.ts. */
+export interface ChartAxisTitleBands {
+  catFontPx: number;
+  valFontPx: number;
+  catBandH: number;
+  valBandW: number;
+}
+
+/** The computed plot rectangle (inner data region), in canvas px. */
+export interface ChartPlotRect {
+  px0: number;
+  py0: number;
+  pw: number;
+  ph: number;
+}
+
+/** Full resolved frame for a chart. `plotRect` is the inner data region; the
+ *  bands describe the gutters reserved around it. `center` is set for radial
+ *  charts (pie/radar) as the plot-rect centre. */
+export interface ChartFrame {
+  title: ChartTitleBand;
+  legend: ChartLegendReserve | null;
+  legendBands: ChartLegendBands;
+  axisTitles: ChartAxisTitleBands;
+  plotRect: ChartPlotRect;
+  center: { cx: number; cy: number };
+}
+
+// ─── Title band ──────────────────────────────────────────────────────────────
+
+/** Chart title font size (px). Verbatim from renderer.ts `chartTitleFontPx`:
+ *  honor the XML `<c:title>…@sz` (hundredths of a point, scaled by ptToPx),
+ *  else the proportional `max(10, h*0.085)` fallback. */
+export function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
+  if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
+  return Math.max(10, h * 0.085);
+}
+
+/** Resolve the title band from the family's top/bottom pad FRACTIONS (of `h`).
+ *  These fractions differ per family (the historical drift); passing them in
+ *  keeps each family's pixels unchanged. When the chart has no title the band
+ *  collapses to zero (matching the `chart.title ? … : 0` guards inline). */
+export function chartTitleBand(
+  chart: ChartModel,
+  h: number,
+  ptToPx: number,
+  topPadFrac: number,
+  bottomPadFrac: number,
+): ChartTitleBand {
+  if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
+  const fontPx = chartTitleFontPx(chart, h, ptToPx);
+  const topPad = h * topPadFrac;
+  const bottomPad = h * bottomPadFrac;
+  return { fontPx, topPad, bottomPad, bandH: fontPx + topPad + bottomPad };
+}
+
+// ─── Legend reserve ──────────────────────────────────────────────────────────
+
+/** Resolve legend placement from `<c:legendPos>`. Returns null when hidden.
+ *  Verbatim from renderer.ts `legendLayout`, except the side reserve FRACTION
+ *  is a parameter (`sideReserveFrac`) so pie can request its wider 0.28 band
+ *  while every other family keeps 0.22. Top/bottom always reserve `max(18,
+ *  h*0.08)`. */
+export function chartLegendReserve(
+  chart: ChartModel,
+  w: number,
+  h: number,
+  sideReserveFrac: number,
+): ChartLegendReserve | null {
+  if (!chart.showLegend) return null;
+  const pos = chart.legendPos ?? 'r';
+  const side: ChartLegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
+  if (side === 'r' || side === 'l') {
+    return { side, reserveW: Math.max(80, w * sideReserveFrac), reserveH: 0 };
+  }
+  return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
+}
+
+/** Split a legend reserve into the four per-side bands (three of which are 0).
+ *  Matches the `leg?.side === 'r' ? leg.reserveW : 0` idiom repeated inline. */
+export function chartLegendBands(leg: ChartLegendReserve | null): ChartLegendBands {
+  return {
+    legRightW: leg?.side === 'r' ? leg.reserveW : 0,
+    legLeftW: leg?.side === 'l' ? leg.reserveW : 0,
+    legTopH: leg?.side === 't' ? leg.reserveH : 0,
+    legBottomH: leg?.side === 'b' ? leg.reserveH : 0,
+  };
+}
+
+// ─── Axis-title bands ────────────────────────────────────────────────────────
+
+/** Axis-title font size (px). Verbatim from renderer.ts `axisTitleFontPx`. */
+export function axisTitleFontPx(
+  sizeHpt: number | null | undefined,
+  h: number,
+  ptToPx: number,
+): number {
+  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
+  return Math.max(8, Math.min(10, h * 0.045));
+}
+
+/** Margin (px) between the chart's outer edge and an axis title. Verbatim from
+ *  renderer.ts `axisTitleMargin`. */
+export function axisTitleMargin(dim: number): number {
+  return Math.max(8, dim * 0.02);
+}
+
+/** Axis-title bands (cat = bottom, val = left). Verbatim from renderer.ts
+ *  `axisTitleLayout`: reserve `fontPx + margin + 4` on the side whose title is
+ *  present, else 0. Identical across bar/line/area/scatter. */
+export function chartAxisTitleBands(
+  chart: ChartModel,
+  w: number,
+  h: number,
+  ptToPx: number,
+): ChartAxisTitleBands {
+  const catFontPx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
+  const valFontPx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  return {
+    catFontPx,
+    valFontPx,
+    catBandH: chart.catAxisTitle ? catFontPx + axisTitleMargin(h) + 4 : 0,
+    valBandW: chart.valAxisTitle ? valFontPx + axisTitleMargin(w) + 4 : 0,
+  };
+}
+
+// ─── Frame parameters + computeChartFrame ────────────────────────────────────
+
+/** A resolved `{t,r,b,l}` plot pad (canvas px). The caller builds this from the
+ *  frame's shared bands plus its own extras (measured value-label gutter,
+ *  secondary-axis bands, magic fractions), so `computeChartFrame` stays
+ *  agnostic to per-family pad formulas while still owning the rect arithmetic. */
+export interface ChartPad {
+  t: number;
+  r: number;
+  b: number;
+  l: number;
+}
+
+/** Parameters that drive {@link computeChartFrame}. Exactly one of `pad`
+ *  (cartesian) or `radialGapFrac` (radial) selects the frame shape.
+ *
+ *  - `titleTopPadFrac` / `titleBottomPadFrac`: title band pad fractions.
+ *  - `legendSideReserveFrac`: side (l/r) legend reserve fraction of `w`.
+ *  - `pad`: fully-resolved cartesian plot pad. Its presence means "cartesian".
+ *  - `plotAreaManualLayout`: honored (overrides `pad`) when present with w/h,
+ *    matching the `<c:plotArea><c:manualLayout>` handling inline today.
+ *  - `radialGapFrac`: for pie/radar, the extra `h * frac` gap subtracted below
+ *    the title/legend before centring the plot. Presence means "radial". */
+export interface FrameParams {
+  titleTopPadFrac: number;
+  titleBottomPadFrac: number;
+  legendSideReserveFrac: number;
+  pad?: ChartPad;
+  radialGapFrac?: number;
+  honorPlotAreaManualLayout?: boolean;
+}
+
+/**
+ * Compute a chart's outer frame: title band, legend reserve, axis-title bands,
+ * and the plot rectangle. This is the single home for the frame geometry that
+ * every family previously duplicated.
+ *
+ * The shared bands (title/legend/axis-title) are always computed. The plot rect
+ * is then resolved in one of two ways:
+ *   • cartesian — `params.pad` supplies the resolved `{t,r,b,l}` insets;
+ *     `px0=x+pad.l`, `pw=w-pad.l-pad.r`, etc. A `<c:plotArea><c:manualLayout>`
+ *     overrides it when `honorPlotAreaManualLayout` is set.
+ *   • radial — `params.radialGapFrac` is set; the plot fills the space left
+ *     after the title/legend bands minus a `h*gap`, and `center` is its middle.
+ *
+ * NB: this function performs NO drawing and reads NO `ctx`; the family passes in
+ * any ctx-measured value (e.g. the column value-label gutter) already folded
+ * into `pad`. That keeps the frame math pure and unit-testable.
+ */
+export function computeChartFrame(
+  chart: ChartModel,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  ptToPx: number,
+  params: FrameParams,
+): ChartFrame {
+  const title = chartTitleBand(chart, h, ptToPx, params.titleTopPadFrac, params.titleBottomPadFrac);
+  const legend = chartLegendReserve(chart, w, h, params.legendSideReserveFrac);
+  const legendBands = chartLegendBands(legend);
+  const axisTitles = chartAxisTitleBands(chart, w, h, ptToPx);
+
+  let px0: number, py0: number, pw: number, ph: number;
+
+  if (params.radialGapFrac != null) {
+    // Radial (pie/radar): centre the plot in the leftover space. Verbatim from
+    // the pie/radar inline math.
+    const gap = h * params.radialGapFrac;
+    pw = w - legendBands.legRightW - legendBands.legLeftW;
+    ph = h - title.bandH - legendBands.legTopH - legendBands.legBottomH - gap;
+    px0 = x + legendBands.legLeftW;
+    py0 = y + title.bandH + legendBands.legTopH + gap;
+  } else {
+    const pad = params.pad;
+    if (!pad) {
+      throw new Error('computeChartFrame: cartesian frame requires params.pad');
+    }
+    const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
+    if (pml && pml.w != null && pml.h != null) {
+      px0 = x + pml.x * w;
+      py0 = y + pml.y * h;
+      pw = pml.w * w;
+      ph = pml.h * h;
+    } else {
+      px0 = x + pad.l;
+      py0 = y + pad.t;
+      pw = w - pad.l - pad.r;
+      ph = h - pad.t - pad.b;
+    }
+  }
+
+  return {
+    title,
+    legend,
+    legendBands,
+    axisTitles,
+    plotRect: { px0, py0, pw, ph },
+    center: { cx: px0 + pw / 2, cy: py0 + ph / 2 },
+  };
+}

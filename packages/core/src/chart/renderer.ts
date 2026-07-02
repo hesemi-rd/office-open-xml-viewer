@@ -4,6 +4,15 @@
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
+import {
+  computeChartFrame,
+  chartTitleBand,
+  chartLegendReserve,
+  chartLegendBands,
+  chartAxisTitleBands,
+  axisTitleMargin,
+  type ChartLegendReserve,
+} from './layout.js';
 import { niceStep, valueAxisScale } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
@@ -63,15 +72,6 @@ export function legendEntryColor(
   return chartColor(entryIndex, series[entryIndex]);
 }
 
-/** Axis-title font size (px). Honors the XML run-prop size (`<c:catAx|valAx>
- *  <c:title>…@sz`, hundredths of a point) when present — e.g. 18pt titles in
- *  sample-30 — otherwise keeps the previous proportional default so untitled-
- *  size charts are unchanged. */
-function axisTitleFontPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
-  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
-  return Math.max(8, Math.min(10, h * 0.045));
-}
-
 /** Draw an axis title at an explicit anchor in the outer gutter band (outside
  *  the tick labels), at its real font size/bold/color. The cat title is
  *  centered under the X axis; the val title is rotated -90° centered to the
@@ -110,33 +110,6 @@ function drawAxisTitle(
  *  '#rrggbb' when the XML supplied a srgb color, else the legacy '#555'. */
 function axisTitleColor(hex: string | null | undefined): string {
   return hex ? `#${hex}` : '#555';
-}
-
-/** Margin (px) between the chart's outer edge and an axis title. ECMA-376
- *  leaves axis-title position automatic when there is no `<c:layout>/<c:manualLayout>`
- *  (§21.2.2.88 layout / §21.2.2.32 plotArea) — there is NO spec-defined inset, so
- *  the `8px` floor and `2%` factor are empirical approximations of Excel's
- *  auto-layout, not measured spec values. `dim` = width (left/val title) or
- *  height (bottom/cat title). */
-function axisTitleMargin(dim: number): number {
-  return Math.max(8, dim * 0.02);
-}
-
-interface AxisTitleLayout { catTitlePx: number; valTitlePx: number; catTitleH: number; valTitleW: number; }
-
-/** Axis-title font sizes (px) and the outer gutter bands to reserve for them
- *  (`catTitleH` → bottom pad, `valTitleW` → left pad). Identical across all four
- *  cartesian renderers; keeping reserve here and the draw anchors in
- *  drawAxisTitles in sync via one source for the band size. The per-renderer
- *  `pad` formula that consumes these differs and stays inline. */
-function axisTitleLayout(chart: ChartModel, w: number, h: number, ptToPx: number): AxisTitleLayout {
-  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  return {
-    catTitlePx, valTitlePx,
-    catTitleH: chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0,
-    valTitleW: chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0,
-  };
 }
 
 /** Draw both axis titles for a cartesian chart (bar/line/area/scatter),
@@ -301,28 +274,12 @@ function drawLegend(
   }
 }
 
-type LegendSide = 'r' | 'l' | 't' | 'b';
-interface LegendLayout {
-  side: LegendSide;
-  /** Reserved plot-area width (>0 when side = l or r). */
-  reserveW: number;
-  /** Reserved plot-area height (>0 when side = t or b). */
-  reserveH: number;
-}
+// Legend placement is resolved by `chartLegendReserve` (layout.ts). This alias
+// keeps the drawing helper's signature readable while sharing the single source
+// of truth for the reserve shape.
+type LegendLayout = ChartLegendReserve;
 
-/** Resolve legend placement from `<c:legendPos>`. Returns null when hidden. */
-function legendLayout(chart: ChartModel, w: number, h: number): LegendLayout | null {
-  if (!chart.showLegend) return null;
-  const pos = chart.legendPos ?? 'r';
-  const side: LegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
-  if (side === 'r' || side === 'l') {
-    return { side, reserveW: Math.max(80, w * 0.22), reserveH: 0 };
-  }
-  // Excel's top/bottom legend is a single-row strip; reserve ~8% of height.
-  return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
-}
-
-/** Draw a legend in the band reserved by {@link legendLayout}. */
+/** Draw a legend in the band reserved by {@link chartLegendReserve}. */
 function drawLegendForLayout(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -415,12 +372,27 @@ function drawAxisTick(
   ctx.lineWidth = prevW;
 }
 
-function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
-  // Honor the XML-specified title font size (hundredths of a point) when
-  // present. ptToPx is the pixels-per-point at the current slide scale, so
-  // a 16pt title renders at the same proportional size as PowerPoint.
-  if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
-  return Math.max(10, h * 0.085);
+/** Stroke one horizontal value-axis gridline spanning the plot width at `gy`.
+ *  Verbatim extraction of the identical stroke that the column-bar, line and
+ *  area renderers each emitted inline: the baseline (value 0) gridline is a
+ *  darker `#aaa` 1px rule, every other gridline is a faint `#e0e0e0` 0.5px
+ *  hairline. `isZero` is the caller's "this is the value-0 line" predicate
+ *  (`si === 0` / `v === 0`). Callers set their own font/label BEFORE/AFTER this
+ *  call, which is why those (drifted) parts stay at the call sites. Scatter is
+ *  deliberately NOT a caller — it has no baseline special-case. */
+function strokeValueGridlineH(
+  ctx: CanvasRenderingContext2D,
+  px0: number,
+  pw: number,
+  gy: number,
+  isZero: boolean,
+): void {
+  ctx.strokeStyle = isZero ? '#aaa' : '#e0e0e0';
+  ctx.lineWidth = isZero ? 1 : 0.5;
+  ctx.beginPath();
+  ctx.moveTo(px0, gy);
+  ctx.lineTo(px0 + pw, gy);
+  ctx.stroke();
 }
 
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
@@ -548,19 +520,23 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // Honor the XML-specified title font size when present; otherwise fall back
   // to the proportional heuristic. Reserve the title band based on the actual
   // drawn height so the plot shrinks to avoid overlap.
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.02 : 0;
-  const titleBottomPad = chart.title ? h * 0.025 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
+  // Shared frame bands (title / legend / axis-title). The bar family's title
+  // pad fractions (0.02 / 0.025) and default 0.22 side-legend reserve are passed
+  // as params, so the pixels are unchanged from the old inline math.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.02, 0.025);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   // Axis-title bands sized from the *actual* title font (honoring XML @sz, e.g.
   // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
   // and never collide with the tick labels.
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
   // Value-axis scales are computed up-front (before `pad`) so the side gutters
   // can be sized to the actual tick-label widths instead of a fixed fraction of
   // the chart width — short numeric labels otherwise leave a big empty gap
@@ -674,18 +650,15 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // and the explicit `x=0.184, w=0.797` keeps the actual bars on the left.
   // `layoutTarget="inner"` (default) means the rectangle covers the inner
   // data region; "outer" includes axes/labels. We treat both identically
-  // because the inner padding stays the same either way.
-  const pml = chart.plotAreaManualLayout;
-  let px0: number, py0: number, pw: number, ph: number;
-  if (pml && pml.w != null && pml.h != null) {
-    px0 = x + pml.x * w;
-    py0 = y + pml.y * h;
-    pw  = pml.w * w;
-    ph  = pml.h * h;
-  } else {
-    px0 = x + pad.l; py0 = y + pad.t;
-    pw  = w - pad.l - pad.r; ph = h - pad.t - pad.b;
-  }
+  // because the inner padding stays the same either way. computeChartFrame
+  // applies the pad → plot rect and the manual-layout override.
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.02,
+    titleBottomPadFrac: 0.025,
+    legendSideReserveFrac: 0.22,
+    pad,
+    honorPlotAreaManualLayout: true,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -719,9 +692,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         : formatChartValWithCode(val, chart.valAxisFormatCode);
       if (!isH) {
         const gy = py0 + ph - (val / axMax) * ph;
-        ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
-        ctx.lineWidth = si === 0 ? 1 : 0.5;
-        ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+        strokeValueGridlineH(ctx, px0, pw, gy, si === 0);
         ctx.textAlign = 'right';
         ctx.fillText(label, px0 - 12, gy);
       } else {
@@ -1036,23 +1007,25 @@ function renderLineChart(
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  // Shared frame bands. The line family uses title pads 0.045 / 0.035 and the
+  // default 0.22 side-legend reserve — passed as params so pixels are unchanged.
   // PowerPoint's auto-layout reserves a title band with air above and below
-  // the text; pinning the title to y+0 and the plot to y+titleFontPx+2 is too
-  // tight. Use proportional pads so scaling preserves the same feel.
-  const titleTopPad    = chart.title ? h * 0.045 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
+  // the text; the proportional pads preserve that feel across scaling.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.045, 0.035);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   // Axis-title bands use the real title font (XML @sz when set), independent of
   // the tick-label sizes above, so 18pt titles get a wide enough gutter.
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -1064,8 +1037,12 @@ function renderLineChart(
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const px0 = x + pad.l; const py0 = y + pad.t;
-  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.045,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    pad,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -1102,9 +1079,7 @@ function renderLineChart(
     for (let si = 0; si <= steps; si++) {
       const v = axMin + si * step;
       const gy = toY(v);
-      ctx.strokeStyle = v === 0 ? '#aaa' : '#e0e0e0';
-      ctx.lineWidth = v === 0 ? 1 : 0.5;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
@@ -1193,16 +1168,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const n = cats.length; if (n === 0) return;
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  // Shared frame bands. Area uses title pads 0.035 / 0.035 and default 0.22
+  // side-legend reserve — params keep pixels unchanged.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.05,
@@ -1212,8 +1190,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const px0 = x + pad.l; const py0 = y + pad.t;
-  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    pad,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -1292,9 +1274,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const steps = Math.round(axMax / step);
     for (let si = 0; si <= steps; si++) {
       const v = si * step; const gy = toY(v);
-      ctx.strokeStyle = si === 0 ? '#aaa' : '#e0e0e0';
-      ctx.lineWidth = si === 0 ? 1 : 0.5;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      strokeValueGridlineH(ctx, px0, pw, gy, si === 0);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
@@ -1364,33 +1344,24 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return;
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+  // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
+  // labels categories (one row per slice) so it reserves a wider 0.28 side band
+  // (vs the default 0.22). The h*0.02 gap below the title/legend before centring
+  // is the shared radial gap. Params keep pixels unchanged.
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.28,
+    radialGapFrac: 0.02,
+  });
+  const titleFontPx = frame.title.fontPx;
+  const titleH = frame.title.bandH;
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, titleFontPx);
 
-  // Pie legend labels categories (one row per slice) so reserve a bit more
-  // than the default 22% when placed on the side.
-  const pieLeg: LegendLayout | null = chart.showLegend
-    ? (() => {
-        const pos = chart.legendPos ?? 'r';
-        const side: LegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
-        if (side === 'r' || side === 'l') {
-          return { side, reserveW: Math.max(80, w * 0.28), reserveH: 0 };
-        }
-        return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
-      })()
-    : null;
-  const legRightW  = pieLeg?.side === 'r' ? pieLeg.reserveW : 0;
-  const legLeftW   = pieLeg?.side === 'l' ? pieLeg.reserveW : 0;
-  const legTopH    = pieLeg?.side === 't' ? pieLeg.reserveH : 0;
-  const legBottomH = pieLeg?.side === 'b' ? pieLeg.reserveH : 0;
-
-  const pw = w - legRightW - legLeftW;
-  const ph = h - titleH - legTopH - legBottomH - h * 0.02;
-  const cx2 = x + legLeftW + pw / 2;
-  const cy2 = y + titleH + legTopH + h * 0.02 + ph / 2;
+  const pieLeg = frame.legend;
+  const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
+  const cx2 = frame.center.cx;
+  const cy2 = frame.center.cy;
   const outerR = Math.min(pw, ph) * 0.42;
   const innerR = isDoughnut ? outerR * 0.5 : 0;
 
@@ -1433,10 +1404,9 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // swatches to one color because it folded the series-level fill (`s.color`)
     // into every entry while the slices used the per-index palette.
     const legendSeries: ChartSeries[] = [{ ...s, categories: cats }];
-    const plotLeft = cx2 - pw / 2;
     drawLegendForLayout(
       ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
-      x, y, w, h, plotLeft, cy2 - ph / 2, pw, ph, titleH + 2,
+      x, y, w, h, plotLeft, plotTop, pw, ph, titleH + 2,
     );
   }
 }
@@ -1450,21 +1420,22 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const cats = chartCategories(chart);
   const n = cats.length; if (n < 3) return;
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH  = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+  // Shared frame (radial form). Radar uses title pads 0.035 / 0.035 and the
+  // default 0.22 side-legend reserve (unlike pie's 0.28). Params keep pixels
+  // unchanged.
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    radialGapFrac: 0.02,
+  });
+  const leg = frame.legend;
+  const titleFontPx = frame.title.fontPx;
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, titleFontPx);
 
-  const pw = w - legRightW - legLeftW;
-  const ph = h - titleH - legTopH - legBottomH - h * 0.02;
-  const cx2 = x + legLeftW + pw / 2;
-  const cy2 = y + titleH + legTopH + h * 0.02 + ph / 2;
+  const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
+  const cx2 = frame.center.cx;
+  const cy2 = frame.center.cy;
   const rd  = Math.min(pw, ph) * 0.38;
 
   let dataMax = 0;
@@ -1596,7 +1567,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   drawLegendForLayout(
     ctx, chart, leg,
     x, y, w, h,
-    cx2 - pw / 2, cy2 - ph / 2, pw, ph, titleH + 2,
+    plotLeft, plotTop, pw, ph, frame.title.bandH + 2,
   );
 }
 
@@ -1606,16 +1577,18 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  // Shared frame bands. Scatter uses title pads 0.035 / 0.035 and default 0.22
+  // side-legend reserve.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
 
   // Title placement — manual layout overrides the auto position.
   if (chart.title) {
@@ -1632,24 +1605,21 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // Plot area placement: honor `<c:plotArea><c:manualLayout>` when present.
   // ECMA-376: layoutTarget="inner" (default) describes the inner plot rect
   // (no axes / labels); "outer" includes axes. For scatter we treat both
-  // identically (the inner padding stays the same).
-  const pml = chart.plotAreaManualLayout;
-  let px0: number, py0: number, pw: number, ph: number;
-  if (pml && pml.w != null && pml.h != null) {
-    px0 = x + pml.x * w;
-    py0 = y + pml.y * h;
-    pw  = pml.w * w;
-    ph  = pml.h * h;
-  } else {
-    const pad = {
-      t: titleH + legTopH + h * 0.02,
-      r: legRightW + w * 0.05,
-      b: (chart.catAxisHidden ? h * 0.04 : h * 0.12) + catTitleH + legBottomH,
-      l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
-    };
-    px0 = x + pad.l; py0 = y + pad.t;
-    pw = w - pad.l - pad.r; ph = h - pad.t - pad.b;
-  }
+  // identically (the inner padding stays the same). The pad is pure arithmetic
+  // and is ignored by computeChartFrame when the manual layout applies.
+  const pad = {
+    t: titleBand.bandH + legTopH + h * 0.02,
+    r: legRightW + w * 0.05,
+    b: (chart.catAxisHidden ? h * 0.04 : h * 0.12) + catTitleH + legBottomH,
+    l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
+  };
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    pad,
+    honorPlotAreaManualLayout: true,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -1904,7 +1874,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     drawSeriesDataLabels(ctx, s, cats, useIndexX, toX, toY, ph, ptToPx);
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
