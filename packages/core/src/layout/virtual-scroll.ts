@@ -20,10 +20,25 @@ export interface VisibleRange {
    *  item — the standard virtualization convention; mount-safe, and flips to i+1
    *  exactly at `offsets[i+1]`). */
   topIndex: number;
-  /** Top offset (px) of every item i: Σ heights[0..i-1] + i*gap. length = heights.length. */
+  /** Top offset (px) of every item i: `leading` + Σ heights[0..i-1] + i*gap.
+   *  length = heights.length. With no padding (`leading` 0) this reduces to the
+   *  bare prefix-sum. */
   offsets: number[];
-  /** Σ heights + (n-1)*gap (gap between items only, none after the last) → spacer height. */
+  /** `leading` + Σ heights + (n-1)*gap + `trailing` (gap between items only, none
+   *  after the last) → spacer height. With no padding this reduces to
+   *  Σ heights + (n-1)*gap. */
   totalHeight: number;
+}
+
+/** Optional leading/trailing padding (px) added OUTSIDE the item run — the desk
+ *  margin a PDF reader leaves above the first item and below the last. Distinct
+ *  from `gap`, which only sits BETWEEN adjacent items. Both default 0, so an
+ *  omitted `pad` is exactly the pre-padding behaviour (fully backward-compatible). */
+export interface VisibleRangePad {
+  /** px above the FIRST item (shifts every offset down by this amount). Default 0. */
+  leading?: number;
+  /** px below the LAST item (added to totalHeight only). Default 0. */
+  trailing?: number;
 }
 
 /** Clamp `v` to `[lo, hi]` (hi < lo yields lo — only reached when n === 0, guarded upstream). */
@@ -41,9 +56,20 @@ function clamp(v: number, lo: number, hi: number): number {
  *                       the search / clamps.
  * @param viewportHeight visible height of the scroll surface (px).
  * @param overscan       extra items kept mounted beyond the viewport on each side.
+ * @param pad            optional {@link VisibleRangePad} desk margin OUTSIDE the
+ *                       item run: `leading` px above the first item shifts every
+ *                       offset down; `trailing` px below the last item extends
+ *                       totalHeight. Both default 0 — an omitted `pad` is exactly
+ *                       the pre-padding behaviour (backward-compatible). A viewport
+ *                       top inside the leading pad (scrollTop < leading, so below
+ *                       every offset) yields topIndex 0 via the existing clamp.
  * @returns a {@link VisibleRange}. Empty `heights` ⇒
  *          `{ start: 0, end: -1, topIndex: 0, offsets: [], totalHeight: 0 }`
- *          (an empty mount range: `start > end`).
+ *          (an empty mount range: `start > end`). NOTE: with n === 0 the padding
+ *          is DELIBERATELY NOT applied — an empty document shows no desk padding,
+ *          consistent with the viewers' empty-doc no-op contract (they never mount
+ *          a spacer for a zero-item document). `pad` only takes effect once there
+ *          is at least one item.
  */
 export function computeVisibleRange(
   heights: number[],
@@ -51,21 +77,28 @@ export function computeVisibleRange(
   scrollTop: number,
   viewportHeight: number,
   overscan: number,
+  pad?: VisibleRangePad,
 ): VisibleRange {
   const n = heights.length;
   if (n === 0) {
+    // Empty doc: no items ⇒ no desk padding (leading/trailing deliberately ignored).
+    // Preserves the exact pre-padding empty result the viewers rely on.
     return { start: 0, end: -1, topIndex: 0, offsets: [], totalHeight: 0 };
   }
 
-  // Prefix-sum offsets: offsets[i] = Σ heights[0..i-1] + i*gap.
+  const leading = pad?.leading ?? 0;
+  const trailing = pad?.trailing ?? 0;
+
+  // Prefix-sum offsets: offsets[i] = leading + Σ heights[0..i-1] + i*gap.
   const offsets = new Array<number>(n);
   let acc = 0;
   for (let i = 0; i < n; i++) {
-    offsets[i] = acc + i * gap;
+    offsets[i] = leading + acc + i * gap;
     acc += heights[i];
   }
-  // Σ heights + (n-1) gaps — no trailing gap after the last item.
-  const totalHeight = acc + (n - 1) * gap;
+  // leading + Σ heights + (n-1) gaps + trailing — no gap after the last item; the
+  // desk padding brackets the run (leading above the first, trailing below the last).
+  const totalHeight = leading + acc + (n - 1) * gap + trailing;
 
   // topIndex = largest i with offsets[i] <= scrollTop (the item under the
   // viewport top), clamped to [0, n-1]. Binary search over the non-decreasing

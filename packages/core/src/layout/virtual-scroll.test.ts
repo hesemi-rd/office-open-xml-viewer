@@ -140,3 +140,68 @@ describe('computeVisibleRange — degenerate inputs', () => {
     expect(computeVisibleRange([100, 100, 100], 10, 110, 50, 0).topIndex).toBe(1);
   });
 });
+
+describe('computeVisibleRange — leading/trailing padding (desk margin)', () => {
+  // pad shifts offsets down by `leading` and extends totalHeight by leading+trailing.
+  // offsets[i] = leading + Σ heights[0..i-1] + i*gap; total = leading + Σh + (n-1)*gap + trailing.
+
+  it('leading pad shifts every offset down and total up by leading+trailing', () => {
+    // 3 uniform 100-tall items, gap 10, pad {24, 24}:
+    // offsets 24, 134, 244; total = 24 + 300 + 2*10 + 24 = 368.
+    const r = computeVisibleRange([100, 100, 100], 10, 0, 1000, 0, { leading: 24, trailing: 24 });
+    expect(r.offsets).toEqual([24, 134, 244]);
+    expect(r.totalHeight).toBe(368);
+  });
+
+  it('omitted pad is identical to pad {0,0} (backward-compatible)', () => {
+    const bare = computeVisibleRange([50, 200, 30], 8, 40, 100, 1);
+    const padded = computeVisibleRange([50, 200, 30], 8, 40, 100, 1, { leading: 0, trailing: 0 });
+    expect(padded).toEqual(bare);
+  });
+
+  it('viewport top inside the leading pad ⇒ topIndex 0 (existing clamp)', () => {
+    // leading 50: offsets = [50, 160, 270]. scrollTop 20 is INSIDE the leading pad
+    // (below every offset), so the search finds lo=0 ⇒ topIndex clamp(-1,0,n-1)=0.
+    const r = computeVisibleRange([100, 100, 100], 10, 20, 80, 0, { leading: 50 });
+    expect(r.topIndex).toBe(0);
+    expect(r.start).toBe(0);
+    // bottom edge 100 → item 0 (top 50) begins before it; item 1 (top 160) does not.
+    expect(r.end).toBe(0);
+  });
+
+  it('viewport ending inside the trailing pad ⇒ end = n-1, no overrun', () => {
+    // leading 0, trailing 100: offsets = [0, 110, 220], total = 300+2*10+100 = 420.
+    // Scroll near the end so the viewport bottom (200+250=450) lands in the trailing
+    // pad; end must clamp to the last real item (2), never past it.
+    const r = computeVisibleRange([100, 100, 100], 10, 200, 250, 1, { trailing: 100 });
+    // offsets [0,110,220]; scrollTop 200 → largest offset ≤ 200 is 110 (item 1).
+    expect(r.topIndex).toBe(1);
+    expect(r.end).toBe(2); // lastVisible (2) + overscan clamped to n-1 — no overrun
+    expect(r.totalHeight).toBe(420);
+  });
+
+  it('pad + gap compose (both contribute, distinctly)', () => {
+    // heights [50, 200, 30], gap 8, pad {12, 40}:
+    // offsets = 12, 12+50+8=70, 12+250+16=278; total = 12 + 280 + 16 + 40 = 348.
+    const r = computeVisibleRange([50, 200, 30], 8, 0, 10, 0, { leading: 12, trailing: 40 });
+    expect(r.offsets).toEqual([12, 70, 278]);
+    expect(r.totalHeight).toBe(348);
+  });
+
+  it('leading-only pad', () => {
+    const r = computeVisibleRange([100, 100], 10, 0, 1000, 0, { leading: 30 });
+    expect(r.offsets).toEqual([30, 140]);
+    expect(r.totalHeight).toBe(30 + 200 + 10); // 240
+  });
+
+  it('trailing-only pad', () => {
+    const r = computeVisibleRange([100, 100], 10, 0, 1000, 0, { trailing: 30 });
+    expect(r.offsets).toEqual([0, 110]);
+    expect(r.totalHeight).toBe(200 + 10 + 30); // 240
+  });
+
+  it('empty input ignores pad entirely (empty-doc no-op contract)', () => {
+    const r = computeVisibleRange([], 16, 0, 500, 1, { leading: 24, trailing: 24 });
+    expect(r).toEqual({ start: 0, end: -1, topIndex: 0, offsets: [], totalHeight: 0 });
+  });
+});
