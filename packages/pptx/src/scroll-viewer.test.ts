@@ -102,3 +102,119 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     expect(engine.destroyed).toBe(false);
   });
 });
+
+describe('PptxScrollViewer — layout + virtualization (T2)', () => {
+  // Uniform 1000×600 EMU slides; `_scale` is px-per-EMU (no PT_TO_PX). Fit the
+  // slide width to the container: base scale = clientWidth / slideWidth. With
+  // clientWidth 200 → base 0.2 ⇒ each slide is 200px wide, 120px tall.
+  function setup(slideCount: number, opts = {}) {
+    const dom = installDom();
+    const container = makeContainer(200, 400); // clientWidth 200, clientHeight 400
+    const engine = new FakePptxEngine(slideCount, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      overscan: 1,
+      width: undefined, // fit container width (200) → base scale below
+      ...opts,
+    });
+    const wrapper = container.children[0] as FakeEl;
+    const scrollHost = wrapper.children[0] as FakeEl;
+    const spacer = scrollHost.children[0] as FakeEl;
+    // Drive layout: container width 200, slide width 1000 EMU → base scale maps
+    // 1000 EMU to 200px (0.2 px/EMU). Provide the viewport height.
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    return { dom, container, engine, v, wrapper, scrollHost, spacer };
+  }
+
+  it('sizes the spacer to computeVisibleRange.totalHeight and mounts only the visible window', () => {
+    const { v, scrollHost, spacer } = setup(10);
+    v.relayout(); // T2 exposes an explicit relayout() the viewer calls after load/resize
+    // Spacer height > 0 and equals n * slideHeightPx + (n-1)*gap in px.
+    expect(parseFloat(spacer.style.height)).toBeGreaterThan(0);
+    // At scrollTop 0 with a 400px viewport and 120px-tall slides, several slides
+    // fit; overscan 1 adds one more. Assert the mounted slot count is bounded.
+    const mounted = scrollHost.children.filter((c) => c !== spacer);
+    expect(mounted.length).toBeGreaterThanOrEqual(1);
+    // Viewport 400 / stride 130 ⇒ ~4 slides visible + overscan; comfortably bounded.
+    expect(mounted.length).toBeLessThanOrEqual(6);
+    v.destroy();
+  });
+
+  it('spacer height is exact for uniform slide heights + gap', () => {
+    const dom = installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(3, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      overscan: 1,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    const spacer = scrollHost.children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // base scale = 200 / 1000 = 0.2 px/EMU ⇒ slide height px = 600 * 0.2 = 120.
+    const scale = 200 / 1000;
+    const slideH = 600 * scale; // 120
+    const n = 3;
+    const expected = n * slideH + (n - 1) * 10;
+    expect(parseFloat(spacer.style.height)).toBeCloseTo(expected, 3);
+    v.destroy();
+    void dom;
+  });
+
+  it('recycles slots on scroll without unbounded canvas growth (pool reuse)', () => {
+    const { v, scrollHost } = setup(50);
+    v.relayout();
+    const initialMount = scrollHost.children.length;
+    // Scroll far down and fire the scroll listener repeatedly.
+    for (let top = 0; top <= 4000; top += 400) {
+      scrollHost.scrollTop = top;
+      scrollHost.dispatch('scroll');
+    }
+    // The DOM child count (spacer + mounted slots) must stay bounded — the pool
+    // reuses slots rather than appending a new canvas per slide.
+    expect(scrollHost.children.length).toBeLessThanOrEqual(initialMount + 2);
+  });
+
+  it('scrolling far then back reuses pooled slot wrappers (bounded distinct allocations)', () => {
+    const { v, scrollHost } = setup(50);
+    v.relayout();
+    // Track EVERY distinct wrapper element the viewer ever appends. If slots are
+    // pooled (recycled), scrolling across the whole deck then back reuses a small
+    // fixed set of wrappers rather than allocating one per visited slide.
+    const seen = new Set<FakeEl>();
+    const collect = () => {
+      for (const c of scrollHost.children) if (c.tag === 'div') seen.add(c);
+    };
+    collect();
+    // Sweep deep into the deck and back to the top.
+    for (const top of [3000, 6000, 3000, 0]) {
+      scrollHost.scrollTop = top;
+      scrollHost.dispatch('scroll');
+      collect();
+    }
+    // 50 slides visited across the sweep; a per-slide allocator would have created
+    // dozens of wrappers. The pool must keep the distinct-wrapper count tiny:
+    // spacer(1) + at most a couple of window-sized generations of slots.
+    expect(seen.size).toBeLessThanOrEqual(12);
+    // Coming back to the top mounts slide 0 again, drawn from the pool.
+    expect(v.mountedSlideIndicesForTest()).toContain(0);
+  });
+
+  it('mounts the correct window for a mid-deck scrollTop', () => {
+    const { v, scrollHost } = setup(20);
+    v.relayout();
+    // Jump to a scrollTop deep in the deck; the mounted slots must include the
+    // slide under the viewport top (topVisibleSlide) and its overscan neighbours.
+    scrollHost.scrollTop = 1300;
+    scrollHost.dispatch('scroll');
+    const top = v.topVisibleSlide;
+    const mountedSlides = v.mountedSlideIndicesForTest(); // T2 test hook
+    expect(mountedSlides).toContain(top);
+    expect(Math.max(...mountedSlides) - Math.min(...mountedSlides)).toBeLessThanOrEqual(6);
+  });
+});
