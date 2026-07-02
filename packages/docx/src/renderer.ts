@@ -1846,22 +1846,59 @@ export function computePages(
       // and emit it onto the current page (the renderer draws it absolutely).
       // It does NOT advance y / measureState.y and leaves prevPara/spaceAfter
       // untouched so the following paragraph spaces against the paragraph
-      // BEFORE the frame. (Pagination of a frame that itself overflows the page
-      // bottom — moving the frame + its anchor text together — is Word runtime
-      // behaviour not pinned by ECMA-376; see HEURISTIC note below. We keep the
-      // minimal model: the frame stays with the anchor paragraph because it
-      // adds no height here, so a normal break on the anchor paragraph carries
-      // the wrap band implicitly. TODO(§17.3.1.11): once a self-contained frame
-      // height/keep calc exists, drive an explicit keep-with-anchor here.)
+      // BEFORE the frame.
+      //
+      // §17.3.1.11 defines only the frame's SIZE and POSITION, not what happens
+      // when it overflows the page bottom. Word's runtime keeps a layout frame
+      // undivided and relocates it (with the anchor context that follows it) to
+      // the next page rather than splitting or clipping — the SAME "keep on
+      // page" semantics as a paragraph-anchored image float (see
+      // anchoredFloatBottomOffset above, §20.4.3.5). We apply it here:
+      //   • vAnchor="text" (default): the frame top rides the anchor paragraph's
+      //     in-flow cursor, so moving the anchor to the next page moves the
+      //     frame with it. If the frame body box overflows the current column's
+      //     bottom, relocate the frame paragraph — the anchor text that follows
+      //     it (which adds no height of its own) trails onto the new column/page.
+      //   • vAnchor="page"/"margin": y is an ABSOLUTE in-page position, so the
+      //     frame lands at the same spot on any page. Relocating cannot help
+      //     (Word draws it at its specified position and lets it overflow), so
+      //     these are left in place — matching the pre-existing behaviour.
+      // A frame TALLER than the page content area can never fit on a fresh page,
+      // so relocating it is futile (it would just overflow the next page too):
+      // leave it in place. This mirrors the anchored-image float guard's
+      // `<= effContentH()` fresh-fit test. (The frame paragraph is placed once
+      // and `continue`s, so no relocation can loop — this guard only suppresses a
+      // pointless page break for an over-tall frame.)
       if (para.framePr) {
-        const anchorH = frameAnchorLineHeightPx(body as PaginatedBodyElement[], el, measureState);
-        // Resolve and register the frame's wrap float against the CURRENT column
-        // band (#513), mirroring renderBodyElements which re-points
-        // state.contentX/contentW per column before drawing a frame. For
-        // hAnchor="text" the box x and exclusion x-range are column-relative
-        // (frameXContainer reads contentX), so measure and paint agree.
+        const fp = para.framePr;
+        // Frame body-box bottom (vSpace-exclusive: vSpace is inter-text padding,
+        // not part of the frame's own area). Resolve inside the column band so
+        // hAnchor="text" reads the current column's contentX/contentW (#513);
+        // the vertical extent (box.y/box.h) is column-independent.
+        const anchorH0 = frameAnchorLineHeightPx(body as PaginatedBodyElement[], el, measureState);
+        const box0 = withColumnBand(() => resolveFrameBox(para, measureState, anchorH0));
+        // Distance from the frame paragraph's in-flow top (measureState.y ==
+        // paraTop) down to the frame body-box bottom — the frame analogue of
+        // anchoredFloatBottomOffset. For vAnchor="text" this is the frame's y
+        // offset + its height; for page/margin it mixes an absolute box.y with
+        // the flow cursor and is not a keep signal, so it is gated out below.
+        const frameBottomOff = box0.y + box0.h - measureState.y;
+        const isTextAnchored = fp.vAnchor !== 'page' && fp.vAnchor !== 'margin';
+        const frameOverflowsHere = isTextAnchored && frameBottomOff > 0 && y + frameBottomOff > effContentH();
+        const frameFitsFresh = frameBottomOff > 0 && frameBottomOff <= effContentH();
+        if (y > 0 && frameOverflowsHere && frameFitsFresh) {
+          // Relocate the frame paragraph to the next column/page BEFORE its float
+          // is registered, so no stale exclusion band is left on the old page
+          // (newPage clears floats wholesale; nextColumn keeps page-scoped ones
+          // but the frame has not registered yet). The trailing anchor paragraph
+          // adds no height across this frame, so it follows onto the new page.
+          nextColumnOrPage(i);
+        }
+        // Resolve+register against the (possibly new) column band so the box x /
+        // exclusion x-range match the column the frame now sits in, and the wrap
+        // float is registered on the page it actually landed on.
         withColumnBand(() => {
-          const box = resolveFrameBox(para, measureState, anchorH);
+          const box = resolveFrameBox(para, measureState, anchorH0);
           registerFrameFloat(box, para.framePr!, measureState);
         });
         pushTagged(el as PaginatedBodyElement);
