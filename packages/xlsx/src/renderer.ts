@@ -3670,7 +3670,11 @@ export function drawShapeText(
       // this paragraph, falling back to the body default.
       if (lineHeight === 0) {
         const fallbackPx = (lastTextPt || DEFAULT_FONT_SIZE) * PT_TO_PX * cs;
-        lineHeight = Math.max(fallbackPx * 1.2, intendedSingleLinePx(lastTextFace, fallbackPx));
+        const designFloor = Math.max(
+          intendedSingleLinePx(lastTextFace, fallbackPx),
+          intendedSingleLinePx(lastTextFaceEa, fallbackPx),
+        );
+        lineHeight = Math.max(fallbackPx * 1.2, designFloor);
         lineAscent = fallbackPx * 0.85;
       }
       lineHeight = applyLineSpacing(lineHeight);
@@ -3681,9 +3685,12 @@ export function drawShapeText(
     // Nearest preceding text size (pt) in this paragraph — inline math with no
     // explicit rPr@sz inherits it (then falls back to the default).
     let lastTextPt = 0;
-    // Nearest preceding text AUTHORED face — used to floor an empty/blank line's
-    // reserved single-line height by that font's design line (intendedSingleLinePx).
+    // Nearest preceding text AUTHORED faces — used to floor an empty/blank
+    // line's reserved single-line height by the tallest design line among the
+    // declared latin / ea faces (intendedSingleLinePx), matching the text-run
+    // floor below (cs is excluded from the line-box floor — see there).
     let lastTextFace: string | undefined;
+    let lastTextFaceEa: string | undefined;
 
     for (const run of p.runs) {
       if (run.type === 'break') { flushLine(); continue; }
@@ -3724,6 +3731,7 @@ export function drawShapeText(
       // Text run.
       lastTextPt = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
       lastTextFace = run.fontFace;
+      lastTextFaceEa = run.fontFaceEa;
       const { font, px: pxSize } = textFont(run);
       const color = run.color ?? '#000000';
       // Floor the natural single line (Excel's flat 1.2×em) by the AUTHORED
@@ -3731,9 +3739,23 @@ export function drawShapeText(
       // core's intendedSingleLinePx — same floor docx/pptx apply. It returns 0
       // for every untabled face (Calibri etc. stay on 1.2×em); a substituted
       // Meiryo (1.596×em) / Sakkal Majalla must measure to its taller design
-      // line. Pass run.fontFace (the metric table keys on authored names), NOT
-      // the fallback stack from fontStackFor. Keep it a FLOOR — not a replace.
-      const singleLinePx = Math.max(pxSize * 1.2, intendedSingleLinePx(run.fontFace, pxSize));
+      // line. Floor by the tallest of the LATIN and EAST-ASIAN faces (the common
+      // Japanese encoding sets Meiryo only on `<a:ea>` while leaving `<a:latin>`
+      // default, §21.1.2.3.1). `<a:cs>` is parsed (see fontFaceCs) but
+      // deliberately NOT in this line-box floor: per the font-slot rules
+      // (§21.1.2.3.1 / §17.3.2.26) the complex-script face renders ONLY
+      // complex-script glyphs (Arabic/Hebrew/Thai), so an unconditional
+      // line-box floor by cs would over-grow a run whose glyphs are Latin/CJK
+      // (e.g. a Japanese run that merely also declares a tabled cs face). Getting
+      // cs right needs per-glyph/per-script handling (deferred, like pptx's
+      // per-glyph floor). Pass the authored names (the metric table keys on
+      // them), NOT the fallback stack. FLOOR, not a replace; matches the docx
+      // shape-text floor's max(latin, ea).
+      const designFloor = Math.max(
+        intendedSingleLinePx(run.fontFace, pxSize),
+        intendedSingleLinePx(run.fontFaceEa, pxSize),
+      );
+      const singleLinePx = Math.max(pxSize * 1.2, designFloor);
       lineHeight = Math.max(lineHeight, singleLinePx);
       lineAscent = Math.max(lineAscent, pxSize * 0.85);
       ctx.font = font;
