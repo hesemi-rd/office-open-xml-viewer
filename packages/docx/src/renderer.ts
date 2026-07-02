@@ -3573,7 +3573,8 @@ function renderEmptyMarkParagraph(
   const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses);
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
-    ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
+    const sb = paraShadingRect(contentX + indLeft, markRectTop, paraW, emptyH, para.borders, borderMerge, scale);
+    ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
   state.y += emptyH;
   if (para.borders && !dryRun) {
@@ -4141,7 +4142,8 @@ function renderParagraph(
   if (para.shading && !dryRun) {
     const totalTextH = lines.reduce((s, l) => s + lineHForLine(l), 0);
     ctx.fillStyle = `#${para.shading}`;
-    ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
+    const sb = paraShadingRect(contentX + indLeft, textAreaTopY, paraW, totalTextH, para.borders, borderMerge, scale);
+    ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
 
   // ECMA-376 §17.18.44 ST_Jc: "both" and "distribute" fully justify the line
@@ -8006,6 +8008,32 @@ interface ParaBorderMerge {
   suppressTop?: boolean;
   /** A same-border paragraph is adjacent below ⇒ don't draw this `bottom` edge. */
   suppressBottom?: boolean;
+}
+
+/** ECMA-376 §17.3.1.31 — paragraph shading fills the border BOX, not just the
+ *  text extent: `<w:pBdr>` edges are offset OUTWARD from the content box by their
+ *  `w:space` (§17.3.1.7, applied by {@link drawParaBorders}), and the shading
+ *  reaches those borders. Return the content box grown by each PRESENT border's
+ *  space, using the SAME per-edge conditions as drawParaBorders so the fill meets
+ *  the border exactly. Without a bordered edge (or no borders at all) that edge is
+ *  not extended. (sample-11: a right border with `space=4` left the gray box
+ *  detached from its border because the fill stopped `space` short of it.)
+ *  Exported for unit testing the per-edge extension. */
+export function paraShadingRect(
+  x: number, y: number, w: number, h: number,
+  borders: ParagraphBorders | null | undefined,
+  merge: ParaBorderMerge | undefined,
+  scale: number,
+): { x: number; y: number; w: number; h: number } {
+  if (!borders) return { x, y, w, h };
+  const sp = (edge: ParaBorderEdge | null): number =>
+    edge && edge.style !== 'none' ? (edge.space ?? 0) * scale : 0;
+  const topEdge = merge?.suppressTop ? borders.between : borders.top;
+  const l = sp(borders.left);
+  const r = sp(borders.right);
+  const t = sp(topEdge);
+  const b = merge?.suppressBottom ? 0 : sp(borders.bottom);
+  return { x: x - l, y: y - t, w: w + l + r, h: h + t + b };
 }
 
 function drawParaBorders(
