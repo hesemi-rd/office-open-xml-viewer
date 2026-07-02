@@ -349,6 +349,18 @@ export class XlsxViewer {
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
   private resizeObserver: ResizeObserver | null = null;
   /**
+   * Pending `requestAnimationFrame` handle for a coalesced re-render, or `null`
+   * when none is scheduled. High-frequency event-driven repaints (scroll, live
+   * resize drag, selection drag, container resize) route through
+   * {@link scheduleRender} so at most one render runs per animation frame: a
+   * burst of scroll events within a single frame collapses to one draw at the
+   * frame's latest scroll position (`renderCurrentSheet` reads the live scroll
+   * offset, so "latest wins" needs no stored position). Explicit API calls
+   * (`showSheet`/`goToSheet`, `select`, `setScale`) stay synchronous — they must
+   * paint immediately, not a frame later. `destroy()` cancels any pending frame.
+   */
+  private _rafId: number | null = null;
+  /**
    * Start-anchored horizontal scroll position (the {@link effectiveScrollLeft}
    * value last produced by a real user scroll or a programmatic reset), kept
    * as the source of truth across container size changes. The native
@@ -548,7 +560,11 @@ export class XlsxViewer {
       if (this.scrollHost.clientWidth > 0) {
         this.effectiveH = this.effectiveScrollLeft;
       }
-      this.renderCurrentSheet();
+      // Coalesce into the next frame: a scroll gesture fires many events per
+      // frame, and the previous synchronous redraw ran the full render on each
+      // one. The overlay update is cheap DOM geometry (no canvas paint) and must
+      // track the scroll immediately, so it stays synchronous.
+      this.scheduleRender();
       this.updateSelectionOverlay();
     });
 
@@ -558,7 +574,10 @@ export class XlsxViewer {
     // view drifts (or, after a hidden mount, stays stranded at the far end).
     this.resizeObserver = new ResizeObserver(() => {
       this.reanchorHorizontalScroll();
-      this.renderCurrentSheet();
+      // Container resizes can burst (a live window/pane drag); coalesce the
+      // canvas paint into one frame. The re-anchor, overlay and nav updates are
+      // cheap and must reflect the new size at once, so they stay synchronous.
+      this.scheduleRender();
       this.updateSelectionOverlay();
       this.updateNavButtons();
     });
@@ -1074,7 +1093,10 @@ export class XlsxViewer {
     sheetAxisCache.delete(ws); // sizes changed → rebuild the cumulative-offset axes
     this.updateSpacerSize(ws);
     this.updateSelectionOverlay();
-    void this.renderCurrentSheet();
+    // Live resize drag fires per pointermove; coalesce the canvas repaint into
+    // one frame. The spacer (scrollbar extent) and overlay updates are cheap DOM
+    // writes that must track the drag immediately, so they stay synchronous.
+    this.scheduleRender();
   }
 
   /**
@@ -1746,7 +1768,10 @@ export class XlsxViewer {
       }
 
       this.updateSelectionOverlay();
-      void this.renderCurrentSheet();
+      // Drag-select fires per pointermove; coalesce the canvas repaint (the
+      // header-highlight bands the renderer draws) into one frame. The overlay
+      // rect and the selection-change callback stay synchronous.
+      this.scheduleRender();
       this.opts.onSelectionChange?.(this.selection);
     });
 
@@ -2115,6 +2140,30 @@ export class XlsxViewer {
     this.spacer.style.height = `${totalH}px`;
   }
 
+  /**
+   * Coalesce a re-render into the next animation frame. Called from the
+   * high-frequency event-driven paths (scroll, live column/row resize, drag-
+   * selection, container resize); a burst of these within one frame schedules a
+   * single {@link renderCurrentSheet}, avoiding the previous behavior where every
+   * scroll event forced its own synchronous full redraw. Already-scheduled frames
+   * are not re-scheduled — the one pending render reads the live scroll/scale
+   * state when it runs, so the most recent position always wins without threading
+   * a coordinate through. Falls back to a synchronous render when
+   * `requestAnimationFrame` is unavailable (e.g. a non-DOM host), preserving the
+   * old semantics there.
+   */
+  private scheduleRender(): void {
+    if (this._rafId !== null) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      void this.renderCurrentSheet();
+      return;
+    }
+    this._rafId = requestAnimationFrame(() => {
+      this._rafId = null;
+      void this.renderCurrentSheet();
+    });
+  }
+
   private async renderCurrentSheet(): Promise<void> {
     if (!this.currentWorksheet) return;
     const ws = this.currentWorksheet;
@@ -2267,6 +2316,13 @@ export class XlsxViewer {
    */
   destroy(): void {
     this.resizeObserver?.disconnect();
+    // Cancel any coalesced render still queued for the next frame so it can't
+    // fire against a torn-down viewer (matches the destroy-completeness flow:
+    // no scheduled work outlives destroy()).
+    if (this._rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
     this.hideCommentPopup();
     this.hideValidationPanel();
     if (this.keydownHandler) {
