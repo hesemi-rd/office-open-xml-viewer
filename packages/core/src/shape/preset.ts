@@ -131,6 +131,14 @@ export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
   'frame',
   'irregularseal1',
   'irregularseal2',
+  // batch 2 — stars (star5/6/7/10 stay legacy: their inner-vertex rings
+  // deviate from the spec guide formulas — see the parity table)
+  'star4',
+  'star8',
+  'star12',
+  'star16',
+  'star24',
+  'star32',
 ]);
 
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
@@ -210,9 +218,6 @@ export function buildShapePath(
 
     // ── Stars ─────────────────────────────────────────────────────────────────
     // Inner-radius defaults from ECMA-376 prstGeom avLst: adj / 50000 = innerR / outerR.
-    case 'star4':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 4, (adj ?? 12500) / 50000);
-      break;
     case 'star5':
     case 'star':
       drawStar(ctx, cx, cy, w / 2, h / 2, 5, (adj ?? 19098) / 50000);
@@ -223,23 +228,8 @@ export function buildShapePath(
     case 'star7':
       drawStar(ctx, cx, cy, w / 2, h / 2, 7, (adj ?? 34142) / 50000);
       break;
-    case 'star8':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 8, (adj ?? 37500) / 50000, -Math.PI / 2);
-      break;
     case 'star10':
       drawStar(ctx, cx, cy, w / 2, h / 2, 10, (adj ?? 41421) / 50000);
-      break;
-    case 'star12':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 12, (adj ?? 37500) / 50000, 0);
-      break;
-    case 'star16':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 16, (adj ?? 37500) / 50000, -Math.PI / 2);
-      break;
-    case 'star24':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 24, (adj ?? 37500) / 50000, 0);
-      break;
-    case 'star32':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 32, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
 
     // ── Arrows ────────────────────────────────────────────────────────────────
