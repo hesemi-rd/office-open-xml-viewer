@@ -2,11 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { renderSlideNode } from './render';
 import type { NodeCanvasFactory } from './render';
 import type { Presentation, Slide, PictureElement } from '@silurus/ooxml-pptx';
+import { loadSkiaForTests } from './test-imports';
 
-// skia-canvas ships a native binding that CI deliberately omits (VRT and other
-// canvas-backed checks are local-only). Load it dynamically so the suite skips
-// cleanly when the binding is absent instead of failing at module load.
-const skia = await import('skia-canvas').catch(() => null);
+// skia-canvas ships a native binding via a devDependency, so `pnpm install`
+// provides it in CI as well as locally. Load it through the shared test helper:
+// absent → skip cleanly (local), but under OOXML_REQUIRE_SKIA=1 (CI) a load
+// failure becomes a hard error instead of a silent skip.
+const skia = await loadSkiaForTests();
 // Non-null aliases for use inside the (skia-gated) test bodies. When `skia` is
 // null the whole suite is skipped via `describe.skipIf`, so these are never
 // dereferenced; the cast keeps the helpers strongly typed without `as any`.

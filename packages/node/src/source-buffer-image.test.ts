@@ -7,10 +7,13 @@ import {
 } from './render';
 import type { NodeCanvasFactory } from './render';
 import type { Presentation, Slide, PictureElement } from '@silurus/ooxml-pptx';
+import { loadSkiaForTests } from './test-imports';
 
-// skia-canvas ships a native binding CI omits; load dynamically so the
-// canvas-backed block skips cleanly when absent (mirrors render.test.ts).
-const skia = await import('skia-canvas').catch(() => null);
+// skia-canvas ships a native binding via a devDependency, so `pnpm install`
+// provides it in CI as well as locally. Load it through the shared test helper:
+// absent → skip cleanly (local), OOXML_REQUIRE_SKIA=1 (CI) → hard failure
+// instead of a silent skip (mirrors render.test.ts).
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas, loadImage } = (skia ?? {}) as Skia;
 
@@ -19,8 +22,14 @@ const factory: NodeCanvasFactory | null =
     ? {
         createCanvas: (w, h) =>
           new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
-        loadImage: (buf) =>
-          loadImage(buf as Buffer) as unknown as ReturnType<NodeCanvasFactory['loadImage']>,
+        // skia-canvas@2 `loadImage` accepts only Buffer/string, but the image
+        // pipeline hands this factory an ArrayBuffer (via installImageBitmapShim →
+        // blob.arrayBuffer()); wrap it in a Buffer, matching the sibling suites
+        // (docx-continuous-columns.test.ts).
+        loadImage: ((buf: ArrayBuffer | Uint8Array | Buffer) =>
+          loadImage(
+            Buffer.from(buf as Uint8Array),
+          )) as unknown as NodeCanvasFactory['loadImage'],
       }
     : null;
 
@@ -96,10 +105,11 @@ function makeZipWithEntry(name: string, data: Uint8Array): Uint8Array {
   return out;
 }
 
-// The WASM parser bindings are git-ignored build output; in CI `pnpm test` runs
-// BEFORE `pnpm build:wasm`, so they may be absent here. Probe once via the
-// dynamic extract_image path and skip these byte-level assertions when the wasm
-// is unavailable (they run locally after a wasm build), mirroring the `skia` gate.
+// The WASM parser bindings are git-ignored build output. CI runs `pnpm build:wasm`
+// before `pnpm test`, so they are present there; but a local run before a wasm
+// build (or a stripped environment) may lack them. Probe once via the dynamic
+// extract_image path and skip these byte-level assertions when the wasm is
+// unavailable, mirroring the `skia` gate.
 const wasmReady = await (async () => {
   try {
     const probe = makeZipWithEntry('probe.bin', new Uint8Array([7]));
@@ -209,7 +219,7 @@ describe.skipIf(!skia)('renderSlideNode sourceBuffer wiring', () => {
     expect(px[3]).toBeGreaterThan(200); // A (opaque — image painted)
   });
 
-  it('without sourceBuffer or fetchImage the picture draws nothing (transparent)', async () => {
+  it('without sourceBuffer or fetchImage the picture draws no image (bare slide background)', async () => {
     const width = 200;
     const dpr = 1;
     const canvas = new Canvas(width * dpr, 200 * dpr);
@@ -226,6 +236,14 @@ describe.skipIf(!skia)('renderSlideNode sourceBuffer wiring', () => {
     }
     const ctx = canvas.getContext('2d');
     const px = ctx.getImageData(100, 100, 1, 1).data;
-    expect(px[3]).toBe(0); // fully transparent — prior empty-Blob behavior preserved
+    // With no byte source the empty-Blob default fails to decode, so the picture
+    // paints nothing — the pixel is the slide's opaque-white background
+    // (renderSlide fills `bg ?? '#FFFFFF'` at full alpha for a null background),
+    // NOT the red an actually-painted image would produce. This still proves the
+    // picture drew no ink: no red channel dominance, just white.
+    expect(px[0]).toBeGreaterThan(200); // R (white background, not red image)
+    expect(px[1]).toBeGreaterThan(200); // G
+    expect(px[2]).toBeGreaterThan(200); // B
+    expect(px[3]).toBe(255); // opaque slide background
   });
 });

@@ -1,13 +1,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { installOffscreenCanvasShim, installImageBitmapShim } from './render';
 import type { NodeCanvasFactory } from './render';
+import { loadSkiaForTests } from './test-imports';
 
-// skia-canvas ships a native binding that CI deliberately omits (it is a
-// peerDependency, not installed by `pnpm install --frozen-lockfile`, and the
-// canvas-backed checks are local-only like the VRT suites). Load it dynamically
-// so these suites skip cleanly when the binding is absent instead of failing
-// the whole run at module load. `describe.skipIf(!skia)` gates every block.
-const skia = await import('skia-canvas').catch(() => null);
+// skia-canvas ships a native binding via a devDependency, so `pnpm install`
+// provides it in CI as well as locally — these canvas-backed checks run
+// everywhere. Load it through the shared test helper: absent → skip cleanly
+// (local), but under OOXML_REQUIRE_SKIA=1 (CI) a load failure becomes a hard
+// error instead of a silent skip. `describe.skipIf(!skia)` gates every block.
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas, loadImage } = (skia ?? {}) as Skia;
 

@@ -24,8 +24,10 @@
  * at dpr=1; clean 2-device-row band at dpr=2). It fails against the pre-fix
  * renderer, so it is a genuine regression guard — not a tautology.
  *
- * CI-safe: skia-canvas ships a native binding CI omits, so the suite is gated
- * with `describe.skipIf(!skia)` exactly like render.test.ts.
+ * CI-safe: skia-canvas is a devDependency (present in CI and locally), so the
+ * suite is gated with `describe.skipIf(!skia)` exactly like render.test.ts —
+ * loaded through the shared test helper (skip locally, fail under
+ * OOXML_REQUIRE_SKIA=1).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -40,16 +42,17 @@ import type {
   CellXf,
   ViewportRange,
 } from '@silurus/ooxml-xlsx';
+import { importForTests, loadSkiaForTests } from './test-imports';
 
-const skia = await import('skia-canvas').catch(() => null);
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 
-// xlsx.ts statically imports the gitignored WASM glue (xlsx_parser.js). In CI
-// `pnpm test` runs BEFORE `pnpm build:wasm`, so a static import here would fail
-// at collection; load it dynamically and skip when absent — same gate as skia
-// (see source-buffer-image.test.ts).
-const xlsxMod = await import('./xlsx.ts').catch(() => null);
+// xlsx.ts statically imports the gitignored WASM glue (xlsx_parser.js). CI runs
+// `pnpm build:wasm` before `pnpm test`, so it is present there; load it through
+// the shared helper so it skips when absent locally but hard-fails under
+// OOXML_REQUIRE_SKIA=1 — same gate as skia (see source-buffer-image.test.ts).
+const xlsxMod = await importForTests(() => import('./xlsx.ts'), './xlsx.ts (xlsx WASM)');
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>

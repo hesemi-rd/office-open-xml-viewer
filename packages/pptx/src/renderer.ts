@@ -3277,10 +3277,14 @@ export function getCachedBitmap(
   const entry: BitmapCacheEntry = { promise };
   // Record the resolved bitmap on the entry so the synchronous bullet draw
   // (peekCachedBitmap) can read it after the warm pass awaits this promise.
-  // A `null` (unsupported metafile) is recorded too, so the draw skips it.
+  // A `null` (unsupported metafile) is recorded too, so the draw skips it. The
+  // `.catch(() => {})` swallows a decode rejection on THIS side-chain (the real
+  // caller still sees it via the returned `promise`): without it a failed decode
+  // — e.g. an empty/undecodable blob — would surface as an unhandled rejection.
+  // On failure `entry.bitmap` simply stays undefined (treated as "not ready").
   void promise.then((bmp) => {
     entry.bitmap = bmp;
-  });
+  }).catch(() => {});
   // Don't poison the cache on a transient decode failure.
   promise.catch(() => cache.delete(imagePath));
   cache.set(imagePath, entry);

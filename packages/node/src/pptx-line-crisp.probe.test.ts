@@ -24,23 +24,25 @@
  * row at dpr=1; clean 2-device-row band at dpr=2). It fails against the pre-fix
  * renderer, so it is a genuine regression guard — not a tautology.
  *
- * CI-safe: skia-canvas ships a native binding CI omits, so the suite is gated
- * with `describe.skipIf(!skia)`. The render helper (`./render.ts`) and the pptx
- * renderer it dynamically imports do NOT statically import WASM, but to stay
- * future-proof the render module is itself loaded via a caught dynamic import and
- * gated too.
+ * CI-safe: skia-canvas is a devDependency (present in CI and locally), so the
+ * suite is gated with `describe.skipIf(!skia)` — loaded through the shared test
+ * helper (skip locally, fail under OOXML_REQUIRE_SKIA=1). The render helper
+ * (`./render.ts`) and the pptx renderer it dynamically imports do NOT statically
+ * import WASM, but to stay future-proof the render module is itself loaded via
+ * the same helper and gated too.
  */
 import { describe, it, expect } from 'vitest';
 import type { Presentation, Slide, TableElement, Stroke } from '@silurus/ooxml-pptx';
+import { importForTests, loadSkiaForTests } from './test-imports';
 
-const skia = await import('skia-canvas').catch(() => null);
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 
-// `./render.ts` does not statically import WASM today, but load it via a caught
-// dynamic import (and gate on it) so the suite never fails at collection if that
+// `./render.ts` does not statically import WASM today, but load it through the
+// shared helper (and gate on it) so the suite never fails at collection if that
 // ever changes.
-const renderMod = await import('./render.ts').catch(() => null);
+const renderMod = await importForTests(() => import('./render.ts'), './render.ts');
 
 const EMU_PER_PX = 9525; // 96 dpi → 1 logical px
 

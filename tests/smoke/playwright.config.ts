@@ -22,7 +22,9 @@ export default defineConfig({
   webServer: {
     command: 'pnpm storybook --port 6007 --no-open',
     url: 'http://localhost:6007/iframe.html',
-    reuseExistingServer: true,
+    // Locally, reuse a Storybook already serving on 6007; in CI always boot a
+    // fresh one so the run never binds to a stale/unrelated server.
+    reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
 });

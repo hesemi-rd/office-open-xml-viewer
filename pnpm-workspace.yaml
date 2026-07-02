@@ -1,3 +1,11 @@
 packages:
   - "packages/*"
   - "site"
+
+# pnpm 10 blocks dependency build scripts unless approved. skia-canvas ships
+# its native binding via a node-pre-gyp install script (no napi-style prebuilt
+# optionalDependencies), so without this approval `pnpm install` leaves
+# lib/v8/index.node absent and every canvas probe suite dies at import time
+# (caught in CI by the OOXML_REQUIRE_SKIA gate).
+onlyBuiltDependencies:
+  - skia-canvas

@@ -7,11 +7,13 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
+import { importForTests, loadSkiaForTests } from './test-imports';
 
-// skia-canvas is a local-only peer dep (CI omits it); the private journal
-// samples are git-ignored (not redistributable). Skip cleanly when either is
-// absent — this suite is a local ground-truth gate, like the VRT specs.
-const skia = await import('skia-canvas').catch(() => null);
+// skia-canvas is a devDependency, so `pnpm install` provides it in CI as well as
+// locally; the private journal samples are git-ignored (not redistributable), so
+// this suite still self-skips where they are absent. Load skia through the shared
+// helper: absent → skip cleanly (local), OOXML_REQUIRE_SKIA=1 (CI) → hard failure.
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas, loadImage } = (skia ?? {}) as Skia;
 
@@ -22,11 +24,16 @@ const factory: NodeCanvasFactory = {
     loadImage(Buffer.from(buf as Uint8Array))) as unknown as NodeCanvasFactory['loadImage'],
 };
 
-const docxMod = skia ? await import('./docx.ts').catch(() => null) : null;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
 const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const rendererMod = skia ? await import(RENDERER_PATH).catch(() => null) : null;
+// The WASM-backed docx parser + renderer are only loaded when skia is present.
+// Both statically import git-ignored WASM glue, so they need `pnpm build:wasm`
+// first; under OOXML_REQUIRE_SKIA=1 a failure to load is a hard error.
+const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
+const rendererMod = skia
+  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
+  : null;
 
 const samplePath = (n: number) =>
   resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);

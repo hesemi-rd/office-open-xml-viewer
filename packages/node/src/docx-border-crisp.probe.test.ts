@@ -24,9 +24,11 @@
  * at dpr=1; clean 2-device-row band at dpr=2). It fails against the pre-fix
  * renderer, so it is a genuine regression guard — not a tautology.
  *
- * CI-safe: skia-canvas ships a native binding CI omits, and docx.ts statically
- * imports gitignored WASM glue, so the suite is gated with
- * `describe.skipIf(!skia || !docxMod)` — both loaded via caught dynamic import.
+ * CI-safe: skia-canvas is a devDependency (present in CI and locally), and
+ * docx.ts statically imports gitignored WASM glue (present after `pnpm
+ * build:wasm`), so the suite is gated with `describe.skipIf(!skia || !docxMod)`
+ * — both loaded through the shared test helper (skip locally, fail under
+ * OOXML_REQUIRE_SKIA=1).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -35,15 +37,17 @@ import { dirname, resolve } from 'node:path';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
 import type { DocxDocumentModel, DocParagraph, BodyElement } from '@silurus/ooxml-docx';
+import { importForTests, loadSkiaForTests } from './test-imports';
 
-const skia = await import('skia-canvas').catch(() => null);
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 
-// docx.ts statically imports the gitignored WASM glue (docx_parser.js). In CI
-// `pnpm test` runs BEFORE `pnpm build:wasm`, so a static import here would fail at
-// collection; load it dynamically and skip when absent — same gate as skia.
-const docxMod = await import('./docx.ts').catch(() => null);
+// docx.ts statically imports the gitignored WASM glue (docx_parser.js). CI runs
+// `pnpm build:wasm` before `pnpm test`, so it is present there; load it through
+// the shared helper so it skips when absent locally but hard-fails under
+// OOXML_REQUIRE_SKIA=1 — same gate as skia.
+const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -62,7 +66,10 @@ const SAMPLE = resolve(ROOT, 'packages/docx/public/demo/sample-1.docx');
 // render-orchestrator.ts directly by path (the type-only import above still uses
 // the package specifier, resolved by TS for typecheck and erased at runtime).
 const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const rendererMod = await import(RENDERER_PATH).catch(() => null);
+const rendererMod = await importForTests(
+  () => import(RENDERER_PATH),
+  'packages/docx/src/renderer.ts',
+);
 // Opt-in diagnostics: set PROBE_OUT to a directory to dump the full render plus
 // an 8x crop of the measured border. Null by default → the test writes no files.
 const OUT_DIR = process.env.PROBE_OUT ?? null;

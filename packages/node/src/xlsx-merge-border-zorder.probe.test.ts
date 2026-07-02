@@ -43,8 +43,12 @@ import type {
   Row,
   ViewportRange,
 } from '@silurus/ooxml-xlsx';
+import { loadSkiaForTests } from './test-imports';
 
-const skia = await import('skia-canvas').catch(() => null);
+// skia-canvas is a devDependency (`pnpm install` provides it in CI as well as
+// locally). Load it through the shared helper: absent → skip cleanly (local),
+// OOXML_REQUIRE_SKIA=1 (CI) → hard failure instead of a silent skip.
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 

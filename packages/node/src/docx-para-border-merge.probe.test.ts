@@ -18,10 +18,12 @@
  * and MEASURES the device-pixel luminance to count the horizontal rules between
  * the code lines — asserting only the box edges remain.
  *
- * CI-safe: skia-canvas ships a native binding CI omits, and docx.ts statically
- * imports gitignored WASM glue, so the suite is gated with
- * `describe.skipIf(!skia || !docxMod || !rendererMod)` — all loaded via caught
- * dynamic import (mirrors docx-border-crisp.probe.test.ts).
+ * CI-safe: skia-canvas is a devDependency (present in CI and locally), and
+ * docx.ts statically imports gitignored WASM glue (present after `pnpm
+ * build:wasm`), so the suite is gated with
+ * `describe.skipIf(!skia || !docxMod || !rendererMod)` — all loaded through the
+ * shared test helper (skip locally, fail under OOXML_REQUIRE_SKIA=1; mirrors
+ * docx-border-crisp.probe.test.ts).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -35,18 +37,22 @@ import type {
   BodyElement,
   ParaBorderEdge,
 } from '@silurus/ooxml-docx';
+import { importForTests, loadSkiaForTests } from './test-imports';
 
-const skia = await import('skia-canvas').catch(() => null);
+const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 
-const docxMod = await import('./docx.ts').catch(() => null);
+const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
 const SAMPLE = resolve(ROOT, 'packages/docx/public/demo/sample-1.docx');
 const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const rendererMod = await import(RENDERER_PATH).catch(() => null);
+const rendererMod = await importForTests(
+  () => import(RENDERER_PATH),
+  'packages/docx/src/renderer.ts',
+);
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
