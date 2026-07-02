@@ -1,6 +1,6 @@
 use crate::types::*;
 use crate::{parse_rels_map, resolve_zip_path};
-use ooxml_common::zip::{read_zip_bytes, read_zip_string};
+use ooxml_common::zip::read_zip_string;
 // Shared DrawingML blip helpers (ECMA-376 §20.1.8.13 + Microsoft 2016 SVG
 // extension, MS-ODRAWXML). `mime_from_ext` is the single source of truth for
 // `.svg ⇒ image/svg+xml`; `svg_blip_rid` resolves the vector original nested in
@@ -129,8 +129,10 @@ pub(crate) fn parse_drawing_anchors(
             let target = drawing_rels.get(rid)?;
             let media_path = resolve_zip_path(drawing_dir, target);
             // Confirm the entry resolves before emitting its path (preserves the
-            // previous "drop when bytes are missing" semantics).
-            read_zip_bytes(archive, &media_path).ok()?;
+            // previous "drop when bytes are missing" semantics). `index_for_name`
+            // reads only the central directory — no inflate, unlike the former
+            // `read_zip_bytes` which decompressed the entry only to discard it.
+            archive.index_for_name(&media_path)?;
             Some(media_path)
         };
 
@@ -1441,7 +1443,9 @@ pub(crate) fn build_drawing_rid_urls(
         let media_path = resolve_zip_path(drawing_dir, &target);
         // Only emit the path when the entry actually resolves (preserves the
         // previous behavior of dropping rIds whose bytes are missing).
-        if read_zip_bytes(archive, &media_path).is_ok() {
+        // `index_for_name` checks the central directory only — no inflate, unlike
+        // the former `read_zip_bytes` which decompressed the entry to discard it.
+        if archive.index_for_name(&media_path).is_some() {
             result.insert(rid, media_path);
         }
     }

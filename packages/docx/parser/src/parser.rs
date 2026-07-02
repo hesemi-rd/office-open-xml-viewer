@@ -1,5 +1,5 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
-use ooxml_common::zip::{read_zip_bytes, read_zip_string};
+use ooxml_common::zip::read_zip_string;
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
 use zip::ZipArchive;
@@ -1334,9 +1334,11 @@ fn load_media_map(
                 format!("{}{}", base_dir, target)
             };
             // Confirm the part exists before mapping the rId (keeps the lazy
-            // pipeline honest: a path in the map is always extractable). The
-            // bytes are discarded — only the path is retained.
-            if read_zip_bytes(zip, &path).is_ok() {
+            // pipeline honest: a path in the map is always extractable).
+            // `index_for_name` consults only the central directory — no inflate,
+            // unlike the former `read_zip_bytes` which decompressed the whole
+            // entry just to throw the bytes away.
+            if zip.index_for_name(&path).is_some() {
                 media_map.insert(rid.clone(), path);
             }
         }
@@ -7930,6 +7932,62 @@ mod svg_blip_tests {
         assert_eq!(img.mime_type, "image/svg+xml");
         // 304800 EMU / 12700 = 24pt.
         assert!((img.width_pt - 24.0).abs() < 1e-6);
+    }
+
+    /// `load_media_map` must drop an rId whose target part is declared in the
+    /// rels but ABSENT from the package (a path in the map is only ever emitted
+    /// when the entry truly resolves). This is the invariant the existence check
+    /// enforces — the check now uses `index_for_name` (central-directory lookup,
+    /// no inflate) in place of the former read-and-discard `read_zip_bytes`, so
+    /// this pins that the swap preserved the "missing part ⇒ dropped" behaviour.
+    /// With no resolvable blip the whole picture resolution returns `None`, so no
+    /// `DocRun::Image` is produced.
+    #[test]
+    fn missing_media_part_drops_the_image() {
+        use zip::write::SimpleFileOptions;
+        let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+  <w:p><w:r><w:drawing>
+    <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+               xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <wp:extent cx="304800" cy="304800"/>
+      <a:graphic><a:graphicData>
+        <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+        </pic:pic>
+      </a:graphicData></a:graphic>
+    </wp:inline>
+  </w:drawing></w:r></w:p>
+</w:body></w:document>"#;
+        // The rels declare media/image1.png, but the archive below deliberately
+        // omits that part.
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdPng" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            let mut put = |name: &str, bytes: &[u8]| {
+                use std::io::Write;
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            };
+            put("word/document.xml", document_xml.as_bytes());
+            put("word/_rels/document.xml.rels", rels_xml.as_bytes());
+            // NOTE: word/media/image1.png is intentionally NOT written.
+            zw.finish().unwrap();
+        }
+        let doc = parse(&buf).expect("parse must succeed even with a dangling image rId");
+        let has_image = doc.body.iter().any(|el| match el {
+            BodyElement::Paragraph(p) => p.runs.iter().any(|r| matches!(r, DocRun::Image(_))),
+            _ => false,
+        });
+        assert!(
+            !has_image,
+            "an rId whose media part is absent must be dropped, yielding no ImageRun"
+        );
     }
 
     /// End-to-end: an inline `<a:blip r:embed>` with a raster fallback AND an
