@@ -2244,10 +2244,18 @@ export class XlsxViewer {
       // Render the viewport off the main thread and paint the returned bitmap.
       // The selection overlay (geometry-based, from getCellRect) is unaffected.
       const bmp = await this.workbook.renderViewportToBitmap(this.currentSheet, viewport, renderOpts);
-      this.canvas.width = bmp.width;
-      this.canvas.height = bmp.height;
-      this.canvas.style.width = `${w}px`;
-      this.canvas.style.height = `${h}px`;
+      // Resize the canvas only when the bitmap dimensions actually change.
+      // Re-assigning canvas.width/height re-allocates the GPU backing store even
+      // when the value is identical, which on a steady scroll stream (same size
+      // every frame) is a wasted allocation per frame (improvement plan C4).
+      // transferFromImageBitmap replaces the whole canvas, so the resize's
+      // implicit clear is not relied upon; skipping the no-op resize is safe.
+      if (this.canvas.width !== bmp.width) this.canvas.width = bmp.width;
+      if (this.canvas.height !== bmp.height) this.canvas.height = bmp.height;
+      const cssW = `${w}px`;
+      const cssH = `${h}px`;
+      if (this.canvas.style.width !== cssW) this.canvas.style.width = cssW;
+      if (this.canvas.style.height !== cssH) this.canvas.style.height = cssH;
       this._bitmapCtx?.transferFromImageBitmap(bmp);
     } else {
       await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, renderOpts);

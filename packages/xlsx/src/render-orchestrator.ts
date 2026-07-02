@@ -224,18 +224,34 @@ export async function renderWorksheetViewport(
   const width = opts.width ?? rawW;
   const height = opts.height ?? rawH;
 
-  target.width = Math.round(width * dpr);
-  target.height = Math.round(height * dpr);
+  // Resize only when the backing store dimensions actually change. Assigning
+  // canvas.width/height re-allocates (and clears) the GPU backing store, so on a
+  // steady-state scroll/zoom stream — where width/height/dpr are unchanged frame
+  // to frame — re-assigning the same value wastes an allocation every frame
+  // (improvement plan C4). The inner renderViewport starts with an explicit
+  // clearRect + white fill, so nothing depends on the width-assignment's implicit
+  // clear; skipping the same-size resize is safe.
+  const bw = Math.round(width * dpr);
+  const bh = Math.round(height * dpr);
+  if (target.width !== bw) target.width = bw;
+  if (target.height !== bh) target.height = bh;
   // Set CSS display size so the browser renders at 1:1 device pixels (no browser-level scaling).
   // Without this, canvas.width=2400 on a DPR=2 display causes the canvas to be laid out at
   // 2400 CSS px, making all content appear blurry when viewed in a 1200 CSS px container.
   if (isHTMLCanvas(target)) {
-    target.style.width = `${width}px`;
-    target.style.height = `${height}px`;
+    const cssW = `${width}px`;
+    const cssH = `${height}px`;
+    if (target.style.width !== cssW) target.style.width = cssW;
+    if (target.style.height !== cssH) target.style.height = cssH;
   }
 
   const ctx = (target as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D;
-  ctx.scale(dpr, dpr);
+  // Set the DPR transform absolutely rather than ctx.scale(dpr, dpr): when the
+  // resize above is skipped the backing store is NOT re-created, so its transform
+  // is not reset to identity, and a relative scale() would compound the dpr every
+  // frame (progressive zoom). setTransform is idempotent whether or not the store
+  // was reallocated.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   renderViewport(ctx, ws, styles, viewport, { ...opts, dpr, loadedImages: imageCache });
 }
