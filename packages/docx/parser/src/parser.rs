@@ -17,7 +17,13 @@ const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 /// OMML (math) namespace — ECMA-376 §22.
 const M_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
 
-type Zip<'a> = ZipArchive<std::io::Cursor<&'a [u8]>>;
+/// The parser's ZIP archive type. Owns its backing bytes (`Cursor<Vec<u8>>`)
+/// rather than borrowing them, so a `DocxArchive` handle can keep a single
+/// opened archive alive across `parse` / `extract_image` / `to_markdown` calls —
+/// the central directory is scanned once and the bytes are copied into WASM once.
+/// `ZipArchive<Cursor<Vec<u8>>>` is fully self-contained (no borrow into the
+/// input), which is what lets the `#[wasm_bindgen]` handle store it as a field.
+pub(crate) type Zip = ZipArchive<std::io::Cursor<Vec<u8>>>;
 
 /// Section-level header/footer references collected from sectPr.
 /// Maps reference type ("default" | "first" | "even") to the target xml path (e.g. "header1.xml").
@@ -71,11 +77,19 @@ fn resolve_section_refs(
     out
 }
 
-pub fn parse(data: &[u8]) -> Result<Document, String> {
-    let cursor = std::io::Cursor::new(data);
-    let mut zip = ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+/// Parse a docx from raw archive bytes. Thin wrapper that opens a fresh
+/// [`Zip`] (owning a copy of `data`) and delegates to [`parse`]. Kept so the
+/// free `parse_docx` WASM entry point and the native `parse_docx_native` path
+/// keep their `&[u8]` signature; the stateful `DocxArchive` handle calls
+/// [`parse`] directly on its retained archive to avoid re-opening it per call.
+pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
+    let mut zip =
+        ZipArchive::new(std::io::Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    parse(&mut zip)
+}
 
-    let rels_xml = read_zip_string(&mut zip, "word/_rels/document.xml.rels").unwrap_or_default();
+pub fn parse(zip: &mut Zip) -> Result<Document, String> {
+    let rels_xml = read_zip_string(zip, "word/_rels/document.xml.rels").unwrap_or_default();
     let rel_map = parse_rels(&rels_xml);
 
     // Styles are referenced from the document relationships (Target may be
@@ -89,7 +103,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/styles.xml".to_string());
-    let style_map = read_zip_string(&mut zip, &styles_path)
+    let style_map = read_zip_string(zip, &styles_path)
         .map(|s| StyleMap::parse(&s))
         .unwrap_or_else(|_| StyleMap::parse(""));
 
@@ -118,11 +132,11 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             .map(|(d, _)| d)
             .unwrap_or("word");
         let rels_path = format!("{}/_rels/{}.xml.rels", dir, stem);
-        let rels_xml = read_zip_string(&mut zip, &rels_path).unwrap_or_default();
+        let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
         let rel_map = parse_rels(&rels_xml);
-        load_media_map(&mut zip, &rel_map, &format!("{}/", dir))
+        load_media_map(zip, &rel_map, &format!("{}/", dir))
     };
-    let mut num_map = read_zip_string(&mut zip, &numbering_path)
+    let mut num_map = read_zip_string(zip, &numbering_path)
         .map(|s| NumberingMap::parse(&s, &numbering_media_map))
         .unwrap_or_default();
 
@@ -135,7 +149,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             } else {
                 format!("word/{}", t)
             };
-            read_zip_string(&mut zip, &p)
+            read_zip_string(zip, &p)
                 .map(|s| ThemeColors::parse(&s))
                 .unwrap_or_default()
         })
@@ -156,7 +170,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
-    if let Ok(settings_xml) = read_zip_string(&mut zip, &settings_path) {
+    if let Ok(settings_xml) = read_zip_string(zip, &settings_path) {
         if let Some(lang) = parse_theme_font_bidi_lang(&settings_xml) {
             theme.fill_default_cs_font(&lang);
         }
@@ -175,9 +189,9 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     }
     let theme = theme;
 
-    let media_map = load_media_map(&mut zip, &rel_map, "word/");
+    let media_map = load_media_map(zip, &rel_map, "word/");
 
-    let doc_xml = read_zip_string(&mut zip, "word/document.xml")?;
+    let doc_xml = read_zip_string(zip, "word/document.xml")?;
     let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
 
     let body_node = xml_doc
@@ -215,22 +229,10 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let mut body_headers = HeadersFooters::default();
     let mut body_footers = HeadersFooters::default();
     for (node_id, refs, title_page) in &section_snapshots {
-        let headers = load_header_footer_set(
-            &mut zip,
-            &refs.headers,
-            "hdr",
-            &style_map,
-            &mut num_map,
-            &theme,
-        );
-        let footers = load_header_footer_set(
-            &mut zip,
-            &refs.footers,
-            "ftr",
-            &style_map,
-            &mut num_map,
-            &theme,
-        );
+        let headers =
+            load_header_footer_set(zip, &refs.headers, "hdr", &style_map, &mut num_map, &theme);
+        let footers =
+            load_header_footer_set(zip, &refs.footers, "ftr", &style_map, &mut num_map, &theme);
         if Some(*node_id) == body_level_sect_id {
             body_headers = headers;
             body_footers = footers;
@@ -274,7 +276,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
-    let font_family_classes = read_zip_string(&mut zip, &font_table_path)
+    let font_family_classes = read_zip_string(zip, &font_table_path)
         .map(|s| parse_font_table(&s))
         .unwrap_or_default();
 
@@ -292,7 +294,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
                 format!("word/{}", t)
             }
         })
-        .and_then(|p| read_zip_string(&mut zip, &p).ok())
+        .and_then(|p| read_zip_string(zip, &p).ok())
         .map(|xml| parse_comments(&xml))
         .unwrap_or_default();
     let footnotes_path = find_rel_target(&rels_xml, "footnotes").map(|t| {
@@ -303,7 +305,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         }
     });
     let footnotes = footnotes_path
-        .map(|p| parse_notes(&mut zip, &p, "footnote", &style_map, &mut num_map, &theme))
+        .map(|p| parse_notes(zip, &p, "footnote", &style_map, &mut num_map, &theme))
         .unwrap_or_default();
     let endnotes_path = find_rel_target(&rels_xml, "endnotes").map(|t| {
         if t.starts_with('/') {
@@ -313,7 +315,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         }
     });
     let endnotes = endnotes_path
-        .map(|p| parse_notes(&mut zip, &p, "endnote", &style_map, &mut num_map, &theme))
+        .map(|p| parse_notes(zip, &p, "endnote", &style_map, &mut num_map, &theme))
         .unwrap_or_default();
 
     Ok(Document {
@@ -7907,7 +7909,7 @@ mod svg_blip_tests {
   </wp:inline>
 </w:drawing></w:r></w:p>"#;
         let data = build_docx_with_media(body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = doc
             .body
             .iter()
@@ -7979,7 +7981,8 @@ mod svg_blip_tests {
             // NOTE: word/media/image1.png is intentionally NOT written.
             zw.finish().unwrap();
         }
-        let doc = parse(&buf).expect("parse must succeed even with a dangling image rId");
+        let doc =
+            parse_from_bytes(&buf).expect("parse must succeed even with a dangling image rId");
         let has_image = doc.body.iter().any(|el| match el {
             BodyElement::Paragraph(p) => p.runs.iter().any(|r| matches!(r, DocRun::Image(_))),
             _ => false,
@@ -8016,7 +8019,7 @@ mod svg_blip_tests {
   </wp:inline>
 </w:drawing></w:r></w:p>"#;
         let data = build_docx_with_media(body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = doc
             .body
             .iter()
@@ -8079,7 +8082,7 @@ mod svg_blip_tests {
   </wp:inline>
 </w:drawing></w:r></w:p>"#;
         let data = build_docx_with_media(body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = only_image(&doc);
         let sr = img
             .src_rect
@@ -8116,7 +8119,7 @@ mod svg_blip_tests {
 </w:drawing></w:r></w:p>"#
             );
             let data = build_docx_with_media(&body);
-            let doc = parse(&data).expect("parse must succeed");
+            let doc = parse_from_bytes(&data).expect("parse must succeed");
             let img = only_image(&doc);
             assert!(
                 img.src_rect.is_none(),
@@ -8314,7 +8317,7 @@ mod anchor_image_relative_from_tests {
             r#"<wp:positionV relativeFrom="margin"><wp:align>top</wp:align></wp:positionV>"#,
         );
         let data = build_docx(&body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = first_image(&doc);
         assert_eq!(
             img.anchor_y_relative_from.as_deref(),
@@ -8332,7 +8335,7 @@ mod anchor_image_relative_from_tests {
             r#"<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>"#,
         );
         let data = build_docx(&body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = first_image(&doc);
         assert_eq!(img.anchor_x_relative_from.as_deref(), Some("margin"));
         assert_eq!(img.anchor_x_align.as_deref(), Some("left"));
@@ -8347,7 +8350,7 @@ mod anchor_image_relative_from_tests {
             r#"<wp:positionV relativeFrom="page"><wp:align>center</wp:align></wp:positionV>"#,
         );
         let data = build_docx(&body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = first_image(&doc);
         assert_eq!(img.anchor_x_relative_from.as_deref(), Some("page"));
         assert_eq!(img.anchor_y_relative_from.as_deref(), Some("page"));
@@ -8371,7 +8374,7 @@ mod anchor_image_relative_from_tests {
   </wp:inline>
 </w:drawing></w:r></w:p>"#;
         let data = build_docx(body);
-        let doc = parse(&data).expect("parse must succeed");
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
         let img = first_image(&doc);
         assert!(img.anchor_x_relative_from.is_none());
         assert!(img.anchor_y_relative_from.is_none());

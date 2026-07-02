@@ -1,13 +1,25 @@
-import init, { parse_docx, extract_image } from './wasm/docx_parser.js';
+import init, { DocxArchive } from './wasm/docx_parser.js';
 import { decodeDataUrl } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types';
 
 let initPromise: Promise<unknown> | null = null;
-// The buffer is transferred into the worker on `parse` (the main thread's copy
-// is neutered), so the worker is its rightful owner. Retain it so a later
-// `extractImage` can read media bytes by zip path without re-sending the file.
-let currentBuffer: Uint8Array | null = null;
-let currentMaxZipEntryBytes: bigint | undefined;
+// A `DocxArchive` handle over the opened zip: `new DocxArchive(bytes, max)`
+// copies the file into WASM ONCE and scans the central directory ONCE, then a
+// later `extractImage` reads media by zip path straight from the retained
+// archive (no re-copy, no re-open, and no JS-side buffer kept alive — the copy
+// lives inside WASM). Held across the worker's lifetime; freed + replaced on a
+// re-parse so we never leak the previous document's WASM allocation.
+let archive: DocxArchive | null = null;
+
+/** Free the current handle (if any) and null it out. Guards against a double
+ *  free / use-after-free: after this the next `extractImage` throws the same
+ *  "No docx loaded" error as before a first parse. */
+function disposeArchive(): void {
+  if (archive) {
+    archive.free();
+    archive = null;
+  }
+}
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
@@ -23,19 +35,24 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     await initPromise;
     if (req.type === 'parse') {
-      currentMaxZipEntryBytes =
+      const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      currentBuffer = new Uint8Array(req.data);
-      // `parse_docx` returns the model as UTF-8 JSON bytes on success and throws
-      // a JS Error on parse/serialize failure (Result<Vec<u8>, JsValue>),
-      // matching pptx/xlsx. The throw is caught by the outer try/catch below, so
-      // no error-field probe is needed here. wasm-bindgen hands back a fresh
+      // Constructing the handle copies `req.data` into WASM; after that the
+      // worker holds no reference to the transferred bytes (memory is not
+      // doubled — the sole copy lives in WASM linear memory). Replace any prior
+      // handle first so re-parsing a new file frees the old archive.
+      disposeArchive();
+      const bytes = new Uint8Array(req.data);
+      archive = new DocxArchive(bytes, max);
+      // `parse()` returns the model as UTF-8 JSON bytes on success and throws a
+      // JS Error on parse/serialize failure (Result<Vec<u8>, JsValue>). The throw
+      // is caught by the outer try/catch below. wasm-bindgen hands back a fresh
       // Uint8Array (a copy of the Rust Vec), so its buffer is exclusively ours:
       // forward it to the main thread as a transferable — no clone, no decode
       // here. The single decode + JSON.parse happens once, on the main thread.
-      const json = parse_docx(currentBuffer, currentMaxZipEntryBytes);
+      const json = archive.parse();
       const documentJson = json.buffer as ArrayBuffer;
       const res: WorkerResponse = { type: 'parsed', id, documentJson };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
@@ -44,8 +61,8 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       return;
     }
     if (req.type === 'extractImage') {
-      if (!currentBuffer) throw new Error('No docx loaded');
-      const bytes = extract_image(currentBuffer, req.path, currentMaxZipEntryBytes);
+      if (!archive) throw new Error('No docx loaded');
+      const bytes = archive.extract_image(req.path);
       const copy = new Uint8Array(bytes).slice().buffer;
       const res: WorkerResponse = { type: 'imageExtracted', id, bytes: copy };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [copy]);

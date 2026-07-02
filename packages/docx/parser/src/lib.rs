@@ -19,8 +19,8 @@ mod xml_util;
 pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let doc =
-        parser::parse(data).map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+    let doc = parser::parse_from_bytes(data)
+        .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
     serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
@@ -31,7 +31,7 @@ pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u
 pub fn docx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let doc = parser::parse(data).map_err(|e| JsValue::from_str(&e))?;
+    let doc = parser::parse_from_bytes(data).map_err(|e| JsValue::from_str(&e))?;
     Ok(markdown::render_document(&doc))
 }
 
@@ -49,10 +49,76 @@ pub fn extract_image(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// A stateful handle over an opened docx archive.
+///
+/// The free functions above (`parse_docx` / `docx_to_markdown` / `extract_image`)
+/// each re-copy the whole file into WASM and re-scan the ZIP central directory on
+/// every call. A `DocxArchive` copies the bytes into WASM **once** (in `new`) and
+/// keeps the opened [`parser::Zip`] alive, so a `parse` followed by any number of
+/// `extract_image` calls (the viewer's parse-then-lazily-load-media pattern)
+/// pays the copy + open cost a single time. `ZipArchive<Cursor<Vec<u8>>>` is
+/// self-contained (it owns its bytes and holds no borrow into the input), which
+/// is what lets it live in a `#[wasm_bindgen]` struct field.
+///
+/// The retained `max` mirrors the per-call `scoped_max` guard the free functions
+/// install: every method re-installs it for its own scope so the zip-bomb entry
+/// cap is honored identically whether callers use the handle or the free
+/// functions.
+#[wasm_bindgen]
+pub struct DocxArchive {
+    archive: parser::Zip,
+    max: Option<u64>,
+}
+
+#[wasm_bindgen]
+impl DocxArchive {
+    /// Copy `data` into WASM once and open the ZIP central directory once.
+    /// `max_zip_entry_bytes` is retained and applied on every subsequent method
+    /// call (identical semantics to the free functions' `scoped_max` guard).
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<DocxArchive, JsValue> {
+        console_error_panic_hook::set_once();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(data.to_vec()))
+            .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+        Ok(DocxArchive {
+            archive,
+            max: max_zip_entry_bytes,
+        })
+    }
+
+    /// Parse the retained archive and return the model as UTF-8 JSON bytes.
+    /// Byte-for-byte identical to `parse_docx` on the same file — same parser,
+    /// same serializer, same error strings.
+    pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let doc = parser::parse(&mut self.archive)
+            .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+        serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+    }
+
+    /// Extract raw bytes for one embedded entry (e.g. "word/media/image1.png")
+    /// from the retained archive. Twin of the free `extract_image`, but reads
+    /// through the already-open archive instead of re-opening it.
+    pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
+    /// free `docx_to_markdown`.
+    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let doc = parser::parse(&mut self.archive).map_err(|e| JsValue::from_str(&e))?;
+        Ok(markdown::render_document(&doc))
+    }
+}
+
 /// Native equivalent of `parse_docx` for use from the MCP server.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
-    parser::parse(data).and_then(|doc| serde_json::to_string(&doc).map_err(|e| e.to_string()))
+    parser::parse_from_bytes(data)
+        .and_then(|doc| serde_json::to_string(&doc).map_err(|e| e.to_string()))
 }
 
 /// Parse a docx and project the result to GitHub-flavoured markdown:
@@ -63,7 +129,7 @@ pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
 /// section properties, font metrics, drawing shapes.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
-    let doc = parser::parse(data)?;
+    let doc = parser::parse_from_bytes(data)?;
     Ok(markdown::render_document(&doc))
 }
 
@@ -92,14 +158,14 @@ mod tests {
     /// the TS-side `JSON.parse` throw a confusing SyntaxError instead of the
     /// real cause. We can't call the `#[wasm_bindgen]` fn from a plain unit
     /// test (that needs wasm-bindgen-test), but `parse_docx` is now a thin
-    /// `parser::parse(...).map_err(...)?` wrapper, so proving the internal
-    /// parse returns a plain `Err(String)` for bad input is enough: the JSON
-    /// escaping hazard is gone *by construction* because the error never round
-    /// trips through hand-assembled JSON — wasm-bindgen serializes the string.
+    /// `parser::parse_from_bytes(...).map_err(...)?` wrapper, so proving the
+    /// internal parse returns a plain `Err(String)` for bad input is enough: the
+    /// JSON escaping hazard is gone *by construction* because the error never
+    /// round trips through hand-assembled JSON — wasm-bindgen serializes it.
     #[test]
     fn parse_rejects_non_zip_bytes_without_json_escaping_hazard() {
-        // Not a zip archive — parser::parse must return Err, not panic.
-        let err = parser::parse(&[1, 2, 3]).expect_err("non-zip bytes must error");
+        // Not a zip archive — opening the archive must return Err, not panic.
+        let err = parser::parse_from_bytes(&[1, 2, 3]).expect_err("non-zip bytes must error");
         // A raw String error is returned verbatim; even a `"`-laden message is
         // carried as-is (no manual `{"error":"…"}` templating to corrupt).
         let quoted = format!("boom: \"{}\"", err);
