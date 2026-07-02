@@ -1,6 +1,8 @@
 import { computeVisibleRange, PT_TO_PX, type VisibleRange } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
+import type { DocxTextRunInfo } from './renderer';
+import { buildDocxTextLayer } from './text-layer';
 import type { RenderPageOptions } from './types';
 
 /**
@@ -87,6 +89,11 @@ export class DocxScrollViewer {
   private _lastRange: VisibleRange | null = null;
   private _lastTopIndex = -1;
   private _scrollListener: (() => void) | null = null;
+  /** Worker mode: page indices whose bitmap render is currently dispatched to the
+   *  engine. Coalesces a scroll storm — we never dispatch a second render for a
+   *  page whose first is still in flight — and lets us drop pages that scrolled
+   *  out of the window before dispatch (design §11 worker coalescing). */
+  private readonly _bitmapInFlight = new Set<number>();
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     this._container = container;
@@ -328,9 +335,133 @@ export class DocxScrollViewer {
     slot.wrapper.style.height = `${hpx}px`;
   }
 
-  /** Rendered by T3. Stubbed here so the mount loop compiles. */
-  private _renderSlot(_i: number, _slot: PageSlot): void {
-    // filled in T3
+  /** Device-pixel ratio for a render (opts override → window → 1). */
+  private _dpr(): number {
+    return this._opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
+  }
+
+  /**
+   * Render page `i` into `slot`. Routes strictly on the constructor-resolved
+   * `_mode` (design §11 — no probing, no silent mis-pathing): `main` ⇒ paint the
+   * slot's canvas directly via `renderPage`; `worker` ⇒ transfer an ImageBitmap
+   * from `renderPageToBitmap`.
+   *
+   * Slot-identity guard: a slot recycled to a DIFFERENT page while a previous
+   * render is in flight must not repaint the stale page. `slot.renderedPage`
+   * tracks the page this slot is committed to; we stamp it up-front and bail on
+   * resolution if it changed (the engine's own token guard is per-canvas; this is
+   * the viewer's per-slot page-identity check).
+   */
+  private _renderSlot(i: number, slot: PageSlot): void {
+    if (!this._doc) return;
+    // Slot-identity guard: this slot is already rendering / has rendered page i.
+    if (slot.renderedPage === i) return;
+    slot.renderedPage = i;
+
+    const dpr = this._dpr();
+    const widthPx = this._pageWidthPx(i);
+
+    if (this._mode === 'worker') {
+      void this._renderSlotBitmap(i, slot, widthPx, dpr);
+      return;
+    }
+
+    // Main mode: render straight onto the slot's canvas.
+    const runs: DocxTextRunInfo[] = [];
+    const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
+    const onTextRun = wantOverlay ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
+    this._doc
+      .renderPage(slot.canvas, i, {
+        width: widthPx, // this page's own px width → uniform px-per-pt scale (§7)
+        dpr,
+        defaultTextColor: this._opts.defaultTextColor,
+        showTrackChanges: this._opts.showTrackChanges,
+        onTextRun,
+      })
+      .then(() => {
+        // A recycle may have re-purposed this slot for a different page (or freed
+        // it) mid-render; bail without painting the stale page.
+        if (this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        if (wantOverlay && slot.textLayer) {
+          buildDocxTextLayer(
+            slot.textLayer,
+            runs,
+            slot.canvas.style.width || `${slot.canvas.width}px`,
+            slot.canvas.style.height || `${slot.canvas.height}px`,
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        this._opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      });
+  }
+
+  /**
+   * Worker-mode slot render: dispatch `renderPageToBitmap`, transfer the result
+   * via a per-slot `bitmaprenderer` context, and manage the ImageBitmap lifecycle.
+   *
+   * Coalescing / drop-stale (design §11):
+   *  - Skip if page `i` is already in flight (a scroll storm won't double-dispatch).
+   *  - Skip if page `i` already left the mounted window before dispatch.
+   *  - On resolution, if `slot` is no longer THIS page's live slot (it recycled to
+   *    another page, or page `i` re-mounted onto a DIFFERENT slot while this render
+   *    was in flight), close the orphan bitmap and skip the paint. In that
+   *    re-mount case a live slot for `i` still awaits a render, so once we clear
+   *    the in-flight guard we re-dispatch it — a page that recycled and re-mounted
+   *    mid-flight must never stay blank.
+   */
+  private async _renderSlotBitmap(i: number, slot: PageSlot, widthPx: number, dpr: number): Promise<void> {
+    if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
+    // Drop-stale before dispatch: if this page already scrolled out of the
+    // mounted window, don't dispatch at all.
+    if (this._slots.get(i) !== slot) return;
+    this._bitmapInFlight.add(i);
+    // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
+    // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
+    // first worker render (bitmapCtx survives recycle), so we never re-getContext
+    // a canvas that already has one (which would throw a type-flip in the DOM).
+    if (!slot.bitmapCtx) {
+      slot.bitmapCtx = slot.canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
+    }
+    try {
+      const bmp = await this._doc!.renderPageToBitmap(i, {
+        width: widthPx,
+        dpr,
+        showTrackChanges: this._opts.showTrackChanges,
+      });
+      // The slot may have recycled to a different page while the worker ran, or
+      // page `i` may have re-mounted onto a DIFFERENT slot. Either way this bitmap
+      // is stale for THIS slot: close it and skip the paint (drop-stale, §11).
+      if (this._slots.get(i) !== slot || slot.renderedPage !== i) {
+        bmp.close();
+        return;
+      }
+      // Close the slot's previous bitmap, then hold the new one BEFORE transfer so
+      // a concurrent recycle between now and transfer can close it (the recycle
+      // path closes slot.bitmap). transferFromImageBitmap consumes the bitmap, so
+      // we null the field immediately after — leaving nothing to double-close.
+      if (slot.bitmap) slot.bitmap.close();
+      slot.bitmap = bmp;
+      slot.canvas.width = bmp.width;
+      slot.canvas.height = bmp.height;
+      slot.canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
+      slot.canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
+      slot.bitmapCtx?.transferFromImageBitmap(bmp);
+      slot.bitmap = null; // transfer consumed it
+    } catch (err) {
+      this._opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      this._bitmapInFlight.delete(i);
+      // If a LIVE slot for page `i` still awaits its render (page `i` re-mounted
+      // onto a different slot while this render was in flight, so the re-mount's
+      // dispatch was coalesced away), issue it now that the guard is clear.
+      const live = this._slots.get(i);
+      if (live && live !== slot && !this._bitmapInFlight.has(i)) {
+        // live.renderedPage === i already (set by _renderSlot on mount); the
+        // dispatch was swallowed by the in-flight guard, not the identity guard.
+        void this._renderSlotBitmap(i, live, this._pageWidthPx(i), this._dpr());
+      }
+    }
   }
 
   get topVisiblePage(): number {

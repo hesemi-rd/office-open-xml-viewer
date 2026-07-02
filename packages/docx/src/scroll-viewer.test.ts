@@ -228,3 +228,208 @@ describe('DocxScrollViewer — layout + virtualization (T2)', () => {
     expect(Math.max(...mountedPages) - Math.min(...mountedPages)).toBeLessThanOrEqual(4);
   });
 });
+
+describe('DocxScrollViewer — rendering (T3)', () => {
+  it("main mode: calls renderPage once per mounted slot with that page's px width", () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // Every mounted page got exactly one renderPage call, no more no less.
+    const mounted = v.mountedPageIndicesForTest().sort((a, b) => a - b);
+    const rendered = engine.renderCalls.map((c) => c.page).sort((a, b) => a - b);
+    expect(rendered).toEqual(mounted);
+    // Each renderPage call carried THIS page's own px width (uniform px-per-pt
+    // scale, §7). base scale = 200/(100*PT_TO_PX); page width px = 200 for all.
+    const widths = engine.renderPageWidths();
+    for (const w of widths) expect(w).toBeCloseTo(200, 3);
+    v.destroy();
+  });
+
+  it('does not re-render a mounted slot for the same page on a no-op scroll', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const before = engine.renderCalls.length;
+    scrollHost.scrollTop = 0; // unchanged window
+    scrollHost.dispatch('scroll');
+    expect(engine.renderCalls.length).toBe(before); // no duplicate renders
+    v.destroy();
+  });
+
+  it('worker mode: never calls renderPage — routes every slot through renderPageToBitmap', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // mode:'worker' — the real DocxDocument.renderPage THROWS synchronously in
+    // worker mode; a viewer that mis-routed would blow up (and renderCalls would
+    // record the attempt). The direct _mode routing must never touch renderPage.
+    const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }], 'worker');
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.renderCalls).toHaveLength(0); // renderPage never touched
+    // Every mounted page dispatched exactly one bitmap render.
+    const mounted = v.mountedPageIndicesForTest().sort((a, b) => a - b);
+    const bitmapPages = [...new Set(engine.bitmapCalls.map((c) => c.page))].sort((a, b) => a - b);
+    expect(bitmapPages).toEqual(mounted);
+    v.destroy();
+  });
+
+  it('worker mode: paints a resolved bitmap into the slot canvas (transfer)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }], 'worker');
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    // A bitmap was produced and transferred into the mounted slot's canvas.
+    expect(engine.createdBitmaps.length).toBeGreaterThan(0);
+    const slotWrapper = scrollHost.children.find((c) =>
+      c.children.some((k) => k.tag === 'canvas'),
+    ) as FakeEl;
+    const canvas = slotWrapper.children.find((k) => k.tag === 'canvas') as FakeEl;
+    // The bitmaprenderer ctx received the bitmap (fake records lastBitmap).
+    expect(canvas._bitmapCtx?.lastBitmap).toBe(engine.createdBitmaps[0]);
+    v.destroy();
+  });
+
+  it('worker mode: closes the ImageBitmap on recycle (deferred — render in flight when the slot recycles)', async () => {
+    // Bitmap-close observability path (plan open question): the primary path
+    // (deterministic slot.bitmap hold under synchronous resolve) does NOT hold —
+    // in non-deferred mode transferFromImageBitmap consumes the bitmap and nulls
+    // slot.bitmap synchronously BEFORE any scroll-away, so a later recycle has
+    // nothing to close. We use the DOCUMENTED FALLBACK: a deferred fake so the
+    // render is genuinely in flight when the slot recycles, and the on-resolution
+    // stale-check closes the orphan (design §11).
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const firstBatch = engine.bitmapCalls.length;
+    expect(firstBatch).toBeGreaterThan(0);
+    // Scroll far away so the first pages' slots recycle while their renders are
+    // still in flight (deferred → not yet resolved).
+    scrollHost.scrollTop = 12000;
+    scrollHost.dispatch('scroll');
+    // Now resolve the early (now-stale) renders — the viewer must close them.
+    for (const call of engine.bitmapCalls.slice(0, firstBatch)) call.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.createdBitmaps.some((b) => b.close.mock.calls.length > 0)).toBe(true);
+    v.destroy();
+  });
+
+  it('worker mode: drops a stale in-flight render — no paint + bitmap closed when the slot moved on', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Deferred: renderPageToBitmap resolves only when the test calls resolve(),
+    // so we can scroll a slot's page out of the window BEFORE the bitmap arrives.
+    const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // Page 0's bitmap is dispatched but NOT yet resolved.
+    const page0 = engine.bitmapCalls.find((c) => c.page === 0);
+    expect(page0).toBeDefined();
+    // Scroll far away so page 0's slot recycles while its render is in flight.
+    scrollHost.scrollTop = 12000;
+    scrollHost.dispatch('scroll');
+    expect(v.mountedPageIndicesForTest()).not.toContain(0);
+    // Now the stale render for page 0 resolves — the viewer must NOT paint it and
+    // must close the orphaned bitmap.
+    const bmp0 = engine.createdBitmaps[engine.bitmapCalls.indexOf(page0!)];
+    page0!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bmp0.close.mock.calls.length).toBeGreaterThan(0); // orphan closed
+    v.destroy();
+  });
+
+  it('worker mode: a page that recycles then re-mounts while in flight still gets a fresh render', async () => {
+    // Coalescing keys on page index; a naive Set<number> would swallow the
+    // re-mounted slot's render (the stale resolve clears in-flight AFTER the
+    // remount coalesced away → the new slot never paints). The viewer must
+    // re-dispatch the live slot's render so the page never stays blank.
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const page0Initial = engine.bitmapCalls.find((c) => c.page === 0);
+    expect(page0Initial).toBeDefined();
+    const dispatchesForPage0 = () => engine.bitmapCalls.filter((c) => c.page === 0).length;
+    expect(dispatchesForPage0()).toBe(1);
+    // Scroll away (page 0 recycles, render still in flight) then back to the top
+    // (page 0 re-mounts on a fresh slot) — all while the initial render is deferred.
+    scrollHost.scrollTop = 12000;
+    scrollHost.dispatch('scroll');
+    expect(v.mountedPageIndicesForTest()).not.toContain(0);
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatch('scroll');
+    expect(v.mountedPageIndicesForTest()).toContain(0);
+    // The initial (now stale) render resolves — the orphan is dropped and the
+    // re-mounted slot's render is (re-)dispatched.
+    page0Initial!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(dispatchesForPage0()).toBeGreaterThanOrEqual(2); // fresh render issued
+    // Resolve the fresh render and confirm it paints into the live slot.
+    for (const c of engine.bitmapCalls.filter((c) => c.page === 0)) c.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(slot0).toBeDefined();
+    const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted, not blank
+    v.destroy();
+  });
+});

@@ -149,6 +149,9 @@ export function installDom(): { resizeCb: () => (() => void) | undefined } {
 
 export interface RenderCall {
   page: number;
+  /** The per-call `width` (px) the viewer passed — asserted by T3 to confirm
+   *  each page gets its OWN px width (uniform px-per-pt scale, §7). */
+  width?: number;
   resolve: () => void;
   reject: (e: Error) => void;
 }
@@ -185,7 +188,7 @@ export class FakeDocxEngine {
     const s = this._sizes[clamped] ?? { widthPt: 0, heightPt: 0 };
     return { widthPt: s.widthPt, heightPt: s.heightPt };
   }
-  renderPage(_canvas: unknown, page: number, _opts?: RenderPageOptions): Promise<void> {
+  renderPage(_canvas: unknown, page: number, opts?: RenderPageOptions): Promise<void> {
     if (this._mode === 'worker') {
       // Record the attempt BEFORE throwing so a test can assert the viewer never
       // routes a worker-mode engine through renderPage (and detect wrong-path
@@ -198,20 +201,30 @@ export class FakeDocxEngine {
       );
     }
     return new Promise<void>((resolve, reject) => {
-      const call: RenderCall = { page, resolve: () => resolve(), reject };
+      const call: RenderCall = { page, width: opts?.width, resolve: () => resolve(), reject };
       this.renderCalls.push(call);
       if (!this.deferred) resolve();
     });
   }
-  renderPageToBitmap(page: number, _opts?: WireRenderPageOptions): Promise<ImageBitmap> {
+  renderPageToBitmap(page: number, opts?: WireRenderPageOptions): Promise<ImageBitmap> {
     const size = this.pageSize(page);
     const bmp = { width: Math.round(size.widthPt), height: Math.round(size.heightPt), close: vi.fn() };
     this.createdBitmaps.push(bmp);
     return new Promise<ImageBitmap>((resolve, reject) => {
-      const call: RenderCall = { page, resolve: () => resolve(bmp as unknown as ImageBitmap), reject };
+      const call: RenderCall = {
+        page,
+        width: opts?.width,
+        resolve: () => resolve(bmp as unknown as ImageBitmap),
+        reject,
+      };
       this.bitmapCalls.push(call);
       if (!this.deferred) resolve(bmp as unknown as ImageBitmap);
     });
+  }
+  /** The per-call `width` (px) recorded for every renderPage call, in call order.
+   *  T3 asserts each mounted page received its OWN px width. */
+  renderPageWidths(): number[] {
+    return this.renderCalls.map((c) => c.width ?? NaN);
   }
   destroy(): void {
     this.destroyed = true;
