@@ -4185,6 +4185,134 @@ function resolveNumberingMarker(
   return { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker };
 }
 
+/** Phase 4-1 B2 Stage 2 — rehydrate the paginator's scale-1 stamped lines into
+ *  the paint scale, keeping the scale-1 line PARTITION but re-deriving all
+ *  hinting-sensitive geometry at the paint scale.
+ *
+ *  Why not a pure ×scale of the scale-1 fields: a real (hinted) font's Canvas
+ *  metrics are NOT scale-linear — `measureText(pt·s).width ≠ s · measureText(pt)`
+ *  and `fontBoundingBoxAscent(pt·s) ≠ s · fontBoundingBoxAscent(pt)`. The draw
+ *  path advances the pen by each segment's `measuredWidth` while `fillText`
+ *  renders at the paint-scale font, and the line box uses `ascent/descent`; a
+ *  geometric ×scale of those would drift the pen off the glyphs horizontally and
+ *  the baseline off by up to ~1px vertically, accumulating down the page (seen on
+ *  demo/sample-1 p.4). So RE-MEASURE every text segment at the paint scale here —
+ *  the exact same per-segment measurement `layoutLines` does (advance via
+ *  gridWidth, box via correctedLineMetrics, the §17.3.2.33 small-caps full-size
+ *  box, the §17.3.3.25 ruby ascent reserve, and the intended-single-line floor) —
+ *  so measure == draw byte-for-byte, identical to a fresh paint-scale layout of
+ *  the SAME partition. Only WHICH glyphs sit on WHICH line comes from the scale-1
+ *  stamp; that is the zoom-invariant part (Word lays text out in the document's
+ *  coordinate space and the display scale is a viewport transform, not a
+ *  re-layout — the scale-1 partition is correct at every zoom). This makes reuse
+ *  a deliberate behaviour change vs. the old recompute-at-paint-scale path, which
+ *  let hinting shift wrap points per zoom.
+ *
+ *  Geometry that IS scale-linear (a clean ×scale): the float-exclusion `xOffset` /
+ *  `availWidth` / `topY` (pure page geometry, no glyph hinting) and non-text
+ *  advances — image `widthPt·scale`, math `render.*Em·emPx`. Empty/synthetic
+ *  lines (no text segment) fall back to the ×scale of the stamped box, matching
+ *  layoutLines' `h·scale·0.8`/`0.2` synthesis.
+ *
+ *  Returns FRESH line + segment objects (never mutates the shared stamp — the
+ *  draw path and repeated renderPage calls read the same immutable array; see
+ *  layout-lines-reuse-identity.test.ts). `scale === 1` returns the stamp
+ *  unchanged (identity — no copy, no re-measure), so the scale-1 reuse path stays
+ *  byte-for-byte as in Stage 1. */
+function rescaleLayoutLines(
+  lines: LayoutLine[],
+  scale: number,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string>,
+  gridDeltaPx: number,
+): LayoutLine[] {
+  if (scale === 1) return lines;
+
+  // Per-text-segment measurement at the PAINT scale — the SAME model layoutLines
+  // uses (segAdvance + the text-segment metric block), so measure == draw.
+  const measureTextSeg = (s: LayoutTextSeg): { advance: number; asc: number; desc: number; intended: number } => {
+    const effPx = calcEffectiveFontPx(s, scale);
+    ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
+    const m = ctx.measureText(s.text);
+    const advance = gridWidth(m.width, s.text, gridDeltaPx);
+    // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
+    // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
+    // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.
+    const fullPx = s.fontSize * scale;
+    let metricM = m;
+    let metricEmPx = effPx;
+    if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
+      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
+      metricM = ctx.measureText(s.text || 'X');
+      metricEmPx = fullPx;
+    }
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx);
+    // §17.3.3.25 — ruby reserves extra ascent room (rt size × 1.5), same as layoutLines.
+    const asc = s.ruby ? corrected.ascent + s.ruby.fontSizePt * scale * 1.5 : corrected.ascent;
+    // Intended single-line floor (font-metrics.ts) — small caps keep the FULL run
+    // size here too (addToLine's intendedEm).
+    const intendedEm = s.smallCaps && !s.vertAlign ? fullPx : effPx;
+    const intended = intendedSingleLinePx(s.fontFamily, intendedEm);
+    return { advance, asc, desc: corrected.descent, intended };
+  };
+
+  return lines.map((l) => {
+    let asc = 0;
+    let desc = 0;
+    let intended = 0;
+    let hasText = false;
+    const segments = l.segments.map((s) => {
+      if ('isTab' in s) {
+        // Tab advance is position-dependent (pen → next stop) and box-neutral; a
+        // ×scale reproduces the scale-1 tab-to-stop advance scaled to paint space
+        // (the stamp reuse is gated to no-float, non-marker paragraphs, so the
+        // tab-stop grid scales cleanly with the box).
+        return { ...s, measuredWidth: s.measuredWidth * scale };
+      }
+      if ('imagePath' in s) {
+        // Anchored images live out of inline flow: layoutLines pins their
+        // measuredWidth to 0 (they add no pen advance) and their anchor*Pt
+        // fields stay in pt space for the draw-time position resolver.
+        if (s.anchor) return { ...s, measuredWidth: 0 };
+        return { ...s, measuredWidth: s.widthPt * scale };
+      }
+      if ('mathNodes' in s) {
+        const copy = { ...s, measuredWidth: s.measuredWidth * scale } as LayoutMathSeg;
+        copy.mathAscent *= scale;
+        copy.mathDescent *= scale;
+        asc = Math.max(asc, copy.mathAscent, s.fontSize * scale * 0.8);
+        desc = Math.max(desc, copy.mathDescent, s.fontSize * scale * 0.2);
+        return copy;
+      }
+      const t = s as LayoutTextSeg;
+      const mm = measureTextSeg(t);
+      hasText = true;
+      if (mm.asc > asc) asc = mm.asc;
+      if (mm.desc > desc) desc = mm.desc;
+      if (mm.intended > intended) intended = mm.intended;
+      return { ...t, measuredWidth: mm.advance };
+    });
+    // Empty/synthetic line (no text/math contributing metrics): fall back to the
+    // ×scale of the stamped box (layoutLines synthesises h·scale·0.8/0.2 there).
+    if (!hasText && asc === 0 && desc === 0) {
+      asc = l.ascent * scale;
+      desc = l.descent * scale;
+      intended = l.intendedSingle * scale;
+    }
+    return {
+      ...l,
+      segments,
+      ascent: asc,
+      descent: desc,
+      intendedSingle: intended,
+      // Pure page geometry — scale-linear (no glyph hinting).
+      xOffset: l.xOffset * scale,
+      availWidth: l.availWidth * scale,
+      topY: l.topY === undefined ? undefined : l.topY * scale,
+    };
+  });
+}
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -4323,20 +4451,35 @@ function renderParagraph(
   // the body as usual. RTL lists keep their existing start-edge handling.
   const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
   const paintGridDeltaPx = gridCharDeltaPx(grid, scale);
-  // Phase 4-1 B2 Stage 1 — compute-once reuse. When the paginator split this
-  // paragraph it stamped the scale-1 lines it laid out (splitParagraphAcrossPages).
-  // Reuse them VERBATIM — skipping this scale's layoutLines entirely — but ONLY
-  // when the paint pass would produce a byte-identical array: its scale is 1 (so
-  // no px field needs rescaling; the scale-1 lines ARE the paint lines) AND every
-  // layout input matches the value the paginator used. The input check is what
-  // keeps this pixel-exact across the cases where measure and paint legitimately
-  // differ — most importantly the numbering firstLineIndent (measure uses
-  // para.indentFirst, paint uses numBodyOffset for a marker), which then fails the
-  // firstIndent equality and recomputes. A float context is excluded outright:
-  // float wrap depends on the page-absolute Y of THIS slice, which the stamped
-  // (whole-paragraph, first-page) lines do not carry. Rescaling to scale ≠ 1 is
-  // deferred to Stage 2 (it changes the line PARTITION under real font hinting —
-  // see layout-lines-scale-invariance.test.ts — i.e. a behaviour change).
+  // Phase 4-1 B2 Stage 2 — compute-once, ZOOM-INVARIANT reuse. When the paginator
+  // split this paragraph it stamped the scale-1 lines it laid out
+  // (splitParagraphAcrossPages). Reuse the scale-1 line PARTITION at ANY paint
+  // scale — skipping this scale's line-BREAK decisions — and rehydrate to the
+  // paint scale by RE-MEASURING each line's glyph geometry at the paint scale
+  // (rescaleLayoutLines: advance + box + tabs, so measure == draw with no hinting
+  // drift; scale 1 returns the stamp unchanged). This is a deliberate BEHAVIOUR
+  // CHANGE from Stage 1, which reused only at scale 1 and otherwise re-ran the
+  // break decisions at the paint scale: with a real (hinted) font those decisions
+  // could move wrap points as the zoom changes, whereas Word lays text out in the
+  // document's coordinate space and treats the display scale as a viewport
+  // transform (the wrap partition is scale 1 at every zoom). Reuse is gated to the
+  // cases where the scale-1 partition is the one this paint would intend — every
+  // layout INPUT must match the paginator's, compared in the paginator's scale-1
+  // space (the paint values are exactly `scale ×` the scale-1 values; see the
+  // per-field derivation below). The input check still rejects the numbering
+  // firstLineIndent case (measure uses para.indentFirst, paint uses numBodyOffset
+  // for a marker) so those recompute. A float context is excluded outright: float
+  // wrap depends on the page-absolute Y of THIS slice, which the stamped
+  // (whole-paragraph, first-page) lines do not carry.
+  //
+  // Scale-1 input reconstruction: the pt sources are read straight off the
+  // paragraph (para.indent*) — NO division — except paraW, whose only scaled term
+  // is contentW (= colW·scale, no rounding), so contentW/scale recovers colW. At
+  // scale 1 every reconstruction is the identity (÷1), so the gate stays
+  // bit-exact there and the Stage-1 pixel-identity test is unaffected. paraW is
+  // compared with a magnitude-relative epsilon because contentW/scale − indL − indR
+  // and (colW − indL − indR) are two float paths to the same real width (round-off
+  // ~1e-13); this is a geometric equality test, not a snapping heuristic.
   //
   // Segment stability: the reuse also assumes buildSegments(para.runs, ·) yields
   // the SAME segments under the paginator's measure state and this paint state.
@@ -4348,27 +4491,54 @@ function renderParagraph(
   // new state-dependent text source, extend that predicate — this gate cannot
   // see inside the stamped segments.
   const stamped = para as unknown as PaginatedElementWithLines;
+  // Reconstruct THIS paint's layout inputs in the paginator's scale-1 pt space.
+  const paraW1 = contentW / scale - (inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft)) - (inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight));
+  const indLeft1 = inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft);
+  const firstIndent1 = hasMarker && !baseRtl ? numBodyOffset / scale : para.indentFirst;
+  const gridDelta1 = gridCharDeltaPx(grid, 1);
   const reuse =
     lineReuseEnabled &&
     stamped.layoutLines !== undefined &&
     stamped.layoutLinesInputs !== undefined &&
-    scale === 1 &&
     stamped.layoutLinesInputs.scale === 1 &&
     !wrapCtx &&
     !stamped.layoutLinesInputs.hasFloats &&
-    stamped.layoutLinesInputs.paraW === paraW &&
-    stamped.layoutLinesInputs.firstIndent === firstLineIndent &&
-    stamped.layoutLinesInputs.tabOriginPx === indLeft &&
-    stamped.layoutLinesInputs.gridDeltaPx === paintGridDeltaPx &&
+    Math.abs(stamped.layoutLinesInputs.paraW - paraW1) <= 1e-6 * Math.max(1, Math.abs(paraW1)) &&
+    stamped.layoutLinesInputs.firstIndent === firstIndent1 &&
+    stamped.layoutLinesInputs.tabOriginPx === indLeft1 &&
+    stamped.layoutLinesInputs.gridDeltaPx === gridDelta1 &&
     // §17.3.1.16 / §17.15.1.58–.59 — kinsoku governs CJK retract decisions in
     // layoutLines, so differing rules mean a (potentially) different partition.
     // Value equivalence, NOT `===`: the prebuiltPages path resolves the rules
     // independently in paginateDocument and here (fresh Sets per call), so the
     // references legitimately differ while the rules are identical.
     kinsokuRulesEquivalent(stamped.layoutLinesInputs.kinsoku, state.kinsoku);
+  // Zoom-invariant line breaking (Phase 4-1 B2 Stage 2). Three cases, all feeding
+  // the SAME draw loop below; rescaleLayoutLines re-measures the geometry at the
+  // paint scale off the scale-1 PARTITION (so measure == draw, no hinting drift):
+  //  1. reuse — the paginator's scale-1 stamp.
+  //  2. no float context — recompute the partition in the paginator's SAME scale-1
+  //     space (paraW1 / firstIndent1 / indLeft1 / gridDelta1). A paragraph that
+  //     missed the stamp (never split, or its inputs differ — e.g. a numbered
+  //     list's firstLineIndent) must STILL break at the scale-1 partition, or a
+  //     page would MIX scale-1-broken (split) and paint-scale-broken (non-split)
+  //     paragraphs — two wrap regimes side by side — and a paint-scale re-break
+  //     can even overflow the height the paginator reserved (estimateParagraphHeight
+  //     also lays out at scale 1). Keeping the whole non-float body on scale-1
+  //     breaking makes the page coherent and paginate-aligned.
+  //  3. float wrap context — stays at the paint scale (a straight layoutLines):
+  //     the wrap windows are evaluated against paint-scale float rectangles at
+  //     page-absolute Y, which have no scale-1 form here (the stamp reuse excludes
+  //     floats for the same reason). Pre-existing paginate(scale 1)/paint(scale s)
+  //     float behaviour, unchanged.
   const lines = reuse
-    ? (stamped.layoutLines as LayoutLine[])
-    : layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt);
+    ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
+    : wrapCtx
+      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt)
+      : rescaleLayoutLines(
+          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt),
+          scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
+        );
 
   // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
   // `decimal`) only positions content at a tab stop when an explicit tab
