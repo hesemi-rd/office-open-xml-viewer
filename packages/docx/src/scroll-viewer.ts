@@ -548,17 +548,33 @@ export class DocxScrollViewer {
       this._reportRenderError(err);
     } finally {
       this._bitmapInFlight.delete(i);
-      // Re-dispatch when a LIVE slot for page `i` still awaits a correct render
-      // and this invocation did NOT paint it. Two mid-flight cases produce that:
-      //  - page `i` re-mounted onto a DIFFERENT slot while we ran (identity moved,
-      //    the re-mount's dispatch was coalesced away by the in-flight guard), or
-      //  - a `setScale` bumped the epoch (this bitmap was at the old scale; the
-      //    live slot may be the SAME object reused from the pool, so a `live !==
-      //    slot` test would wrongly skip it).
-      // `!painted` covers both without special-casing which staleness fired; when
-      // we DID paint, `live === slot` and no re-dispatch is needed.
+      // Re-dispatch ONLY when this invocation went stale — a LIVE slot for page
+      // `i` still awaits a correct render and the reason we didn't paint was
+      // staleness, not a render failure. The two staleness cases:
+      //  - IDENTITY MOVED (`live !== slot`): page `i` re-mounted onto a DIFFERENT
+      //    slot while we ran (the re-mount's own dispatch was coalesced away by
+      //    the in-flight guard), so the live slot has no render in flight.
+      //  - EPOCH MOVED (`epoch !== this._renderEpoch`): a `setScale` bumped the
+      //    epoch mid-flight, so this bitmap was at a superseded scale. The live
+      //    slot may be the SAME object reused from the pool, which the identity
+      //    test alone would miss — the epoch test catches the same-slot case.
+      // NO RETRY ON PLAIN REJECTION: when the slot is still live at the same epoch
+      // and we simply failed (`renderPageToBitmap` rejected or the transfer threw),
+      // `!painted` holds but BOTH staleness tests are false, so we do NOT
+      // re-dispatch. Retrying a plain failure would loop unbounded (reject →
+      // re-dispatch → reject → …); the onError contract is that "a failed page is
+      // left blank" (see DocxScrollViewerOptions.onError), so we leave it blank.
+      // Bounded epoch-then-reject: an epoch-moved re-dispatch captures the NEW
+      // epoch, so if that fresh render then rejects at the still-current epoch,
+      // both tests are false and it stops — no unbounded retry.
       const live = this._slots.get(i);
-      if (!painted && live && !this._bitmapInFlight.has(i) && !this._destroyed) {
+      if (
+        !painted &&
+        live &&
+        (live !== slot || epoch !== this._renderEpoch) &&
+        !this._bitmapInFlight.has(i) &&
+        !this._destroyed
+      ) {
         // live.renderedPage === i already (set by _renderSlot on mount); the fresh
         // dispatch runs at the CURRENT epoch/scale via _pageWidthPx(i).
         void this._renderSlotBitmap(i, live, this._pageWidthPx(i), this._dpr());
@@ -579,6 +595,12 @@ export class DocxScrollViewer {
    * `newScrollTop = offsets'[top] + intraFrac × heights'[top]`, clamped to
    * `[0, totalHeight' − viewportHeight]`. Because a page's height scales linearly
    * with `_scale`, the same fractional position maps exactly to the new geometry.
+   *
+   * CAVEAT — base fit below the floor: `relayout()` sets `_scale = base` WITHOUT
+   * clamping to `[zoomMin, zoomMax]`. If the base fit is below `zoomMin` (a wide
+   * page in a narrow container), the initial scale sits under the floor, but once
+   * the user zooms via `setScale` the clamp pins the minimum to `zoomMin`, so they
+   * can no longer return below the floor to the original base fit through this API.
    */
   setScale(scale: number): void {
     if (!this._doc || this._doc.pageCount === 0 || !this._scaleEstablished) return;

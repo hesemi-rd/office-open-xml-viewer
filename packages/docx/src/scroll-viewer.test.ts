@@ -475,6 +475,50 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     v.destroy();
   });
 
+  it('worker mode: a PLAIN render rejection (slot still live, epoch unchanged) does NOT re-dispatch — no retry storm', async () => {
+    // B1 regression: the finally re-dispatch must gate on STALENESS, not merely
+    // `!painted`. When `renderPageToBitmap` rejects while the slot is still live
+    // and the epoch is unchanged, `painted` is false and `live === slot`, but
+    // NEITHER staleness test fires, so we must NOT re-dispatch. A `!painted`-only
+    // gate would loop reject → re-dispatch → reject … unbounded (empirically 1→2
+    // →3→4 with onError every round). The onError contract leaves the page blank.
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const onError = vi.fn();
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      overscan: 1,
+      onError,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+
+    const page0 = engine.bitmapCalls.find((c) => c.page === 0);
+    expect(page0).toBeDefined();
+    expect(v.mountedPageIndicesForTest()).toContain(0); // slot still live
+    const dispatchesForPage0 = () => engine.bitmapCalls.filter((c) => c.page === 0).length;
+    expect(dispatchesForPage0()).toBe(1);
+
+    // Reject the render with the slot STILL LIVE and no scale change (epoch fixed).
+    page0!.reject(new Error('worker render failed'));
+    // Flush microtasks generously — a retry storm would keep queuing dispatches.
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+
+    // Dispatch count for page 0 stayed at 1 — the storm is gone.
+    expect(dispatchesForPage0()).toBe(1);
+    // onError fired exactly once (the single failure), never again.
+    expect(onError).toHaveBeenCalledTimes(1);
+    // Still no further dispatches after more microtask flushing.
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+    expect(dispatchesForPage0()).toBe(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    v.destroy();
+  });
+
   it('worker mode: destroy() mid-flight closes the resolving bitmap and does not fire onError post-destroy', async () => {
     installDom();
     const container = makeContainer(200, 400);
@@ -713,6 +757,62 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
     expect(canvas0._bitmapCtx?.lastBitmap).not.toBe(bmpOld); // never painted the stale bitmap
     expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted the fresh one
+    v.destroy();
+  });
+
+  // B1: epoch-then-reject must stay BOUNDED. setScale bumps the epoch mid-flight,
+  // so the OLD dispatch is stale on resolution; whether it resolves or REJECTS,
+  // the finally must issue exactly ONE fresh dispatch at the new epoch. The fresh
+  // dispatch captures the new epoch, so if IT later rejects (same epoch, still
+  // live) nothing re-dispatches — the retry is bounded to a single fresh attempt.
+  it('render epoch: rejecting the OLD-scale dispatch after setScale still yields exactly ONE fresh dispatch at the new scale (bounded)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(20, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const onError = vi.fn();
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      overscan: 1,
+      zoomMin: 0.5,
+      zoomMax: 3,
+      onError,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+
+    const page0Old = engine.bitmapCalls.find((c) => c.page === 0);
+    expect(page0Old).toBeDefined();
+    const dispatchesForPage0 = () => engine.bitmapCalls.filter((c) => c.page === 0).length;
+    expect(dispatchesForPage0()).toBe(1);
+    const oldWidth = page0Old!.width;
+
+    // Zoom mid-flight: bumps the epoch. Page 0's re-mount is coalesced away.
+    v.setScale(v.scaleForTest() * 2);
+    expect(v.mountedPageIndicesForTest()).toContain(0);
+    expect(dispatchesForPage0()).toBe(1);
+
+    // REJECT the old-scale dispatch. Epoch moved ⇒ stale ⇒ re-dispatch (not a plain
+    // failure retry). Exactly ONE fresh dispatch at the new epoch.
+    page0Old!.reject(new Error('old-scale render failed'));
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+    const afterReject = engine.bitmapCalls.filter((c) => c.page === 0);
+    expect(afterReject.length).toBe(2); // one fresh dispatch, no storm
+    const freshCall = afterReject[afterReject.length - 1];
+    expect(freshCall.width).toBeGreaterThan(oldWidth ?? 0); // at the NEW (larger) scale
+
+    // The fresh dispatch then SUCCEEDS and paints — the page is not left blank.
+    freshCall.resolve();
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+    expect(dispatchesForPage0()).toBe(2); // still exactly two; success does not re-dispatch
+    const slot0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(slot0).toBeDefined();
+    const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted the fresh bitmap
     v.destroy();
   });
 
