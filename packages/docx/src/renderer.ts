@@ -4269,7 +4269,13 @@ function rescaleLayoutLines(
         // tab-stop grid scales cleanly with the box).
         return { ...s, measuredWidth: s.measuredWidth * scale };
       }
-      if ('imagePath' in s) return { ...s, measuredWidth: s.widthPt * scale };
+      if ('imagePath' in s) {
+        // Anchored images live out of inline flow: layoutLines pins their
+        // measuredWidth to 0 (they add no pen advance) and their anchor*Pt
+        // fields stay in pt space for the draw-time position resolver.
+        if (s.anchor) return { ...s, measuredWidth: 0 };
+        return { ...s, measuredWidth: s.widthPt * scale };
+      }
       if ('mathNodes' in s) {
         const copy = { ...s, measuredWidth: s.measuredWidth * scale } as LayoutMathSeg;
         copy.mathAscent *= scale;

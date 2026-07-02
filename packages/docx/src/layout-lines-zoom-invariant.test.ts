@@ -233,4 +233,53 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     const reuseAt075 = await partitionAtWidth(model, pages, 150);
     expect(reuseAt075).toEqual(recomputeAt1);
   });
+
+  it('an ANCHORED image in the paragraph adds no inline advance at any scale', async () => {
+    // Anchored images live out of inline flow: layoutLines pins measuredWidth=0
+    // and never adds them to line.segments (they are drawn by renderAnchorImages).
+    // Characterizes that the reuse/rehydration path preserves this: the partition
+    // is zoom-invariant AND every line's first glyph starts at the paragraph
+    // origin (∝ scale) — not shifted right by imageWidth·scale, which is what a
+    // rescale that conjured an inline advance for the anchor would produce.
+    const text = Array.from({ length: 120 }, (_, i) => `w${i % 10}`).join(' ');
+    const p = para(text);
+    p.runs.unshift({
+      type: 'image', imagePath: 'word/media/image1.png', mimeType: 'image/png',
+      widthPt: 50, heightPt: 40, anchor: true, anchorXPt: 30, anchorYPt: 20,
+    } as unknown as DocParagraph['runs'][number]);
+    const model = doc([p as unknown as BodyElement]);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+
+    const collect = async (width: number): Promise<{ partition: string[]; firstX: number[] }> => {
+      const partition: string[] = [];
+      const firstX: number[] = [];
+      for (let pg = 0; pg < pages.length; pg++) {
+        const rec = makeRecordingCanvas();
+        await renderDocumentToCanvas(model, rec.canvas, pg, { dpr: 1, width, prebuiltPages: pages });
+        const byLine = new Map<number, Draw[]>();
+        for (const d of rec.draws) {
+          const key = Math.round(d.y * 100) / 100;
+          if (!byLine.has(key)) byLine.set(key, []);
+          byLine.get(key)!.push(d);
+        }
+        for (const [, draws] of [...byLine.entries()].sort((a, b) => a[0] - b[0])) {
+          draws.sort((a, b) => a.x - b.x);
+          partition.push(draws.map((d) => d.text).join(''));
+          firstX.push(draws[0].x);
+        }
+      }
+      return { partition, firstX };
+    };
+
+    const at1 = await collect(200);   // scale 1.0
+    const at075 = await collect(150); // scale 0.75
+    expect(at075.partition).toEqual(at1.partition);
+    // Line starts scale linearly (page origin ∝ scale): x@0.75 = x@1 × 0.75.
+    // A conjured 50pt inline advance would add 37.5px here and fail.
+    expect(at075.firstX.length).toBe(at1.firstX.length);
+    for (let i = 0; i < at1.firstX.length; i++) {
+      expect(at075.firstX[i]).toBeCloseTo(at1.firstX[i] * 0.75, 6);
+    }
+  });
 });
