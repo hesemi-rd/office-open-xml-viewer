@@ -2,7 +2,6 @@ use crate::resolve_zip_path;
 use crate::types::*;
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
-use std::io::Cursor;
 
 // ─── Slicer loading ─────────────────────────────────────────────────────────
 //
@@ -33,9 +32,7 @@ pub(crate) struct PivotCacheFields {
 /// Parse every `xl/pivotCache/pivotCacheDefinition*.xml` and merge its
 /// cacheFields (indexed by `@name`) into a single map. Sample workbooks
 /// typically have one pivotCache but the loop keeps the code general.
-pub(crate) fn load_all_pivot_cache_fields(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-) -> PivotCacheFields {
+pub(crate) fn load_all_pivot_cache_fields(archive: &mut crate::XlsxZip) -> PivotCacheFields {
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let mut out = PivotCacheFields::default();
     let names: Vec<String> = (0..archive.len())
@@ -84,7 +81,7 @@ pub(crate) fn load_all_pivot_cache_fields(
 /// the slicerCache's `@name` attribute (e.g. `"スライサー_贈答相手1"`). That
 /// name is what `<slicer cache="…"/>` in `xl/slicers/slicerN.xml` references.
 pub(crate) fn load_all_slicer_caches(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
 ) -> HashMap<String, SlicerCacheInfo> {
     let mut out: HashMap<String, SlicerCacheInfo> = HashMap::new();
     let names: Vec<String> = (0..archive.len())
@@ -155,7 +152,7 @@ pub(crate) fn parse_slicers_xml(xml: &str) -> HashMap<String, SlicerDef> {
 }
 
 pub(crate) fn load_sheet_slicers(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     sheet_path: &str, // e.g. "worksheets/sheet1.xml"
 ) -> Vec<SlicerAnchor> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {

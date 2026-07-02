@@ -1,14 +1,24 @@
-import init, { parse_xlsx, parse_sheet, extract_image } from './wasm/xlsx_parser.js';
+import init, { XlsxArchive } from './wasm/xlsx_parser.js';
 import { decodeDataUrl } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 
 let initPromise: Promise<unknown> | null = null;
-// The buffer is *copied* into the worker on `parse` (xlsx clones rather than
-// transfers, so the main thread keeps its own copy too). Retain it so a later
-// `extractImage` can read media bytes by zip path without re-sending the file —
-// mirroring how docx/pptx worker.ts keep `currentBuffer`.
-let currentBuffer: Uint8Array | null = null;
-let currentMaxZipEntryBytes: bigint | undefined;
+// An `XlsxArchive` handle over the opened zip. `new XlsxArchive(bytes, max)`
+// copies the file into WASM ONCE and scans the central directory ONCE; the
+// workbook / sharedStrings / theme parts are then parsed ONCE and reused on every
+// `parseSheet` (the D3 win — a sheet switch previously re-parsed all of them).
+// `extractImage` also reads by zip path straight from the retained archive. No
+// JS-side buffer is kept alive (the sole copy lives in WASM). Freed + replaced on
+// a re-parse.
+let archive: XlsxArchive | null = null;
+
+/** Free the current handle (if any) and null it out — double-free / UAF guard. */
+function disposeArchive(): void {
+  if (archive) {
+    archive.free();
+    archive = null;
+  }
+}
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
@@ -24,45 +34,46 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     await initPromise;
     if (req.type === 'parse') {
-      currentMaxZipEntryBytes =
+      const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      currentBuffer = new Uint8Array(req.data);
-      // `parse_xlsx` returns the workbook index as UTF-8 JSON bytes
-      // (Result<Vec<u8>, JsValue>). wasm-bindgen hands back a fresh Uint8Array
-      // that owns its buffer, so forward it to main as a transferable — no
-      // clone, no decode here. The single decode + JSON.parse happens on main.
-      const json = parse_xlsx(currentBuffer, currentMaxZipEntryBytes);
+      // Constructing the handle copies `req.data` into WASM; after that the
+      // worker holds no reference to those bytes (memory is not doubled). Replace
+      // any prior handle first so re-parsing a new file frees the old archive.
+      disposeArchive();
+      const bytes = new Uint8Array(req.data);
+      archive = new XlsxArchive(bytes, max);
+      // `parse()` returns the workbook index as UTF-8 JSON bytes (Result<Vec<u8>,
+      // JsValue>). wasm-bindgen hands back a fresh Uint8Array that owns its
+      // buffer, so forward it to main as a transferable — no clone, no decode
+      // here. The single decode + JSON.parse happens on main.
+      const json = archive.parse();
       const workbookJson = json.buffer as ArrayBuffer;
       const res: WorkerResponse = { type: 'parsed', id, workbookJson };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         workbookJson,
       ]);
     } else if (req.type === 'parseSheet') {
-      // Reuse the buffer retained at `parse` instead of re-receiving it — the
-      // whole file no longer crosses the worker boundary on every sheet switch
-      // (twin of the `extractImage` reuse below). A `parseSheet` before any
-      // `parse` has no buffer to work with: that is a protocol violation, so
-      // fail loudly rather than silently returning an empty sheet.
-      if (!currentBuffer) {
-        throw new Error('parseSheet before parse: no buffer retained');
+      // Parse straight off the retained archive, reusing its cached workbook /
+      // sharedStrings / theme parts — the whole file no longer crosses the worker
+      // boundary and those shared parts are no longer re-parsed on every sheet
+      // switch. A `parseSheet` before any `parse` has no archive to work with:
+      // that is a protocol violation, so fail loudly.
+      if (!archive) {
+        throw new Error('parseSheet before parse: no archive retained');
       }
-      const maxBytes =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
       // `parse_sheet` also returns UTF-8 JSON bytes; forward its transferable
       // buffer to main the same way (single decode + parse on main).
-      const json = parse_sheet(currentBuffer, req.sheetIndex, req.sheetName, maxBytes);
+      const json = archive.parse_sheet(req.sheetIndex, req.sheetName);
       const worksheetJson = json.buffer as ArrayBuffer;
       const res: WorkerResponse = { type: 'parsedSheet', id, worksheetJson };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         worksheetJson,
       ]);
     } else if (req.type === 'extractImage') {
-      if (!currentBuffer) throw new Error('No xlsx loaded');
-      const bytes = extract_image(currentBuffer, req.path, currentMaxZipEntryBytes);
+      if (!archive) throw new Error('No xlsx loaded');
+      const bytes = archive.extract_image(req.path);
       const copy = new Uint8Array(bytes).slice().buffer;
       const res: WorkerResponse = { type: 'imageExtracted', id, bytes: copy };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [copy]);

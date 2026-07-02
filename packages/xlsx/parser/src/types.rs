@@ -10,7 +10,7 @@ pub struct Workbook {
 /// Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`).
 /// `Hidden` = hidden but user-unhideable via the UI; `VeryHidden` = revealable
 /// only programmatically. Default is `Visible`.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SheetVisibility {
     Visible,
@@ -26,7 +26,7 @@ impl SheetVisibility {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetMeta {
     pub name: String,

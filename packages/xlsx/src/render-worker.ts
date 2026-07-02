@@ -9,7 +9,7 @@
  * re-`parse` resets all per-document caches so a reused worker never serves
  * stale sheets / images.
  */
-import init, { parse_xlsx, parse_sheet, extract_image } from './wasm/xlsx_parser.js';
+import init, { XlsxArchive } from './wasm/xlsx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
@@ -18,8 +18,12 @@ import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protoco
 
 let initPromise: Promise<unknown> | null = null;
 let workbook: ParsedWorkbook | null = null;
-let rawData: ArrayBuffer | null = null;
-let maxZipEntryBytes: bigint | undefined;
+// An `XlsxArchive` handle over the opened zip. `new XlsxArchive(bytes, max)`
+// copies the file into WASM ONCE and opens it ONCE; the workbook / sharedStrings
+// / theme parts are parsed ONCE and reused on every `parse_sheet` (the D3 win).
+// `getImage` also reads bytes by zip path straight from the retained archive. No
+// JS-side buffer kept alive. Freed + replaced on a re-parse.
+let archive: XlsxArchive | null = null;
 let fontsLoaded: Promise<void> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
 const imageCache = new Map<string, CanvasImageSource | null>();
@@ -32,16 +36,24 @@ const imageBlobCache = new Map<string, Promise<Blob>>();
 const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
 
+/** Free the current handle (if any) and null it out — double-free / UAF guard. */
+function disposeArchive(): void {
+  if (archive) {
+    archive.free();
+    archive = null;
+  }
+}
+
 /** In-worker image-byte loader (twin of the docx render-worker `getImage`). The
  *  orchestrator's `fetchImage` routes here in worker mode, so image bytes are
- *  read straight from the retained `rawData` with no main-thread round-trip.
+ *  read straight from the retained archive with no main-thread round-trip.
  *  Mime travels on the element, so the caller supplies it. */
 function getImage(path: string, mimeType: string): Promise<Blob> {
   const hit = imageBlobCache.get(path);
   if (hit) return hit;
   const p = (async () => {
-    if (!rawData) throw new Error('Workbook not loaded');
-    const bytes = extract_image(new Uint8Array(rawData), path, maxZipEntryBytes);
+    if (!archive) throw new Error('Workbook not loaded');
+    const bytes = archive.extract_image(path);
     return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
   })();
   imageBlobCache.set(path, p);
@@ -50,16 +62,18 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 
 /** Lazily parse one worksheet directly via WASM and cache it — the worker-side
  *  equivalent of XlsxWorkbook.getWorksheet (same `parse_sheet` call, same
- *  cache). Shared by the `renderViewport` handler. */
+ *  decode cache). The handle's own shared-part cache means repeat sheet switches
+ *  no longer re-parse the workbook / sharedStrings / theme. Shared by the
+ *  `renderViewport` handler. */
 function parseSheetLocally(sheetIndex: number): Worksheet {
   const cached = sheetCache.get(sheetIndex);
   if (cached) return cached;
-  if (!workbook || !rawData) throw new Error('Workbook not loaded');
+  if (!workbook || !archive) throw new Error('Workbook not loaded');
   const sheetMeta = workbook.workbook.sheets[sheetIndex];
   if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
   // `parse_sheet` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); the
   // render worker consumes the model in-worker, so decode + parse here.
-  const json = parse_sheet(new Uint8Array(rawData), sheetIndex, sheetMeta.name, maxZipEntryBytes);
+  const json = archive.parse_sheet(sheetIndex, sheetMeta.name);
   const ws = JSON.parse(new TextDecoder().decode(json)) as Worksheet;
   sheetCache.set(sheetIndex, ws);
   return ws;
@@ -80,16 +94,19 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       sheetCache.clear();
       imageCache.clear();
       imageBlobCache.clear();
-      maxZipEntryBytes =
+      const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      // `parse_xlsx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode
-      // + parse the workbook index here (consumed in-worker, then a light copy
-      // is sent to the proxy as an object).
-      const json = parse_xlsx(new Uint8Array(req.data), maxZipEntryBytes);
-      workbook = JSON.parse(new TextDecoder().decode(json)) as ParsedWorkbook;
-      rawData = req.data;
+      // Constructing the handle copies `req.data` into WASM; the worker then
+      // holds no reference to those bytes (memory is not doubled). Replace any
+      // prior handle first so a re-parse frees the old archive.
+      disposeArchive();
+      archive = new XlsxArchive(new Uint8Array(req.data), max);
+      // `parse()` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
+      // parse the workbook index here (consumed in-worker, then a light copy is
+      // sent to the proxy as an object).
+      workbook = JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
       if (req.useGoogleFonts) {
         // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for
         // every styled font name, plus the generic Arabic fallbacks. Fonts must
@@ -131,10 +148,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'extractImage') {
       // Worker render mode decodes images in-worker via the getImage closure;
       // this arm exists only for protocol parity with worker.ts. Raw bytes are
-      // read straight from the retained rawData (no mime needed for a byte
+      // read straight from the retained archive (no mime needed for a byte
       // transfer).
-      if (!rawData) throw new Error('Workbook not loaded');
-      const raw = extract_image(new Uint8Array(rawData), req.path, maxZipEntryBytes);
+      if (!archive) throw new Error('Workbook not loaded');
+      const raw = archive.extract_image(req.path);
       const bytes = new Uint8Array(raw).slice().buffer;
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;

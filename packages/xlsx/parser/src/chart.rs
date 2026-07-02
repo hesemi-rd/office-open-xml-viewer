@@ -2,12 +2,11 @@ use crate::types::*;
 use crate::{parse_rels_map, resolve_fill_color, resolve_zip_path};
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
-use std::io::Cursor;
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
 /// its drawing(s) for chart anchors (`<xdr:graphicFrame>` elements).
 pub(crate) fn load_sheet_charts(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     sheet_path: &str,
     theme_colors: &[String],
 ) -> Vec<ChartAnchor> {

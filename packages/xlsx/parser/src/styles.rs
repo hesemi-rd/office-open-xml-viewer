@@ -1,16 +1,13 @@
 use crate::parse_color;
 use crate::types::*;
 use ooxml_common::zip::read_zip_string;
-use std::io::Cursor;
 
 /// Resolve the workbook's Normal-style font (family name + point size) by
 /// following `<cellStyleXfs>[0].fontId` → `<fonts>[fontId]`. Returns `(None,
 /// None)` if `xl/styles.xml` is missing or malformed. The renderer uses this
 /// to compute the Max Digit Width for column-width pixel conversion
 /// (ECMA-376 §18.3.1.13).
-pub(crate) fn parse_default_font(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-) -> (Option<String>, Option<f64>) {
+pub(crate) fn parse_default_font(archive: &mut crate::XlsxZip) -> (Option<String>, Option<f64>) {
     let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
         return (None, None);
     };
@@ -60,7 +57,7 @@ pub(crate) fn parse_default_font(
 }
 
 pub(crate) fn parse_styles(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     theme_colors: &[String],
 ) -> Result<Styles, String> {
     let xml = read_zip_string(archive, "xl/styles.xml")?;

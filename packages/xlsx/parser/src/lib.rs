@@ -19,6 +19,17 @@ use slicer::*;
 mod table;
 use table::*;
 
+/// The parser's ZIP archive type. Owns its backing bytes (`Cursor<Vec<u8>>`)
+/// rather than borrowing them, so an `XlsxArchive` handle can keep a single
+/// opened archive alive across `parse` / `parse_sheet` / `extract_image` calls —
+/// the central directory is scanned once, the bytes are copied into WASM once,
+/// and (crucially for xlsx) the shared workbook parts are parsed once and reused
+/// on every sheet switch instead of being re-parsed per `parse_sheet`.
+/// `ZipArchive<Cursor<Vec<u8>>>` is fully self-contained (no borrow into the
+/// input), which is what lets it live in a `#[wasm_bindgen]` struct field and be
+/// passed by `&mut` to every per-sheet loader.
+pub(crate) type XlsxZip = zip::ZipArchive<Cursor<Vec<u8>>>;
+
 // Excel built-in indexed color palette (indices 0-63)
 // Standard Excel 2003 color palette
 const INDEXED_COLORS: &[&str] = &[
@@ -55,6 +66,113 @@ pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u
     serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// Workbook-level parts that every `parse_sheet` needs but that do NOT change
+/// between sheets: the workbook.xml / workbook.xml.rels source strings, the
+/// resolved sheet list, the theme palette, and the shared-string table.
+///
+/// Building these is the bulk of a sheet parse's fixed cost — `sharedStrings.xml`
+/// in particular is decompressed and walked in full. The free `parse_sheet`
+/// rebuilds them on every call (unchanged behavior); the stateful `XlsxArchive`
+/// builds them ONCE and reuses them for every sheet switch (the D3 win).
+///
+/// The XML is kept as owned `String`s rather than as `roxmltree::Document`s: a
+/// `Document` borrows its source, so it can't be cached across calls, but
+/// re-parsing the small workbook.xml / rels strings from memory (no zip inflate)
+/// is negligible next to re-decompressing + re-walking sharedStrings/theme.
+struct WorkbookShared {
+    workbook_xml: String,
+    rels_xml: String,
+    sheets: Vec<SheetMeta>,
+    theme_colors: Vec<String>,
+    shared_strings: Vec<SharedString>,
+}
+
+impl WorkbookShared {
+    /// Read + parse the workbook-level shared parts from an opened archive.
+    ///
+    /// `workbook.xml` is mandatory (a workbook without it is unparseable), but
+    /// `workbook.xml.rels` is read leniently (empty on absence): the original
+    /// `parse_xlsx` tolerated a missing rels part (tab colors skipped), while
+    /// `parse_sheet` required it — so the mandatory-rels enforcement stays in
+    /// `parse_sheet_with`, where an empty rels string fails `resolve_sheet_path`
+    /// exactly as the old `?` on the rels read did.
+    fn load(archive: &mut XlsxZip) -> Result<WorkbookShared, String> {
+        let workbook_xml = read_zip_string(archive, "xl/workbook.xml")?;
+        let sheets = {
+            let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
+            parse_workbook_sheets(&wb_doc)
+        };
+        let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
+        let theme_colors = parse_theme_colors(archive);
+        let shared_strings = read_shared_strings(archive, &theme_colors);
+        Ok(WorkbookShared {
+            workbook_xml,
+            rels_xml,
+            sheets,
+            theme_colors,
+            shared_strings,
+        })
+    }
+}
+
+/// Parse one worksheet from an opened archive, reusing already-loaded
+/// [`WorkbookShared`] parts. This is the shared core of the free `parse_sheet`
+/// and `XlsxArchive::parse_sheet`; the only difference between them is whether
+/// `shared` was built fresh for this call or cached across sheet switches.
+///
+/// `wb_doc` / `rels_doc` are re-parsed here from the cached source strings (cheap
+/// in-memory roxmltree parses, no zip inflate) because a `roxmltree::Document`
+/// borrows its input and so can't be stored in `WorkbookShared`.
+fn parse_sheet_with(
+    archive: &mut XlsxZip,
+    shared: &WorkbookShared,
+    sheet_index: u32,
+    name: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let wb_doc = roxmltree::Document::parse(&shared.workbook_xml).map_err(|e| e.to_string())?;
+    // `workbook.xml.rels` is mandatory for a sheet parse (the original
+    // `parse_sheet` read it with `?`). `WorkbookShared` caches it leniently for
+    // the `parse_xlsx` path, so on the (defensive) missing-rels case re-read it
+    // here to surface the identical "entry not found" error the old code raised.
+    if shared.rels_xml.is_empty() {
+        read_zip_string(archive, "xl/_rels/workbook.xml.rels")
+            .map_err(|e| JsValue::from_str(&e))?;
+    }
+    let rels_doc = roxmltree::Document::parse(&shared.rels_xml).map_err(|e| e.to_string())?;
+
+    let sheet_meta = shared
+        .sheets
+        .get(sheet_index as usize)
+        .ok_or_else(|| format!("sheet index {} out of range", sheet_index))?;
+
+    let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
+        .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
+
+    let theme_colors = &shared.theme_colors;
+    let sheet_xml = read_zip_string(archive, &format!("xl/{}", sheet_path))?;
+    let (mut ws, hyperlink_rids) =
+        parse_worksheet(&sheet_xml, &shared.shared_strings, theme_colors, name)
+            .map_err(|e| e.to_string())?;
+
+    // Attach any drawing-anchored images and charts for this sheet
+    ws.images = load_sheet_images(archive, &sheet_path);
+    ws.charts = load_sheet_charts(archive, &sheet_path, theme_colors);
+    ws.shape_groups = load_sheet_shape_groups(archive, &sheet_path, theme_colors);
+    ws.hyperlinks = load_hyperlinks(archive, &sheet_path, hyperlink_rids);
+    ws.comments = load_sheet_comments(archive, &sheet_path);
+    ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
+    ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
+    ws.tables = load_sheet_tables(archive, &sheet_path, theme_colors);
+    ws.slicers = load_sheet_slicers(archive, &sheet_path);
+    ws.sparkline_groups =
+        load_sheet_sparklines(archive, &sheet_xml, &shared.sheets, &rels_doc, theme_colors);
+    let (df_family, df_size) = parse_default_font(archive);
+    ws.default_font_family = df_family;
+    ws.default_font_size = df_size;
+
+    serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 /// Parse one worksheet's cell data + layout and return it as UTF-8 JSON
 /// **bytes** (see `parse_xlsx` for the bytes-return rationale).
 #[wasm_bindgen]
@@ -66,87 +184,51 @@ pub fn parse_sheet(
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-
-    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
-    let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
-    let sheets = parse_workbook_sheets(&wb_doc);
-
-    let sheet_meta = sheets
-        .get(sheet_index as usize)
-        .ok_or_else(|| format!("sheet index {} out of range", sheet_index))?;
-
-    // Resolve rId → target path from workbook.xml.rels
-    let rels_xml = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
-    let rels_doc = roxmltree::Document::parse(&rels_xml).map_err(|e| e.to_string())?;
-    let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
-        .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
-
-    let theme_colors = parse_theme_colors(&mut archive);
-    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
-    let sheet_xml = read_zip_string(&mut archive, &format!("xl/{}", sheet_path))?;
-    let (mut ws, hyperlink_rids) =
-        parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
-            .map_err(|e| e.to_string())?;
-
-    // Attach any drawing-anchored images and charts for this sheet
-    ws.images = load_sheet_images(&mut archive, &sheet_path);
-    ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
-    ws.shape_groups = load_sheet_shape_groups(&mut archive, &sheet_path, &theme_colors);
-    ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
-    ws.comments = load_sheet_comments(&mut archive, &sheet_path);
-    ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
-    ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
-    ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
-    ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
-    ws.sparkline_groups =
-        load_sheet_sparklines(&mut archive, &sheet_xml, &sheets, &rels_doc, &theme_colors);
-    let (df_family, df_size) = parse_default_font(&mut archive);
-    ws.default_font_family = df_family;
-    ws.default_font_size = df_size;
-
-    serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    // The free function rebuilds the shared parts per call (behavior unchanged).
+    // `XlsxArchive::parse_sheet` reuses a cached `WorkbookShared` instead.
+    let shared = WorkbookShared::load(&mut archive).map_err(|e| JsValue::from_str(&e))?;
+    parse_sheet_with(&mut archive, &shared, sheet_index, name)
 }
 
-fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
-    let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-
-    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
-    let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
-    let sheets = parse_workbook_sheets(&wb_doc);
-
-    let theme_colors = parse_theme_colors(&mut archive);
-    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
-    let styles = parse_styles(&mut archive, &theme_colors)?;
+fn parse_xlsx_inner_with(
+    archive: &mut XlsxZip,
+    shared: &WorkbookShared,
+) -> Result<ParsedWorkbook, String> {
+    let theme_colors = &shared.theme_colors;
+    let styles = parse_styles(archive, theme_colors)?;
 
     // Surface each sheet's tab color (`<sheetPr><tabColor>`) on the workbook
     // sheet list so the viewer can paint every tab up front. `<sheetPr>` is the
     // first child of `<worksheet>` (ECMA-376 §18.3.1.99 element order), so a
     // small head read of each sheet entry is enough — we never decompress the
     // (potentially huge) `<sheetData>` body just to read the tab color.
-    let mut sheets = sheets;
-    if let Ok(rels_xml) = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels") {
-        if let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) {
-            for sheet in sheets.iter_mut() {
-                let Some(path) = resolve_sheet_path(&rels_doc, &sheet.r_id) else {
-                    continue;
-                };
-                let Ok(head) = read_zip_entry_head(&mut archive, &format!("xl/{}", path), 16_384)
-                else {
-                    continue;
-                };
-                sheet.tab_color = extract_tab_color_from_head(&head, &theme_colors);
-            }
+    let mut sheets = shared.sheets.clone();
+    if let Ok(rels_doc) = roxmltree::Document::parse(&shared.rels_xml) {
+        for sheet in sheets.iter_mut() {
+            let Some(path) = resolve_sheet_path(&rels_doc, &sheet.r_id) else {
+                continue;
+            };
+            let Ok(head) = read_zip_entry_head(archive, &format!("xl/{}", path), 16_384) else {
+                continue;
+            };
+            sheet.tab_color = extract_tab_color_from_head(&head, theme_colors);
         }
     }
 
     Ok(ParsedWorkbook {
         workbook: Workbook { sheets },
         styles,
-        shared_strings,
+        shared_strings: shared.shared_strings.clone(),
     })
+}
+
+fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    let shared = WorkbookShared::load(&mut archive)?;
+    parse_xlsx_inner_with(&mut archive, &shared)
 }
 
 /// Read only the first `max_bytes` of a ZIP entry as text. Used to probe the
@@ -154,7 +236,7 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
 /// Lossy UTF-8 keeps a multibyte character split at the cut from erroring; the
 /// region we care about (`<sheetPr><tabColor>`) is pure ASCII near the start.
 fn read_zip_entry_head(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut XlsxZip,
     name: &str,
     max_bytes: u64,
 ) -> Result<String, String> {
@@ -203,7 +285,7 @@ fn extract_tab_color_from_head(head: &str, theme_colors: &[String]) -> Option<St
 /// from entry N (1-based) of this list (ECMA-376 §20.1.4.2.19); an entry
 /// without an explicit `w` uses the CT_LineProperties default 9525 EMU =
 /// 0.75 pt (§20.1.2.2.24).
-pub(crate) fn parse_theme_ln_widths(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<i64> {
+pub(crate) fn parse_theme_ln_widths(archive: &mut XlsxZip) -> Vec<i64> {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
@@ -230,7 +312,7 @@ pub(crate) fn parse_theme_ln_widths(archive: &mut zip::ZipArchive<Cursor<&[u8]>>
     widths
 }
 
-fn parse_theme_colors(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
+fn parse_theme_colors(archive: &mut XlsxZip) -> Vec<String> {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
@@ -513,10 +595,7 @@ fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     None
 }
 
-fn read_shared_strings(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    theme_colors: &[String],
-) -> Vec<SharedString> {
+fn read_shared_strings(archive: &mut XlsxZip, theme_colors: &[String]) -> Vec<SharedString> {
     let Ok(xml) = read_zip_string(archive, "xl/sharedStrings.xml") else {
         return Vec::new();
     };
@@ -1264,10 +1343,7 @@ pub(crate) fn parse_rels_map(xml: &str) -> HashMap<String, String> {
 /// Reads xl/commentsN.xml for the given sheet and returns each `<comment>` as
 /// a structured `XlsxComment` (cell ref, resolved author name, plain text).
 /// Callers can derive `comment_refs: Vec<String>` from `c.cell_ref`.
-fn load_sheet_comments(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    sheet_path: &str,
-) -> Vec<XlsxComment> {
+fn load_sheet_comments(archive: &mut XlsxZip, sheet_path: &str) -> Vec<XlsxComment> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
     };
@@ -1326,7 +1402,7 @@ fn load_sheet_comments(
 /// (Office-365 threaded-comment authors, MS-XLSX schema
 /// `…/office/spreadsheetml/2018/threadedcomments`). `<person displayName id/>`.
 /// Returns an empty map when no persons part exists.
-fn load_persons(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> HashMap<String, String> {
+fn load_persons(archive: &mut XlsxZip) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
     // Persons live under xl/persons/ by convention; collect every part there so
     // we don't depend on the exact file name (person.xml vs person1.xml).
@@ -1539,7 +1615,7 @@ fn parse_data_validations(ws_root: roxmltree::Node<'_, '_>) -> Vec<DataValidatio
 
 /// Resolve hyperlink rIds to URLs from the sheet rels file.
 fn load_hyperlinks(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut XlsxZip,
     sheet_path: &str,
     hyperlink_rids: HyperlinkRids,
 ) -> Vec<Hyperlink> {
@@ -1743,7 +1819,7 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
 /// reading the referenced sheet from the archive (cached per call to avoid
 /// re-reads). Theme colors are flattened to `#RRGGBB` via `parse_color`.
 fn load_sheet_sparklines(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut XlsxZip,
     sheet_xml: &str,
     sheets: &[SheetMeta],
     rels_doc: &roxmltree::Document,
@@ -2036,6 +2112,101 @@ pub fn extract_image(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// A stateful handle over an opened xlsx archive.
+///
+/// Two costs the free functions pay on every call are eliminated here:
+///
+/// 1. **Buffer copy + central-directory scan** (like docx / pptx): `new` copies
+///    the bytes into WASM once and opens the ZIP once, then `parse` / `parse_sheet`
+///    / `extract_image` reuse the retained archive.
+/// 2. **Shared-part re-parse (D3)**: the free `parse_sheet` re-reads and re-parses
+///    `xl/workbook.xml`, `xl/sharedStrings.xml`, and the theme on EVERY sheet
+///    switch — decompressing + walking `sharedStrings.xml` in full each time. The
+///    handle parses those [`WorkbookShared`] parts ONCE (on the first `parse` or
+///    `parse_sheet`) and reuses them for every subsequent sheet, so switching
+///    sheets only reads that one sheet's XML + its drawings.
+///
+/// `ZipArchive<Cursor<Vec<u8>>>` and every cached part are fully owned (no borrow
+/// into the input), which is what lets them live in a `#[wasm_bindgen]` struct.
+/// The retained `max` mirrors the per-call `scoped_max` guard the free functions
+/// install.
+#[wasm_bindgen]
+pub struct XlsxArchive {
+    archive: XlsxZip,
+    max: Option<u64>,
+    /// Workbook-level parts parsed once and reused across sheet switches. Loaded
+    /// lazily on the first `parse` / `parse_sheet` (see [`XlsxArchive::shared`]).
+    shared: Option<WorkbookShared>,
+}
+
+#[wasm_bindgen]
+impl XlsxArchive {
+    /// Copy `data` into WASM once and open the ZIP central directory once.
+    /// `max_zip_entry_bytes` is retained and applied on every subsequent method
+    /// call (identical semantics to the free functions' `scoped_max` guard). The
+    /// shared workbook parts are parsed lazily on the first `parse`/`parse_sheet`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<XlsxArchive, JsValue> {
+        console_error_panic_hook::set_once();
+        let archive = zip::ZipArchive::new(Cursor::new(data.to_vec()))
+            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
+        Ok(XlsxArchive {
+            archive,
+            max: max_zip_entry_bytes,
+            shared: None,
+        })
+    }
+
+    /// Parse (once) and return the workbook-level shared parts, caching them for
+    /// reuse. Borrows `self` split so the cached `shared` and the `archive` can be
+    /// used together by callers.
+    fn ensure_shared(&mut self) -> Result<(), JsValue> {
+        if self.shared.is_none() {
+            let shared =
+                WorkbookShared::load(&mut self.archive).map_err(|e| JsValue::from_str(&e))?;
+            self.shared = Some(shared);
+        }
+        Ok(())
+    }
+
+    /// Parse the workbook index (sheet list + styles + shared strings) and return
+    /// it as UTF-8 JSON bytes. Byte-for-byte identical to `parse_xlsx`.
+    pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        self.ensure_shared()?;
+        let shared = self.shared.as_ref().expect("shared loaded above");
+        let wb =
+            parse_xlsx_inner_with(&mut self.archive, shared).map_err(|e| JsValue::from_str(&e))?;
+        serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+    }
+
+    /// Parse one worksheet by 0-based index and return it as UTF-8 JSON bytes.
+    /// Byte-for-byte identical to `parse_sheet`, but the workbook / sharedStrings
+    /// / theme parts are taken from the cache instead of re-parsed (the D3 win).
+    pub fn parse_sheet(&mut self, sheet_index: u32, name: &str) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        self.ensure_shared()?;
+        let shared = self.shared.as_ref().expect("shared loaded above");
+        parse_sheet_with(&mut self.archive, shared, sheet_index, name)
+    }
+
+    /// Extract raw bytes for one embedded image entry (e.g.
+    /// "xl/media/image1.png") from the retained archive. Twin of the free
+    /// `extract_image`, but reads through the already-open archive.
+    pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
+    /// free `xlsx_to_markdown`.
+    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
+        let _guard = ooxml_common::zip::scoped_max(self.max);
+        to_markdown_from_archive(&mut self.archive).map_err(|e| JsValue::from_str(&e))
+    }
+}
+
 /// cached `<v>` so formula formulas show their results, not the formula text.
 /// Designed for AI agents that need to read the spreadsheet content
 /// efficiently — drops styling, formatting, charts, sparklines, drawings.
@@ -2046,65 +2217,56 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 /// Shared implementation between `to_markdown_native` (mcp-server) and
 /// `xlsx_to_markdown` (browser / Node WASM).
 fn to_markdown_impl(data: &[u8]) -> Result<String, String> {
-    let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
-    let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
-    let sheets = parse_workbook_sheets(&wb_doc);
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    to_markdown_from_archive(&mut archive)
+}
 
+/// Render every sheet of an opened archive to markdown. Shared by the free
+/// `xlsx_to_markdown` / `to_markdown_native` and `XlsxArchive::to_markdown`;
+/// loads the workbook-level [`WorkbookShared`] parts once and renders each sheet
+/// through the same `parse_sheet_with` pipeline as the JSON path (so markdown and
+/// JSON never diverge on cell values).
+fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
+    let shared = WorkbookShared::load(archive)?;
     let mut out = String::new();
-    for (idx, sheet_meta) in sheets.iter().enumerate() {
-        let sheet_json = parse_sheet_native(data, idx as u32, &sheet_meta.name)
-            .map_err(|e| format!("sheet '{}' (#{}) parse failed: {}", sheet_meta.name, idx, e))?;
+    for (idx, sheet_meta) in shared.sheets.iter().enumerate() {
+        let sheet_json =
+            parse_sheet_with(archive, &shared, idx as u32, &sheet_meta.name).map_err(|e| {
+                format!(
+                    "sheet '{}' (#{}) parse failed: {}",
+                    sheet_meta.name,
+                    idx,
+                    jsvalue_to_string(&e)
+                )
+            })?;
         let sheet: serde_json::Value =
-            serde_json::from_str(&sheet_json).map_err(|e| e.to_string())?;
+            serde_json::from_slice(&sheet_json).map_err(|e| e.to_string())?;
         markdown::render_sheet(&sheet, &mut out);
     }
     Ok(out)
 }
 
 /// Parses a single worksheet by 0-based index and returns it as JSON.
-/// Native equivalent of `parse_sheet` for use from the MCP server.
+/// Native equivalent of `parse_sheet` for use from the MCP server. Shares the
+/// exact per-sheet pipeline (`WorkbookShared::load` + `parse_sheet_with`) with
+/// the WASM `parse_sheet`, then decodes the JSON bytes to a `String` — so the
+/// native and WASM paths can never drift.
 pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
-    let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    let shared = WorkbookShared::load(&mut archive)?;
+    let json = parse_sheet_with(&mut archive, &shared, sheet_index, name)
+        .map_err(|e| jsvalue_to_string(&e))?;
+    String::from_utf8(json).map_err(|e| e.to_string())
+}
 
-    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
-    let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
-    let sheets = parse_workbook_sheets(&wb_doc);
-
-    let sheet_meta = sheets
-        .get(sheet_index as usize)
-        .ok_or_else(|| format!("sheet index {} out of range", sheet_index))?;
-
-    let rels_xml = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
-    let rels_doc = roxmltree::Document::parse(&rels_xml).map_err(|e| e.to_string())?;
-    let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
-        .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
-
-    let theme_colors = parse_theme_colors(&mut archive);
-    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
-    let sheet_xml = read_zip_string(&mut archive, &format!("xl/{}", sheet_path))?;
-    let (mut ws, hyperlink_rids) =
-        parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
-            .map_err(|e| e.to_string())?;
-
-    ws.images = load_sheet_images(&mut archive, &sheet_path);
-    ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
-    ws.shape_groups = load_sheet_shape_groups(&mut archive, &sheet_path, &theme_colors);
-    ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
-    ws.comments = load_sheet_comments(&mut archive, &sheet_path);
-    ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
-    ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
-    ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
-    ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
-    ws.sparkline_groups =
-        load_sheet_sparklines(&mut archive, &sheet_xml, &sheets, &rels_doc, &theme_colors);
-    let (df_family, df_size) = parse_default_font(&mut archive);
-    ws.default_font_family = df_family;
-    ws.default_font_size = df_size;
-
-    serde_json::to_string(&ws).map_err(|e| e.to_string())
+/// Best-effort `JsValue` → `String` for the native (mcp-server) paths that reuse
+/// the WASM-typed `parse_sheet_with`. On wasm the error is a JS string; natively
+/// `JsValue` carries the message via its `Debug`/`Into<String>` impls, so this
+/// preserves the original error text raised by the shared pipeline.
+fn jsvalue_to_string(v: &JsValue) -> String {
+    v.as_string().unwrap_or_else(|| format!("{v:?}"))
 }
 
 #[cfg(test)]

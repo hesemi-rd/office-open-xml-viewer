@@ -8,6 +8,9 @@ use ooxml_common::zip::read_zip_string;
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
 use std::collections::HashMap;
+// `Cursor` is only used to build in-memory archives in this module's tests; the
+// production archive type is `crate::XlsxZip`.
+#[cfg(test)]
 use std::io::Cursor;
 
 /// Parse `<xdr:twoCellAnchor>` elements from a drawing XML and resolve
@@ -17,7 +20,7 @@ pub(crate) fn parse_drawing_anchors(
     drawing_xml: &str,
     drawing_rels: &HashMap<String, String>,
     drawing_dir: &str,
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
 ) -> Vec<ImageAnchor> {
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
         return Vec::new();
@@ -1362,7 +1365,7 @@ pub(crate) fn parse_shape_anchors(
 }
 
 pub(crate) fn load_sheet_shape_groups(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     sheet_path: &str,
     theme_colors: &[String],
 ) -> Vec<ShapeAnchor> {
@@ -1413,7 +1416,7 @@ pub(crate) fn load_sheet_shape_groups(
 /// renderer fetches each referenced image's bytes lazily via `extract_image`,
 /// so this maps to zip paths rather than inlining base64.
 pub(crate) fn build_drawing_rid_urls(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     drawing_path: &str,
 ) -> HashMap<String, String> {
     let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else {
@@ -1455,7 +1458,7 @@ pub(crate) fn build_drawing_rid_urls(
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
 /// its drawing(s), and return all image anchors found.
 pub(crate) fn load_sheet_images(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     sheet_path: &str, // e.g. "worksheets/sheet1.xml"
 ) -> Vec<ImageAnchor> {
     // sheet rels path:  xl/worksheets/_rels/sheet1.xml.rels
@@ -2275,7 +2278,7 @@ mod blip_svg_tests {
     fn parse_one(blip_inner: &str, rels: &HashMap<String, String>) -> ImageAnchor {
         let xml = drawing_xml(blip_inner);
         let data = build_media_zip(PNG_1X1, SVG);
-        let cursor = Cursor::new(data.as_slice());
+        let cursor = Cursor::new(data.clone());
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
         let anchors = parse_drawing_anchors(&xml, rels, "xl/drawings", &mut archive);
         assert_eq!(anchors.len(), 1, "exactly one picture anchor expected");

@@ -1,7 +1,6 @@
 use crate::types::*;
 use crate::{parse_cell_ref, resolve_zip_path};
 use ooxml_common::zip::read_zip_string;
-use std::io::Cursor;
 
 /// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
 /// collect them for the renderer. Each table carries a ref range, style name
@@ -48,7 +47,7 @@ pub(crate) struct TableStyleElements {
 /// Parse `<tableStyles><tableStyle name="…"><tableStyleElement type="…" dxfId="…"/>`
 /// into a lookup keyed by table-style name.
 pub(crate) fn parse_table_styles_map(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
 ) -> std::collections::HashMap<String, TableStyleElements> {
     use std::collections::HashMap;
     let mut map: HashMap<String, TableStyleElements> = HashMap::new();
@@ -119,7 +118,7 @@ pub(crate) fn resolve_table_style_accent(style_name: &str, theme_colors: &[Strin
 }
 
 pub(crate) fn load_sheet_tables(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    archive: &mut crate::XlsxZip,
     sheet_path: &str,
     theme_colors: &[String],
 ) -> Vec<TableInfo> {
