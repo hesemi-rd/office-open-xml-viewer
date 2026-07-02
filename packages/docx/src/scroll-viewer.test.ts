@@ -1043,15 +1043,34 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
 
   it('scrollToPage sets scrollTop to the page offset and clamps out-of-range', () => {
     const { v, scrollHost } = setup();
+    // Pick a clientHeight that makes maxTop STRICTLY LESS than the last page's top
+    // offset, so the `Math.min(maxTop, target)` clamp is actually exercised. With the
+    // default clientHeight 400, offsets[19] === maxTop and the clamp is a degenerate
+    // no-op. totalHeight = 8190, offsets[19] = 19*STRIDE = 7790.
+    scrollHost.clientHeight = 500; // maxTop = 8190 − 500 = 7690 < offsets[19] 7790
     v.scrollToPage(3);
     expect(Math.abs(scrollHost.scrollTop - 3 * STRIDE)).toBeLessThan(2);
-    v.scrollToPage(999); // clamps to last page
-    // Last page's top offset exceeds the max scroll top, so scrollToPage pins to
-    // the max (totalHeight − viewportHeight). Assert we clamped to that bound.
-    const totalHeight = 20 * PAGE_H + 19 * GAP; // Σheights + Σgaps
-    const maxTop = totalHeight - 400; // − viewport height
+    v.scrollToPage(999); // clamps to last page index (19)
+    // Page 19's top offset (7790) exceeds the max scroll top (7690), so scrollToPage
+    // pins to the max (totalHeight − viewportHeight). This asserts the Math.min clamp
+    // fired: scrollTop is maxTop (7690), STRICTLY below offsets[19] (7790).
+    const totalHeight = 20 * PAGE_H + 19 * GAP; // Σheights + Σgaps = 8190
+    const maxTop = totalHeight - 500; // − viewport height = 7690
+    const lastOffset = 19 * STRIDE; // 7790
+    expect(maxTop).toBeLessThan(lastOffset); // precondition: clamp is exercised
     expect(Math.abs(scrollHost.scrollTop - maxTop)).toBeLessThan(2);
     v.scrollToPage(-5); // clamps to 0
+    expect(scrollHost.scrollTop).toBe(0);
+    v.destroy();
+  });
+
+  it('scrollToPage: viewport taller than total content ⇒ scrollTop pinned to 0 (negative maxTop guard)', () => {
+    // A 2-page document is shorter than a very tall viewport, so
+    // totalHeight − clientHeight is NEGATIVE; the `Math.max(0, …)` maxTop guard must
+    // pin scrollTop to 0 rather than a negative top.
+    const { v, scrollHost } = setup(2);
+    scrollHost.clientHeight = 5000; // >> totalHeight (2*400 + 10 = 810)
+    v.scrollToPage(1); // last page; its offset (410) is above maxTop (0)
     expect(scrollHost.scrollTop).toBe(0);
     v.destroy();
   });
@@ -1118,6 +1137,75 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     v.resizeForTest(); // same width — no-op re-fit
     expect(v.scaleForTest()).toBe(scaleBefore);
     expect(v.renderEpochForTest()).toBe(epochBefore);
+    v.destroy();
+  });
+
+  it('height-only resize (width unchanged) re-mounts the newly-revealed window without a scroll, no epoch bump, no callback', () => {
+    // F1 regression: a height-only grow used to early-return before `_mountVisible`,
+    // leaving the newly-revealed rows blank until the user scrolled. At scrollTop 0
+    // the initially-mounted window is [0,1] (viewport 400 = one page; +1 overscan).
+    // Growing the viewport to 1600 must mount [0..4] purely from the resize — no
+    // scroll event, no epoch bump (geometry/scale unchanged so cached canvases stay
+    // valid), and no onVisiblePageChange fire (topIndex stays 0 at scrollTop 0).
+    const changes: number[] = [];
+    const { v, scrollHost } = setup(20, { onVisiblePageChange: (i: number) => changes.push(i) });
+    const mountedBefore = v.mountedPageIndicesForTest().slice().sort((a, b) => a - b);
+    expect(mountedBefore).toEqual([0, 1]);
+    expect(changes).toEqual([0]); // initial mount fired 0
+    const epochBefore = v.renderEpochForTest();
+    const scaleBefore = v.scaleForTest();
+
+    // Grow HEIGHT only; width (and thus the fit-width base scale) is unchanged.
+    scrollHost.clientHeight = 1600;
+    v.resizeForTest(); // NO scroll event dispatched
+
+    const mountedAfter = v.mountedPageIndicesForTest().slice().sort((a, b) => a - b);
+    // The revealed window grew: bottom edge 1600 now intersects pages 0..3 (+1
+    // overscan ⇒ end 4). The mounted span strictly grows.
+    expect(mountedAfter).toEqual([0, 1, 2, 3, 4]);
+    expect(mountedAfter.length).toBeGreaterThan(mountedBefore.length);
+    // No epoch bump — nothing was re-scaled, so no in-flight render is stale.
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    expect(v.scaleForTest()).toBe(scaleBefore);
+    // topIndex is still 0 at scrollTop 0 ⇒ callback did NOT fire again.
+    expect(changes).toEqual([0]);
+    v.destroy();
+  });
+
+  it('clamped resize (zoomMax clamp + width & height grow) still refreshes the revealed window', () => {
+    // F1 clamped-path variant: pin zoomMax to the current base so a width grow's
+    // re-fit (newBase × mult) clamps back to the SAME scale, making setScale a no-op
+    // (which skips its own force-re-render mount). The post-setScale `_mountVisible`
+    // must still mount the rows the taller viewport revealed. base = 1.5, no user
+    // zoom ⇒ mult 1; after width→400 newBase 3.0 clamps to zoomMax 1.5 (== _scale).
+    const changes: number[] = [];
+    const { v, scrollHost, container } = setup(20, {
+      zoomMax: BASE, // 1.5 — clamps the re-fit back to the current scale
+      onVisiblePageChange: (i: number) => changes.push(i),
+    });
+    expect(v.scaleForTest()).toBe(BASE);
+    const mountedBefore = v.mountedPageIndicesForTest().slice().sort((a, b) => a - b);
+    expect(mountedBefore).toEqual([0, 1]);
+    const epochBefore = v.renderEpochForTest();
+
+    // Grow BOTH width and height. The width grow triggers the re-fit branch, but the
+    // clamp pins the scale unchanged ⇒ setScale no-ops. Heights are therefore
+    // unchanged (scale unchanged), so the taller viewport reveals more of the SAME
+    // geometry: mounted grows to [0..4].
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    scrollHost.clientWidth = 400;
+    scrollHost.clientHeight = 1600;
+    v.resizeForTest();
+
+    const mountedAfter = v.mountedPageIndicesForTest().slice().sort((a, b) => a - b);
+    expect(mountedAfter).toEqual([0, 1, 2, 3, 4]);
+    expect(mountedAfter.length).toBeGreaterThan(mountedBefore.length);
+    // Scale stayed pinned at the clamp, so setScale no-oped ⇒ no epoch bump.
+    expect(v.scaleForTest()).toBe(BASE);
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    // topIndex still 0 ⇒ no extra callback.
+    expect(changes).toEqual([0]);
     v.destroy();
   });
 

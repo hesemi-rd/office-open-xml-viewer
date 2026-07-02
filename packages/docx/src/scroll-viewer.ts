@@ -710,9 +710,15 @@ export class DocxScrollViewer {
    * `opts.behavior` ('auto' | 'smooth', default 'auto') is honoured via
    * `scrollHost.scrollTo({ top, behavior })` when the host supports it (a real
    * browser); the stub-DOM has no `scrollTo`, so the fallback sets `scrollTop`
-   * directly (which is what the tests assert). After moving we re-mount the
-   * visible window synchronously so the target page's slots exist immediately
-   * (a `smooth` scroll's own `scroll` events would otherwise mount them lazily).
+   * directly (which is what the tests assert). We then call `_mountVisible` once.
+   *
+   * MOUNTING CAVEAT: synchronous mounting of the target page is guaranteed only on
+   * the DEFAULT/'auto' path — there `scrollTop` has already jumped to `top`, so the
+   * `_mountVisible` call reads the final scroll position and the target page's slots
+   * exist immediately. With `behavior: 'smooth'` the scroll animates ASYNCHRONOUSLY:
+   * `scrollTop` is still near the old position when `_mountVisible` runs, so the
+   * target page mounts lazily via the animation's subsequent `scroll` events, not
+   * from this call.
    */
   scrollToPage(index: number, opts?: { behavior?: 'auto' | 'smooth' }): void {
     if (!this._doc || this._doc.pageCount === 0 || !this._scaleEstablished) return;
@@ -737,8 +743,10 @@ export class DocxScrollViewer {
    * Re-fit the base scale on a container resize while PRESERVING the current zoom
    * multiplier (design §11), then re-anchor + re-render. A `ResizeObserver` fires
    * on any box change, but only a WIDTH change alters the fit-to-width base scale;
-   * a height-only change is ignored (the visible window is recomputed on the next
-   * scroll/relayout anyway). Empty/unloaded ⇒ no-op; a still-zero width ⇒ defer.
+   * a height-only change skips the re-fit yet STILL re-mounts the visible window
+   * (via `_mountVisible`), because a taller viewport reveals rows that were below
+   * the fold and would otherwise stay blank until the next scroll. Empty/unloaded
+   * ⇒ no-op; a still-zero width ⇒ defer.
    *
    * Zero-width recovery: a container that was 0-wide at construction never
    * established a scale (`_scaleEstablished` is false), so the first non-zero
@@ -750,8 +758,10 @@ export class DocxScrollViewer {
    * Routing through `setScale(newScale)` bumps `_renderEpoch` (resize IS an epoch
    * event — T4 banner) and re-anchors + force-re-renders every slot at the new
    * geometry, exactly like a zoom. `setScale`'s clamp/no-op guards apply: an
-   * unchanged newScale (identical width) is a no-op there, so we also short-circuit
-   * before it when the width is unchanged to avoid churn.
+   * unchanged newScale (identical width) is a no-op there — so we short-circuit
+   * BEFORE it when the fit-width is unchanged (mounting the revealed window without
+   * a needless force-re-render), and after it we call `_mountVisible` again to cover
+   * the case where the clamp made `setScale` no-op yet the viewport still grew.
    */
   private _onResize(): void {
     if (!this._doc || this._doc.pageCount === 0) return;
@@ -763,14 +773,41 @@ export class DocxScrollViewer {
     const newBase = this._baseScale();
     if (newBase <= 0) return; // still unlaid-out — wait for the next resize
     const newFitWidth = this._fitWidthPx();
-    if (newFitWidth === this._lastFitWidth) return; // height-only change — no re-fit
+    if (newFitWidth === this._lastFitWidth) {
+      // Height-only change (or any resize that leaves the fit-width identical):
+      // the base scale is unchanged, so there is no re-fit to do — but a taller
+      // viewport now exposes rows that were below the fold. `_mountVisible`
+      // recomputes the visible range from the CURRENT clientHeight and mounts the
+      // newly-revealed pages; without it those rows stay blank until the user
+      // scrolls (which recomputes the range). No epoch bump — the geometry
+      // (and every mounted slot's px size) is unchanged, so cached canvases are
+      // still valid; we only add the missing slots.
+      this._mountVisible();
+      return;
+    }
     this._lastFitWidth = newFitWidth;
     // Preserve the zoom multiplier across the re-fit: newScale = newBase × mult.
     const mult = this._prevBase > 0 ? this._scale / this._prevBase : 1;
     this._prevBase = newBase;
     // Route through setScale so the epoch bumps and the re-anchor/force-re-render
     // path runs identically to a zoom.
+    //
+    // zoomMin RATCHET (design §8.1 caveat, see setScale JSDoc): `zoomMin`/`zoomMax`
+    // are ABSOLUTE px-per-pt bounds, but the re-fit base (`newBase × mult`) is
+    // computed UNCLAMPED. A resize that transits the scale below `zoomMin × pageWidth`
+    // (a wide page in a container that briefly narrows) is clamped UP by `setScale`,
+    // which permanently inflates the implied multiplier even with zero user zoom —
+    // the next re-fit reads back the clamped `_scale` as `mult`. This is bounded and
+    // converges (the clamp floor is fixed), but it means the preserved multiplier can
+    // drift above 1 purely from resize transits below the floor. Accepted consequence
+    // of using absolute bounds (§8.1) with an unclamped relayout base.
     this.setScale(newBase * mult);
+    // `setScale` no-ops when the clamped scale is unchanged (e.g. already pinned at
+    // a clamp boundary), which would skip its `_mountVisibleForceRerender`. A
+    // width+height growth that ends up clamped to the same scale must still reveal
+    // the taller viewport's rows, so mount here too. Idempotent when `setScale` ran:
+    // the window is already mounted and every present slot is a re-position no-op.
+    this._mountVisible();
   }
 
   get topVisiblePage(): number {
