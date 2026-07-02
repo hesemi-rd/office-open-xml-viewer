@@ -10,16 +10,40 @@
 // called `ctx.beginPath()` and will call `ctx.fill()` / `ctx.stroke()`
 // after this returns.
 //
-// UNIFICATION IN PROGRESS (Phase 4 A2): body rendering is already driven by
-// the spec engine (shape/preset-geometry, presets.json) everywhere; this
-// legacy switch remains reachable only as (a) the silhouette tracer for pptx
-// effect masks and (b) the fallback for names the spec engine doesn't carry
-// (`rect`). Presets whose hand-written case was proven coordinate-identical
-// to the spec engine (see preset-parity.test.ts) have had their case DELETED
-// and are routed through the engine via SPEC_MIGRATED_PRESETS below. The
-// remaining cases differ from the spec engine's output and are kept verbatim
-// so rendering does not move by a pixel; see the parity table in
-// preset-parity.test.ts for the nature of each difference.
+// PARTIALLY UNIFIED with the spec engine (Phase 4 A2): body rendering is
+// already driven by the spec engine (shape/preset-geometry, presets.json)
+// everywhere; this legacy switch remains reachable only as (a) the silhouette
+// tracer for pptx effect masks and (b) the fallback for names the spec engine
+// doesn't carry (`rect`). Presets whose hand-written case was proven
+// coordinate-identical to the spec engine (see preset-parity.test.ts) have
+// had their case DELETED and are routed through the engine via
+// SPEC_MIGRATED_PRESETS below.
+//
+// Every case still in the switch is a KNOWN DIFFERENCE from the spec engine,
+// kept verbatim so no rendered pixel moves. Nature of the differences
+// (details per preset in the parity harness's PRESET_PARITY_REPORT table):
+//  - geometry approximations — the legacy math deviates from the ECMA-376
+//    guide formulas (regular-polygon rings for pentagon…dodecagon and
+//    star5/6/7/10; fixed-ratio instead of ss-based arrows/chevron/homeplate;
+//    quadratic instead of circular corner arcs for the round*/snip2* rects;
+//    simplified moon/teardrop/pie/chord/blockarc/wave/… constructions). The
+//    spec engine is the ECMA-faithful side; converging means adopting its
+//    geometry and re-approving VRT references.
+//  - structural — the legacy body emits fewer/merged subpaths (single-outline
+//    cloud/cloudCallout, no 3D highlight overlays for can/cube/bevel, merged
+//    contours for plus/mathMultiply/mathNotEqual/arrow-callouts, missing
+//    decorative strokes on flowchart* variants, donut hole winding). Six of
+//    these are fill-equivalent (identical silhouettes; only decorative stroke
+//    lines differ): accentCallout1, accentBorderCallout1,
+//    flowchartPredefinedProcess, flowchartSort, flowchartInternalStorage,
+//    flowchartSummingJunction — the cheapest future convergence batch.
+//  - intentional — `arc` (the engine's spec shape is pie-wedge fill + open
+//    arc stroke; the legacy open arc is kept for effect-mask semantics, see
+//    the pptx renderer's paintShapeBody) and the bent/curved connectors
+//    (legacy draws a straight diagonal, engine the spec elbow/curve).
+//  - `flowchartAlternateProcess` matches at default adjusts but honours an
+//    adj1 the spec declares no avLst for; kept so rogue avLst payloads don't
+//    change effect-mask silhouettes.
 
 /* eslint-disable */
 
@@ -591,8 +615,7 @@ export function buildShapePath(
     }
 
     // ── Wedge / pie slice ─────────────────────────────────────────────────────
-    case 'pie':
-    case 'pieWedge': {
+    case 'pie': {
       const stAng = (adj  ?? 0)        / 21600000 * Math.PI * 2;
       const enAng = (adj2 ?? 16200000) / 21600000 * Math.PI * 2;
       ctx.moveTo(cx, cy);
@@ -691,7 +714,6 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-    case 'snipRoundRect':
     case 'sniproundrect': {
       // One snipped + one rounded corner
       const a = Math.min(50000, Math.max(0, adj ?? 16667));
