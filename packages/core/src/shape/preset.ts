@@ -139,6 +139,16 @@ export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
   'star16',
   'star24',
   'star32',
+  // batch 3 — straight connectors, plain callout1 pair, matched arrows
+  // (bent/curved connectors stay legacy: their case draws a straight
+  // diagonal, not the spec elbow/curve; accent callouts stay: accent-bar
+  // placement differs)
+  'line',
+  'straightconnector1',
+  'callout1',
+  'bordercallout1',
+  'leftuparrow',
+  'quadarrowcallout',
 ]);
 
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
@@ -414,8 +424,6 @@ export function buildShapePath(
     // callout2 / callout3 require adj5..adj8 which exceed this function's
     // 4-adjustment signature, so they go through the generic preset engine
     // (`renderPresetShape`) that reads the full presets.json definition.
-    case 'callout1':
-    case 'bordercallout1':
     case 'accentcallout1':
     case 'accentbordercallout1': {
       // ECMA-376 callout1 gd block (presets.json):
@@ -504,8 +512,6 @@ export function buildShapePath(
     }
 
     // ── Connectors ────────────────────────────────────────────────────────────
-    case 'line':
-    case 'straightconnector1':
     case 'bentconnector2':
     case 'bentconnector3':
     case 'bentconnector4':
@@ -516,6 +522,9 @@ export function buildShapePath(
     case 'curvedconnector5':
       // Connectors run diagonally from top-left to bottom-right of their bounding box.
       // Flip transforms (already applied to ctx) handle other orientations.
+      // (Straight `line`/`straightConnector1` migrated to the spec engine; the
+      // bent/curved ones stay because this legacy body draws a straight
+      // diagonal, not the spec elbow/curve geometry.)
       ctx.moveTo(x, y);
       ctx.lineTo(x + w, y + h);
       break;
@@ -1018,71 +1027,6 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-
-    // ── Quad-arrow callout ────────────────────────────────────────────────────
-    // ECMA-376 prstGeom quadArrowCallout:
-    //   adj1 = shaft half-thickness (default 18515)
-    //   adj2 = arrowhead half-width (default 18515)
-    //   adj3 = arrowhead length (default 18515)
-    //   adj4 = inner square size (default 48123)
-    case 'quadarrowcallout': {
-      const ss = Math.min(w, h);
-      const a2 = Math.min(50000, Math.max(0, adj2 ?? 18515));
-      const maxAdj1 = a2 * 2;
-      const a1 = Math.min(maxAdj1, Math.max(0, adj  ?? 18515));
-      const maxAdj3 = 50000 - a2;
-      const a3 = Math.min(maxAdj3, Math.max(0, adj3 ?? 18515));
-      const maxAdj4 = 100000 - 2 * a3;
-      const a4 = Math.min(maxAdj4, Math.max(a1, adj4 ?? 48123));
-      const dx2 = ss * a2 / 100000;
-      const dx3 = ss * a1 / 200000;
-      const ah  = ss * a3 / 100000;
-      const dx1 = w * a4 / 200000;
-      const dy1 = h * a4 / 200000;
-      const x2a = cx - dx1, x7a = cx + dx1;
-      const x3a = cx - dx2, x6a = cx + dx2;
-      const x4a = cx - dx3, x5a = cx + dx3;
-      const x8a = x + w - ah;
-      const y2a = cy - dy1, y7a = cy + dy1;
-      const y3a = cy - dx2, y6a = cy + dx2;
-      const y4a = cy - dx3, y5a = cy + dx3;
-      const y8a = y + h - ah;
-      ctx.moveTo(x,          cy);
-      ctx.lineTo(x + ah,     y3a);
-      ctx.lineTo(x + ah,     y4a);
-      ctx.lineTo(x2a,        y4a);
-      ctx.lineTo(x2a,        y2a);
-      ctx.lineTo(x4a,        y2a);
-      ctx.lineTo(x4a,        y + ah);
-      ctx.lineTo(x3a,        y + ah);
-      ctx.lineTo(cx,         y);
-      ctx.lineTo(x6a,        y + ah);
-      ctx.lineTo(x5a,        y + ah);
-      ctx.lineTo(x5a,        y2a);
-      ctx.lineTo(x7a,        y2a);
-      ctx.lineTo(x7a,        y4a);
-      ctx.lineTo(x8a,        y4a);
-      ctx.lineTo(x8a,        y3a);
-      ctx.lineTo(x + w,      cy);
-      ctx.lineTo(x8a,        y6a);
-      ctx.lineTo(x8a,        y5a);
-      ctx.lineTo(x7a,        y5a);
-      ctx.lineTo(x7a,        y7a);
-      ctx.lineTo(x5a,        y7a);
-      ctx.lineTo(x5a,        y8a);
-      ctx.lineTo(x6a,        y8a);
-      ctx.lineTo(cx,         y + h);
-      ctx.lineTo(x3a,        y8a);
-      ctx.lineTo(x4a,        y8a);
-      ctx.lineTo(x4a,        y7a);
-      ctx.lineTo(x2a,        y7a);
-      ctx.lineTo(x2a,        y5a);
-      ctx.lineTo(x + ah,     y5a);
-      ctx.lineTo(x + ah,     y6a);
-      ctx.closePath();
-      break;
-    }
-
     // ── Wave ──────────────────────────────────────────────────────────────────
     // OOXML: wavy top and bottom filling the bounding box. adj=12500 (12.5% amplitude).
     case 'wave': {
@@ -1303,41 +1247,6 @@ export function buildShapePath(
     //   adj1 (default 25000): arrow-head overhang (shaft width control; dx3 = ss*a1/200000)
     //   adj2 (default 25000): shaft offset from bbox edge (= head half-width; dx4 = ss*a2/100000)
     //   adj3 (default 25000): arrow-head length along arm (x1 = ss*a3/100000)
-    case 'leftuparrow': {
-      const ss = Math.min(w, h);
-      const a2 = Math.min(50000, Math.max(0, adj2 ?? 25000));
-      const maxAdj1 = a2 * 2;
-      const a1 = Math.min(maxAdj1, Math.max(0, adj ?? 25000));
-      const maxAdj3 = 100000 - maxAdj1;
-      const a3 = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
-      const x1  = ss * a3 / 100000;
-      const dx2 = ss * a2 / 50000;
-      const x2  = w - dx2;
-      const y2  = h - dx2;
-      const dx4 = ss * a2 / 100000;
-      const x4  = w - dx4;
-      const y4  = h - dx4;
-      const dx3 = ss * a1 / 200000;
-      const x3  = x4 - dx3;
-      const x5  = x4 + dx3;
-      const y3  = y4 - dx3;
-      const y5  = y4 + dx3;
-      ctx.moveTo(x,      y + y4);
-      ctx.lineTo(x + x1, y + y2);
-      ctx.lineTo(x + x1, y + y3);
-      ctx.lineTo(x + x3, y + y3);
-      ctx.lineTo(x + x3, y + x1);
-      ctx.lineTo(x + x2, y + x1);
-      ctx.lineTo(x + x4, y);
-      ctx.lineTo(x + w,  y + x1);
-      ctx.lineTo(x + x5, y + x1);
-      ctx.lineTo(x + x5, y + y5);
-      ctx.lineTo(x + x1, y + y5);
-      ctx.lineTo(x + x1, y + h);
-      ctx.closePath();
-      break;
-    }
-
     // ── U-turn arrow ──────────────────────────────────────────────────────────
     // Spec (ECMA-376): outer half-arc on top, arrowhead on right side pointing down
     case 'uturnarrow': {
