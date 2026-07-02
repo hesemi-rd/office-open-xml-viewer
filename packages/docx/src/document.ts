@@ -170,6 +170,14 @@ export class DocxDocument {
     return this._getPages().length;
   }
 
+  /** The render mode this engine was loaded with ('main' | 'worker'). A fact for
+   *  integrators and the scroll viewer: an injected engine's mode decides whether
+   *  pages render via renderPage (main) or renderPageToBitmap (worker) — no
+   *  probing (design §11: no silent mis-pathing). */
+  get mode(): 'main' | 'worker' {
+    return this._mode;
+  }
+
   /**
    * The raw parsed document model. Available only in `mode: 'main'`; in
    * `mode: 'worker'` the model stays in the worker and this throws.

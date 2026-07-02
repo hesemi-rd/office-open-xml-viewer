@@ -399,7 +399,7 @@ describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom'
     type Doc = Awaited<ReturnType<typeof DocxDocument.load>>;
     const make = (state: Record<string, unknown>) => {
       const d = Object.create(DocxDocument.prototype) as Doc;
-      Object.assign(d, { _meta: null, _document: null, _pages: null }, state);
+      Object.assign(d, { _meta: null, _document: null, _pages: null, _mode: 'main' }, state);
       return d;
     };
 
@@ -423,5 +423,12 @@ describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom'
 
     // Not loaded (pre-load / post-destroy): {0,0}.
     expect(make({}).pageSize(0)).toEqual({ widthPt: 0, heightPt: 0 });
+
+    // Engine fact (WS4 O1): the render mode is publicly readable so a viewer
+    // receiving an injected engine can route main vs bitmap paths without probing.
+    const workerish = make({ _mode: 'worker' });
+    expect(workerish.mode).toBe('worker');
+    const mainish = make({ _mode: 'main' });
+    expect(mainish.mode).toBe('main');
   });
 });
