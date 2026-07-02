@@ -26,41 +26,43 @@ cargo test
 
 ---
 
-## Phase 1 — 安全網と即効修正
+## Phase 1 — 安全網と即効修正 ✅ 完了（2026-07-02、PR #658–#664）
+
+全 22 項目完了。各項目の注記は実装時の再定義・追加発見を含む（計画の指摘が現物と異なった項目: A6 / D7 / A8 / A9 / E5 barrel）。CI 運用知見: smoke ジョブの `playwright install chrome --with-deps` が apt/CDN 起因で 30 分超ハングする事象が 2 回連続発生 → プリインストール Chrome があれば skip + 全ジョブ timeout-minutes で恒久対策済み（#662 内）。
 
 ### CI / パッケージング
 
-- [ ] E1: smoke suite（`tests/smoke/layouts.spec.ts`）を CI に接続（WASM ビルド → Storybook 起動 → Playwright chromium）
-- [ ] E3: typecheck ジョブに `Swatinem/rust-cache@v2`（3 parser workspace 指定。rust ジョブ / publish.yml の記述を流用）
-- [ ] E8: `packages/node` の skia-canvas probe テストを CI で実行（skia-canvas を devDep 化 or 明示 install、skip されていないことをログで確認）
-- [ ] E6: publish.yml に `pnpm test` + `npm pack` → 一時 dir で `import('@silurus/ooxml/docx')` smoke + `attw --pack` / `publint`
-- [ ] E2: ルート package.json の全 exports で `types` を先頭に、`default` 条件を追加。**公開済み 0.69.0 の tarball で現状の型解決を先に確認**
-- [ ] E5: `sideEffects: false` 追加（module スコープ副作用を監査してから）。`src/index.ts` の docx flat re-export（pptx/xlsx と非対称）を整理
+- [x] E1 (#658): smoke suite（`tests/smoke/layouts.spec.ts`）を CI に接続（WASM ビルド → Storybook 起動 → Playwright chromium）
+- [x] E3 (#658): typecheck ジョブに `Swatinem/rust-cache@v2`（3 parser workspace 指定。rust ジョブ / publish.yml の記述を流用）
+- [x] E8 (#658): devDep 化 + `OOXML_REQUIRE_SKIA=1` で silent skip を hard fail 化。pnpm 10 の build-script 承認（`onlyBuiltDependencies: [skia-canvas]`）が必須と判明し追加。初実行でテスト自体の実バグ 2 件（skia@2 API 不一致・到達不能アサーション）と pptx unhandled-rejection リークを検出・修正
+- [x] E6 (#664): publish.yml に test + publint + attw `--profile esm-only`（fail-closed）+ tarball smoke（temp dir に npm i して 3 サブパス import）を追加
+- [x] E2 (#664): types 先頭化 + default 追加。実測: tsc 4 象限は before も pass だが、attw が TS bug #50762 の「fallback condition 誤用」🐛 を bundler/node16-ESM 全 5 エントリで検出 → 修正後 🟢、publint 5 errors → clean
+- [x] E5 (#664): sideEffects: false を root+4 パッケージに追加（grep 監査 + 独立監査 + DOM なし Node import 成功の三重確認）。「docx flat re-export 非対称」は計画の誤読と判明（root は対称、flat barrel は各パッケージ自身のもの）— API 変更なし
 
 ### 正しさ / 堅牢性（ユーザー可視）
 
-- [ ] C6: pptx `viewer.ts` `destroy()` — `wrapper.remove()` 前に caller の canvas を `insertBefore` で返還。検証: destroy → 同一 canvas で再生成
-- [ ] C5: xlsx `viewer.ts` `destroy()` — wrapper subtree と注入 `<style>` を除去（style は module-wide 1 回注入への変更でも可）。検証: Storybook で mount/unmount 繰り返し
-- [ ] C5/C6 追補: `DocxScrollViewer` / `PptxScrollViewer` の `destroy()` を同観点（caller 所有 DOM の返還・注入 style/listener の除去）で点検し、同種の穴があれば同一 PR で修正
-- [ ] A6: dash テーブル統合 — `core/src/draw/dash.ts` を正とし `paint.ts` の `DASH_PATTERNS` を消す。ST_PresetLineDashVal（§20.1.10.49）の全キーで両者の出力差を先に一覧化（`lgDash`→solid バグの確認）
-- [ ] D11: `parse_docx` を `Result<String, JsValue>` に統一（エラー JSON の手組み format! 廃止）。TS 側の catch パス確認
-- [ ] D9(部分): xlsx `lib.rs` の `serde_json::to_string(&wb).unwrap()` を `map_err` に
+- [x] C6 (#659): pptx `viewer.ts` `destroy()` — `wrapper.remove()` 前に caller の canvas を `insertBefore` で返還。検証: destroy → 同一 canvas で再生成
+- [x] C5 (#659): xlsx `viewer.ts` `destroy()` — wrapper subtree と注入 `<style>` を除去（style は module-wide 1 回注入への変更でも可）。検証: Storybook で mount/unmount 繰り返し
+- [x] C5/C6 追補 (#659): ScrollViewer ×2 は点検の結果、完全実装で修正不要。代わりに **DocxViewer に pptx と同一の canvas 喪失バグを発見し同 PR で修正**。レビューで stale-nextSibling の DOM 仕様違反（NotFoundError）も検出しガード追加、テスト DOM の二重所属欠陥も修正
+- [x] A6 (#660) **再定義**: 「lgDash→solid」は誤診（dash.ts のテーブルは実は §20.1.10.82 ST_TextUnderlineType の下線用で、prstDash 値は流れない）。真バグ = paint.ts の `sysDashDotDot` 欠落（solid に化ける）を修正。preset テーブルを dash.ts へ `pptxPresetDashArray` として移設（byte-equivalence テスト付き）、下線側を `pptxUnderlineDashArray` に改名し誤 spec 引用を修正
+- [x] D11 (#661): Result 化 + TS 受け口 2 箇所（worker.ts / render-worker.ts）の error フィールド probe 削除。壊れた入力で `docx-parser error: ...` throw を end-to-end 確認
+- [x] D9(部分) (#661): map_err 化（panic による WASM インスタンス死を排除）
 
 ### 即効 perf
 
-- [ ] D1: zip 存在確認の全 inflate 廃止（docx `load_media_map` / xlsx `build_drawing_rid_urls` / pptx master bg）→ `index_for_name` 系へ。`ooxml_common::zip::entry_exists` として共有
-- [ ] C1: xlsx `workbook.ts` `parseSheet` の `rawData.slice(0)` 廃止 — worker の `currentBuffer` を使用（worker 再起動時の fallback として optional data は残す）
-- [ ] C3: xlsx `getCellAt` / `getHeaderHit` を `AxisMetrics.indexAt()` 経由に（frozen-pane 分岐に注意）。検証: 50 万行スクロール後の pointermove
-- [ ] B6: docx `normalizeFontFamily` / `buildFont` の memo 化（`Map<family, chain>`、`fontFamilyClasses` は per-doc なので identity キー or render 毎リセット）+ `ctx.font` 不変時の再代入スキップ
-- [ ] A8(前半): `decodeRasterOrMetafile` の sniff を `data.slice(0, 8).arrayBuffer()` に
-- [ ] D10(前半): ルート Cargo.toml に `codegen-units=1` / `panic="abort"` / `strip="debuginfo"`、各 parser に `wasm-opt = ["-Oz"]`。**前後の .wasm サイズを記録**
+- [x] D1 (#662): 計画の 3 箇所に加え grep で 10 箇所追加発見、**計 13 箇所**を `index_for_name` に置換（bytes を実際に使う 3 箇所は正しく除外）。共有ヘルパーは不要と判断（archive ハンドル既保持のため inline が自然）
+- [x] C1 (#662): `data` フィールドをプロトコルから**削除**（optional で残すより契約が明確 — parse 前の parseSheet は明示エラー）。worker-vs-main VRT 0.000% diff で挙動同一を証明
+- [x] C3 (#663): `scrollableIndexAt` 新設で O(log n) 化。ベンチ: 50 万行 ×1000 ヒットで 9296ms → 0.378ms（~24,600×）、旧実装 verbatim コピーを oracle にした全数パリティ 0 差
+- [x] B6 (#663): `WeakMap<fontFamilyClasses, Map<family, css>>`（identity キー、呼び出し面変更ゼロ）。font 再代入スキップは測定ループの 2 writer（measureText/strAdvance）を単一トラッカーで統一（draw パス 12 箇所は据え置き）
+- [x] A8(前半) (#663): slice は **44 バイト**が正（EMF 判定に offset 40-43 が必要。計画の 8 バイトでは不足）。raster は Blob 直渡しで全体コピー消滅
+- [x] D10(前半) (#662): 3 バイナリ計 1,967,032 → 1,903,734 bytes（**−3.22%**）。ビルド 23.8s → 33.4s。panic=abort でも console_error_panic_hook のスタック出力は保持（hook は abort 前に走る）
 
 ### 小粒衛生
 
-- [ ] D7: `read_zip_entry` / `read_zip_bytes` を `ooxml_common::zip` に集約（pptx 版だけ cap エラーを握り潰す差異があるので挙動統一に注意）
-- [ ] A11: core barrel からテスト専用 bevel 内部（`edt1d` 等）・未消費 export を削除（テストは deep import に変更）
-- [ ] A9: WMF/EMF/DIB の `new OffscreenCanvas` 直呼びを `createAuxCanvas` 系 fallback 付き factory に統一
-- [ ] C11: pptx render token（`__pptxRenderToken` monkey-patch）を module-level WeakMap に
+- [x] D7 (#661): 実像は「docx にも私的ヘルパーあり」で**計 5 実装・~45 呼び出し面**を generic `read_zip_bytes/read_zip_string<R: Read+Seek>` に集約。cap 超過は Err 返却とし、画像パスの従来挙動（スキップ）は呼び出し側の明示的 `.ok()` で維持
+- [x] A11 (#663): 4 export（edt1d/shadePixel/shadeParamsFor/fillDirFromKey）削除。materialClass/lightDirFromRig は pptx が実使用のため保持。テストは既に deep import で変更不要。dead export はゼロ（全数調査）
+- [x] A9 (#663): 無条件直呼びは wmf.ts の 1 箇所のみだった（emf/dib はチェック済み）。createAuxCanvas を `core/canvas/aux-canvas.ts` へ移設し 3 ファイル統一 — EMF/DIB は main-thread fallback を獲得（strict superset）。worker 専用の OffscreenCanvas+transferToImageBitmap は正当につき対象外。pattern-bitmaps の重複 factory も統合
+- [x] C11 (#663): pptx に加え **docx にも同型 monkey-patch を発見**（横断原則）— 両方 WeakMap 化。xlsx は同期描画で該当なし
 
 ## Phase 2 — WASM 境界とキャッシュ再設計
 
