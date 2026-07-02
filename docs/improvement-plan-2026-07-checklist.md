@@ -64,21 +64,23 @@ cargo test
 - [x] A9 (#663): 無条件直呼びは wmf.ts の 1 箇所のみだった（emf/dib はチェック済み）。createAuxCanvas を `core/canvas/aux-canvas.ts` へ移設し 3 ファイル統一 — EMF/DIB は main-thread fallback を獲得（strict superset）。worker 専用の OffscreenCanvas+transferToImageBitmap は正当につき対象外。pattern-bitmaps の重複 factory も統合
 - [x] C11 (#663): pptx に加え **docx にも同型 monkey-patch を発見**（横断原則）— 両方 WeakMap 化。xlsx は同期描画で該当なし
 
-## Phase 2 — WASM 境界とキャッシュ再設計
+## Phase 2 — WASM 境界とキャッシュ再設計 ✅ 完了（2026-07-03、PR #666–#672）
 
-- [ ] ベンチ基盤: 代表ファイル 3 種で初回表示 / シート・スライド切替 / スクロール FPS の計測スクリプトを用意（以降の各項目で前後比較）
-- [ ] C2+B7+D9: 境界プロトコル統一 — parser は `Vec<u8>`（JSON bytes）返却 → worker は transferable 素通し → 受信側で 1 回 `JSON.parse`。**3 フォーマット同時に**
-- [x] D2: stateful `#[wasm_bindgen]` アーカイブハンドル（`DocxArchive`/`PptxArchive`/`XlsxArchive` = 所有 `ZipArchive<Cursor<Vec<u8>>>` + `max` 保持）。bytes を WASM へ 1 回コピー・central directory を 1 回スキャンし `parse()`/`extract_image(path)`/`parse_sheet(i,name)` を retained archive 上で提供。フリー関数（`parse_*`/`extract_*`）は所有 archive を張る thin wrapper 化で温存（node/markdown/stories/MCP 無変更）。各 worker は `currentBuffer: Uint8Array` を `archive: *Archive|null` に置換し、構築後は JS 側 bytes を保持しない（メモリ二重化解消）。再 parse 時 `disposeArchive()` で明示 free（二重 free/UAF ガード）。ベンチ: pptx sample-4 (15MB, parse+5 media) **1.49×**、docx sample-9 (13 images) 1.10×
-- [x] D3: xlsx `WorkbookShared`（workbook.xml/rels source + sheet list + theme palette + sharedStrings）をハンドル内で 1 回パースし全シート切替で再利用。`parse_sheet` 毎の sharedStrings/theme 全再パースを解消（`parse_sheet_with`/`parse_xlsx_inner_with` に分離、フリー関数は毎回 fresh build で従来コスト維持）。ベンチ: sample-12 (8 sheets) **1.61×**、sample-9 (3 sheets) 1.30×。roxmltree `Document` は借用のためキャッシュ不可 → cached string から都度再パース（inflate なしで安価）。drawing XML の parse-once 化は sheet 単位再パース解消を主目的とし本コミット範囲では見送り（別項）
-- [ ] D4: pptx マスター DOM の parse-once 化（~10-12 回 → 1 回）、layout cache 追加（`master_cache` の鏡映）、slide XML の 2 回パース解消
-- [ ] B3: docx 画像デコードキャッシュ（`Map<string, DecodedImage>` を DocxDocument に、`destroy()` で解放）
-- [ ] A8(後半): core に `getCachedBitmapByPath`（SVG キャッシュの sibling、ImageBitmap の close 管理付き）を追加し 3 フォーマットで共用
-- [ ] C4: xlsx スクロール — rAF coalescing（1 フレーム 1 render・latest wins）+ サイズ不変時の canvas 再確保スキップ + worker モードの世代カウンタで stale bitmap 破棄
-- [ ] A4: effect 系 aux canvas を bbox+ぼかし半径サイズに縮小 + module-level プール
-- [ ] A3: `applyExtrusion` を silhouette bbox 限定 + drawImage 反復の GPU 合成に置換、`applyBevelShading` も bbox 限定
-- [ ] A5: preset-geometry formula のプリコンパイル（`Map<presetName, CompiledDef>`）。出力バイト一致を確認
-- [ ] A10: `WorkerBridge.request` に `{ timeoutMs, signal }` + worker `error` イベントで pending 一括 reject
-- [ ] B4: docx 同一ページ再描画時の layout 再計算削減（pt 空間 `LayoutLine[]` のキャッシュ。丸め差に注意 — 本格統一は Phase 4-1）
+体感成果: 15MB pptx パース 30→11ms（#666+#669 複合）、xlsx シート切替 1.61×+転送ゼロ、docx ページ再訪 ~9×、xlsx スクロール 100 イベント→1 render、wedged worker の永久ハング解消。全 PR にベンチ/等価性証明（sha256 golden / oracle / byte-identity）添付。
+
+- [x] ベンチ基盤 (#666/#671): `packages/node/src/bench-parse.mjs`（境界込み parse 時間、string/bytes 自動判別）+ `bench-handle.mjs`（parse 後の反復 work: 全シート切替/全画像抽出、--wasm-dir で before 計測）
+- [x] C2+B7+D9 (#666): 4 parse 関数を Vec<u8>(JSON bytes) 化、worker は transferable 素通し、main で 1 回 decode+parse（render-worker は in-worker 消費なので現行維持）。15MB pptx median 30→15ms(~2×)。レビューの「WASM memory 全体転送」指摘は生成コードの .slice() 確認で却下
+- [x] D2 (#671): stateful `#[wasm_bindgen]` アーカイブハンドル（`DocxArchive`/`PptxArchive`/`XlsxArchive` = 所有 `ZipArchive<Cursor<Vec<u8>>>` + `max` 保持）。bytes を WASM へ 1 回コピー・central directory を 1 回スキャンし `parse()`/`extract_image(path)`/`parse_sheet(i,name)` を retained archive 上で提供。フリー関数（`parse_*`/`extract_*`）は所有 archive を張る thin wrapper 化で温存（node/markdown/stories/MCP 無変更）。各 worker は `currentBuffer: Uint8Array` を `archive: *Archive|null` に置換し、構築後は JS 側 bytes を保持しない（メモリ二重化解消）。再 parse 時 `disposeArchive()` で明示 free（二重 free/UAF ガード）。ベンチ: pptx sample-4 (15MB, parse+5 media) **1.49×**、docx sample-9 (13 images) 1.10×
+- [x] D3 (#671): xlsx `WorkbookShared`（workbook.xml/rels source + sheet list + theme palette + sharedStrings）をハンドル内で 1 回パースし全シート切替で再利用。`parse_sheet` 毎の sharedStrings/theme 全再パースを解消（`parse_sheet_with`/`parse_xlsx_inner_with` に分離、フリー関数は毎回 fresh build で従来コスト維持）。ベンチ: sample-12 (8 sheets) **1.61×**、sample-9 (3 sheets) 1.30×。roxmltree `Document` は借用のためキャッシュ不可 → cached string から都度再パース（inflate なしで安価）。drawing XML の parse-once 化は sheet 単位再パース解消を主目的とし本コミット範囲では見送り（別項）
+- [x] D4 (#669): master 11 extractors+bg が単一 Document 共有、ParsedLayout+layout_cache で 4×S→1/distinct+1/slide。「slide XML 2 回パース」は誤認（1 回）。layout decorative は slide 固有 smartart 依存で意図的非キャッシュ（unsound 回避）。出力 sha256 byte-identical、-20%/-26% parse 回数、cfg(test) カウンタで 2+2N を regression 固定
+- [x] B3 (#668): base bitmap は core キャッシュ、a:clrChange recolor は第 2 層（per-fetchImage WeakMap）でメモ化。ページ再訪の画像コスト ~9×（0.27→0.03ms）。destroy() で 3 キャッシュ全 drop
+- [x] A8(後半) (#668): pptx 実装を core/image/bitmap-image-by-path.ts へ verbatim lift（LRU 256、同期 peek、eviction close、rejection-handler 規律をヘッダに明文化）。pptx は thin re-export。**xlsx は意図的非移行**（raster+SVG 同居の workbook 所有 Map で構造が異なる — false-abstraction 回避、二重 LRU と close 所有権競合を防ぐ）
+- [x] C4 (#667): scheduleRender で scroll/resize/drag を rAF coalesce（100 イベント→1 render）、明示 API は同期維持。size guard は orchestrator 側にも（+setTransform 冪等化）。_renderSeq 世代で stale bitmap close。worker-vs-main VRT 0.000%
+- [x] A4 (#672): innerShadow/softEdge(×3)/reflection の aux を bbox⊕margin に縮小（blur は 3σ=3·blur — pixel テストが margin バグを捕捉）。ピクセル −~99%（79–87×）。**プールは不採用**（bbox 化後はサイズ不一致でヒットせず）。**reflection は full-canvas に revert** — mirror blit のリサンプリングが crop 端で skia プラットフォーム依存（Linux CI で δ≤7 検出）。tripwire テストで再 crop を防止
+- [x] A3 (#672) **縮小案採用**: region 限定（getImageData/loop/putImageData）のみ、GPU 合成は VRT 割れリスクで見送り。byte-identical 証明済み。正直な注記: pptx は shape 専用オフスクリーンのため現行パスの実利は pad 分のみ — seam は大 canvas 呼び出し向け
+- [x] A5 (#672): {op, argTokens} へ lazy プリコンパイル（WeakMap、evaluatorForDef 単一チョークポイント）。186 プリセット全数 oracle 一致。split() 呼び出し −99.6%（12.9×）
+- [x] A10 (#670): per-request timeout + AbortSignal + worker error/messageerror の pending 一括 reject（常時有効）。timeout は opt-in（LoadOptions.workerTimeoutMs、既定無制限 — 巨大ファイルの正当な長時間パースを壊さない）。viewer 5 箇所の明示 forwarding
+- [~] B4: **Phase 4-1 に統合**。B3 で再訪コストの主犯（画像再デコード）は解消済み。LayoutLine[] キャッシュは B2 統一（compute-once 単一成果物）の副産物として実装するのが正道 — 中間キャッシュを別実装すると Phase 4-1 で捨てることになるため
 
 ## Phase 3 — 共有層への集約（横断 1 PR / commit は関心毎）
 
