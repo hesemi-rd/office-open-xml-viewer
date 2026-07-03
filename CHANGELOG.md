@@ -4,6 +4,26 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.70.2 — 2026-07-03
+
+Patch (hotfix on v0.70.1). Fixes the packaging of the parser WASM asset
+reference, which broke webpack 5 and Next.js consumers in 0.70.x.
+
+- **build:** dist bundles shipped a double-nested
+  `new URL(new URL("….wasm", import.meta.url).href, import.meta.url).href`.
+  webpack 5 compiled the outer call into an empty critical-dependency
+  ContextModule that threw `MODULE_NOT_FOUND` the moment any entry was
+  imported, and Turbopack rewrote the outer `import.meta.url` to `file://`,
+  breaking the worker's WASM fetch in Next.js (dev and build alike). The
+  reference is now emitted as the bare single-level
+  `new URL("…", import.meta.url).href`. Verified end-to-end: webpack 5,
+  Next.js 16 (Turbopack dev/build), Vite 8 dev/build, plain
+  `<script type="module">`. (#715)
+- **README:** bundler note rewritten to the verified compatibility matrix —
+  Vite 7 dev servers need `optimizeDeps: { exclude: ['@silurus/ooxml'] }`
+  (fixed upstream in Vite 8); esbuild / Angular CLI use the `wasmUrl` load
+  option. (#715)
+
 ## 0.70.1 — 2026-07-03
 
 Patch. Documentation-only: correct the Angular / esbuild guidance for loading
