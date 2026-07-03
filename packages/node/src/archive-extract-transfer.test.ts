@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { crc32 } from 'node:zlib';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
@@ -77,8 +77,13 @@ interface PptxHandle extends ArchiveHandle {
   extract_media(path: string): Uint8Array;
 }
 
-let wasmReady = false;
-beforeAll(() => {
+// The WASM parser bindings are git-ignored build output. CI runs `pnpm build:wasm`
+// before `pnpm test`, so they are present there; but a local run before a wasm
+// build (or a stripped environment) may lack them. Probe once via a top-level-await
+// IIFE and gate the whole suite with `describe.skipIf` so it reports as SKIPPED
+// (not a silent zero-assertion pass) when the wasm is unavailable — mirroring the
+// sibling `source-buffer-image.test.ts`.
+const wasmReady = await (async () => {
   try {
     loadWasmModule(
       pptxWasm as unknown as { initSync: (m: WebAssembly.Module) => unknown },
@@ -92,11 +97,11 @@ beforeAll(() => {
       xlsxWasm as unknown as { initSync: (m: WebAssembly.Module) => unknown },
       resolveWasm(import.meta.url, '../../xlsx/src/wasm/xlsx_parser_bg.wasm'),
     );
-    wasmReady = true;
+    return true;
   } catch {
-    wasmReady = false;
+    return false;
   }
-});
+})();
 
 /** Assert the returned array is byte-correct AND a transfer-safe, full-span,
  *  non-WASM-aliasing buffer (the SC18 precondition for a direct transfer). */
@@ -115,9 +120,8 @@ function assertIndependentFullSpan(bytes: Uint8Array, expected: Uint8Array) {
   expect(buf.byteLength).toBe(0); // detached by the transfer → was standalone
 }
 
-describe('SC18 extract_* returns a transfer-safe buffer', () => {
+describe.skipIf(!wasmReady)('SC18 extract_* returns a transfer-safe buffer', () => {
   it('pptx: extract_image + extract_media are independent full-span copies', () => {
-    if (!wasmReady) return;
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5, 6]);
     const mp4 = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70]);
     // Each path lives in its own one-entry zip (the builder is single-entry).
@@ -141,7 +145,6 @@ describe('SC18 extract_* returns a transfer-safe buffer', () => {
   });
 
   it('docx: extract_image is an independent full-span copy', () => {
-    if (!wasmReady) return;
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9, 8, 7]);
     const zip = makeZipWithEntry('word/media/image1.png', png);
     const Handle = (docxWasm as unknown as { DocxArchive: new (b: Uint8Array) => ArchiveHandle })
@@ -155,7 +158,6 @@ describe('SC18 extract_* returns a transfer-safe buffer', () => {
   });
 
   it('xlsx: extract_image is an independent full-span copy', () => {
-    if (!wasmReady) return;
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 42, 43]);
     const zip = makeZipWithEntry('xl/media/image1.png', png);
     const Handle = (xlsxWasm as unknown as { XlsxArchive: new (b: Uint8Array) => ArchiveHandle })
