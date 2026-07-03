@@ -288,12 +288,13 @@ CI が Chromium のみ、パーサーのファジング 0 件、MathJax (Apache-
 - QA6(ファジング)→ 出た crash を corpus 化 → QA7(property tests)
 - 目標: 「任意バイト列で panic/hang/OOM しない」を fuzz 24h クリーンで裏付け
 
-### Phase 8 — プロダクト展開
+### Phase 8 — プロダクト展開 【全項目見送り(2026-07-03 ユーザー決定)】
 
-- PD2(node 公開)→ PD3(PDF: ラスタ印刷 → ベクター記録コンテキスト)→ PD5(react)→ PD6(Web Component)
-- PD4(typed errors)→ PD8(暗号化対応)
-- PD9(スコアカード)PD10(API ref 生成)
-- 検証: tarball smoke の拡張(新パッケージも import 検証)
+ニーズが実証されていない段階でのプロダクト展開は行わない(PD7 も同判断で見送り)。需要が出た時点で個別に再検討。PD1 / PD11 は Phase 1 に存続。
+
+- ~~PD2(node 公開)→ PD3(PDF: ラスタ印刷 → ベクター記録コンテキスト)→ PD5(react)→ PD6(Web Component)~~
+- ~~PD4(typed errors)→ PD8(暗号化対応)~~
+- ~~PD9(スコアカード)PD10(API ref 生成)~~
 
 ### 継続トラック(フェーズ非依存・機会があれば)
 

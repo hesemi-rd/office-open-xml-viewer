@@ -79,7 +79,7 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 ### コンプライアンス / プロダクト即効
 - [ ] QA14: MathJax 帰属 + THIRD_PARTY_NOTICES
 - [ ] PD1: markdown 公開(toMarkdown API + パッケージ + CLI)
-- [ ] PD7: サイト Why ページ(定量比較、出典付き)
+- ~~PD7: サイト Why ページ(定量比較、出典付き)~~ — **見送り(2026-07-03 ユーザー決定)**: ニーズが出ていない段階でのマーケ施策は行わない
 - [ ] PD11: STABILITY.md
 - [ ] XF13 註: README「EMF not yet rendered」是正
 
@@ -176,16 +176,18 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 - [ ] QA6: cargo-fuzz(3 parser + handle + rels)、24h クリーン目標
 - [ ] QA7: proptest / fast-check
 
-## Phase 8 — プロダクト展開
+## Phase 8 — プロダクト展開 【全項目見送り(2026-07-03 ユーザー決定)】
 
-- [ ] PD2: node 公開 + docx/xlsx サムネイル完成
-- [ ] PD3: PDF(S: ラスタ印刷 → L: ベクター記録コンテキスト)
-- [ ] PD4: OoxmlError typed errors
-- [ ] PD5: @silurus/ooxml-react
-- [ ] PD6: Web Component + 静的ホスト
-- [ ] PD8: 暗号化対応(Agile Encryption)
-- [ ] PD9: fidelity スコアカード
-- [ ] PD10: API リファレンス生成化
+> ニーズが実証されていない段階でのプロダクト展開・エコシステム拡張は行わない。ユーザー需要が出た時点で個別に再検討する(PD7 も同判断で見送り)。Phase 1 の PD1(markdown 公開 — 既に全ユーザーの WASM に同梱済み機能の露出)と PD11(STABILITY.md — 運用ドキュメント)は対象外で存続。
+
+- ~~PD2: node 公開 + docx/xlsx サムネイル完成~~
+- ~~PD3: PDF(S: ラスタ印刷 → L: ベクター記録コンテキスト)~~
+- ~~PD4: OoxmlError typed errors~~
+- ~~PD5: @silurus/ooxml-react~~
+- ~~PD6: Web Component + 静的ホスト~~
+- ~~PD8: 暗号化対応(Agile Encryption)~~
+- ~~PD9: fidelity スコアカード~~
+- ~~PD10: API リファレンス生成化~~
 
 ## 継続トラック
 
