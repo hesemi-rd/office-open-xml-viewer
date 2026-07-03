@@ -6,7 +6,8 @@ import {
   defaultDpr,
   dropSvgImageCache,
   dropBitmapCacheByPath,
-  assertNotCfbContainer,
+  resolveOoxmlContainer,
+  toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -82,11 +83,13 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
-    // Reject password-protected / legacy-binary (CFB) files on the main thread —
-    // before spinning up the worker — with a typed OoxmlError, instead of the
-    // opaque zip error the parser would otherwise emit. Detecting here keeps the
-    // OoxmlError instance intact (it would not survive the worker boundary).
-    assertNotCfbContainer(buffer);
+    // Resolve the container on the main thread — before spinning up the worker.
+    // A normal ZIP passes through unchanged; an Agile-encrypted CFB is decrypted
+    // in place when `opts.password` is supplied ([MS-OFFCRYPTO]); a
+    // password-protected file without a password, or a legacy-binary / unknown
+    // CFB, becomes a typed OoxmlError (whose `instanceof` would not survive the
+    // worker boundary, hence the main-thread check).
+    buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =

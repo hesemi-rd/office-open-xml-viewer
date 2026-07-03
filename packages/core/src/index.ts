@@ -49,7 +49,23 @@ export { OoxmlError, type OoxmlErrorCode } from './errors/ooxml-error';
 export { sniffCfb, type CfbKind } from './errors/cfb-sniff';
 // Shared load() guard: throws the right OoxmlError when the bytes are a CFB
 // container (encrypted / legacy-binary / other) instead of an OOXML ZIP.
-export { assertNotCfbContainer } from './errors/cfb-guard';
+// `resolveOoxmlContainer` is the decrypt-aware superset the load() factories
+// call: it returns plaintext ZIP bytes, decrypting an Agile-encrypted file when
+// a password is supplied ([MS-OFFCRYPTO], PD8).
+export { assertNotCfbContainer, resolveOoxmlContainer, toArrayBuffer } from './errors/cfb-guard';
+// Agile Encryption decryption ([MS-OFFCRYPTO]): `decryptOoxml` turns an
+// encrypted CFB + password into plaintext ZIP bytes. Lower-level primitives
+// (key derivation, EncryptionInfo parse) are exported for testing / advanced use.
+export {
+  decryptOoxml,
+  parseEncryptionInfo,
+  AgileDecryptError,
+  type DecryptResult,
+  type DecryptFailure,
+  type EncryptionInfoKind,
+  type AgileEncryptionDescriptor,
+} from './crypto';
+export { readCfbStream } from './errors/cfb-read';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 // Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package

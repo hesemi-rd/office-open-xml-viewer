@@ -612,6 +612,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 | | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
+| **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---
 
@@ -666,6 +667,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
 | | Drag-to-resize columns / rows by dragging header borders (`resizable` option, default on) — **view-only: changes the on-screen view only and never modifies the loaded file** | ✅ |
 | | Customizable cell-selection color (`selectionColor` option, `setSelectionColor()`) | ✅ |
+| **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---
 
@@ -758,6 +760,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | lumMod / lumOff / alpha transforms | ✅ |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 | | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
+| **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---
 
@@ -816,6 +819,11 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
   Supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. Zero / negative values fall back to the default.
 - **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
+- **Encrypted OOXML ([MS-OFFCRYPTO] Agile Encryption).** Password-protected `.docx` / `.xlsx` / `.pptx` files are OLE2/CFB containers, not ZIPs. Pass `password` to `load(...)` and the file is decrypted **client-side** via WebCrypto — no bytes and no password leave the browser:
+  ```ts
+  const doc = await DocxDocument.load(bytes, { password: 'secret' });
+  ```
+  Key derivation (SHA-512 spin, commonly 100,000 iterations) and AES-CBC segment decryption run on the main thread and add roughly a second before parsing. Failures are typed [`OoxmlError`](packages/core/src/errors/ooxml-error.ts)s: no `password` on an encrypted file → `encrypted`, wrong `password` → `invalid-password`, a non-Agile scheme (legacy **Standard** / **Extensible** encryption, or an encrypted legacy binary `.doc`/`.xls`/`.ppt`) → `unsupported-encryption`. **Note:** decryption recovers the plaintext but does **not** verify the file's HMAC data-integrity tag ([MS-OFFCRYPTO] §2.3.4.14), so tampering with the ciphertext is not detected — treat decrypted output from untrusted sources with the same care as any other input.
 
 ## License
 

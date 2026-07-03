@@ -5,7 +5,8 @@ import {
   WorkerBridge,
   defaultDpr,
   dropSvgImageCache,
-  assertNotCfbContainer,
+  resolveOoxmlContainer,
+  toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -86,12 +87,13 @@ export class XlsxWorkbook {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
-    // Resolve the bytes first, then reject password-protected / legacy-binary
-    // (CFB) files on the main thread — before spinning up the worker — with a
-    // typed OoxmlError rather than the opaque zip error the parser would emit.
-    // Detecting here keeps the OoxmlError instance intact (it would not survive
-    // the worker boundary). The resolved buffer is handed to `_load` so a URL
-    // source is not fetched twice.
+    // Resolve the bytes first, then resolve the container on the main thread —
+    // before spinning up the worker. A normal ZIP passes through unchanged; an
+    // Agile-encrypted CFB is decrypted when `opts.password` is supplied
+    // ([MS-OFFCRYPTO]); a password-protected file without a password, or a
+    // legacy-binary / unknown CFB, becomes a typed OoxmlError (whose `instanceof`
+    // would not survive the worker boundary). The resolved buffer is handed to
+    // `_load` so a URL source is not fetched twice.
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
       const res = await fetch(source);
@@ -100,7 +102,7 @@ export class XlsxWorkbook {
     } else {
       buffer = source;
     }
-    assertNotCfbContainer(buffer);
+    buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -112,15 +114,11 @@ export class XlsxWorkbook {
     return wb;
   }
 
-  private async _load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
-    let data: ArrayBuffer;
-    if (typeof source === 'string') {
-      const res = await fetch(source);
-      if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
-      data = await res.arrayBuffer();
-    } else {
-      data = source;
-    }
+  // `load()` always resolves a URL/string source to an ArrayBuffer (via
+  // resolveOoxmlContainer, so decryption sees the container before the render
+  // worker is constructed) before calling `_load`, so this only ever receives
+  // an ArrayBuffer — no separate string-source fetch branch is needed here.
+  private async _load(data: ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
     this.math = opts.math;

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { formatCellValue } from './number-format.js';
 import type { Cell, Styles } from './types.js';
 
@@ -201,18 +201,37 @@ describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
   // a 1904 workbook the recomputed volatile must be formatted against the 1900
   // epoch — otherwise it would render 1462 days LATE. This pins the
   // `effectiveDate1904` branch that forces date1904=false for recomputed cells.
+  //
+  // `todaySerial`/`nowSerial` (formula.ts) each call `new Date()` internally,
+  // using the *local* Y/M/D. The previous version of this suite read
+  // `new Date()` itself (before and after calling `formatCellValue`) and
+  // accepted either reading, to tolerate a midnight rollover *during* the
+  // test. That guard only covered a rollover between its own two clock reads
+  // — it did not cover the implementation's own independent `new Date()` call
+  // landing on the other side of local midnight from both of them. With three
+  // separate, un-synchronized clock reads (before / inside todaySerial or
+  // nowSerial / after), a rollover close to any one of them could still make
+  // `rendered` fall outside the "acceptable" set (observed failing locally at
+  // 00:09 JST). Freezing the system clock for the whole test removes the race
+  // instead of trying to widen the acceptance window further.
+  const FROZEN_NOW = new Date('2024-03-15T12:00:00.000Z'); // clear of any DST/epoch edge
 
-  /** Local calendar date as YYYY-MM-DD — matches how `todaySerial` derives the
-   *  serial (Date.UTC of the local Y/M/D). Returns the set of dates that are
-   *  acceptable across a possible midnight tick during the test. */
-  function acceptableTodayStrings(): Set<string> {
-    const iso = (d: Date): string =>
-      `${d.getFullYear().toString().padStart(4, '0')}-${(d.getMonth() + 1)
-        .toString()
-        .padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
-    // Capture both the local "today" at the start and end of the assertion so a
-    // midnight rollover between the two clock reads does not make the test flaky.
-    return new Set([iso(new Date()), iso(new Date(Date.now()))]);
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FROZEN_NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The local calendar date `todaySerial`/`nowSerial` derive from the frozen
+   *  clock (Date.UTC of the local Y/M/D read off `new Date()`), as YYYY-MM-DD. */
+  function frozenTodayString(): string {
+    const d = new Date();
+    return `${d.getFullYear().toString().padStart(4, '0')}-${(d.getMonth() + 1)
+      .toString()
+      .padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
   }
 
   function volatileCell(formula: string): Cell {
@@ -224,29 +243,20 @@ describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
   }
 
   it('TODAY() in a 1904 workbook renders the correct 1900-system today (not 1462 days off)', () => {
-    const before = acceptableTodayStrings();
     const rendered = formatCellValue(volatileCell('TODAY()'), styles('yyyy-mm-dd'), null, true);
-    const after = acceptableTodayStrings();
-    const acceptable = new Set([...before, ...after]);
-    expect(acceptable.has(rendered)).toBe(true);
+    expect(rendered).toBe(frozenTodayString());
   });
 
   it('tolerates a leading = and whitespace in the recomputed formula', () => {
-    const before = acceptableTodayStrings();
     const rendered = formatCellValue(volatileCell(' = TODAY() '), styles('yyyy-mm-dd'), null, true);
-    const after = acceptableTodayStrings();
-    const acceptable = new Set([...before, ...after]);
-    expect(acceptable.has(rendered)).toBe(true);
+    expect(rendered).toBe(frozenTodayString());
   });
 
   it('NOW() in a 1904 workbook renders the correct 1900-system date portion', () => {
-    const before = acceptableTodayStrings();
     // NOW() carries a time fraction; the date portion must still be today's
     // 1900-system calendar date, not the 1904-shifted one.
     const rendered = formatCellValue(volatileCell('NOW()'), styles('yyyy-mm-dd'), null, true);
-    const after = acceptableTodayStrings();
-    const acceptable = new Set([...before, ...after]);
-    expect(acceptable.has(rendered)).toBe(true);
+    expect(rendered).toBe(frozenTodayString());
   });
 
   it('a non-volatile stored serial in a 1904 workbook still honors the 1904 epoch', () => {
@@ -254,5 +264,18 @@ describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
     // date system. 1904-system serial 43830 = 2024-01-01.
     const cell: Cell = { row: 1, col: 1, colRef: 'A1', value: { type: 'number', number: 43830 }, styleIndex: 0 };
     expect(formatCellValue(cell, styles('yyyy-mm-dd'), null, true)).toBe('2024-01-01');
+  });
+
+  it('renders correctly right at a local-midnight boundary (23:59:59.900 -> 00:00:00.050)', () => {
+    // Regression guard for the exact race this suite used to be exposed to:
+    // pin the clock a hair before local midnight and confirm TODAY() reflects
+    // that frozen instant precisely (no dependence on wall-clock timing).
+    vi.setSystemTime(new Date('2024-03-15T23:59:59.900'));
+    const before = formatCellValue(volatileCell('TODAY()'), styles('yyyy-mm-dd'), null, true);
+    expect(before).toBe('2024-03-15');
+
+    vi.setSystemTime(new Date('2024-03-16T00:00:00.050'));
+    const after = formatCellValue(volatileCell('TODAY()'), styles('yyyy-mm-dd'), null, true);
+    expect(after).toBe('2024-03-16');
   });
 });
