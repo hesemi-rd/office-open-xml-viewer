@@ -283,3 +283,55 @@ describe('CH2 — stackedLine / stackedLinePct stack cumulatively', () => {
     expect(top).toBeLessThan(30);
   });
 });
+
+describe('CH3 — labels are locale-independent (§18.8.30)', () => {
+  // `toLocaleString()` groups thousands in every common locale, so an explicit
+  // no-separator format code ("0") is the discriminator: the §18.8.30 engine
+  // honors it (no commas), while toLocaleString ignores it and always inserts
+  // the host locale's group separator. The old code called toLocaleString and
+  // dropped the format code entirely, so these tests were Red before the fix.
+  it('waterfall data labels honor the format code (no host-locale grouping)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'End'],
+      series: [series({ name: 'W', values: [1234567, 0] })],
+      subtotalIndices: [1],
+      dataLabelFormatCode: '0',
+    }), RECT, 1);
+    // The 1234567 subtotal bar's label must be un-grouped ("1234567"), proving
+    // it went through the §18.8.30 engine rather than toLocaleString().
+    expect(rec.texts.some(t => t.text.includes('1234567'))).toBe(true);
+    expect(rec.texts.every(t => !t.text.includes('1,234,567'))).toBe(true);
+  });
+
+  it('waterfall negative data labels keep the △ marker and honor the format code', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'Drop', 'End'],
+      series: [series({ name: 'W', values: [2000000, -1234567, 765433] })],
+      subtotalIndices: [2],
+      dataLabelFormatCode: '0',
+    }), RECT, 1);
+    // Negative bar: △ prefix + un-grouped magnitude from the engine.
+    expect(rec.texts.some(t => t.text.includes('△') && t.text.includes('1234567'))).toBe(true);
+    expect(rec.texts.every(t => !t.text.includes('1,234,567'))).toBe(true);
+  });
+
+  it('waterfall value-axis labels honor the format code (through the §18.8.30 engine)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'End'],
+      series: [series({ name: 'W', values: [1000000, 0] })],
+      subtotalIndices: [1],
+      valAxisFormatCode: '0',
+    }), RECT, 1);
+    // A no-separator format code must suppress grouping. The old code ignored
+    // valAxisFormatCode and always grouped via toLocaleString(), so a "1,000,000"
+    // tick label would appear — after the fix the ticks are un-grouped.
+    expect(rec.texts.every(t => !t.text.includes('1,000,000'))).toBe(true);
+    expect(rec.texts.some(t => /^\d{4,}$/.test(t.text))).toBe(true);
+  });
+});

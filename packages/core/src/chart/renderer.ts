@@ -2355,7 +2355,10 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     for (let v = Math.ceil(dataMin / step) * step; v <= dataMax; v += step) {
       const gy = py0 + ph * (1 - (v - dataMin) / padded);
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
-      ctx.fillText(v.toLocaleString(), px0 - 4, gy);
+      // Locale-independent §18.8.30 formatting (honoring `<c:valAx><c:numFmt>`),
+      // matching the other renderers — `toLocaleString()` grouped by the
+      // viewer's OS locale, so the same chart read differently across machines.
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
 
@@ -2422,9 +2425,14 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     }
 
     const rawVal = vals[i] ?? 0;
+    // Locale-independent §18.8.30 formatting, honoring the data-label format
+    // code (chart-level `<c:dLbls><c:numFmt>` then the series `formatCode`),
+    // matching the bar renderer's data-label wiring. Negative bars keep the △
+    // marker and show the formatted magnitude below the bar.
+    const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
     const labelText = rawVal < 0
-      ? `△ ${Math.abs(rawVal).toLocaleString()}`
-      : rawVal.toLocaleString();
+      ? `△ ${formatChartValWithCode(Math.abs(rawVal), labelFormat)}`
+      : formatChartValWithCode(rawVal, labelFormat);
     // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
     // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
     // then to neutral grey. PowerPoint paints negative-bar labels in
