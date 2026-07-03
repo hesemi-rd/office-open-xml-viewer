@@ -1,18 +1,26 @@
+use ooxml_common::ns::{attr_ns, is_w_ns, wordprocessingml};
 use roxmltree::Node;
 
-pub const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-pub const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+/// Transitional WordprocessingML URI, used only by test fixtures that build
+/// `w:`-namespaced XML; runtime matching goes through [`is_w_ns`], which accepts
+/// the Strict URI too.
+#[cfg(test)]
+pub const W_NS: &str = wordprocessingml::TRANSITIONAL;
+/// Transitional relationships URI. See [`W_NS`] for why the Transitional value is
+/// kept for tests while runtime matching accepts either class.
+#[cfg(test)]
+pub const R_NS: &str = ooxml_common::ns::relationships::TRANSITIONAL;
 
 /// Find first child in w: namespace.
 pub fn child_w<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
     node.children()
-        .find(|n| n.tag_name().name() == name && n.tag_name().namespace() == Some(W_NS))
+        .find(|n| n.tag_name().name() == name && is_w_ns(n.tag_name().namespace()))
 }
 
 /// Collect all children in w: namespace with given name.
 pub fn children_w<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Vec<Node<'a, 'input>> {
     node.children()
-        .filter(|n| n.tag_name().name() == name && n.tag_name().namespace() == Some(W_NS))
+        .filter(|n| n.tag_name().name() == name && is_w_ns(n.tag_name().namespace()))
         .collect()
 }
 
@@ -23,7 +31,7 @@ pub fn element_children_flat<'a, 'input>(node: Node<'a, 'input>) -> Vec<Node<'a,
     let mut out = Vec::new();
     for child in node.children().filter(|n| n.is_element()) {
         let tn = child.tag_name();
-        if tn.namespace() == Some(W_NS) && tn.name() == "sdt" {
+        if is_w_ns(tn.namespace()) && tn.name() == "sdt" {
             if let Some(content) = child_w(child, "sdtContent") {
                 out.extend(element_children_flat(content));
             }
@@ -38,15 +46,20 @@ pub fn element_children_flat<'a, 'input>(node: Node<'a, 'input>) -> Vec<Node<'a,
 pub fn children_w_flat<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Vec<Node<'a, 'input>> {
     element_children_flat(node)
         .into_iter()
-        .filter(|n| n.tag_name().name() == name && n.tag_name().namespace() == Some(W_NS))
+        .filter(|n| n.tag_name().name() == name && is_w_ns(n.tag_name().namespace()))
         .collect()
 }
 
-/// Get attribute in w: namespace, falling back to no-namespace.
+/// Get attribute in w: namespace (Transitional or Strict), falling back to
+/// no-namespace.
 pub fn attr_w(node: Node, name: &str) -> Option<String> {
-    node.attribute((W_NS, name))
-        .or_else(|| node.attribute(name))
-        .map(|s| s.to_string())
+    attr_ns(
+        &node,
+        wordprocessingml::TRANSITIONAL,
+        wordprocessingml::STRICT,
+        name,
+    )
+    .map(|s| s.to_string())
 }
 
 /// Parse twips (1/20 pt) string to f64 pt.

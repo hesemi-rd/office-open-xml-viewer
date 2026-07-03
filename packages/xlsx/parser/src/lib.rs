@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
 
+use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
 use ooxml_common::zip::read_zip_string;
 
 mod markdown;
@@ -500,9 +501,8 @@ pub(crate) fn resolve_color_attrs(
 /// select the 1904 date system. Absent attribute / element ⇒ false (the
 /// default 1900 date system). See §18.17.4.1 for the date-system definitions.
 fn parse_workbook_date1904(doc: &roxmltree::Document) -> bool {
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     doc.descendants()
-        .find(|n| n.tag_name().name() == "workbookPr" && n.tag_name().namespace() == Some(ns))
+        .find(|n| n.tag_name().name() == "workbookPr" && is_x_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("date1904"))
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -510,16 +510,21 @@ fn parse_workbook_date1904(doc: &roxmltree::Document) -> bool {
 
 fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
     let mut sheets = Vec::new();
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-    let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     for node in doc.descendants() {
-        if node.tag_name().name() == "sheet" && node.tag_name().namespace() == Some(ns) {
+        if node.tag_name().name() == "sheet" && is_x_ns(node.tag_name().namespace()) {
             let name = node.attribute("name").unwrap_or("Sheet").to_string();
             let sheet_id = node
                 .attribute("sheetId")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1);
-            let r_id = node.attribute((r_ns, "id")).unwrap_or("").to_string();
+            let r_id = attr_ns(
+                &node,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
+                "id",
+            )
+            .unwrap_or("")
+            .to_string();
             let visibility = match node.attribute("state") {
                 Some("hidden") => SheetVisibility::Hidden,
                 Some("veryHidden") => SheetVisibility::VeryHidden,
@@ -542,9 +547,8 @@ fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
 /// whose `localSheetId` matches the given sheet position.
 fn parse_defined_names_for_sheet(doc: &roxmltree::Document, sheet_index: u32) -> Vec<DefinedName> {
     let mut names = Vec::new();
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     for node in doc.descendants() {
-        if node.tag_name().name() != "definedName" || node.tag_name().namespace() != Some(ns) {
+        if node.tag_name().name() != "definedName" || !is_x_ns(node.tag_name().namespace()) {
             continue;
         }
         let local: Option<u32> = node.attribute("localSheetId").and_then(|s| s.parse().ok());
@@ -593,11 +597,10 @@ fn read_shared_strings(archive: &mut XlsxZip, theme_colors: &[String]) -> Vec<Sh
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
         return Vec::new();
     };
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let mut strings = Vec::new();
     for si in doc.descendants() {
-        if si.tag_name().name() == "si" && si.tag_name().namespace() == Some(ns) {
-            strings.push(parse_si_node(&si, ns, theme_colors));
+        if si.tag_name().name() == "si" && is_x_ns(si.tag_name().namespace()) {
+            strings.push(parse_si_node(&si, theme_colors));
         }
     }
     strings
@@ -606,7 +609,7 @@ fn read_shared_strings(archive: &mut XlsxZip, theme_colors: &[String]) -> Vec<Sh
 /// Parse a `<si>` (shared) or `<is>` (inline) node into a SharedString.
 /// The node may contain direct `<t>` text (plain) and/or multiple `<r>`
 /// runs with per-run `<rPr>` font properties.
-fn parse_si_node(node: &roxmltree::Node, ns: &str, theme_colors: &[String]) -> SharedString {
+fn parse_si_node(node: &roxmltree::Node, theme_colors: &[String]) -> SharedString {
     let mut text = String::new();
     let mut runs: Vec<Run> = Vec::new();
     let mut has_runs = false;
@@ -615,12 +618,12 @@ fn parse_si_node(node: &roxmltree::Node, ns: &str, theme_colors: &[String]) -> S
             continue;
         }
         match child.tag_name().name() {
-            "t" if child.tag_name().namespace() == Some(ns) => {
+            "t" if is_x_ns(child.tag_name().namespace()) => {
                 if let Some(s) = child.text() {
                     text.push_str(s);
                 }
             }
-            "r" if child.tag_name().namespace() == Some(ns) => {
+            "r" if is_x_ns(child.tag_name().namespace()) => {
                 has_runs = true;
                 let mut run_text = String::new();
                 let mut run_font: Option<RunFont> = None;
@@ -699,8 +702,6 @@ fn parse_worksheet(
     name: &str,
 ) -> Result<(Worksheet, HyperlinkRids), String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-    let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     let mut rows = Vec::new();
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
@@ -841,7 +842,7 @@ fn parse_worksheet(
 
     for node in doc.descendants() {
         match node.tag_name().name() {
-            "sheetFormatPr" if node.tag_name().namespace() == Some(ns) => {
+            "sheetFormatPr" if is_x_ns(node.tag_name().namespace()) => {
                 if let Some(v) = node
                     .attribute("defaultColWidth")
                     .and_then(|s| s.parse().ok())
@@ -861,7 +862,7 @@ fn parse_worksheet(
                     default_row_height = v;
                 }
             }
-            "col" if node.tag_name().namespace() == Some(ns) => {
+            "col" if is_x_ns(node.tag_name().namespace()) => {
                 let custom = attr_bool(&node, "customWidth").unwrap_or(false);
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
                 // Only record widths for custom-widthed columns OR hidden columns
@@ -889,17 +890,17 @@ fn parse_worksheet(
                     col_widths.insert(c, width);
                 }
             }
-            "sheetView" if node.tag_name().namespace() == Some(ns) => {
+            "sheetView" if is_x_ns(node.tag_name().namespace()) => {
                 show_zeros = attr_bool(&node, "showZeros").unwrap_or(true);
                 show_gridlines = attr_bool(&node, "showGridLines").unwrap_or(true);
                 // ECMA-376 §18.3.1.87 `rightToLeft` — mirrors the whole grid so
                 // column A is on the right. Default false (left-to-right).
                 right_to_left = attr_bool(&node, "rightToLeft").unwrap_or(false);
             }
-            "tabColor" if node.tag_name().namespace() == Some(ns) => {
+            "tabColor" if is_x_ns(node.tag_name().namespace()) => {
                 tab_color = parse_color(&node, theme_colors);
             }
-            "autoFilter" if node.tag_name().namespace() == Some(ns) => {
+            "autoFilter" if is_x_ns(node.tag_name().namespace()) => {
                 if let Some(r) = node.attribute("ref") {
                     let parts: Vec<&str> = r.split(':').collect();
                     auto_filter = if parts.len() == 2 {
@@ -922,7 +923,7 @@ fn parse_worksheet(
                     };
                 }
             }
-            "hyperlinks" if node.tag_name().namespace() == Some(ns) => {
+            "hyperlinks" if is_x_ns(node.tag_name().namespace()) => {
                 for hl in node.children() {
                     if !hl.is_element() || hl.tag_name().name() != "hyperlink" {
                         continue;
@@ -935,14 +936,14 @@ fn parse_worksheet(
                     let (col, row) = parse_cell_ref(ref_single);
                     if let Some(rid) = hl
                         .attributes()
-                        .find(|a| a.name() == "id" && a.namespace() == Some(r_ns))
+                        .find(|a| a.name() == "id" && is_r_ns(a.namespace()))
                         .map(|a| a.value().to_string())
                     {
                         hyperlink_rids.push((col, row, rid));
                     }
                 }
             }
-            "pane" if node.tag_name().namespace() == Some(ns) => {
+            "pane" if is_x_ns(node.tag_name().namespace()) => {
                 let state = node.attribute("state").unwrap_or("");
                 if state == "frozen" || state == "frozenSplit" {
                     freeze_rows = node
@@ -957,7 +958,7 @@ fn parse_worksheet(
                         .unwrap_or(0);
                 }
             }
-            "mergeCell" if node.tag_name().namespace() == Some(ns) => {
+            "mergeCell" if is_x_ns(node.tag_name().namespace()) => {
                 if let Some(r) = node.attribute("ref") {
                     let parts: Vec<&str> = r.split(':').collect();
                     if parts.len() == 2 {
@@ -972,7 +973,7 @@ fn parse_worksheet(
                     }
                 }
             }
-            "row" if node.tag_name().namespace() == Some(ns) => {
+            "row" if is_x_ns(node.tag_name().namespace()) => {
                 let row_idx: u32 = node
                     .attribute("r")
                     .and_then(|s| s.parse().ok())
@@ -994,14 +995,14 @@ fn parse_worksheet(
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
                 }
-                let cells = parse_row_cells(&node, shared_strings, theme_colors, ns);
+                let cells = parse_row_cells(&node, shared_strings, theme_colors);
                 rows.push(Row {
                     index: row_idx,
                     height,
                     cells,
                 });
             }
-            "conditionalFormatting" if node.tag_name().namespace() == Some(ns) => {
+            "conditionalFormatting" if is_x_ns(node.tag_name().namespace()) => {
                 let sqref = node.attribute("sqref").map(parse_sqref).unwrap_or_default();
                 let mut rules: Vec<CfRule> = Vec::new();
                 for cf in node.children() {
@@ -1759,11 +1760,10 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
     let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
         return values;
     };
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let row_span = (range.right - range.left + 1) as usize;
     for c in doc
         .descendants()
-        .filter(|n| n.tag_name().name() == "c" && n.tag_name().namespace() == Some(ns))
+        .filter(|n| n.tag_name().name() == "c" && is_x_ns(n.tag_name().namespace()))
     {
         let Some(r_attr) = c.attribute("r") else {
             continue;
@@ -1780,7 +1780,7 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
         }
         let v = c
             .children()
-            .find(|n| n.tag_name().name() == "v" && n.tag_name().namespace() == Some(ns))
+            .find(|n| n.tag_name().name() == "v" && is_x_ns(n.tag_name().namespace()))
             .and_then(|n| n.text())
             .and_then(|s| s.trim().parse::<f64>().ok());
         if let Some(num) = v {
@@ -1941,11 +1941,10 @@ fn parse_row_cells(
     row_node: &roxmltree::Node,
     shared_strings: &[SharedString],
     theme_colors: &[String],
-    ns: &str,
 ) -> Vec<Cell> {
     let mut cells = Vec::new();
     for c_node in row_node.children() {
-        if c_node.tag_name().name() != "c" || c_node.tag_name().namespace() != Some(ns) {
+        if c_node.tag_name().name() != "c" || !is_x_ns(c_node.tag_name().namespace()) {
             continue;
         }
         let cell_ref = c_node.attribute("r").unwrap_or("A1").to_string();
@@ -1978,7 +1977,7 @@ fn parse_row_cells(
         let value = if cell_type == "inlineStr" {
             match is_node {
                 Some(is) => {
-                    let ss = parse_si_node(&is, ns, theme_colors);
+                    let ss = parse_si_node(&is, theme_colors);
                     CellValue::Text {
                         text: ss.text,
                         runs: ss.runs,
@@ -2803,5 +2802,65 @@ mod date1904_wire_shape_tests {
     fn worksheet_date1904_true_is_serialized() {
         let v = serde_json::to_value(worksheet(true)).unwrap();
         assert_eq!(v.get("date1904").and_then(|d| d.as_bool()), Some(true));
+    }
+}
+
+/// ISO/IEC 29500 Strict-conformance fixture (`fix(xlsx): accept Strict
+/// namespace URIs across the parser` routed `parse_row_cells`'s `<c>`/`<v>`
+/// element matching through `is_x_ns`). Before that conversion every
+/// `<row>`/`<c>`/`<v>` lookup was pinned to the Transitional `x:` URI, so a
+/// Strict worksheet — `xmlns="http://purl.oclc.org/ooxml/spreadsheetml/
+/// main"` — parsed to zero rows; this pins that cell values (shared-string
+/// text, an inline string, and a numeric literal) and each cell's `s` style
+/// index resolve identically to the Transitional case.
+#[cfg(test)]
+mod strict_namespace_cell_tests {
+    use super::*;
+
+    const X_NS_STRICT: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+
+    #[test]
+    fn strict_worksheet_resolves_cell_values_and_style_index() {
+        let shared = vec![SharedString {
+            text: "Shared Hello".to_string(),
+            runs: None,
+        }];
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="s" s="2"><v>0</v></c>
+      <c r="B1" t="inlineStr"><is><t>Inline Hi</t></is></c>
+      <c r="C1"><v>42.5</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#,
+            ns = X_NS_STRICT,
+        );
+
+        let (ws, _) =
+            parse_worksheet(&xml, &shared, &[], "Sheet1").expect("Strict worksheet must parse");
+        assert_eq!(ws.rows.len(), 1, "Strict <row> must be found via is_x_ns");
+        let cells = &ws.rows[0].cells;
+        assert_eq!(cells.len(), 3, "Strict <c> must be found via is_x_ns");
+
+        match &cells[0].value {
+            CellValue::Text { text, .. } => assert_eq!(text, "Shared Hello"),
+            other => panic!("expected shared-string text, got {other:?}"),
+        }
+        assert_eq!(
+            cells[0].style_index, 2,
+            "the `s` style index must round-trip"
+        );
+
+        match &cells[1].value {
+            CellValue::Text { text, .. } => assert_eq!(text, "Inline Hi"),
+            other => panic!("expected inline string text, got {other:?}"),
+        }
+
+        match &cells[2].value {
+            CellValue::Number { number } => assert_eq!(*number, 42.5),
+            other => panic!("expected a number, got {other:?}"),
+        }
     }
 }

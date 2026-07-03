@@ -110,11 +110,14 @@ fn mchild<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
 
 fn mval(node: Node, child: &str) -> Option<String> {
     mchild(node, child).and_then(|n| {
-        n.attribute((
-            "http://schemas.openxmlformats.org/officeDocument/2006/math",
+        // The `m:val` attribute lives in the math namespace — Transitional or
+        // Strict (ISO/IEC 29500) — falling back to the unqualified form.
+        crate::ns::attr_ns(
+            &n,
+            crate::ns::math::TRANSITIONAL,
+            crate::ns::math::STRICT,
             "val",
-        ))
-        .or_else(|| n.attribute("val"))
+        )
         .map(|s| s.to_string())
     })
 }
@@ -497,6 +500,29 @@ mod tests {
         assert!(
             json.contains(r#""op":"∑""#) || json.contains("∑"),
             "json: {json}"
+        );
+    }
+
+    // ISO/IEC 29500 Strict: OMML under the Strict math namespace
+    // (`http://purl.oclc.org/ooxml/officeDocument/math`) parses identically —
+    // notably `m:chr/@m:val` reaches the nary op via the `math::STRICT` branch
+    // of `mval`. (Element matching is by local name and was already Strict-safe;
+    // this covers the `m:val` attribute read.)
+    #[test]
+    fn strict_math_ns_nary_val_reaches_op() {
+        let m_strict = crate::ns::math::STRICT;
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{m_strict}"><m:nary>
+              <m:naryPr><m:chr m:val="∑"/></m:naryPr>
+              <m:e><m:r><m:t>i</m:t></m:r></m:e>
+            </m:nary></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        let json = serde_json::to_string(&nodes).unwrap();
+        assert!(json.contains(r#""kind":"nary""#), "json: {json}");
+        assert!(
+            json.contains(r#""op":"∑""#),
+            "Strict m:val must set op; json: {json}"
         );
     }
 

@@ -1,6 +1,7 @@
 use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use ooxml_common::blip::mime_from_ext;
+use ooxml_common::ns::{attr_ns, relationships};
 use roxmltree::Document as XmlDoc;
 use std::collections::{HashMap, HashSet};
 
@@ -183,12 +184,14 @@ impl NumberingMap {
             else {
                 continue;
             };
-            // `r:id` lives in the relationships namespace; fall back to the
-            // unqualified attribute for defensiveness.
-            let Some(rid) = imagedata
-                .attribute((R_NS, "id"))
-                .or_else(|| imagedata.attribute("id"))
-            else {
+            // `r:id` lives in the relationships namespace (Transitional or
+            // Strict); fall back to the unqualified attribute for defensiveness.
+            let Some(rid) = attr_ns(
+                &imagedata,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
+                "id",
+            ) else {
                 continue;
             };
             let Some(image_path) = media_map.get(rid).cloned() else {

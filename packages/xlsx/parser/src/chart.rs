@@ -6,6 +6,7 @@ use ooxml_common::chart::{
     ChartManualLayout as CmManualLayout, ChartModel, ChartSeries as CmSeries,
     ChartSeriesDataLabels as CmSeriesDataLabels, LegendManualLayout as CmLegendManualLayout,
 };
+use ooxml_common::ns::{is_a_ns, is_c_ns, is_r_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 
@@ -281,10 +282,6 @@ pub(crate) fn load_sheet_charts(
     }
 
     let mut all_charts: Vec<ChartAnchor> = Vec::new();
-    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    let c_ns = "http://schemas.openxmlformats.org/drawingml/2006/chart";
-    let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     for target in drawing_targets {
         // Resolve drawing path relative to the sheet directory
@@ -319,7 +316,7 @@ pub(crate) fn load_sheet_charts(
             let anchor_tag = anchor.tag_name().name();
             let is_one_cell = anchor_tag == "oneCellAnchor";
             if (anchor_tag != "twoCellAnchor" && !is_one_cell)
-                || anchor.tag_name().namespace() != Some(xdr_ns)
+                || !is_xdr_ns(anchor.tag_name().namespace())
             {
                 continue;
             }
@@ -378,11 +375,11 @@ pub(crate) fn load_sheet_charts(
                         // Look for a:graphic/a:graphicData/c:chart[@r:id]
                         for gf_child in child.descendants() {
                             if gf_child.tag_name().name() == "chart"
-                                && gf_child.tag_name().namespace() == Some(c_ns)
+                                && is_c_ns(gf_child.tag_name().namespace())
                             {
                                 if let Some(rid) = gf_child
                                     .attributes()
-                                    .find(|a| a.name() == "id" && a.namespace() == Some(r_ns))
+                                    .find(|a| a.name() == "id" && is_r_ns(a.namespace()))
                                     .map(|a| a.value().to_string())
                                 {
                                     chart_rid = Some(rid);
@@ -415,7 +412,7 @@ pub(crate) fn load_sheet_charts(
             let Ok(chart_xml) = read_zip_string(archive, &chart_path) else {
                 continue;
             };
-            let Some(chart_data) = parse_chart_xml(&chart_xml, c_ns, a_ns, theme_colors) else {
+            let Some(chart_data) = parse_chart_xml(&chart_xml, theme_colors) else {
                 continue;
             };
 
@@ -440,25 +437,20 @@ pub(crate) fn load_sheet_charts(
 // ─── Chart XML parser ────────────────────────────────────────────────────────
 
 /// Parse a `xl/charts/chartN.xml` file into a `ChartData`.
-pub(crate) fn parse_chart_xml(
-    xml: &str,
-    c_ns: &str,
-    a_ns: &str,
-    theme_colors: &[String],
-) -> Option<ChartData> {
+pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<ChartData> {
     let doc = roxmltree::Document::parse(xml).ok()?;
 
     // Find c:chart root element
     let chart_root = doc
         .descendants()
-        .find(|n| n.tag_name().name() == "chart" && n.tag_name().namespace() == Some(c_ns))?;
+        .find(|n| n.tag_name().name() == "chart" && is_c_ns(n.tag_name().namespace()))?;
 
     // Parse optional title
-    let title = extract_chart_title(&chart_root, c_ns, a_ns);
-    let title_font_size_hpt = extract_chart_title_size(&chart_root, c_ns, a_ns);
-    let title_font_color = extract_chart_title_color(&chart_root, c_ns, a_ns);
-    let title_font_face = extract_chart_title_face(&chart_root, c_ns, a_ns);
-    let title_font_bold = extract_chart_title_bold(&chart_root, c_ns, a_ns);
+    let title = extract_chart_title(&chart_root);
+    let title_font_size_hpt = extract_chart_title_size(&chart_root);
+    let title_font_color = extract_chart_title_color(&chart_root);
+    let title_font_face = extract_chart_title_face(&chart_root);
+    let title_font_bold = extract_chart_title_bold(&chart_root);
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
@@ -468,7 +460,7 @@ pub(crate) fn parse_chart_xml(
     let (show_legend, legend_pos) = ooxml_common::chart::extract_legend(chart_root);
     let legend_node = chart_root
         .children()
-        .find(|n| n.tag_name().name() == "legend" && n.tag_name().namespace() == Some(c_ns));
+        .find(|n| n.tag_name().name() == "legend" && is_c_ns(n.tag_name().namespace()));
     // Legend <c:layout><c:manualLayout> (ECMA-376 §21.2.2.31) — when present,
     // gives explicit x/y/w/h fractions of the chart space. Used by the Excel
     // templates that position a top legend into a narrow band, e.g. over the
@@ -477,20 +469,20 @@ pub(crate) fn parse_chart_xml(
     let legend_manual_layout = legend_node.and_then(|ln| {
         let layout = ln
             .children()
-            .find(|n| n.tag_name().name() == "layout" && n.tag_name().namespace() == Some(c_ns))?;
-        let manual = layout.children().find(|n| {
-            n.tag_name().name() == "manualLayout" && n.tag_name().namespace() == Some(c_ns)
-        })?;
+            .find(|n| n.tag_name().name() == "layout" && is_c_ns(n.tag_name().namespace()))?;
+        let manual = layout
+            .children()
+            .find(|n| n.tag_name().name() == "manualLayout" && is_c_ns(n.tag_name().namespace()))?;
         let val = |tag: &str| {
             manual
                 .children()
-                .find(|n| n.tag_name().name() == tag && n.tag_name().namespace() == Some(c_ns))
+                .find(|n| n.tag_name().name() == tag && is_c_ns(n.tag_name().namespace()))
                 .and_then(|n| n.attribute("val").and_then(|v| v.parse::<f64>().ok()))
         };
         let mode = |tag: &str| {
             manual
                 .children()
-                .find(|n| n.tag_name().name() == tag && n.tag_name().namespace() == Some(c_ns))
+                .find(|n| n.tag_name().name() == tag && is_c_ns(n.tag_name().namespace()))
                 .and_then(|n| n.attribute("val").map(|v| v.to_string()))
                 .unwrap_or_else(|| "edge".to_string())
         };
@@ -513,10 +505,10 @@ pub(crate) fn parse_chart_xml(
     // via `has_chart_sp_pr=false`.
     let chart_space_root = doc
         .descendants()
-        .find(|n| n.tag_name().name() == "chartSpace" && n.tag_name().namespace() == Some(c_ns));
+        .find(|n| n.tag_name().name() == "chartSpace" && is_c_ns(n.tag_name().namespace()));
     let chart_sp_pr = chart_space_root.and_then(|cs| {
         cs.children()
-            .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "spPr" && is_c_ns(n.tag_name().namespace()))
     });
     let has_chart_sp_pr = chart_sp_pr.is_some();
     let chart_bg = chart_sp_pr.and_then(|sp| {
@@ -555,21 +547,21 @@ pub(crate) fn parse_chart_xml(
     // `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27).
     let title_manual_layout = chart_root
         .children()
-        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "title" && is_c_ns(n.tag_name().namespace()))
         .and_then(|t| {
             t.children()
-                .find(|n| n.tag_name().name() == "layout" && n.tag_name().namespace() == Some(c_ns))
+                .find(|n| n.tag_name().name() == "layout" && is_c_ns(n.tag_name().namespace()))
         })
-        .and_then(|l| extract_manual_layout(&l, c_ns));
+        .and_then(|l| extract_manual_layout(&l));
 
     // Find c:plotArea
     let plot_area = chart_root
         .children()
-        .find(|n| n.tag_name().name() == "plotArea" && n.tag_name().namespace() == Some(c_ns))?;
+        .find(|n| n.tag_name().name() == "plotArea" && is_c_ns(n.tag_name().namespace()))?;
     let plot_area_manual_layout = plot_area
         .children()
-        .find(|n| n.tag_name().name() == "layout" && n.tag_name().namespace() == Some(c_ns))
-        .and_then(|l| extract_manual_layout(&l, c_ns));
+        .find(|n| n.tag_name().name() == "layout" && is_c_ns(n.tag_name().namespace()))
+        .and_then(|l| extract_manual_layout(&l));
 
     let mut primary_type = String::new();
     let mut bar_dir = "col".to_string();
@@ -651,7 +643,7 @@ pub(crate) fn parse_chart_xml(
         if !child.is_element() {
             continue;
         }
-        if child.tag_name().namespace() != Some(c_ns) {
+        if !is_c_ns(child.tag_name().namespace()) {
             continue;
         }
         let elem_name = child.tag_name().name();
@@ -667,7 +659,7 @@ pub(crate) fn parse_chart_xml(
             // is out of scope here — treated identically to catAx.
             "catAx" | "dateAx" => {
                 if cat_axis_title.is_none() {
-                    let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                    let (t, sz, b, c) = extract_axis_title_with_props(&child);
                     if t.is_some() {
                         cat_axis_title = t;
                         cat_axis_title_size = sz;
@@ -676,16 +668,16 @@ pub(crate) fn parse_chart_xml(
                     }
                 }
                 if cat_axis_font_size_hpt.is_none() {
-                    cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
+                    cat_axis_font_size_hpt = extract_axis_tick_label_size(&child);
                 }
                 if cat_axis_format_code.is_none() {
-                    cat_axis_format_code = extract_axis_format_code(&child, c_ns);
+                    cat_axis_format_code = extract_axis_format_code(&child);
                 }
                 if cat_axis_font_bold.is_none() {
-                    cat_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
+                    cat_axis_font_bold = extract_axis_tick_label_bold(&child);
                 }
                 if cat_axis_line_color.is_none() || cat_axis_line_width_emu.is_none() {
-                    let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
+                    let (col, w) = extract_axis_line_style(&child, theme_colors);
                     if cat_axis_line_color.is_none() {
                         cat_axis_line_color = col;
                     }
@@ -694,14 +686,12 @@ pub(crate) fn parse_chart_xml(
                     }
                 }
                 if cat_axis_major_tick_mark.is_none() {
-                    cat_axis_major_tick_mark =
-                        extract_axis_tick_mark(&child, c_ns, "majorTickMark");
+                    cat_axis_major_tick_mark = extract_axis_tick_mark(&child, "majorTickMark");
                 }
                 if cat_axis_minor_tick_mark.is_none() {
-                    cat_axis_minor_tick_mark =
-                        extract_axis_tick_mark(&child, c_ns, "minorTickMark");
+                    cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
                 }
-                if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
+                if let Some((mn, mx)) = extract_axis_scaling(&child) {
                     if cat_axis_min.is_none() {
                         cat_axis_min = mn;
                     }
@@ -709,17 +699,17 @@ pub(crate) fn parse_chart_xml(
                         cat_axis_max = mx;
                     }
                 }
-                let (cr, cra) = extract_axis_crosses(&child, c_ns);
+                let (cr, cra) = extract_axis_crosses(&child);
                 if cat_axis_crosses.is_none() {
                     cat_axis_crosses = cr;
                 }
                 if cat_axis_crosses_at.is_none() {
                     cat_axis_crosses_at = cra;
                 }
-                if axis_is_deleted(&child, c_ns) {
+                if axis_is_deleted(&child) {
                     cat_axis_hidden = true;
                 }
-                if axis_line_is_hidden(&child, c_ns) {
+                if axis_line_is_hidden(&child) {
                     cat_axis_line_hidden = true;
                 }
                 continue;
@@ -731,9 +721,7 @@ pub(crate) fn parse_chart_xml(
                 // always Y.
                 let ax_pos = child
                     .children()
-                    .find(|n| {
-                        n.tag_name().name() == "axPos" && n.tag_name().namespace() == Some(c_ns)
-                    })
+                    .find(|n| n.tag_name().name() == "axPos" && is_c_ns(n.tag_name().namespace()))
                     .and_then(|n| n.attribute("val"))
                     .unwrap_or("");
                 let is_x_axis = matches!(ax_pos, "b" | "t");
@@ -743,7 +731,7 @@ pub(crate) fn parse_chart_xml(
                     // X-axis title of every scatter chart was dropped (the catAx
                     // branch above never runs for scatter — there is no catAx).
                     if cat_axis_title.is_none() {
-                        let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child);
                         if t.is_some() {
                             cat_axis_title = t;
                             cat_axis_title_size = sz;
@@ -752,9 +740,9 @@ pub(crate) fn parse_chart_xml(
                         }
                     }
                     if cat_axis_format_code.is_none() {
-                        cat_axis_format_code = extract_axis_format_code(&child, c_ns);
+                        cat_axis_format_code = extract_axis_format_code(&child);
                     }
-                    if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
+                    if let Some((mn, mx)) = extract_axis_scaling(&child) {
                         if cat_axis_min.is_none() {
                             cat_axis_min = mn;
                         }
@@ -763,13 +751,13 @@ pub(crate) fn parse_chart_xml(
                         }
                     }
                     if cat_axis_font_size_hpt.is_none() {
-                        cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
+                        cat_axis_font_size_hpt = extract_axis_tick_label_size(&child);
                     }
                     if cat_axis_font_bold.is_none() {
-                        cat_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
+                        cat_axis_font_bold = extract_axis_tick_label_bold(&child);
                     }
                     if cat_axis_line_color.is_none() || cat_axis_line_width_emu.is_none() {
-                        let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
+                        let (col, w) = extract_axis_line_style(&child, theme_colors);
                         if cat_axis_line_color.is_none() {
                             cat_axis_line_color = col;
                         }
@@ -778,29 +766,27 @@ pub(crate) fn parse_chart_xml(
                         }
                     }
                     if cat_axis_major_tick_mark.is_none() {
-                        cat_axis_major_tick_mark =
-                            extract_axis_tick_mark(&child, c_ns, "majorTickMark");
+                        cat_axis_major_tick_mark = extract_axis_tick_mark(&child, "majorTickMark");
                     }
                     if cat_axis_minor_tick_mark.is_none() {
-                        cat_axis_minor_tick_mark =
-                            extract_axis_tick_mark(&child, c_ns, "minorTickMark");
+                        cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
                     }
-                    let (cr, cra) = extract_axis_crosses(&child, c_ns);
+                    let (cr, cra) = extract_axis_crosses(&child);
                     if cat_axis_crosses.is_none() {
                         cat_axis_crosses = cr;
                     }
                     if cat_axis_crosses_at.is_none() {
                         cat_axis_crosses_at = cra;
                     }
-                    if axis_is_deleted(&child, c_ns) {
+                    if axis_is_deleted(&child) {
                         cat_axis_hidden = true;
                     }
-                    if axis_line_is_hidden(&child, c_ns) {
+                    if axis_line_is_hidden(&child) {
                         cat_axis_line_hidden = true;
                     }
                 } else {
                     if val_axis_title.is_none() {
-                        let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child);
                         if t.is_some() {
                             val_axis_title = t;
                             val_axis_title_size = sz;
@@ -809,15 +795,15 @@ pub(crate) fn parse_chart_xml(
                         }
                     }
                     if val_axis_font_size_hpt.is_none() {
-                        val_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
+                        val_axis_font_size_hpt = extract_axis_tick_label_size(&child);
                     }
                     if val_axis_format_code.is_none() {
-                        val_axis_format_code = extract_axis_format_code(&child, c_ns);
+                        val_axis_format_code = extract_axis_format_code(&child);
                     }
                     if val_axis_font_bold.is_none() {
-                        val_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
+                        val_axis_font_bold = extract_axis_tick_label_bold(&child);
                     }
-                    if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
+                    if let Some((mn, mx)) = extract_axis_scaling(&child) {
                         if val_axis_min.is_none() {
                             val_axis_min = mn;
                         }
@@ -825,7 +811,7 @@ pub(crate) fn parse_chart_xml(
                             val_axis_max = mx;
                         }
                     }
-                    let (cr, cra) = extract_axis_crosses(&child, c_ns);
+                    let (cr, cra) = extract_axis_crosses(&child);
                     if val_axis_crosses.is_none() {
                         val_axis_crosses = cr;
                     }
@@ -833,7 +819,7 @@ pub(crate) fn parse_chart_xml(
                         val_axis_crosses_at = cra;
                     }
                     if val_axis_line_color.is_none() || val_axis_line_width_emu.is_none() {
-                        let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
+                        let (col, w) = extract_axis_line_style(&child, theme_colors);
                         if val_axis_line_color.is_none() {
                             val_axis_line_color = col;
                         }
@@ -842,17 +828,15 @@ pub(crate) fn parse_chart_xml(
                         }
                     }
                     if val_axis_major_tick_mark.is_none() {
-                        val_axis_major_tick_mark =
-                            extract_axis_tick_mark(&child, c_ns, "majorTickMark");
+                        val_axis_major_tick_mark = extract_axis_tick_mark(&child, "majorTickMark");
                     }
                     if val_axis_minor_tick_mark.is_none() {
-                        val_axis_minor_tick_mark =
-                            extract_axis_tick_mark(&child, c_ns, "minorTickMark");
+                        val_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
                     }
-                    if axis_is_deleted(&child, c_ns) {
+                    if axis_is_deleted(&child) {
                         val_axis_hidden = true;
                     }
-                    if axis_line_is_hidden(&child, c_ns) {
+                    if axis_line_is_hidden(&child) {
                         val_axis_line_hidden = true;
                     }
                 }
@@ -946,15 +930,9 @@ pub(crate) fn parse_chart_xml(
 
         // Parse series
         for ser_node in child.children().filter(|n| {
-            n.is_element() && n.tag_name().name() == "ser" && n.tag_name().namespace() == Some(c_ns)
+            n.is_element() && n.tag_name().name() == "ser" && is_c_ns(n.tag_name().namespace())
         }) {
-            let s = parse_chart_series(
-                &ser_node,
-                c_ns,
-                ser_type,
-                chart_marker_default,
-                theme_colors,
-            );
+            let s = parse_chart_series(&ser_node, ser_type, chart_marker_default, theme_colors);
             if shared_categories.is_empty() && !s.categories.is_empty() {
                 shared_categories = s.categories.clone();
             }
@@ -972,7 +950,7 @@ pub(crate) fn parse_chart_xml(
             if let Some(ser_dlbls) = ser_node.children().find(|n| {
                 n.is_element()
                     && n.tag_name().name() == "dLbls"
-                    && n.tag_name().namespace() == Some(c_ns)
+                    && is_c_ns(n.tag_name().namespace())
             }) {
                 for d in ser_dlbls.children().filter(|n| n.is_element()) {
                     match d.tag_name().name() {
@@ -1085,17 +1063,13 @@ pub(crate) fn parse_chart_xml(
 /// `<c:catAx|valAx><c:numFmt@formatCode>` (ECMA-376 §21.2.2.21). Thin
 /// wrapper around `ooxml_common::chart::extract_axis_format_code` so the
 /// pptx and xlsx parsers stay in lockstep on the format-code rules.
-pub(crate) fn extract_axis_format_code(axis_node: &roxmltree::Node, _c_ns: &str) -> Option<String> {
+pub(crate) fn extract_axis_format_code(axis_node: &roxmltree::Node) -> Option<String> {
     ooxml_common::chart::extract_axis_format_code(*axis_node)
 }
 
 /// `<c:catAx|valAx><c:majorTickMark val>` / `<c:minorTickMark val>` —
 /// `none` / `out` / `in` / `cross` (ECMA-376 §21.2.2.49 ST_TickMark).
-pub(crate) fn extract_axis_tick_mark(
-    axis_node: &roxmltree::Node,
-    _c_ns: &str,
-    name: &str,
-) -> Option<String> {
+pub(crate) fn extract_axis_tick_mark(axis_node: &roxmltree::Node, name: &str) -> Option<String> {
     ooxml_common::chart::extract_axis_tick_mark(*axis_node, name)
 }
 
@@ -1103,12 +1077,11 @@ pub(crate) fn extract_axis_tick_mark(
 /// (EMU) for the axis line itself. None when not set.
 pub(crate) fn extract_axis_line_style(
     axis_node: &roxmltree::Node,
-    c_ns: &str,
     theme_colors: &[String],
 ) -> (Option<String>, Option<u32>) {
     let Some(sp_pr) = axis_node
         .children()
-        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "spPr" && is_c_ns(n.tag_name().namespace()))
     else {
         return (None, None);
     };
@@ -1125,10 +1098,10 @@ pub(crate) fn extract_axis_line_style(
 /// `<c:delete val="1"/>` which hides the entire axis. Sample-1 "Carbon &
 /// Growth" uses this on `<c:valAx>` to keep the Y-axis numbers visible
 /// while suppressing the vertical rule.
-pub(crate) fn axis_line_is_hidden(axis_node: &roxmltree::Node, c_ns: &str) -> bool {
+pub(crate) fn axis_line_is_hidden(axis_node: &roxmltree::Node) -> bool {
     let Some(sp_pr) = axis_node
         .children()
-        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "spPr" && is_c_ns(n.tag_name().namespace()))
     else {
         return false;
     };
@@ -1142,10 +1115,7 @@ pub(crate) fn axis_line_is_hidden(axis_node: &roxmltree::Node, c_ns: &str) -> bo
 /// `<c:catAx|valAx><c:txPr>...defRPr@b>` — bold flag for axis tick labels.
 /// Thin wrapper around `ooxml_common::chart::extract_axis_tick_label_bold` so
 /// the pptx and xlsx parsers stay in lockstep.
-pub(crate) fn extract_axis_tick_label_bold(
-    axis_node: &roxmltree::Node,
-    _c_ns: &str,
-) -> Option<bool> {
+pub(crate) fn extract_axis_tick_label_bold(axis_node: &roxmltree::Node) -> Option<bool> {
     ooxml_common::chart::extract_axis_tick_label_bold(*axis_node)
 }
 
@@ -1153,18 +1123,15 @@ pub(crate) fn extract_axis_tick_label_bold(
 /// along its perpendicular axis. `crosses` is a string ("autoZero" |
 /// "min" | "max"); `crossesAt` is an explicit numeric override that
 /// takes precedence at render time.
-pub(crate) fn extract_axis_crosses(
-    axis_node: &roxmltree::Node,
-    c_ns: &str,
-) -> (Option<String>, Option<f64>) {
+pub(crate) fn extract_axis_crosses(axis_node: &roxmltree::Node) -> (Option<String>, Option<f64>) {
     let crosses = axis_node
         .children()
-        .find(|n| n.tag_name().name() == "crosses" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "crosses" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .map(|s| s.to_string());
     let crosses_at = axis_node
         .children()
-        .find(|n| n.tag_name().name() == "crossesAt" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "crossesAt" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .and_then(|v| v.parse::<f64>().ok());
     (crosses, crosses_at)
@@ -1176,7 +1143,6 @@ pub(crate) fn extract_axis_crosses(
 /// callsite shape `if let Some((mn, mx)) = …`).
 pub(crate) fn extract_axis_scaling(
     axis_node: &roxmltree::Node,
-    _c_ns: &str,
 ) -> Option<(Option<f64>, Option<f64>)> {
     let (mn, mx) = ooxml_common::chart::extract_axis_min_max(*axis_node);
     if mn.is_some() || mx.is_some() {
@@ -1188,20 +1154,17 @@ pub(crate) fn extract_axis_scaling(
 
 /// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis is hidden
 /// (ECMA-376 §21.2.2.40). Thin wrapper around the shared helper.
-pub(crate) fn axis_is_deleted(axis_node: &roxmltree::Node, _c_ns: &str) -> bool {
+pub(crate) fn axis_is_deleted(axis_node: &roxmltree::Node) -> bool {
     ooxml_common::chart::axis_is_deleted(*axis_node)
 }
 
 /// Extract a `<c:layout><c:manualLayout>` block. The given `layout_node` is
 /// `<c:layout>` (parent of `<c:manualLayout>`). Returns None when the layout
 /// is auto (no `manualLayout` child).
-pub(crate) fn extract_manual_layout(
-    layout_node: &roxmltree::Node,
-    c_ns: &str,
-) -> Option<ManualLayout> {
-    let ml = layout_node.children().find(|n| {
-        n.tag_name().name() == "manualLayout" && n.tag_name().namespace() == Some(c_ns)
-    })?;
+pub(crate) fn extract_manual_layout(layout_node: &roxmltree::Node) -> Option<ManualLayout> {
+    let ml = layout_node
+        .children()
+        .find(|n| n.tag_name().name() == "manualLayout" && is_c_ns(n.tag_name().namespace()))?;
     let mut x_mode = "edge".to_string();
     let mut y_mode = "edge".to_string();
     let mut layout_target: Option<String> = None;
@@ -1211,7 +1174,7 @@ pub(crate) fn extract_manual_layout(
     let mut h: Option<f64> = None;
     for ch in ml
         .children()
-        .filter(|n| n.is_element() && n.tag_name().namespace() == Some(c_ns))
+        .filter(|n| n.is_element() && is_c_ns(n.tag_name().namespace()))
     {
         let val = ch.attribute("val").map(|s| s.to_string());
         match ch.tag_name().name() {
@@ -1261,33 +1224,21 @@ pub(crate) fn extract_manual_layout(
 /// Extract a category/value axis tick-label font size (hundredths of a point)
 /// from the first `a:defRPr@sz` (or `a:rPr@sz`) inside the axis' `c:txPr`.
 /// ECMA-376 §21.2.2.17 — `<c:txPr>` controls tick label text properties.
-pub(crate) fn extract_axis_tick_label_size(
-    axis_node: &roxmltree::Node,
-    _c_ns: &str,
-    _a_ns: &str,
-) -> Option<i32> {
+pub(crate) fn extract_axis_tick_label_size(axis_node: &roxmltree::Node) -> Option<i32> {
     ooxml_common::chart::extract_axis_tick_label_size(*axis_node)
 }
 
 /// Extract the chart title's font size (hundredths of a point) from the first
 /// `a:defRPr@sz` or `a:rPr@sz` found under `c:title`. Returns None when absent.
 /// Thin wrapper around `ooxml_common::chart::extract_chart_title_size`.
-pub(crate) fn extract_chart_title_size(
-    chart_root: &roxmltree::Node,
-    _c_ns: &str,
-    _a_ns: &str,
-) -> Option<i32> {
+pub(crate) fn extract_chart_title_size(chart_root: &roxmltree::Node) -> Option<i32> {
     ooxml_common::chart::extract_chart_title_size(*chart_root)
 }
 
 /// Extract chart title bold flag from the first `a:defRPr@b` / `a:rPr@b`
 /// inside `c:title`. Returns None when not specified (renderer treats as
 /// not bold). Thin wrapper around `ooxml_common::chart::extract_chart_title_bold`.
-pub(crate) fn extract_chart_title_bold(
-    chart_root: &roxmltree::Node,
-    _c_ns: &str,
-    _a_ns: &str,
-) -> Option<bool> {
+pub(crate) fn extract_chart_title_bold(chart_root: &roxmltree::Node) -> Option<bool> {
     ooxml_common::chart::extract_chart_title_bold(*chart_root)
 }
 
@@ -1296,29 +1247,21 @@ pub(crate) fn extract_chart_title_bold(
 /// scheme colors would require the workbook theme, which isn't wired through
 /// to chart parsing yet. Thin wrapper around
 /// `ooxml_common::chart::extract_chart_title_srgb`.
-pub(crate) fn extract_chart_title_color(
-    chart_root: &roxmltree::Node,
-    _c_ns: &str,
-    _a_ns: &str,
-) -> Option<String> {
+pub(crate) fn extract_chart_title_color(chart_root: &roxmltree::Node) -> Option<String> {
     ooxml_common::chart::extract_chart_title_srgb(*chart_root)
 }
 
 /// Extract the chart title's font family from the first `a:latin@typeface`
 /// descendant of `c:title` (ECMA-376 DrawingML §20.1.4.2.24).
-pub(crate) fn extract_chart_title_face(
-    chart_root: &roxmltree::Node,
-    c_ns: &str,
-    a_ns: &str,
-) -> Option<String> {
+pub(crate) fn extract_chart_title_face(chart_root: &roxmltree::Node) -> Option<String> {
     let title_node = chart_root
         .children()
-        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+        .find(|n| n.tag_name().name() == "title" && is_c_ns(n.tag_name().namespace()))?;
     title_node.descendants().find_map(|n| {
         if !n.is_element() {
             return None;
         }
-        if n.tag_name().namespace() != Some(a_ns) {
+        if !is_a_ns(n.tag_name().namespace()) {
             return None;
         }
         if n.tag_name().name() != "latin" {
@@ -1330,11 +1273,7 @@ pub(crate) fn extract_chart_title_face(
 
 /// Extract plain text from `c:chart/c:title`. Thin wrapper around
 /// `ooxml_common::chart::extract_chart_title_text`.
-pub(crate) fn extract_chart_title(
-    chart_root: &roxmltree::Node,
-    _c_ns: &str,
-    _a_ns: &str,
-) -> Option<String> {
+pub(crate) fn extract_chart_title(chart_root: &roxmltree::Node) -> Option<String> {
     ooxml_common::chart::extract_chart_title_text(*chart_root)
 }
 
@@ -1345,8 +1284,6 @@ pub(crate) fn extract_chart_title(
 /// `ooxml_common::chart::extract_axis_title_with_props`.
 fn extract_axis_title_with_props(
     axis_node: &roxmltree::Node,
-    _c_ns: &str,
-    _a_ns: &str,
 ) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
     ooxml_common::chart::extract_axis_title_with_props(*axis_node)
 }
@@ -1402,12 +1339,11 @@ pub(crate) fn resolve_series_color(
 
 pub(crate) fn parse_chart_series(
     node: &roxmltree::Node,
-    c_ns: &str,
     ser_type: &str,
     chart_marker_default: bool,
     theme_colors: &[String],
 ) -> ChartSeries {
-    let name = extract_series_name(node, c_ns);
+    let name = extract_series_name(node);
 
     // `<c:idx val>` (ECMA-376 §21.2.2.27) — the canonical series index Excel
     // uses for default color selection. When absent, fall back to 0 so we
@@ -1415,7 +1351,7 @@ pub(crate) fn parse_chart_series(
     // order (legend / stacking) and is intentionally ignored for coloring.
     let idx: usize = node
         .children()
-        .find(|n| n.tag_name().name() == "idx" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "idx" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
@@ -1424,7 +1360,7 @@ pub(crate) fn parse_chart_series(
     // stacking and legend ordering. Defaults to 0.
     let order: usize = node
         .children()
-        .find(|n| n.tag_name().name() == "order" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "order" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
@@ -1437,20 +1373,20 @@ pub(crate) fn parse_chart_series(
         ("cat", "val")
     };
 
-    let categories = collect_str_cache(node, c_ns, cat_tag);
-    let values = collect_num_cache(node, c_ns, val_tag);
+    let categories = collect_str_cache(node, cat_tag);
+    let values = collect_num_cache(node, val_tag);
     // `<c:val><c:numRef><c:numCache><c:formatCode>` (ECMA-376 §21.2.2.37)
     // preserves the Excel number format Excel stamped onto the cached values
     // at save time; absent "General" codes return None so the renderer can
     // fall back cleanly.
     let val_format_code = node
         .children()
-        .find(|n| n.tag_name().name() == val_tag && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == val_tag && is_c_ns(n.tag_name().namespace()))
         .and_then(|val_node| {
             val_node.descendants().find(|n| {
                 n.is_element()
                     && n.tag_name().name() == "formatCode"
-                    && n.tag_name().namespace() == Some(c_ns)
+                    && is_c_ns(n.tag_name().namespace())
             })
         })
         .and_then(|n| n.text().map(|s| s.to_string()))
@@ -1477,9 +1413,9 @@ pub(crate) fn parse_chart_series(
     // charts default to visible markers even without an explicit flag.
     let marker_node = node
         .children()
-        .find(|n| n.tag_name().name() == "marker" && n.tag_name().namespace() == Some(c_ns));
+        .find(|n| n.tag_name().name() == "marker" && is_c_ns(n.tag_name().namespace()));
     let (marker_symbol, marker_size, marker_fill, marker_line) =
-        parse_marker_block(marker_node, c_ns, theme_colors);
+        parse_marker_block(marker_node, theme_colors);
     let show_marker = match (&marker_symbol, ser_type) {
         (Some(sym), _) => sym != "none",
         (None, "scatter") => true,
@@ -1496,15 +1432,15 @@ pub(crate) fn parse_chart_series(
         &XlsxColorResolver { theme_colors },
     );
 
-    let data_point_overrides = parse_data_point_overrides(node, c_ns, theme_colors);
+    let data_point_overrides = parse_data_point_overrides(node, theme_colors);
     // `<c15:datalabelsRange>` lookup table for `<a:fld type="CELLRANGE">`
     // labels. Excel saves the actual cached label strings here; we resolve
     // CELLRANGE field placeholders against this at parse time so the
     // renderer just receives plain strings.
-    let dlbl_range_cache = collect_dlbl_range_cache(node, c_ns);
+    let dlbl_range_cache = collect_dlbl_range_cache(node);
     let (series_data_labels, data_label_overrides) =
-        parse_data_labels(node, c_ns, theme_colors, &dlbl_range_cache);
-    let err_bars = parse_error_bars(node, c_ns, &values, theme_colors);
+        parse_data_labels(node, theme_colors, &dlbl_range_cache);
+    let err_bars = parse_error_bars(node, &values, theme_colors);
 
     ChartSeries {
         name,
@@ -1532,7 +1468,6 @@ pub(crate) fn parse_chart_series(
 /// line colors come from `<c:spPr>` nested inside marker.
 pub(crate) fn parse_marker_block(
     marker_node: Option<roxmltree::Node>,
-    c_ns: &str,
     theme_colors: &[String],
 ) -> (Option<String>, Option<u32>, Option<String>, Option<String>) {
     let Some(mk) = marker_node else {
@@ -1540,17 +1475,17 @@ pub(crate) fn parse_marker_block(
     };
     let symbol = mk
         .children()
-        .find(|n| n.tag_name().name() == "symbol" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "symbol" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .map(|s| s.to_string());
     let size = mk
         .children()
-        .find(|n| n.tag_name().name() == "size" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "size" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .and_then(|v| v.parse::<u32>().ok());
     let sp_pr = mk
         .children()
-        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns));
+        .find(|n| n.tag_name().name() == "spPr" && is_c_ns(n.tag_name().namespace()));
     let fill = sp_pr.and_then(|p| extract_solid_fill_in_drawingml(&p, theme_colors));
     let line = sp_pr.and_then(|p| {
         let ln = p.children().find(|n| n.tag_name().name() == "ln");
@@ -1593,28 +1528,27 @@ pub(crate) fn extract_solid_fill_in_drawingml(
 /// single `<c:idx>` (ECMA-376 §21.2.2.39).
 pub(crate) fn parse_data_point_overrides(
     ser_node: &roxmltree::Node,
-    c_ns: &str,
     theme_colors: &[String],
 ) -> Vec<DataPointOverride> {
     let mut result = Vec::new();
     for dpt in ser_node.children().filter(|n| {
-        n.is_element() && n.tag_name().name() == "dPt" && n.tag_name().namespace() == Some(c_ns)
+        n.is_element() && n.tag_name().name() == "dPt" && is_c_ns(n.tag_name().namespace())
     }) {
         let idx = dpt
             .children()
-            .find(|n| n.tag_name().name() == "idx" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "idx" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
         let sp_pr = dpt
             .children()
-            .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns));
+            .find(|n| n.tag_name().name() == "spPr" && is_c_ns(n.tag_name().namespace()));
         let color = sp_pr.and_then(|p| extract_solid_fill_in_drawingml(&p, theme_colors));
         let mk = dpt
             .children()
-            .find(|n| n.tag_name().name() == "marker" && n.tag_name().namespace() == Some(c_ns));
+            .find(|n| n.tag_name().name() == "marker" && is_c_ns(n.tag_name().namespace()));
         let (marker_symbol, marker_size, marker_fill, marker_line) =
-            parse_marker_block(mk, c_ns, theme_colors);
+            parse_marker_block(mk, theme_colors);
         result.push(DataPointOverride {
             idx,
             color,
@@ -1630,19 +1564,16 @@ pub(crate) fn parse_data_point_overrides(
 /// Resolve `<c:ser><c:extLst><c:ext><c15:datalabelsRange>` cache: index →
 /// label text. Used to substitute `<a:fld type="CELLRANGE">` placeholders.
 /// Returns indices in 0..ptCount; missing entries are empty strings.
-pub(crate) fn collect_dlbl_range_cache(
-    ser_node: &roxmltree::Node,
-    c_ns: &str,
-) -> HashMap<u32, String> {
+pub(crate) fn collect_dlbl_range_cache(ser_node: &roxmltree::Node) -> HashMap<u32, String> {
     let mut map: HashMap<u32, String> = HashMap::new();
     let Some(ext_lst) = ser_node
         .children()
-        .find(|n| n.tag_name().name() == "extLst" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "extLst" && is_c_ns(n.tag_name().namespace()))
     else {
         return map;
     };
     for ext in ext_lst.children().filter(|n| {
-        n.is_element() && n.tag_name().name() == "ext" && n.tag_name().namespace() == Some(c_ns)
+        n.is_element() && n.tag_name().name() == "ext" && is_c_ns(n.tag_name().namespace())
     }) {
         for range in ext
             .descendants()
@@ -1655,16 +1586,14 @@ pub(crate) fn collect_dlbl_range_cache(
                 for pt in cache.children().filter(|n| {
                     n.is_element()
                         && n.tag_name().name() == "pt"
-                        && n.tag_name().namespace() == Some(c_ns)
+                        && is_c_ns(n.tag_name().namespace())
                 }) {
                     let Some(idx) = pt.attribute("idx").and_then(|v| v.parse::<u32>().ok()) else {
                         continue;
                     };
                     let v = pt
                         .children()
-                        .find(|n| {
-                            n.tag_name().name() == "v" && n.tag_name().namespace() == Some(c_ns)
-                        })
+                        .find(|n| n.tag_name().name() == "v" && is_c_ns(n.tag_name().namespace()))
                         .and_then(|n| n.text())
                         .unwrap_or("")
                         .to_string();
@@ -1731,20 +1660,19 @@ pub(crate) fn flatten_rich_text(
 /// Parse `<c:dLbls>` (series-level defaults + per-idx overrides).
 pub(crate) fn parse_data_labels(
     ser_node: &roxmltree::Node,
-    c_ns: &str,
     theme_colors: &[String],
     cellrange_cache: &HashMap<u32, String>,
 ) -> (Option<SeriesDataLabels>, Vec<DataLabelOverride>) {
     let Some(d_lbls) = ser_node
         .children()
-        .find(|n| n.tag_name().name() == "dLbls" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "dLbls" && is_c_ns(n.tag_name().namespace()))
     else {
         return (None, Vec::new());
     };
 
     let bool_attr = |n: &roxmltree::Node, name: &str| {
         n.children()
-            .find(|c| c.tag_name().name() == name && c.tag_name().namespace() == Some(c_ns))
+            .find(|c| c.tag_name().name() == name && is_c_ns(c.tag_name().namespace()))
             .and_then(|c| c.attribute("val"))
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
@@ -1752,17 +1680,17 @@ pub(crate) fn parse_data_labels(
 
     let position = d_lbls
         .children()
-        .find(|n| n.tag_name().name() == "dLblPos" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "dLblPos" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .map(|s| s.to_string());
     let format_code = d_lbls
         .children()
-        .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "numFmt" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("formatCode"))
         .map(|s| s.to_string());
     let font_color = d_lbls
         .children()
-        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "txPr" && is_c_ns(n.tag_name().namespace()))
         .and_then(|tx| {
             tx.descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
@@ -1770,7 +1698,7 @@ pub(crate) fn parse_data_labels(
         });
     let font_bold_default = d_lbls
         .children()
-        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "txPr" && is_c_ns(n.tag_name().namespace()))
         .and_then(|tx| {
             tx.descendants()
                 .find(|n| {
@@ -1782,7 +1710,7 @@ pub(crate) fn parse_data_labels(
         });
     let font_size_default = d_lbls
         .children()
-        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "txPr" && is_c_ns(n.tag_name().namespace()))
         .and_then(|tx| {
             tx.descendants()
                 .find(|n| {
@@ -1807,11 +1735,11 @@ pub(crate) fn parse_data_labels(
 
     let mut overrides = Vec::new();
     for dl in d_lbls.children().filter(|n| {
-        n.is_element() && n.tag_name().name() == "dLbl" && n.tag_name().namespace() == Some(c_ns)
+        n.is_element() && n.tag_name().name() == "dLbl" && is_c_ns(n.tag_name().namespace())
     }) {
         let idx = dl
             .children()
-            .find(|n| n.tag_name().name() == "idx" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "idx" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
@@ -1819,13 +1747,13 @@ pub(crate) fn parse_data_labels(
         // label. Render as empty text so the renderer skips it.
         let deleted = dl
             .children()
-            .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "delete" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let pos = dl
             .children()
-            .find(|n| n.tag_name().name() == "dLblPos" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "dLblPos" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .map(|s| s.to_string());
         let cache_for_idx = cellrange_cache.get(&idx).map(|s| s.as_str());
@@ -1838,7 +1766,7 @@ pub(crate) fn parse_data_labels(
             // available, else empty.
             let tx = dl
                 .children()
-                .find(|n| n.tag_name().name() == "tx" && n.tag_name().namespace() == Some(c_ns));
+                .find(|n| n.tag_name().name() == "tx" && is_c_ns(n.tag_name().namespace()));
             match tx {
                 Some(tx_node) => flatten_rich_text(&tx_node, cache_for_idx),
                 None => cache_for_idx.unwrap_or("").to_string(),
@@ -1846,7 +1774,7 @@ pub(crate) fn parse_data_labels(
         };
         let font_color = dl
             .children()
-            .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "txPr" && is_c_ns(n.tag_name().namespace()))
             .and_then(|tx| {
                 tx.descendants()
                     .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
@@ -1896,35 +1824,34 @@ pub(crate) fn parse_data_labels(
 /// a direction (x|y); a series can have at most one of each direction.
 pub(crate) fn parse_error_bars(
     ser_node: &roxmltree::Node,
-    c_ns: &str,
     series_values: &[Option<f64>],
     theme_colors: &[String],
 ) -> Vec<ErrBars> {
     let mut result = Vec::new();
     for eb in ser_node.children().filter(|n| {
-        n.is_element() && n.tag_name().name() == "errBars" && n.tag_name().namespace() == Some(c_ns)
+        n.is_element() && n.tag_name().name() == "errBars" && is_c_ns(n.tag_name().namespace())
     }) {
         let dir = eb
             .children()
-            .find(|n| n.tag_name().name() == "errDir" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "errDir" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .unwrap_or("y")
             .to_string();
         let bar_type = eb
             .children()
-            .find(|n| n.tag_name().name() == "errBarType" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "errBarType" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .unwrap_or("both")
             .to_string();
         let val_type = eb
             .children()
-            .find(|n| n.tag_name().name() == "errValType" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "errValType" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .unwrap_or("fixedVal")
             .to_string();
         let no_end_cap = eb
             .children()
-            .find(|n| n.tag_name().name() == "noEndCap" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "noEndCap" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -1936,12 +1863,13 @@ pub(crate) fn parse_error_bars(
         match val_type.as_str() {
             "cust" => {
                 for (slot, target) in [("plus", &mut plus), ("minus", &mut minus)] {
-                    let Some(side) = eb.children().find(|n| {
-                        n.tag_name().name() == slot && n.tag_name().namespace() == Some(c_ns)
-                    }) else {
+                    let Some(side) = eb
+                        .children()
+                        .find(|n| n.tag_name().name() == slot && is_c_ns(n.tag_name().namespace()))
+                    else {
                         continue;
                     };
-                    let vals = extract_num_block(&side, c_ns, n_points);
+                    let vals = extract_num_block(&side, n_points);
                     if !vals.is_empty() {
                         let len = vals.len().min(target.len());
                         target[..len].copy_from_slice(&vals[..len]);
@@ -1951,9 +1879,7 @@ pub(crate) fn parse_error_bars(
             "fixedVal" => {
                 let v = eb
                     .children()
-                    .find(|n| {
-                        n.tag_name().name() == "val" && n.tag_name().namespace() == Some(c_ns)
-                    })
+                    .find(|n| n.tag_name().name() == "val" && is_c_ns(n.tag_name().namespace()))
                     .and_then(|n| n.attribute("val"))
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
@@ -1966,9 +1892,7 @@ pub(crate) fn parse_error_bars(
                 // Each point's bar = abs(value) * pct/100.
                 let pct = eb
                     .children()
-                    .find(|n| {
-                        n.tag_name().name() == "val" && n.tag_name().namespace() == Some(c_ns)
-                    })
+                    .find(|n| n.tag_name().name() == "val" && is_c_ns(n.tag_name().namespace()))
                     .and_then(|n| n.attribute("val"))
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
@@ -1989,9 +1913,7 @@ pub(crate) fn parse_error_bars(
                     let std = var.sqrt();
                     let mult = eb
                         .children()
-                        .find(|n| {
-                            n.tag_name().name() == "val" && n.tag_name().namespace() == Some(c_ns)
-                        })
+                        .find(|n| n.tag_name().name() == "val" && is_c_ns(n.tag_name().namespace()))
                         .and_then(|n| n.attribute("val"))
                         .and_then(|s| s.parse::<f64>().ok())
                         .unwrap_or(1.0);
@@ -2012,7 +1934,7 @@ pub(crate) fn parse_error_bars(
 
         let sp_pr = eb
             .children()
-            .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns));
+            .find(|n| n.tag_name().name() == "spPr" && is_c_ns(n.tag_name().namespace()));
         let color = sp_pr.and_then(|p| {
             let ln = p.children().find(|n| n.tag_name().name() == "ln");
             match ln {
@@ -2047,22 +1969,18 @@ pub(crate) fn parse_error_bars(
 /// Read a `<c:numRef><c:numCache>` or `<c:numLit>` block under `parent` and
 /// return per-point values keyed by `<c:pt idx>`. Length is at least
 /// `expected_len` (padded with None).
-pub(crate) fn extract_num_block(
-    parent: &roxmltree::Node,
-    c_ns: &str,
-    expected_len: usize,
-) -> Vec<Option<f64>> {
+pub(crate) fn extract_num_block(parent: &roxmltree::Node, expected_len: usize) -> Vec<Option<f64>> {
     let cache = parent.descendants().find(|n| {
         n.is_element()
             && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")
-            && n.tag_name().namespace() == Some(c_ns)
+            && is_c_ns(n.tag_name().namespace())
     });
     let Some(cache) = cache else {
         return Vec::new();
     };
     let pt_count: usize = cache
         .children()
-        .find(|n| n.tag_name().name() == "ptCount" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "ptCount" && is_c_ns(n.tag_name().namespace()))
         .and_then(|n| n.attribute("val"))
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(expected_len);
@@ -2070,14 +1988,14 @@ pub(crate) fn extract_num_block(
     let mut values: Vec<Option<f64>> = vec![None; len];
     for pt in cache
         .children()
-        .filter(|n| n.tag_name().name() == "pt" && n.tag_name().namespace() == Some(c_ns))
+        .filter(|n| n.tag_name().name() == "pt" && is_c_ns(n.tag_name().namespace()))
     {
         let Some(idx) = pt.attribute("idx").and_then(|v| v.parse::<usize>().ok()) else {
             continue;
         };
         let v = pt
             .children()
-            .find(|n| n.tag_name().name() == "v" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "v" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.text())
             .and_then(|s| s.trim().parse::<f64>().ok());
         if idx < values.len() {
@@ -2088,15 +2006,15 @@ pub(crate) fn extract_num_block(
 }
 
 /// Extract series name from `c:tx`.
-pub(crate) fn extract_series_name(node: &roxmltree::Node, c_ns: &str) -> String {
+pub(crate) fn extract_series_name(node: &roxmltree::Node) -> String {
     // c:tx/c:strRef/c:strCache/c:pt[@idx=0]/c:v
     // or c:tx/c:v
     if let Some(tx) = node
         .children()
-        .find(|n| n.tag_name().name() == "tx" && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == "tx" && is_c_ns(n.tag_name().namespace()))
     {
         for desc in tx.descendants() {
-            if desc.tag_name().name() == "v" && desc.tag_name().namespace() == Some(c_ns) {
+            if desc.tag_name().name() == "v" && is_c_ns(desc.tag_name().namespace()) {
                 if let Some(t) = desc.text() {
                     if !t.is_empty() {
                         return t.to_string();
@@ -2111,37 +2029,32 @@ pub(crate) fn extract_series_name(node: &roxmltree::Node, c_ns: &str) -> String 
 /// Collect string values from a cache child element (e.g. `<c:cat>` or `<c:xVal>`).
 /// Reads `c:strRef/c:strCache`, `c:multiLvlStrRef/c:multiLvlStrCache`, or
 /// `c:numRef/c:numCache` (formats numbers as strings).
-pub(crate) fn collect_str_cache(
-    ser_node: &roxmltree::Node,
-    c_ns: &str,
-    child_tag: &str,
-) -> Vec<String> {
+pub(crate) fn collect_str_cache(ser_node: &roxmltree::Node, child_tag: &str) -> Vec<String> {
     let Some(child) = ser_node
         .children()
-        .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == child_tag && is_c_ns(n.tag_name().namespace()))
     else {
         return Vec::new();
     };
 
     // Multi-level categories: use only the first (innermost) lvl to get primary labels.
-    if let Some(multi_cache) = child.descendants().find(|n| {
-        n.tag_name().name() == "multiLvlStrCache" && n.tag_name().namespace() == Some(c_ns)
-    }) {
+    if let Some(multi_cache) = child
+        .descendants()
+        .find(|n| n.tag_name().name() == "multiLvlStrCache" && is_c_ns(n.tag_name().namespace()))
+    {
         let pt_count: usize = multi_cache
             .children()
-            .find(|n| n.tag_name().name() == "ptCount" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "ptCount" && is_c_ns(n.tag_name().namespace()))
             .and_then(|n| n.attribute("val"))
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         if let Some(first_lvl) = multi_cache
             .children()
-            .find(|n| n.tag_name().name() == "lvl" && n.tag_name().namespace() == Some(c_ns))
+            .find(|n| n.tag_name().name() == "lvl" && is_c_ns(n.tag_name().namespace()))
         {
             let mut pts: Vec<(usize, String)> = Vec::new();
             for pt in first_lvl.children().filter(|n| {
-                n.is_element()
-                    && n.tag_name().name() == "pt"
-                    && n.tag_name().namespace() == Some(c_ns)
+                n.is_element() && n.tag_name().name() == "pt" && is_c_ns(n.tag_name().namespace())
             }) {
                 let idx: usize = pt
                     .attribute("idx")
@@ -2171,13 +2084,13 @@ pub(crate) fn collect_str_cache(
     let mut pts: Vec<(usize, String)> = Vec::new();
     for desc in child.descendants() {
         match desc.tag_name().name() {
-            "ptCount" if desc.tag_name().namespace() == Some(c_ns) => {
+            "ptCount" if is_c_ns(desc.tag_name().namespace()) => {
                 pt_count = desc
                     .attribute("val")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
             }
-            "pt" if desc.tag_name().namespace() == Some(c_ns) => {
+            "pt" if is_c_ns(desc.tag_name().namespace()) => {
                 let idx: usize = desc
                     .attribute("idx")
                     .and_then(|v| v.parse().ok())
@@ -2206,14 +2119,10 @@ pub(crate) fn collect_str_cache(
 }
 
 /// Collect numeric values from a cache child element (e.g. `<c:val>` or `<c:yVal>`).
-pub(crate) fn collect_num_cache(
-    ser_node: &roxmltree::Node,
-    c_ns: &str,
-    child_tag: &str,
-) -> Vec<Option<f64>> {
+pub(crate) fn collect_num_cache(ser_node: &roxmltree::Node, child_tag: &str) -> Vec<Option<f64>> {
     let Some(child) = ser_node
         .children()
-        .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
+        .find(|n| n.tag_name().name() == child_tag && is_c_ns(n.tag_name().namespace()))
     else {
         return Vec::new();
     };
@@ -2222,13 +2131,13 @@ pub(crate) fn collect_num_cache(
     let mut pts: Vec<(usize, f64)> = Vec::new();
     for desc in child.descendants() {
         match desc.tag_name().name() {
-            "ptCount" if desc.tag_name().namespace() == Some(c_ns) => {
+            "ptCount" if is_c_ns(desc.tag_name().namespace()) => {
                 pt_count = desc
                     .attribute("val")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
             }
-            "pt" if desc.tag_name().namespace() == Some(c_ns) => {
+            "pt" if is_c_ns(desc.tag_name().namespace()) => {
                 let idx: usize = desc
                     .attribute("idx")
                     .and_then(|v| v.parse().ok())
@@ -2308,7 +2217,7 @@ mod pie_doughnut_tests {
     #[test]
     fn pie_chart_series_and_categories() {
         let xml = pie_chart_xml("pieChart");
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("pie chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("pie chart parses");
         assert_eq!(chart.chart_type, "pie");
         assert_eq!(chart.title.as_deref(), Some("Share"));
         assert_eq!(chart.categories, vec!["North", "South", "East"]);
@@ -2323,7 +2232,7 @@ mod pie_doughnut_tests {
     #[test]
     fn doughnut_chart_type() {
         let xml = pie_chart_xml("doughnutChart");
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("doughnut chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("doughnut chart parses");
         assert_eq!(chart.chart_type, "doughnut");
         assert_eq!(chart.categories.len(), 3);
         assert_eq!(chart.series.len(), 1);
@@ -2377,7 +2286,7 @@ mod pie_doughnut_tests {
 
     #[test]
     fn adapter_bar_defaults_and_series_mapping() {
-        let data = parse_chart_xml(&bar_chart_xml(), C_NS, A_NS, &theme()).expect("bar parses");
+        let data = parse_chart_xml(&bar_chart_xml(), &theme()).expect("bar parses");
         // `order` exists on the parse-time series but not on the emitted model.
         assert_eq!(data.series[0].order, 0);
         let m = ChartModel::from(data);
@@ -2441,7 +2350,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
         assert_eq!(m.chart_type, "stackedBarH");
         // spPr present but noFill → transparent, so NOT the white default.
         assert!(
@@ -2466,7 +2375,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
         assert_eq!(m.chart_type, "line");
         assert!(m.series[0].categories.is_none());
     }
@@ -2489,7 +2398,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&with, C_NS, A_NS, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&with, &theme()).expect("parses"));
         assert!(
             m.date1904,
             "<c:date1904/> must set ChartModel.date1904 = true"
@@ -2506,7 +2415,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m0 = ChartModel::from(parse_chart_xml(&without, C_NS, A_NS, &theme()).expect("parses"));
+        let m0 = ChartModel::from(parse_chart_xml(&without, &theme()).expect("parses"));
         assert!(
             !m0.date1904,
             "absent <c:date1904> must leave the 1900 default"
@@ -2560,7 +2469,7 @@ mod label_color_tests {
     fn per_series_label_color_resolves_tx1_to_dk1() {
         let xml = ser_xml("tx1");
         let doc = Document::parse(&xml).unwrap();
-        let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
+        let s = parse_chart_series(&doc.root_element(), "bar", false, &theme());
         // tx1 maps to dk1 → theme[0]
         assert_eq!(s.label_color.as_deref(), Some("111111"));
     }
@@ -2569,7 +2478,7 @@ mod label_color_tests {
     fn per_series_label_color_resolves_bg1_to_lt1() {
         let xml = ser_xml("bg1");
         let doc = Document::parse(&xml).unwrap();
-        let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
+        let s = parse_chart_series(&doc.root_element(), "bar", false, &theme());
         // bg1 maps to lt1 → theme[1]
         assert_eq!(s.label_color.as_deref(), Some("fefefe"));
     }
@@ -2583,7 +2492,7 @@ mod label_color_tests {
             c = C_NS
         );
         let doc = Document::parse(&xml).unwrap();
-        let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
+        let s = parse_chart_series(&doc.root_element(), "bar", false, &theme());
         assert_eq!(s.label_color, None);
     }
 }
@@ -2651,7 +2560,7 @@ mod axis_title_and_border_tests {
             <a:defRPr sz="1800" b="1"/>
           </a:pPr><a:r><a:rPr sz="1800" b="1"/><a:t>Revenue</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = bar_chart_xml("", val_title, "");
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
         assert_eq!(chart.val_axis_title.as_deref(), Some("Revenue"));
         assert_eq!(chart.val_axis_title_size, Some(1800));
         assert_eq!(chart.val_axis_title_bold, Some(true));
@@ -2663,7 +2572,7 @@ mod axis_title_and_border_tests {
         let val_title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1800"/><a:t>Units</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = bar_chart_xml("", val_title, "");
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
         assert_eq!(chart.val_axis_title_size, Some(1800));
         assert_eq!(chart.val_axis_title_bold, None);
     }
@@ -2675,7 +2584,7 @@ mod axis_title_and_border_tests {
         let cat_title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1800"><a:solidFill><a:srgbClr val="ff0000"/></a:solidFill></a:rPr><a:t>Month</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = bar_chart_xml(cat_title, "", "");
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
         assert_eq!(chart.cat_axis_title.as_deref(), Some("Month"));
         assert_eq!(chart.cat_axis_title_size, Some(1800));
         assert_eq!(chart.cat_axis_title_color.as_deref(), Some("ff0000"));
@@ -2685,7 +2594,7 @@ mod axis_title_and_border_tests {
     #[test]
     fn fixture_c_no_sp_pr_no_border() {
         let xml = bar_chart_xml("", "", "");
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
         assert!(!chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color, None);
         assert_eq!(chart.chart_border_width_emu, None);
@@ -2697,7 +2606,7 @@ mod axis_title_and_border_tests {
     fn fixture_d_explicit_ln_solid_fill_border() {
         let sp_pr = r#"<c:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr>"#;
         let xml = bar_chart_xml("", "", sp_pr);
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
         assert!(chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color.as_deref(), Some("808080"));
         assert_eq!(chart.chart_border_width_emu, Some(9525));
@@ -2708,7 +2617,7 @@ mod axis_title_and_border_tests {
     fn fixture_e_ln_nofill_no_border() {
         let sp_pr = r#"<c:spPr><a:ln w="12700"><a:noFill/></a:ln></c:spPr>"#;
         let xml = bar_chart_xml("", "", sp_pr);
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
         assert!(chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color, None);
     }
@@ -2769,7 +2678,7 @@ mod axis_title_and_border_tests {
         let y_title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1800"/><a:t>Period</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = scatter_chart_xml(x_title, y_title);
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("scatter parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("scatter parses");
         // Bottom (X) valAx → cat-axis title, bold 18pt.
         assert_eq!(chart.cat_axis_title.as_deref(), Some("Acid/Bromate"));
         assert_eq!(chart.cat_axis_title_size, Some(1800));
@@ -2923,7 +2832,7 @@ mod date_axis_tests {
     #[test]
     fn date_axis_format_code_populates_cat_axis_format_code() {
         let xml = date_axis_chart_xml(r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="0"/>"#);
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("dateAx chart parses");
         assert_eq!(chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
     }
 
@@ -2932,7 +2841,7 @@ mod date_axis_tests {
     #[test]
     fn date_axis_delete_hides_cat_axis() {
         let xml = date_axis_chart_xml(r#"<c:delete val="1"/>"#);
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("dateAx chart parses");
         assert!(chart.cat_axis_hidden);
     }
 
@@ -2942,8 +2851,76 @@ mod date_axis_tests {
         let title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1200"/><a:t>Date</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = date_axis_chart_xml(title);
-        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        let chart = parse_chart_xml(&xml, &theme()).expect("dateAx chart parses");
         assert_eq!(chart.cat_axis_title.as_deref(), Some("Date"));
         assert_eq!(chart.cat_axis_title_size, Some(1200));
+    }
+}
+
+/// ISO/IEC 29500 Strict-conformance fixture. `parse_chart_xml` and its helpers
+/// match `c:`/`a:` elements via `is_c_ns`/`is_a_ns` (see `fix(xlsx): accept
+/// Strict namespace URIs across the parser`); this pins that a Strict
+/// chartSpace — `xmlns:c="http://purl.oclc.org/ooxml/drawingml/chart"` +
+/// `xmlns:a="http://purl.oclc.org/ooxml/drawingml/main"` — yields the exact
+/// same `ChartData` (series values, categories, axis format code) as the
+/// Transitional fixture. Before the `is_c_ns`/`is_a_ns` conversion this
+/// document parsed to `None` (the top-level `<c:chart>` lookup itself is
+/// namespace-pinned), so this test only passes through the predicate path.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+
+    const C_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/chart";
+    const A_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    #[test]
+    fn strict_chart_series_categories_and_axis_format_code() {
+        let xml = format!(
+            r##"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:title><c:tx><c:rich><a:p><a:r><a:t>Strict Share</a:t></a:r></a:p></c:rich></c:tx></c:title>
+    <c:plotArea>
+      <c:layout/>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Sales</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>Q1</c:v></c:pt>
+            <c:pt idx="1"><c:v>Q2</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt>
+            <c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:barChart>
+      <c:valAx>
+        <c:axId val="1"/><c:axPos val="l"/>
+        <c:numFmt formatCode="#,##0.00" sourceLinked="0"/>
+      </c:valAx>
+      <c:catAx><c:axId val="2"/><c:axPos val="b"/></c:catAx>
+    </c:plotArea>
+    <c:legend><c:legendPos val="r"/></c:legend>
+  </c:chart>
+</c:chartSpace>"##,
+            c = C_NS_STRICT,
+            a = A_NS_STRICT,
+        );
+
+        let chart = parse_chart_xml(&xml, &theme()).expect("Strict chartSpace must parse");
+        assert_eq!(chart.chart_type, "bar");
+        assert_eq!(chart.title.as_deref(), Some("Strict Share"));
+        assert_eq!(chart.categories, vec!["Q1", "Q2"]);
+        assert_eq!(chart.series.len(), 1);
+        assert_eq!(chart.series[0].values, vec![Some(10.0), Some(20.0)]);
+        assert_eq!(chart.val_axis_format_code.as_deref(), Some("#,##0.00"));
     }
 }

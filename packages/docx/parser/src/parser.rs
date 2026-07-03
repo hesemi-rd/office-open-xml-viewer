@@ -1,4 +1,5 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
@@ -13,9 +14,6 @@ use crate::types::*;
 use crate::xml_util::*;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
-
-/// OMML (math) namespace — ECMA-376 §22.
-const M_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
 
 /// The parser's ZIP archive type. Owns its backing bytes (`Cursor<Vec<u8>>`)
 /// rather than borrowing them, so a `DocxArchive` handle can keep a single
@@ -738,9 +736,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
                 .find(|n| n.is_element() && n.tag_name().name() == "defJc")
         })
         .and_then(|jc| {
-            jc.attribute((M_NS, "val"))
-                .or_else(|| jc.attribute("val"))
-                .map(|s| s.to_string())
+            attr_ns(&jc, math::TRANSITIONAL, math::STRICT, "val").map(|s| s.to_string())
         });
 
     if kinsoku.is_none()
@@ -792,11 +788,15 @@ fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
     let Ok(doc) = XmlDoc::parse(xml) else {
         return map;
     };
-    let w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     for font in doc.root_element().descendants().filter(|n| {
-        n.is_element() && n.tag_name().name() == "font" && n.tag_name().namespace() == Some(w_ns)
+        n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
     }) {
-        let Some(name) = font.attribute((w_ns, "name")) else {
+        let Some(name) = attr_ns(
+            &font,
+            wordprocessingml::TRANSITIONAL,
+            wordprocessingml::STRICT,
+            "name",
+        ) else {
             continue;
         };
         let family = font
@@ -804,9 +804,16 @@ fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
             .find(|n| {
                 n.is_element()
                     && n.tag_name().name() == "family"
-                    && n.tag_name().namespace() == Some(w_ns)
+                    && is_w_ns(n.tag_name().namespace())
             })
-            .and_then(|n| n.attribute((w_ns, "val")));
+            .and_then(|n| {
+                attr_ns(
+                    &n,
+                    wordprocessingml::TRANSITIONAL,
+                    wordprocessingml::STRICT,
+                    "val",
+                )
+            });
         if let Some(f) = family {
             map.insert(name.to_string(), f.to_string());
         }
@@ -834,7 +841,7 @@ fn body_children_with_cover_breaks<'a, 'input>(
     let mut out: Vec<(roxmltree::Node, bool)> = Vec::new();
     for child in node.children().filter(|n| n.is_element()) {
         let tn = child.tag_name();
-        if tn.namespace() == Some(W_NS) && tn.name() == "sdt" {
+        if is_w_ns(tn.namespace()) && tn.name() == "sdt" {
             let is_cover = child_w(child, "sdtPr")
                 .and_then(|pr| child_w(pr, "docPartObj"))
                 .and_then(|obj| child_w(obj, "docPartGallery"))
@@ -1557,10 +1564,13 @@ fn merge_section_refs(
             continue;
         }
         let kind = attr_w(child, "type").unwrap_or_else(|| "default".to_string());
-        let rid = child
-            .attribute((R_NS, "id"))
-            .or_else(|| child.attribute("id"))
-            .map(|s| s.to_string());
+        let rid = attr_ns(
+            &child,
+            relationships::TRANSITIONAL,
+            relationships::STRICT,
+            "id",
+        )
+        .map(|s| s.to_string());
         let Some(rid) = rid else { continue };
         let Some(target) = rel_map.get(&rid) else {
             continue;
@@ -1984,10 +1994,13 @@ fn parse_para_content(
             }
             "hyperlink" => {
                 // Resolve URL from r:id via relationships
-                let href = child
-                    .attribute((R_NS, "id"))
-                    .or_else(|| child.attribute("id"))
-                    .and_then(|rid| rel_map.get(rid).cloned());
+                let href = attr_ns(
+                    &child,
+                    relationships::TRANSITIONAL,
+                    relationships::STRICT,
+                    "id",
+                )
+                .and_then(|rid| rel_map.get(rid).cloned());
                 for r in child
                     .children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "r")
@@ -2077,9 +2090,7 @@ fn parse_para_content(
                             .find(|n| n.is_element() && n.tag_name().name() == "jc")
                     })
                     .and_then(|jc| {
-                        jc.attribute((M_NS, "val"))
-                            .or_else(|| jc.attribute("val"))
-                            .map(|s| s.to_string())
+                        attr_ns(&jc, math::TRANSITIONAL, math::STRICT, "val").map(|s| s.to_string())
                     });
                 for om in child
                     .children()
@@ -4406,9 +4417,12 @@ fn parse_object_ole_image(
     let imagedata = object
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "imagedata")?;
-    let rid = imagedata
-        .attribute((R_NS, "id"))
-        .or_else(|| imagedata.attribute("id"))?;
+    let rid = attr_ns(
+        &imagedata,
+        relationships::TRANSITIONAL,
+        relationships::STRICT,
+        "id",
+    )?;
     let image_path = media_map.get(rid)?.clone();
     let mime_type = mime_from_ext(&image_path).to_string();
 
@@ -4430,11 +4444,14 @@ fn parse_object_ole_image(
         None
     };
     let dxa_pt = |name: &str| -> Option<f64> {
-        object
-            .attribute((W_NS, name))
-            .or_else(|| object.attribute(name))
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|twentieths| twentieths / 20.0)
+        attr_ns(
+            &object,
+            wordprocessingml::TRANSITIONAL,
+            wordprocessingml::STRICT,
+            name,
+        )
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|twentieths| twentieths / 20.0)
     };
     let width_pt = css_pt("width").or_else(|| dxa_pt("dxaOrig")).unwrap_or(0.0);
     let height_pt = css_pt("height")
@@ -6397,6 +6414,8 @@ mod math_jc_tests {
 #[cfg(test)]
 mod sym_run_tests {
     use super::*;
+
+    const M_NS: &str = math::TRANSITIONAL;
 
     fn parse_p(inner: &str) -> DocParagraph {
         let xml = format!(
@@ -10861,6 +10880,116 @@ mod ole_object_tests {
             imgs.is_empty(),
             "a dangling v:imagedata rId ⇒ no image run, got {}",
             imgs.len()
+        );
+    }
+}
+
+/// Strict-conformance (ISO/IEC 29500 Strict) fixtures. These mirror ordinary
+/// paragraph/run/hyperlink/math tests but declare the WordprocessingML,
+/// relationships and math namespaces under the `http://purl.oclc.org/ooxml/...`
+/// URIs that Office emits when a document is saved in Strict mode. They assert
+/// the parser produces the SAME model it does for the Transitional equivalents —
+/// proving `ooxml_common::ns` accepts both conformance classes.
+///
+/// The URIs are declared verbatim from the ECMA-376 5th edition Strict XML
+/// Schema `targetNamespace` values. End-to-end validation against real
+/// Office-authored Strict `.docx` files belongs to the QA11 public-conformance
+/// corpus track; these synthetic fixtures cover the parser namespace matching.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+
+    const W_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    const R_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    const M_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/math";
+
+    fn text_runs(p: &DocParagraph) -> Vec<&TextRun> {
+        p.runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Parse a `<w:p>` declared under the Strict w / r / m namespaces.
+    fn parse_strict_p(inner: &str, rels: &HashMap<String, String>) -> DocParagraph {
+        let xml = format!(
+            r#"<w:p xmlns:w="{W_STRICT}" xmlns:r="{R_STRICT}" xmlns:m="{M_STRICT}">{inner}</w:p>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            rels,
+            &theme,
+            None,
+            &mut field,
+        )
+    }
+
+    // A Strict paragraph's run text and bold/italic direct formatting resolve
+    // exactly as in a Transitional paragraph (element matching via `is_w_ns`,
+    // attribute reads via `attr_w`).
+    #[test]
+    fn strict_run_bold_italic_text() {
+        let p = parse_strict_p(
+            r#"<w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Hello Strict</w:t></w:r>"#,
+            &HashMap::new(),
+        );
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1, "one text run expected");
+        assert_eq!(runs[0].text, "Hello Strict");
+        assert!(runs[0].bold, "Strict <w:b/> ⇒ bold");
+        assert!(runs[0].italic, "Strict <w:i/> ⇒ italic");
+    }
+
+    // A Strict `<w:hyperlink r:id>` resolves its URL through the relationships
+    // map — exercising the Strict relationships namespace on the `r:id`
+    // attribute (`attr_ns`).
+    #[test]
+    fn strict_hyperlink_rid_resolves() {
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "https://example.com/".to_string());
+        let p = parse_strict_p(
+            r#"<w:hyperlink r:id="rId1"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
+            &rels,
+        );
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "link");
+        assert_eq!(
+            runs[0].hyperlink.as_deref(),
+            Some("https://example.com/"),
+            "Strict r:id must resolve via relationships"
+        );
+    }
+
+    // A Strict display-math paragraph's per-instance justification (`m:jc`)
+    // reaches the Math run — exercising the Strict math namespace on `m:val`.
+    #[test]
+    fn strict_omathpara_jc_reaches_run() {
+        let p = parse_strict_p(
+            r#"<m:oMathPara><m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr>
+               <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#,
+            &HashMap::new(),
+        );
+        let jc = p.runs.iter().find_map(|r| match r {
+            DocRun::Math { jc, .. } => Some(jc.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            jc,
+            Some(Some("left".to_string())),
+            "Strict m:jc/@m:val must reach the Math run"
         );
     }
 }

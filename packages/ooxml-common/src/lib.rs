@@ -11,6 +11,7 @@ pub mod chart;
 pub mod color;
 pub mod fill;
 pub mod math;
+pub mod ns;
 pub mod rels;
 pub mod text;
 pub mod theme;

@@ -20,6 +20,7 @@ use crate::{
     PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 
@@ -1777,7 +1778,7 @@ pub(crate) fn parse_sp_tree_node(
                 .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
             {
                 let uri = attr(&gd, "uri").unwrap_or_default();
-                if uri == "http://schemas.openxmlformats.org/drawingml/2006/diagram" {
+                if is_diagram_uri(&uri) {
                     if let Some(rel_ids) = child(gd, "relIds") {
                         if let Some(dm_rid) = attr_r(&rel_ids, "dm") {
                             if let Some(drawing_xml) = smartart_drawings.get(&dm_rid) {
@@ -1831,7 +1832,7 @@ pub(crate) fn parse_sp_tree_node(
                 .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
             {
                 let uri = attr(&gd, "uri").unwrap_or_default();
-                if uri == "http://schemas.openxmlformats.org/presentationml/2006/ole" {
+                if is_pml_ole_uri(&uri) {
                     // `<p:oleObj>` is commonly wrapped in `mc:AlternateContent`.
                     // PowerPoint's canonical output puts a spid-only oleObj in the
                     // `mc:Choice Requires="v"` (VML) branch and the drawable
@@ -2513,5 +2514,247 @@ mod ole_tests {
             "an oleObj with no preview pic must emit nothing, got {} element(s)",
             out.len()
         );
+    }
+}
+
+/// Strict-conformance (ISO/IEC 29500 Strict) fixtures. PresentationML and
+/// DrawingML elements are matched by local name (already Strict-safe); the one
+/// namespace-pinned site is `attr_r`, which reads `r:embed` / `r:id`. These
+/// tests declare the p / a / r namespaces under the `http://purl.oclc.org/ooxml/`
+/// Strict URIs and assert a shape's text and a picture's resolved image path come
+/// out identical to the Transitional case — proving `attr_r` accepts the Strict
+/// relationships namespace. (Real Office-authored Strict `.pptx` end-to-end
+/// validation is the QA11 public-conformance-corpus track.)
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+    use crate::master::LayoutPlaceholders;
+    use std::io::{Cursor, Write};
+
+    const STRICT_NS: &str = concat!(
+        r#"xmlns:p="http://purl.oclc.org/ooxml/presentationml/main" "#,
+        r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" "#,
+        r#"xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships""#
+    );
+
+    fn tiny_png() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        b.extend_from_slice(&[0, 0, 0, 13]);
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&[8, 6, 0, 0, 0]);
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        b
+    }
+
+    fn zip_with(parts: &[(&str, &[u8])]) -> PptxZip {
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (path, bytes) in parts {
+                w.start_file(*path, o).unwrap();
+                w.write_all(bytes).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+    }
+
+    /// Parse each child of the `<p:spTree>` root, mirroring the real slide
+    /// driver (which iterates `cSld > spTree`'s element children).
+    fn run(xml: &str, zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<SlideElement> {
+        run_with_smart(xml, zip, rels, &HashMap::new())
+    }
+
+    /// Like [`run`], but threads a `dm_rid → drawing_xml` SmartArt cache
+    /// through, mirroring [`crate::build_smartart_drawings`]'s output — needed
+    /// by tests that exercise the `<a:graphicData uri="…diagram">` fallback
+    /// path.
+    fn run_with_smart(
+        xml: &str,
+        zip: &mut PptxZip,
+        rels: &HashMap<String, String>,
+        smart: &HashMap<String, String>,
+    ) -> Vec<SlideElement> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let lph = LayoutPlaceholders::default();
+        let theme = HashMap::new();
+        let mut out = Vec::new();
+        for node in doc.root_element().children().filter(|n| n.is_element()) {
+            parse_sp_tree_node(
+                node,
+                &lph,
+                "ppt/slides",
+                rels,
+                smart,
+                zip,
+                &theme,
+                &mut out,
+                false,
+                None,
+            );
+        }
+        out
+    }
+
+    // A Strict `<p:sp>` text body yields the run text (local-name matching is
+    // namespace-agnostic), and a Strict `<p:pic>` resolves its blip `r:embed`
+    // through the relationships map into an `image_path` — the latter exercises
+    // `attr_r` against the Strict relationships URI.
+    #[test]
+    fn strict_shape_text_and_picture_embed_resolve() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdImg".to_string(), "../media/image1.png".to_string());
+        let mut zip = zip_with(&[("ppt/media/image1.png", &tiny_png())]);
+
+        let xml = format!(
+            r#"<p:spTree {STRICT_NS}>
+                <p:sp>
+                  <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                  <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="457200"/></a:xfrm>
+                    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                  <p:txBody><a:bodyPr/><a:p><a:r><a:t>Strict Slide</a:t></a:r></a:p></p:txBody>
+                </p:sp>
+                <p:pic>
+                  <p:nvPicPr><p:cNvPr id="3" name="Image"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                  <p:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                  <p:spPr><a:xfrm><a:off x="0" y="500000"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                </p:pic>
+              </p:spTree>"#
+        );
+
+        let out = run(&xml, &mut zip, &rels);
+
+        let shape_text = out.iter().find_map(|e| match e {
+            SlideElement::Shape(s) => s
+                .text_body
+                .as_ref()
+                .and_then(|tb| tb.paragraphs.first())
+                .and_then(|para| para.runs.first())
+                .and_then(|r| match r {
+                    TextRun::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        });
+        assert_eq!(
+            shape_text.as_deref(),
+            Some("Strict Slide"),
+            "Strict shape text must parse"
+        );
+
+        let image_path = out.iter().find_map(|e| match e {
+            SlideElement::Picture(p) => Some(p.image_path.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            image_path.as_deref(),
+            Some("ppt/media/image1.png"),
+            "Strict r:embed must resolve to the media part via attr_r"
+        );
+    }
+
+    /// A `<p:graphicFrame>` whose `<a:graphicData uri="…">` is the *Strict*
+    /// SmartArt diagram literal (`http://purl.oclc.org/ooxml/drawingml/
+    /// diagram`, ECMA-376 Part 1 Strict `dml-diagram.xsd` targetNamespace) must
+    /// still be recognized and routed through the cached `drawing1.xml`
+    /// fallback — proving the `graphicData@uri` comparison itself (not just
+    /// `attr_r`) accepts the Strict value.
+    #[test]
+    fn strict_graphicframe_diagram_uri_renders_smartart_fallback() {
+        let rels = HashMap::new();
+        let mut zip = zip_with(&[]);
+
+        let dm_rid = "rIdData1";
+        let mut smart = HashMap::new();
+        smart.insert(
+            dm_rid.to_string(),
+            format!(
+                r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" {STRICT_NS}>
+                  <p:spTree>
+                    <p:sp>
+                      <p:nvSpPr><p:cNvPr id="2" name="Node1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                      <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+                        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                      <p:txBody><a:bodyPr/><a:p><a:r><a:t>SmartArt Node</a:t></a:r></a:p></p:txBody>
+                    </p:sp>
+                  </p:spTree>
+                </dsp:drawing>"#
+            ),
+        );
+
+        let xml = format!(
+            r#"<p:spTree {STRICT_NS}>
+                <p:graphicFrame>
+                  <p:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></p:xfrm>
+                  <a:graphic><a:graphicData uri="http://purl.oclc.org/ooxml/drawingml/diagram">
+                    <dgm:relIds xmlns:dgm="http://purl.oclc.org/ooxml/drawingml/diagram" r:dm="{dm_rid}" r:lo="rIdLo1" r:qs="rIdQs1" r:cs="rIdCs1"/>
+                  </a:graphicData></a:graphic>
+                </p:graphicFrame>
+              </p:spTree>"#
+        );
+
+        let out = run_with_smart(&xml, &mut zip, &rels, &smart);
+        let smartart_text = out.iter().find_map(|e| match e {
+            SlideElement::Shape(s) => s
+                .text_body
+                .as_ref()
+                .and_then(|tb| tb.paragraphs.first())
+                .and_then(|para| para.runs.first())
+                .and_then(|r| match r {
+                    TextRun::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        });
+        assert_eq!(
+            smartart_text.as_deref(),
+            Some("SmartArt Node"),
+            "Strict graphicData@uri for a diagram must still route to the cached drawing fallback"
+        );
+    }
+
+    /// A `<p:graphicFrame>` whose `<a:graphicData uri="…">` is the *Strict* OLE
+    /// literal (`http://purl.oclc.org/ooxml/presentationml/ole`, confirmed by
+    /// ECMA-376 Part 1 Annex L.7.2.5 Strict example markup) must still surface
+    /// the embedded object's preview `<p:pic>` as a picture element.
+    #[test]
+    fn strict_graphicframe_ole_uri_renders_preview_picture() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdImg".to_string(), "../media/oleImage1.png".to_string());
+        let mut zip = zip_with(&[("ppt/media/oleImage1.png", &tiny_png())]);
+
+        let xml = format!(
+            r#"<p:spTree {STRICT_NS}>
+                <p:graphicFrame>
+                  <p:xfrm><a:off x="1000000" y="2000000"/><a:ext cx="1828800" cy="914400"/></p:xfrm>
+                  <a:graphic><a:graphicData uri="http://purl.oclc.org/ooxml/presentationml/ole">
+                    <p:oleObj r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/>
+                      <p:pic>
+                        <p:nvPicPr><p:cNvPr id="5" name="Object"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                        <p:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                      </p:pic>
+                    </p:oleObj>
+                  </a:graphicData></a:graphic>
+                </p:graphicFrame>
+              </p:spTree>"#
+        );
+
+        let out = run(&xml, &mut zip, &rels);
+        let SlideElement::Picture(p) = out
+            .iter()
+            .find(|e| matches!(e, SlideElement::Picture(_)))
+            .expect("a Strict OLE graphicData@uri must still emit the preview picture")
+        else {
+            unreachable!()
+        };
+        assert_eq!((p.x, p.y), (1_000_000, 2_000_000));
+        assert_eq!((p.width, p.height), (1_828_800, 914_400));
     }
 }

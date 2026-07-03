@@ -1,5 +1,6 @@
 use crate::parse_color;
 use crate::types::*;
+use ooxml_common::ns::is_x_ns;
 use ooxml_common::zip::read_zip_string;
 
 /// Resolve the workbook's Normal-style font (family name + point size) by
@@ -14,10 +15,9 @@ pub(crate) fn parse_default_font(archive: &mut crate::XlsxZip) -> (Option<String
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
         return (None, None);
     };
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let mut font_id: usize = 0;
     for n in doc.descendants() {
-        if n.tag_name().name() == "cellStyleXfs" && n.tag_name().namespace() == Some(ns) {
+        if n.tag_name().name() == "cellStyleXfs" && is_x_ns(n.tag_name().namespace()) {
             if let Some(xf) = n
                 .children()
                 .find(|c| c.is_element() && c.tag_name().name() == "xf")
@@ -31,8 +31,7 @@ pub(crate) fn parse_default_font(archive: &mut crate::XlsxZip) -> (Option<String
         }
     }
     for fonts_node in doc.descendants() {
-        if fonts_node.tag_name().name() != "fonts" || fonts_node.tag_name().namespace() != Some(ns)
-        {
+        if fonts_node.tag_name().name() != "fonts" || !is_x_ns(fonts_node.tag_name().namespace()) {
             continue;
         }
         if let Some(font_node) = fonts_node
@@ -62,14 +61,13 @@ pub(crate) fn parse_styles(
 ) -> Result<Styles, String> {
     let xml = read_zip_string(archive, "xl/styles.xml")?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
-    let num_fmts = parse_num_fmts(&doc, ns);
-    let fonts = parse_fonts(&doc, ns, theme_colors);
-    let fills = parse_fills(&doc, ns, theme_colors);
-    let borders = parse_borders(&doc, ns, theme_colors);
-    let cell_xfs = parse_cell_xfs(&doc, ns);
-    let dxfs = parse_dxfs(&doc, ns, theme_colors);
+    let num_fmts = parse_num_fmts(&doc);
+    let fonts = parse_fonts(&doc, theme_colors);
+    let fills = parse_fills(&doc, theme_colors);
+    let borders = parse_borders(&doc, theme_colors);
+    let cell_xfs = parse_cell_xfs(&doc);
+    let dxfs = parse_dxfs(&doc, theme_colors);
 
     Ok(Styles {
         fonts,
@@ -81,10 +79,10 @@ pub(crate) fn parse_styles(
     })
 }
 
-pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Dxf> {
+pub(crate) fn parse_dxfs(doc: &roxmltree::Document, theme_colors: &[String]) -> Vec<Dxf> {
     let mut dxfs = Vec::new();
     for dxfs_node in doc.descendants() {
-        if dxfs_node.tag_name().name() != "dxfs" || dxfs_node.tag_name().namespace() != Some(ns) {
+        if dxfs_node.tag_name().name() != "dxfs" || !is_x_ns(dxfs_node.tag_name().namespace()) {
             continue;
         }
         for dxf_node in dxfs_node.children() {
@@ -208,10 +206,10 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[St
     dxfs
 }
 
-pub(crate) fn parse_num_fmts(doc: &roxmltree::Document, ns: &str) -> Vec<NumFmt> {
+pub(crate) fn parse_num_fmts(doc: &roxmltree::Document) -> Vec<NumFmt> {
     let mut fmts = Vec::new();
     for node in doc.descendants() {
-        if node.tag_name().name() == "numFmts" && node.tag_name().namespace() == Some(ns) {
+        if node.tag_name().name() == "numFmts" && is_x_ns(node.tag_name().namespace()) {
             for child in node.children() {
                 if child.tag_name().name() != "numFmt" {
                     continue;
@@ -244,15 +242,10 @@ pub(crate) fn parse_st_on_off(node: &roxmltree::Node) -> bool {
     }
 }
 
-pub(crate) fn parse_fonts(
-    doc: &roxmltree::Document,
-    ns: &str,
-    theme_colors: &[String],
-) -> Vec<Font> {
+pub(crate) fn parse_fonts(doc: &roxmltree::Document, theme_colors: &[String]) -> Vec<Font> {
     let mut fonts = Vec::new();
     for fonts_node in doc.descendants() {
-        if fonts_node.tag_name().name() == "fonts" && fonts_node.tag_name().namespace() == Some(ns)
-        {
+        if fonts_node.tag_name().name() == "fonts" && is_x_ns(fonts_node.tag_name().namespace()) {
             for font_node in fonts_node.children() {
                 if font_node.tag_name().name() != "font" {
                     continue;
@@ -304,15 +297,10 @@ pub(crate) fn parse_fonts(
     fonts
 }
 
-pub(crate) fn parse_fills(
-    doc: &roxmltree::Document,
-    ns: &str,
-    theme_colors: &[String],
-) -> Vec<Fill> {
+pub(crate) fn parse_fills(doc: &roxmltree::Document, theme_colors: &[String]) -> Vec<Fill> {
     let mut fills = Vec::new();
     for fills_node in doc.descendants() {
-        if fills_node.tag_name().name() == "fills" && fills_node.tag_name().namespace() == Some(ns)
-        {
+        if fills_node.tag_name().name() == "fills" && is_x_ns(fills_node.tag_name().namespace()) {
             for fill_node in fills_node.children() {
                 if fill_node.tag_name().name() != "fill" {
                     continue;
@@ -402,15 +390,11 @@ pub(crate) fn parse_fills(
     fills
 }
 
-pub(crate) fn parse_borders(
-    doc: &roxmltree::Document,
-    ns: &str,
-    theme_colors: &[String],
-) -> Vec<Border> {
+pub(crate) fn parse_borders(doc: &roxmltree::Document, theme_colors: &[String]) -> Vec<Border> {
     let mut borders = Vec::new();
     for borders_node in doc.descendants() {
         if borders_node.tag_name().name() == "borders"
-            && borders_node.tag_name().namespace() == Some(ns)
+            && is_x_ns(borders_node.tag_name().namespace())
         {
             for border_node in borders_node.children() {
                 if border_node.tag_name().name() != "border" {
@@ -459,10 +443,10 @@ pub(crate) fn parse_borders(
     borders
 }
 
-pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
+pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document) -> Vec<CellXf> {
     let mut xfs = Vec::new();
     for xfs_node in doc.descendants() {
-        if xfs_node.tag_name().name() == "cellXfs" && xfs_node.tag_name().namespace() == Some(ns) {
+        if xfs_node.tag_name().name() == "cellXfs" && is_x_ns(xfs_node.tag_name().namespace()) {
             for xf_node in xfs_node.children() {
                 if xf_node.tag_name().name() != "xf" {
                     continue;
@@ -534,4 +518,75 @@ pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf>
         }
     }
     xfs
+}
+
+/// ISO/IEC 29500 Strict-conformance fixture (`fix(xlsx): accept Strict
+/// namespace URIs across the parser` routed every `x:` element match here
+/// through `is_x_ns`). Before that conversion `<fonts>`/`<cellXfs>` were
+/// found via a hardcoded Transitional URI, so a Strict `xl/styles.xml` —
+/// `xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main"` — resolved to
+/// empty `fonts/cell_xfs` vectors; this pins that the style *references* a
+/// worksheet cell's `s="N"` index into now resolve identically to the
+/// Transitional case.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+
+    const X_NS_STRICT: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    #[test]
+    fn strict_styles_xml_resolves_fonts_fills_and_cell_xfs() {
+        let xml = format!(
+            r#"<styleSheet xmlns="{ns}">
+  <fonts count="2">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><b/><sz val="14"/><name val="Calibri"/><color rgb="FFFF0000"/></font>
+  </fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="2">
+    <xf fontId="0" fillId="0" borderId="0"/>
+    <xf fontId="1" fillId="1" borderId="0" applyFont="1" applyFill="1">
+      <alignment horizontal="center" wrapText="1"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#,
+            ns = X_NS_STRICT,
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+
+        let fonts = parse_fonts(&doc, &theme());
+        assert_eq!(fonts.len(), 2, "Strict <fonts> must be found via is_x_ns");
+        assert!(fonts[1].bold);
+        assert_eq!(fonts[1].size, 14.0);
+        assert_eq!(fonts[1].name.as_deref(), Some("Calibri"));
+        assert_eq!(fonts[1].color.as_deref(), Some("#FF0000"));
+
+        let fills = parse_fills(&doc, &theme());
+        assert_eq!(fills.len(), 2, "Strict <fills> must be found via is_x_ns");
+        assert_eq!(fills[1].pattern_type, "solid");
+        assert_eq!(fills[1].fg_color.as_deref(), Some("#FFFF00"));
+
+        let cell_xfs = parse_cell_xfs(&doc);
+        assert_eq!(
+            cell_xfs.len(),
+            2,
+            "Strict <cellXfs> must be found via is_x_ns"
+        );
+        // A worksheet cell's `s="1"` references cell_xfs[1] — the style
+        // reference a real Strict document round-trips through.
+        let styled = &cell_xfs[1];
+        assert_eq!(styled.font_id, 1);
+        assert_eq!(styled.fill_id, 1);
+        assert_eq!(styled.align_h.as_deref(), Some("center"));
+        assert!(styled.wrap_text);
+    }
 }

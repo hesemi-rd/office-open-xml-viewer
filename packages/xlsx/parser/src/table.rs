@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::{parse_cell_ref, resolve_zip_path};
+use ooxml_common::ns::is_x_ns;
 use ooxml_common::zip::read_zip_string;
 
 /// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
@@ -57,9 +58,8 @@ pub(crate) fn parse_table_styles_map(
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
         return map;
     };
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     for n in doc.descendants() {
-        if n.tag_name().name() != "tableStyles" || n.tag_name().namespace() != Some(ns) {
+        if n.tag_name().name() != "tableStyles" || !is_x_ns(n.tag_name().namespace()) {
             continue;
         }
         for ts in n

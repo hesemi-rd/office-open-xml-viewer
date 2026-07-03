@@ -7,6 +7,7 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 // `Cursor` is only used to build in-memory archives in this module's tests; the
@@ -26,13 +27,10 @@ pub(crate) fn parse_drawing_anchors(
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
         return Vec::new();
     };
-    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
     let mut anchors: Vec<ImageAnchor> = Vec::new();
 
     for anchor in doc.descendants() {
-        if anchor.tag_name().name() != "twoCellAnchor"
-            || anchor.tag_name().namespace() != Some(xdr_ns)
+        if anchor.tag_name().name() != "twoCellAnchor" || !is_xdr_ns(anchor.tag_name().namespace())
         {
             continue;
         }
@@ -89,12 +87,11 @@ pub(crate) fn parse_drawing_anchors(
                 "pic" => {
                     // <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
                     let blip_fill = child.children().find(|n| {
-                        n.tag_name().name() == "blipFill"
-                            && n.tag_name().namespace() == Some(xdr_ns)
+                        n.tag_name().name() == "blipFill" && is_xdr_ns(n.tag_name().namespace())
                     });
                     if let Some(bf) = blip_fill {
                         let blip = bf.children().find(|n| {
-                            n.tag_name().name() == "blip" && n.tag_name().namespace() == Some(a_ns)
+                            n.tag_name().name() == "blip" && is_a_ns(n.tag_name().namespace())
                         });
                         if let Some(b) = blip {
                             // Raster fallback (`<a:blip r:embed>`); tolerate the
@@ -110,10 +107,10 @@ pub(crate) fn parse_drawing_anchors(
                     // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
                     // own saved EMU extent. Authoritative when editAs="oneCell".
                     if let Some(sp_pr) = child.children().find(|n| {
-                        n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(xdr_ns)
+                        n.tag_name().name() == "spPr" && is_xdr_ns(n.tag_name().namespace())
                     }) {
                         if let Some(xfrm_n) = sp_pr.children().find(|n| {
-                            n.tag_name().name() == "xfrm" && n.tag_name().namespace() == Some(a_ns)
+                            n.tag_name().name() == "xfrm" && is_a_ns(n.tag_name().namespace())
                         }) {
                             if let Some(xfrm) = parse_xfrm(&xfrm_n) {
                                 native_ext_cx = xfrm.ext_x as i64;
@@ -1162,7 +1159,6 @@ pub(crate) fn parse_shape_anchors(
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
         return Vec::new();
     };
-    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
     let mut anchors: Vec<ShapeAnchor> = Vec::new();
 
     for anchor in doc.descendants() {
@@ -1172,7 +1168,7 @@ pub(crate) fn parse_shape_anchors(
         // size). Excel authors equation text boxes as oneCellAnchor, so we must
         // accept both or those shapes (and their math) are silently dropped.
         if (anchor_tag != "twoCellAnchor" && anchor_tag != "oneCellAnchor")
-            || anchor.tag_name().namespace() != Some(xdr_ns)
+            || !is_xdr_ns(anchor.tag_name().namespace())
         {
             continue;
         }
@@ -1653,12 +1649,13 @@ fn vml_ole_preview<'a>(
         .attribute(("urn:schemas-microsoft-com:office:office", "relid"))
         .or_else(|| imagedata.attribute("relid"))
         .or_else(|| {
-            imagedata.attribute((
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            attr_ns(
+                &imagedata,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
                 "id",
-            ))
-        })
-        .or_else(|| imagedata.attribute("id"))?;
+            )
+        })?;
     let target = vml_rels.get(rid)?;
     let media_path = resolve_zip_path(vml_dir, target);
     archive.index_for_name(&media_path)?;
@@ -1691,12 +1688,12 @@ fn load_legacy_vml_drawing(
     let legacy = doc
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "legacyDrawing")?;
-    let rid = legacy
-        .attribute((
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-            "id",
-        ))
-        .or_else(|| legacy.attribute("id"))?;
+    let rid = attr_ns(
+        &legacy,
+        relationships::TRANSITIONAL,
+        relationships::STRICT,
+        "id",
+    )?;
     let target = sheet_rels.get(rid)?;
     let vml_path = resolve_zip_path(sheet_dir, target); // e.g. xl/drawings/vmlDrawing1.vml
     let vml_xml = read_zip_string(archive, &vml_path).ok()?;
@@ -1790,12 +1787,12 @@ pub(crate) fn parse_ole_object_anchors(
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "objectPr");
         let object_pr_preview = object_pr.and_then(|pr| {
-            let rid = pr
-                .attribute((
-                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-                    "id",
-                ))
-                .or_else(|| pr.attribute("id"))?;
+            let rid = attr_ns(
+                &pr,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
+                "id",
+            )?;
             let target = sheet_rels.get(rid)?;
             let media_path = resolve_zip_path(sheet_dir, target);
             archive.index_for_name(&media_path)?;
@@ -3470,5 +3467,84 @@ mod ole_object_tests {
         );
         let doc = roxmltree::Document::parse(&vml).expect("declaration-less VML must parse");
         assert_eq!(doc.root_element().tag_name().name(), "xml");
+    }
+}
+
+/// ISO/IEC 29500 Strict-conformance fixture (`fix(xlsx): accept Strict
+/// namespace URIs across the parser` routed `parse_drawing_anchors`'s
+/// `xdr:`/`a:` element matching through `is_xdr_ns`/`is_a_ns`, and the blip's
+/// `r:embed` through the shared `blip_embed_rid`/`attr_ns` helpers). Before
+/// that conversion `<xdr:twoCellAnchor>` was found via a hardcoded
+/// Transitional URI, so a Strict `xl/drawings/drawing1.xml` — declaring
+/// `xdr:`/`a:`/`r:` under the `http://purl.oclc.org/ooxml/…` URIs — resolved
+/// to zero anchors; this pins that a picture's `r:embed` blip still resolves
+/// to its media part.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    const XDR_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/spreadsheetDrawing";
+    const A_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+    const R_NS_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+
+    // 1×1 transparent PNG (smallest valid PNG), same fixture as `blip_svg_tests`.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn build_media_zip(png: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("xl/media/image1.png", opts).unwrap();
+            zw.write_all(png).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn strict_drawing_anchor_resolves_blip_embed() {
+        let xml = format!(
+            r#"<xdr:wsDr xmlns:xdr="{xdr}" xmlns:a="{a}" xmlns:r="{r}">
+  <xdr:twoCellAnchor editAs="oneCell">
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="P"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#,
+            xdr = XDR_NS_STRICT,
+            a = A_NS_STRICT,
+            r = R_NS_STRICT,
+        );
+
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+
+        let data = build_media_zip(PNG_1X1);
+        let mut archive = zip::ZipArchive::new(Cursor::new(data)).unwrap();
+        let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive);
+
+        assert_eq!(
+            anchors.len(),
+            1,
+            "Strict xdr:twoCellAnchor must be found via is_xdr_ns"
+        );
+        assert_eq!(anchors[0].image_path, "xl/media/image1.png");
+        assert_eq!(anchors[0].mime_type, "image/png");
     }
 }

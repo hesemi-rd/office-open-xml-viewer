@@ -1,5 +1,6 @@
 use crate::resolve_zip_path;
 use crate::types::*;
+use ooxml_common::ns::{is_x_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 
@@ -33,7 +34,6 @@ pub(crate) struct PivotCacheFields {
 /// cacheFields (indexed by `@name`) into a single map. Sample workbooks
 /// typically have one pivotCache but the loop keeps the code general.
 pub(crate) fn load_all_pivot_cache_fields(archive: &mut crate::XlsxZip) -> PivotCacheFields {
-    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let mut out = PivotCacheFields::default();
     let names: Vec<String> = (0..archive.len())
         .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
@@ -47,7 +47,7 @@ pub(crate) fn load_all_pivot_cache_fields(archive: &mut crate::XlsxZip) -> Pivot
             continue;
         };
         for field in doc.descendants() {
-            if field.tag_name().name() != "cacheField" || field.tag_name().namespace() != Some(ns) {
+            if field.tag_name().name() != "cacheField" || !is_x_ns(field.tag_name().namespace()) {
                 continue;
             }
             let Some(field_name) = field.attribute("name") else {
@@ -234,14 +234,12 @@ pub(crate) fn parse_slicer_anchors(
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
         return Vec::new();
     };
-    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
     let mc_ns = "http://schemas.openxmlformats.org/markup-compatibility/2006";
     let slicer_uri = "http://schemas.microsoft.com/office/drawing/2010/slicer";
     let mut out: Vec<SlicerAnchor> = Vec::new();
 
     for anchor in doc.descendants() {
-        if anchor.tag_name().name() != "twoCellAnchor"
-            || anchor.tag_name().namespace() != Some(xdr_ns)
+        if anchor.tag_name().name() != "twoCellAnchor" || !is_xdr_ns(anchor.tag_name().namespace())
         {
             continue;
         }

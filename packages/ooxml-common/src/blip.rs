@@ -9,11 +9,14 @@
 //! the SVG extension, only implemented in pptx) per parser; sharing them keeps
 //! the three formats' blip handling identical.
 
+use crate::ns::relationships;
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 
-/// Relationships namespace (`r:`) — where a blip's `embed` / `link` rIds live.
-pub const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+/// Transitional relationships namespace (`r:`) — where a blip's `embed` / `link`
+/// rIds live. Runtime lookups accept the Strict URI too (see [`blip_embed_rid`]);
+/// this constant is kept for the crate's test fixtures.
+pub const R_NS: &str = relationships::TRANSITIONAL;
 
 /// Microsoft 2016 SVG extension URI (MS-ODRAWXML). An `<a:blip>` wrapping a
 /// vector image carries `<a:extLst><a:ext uri="{96DAC541-…}"><asvg:svgBlip
@@ -22,10 +25,11 @@ pub const SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
 
 /// Resolve a blip-like node's `r:embed` relationship id (the raster image, or
 /// an `svgBlip`'s vector target). Reads the `embed` attribute in the
-/// relationships namespace, tolerating the literal `r:embed` form some producers
-/// emit without binding the namespace.
+/// relationships namespace — Transitional or Strict (ISO/IEC 29500) — tolerating
+/// the literal `r:embed` form some producers emit without binding the namespace.
 pub fn blip_embed_rid(node: &Node<'_, '_>) -> Option<String> {
-    node.attribute((R_NS, "embed"))
+    node.attribute((relationships::TRANSITIONAL, "embed"))
+        .or_else(|| node.attribute((relationships::STRICT, "embed")))
         .or_else(|| node.attribute("r:embed"))
         .map(str::to_string)
 }
@@ -142,6 +146,21 @@ mod tests {
 
     const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
     const ASVG_NS: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
+
+    // ISO/IEC 29500 Strict: a blip declaring the relationships namespace under
+    // the `http://purl.oclc.org/ooxml/officeDocument/relationships` URI still
+    // resolves its `r:embed` rId (the `relationships::STRICT` branch of
+    // `blip_embed_rid`).
+    #[test]
+    fn blip_embed_rid_reads_strict_relationships_ns() {
+        let r_strict = crate::ns::relationships::STRICT;
+        let xml = format!(r#"<a:blip xmlns:a="{A_NS}" xmlns:r="{r_strict}" r:embed="rIdStrict"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        assert_eq!(
+            blip_embed_rid(&doc.root_element()).as_deref(),
+            Some("rIdStrict")
+        );
+    }
 
     #[test]
     fn svg_blip_rid_reads_extension_regardless_of_prefix() {
