@@ -214,6 +214,55 @@ describe('floating table geometry (§17.4.57) — vertical placement', () => {
   });
 });
 
+// Word ground truth (private/sample-18 Sec B, Word-exported PDF via pdftotext):
+// a vertAnchor="page" floating table whose requested tblpY would push its BOTTOM
+// past the physical page edge is shifted UP so its bottom sits flush on the page
+// bottom (measured top 741.9pt = 841.9 − 100 for a 100pt table), NOT left
+// overflowing. computeFloatTableBox clamps it via clampAbsBoxIntoContainer.
+// vertAnchor="text" is NOT clamped (its overflow is row-split by the paginator).
+describe('floating table geometry (§17.4.57) — page/margin-anchored clamp (Word ground truth)', () => {
+  it('vertAnchor="page": a box overflowing the page bottom is clamped up to pageH − boxH', () => {
+    // The sample-18 Sec B geometry at A4 (pageH 841.9, table 100pt): tblpY=775
+    // would put the bottom at 875 > 841.9 ⇒ clamp to y = 841.9 − 100 = 741.9.
+    const st = makeState({ pageH: 841.9 });
+    const b = box(tblp({ vertAnchor: 'page', tblpY: 775 }), st, 300, 250, 100);
+    expect(b.y).toBeCloseTo(841.9 - 100, 6); // 741.9 — clamped to the page bottom
+  });
+
+  it('vertAnchor="page": a box that already fits is NOT moved (clamp is idempotent)', () => {
+    const st = makeState(); // pageH 800
+    const b = box(tblp({ vertAnchor: 'page', tblpY: 5 }), st, 300, 150, 60);
+    expect(b.y).toBe(5); // 5 + 60 = 65 ≤ 800 ⇒ unchanged
+  });
+
+  it('vertAnchor="page": a box TALLER than the page pins to the top (floor = page top)', () => {
+    // boxH 900 > pageH 800: pageH − boxH = −100 would push it above the page top,
+    // so the floor (containerStart = 0) wins — the box overflows the bottom instead.
+    const st = makeState(); // pageH 800
+    const b = box(tblp({ vertAnchor: 'page', tblpY: 50 }), st, 300, 150, 900);
+    expect(b.y).toBe(0); // clamped to the page top, not −100
+  });
+
+  it('vertAnchor="margin": a box overflowing the bottom margin is clamped to (pageH − marginBottom) − boxH', () => {
+    // margin band [72, 728]: tblpY=700 ⇒ y=772, bottom 872 > 728 ⇒ clamp to
+    // 728 − 100 = 628 (the container end is the bottom text margin, ASSUMED — no
+    // fixture pins where Word clamps a margin-anchored overflow; symmetric with page).
+    const st = makeState(); // margin band [72, 728]
+    const b = box(tblp({ vertAnchor: 'margin', tblpY: 700 }), st, 300, 150, 100);
+    expect(b.y).toBe(728 - 100); // 628 — clamped to the margin band bottom
+  });
+
+  it('vertAnchor="text": an overflowing box is NOT clamped (paginator row-split handles it)', () => {
+    // A vertAnchor="text" table rides the flow cursor; its overflow is split
+    // row-by-row by computePages, so the geometry must leave the box at paraTop +
+    // tblpY even when that runs past the page — clamping here would corrupt the
+    // per-slice band. paraTop 780, tblpY 0, tableH 100 ⇒ y stays 780 (bottom 880).
+    const st = makeState(); // pageH 800
+    const b = box(tblp({ vertAnchor: 'text', tblpY: 0 }), st, 780, 150, 100);
+    expect(b.y).toBe(780); // NOT clamped to 700 — text-anchored is the paginator's job
+  });
+});
+
 describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
   it('registers a square wrap float padded by the *FromText dist values', () => {
     const st = makeState();

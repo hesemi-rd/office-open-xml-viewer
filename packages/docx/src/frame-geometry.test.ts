@@ -282,6 +282,61 @@ describe('frame geometry (§17.3.1.11 / §22.9.2.20) — yAlign is vAnchor-band 
   });
 });
 
+// Word ground truth (private/sample-17 Sec B, Word-exported PDF via pdftotext):
+// a vAnchor="page" frame whose requested `y` would push its BOTTOM past the
+// physical page edge is shifted UP so its bottom sits flush on the page bottom
+// (measured top 741.9pt = 841.9 − 100 for a 100pt frame), NOT left overflowing.
+// computeFrameBox clamps it via clampAbsBoxIntoContainer — identical to the
+// floating-table clamp (float-table-geometry.test.ts). vAnchor="text" is NOT
+// clamped (its overflow is the paginator's keep-with-anchor).
+describe('frame geometry (§17.3.1.11) — page/margin-anchored clamp (Word ground truth)', () => {
+  it('vAnchor="page": a frame overflowing the page bottom is clamped up to pageH − frameH', () => {
+    // The sample-17 Sec B geometry at A4 (pageH 841.9, frame 100pt): y=775 would
+    // put the bottom at 875 > 841.9 ⇒ clamp to y = 841.9 − 100 = 741.9.
+    const st = makeState({ pageH: 841.9 });
+    const fp = frame({ vAnchor: 'page', hRule: 'exact', h: 100, y: 775 });
+    const b = box(fp, st, 300, 250, 100, 12);
+    expect(b.y).toBeCloseTo(841.9 - 100, 6); // 741.9 — clamped to the page bottom
+  });
+
+  it('vAnchor="page": a frame that already fits is NOT moved (clamp is idempotent)', () => {
+    const st = makeState(); // pageH 800
+    const fp = frame({ vAnchor: 'page', hRule: 'exact', h: 60, y: 5 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(5); // 5 + 60 = 65 ≤ 800 ⇒ unchanged
+  });
+
+  it('vAnchor="page": a frame TALLER than the page pins to the top (floor = page top)', () => {
+    // frameH 900 > pageH 800: pageH − frameH = −100 would push it above the page
+    // top, so the floor (containerStart = 0) wins — it overflows the bottom instead.
+    const st = makeState(); // pageH 800
+    const fp = frame({ vAnchor: 'page', hRule: 'exact', h: 900, y: 50 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(0); // clamped to the page top, not −100
+  });
+
+  it('vAnchor="margin": a frame overflowing the bottom margin is clamped to (pageH − marginBottom) − frameH', () => {
+    // margin band [72, 728]: y=700 ⇒ frameY=772, bottom 872 > 728 ⇒ clamp to
+    // 728 − 100 = 628 (container end = bottom text margin, ASSUMED — no fixture
+    // pins where Word clamps a margin-anchored overflow; symmetric with page).
+    const st = makeState(); // margin band [72, 728]
+    const fp = frame({ vAnchor: 'margin', hRule: 'exact', h: 100, y: 700 });
+    const b = box(fp, st, 300, 40, 100, 12);
+    expect(b.y).toBe(728 - 100); // 628 — clamped to the margin band bottom
+  });
+
+  it('vAnchor="text": an overflowing frame is NOT clamped (paginator keep-with-anchor handles it)', () => {
+    // A vAnchor="text" frame rides the flow cursor; the paginator relocates it (and
+    // its anchor context) when it overflows, so the geometry must leave the box at
+    // paraTop + y even past the page — clamping here would fight that. paraTop 780,
+    // y 0, h 100 ⇒ y stays 780 (bottom 880).
+    const st = makeState(); // pageH 800
+    const fp = frame({ vAnchor: 'text', hRule: 'exact', h: 100, y: 0 });
+    const b = box(fp, st, 780, 40, 100, 12);
+    expect(b.y).toBe(780); // NOT clamped — text-anchored is the paginator's job
+  });
+});
+
 describe('frame geometry (§17.3.1.11) — generic frame (dropCap="none") sizing', () => {
   it('hRule="exact" forces the frame height to h regardless of content', () => {
     const st = makeState();

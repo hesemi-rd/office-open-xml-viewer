@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { computePages } from './renderer.js';
 import type {
   BodyElement,
+  CellElement,
   DocParagraph,
   DocTable,
   DocTableRow,
@@ -11,20 +12,26 @@ import type {
   PaginatedBodyElement,
 } from './types';
 
-// Unit tests for the keep-with-anchor pagination of a page-overflowing FLOATING
-// table (ECMA-376 §17.4.57 `<w:tblpPr>`). §17.4.57 pins only the table's
-// size/position; keeping an undivided floating table with its anchor context on
-// the next page is Word runtime behaviour — the SAME "keep on page" semantics
-// already covered for a text frame (§17.3.1.11, frame-keep-with-anchor.test.ts)
-// and a paragraph-anchored image float. These assertions guard that behaviour,
-// which the private-sample VRT (sample-11's small top-of-page float only, never
-// a page-boundary one) cannot cover.
+// Unit tests for the page-fit pagination of a page-overflowing FLOATING table
+// (ECMA-376 §17.4.57 `<w:tblpPr>`).
+//
+// HISTORY: PR #691 shipped "relocate the whole undivided floating table to the
+// next page". That was measured to be WRONG against Word: the Word-exported PDFs
+// of private/sample-18 + sample-21 (pdftotext bbox — see issue #674's reopening
+// comment) show Word SPLITS a page-overflowing vertAnchor="text" floating table
+// ROW BY ROW like a block table, spilling the remainder onto continuation pages,
+// and flows the anchor paragraph beside the FINAL continuation band from that
+// page's body TOP. The old whole-table-relocation tests are therefore replaced
+// here with row-split assertions. A page/margin-anchored floating table is still
+// NOT split — its absolute in-page y is instead clamped up into its container by
+// computeFloatTableBox (geometry; see float-table-geometry.test.ts), so it stays a
+// single element on its page.
 //
 // The stub canvas mirrors frame-keep-with-anchor.test.ts / pagination.test.ts:
 // glyph advance = charCount × fontPx and the font box = 0.8/0.2 em, so a single
 // line is exactly fontPx tall. Table row heights are pinned with
-// rowHeightRule="exact" so `tableH` is deterministic (independent of the stub's
-// cell measurement), the table analogue of the frame's hRule="exact"/h.
+// rowHeightRule="exact" so each row's height is deterministic (independent of the
+// stub's cell measurement), the table analogue of the frame's hRule="exact"/h.
 
 function makeCtx(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -101,13 +108,14 @@ function tblp(over: Partial<TblpPr> = {}): TblpPr {
 }
 
 /** A single-cell row of the given exact pt height (`rowHeightRule="exact"` short-
- *  circuits content measurement, so `tableH` == `rowHeight` regardless of the
- *  stub canvas — the table analogue of the frame's hRule="exact"/h). */
-function row(heightPt: number): DocTableRow {
+ *  circuits content measurement, so the row height == `heightPt` regardless of the
+ *  stub canvas — the table analogue of the frame's hRule="exact"/h). The optional
+ *  `label` cell text lets a test read which rows landed on which page. */
+function row(heightPt: number, label = ''): DocTableRow {
   return {
     cells: [
       {
-        content: [],
+        content: label ? [para({ text: label }) as unknown as CellElement] : [],
         colSpan: 1,
         vMerge: null,
         borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
@@ -122,12 +130,15 @@ function row(heightPt: number): DocTableRow {
   };
 }
 
-/** A floating table (`w:tblpPr`) of total height `tableHPt`, laid out as one
- *  exact-height row so its measured extent is deterministic. */
-function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
+/** A floating table (`w:tblpPr`) of `n` exact-height rows, each `rowHPt` tall and
+ *  labelled `r1`, `r2`, … so a test can read the per-page row split. Its total
+ *  height is `n × rowHPt`, deterministic under the stub. */
+function floatTableRows(tp: TblpPr, n: number, rowHPt: number): BodyElement {
+  const rows: DocTableRow[] = [];
+  for (let i = 1; i <= n; i++) rows.push(row(rowHPt, `r${i}`));
   const t: DocTable = {
     colWidths: [80],
-    rows: [row(tableHPt)],
+    rows,
     borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
     cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
     jc: 'left',
@@ -136,12 +147,32 @@ function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
   return { type: 'table', ...t } as unknown as BodyElement;
 }
 
+/** A floating table (`w:tblpPr`) of total height `tableHPt`, laid out as one
+ *  exact-height row so its measured extent is deterministic. */
+function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
+  return floatTableRows(tp, 1, tableHPt);
+}
+
 /** True when an element is a floating table (identified by its tblpPr). */
 const isFloatTable = (el: PaginatedBodyElement): boolean =>
   el.type === 'table' && (el as unknown as DocTable).tblpPr != null;
 
-/** True when a page holds a floating table. */
+/** True when a page holds a floating table (any slice). */
 const hasFloatTable = (page: PaginatedBodyElement[]): boolean => page.some(isFloatTable);
+
+/** The row labels (r1, r2, …) of the floating-table slice(s) on a page, in order. */
+const floatRowsOn = (page: PaginatedBodyElement[]): string[] => {
+  const out: string[] = [];
+  for (const el of page) {
+    if (!isFloatTable(el)) continue;
+    for (const r of (el as unknown as DocTable).rows) {
+      const c0 = r.cells[0]?.content?.[0] as unknown as DocParagraph | undefined;
+      const t = c0?.runs?.filter((x) => x.type === 'text').map((x) => (x as DocxTextRun).text).join('') ?? '';
+      out.push(t);
+    }
+  }
+  return out;
+};
 
 /** Text of a paragraph element (joins its text runs). */
 const textOf = (el: PaginatedBodyElement): string =>
@@ -163,133 +194,224 @@ const colOf = (el: PaginatedBodyElement): number | undefined => el.colIndex;
 const floatTableEl = (page: PaginatedBodyElement[]): PaginatedBodyElement | undefined =>
   page.find(isFloatTable);
 
-describe('computePages — floating-table page-fit / keep-with-anchor (§17.4.57)', () => {
-  // Content band 160×100, bodyTop 20. Table: vertAnchor="text", one exact row of
-  // height H ⇒ table body box [paraTop, paraTop+H]. With N leading 20pt lines the
-  // table's in-flow top is at y=20N; the table overflows the 100pt content area
-  // once 20N + H > 100.
+describe('computePages — floating-table page-fit / row-split (§17.4.57, Word ground truth)', () => {
+  // Content band 160×100, bodyTop 20. A vertAnchor="text" table's first slice sits
+  // at its in-flow anchor (y=20N after N leading 20pt lines); it overflows once
+  // 20N + tableH > 100 and is then SPLIT row-by-row, the remainder continuing at
+  // the next page's body top.
 
-  it('relocates a text-anchored floating table + its anchor text to the next page when it overflows the bottom', () => {
-    // 3 leading lines (y advances 20→40→60), then the floating table (60 tall:
-    // 60+60 > 100 ⇒ overflow), then the anchor text paragraph.
+  it('(a) splits a text-anchored floating table across pages, greedily filling page 1 from the anchor', () => {
+    // 2 leading 20pt lines (y 20→40), then a 5-row table (each 20pt). Anchor at
+    // y=40 ⇒ remaining band to the content bottom (100) is 60pt ⇒ 3 rows (r1–r3)
+    // fit on page 1; r4–r5 continue at page 2's body top. The trailing anchor text
+    // follows onto page 2 (kept with the final band).
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),
-      para({ text: 'c' }),
-      floatTable(tblp({ vertAnchor: 'text', tblpY: 0 }), 60),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
       para({ text: 'anchor' }),
     ];
     const pages = computePages(body, section(), makeCtx());
     expect(pages.length).toBe(2);
-    // The table does NOT stay on page 1 (would overflow); it moves to page 2…
-    expect(hasFloatTable(pages[0])).toBe(false);
-    expect(hasFloatTable(pages[1])).toBe(true);
-    // …and its trailing anchor text follows it onto page 2 (kept together).
-    expect(hasAnchorText(pages[1], 'anchor')).toBe(true);
-    expect(hasAnchorText(pages[0], 'anchor')).toBe(false);
-    // Page 1 keeps only the three leading lines (no float band leaked over).
-    expect(pages[0].map(textOf)).toEqual(['a', 'b', 'c']);
+    // Page 1: the two leading lines + a slice holding exactly the rows that fit.
+    expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2', 'r3']);
+    // Page 2: the continuation slice with the remaining rows.
+    expect(floatRowsOn(pages[1])).toEqual(['r4', 'r5']);
+    // Every row appears exactly once across the split (no duplication, no loss).
+    expect([...floatRowsOn(pages[0]), ...floatRowsOn(pages[1])]).toEqual([
+      'r1', 'r2', 'r3', 'r4', 'r5',
+    ]);
   });
 
-  it('relocates an overflowing floating table to the NEXT COLUMN (not a new page) in a multi-column section', () => {
-    // 2 equal columns: colW = (160-20)/2 = 70; content height 100 (5 × 20pt per
-    // column). Column 0 gets 3 leading lines (y 20→40→60); the table body box
-    // (60 tall) then overflows column 0's bottom (60+60 > 100). With a column
-    // still available on the page, it relocates to column 1 — NOT a new page.
+  it('(b) splits a tall floating table across pages until every row is placed (sample-21 shape)', () => {
+    // A single leading 20pt line (anchor at y=20) then an 8-row table (20pt each ⇒
+    // 160pt total, > the 100pt content area, so it needs 2 pages). Page 1's band
+    // runs from the anchor (y=20) to the bottom (100) = 80pt ⇒ 4 rows (r1–r4);
+    // page 2 (fresh, full 100pt band) takes the remaining 4 (r5–r8). This is the
+    // reduced analogue of sample-21 (800pt/32 rows → r1–r23 then r24–r32).
+    const body = [
+      para({ text: 'a' }),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 8, 20),
+      para({ text: 'anchor' }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages.length).toBe(2);
+    expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2', 'r3', 'r4']);
+    expect(floatRowsOn(pages[1])).toEqual(['r5', 'r6', 'r7', 'r8']);
+  });
+
+  it('(c) flows the trailing anchor paragraph from the TERMINAL page body top, not below the band', () => {
+    // 2 leading lines (anchor at y=40), 5-row 20pt table split (r1–r3 | r4–r5).
+    // The anchor paragraph must land on page 2 (the terminal continuation page) —
+    // Word flows it beside the final band from that page's body top, so it never
+    // stays on page 1 and never starts below the band.
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
+      para({ text: 'anchor' }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    expect(hasAnchorText(pages[0], 'anchor')).toBe(false);
+    expect(hasAnchorText(pages[1], 'anchor')).toBe(true);
+    // The anchor paragraph is the FIRST paragraph on page 2 after the continuation
+    // slice (the slice is pushed before the anchor so the wrap band is registered
+    // first) — i.e. it starts at the body top beside the band, not after it.
+    const page2Types = pages[1].map((el) => (isFloatTable(el) ? 'slice' : textOf(el)));
+    expect(page2Types).toEqual(['slice', 'anchor']);
+  });
+
+  it('(a-multicol) splits a text-anchored floating table into the NEXT COLUMN in a multi-column section', () => {
+    // 2 equal columns: colW = (160-20)/2 = 70; content height 100. Column 0 gets 2
+    // leading lines (y 20→40); a 5-row 20pt table then overflows column 0 from the
+    // anchor (40 + 60 = 100 exactly for 3 rows, r4–r5 spill). With a column still
+    // available on the page, the remainder continues in COLUMN 1 — not a new page.
     const twoCol = section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),
-      para({ text: 'c' }),
-      floatTable(tblp({ vertAnchor: 'text', horzAnchor: 'text', tblpY: 0 }), 60),
+      floatTableRows(tblp({ vertAnchor: 'text', horzAnchor: 'text', tblpY: 0 }), 5, 20),
       para({ text: 'anchor' }),
     ];
     const pages = computePages(body, twoCol, makeCtx());
-    // Still a single page (column 1 absorbed the table + anchor).
+    // Still a single page (column 1 absorbed the remaining rows + the anchor).
     expect(pages.length).toBe(1);
-    const f = floatTableEl(pages[0]);
-    expect(f).toBeDefined();
-    expect(colOf(f as PaginatedBodyElement)).toBe(1); // moved into column 1
-    // The three leading lines (a/b/c) stayed in column 0.
-    const leadCols = pages[0]
-      .filter((el) => ['a', 'b', 'c'].includes(textOf(el)))
-      .map(colOf);
-    expect(leadCols).toEqual([0, 0, 0]);
-    // The trailing anchor text follows the table into column 1.
+    // The first slice sits in column 0, the continuation slice in column 1.
+    const slices = pages[0].filter(isFloatTable);
+    expect(slices.length).toBe(2);
+    expect(colOf(slices[0])).toBe(0);
+    expect(colOf(slices[1])).toBe(1);
+    // The trailing anchor text follows the final band into column 1.
     const anchor = pages[0].find((el) => textOf(el) === 'anchor');
     expect(anchor).toBeDefined();
     expect(colOf(anchor as PaginatedBodyElement)).toBe(1);
   });
 
-  it('keeps a text-anchored floating table in place when it fits (near the top of the page)', () => {
-    // Only 1 leading line (y=20). Table body box [20,80] fits within [0,100] ⇒
-    // no relocation. Everything stays on page 1. (sample-11 shape: a small
-    // vertAnchor="text" tblpY=1 float near the page top must NOT be sent.)
+  it('(f) keeps a text-anchored floating table as ONE element when every row fits (no split)', () => {
+    // Only 1 leading line (anchor at y=20). A 3-row 20pt table (60pt) fits within
+    // [20,100] ⇒ no split. Everything stays on page 1 as a single float element
+    // (sample-11 shape: a small vertAnchor="text" float near the page top must not
+    // be divided or relocated).
     const body = [
       para({ text: 'a' }),
-      floatTable(tblp({ vertAnchor: 'text', tblpY: 1 }), 60),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 1 }), 3, 20),
       para({ text: 'anchor' }),
     ];
     const pages = computePages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
-    expect(hasFloatTable(pages[0])).toBe(true);
+    expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2', 'r3']);
+    // Exactly ONE floating-table element (not sliced).
+    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    expect(floatCount).toBe(1);
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
   });
 
-  it('does NOT relocate (or loop) a floating table taller than the page content area', () => {
-    // 150 tall > content height 100: the table can never fit on any page, so
-    // relocating would loop forever. It is left in place and allowed to overflow.
-    // The real assertion is that this terminates (no timeout / infinite paging)
-    // AND that the floating table is NOT row-split (Word keeps it undivided).
+  it('moves the whole table to the next page when not even the first row fits the remaining band', () => {
+    // 4 leading lines (anchor at y=80), then a 3-row 30pt table. The remaining band
+    // (100−80 = 20pt) cannot hold even the first row (30pt), and a fuller band is
+    // one page away ⇒ the WHOLE table moves to page 2 first (no page-1 slice), then
+    // fills there (30+30 = 60 ≤ 100 ⇒ all 3 rows: 30·3 = 90 ≤ 100).
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),
       para({ text: 'c' }),
-      floatTable(tblp({ vertAnchor: 'text', tblpY: 0 }), 150),
+      para({ text: 'd' }),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 3, 30),
       para({ text: 'anchor' }),
     ];
     const pages = computePages(body, section(), makeCtx());
-    // Table stays on page 1 with its three leading lines (no relocation).
-    expect(hasFloatTable(pages[0])).toBe(true);
-    // A floating table adds no flow height, so the anchor stays on the same page.
-    expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
-    expect(pages.length).toBe(1);
-    // Exactly ONE floating-table element exists across all pages (not split into
-    // per-page slices like a block table).
+    expect(pages.length).toBe(2);
+    // No slice on page 1 (the four leading lines only).
+    expect(hasFloatTable(pages[0])).toBe(false);
+    expect(pages[0].map(textOf)).toEqual(['a', 'b', 'c', 'd']);
+    // All rows land on page 2 (a fresh full band fits them).
+    expect(floatRowsOn(pages[1])).toEqual(['r1', 'r2', 'r3']);
+    expect(hasAnchorText(pages[1], 'anchor')).toBe(true);
+  });
+
+  it('terminates (no loop) and places a single over-tall row on the page it best fits', () => {
+    // 3 leading lines (anchor at y=60), then a 1-row table 150pt tall — taller than
+    // the whole 100pt content area, so it can never fit any band. The forward-
+    // progress guarantee places it (overflowing) rather than looping. Because the
+    // remaining page-1 band (40pt) can't hold it AND a fuller band is one page
+    // away, it moves to page 2 first, then is placed there (over-tall rows are not
+    // sub-divided — a floating table splits by ROW, and one row is atomic).
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      para({ text: 'c' }),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 1, 150),
+      para({ text: 'anchor' }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    // Terminates with a bounded page count; the over-tall single row is placed once.
+    expect(pages.length).toBe(2);
+    expect(floatRowsOn(pages[1])).toEqual(['r1']);
     const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
     expect(floatCount).toBe(1);
   });
 
-  it('does NOT relocate a page-anchored floating table that overflows (absolute y is honored in place)', () => {
-    // vertAnchor="page", tblpY=90: the table is pinned at page-y 90 with H=60 ⇒
-    // bottom 150, past the 140 page edge. An absolute page position is the SAME
-    // on any page, so relocation cannot help — Word draws it there (overflowing).
+  it('(d) does NOT split a page-anchored floating table (absolute y; clamped in place by geometry)', () => {
+    // vertAnchor="page", tblpY=90: the table is pinned at page-y 90 with total
+    // height 60 ⇒ it would reach y=150, past the 140 page edge. An absolute page
+    // position is the SAME on any page, so it is NOT split or relocated — it stays
+    // one element on page 1 (computeFloatTableBox clamps the box UP into the page;
+    // see float-table-geometry.test.ts for the clamped y).
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),
       para({ text: 'c' }),
-      floatTable(tblp({ vertAnchor: 'page', tblpY: 90 }), 60),
+      floatTableRows(tblp({ vertAnchor: 'page', tblpY: 90 }), 2, 30),
       para({ text: 'anchor' }),
     ];
     const pages = computePages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
     expect(hasFloatTable(pages[0])).toBe(true);
+    // Not sliced — both rows are on the single element.
+    expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2']);
+    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    expect(floatCount).toBe(1);
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
   });
 
-  it('does NOT relocate a margin-anchored floating table that overflows (absolute y is honored in place)', () => {
-    // vertAnchor="margin", tblpY=70: table at margin-top(20)+70 = 90, H=60 ⇒
-    // bottom 150, past the bottom margin. Absolute ⇒ left in place (mirrors
-    // vertAnchor="page").
+  it('(e) does NOT split a margin-anchored floating table (absolute y; clamped in place by geometry)', () => {
+    // vertAnchor="margin", tblpY=70: the table is at margin-top(20)+70 = 90 with
+    // total height 60 ⇒ bottom 150, past the bottom margin. Absolute ⇒ left as one
+    // element (mirrors vertAnchor="page"); the box clamps up into the margin band.
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),
       para({ text: 'c' }),
-      floatTable(tblp({ vertAnchor: 'margin', tblpY: 70 }), 60),
+      floatTableRows(tblp({ vertAnchor: 'margin', tblpY: 70 }), 2, 30),
       para({ text: 'anchor' }),
     ];
     const pages = computePages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
     expect(hasFloatTable(pages[0])).toBe(true);
+    expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2']);
+    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    expect(floatCount).toBe(1);
+  });
+
+  it('registers each slice as its own floating table so both pages report a float element', () => {
+    // Sanity: a split leaves a floating-table element on BOTH pages (one slice
+    // each), never a single element straddling the boundary.
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
+      para({ text: 'anchor' }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    expect(hasFloatTable(pages[0])).toBe(true);
+    expect(hasFloatTable(pages[1])).toBe(true);
+    // Two slices total (one per page).
+    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    expect(floatCount).toBe(2);
+    // Each slice still carries a tblpPr so the paint pass diverts to renderFloatTable.
+    for (const p of pages) {
+      const el = floatTableEl(p);
+      if (el) expect((el as unknown as DocTable).tblpPr).toBeDefined();
+    }
   });
 });

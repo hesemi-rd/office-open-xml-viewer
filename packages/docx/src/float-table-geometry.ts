@@ -19,6 +19,7 @@ import {
   frameYContainer,
   resolveAlignedPosH,
   resolveAlignedPosV,
+  clampAbsBoxIntoContainer,
   pushFloatRect,
 } from './frame-geometry.js';
 
@@ -90,6 +91,17 @@ export function computeFloatTableBox(
   } else {
     // §17.4.57 tblpY: absolute signed offset from the vertAnchor band start.
     y = vBand.start + tp.tblpY * sc;
+  }
+
+  // Word ground truth (sample-18 Sec B): a vertAnchor=page/margin floating table
+  // whose bottom would fall past its container is shifted UP to sit flush on the
+  // container bottom (physical page edge for page-anchored: measured top 741.9pt =
+  // 841.9 − 100 for a 100pt table), not left overflowing. vertAnchor="text" is
+  // excluded — its overflow is handled by the paginator's row-split (the floating
+  // analogue of splitTableAcrossPages), and its band rides the flow cursor, so
+  // clamping here would be wrong. Mirrors computeFrameBox exactly (§17.3.1.11).
+  if (tp.vertAnchor === 'page' || tp.vertAnchor === 'margin') {
+    y = clampAbsBoxIntoContainer(y, tableH, vBand);
   }
 
   return { x, y, w: tableW, h: tableH };

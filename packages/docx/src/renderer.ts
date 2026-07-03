@@ -2159,33 +2159,27 @@ export function computePages(
       // the table.
       //
       // §17.4.57 defines only the table's SIZE and POSITION, not what happens
-      // when it overflows the page bottom. Word's runtime keeps a floating table
-      // undivided and relocates it (with the anchor context that follows it) to
-      // the next page rather than splitting or clipping — the SAME "keep on
-      // page" semantics already implemented for a page-overflowing text frame
-      // (§17.3.1.11; see the framePr branch above) and a paragraph-anchored image
-      // float (anchoredFloatBottomOffset, §20.4.3.5). The tblpPr anchor/alignment
-      // vocabulary lines up 1:1 with framePr (§17.4.57 vertAnchor↔§17.3.1.11
-      // vAnchor, tblpY↔y), so this reuses that established pattern rather than
-      // inventing table-specific math:
-      //   • vertAnchor="text": the table top rides the anchor paragraph's in-flow
-      //     cursor, so moving the anchor to the next page moves the table with it.
-      //     If the table body box overflows the current column's bottom, relocate
-      //     it — the anchor text that follows it (which adds no height of its own)
-      //     trails onto the new column/page.
-      //   • vertAnchor="page"/"margin" (parser default is "page"): y is an
-      //     ABSOLUTE in-page position, so the table lands at the same spot on any
-      //     page. Relocating cannot help (Word draws it at its specified position
-      //     and lets it overflow), so these are left in place — matching the
-      //     pre-existing behaviour.
-      // A table TALLER than the page content area can never fit on a fresh page,
-      // so relocating it is futile (it would just overflow the next page too):
-      // leave it in place. This mirrors the text-frame / anchored-image guard's
-      // `<= effContentH()` fresh-fit test. Unlike a block table (below), a
-      // FLOATING table is not row-split here — Word does not divide a floating
-      // table across pages, so an over-tall one is left to overflow in place. (The
-      // table element is placed once and `continue`s, so no relocation can loop —
-      // this guard only suppresses a pointless page break for an over-tall table.)
+      // when it overflows the page bottom. Word's ACTUAL behaviour (measured from
+      // Word-exported PDFs of private/sample-18 + sample-21 via pdftotext bbox —
+      // see issue #674's reopening comment) is:
+      //   • vertAnchor="text": Word does NOT relocate the whole table. It SPLITS it
+      //     ROW-BY-ROW like a block table — the rows that fit the remaining band
+      //     from the anchor down to the body bottom stay on the current page, and
+      //     the rest continue in a band at the top of the next page(s), for as many
+      //     pages as needed. The anchor paragraph then flows beside the FINAL
+      //     continuation band, starting from that page's body top (NOT below the
+      //     band). This is the floating analogue of splitTableAcrossPages; the wrap
+      //     band is split alongside the rows (one FloatRect per slice).
+      //   • vertAnchor="page"/"margin" (parser default is "page"): y is an ABSOLUTE
+      //     in-page position, so the table lands at the same spot on any page and
+      //     is NOT split. Word keeps it on its page but CLAMPS the box up to the
+      //     container bottom when it would overflow (computeFloatTableBox /
+      //     clampAbsBoxIntoContainer handles that geometry; sample-18 Sec B: top
+      //     741.9 = 841.9 − 100). So these take the single-element path unchanged.
+      // The tblpPr anchor vocabulary lines up 1:1 with framePr (§17.4.57
+      // vertAnchor↔§17.3.1.11 vAnchor, tblpY↔y). Was PR #691's whole-table
+      // relocation, replaced here after the Word-PDF ground truth showed row
+      // splitting (issue #674).
       if (tbl.tblpPr) {
         // #513: re-point measureState.contentX/contentW at the CURRENT newspaper
         // column for the duration of the placement so the paginator estimates the
@@ -2199,19 +2193,22 @@ export function computePages(
         // computeTableLayout expects (it re-divides by scale internally); colX()
         // (pt) is likewise the column's page-absolute left edge.
         //
-        // Lay the table out against the CURRENT column band and resolve its box.
-        // computeTableLayout is the only (heavy) measurement; its `tableH` drives
-        // both the overflow test and the wrap float below (compute-once — the
-        // decision reuses this box's height, never re-measures it separately).
+        // Lay the table out against the CURRENT column band and resolve its box +
+        // per-row heights (B2 stage 1b: computeTableLayout is the ONE heavy
+        // measurement — its rowHeights drive the overflow test, the row-split
+        // greedy fit, and the paint-reuse stamp below; never re-measured). `tp` is
+        // the tblpPr under which the FIRST slice is placed (at the in-flow anchor);
+        // continuation slices clone it with tblpY=0 so their box sits at body top.
         const tp = tbl.tblpPr;
-        const measureFloatBox = () =>
+        const measureFloat = () =>
           withColumnBand(() => {
             const cW = colW() * measureState.scale;
             const layout = computeTableLayout(tbl, cW, measureState);
             const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
-            return computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
+            const box = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
+            return { box, layout, contentWPt: cW / measureState.scale };
           });
-        let box = measureFloatBox();
+        const first = measureFloat();
         // Distance from the table's in-flow top (measureState.y == paraTop) down
         // to its body-box bottom — the table analogue of the frame's
         // frameBottomOff. The bottom is vSpace-exclusive (box.h is the bare table
@@ -2219,28 +2216,78 @@ export function computePages(
         // the table's own area). For vertAnchor="text" this is the table's y
         // offset + its height; for page/margin it mixes an absolute box.y with the
         // flow cursor and is not a keep signal, so it is gated out below.
-        const tableBottomOff = box.y + box.h - measureState.y;
+        const tableBottomOff = first.box.y + first.box.h - measureState.y;
         const isTextAnchored = tp.vertAnchor !== 'page' && tp.vertAnchor !== 'margin';
-        const tableOverflowsHere = isTextAnchored && tableBottomOff > 0 && y + tableBottomOff > effContentH();
-        const tableFitsFresh = tableBottomOff > 0 && tableBottomOff <= effContentH();
-        if (y > 0 && tableOverflowsHere && tableFitsFresh) {
-          // Relocate the floating table to the next column/page BEFORE its float
-          // is registered, so no stale exclusion band is left on the old page
-          // (newPage clears floats wholesale; nextColumn keeps page-scoped ones
-          // but the table has not registered yet). The trailing anchor paragraph
-          // adds no height across this table, so it follows onto the new page. The
-          // column width can differ between columns (box.h / wrap side depend on
-          // it), so re-measure the box against the column the table landed in.
-          nextColumnOrPage(i);
-          box = measureFloatBox();
+        const tableOverflowsHere =
+          isTextAnchored && tableBottomOff > 0 && y + tableBottomOff > effContentH();
+
+        if (isTextAnchored && tableOverflowsHere) {
+          // ── Row-split across pages (Word ground truth, issue #674) ──
+          // Greedy-fit the rows from the anchor down to the body bottom, spilling
+          // the remainder onto continuation pages. Registers one wrap FloatRect
+          // per slice and leaves the body cursor at the FINAL continuation page's
+          // body top so the trailing anchor paragraph flows from there.
+          const endY = splitFloatTableAcrossPages(
+            tbl,
+            tp,
+            first.layout.colWidths, // scale-1 (px==pt) column grid, constant across slices
+            first.layout.rowHeights,
+            first.box.y - measureState.y, // tblpY offset (pt) of slice 1 from anchor
+            first.contentWPt,
+            () => y,
+            () => colTopY,
+            () => effContentH(),
+            () => nextColumnOrPage(i),
+            (sliceEl) => {
+              // Register the slice's wrap float + push it, both against the CURRENT
+              // column band on the page it landed on. registerTableFloat pushes onto
+              // measureState.floats so a following same-page paragraph (the anchor
+              // beside the final band) wraps around it. The box's WIDTH/HEIGHT come
+              // from the slice's stamp (the anchor-column layout, resolved once — so
+              // every slice uses one consistent geometry, matching the greedy fit);
+              // only its x/side re-resolve against the current column via
+              // withColumnBand (a continuation may land in a different newspaper
+              // column, #513). scale is 1 here (px==pt), so the stamp is used as-is.
+              withColumnBand(() => {
+                const sp = sliceEl as PaginatedBodyElement;
+                const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
+                const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;
+                const sliceH = (sp.tableRowHeightsPt ?? []).reduce((s, h) => s + h, 0) * measureState.scale;
+                const sliceBox = computeFloatTableBox(
+                  sliceTp, measureState, measureState.y, tableW, sliceH,
+                );
+                const side = floatTableWrapSide(sliceBox, measureState);
+                registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
+              });
+              pushTagged(sliceEl);
+            },
+          );
+          y = endY;
+          measureState.y = bodyTopPt() + endY;
+          // The split always advanced at least once (the whole table did not fit at
+          // the anchor), so the final continuation page's advancePage already reset
+          // prevPara/prevSpaceAfter; re-assert them so the trailing anchor paragraph
+          // spaces from the body top (no collapse against a pre-split paragraph).
+          prevPara = null;
+          prevSpaceAfter = 0;
+          continue;
         }
-        // Register the wrap float against the (possibly new) column band so the
-        // box x / wrap side match the column the table now sits in, and the float
-        // is registered on the page it actually landed on.
+
+        // Fits (or page/margin-anchored): single element, box registered in place.
+        // Register the wrap float against the column band so the box x / wrap side
+        // match the column the table sits in. (page/margin: the box may be clamped
+        // up by computeFloatTableBox; the float band follows the clamped box.)
         withColumnBand(() => {
-          const side = floatTableWrapSide(box, measureState);
-          registerTableFloat(box, tp, measureState, side, tbl.overlap !== 'never');
+          const side = floatTableWrapSide(first.box, measureState);
+          registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
         });
+        // B2 stage 1b — stamp the whole-table layout so the paint pass reuses it.
+        stampTableLayout(
+          el as PaginatedBodyElement,
+          first.layout.colWidths,
+          first.layout.rowHeights,
+          first.contentWPt,
+        );
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
@@ -3456,6 +3503,131 @@ export function splitTableAcrossPages(
     }
   }
   return y;
+}
+
+/**
+ * Split a FLOATING table (ECMA-376 §17.4.57 `<w:tblpPr>`, vertAnchor="text") that
+ * overflows the page bottom across page boundaries, row by row — the Word ground
+ * truth for a page-overflowing floating table (issue #674; measured from
+ * private/sample-18 + sample-21 Word-exported PDFs). It is the out-of-flow analogue
+ * of {@link splitTableAcrossPages}:
+ *   • The FIRST slice sits at the table's in-flow anchor (`slice1TopOffset` below
+ *     the flow cursor `y`), taking the rows that fit down to the body bottom.
+ *   • Each CONTINUATION slice sits at the next page's body TOP (its tblpPr is cloned
+ *     with tblpY=0 so computeFloatTableBox anchors it at `paraTop` = the body top,
+ *     with no in-flow offset), taking the next run of rows.
+ *   • A floating table adds NO flow height, so no header rows are repeated and no
+ *     column-top stamp is threaded (the box y is fully dictated by tblpPr, resolved
+ *     at paint by renderFloatTable). The trailing anchor paragraph flows beside the
+ *     FINAL band from the terminal page's body top, so the caller sets the body
+ *     cursor to that page's region top (the returned `endY`).
+ *
+ * `emitSlice` is invoked once per slice (on the page it landed on) to register its
+ * wrap FloatRect and push it onto the current page — the caller owns the column
+ * band / float bookkeeping. `advancePage` moves to the next column/page (clearing
+ * page-scoped floats there). `curY` / `regionTopY` / `contentH` are read live
+ * (AFTER each `advancePage`) so multi-column regions and per-page reserves are
+ * honored.
+ *
+ * Rows are placed greedily but ALWAYS at least one per slice (forward-progress
+ * guarantee, mirroring splitTableAcrossPages): a single row taller than a full page
+ * is placed overflowing rather than looping. When the anchor sits so low that not
+ * even the first row fits the remaining band, the whole table is moved to the next
+ * page FIRST (no page-1 slice) — matching Word (a floating table row is not left
+ * hanging past the bottom margin when a fuller band is one page away). Breaks land
+ * only on vMerge-safe boundaries ({@link tableBreakAllowedBefore}).
+ *
+ * Returns the body cursor (content-relative pt) after the final slice: the terminal
+ * page's region top, so the anchor paragraph flows from the body top beside the
+ * last band.
+ */
+export function splitFloatTableAcrossPages(
+  table: DocTable,
+  tp: TblpPr,
+  colWidthsPt: number[],
+  rowHs: number[],
+  /** pt offset of slice 1's top below the flow cursor (`tp.tblpY × scale`; ~0 for
+   *  a tblpY=1twip auto-converted float). Continuation slices ignore it (tblpY=0). */
+  slice1TopOffset: number,
+  /** pt content-band width the columns were fit to (for the paint-reuse stamp). */
+  contentWPt: number,
+  /** Current body cursor (content-relative pt), read live. Slice 1's top is
+   *  `curY() + slice1TopOffset`; a continuation slice's top is `regionTopY()`. */
+  curY: () => number,
+  /** Current column-region top (content-relative pt), read AFTER each advancePage. */
+  regionTopY: () => number,
+  /** Effective content height (content-relative pt) of the current page, read live
+   *  (respects the per-page footnote/header/footer reserve). */
+  contentH: () => number,
+  /** Advance to the next column / page (clears page-scoped floats there). */
+  advancePage: () => void,
+  /** Push the fully-stamped slice element onto the current page (and register its
+   *  wrap float). Called once per slice, on the page it landed on. Omitted (direct
+   *  unit tests) ⇒ the slice is dropped (the test asserts geometry via a stub). */
+  emitSlice?: (sliceEl: PaginatedBodyElement) => void,
+): number {
+  const n = rowHs.length;
+  let start = 0;
+  let firstSlice = true;
+
+  while (start < n) {
+    // Slice top (content-relative pt): the in-flow anchor for slice 1, else the
+    // fresh page/column region top.
+    const sliceTopRel = firstSlice ? curY() + slice1TopOffset : regionTopY();
+    const avail = contentH() - sliceTopRel;
+
+    // If not even the first row fits the remaining band AND a fuller band exists on
+    // a fresh page/column, move the whole (remaining) table there first — no slice
+    // on this page. Only possible for a slice whose top is below the region top
+    // (i.e. slice 1 low on the page); a fresh page's `avail` already equals the max
+    // band, so this never loops. (A row taller than a full page still gets placed
+    // below, since then `avail == the max band` and the guard is false.)
+    if (rowHs[start] > avail && sliceTopRel > regionTopY()) {
+      advancePage();
+      firstSlice = false;
+      continue;
+    }
+
+    // Greedy-fit rows [start, end); always take the first row (forward progress).
+    let used = 0;
+    let end = start;
+    while (end < n) {
+      const h = rowHs[end];
+      if (end > start && used + h > avail && tableBreakAllowedBefore(table, end)) break;
+      used += h;
+      end++;
+    }
+
+    // Build the slice element: a subset of rows, its own tblpPr (slice 1 keeps the
+    // original in-flow anchor; continuations anchor at the body top via tblpY=0).
+    // §17.4.78 tblHeader repeats are DELIBERATELY not applied: no fixture shows Word
+    // repeating a floating table's header rows on continuation bands (unlike a block
+    // table), and sample-18/21 have no header rows — so the safe, observed behaviour
+    // is to carry each row exactly once (UNOBSERVED for headers; revisit with a
+    // header fixture if one surfaces).
+    const sliceTp: TblpPr = firstSlice ? tp : { ...tp, tblpY: 0 };
+    const sliceEl = {
+      ...table,
+      type: 'table',
+      rows: table.rows.slice(start, end),
+      tblpPr: sliceTp,
+    } as unknown as PaginatedBodyElement;
+    // B2 stage 1b — stamp the full column grid (constant across slices) + this
+    // slice's own rows so the paint pass (renderFloatTable → computeTableLayout)
+    // reuses them 1:1 instead of re-measuring, and emitSlice's box math below reuses
+    // the same stamp.
+    stampTableLayout(sliceEl, colWidthsPt, rowHs.slice(start, end), contentWPt);
+
+    emitSlice?.(sliceEl);
+
+    start = end;
+    firstSlice = false;
+    if (start < n) advancePage();
+  }
+
+  // Terminal page's region top: the anchor paragraph flows from the body top beside
+  // the final band.
+  return regionTopY();
 }
 
 /**

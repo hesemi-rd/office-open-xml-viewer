@@ -218,10 +218,14 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
     expect(pages.length).toBe(1);
   });
 
-  it('does NOT relocate a page-anchored frame that overflows (absolute y is honored in place)', () => {
-    // vAnchor="page", y=90: the frame is pinned at page-y 90 with h=60 ⇒ bottom
-    // 150, past the 140 page edge. An absolute page position is the SAME on any
-    // page, so relocation cannot help — Word draws it there and lets it overflow.
+  it('does NOT relocate a page-anchored frame that overflows (absolute y ⇒ kept on page, box clamped)', () => {
+    // vAnchor="page", y=90: the frame is pinned at page-y 90 with h=60 ⇒ its
+    // requested bottom is 150, past the 140 page edge. An absolute page position is
+    // the SAME on any page, so PAGINATION cannot help — the frame stays on page 1
+    // (no relocation). Word does not let it overflow: computeFrameBox clamps the box
+    // UP into the page (to pageH − h; see frame-geometry.test.ts "clamp"). This test
+    // guards only the pagination decision (page count / no relocation); the clamped
+    // box y is asserted in the geometry suite.
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),
@@ -235,9 +239,11 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
   });
 
-  it('does NOT relocate a margin-anchored frame that overflows (absolute y is honored in place)', () => {
-    // vAnchor="margin", y=70: frame at margin-top(20)+70 = 90, h=60 ⇒ bottom 150,
-    // past the bottom margin. Absolute ⇒ left in place (mirrors vAnchor="page").
+  it('does NOT relocate a margin-anchored frame that overflows (absolute y ⇒ kept on page, box clamped)', () => {
+    // vAnchor="margin", y=70: frame at margin-top(20)+70 = 90, h=60 ⇒ requested
+    // bottom 150, past the bottom margin. Absolute ⇒ kept on page 1 (mirrors
+    // vAnchor="page"); the box is clamped up into the margin band by computeFrameBox
+    // (geometry suite). This test guards only the pagination decision.
     const body = [
       para({ text: 'a' }),
       para({ text: 'b' }),

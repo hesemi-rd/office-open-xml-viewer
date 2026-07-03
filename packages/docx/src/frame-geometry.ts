@@ -159,6 +159,43 @@ export function resolveAlignedPosV(
 }
 
 /**
+ * Clamp an absolutely-positioned (vAnchor=page/margin) box so it stays inside its
+ * vertical container band — Word ground truth (sample-17 Sec B frame,
+ * sample-18 Sec B floating table): a `vAnchor="page"` box requesting a `y` that
+ * would push its BOTTOM past the physical page edge is shifted UP so its bottom
+ * sits exactly on the page bottom (measured 741.9pt = 841.9 − 100 for a 100pt
+ * box), NOT left overflowing. This is the frame / floating-table analogue of the
+ * pagination keep-with-anchor that a vAnchor="text" box gets instead (moving the
+ * anchor cursor); page/margin boxes have an ABSOLUTE in-page y that pagination
+ * cannot help, so the geometry clamps them here.
+ *
+ *   y = max(containerStart, containerEnd − boxH)
+ *
+ * The floor is `containerStart` (container top): a box TALLER than its container
+ * pins to the top and is allowed to overflow the bottom (clamping to
+ * `end − boxH < start` would push it ABOVE the container top, which is worse). For
+ * vAnchor="page" the container is the physical page [0, pageH], matching the
+ * sample-17/18 physical-bottom measurements. For vAnchor="margin" the clamp
+ * target (container end = the bottom text margin) is NOT independently observed —
+ * no fixture pins where Word clamps a margin-anchored overflow — so it is ASSUMED
+ * to be the container's own end (the margin band bottom), symmetric with the page
+ * case. Callers pass the SAME `frameYContainer(vAnchor,…)` band the placement was
+ * resolved against, so the clamp target always matches the anchor semantics.
+ *
+ * Only meaningful for vAnchor=page/margin: the caller gates on that (vAnchor=text
+ * is handled by pagination, and its band start/end ride the flow cursor, so this
+ * clamp must not run there). Idempotent for a box that already fits (y unchanged).
+ */
+export function clampAbsBoxIntoContainer(
+  y: number,
+  boxH: number,
+  band: { start: number; end: number },
+): number {
+  if (y + boxH <= band.end) return y; // already inside — no-op (common case).
+  return Math.max(band.start, band.end - boxH);
+}
+
+/**
  * Resolve a frame's box in canvas px. `paraTop` is the in-flow top of the frame
  * paragraph (post-spaceBefore). `contentW`/`contentH` are the frame content's
  * measured natural size (px); `anchorLineHpx` is one line height of the
@@ -232,6 +269,16 @@ export function computeFrameBox(
   } else {
     // §17.3.1.11 y: absolute signed offset from the vAnchor band start.
     frameY = vBand.start + (fp.y != null ? fp.y * sc : 0);
+  }
+
+  // Word ground truth (sample-17 Sec B): a vAnchor=page/margin frame whose bottom
+  // would fall past its container is shifted UP to sit flush on the container
+  // bottom (physical page edge for page-anchored), not left overflowing. A
+  // vAnchor="text" frame is excluded — its overflow is handled by the paginator's
+  // keep-with-anchor (moving the anchor cursor), and its band rides the flow, so
+  // clamping here would be wrong. See clampAbsBoxIntoContainer.
+  if (fp.vAnchor === 'page' || fp.vAnchor === 'margin') {
+    frameY = clampAbsBoxIntoContainer(frameY, frameH, vBand);
   }
 
   // Exclusion padding: hSpace L/R applies only with wrap="around" (§17.3.1.11
