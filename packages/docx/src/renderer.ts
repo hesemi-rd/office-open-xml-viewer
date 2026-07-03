@@ -46,8 +46,10 @@ import {
   symbolTextToUnicodeSegments,
   docxBorderDashArray,
   fillDoubleBorder,
+  drawUnderline,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
+import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
   segmentsHaveRtl,
@@ -5477,11 +5479,48 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         const isDeletion = revActive && s.revision?.kind === 'deletion';
 
         if (s.underline || isInsertion) {
-          ctx.strokeStyle = lineColor;
-          ctx.lineWidth = lineW;
+          // The docx underline anchor (byte-stable across releases): the single
+          // rule sits `effSizePx*0.12` below the baseline, at weight `lineW`.
           const uyRaw = baseline + yOffset + effSizePx * 0.12;
-          const uy = uyRaw + crispOffset(uyRaw, lineW, state.dpr);
-          ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + decoW, uy); ctx.stroke();
+          // A styled underline (§17.3.2.40 `<w:u w:val>` other than single) is
+          // drawn by the shared core painter (§20.1.10.82 ST_TextUnderlineType).
+          // Insertions carry no style, so they always take the single path.
+          // `s.underlineColor` (§17.3.2.40 `w:u@color`) overrides the glyph
+          // colour when a concrete hex is given; `auto` (or absent) follows the
+          // glyph colour.
+          const uStyle = !isInsertion ? s.underlineStyle : undefined;
+          if (uStyle) {
+            const uColor =
+              s.underlineColor && s.underlineColor !== 'auto'
+                ? `#${s.underlineColor}`
+                : lineColor;
+            // core.drawUnderline computes its own rule y as `baseline +
+            // max(2, coreLineW)`. Pass a `baseline` shifted so that lands exactly
+            // on the docx anchor `uyRaw`, keeping styled underlines flush with the
+            // single rule's position. coreLineW mirrors core's own weight formula.
+            const coreLineW = Math.max(1, effSizePx * 0.05);
+            const coreBaseline = uyRaw - Math.max(2, coreLineW);
+            drawUnderline(
+              ctx,
+              x,
+              coreBaseline,
+              decoW,
+              effSizePx,
+              uColor,
+              docxUnderlineToDrawingML(uStyle),
+              state.dpr,
+            );
+            ctx.setLineDash([]);
+          } else {
+            const uColor =
+              !isInsertion && s.underlineColor && s.underlineColor !== 'auto'
+                ? `#${s.underlineColor}`
+                : lineColor;
+            ctx.strokeStyle = uColor;
+            ctx.lineWidth = lineW;
+            const uy = uyRaw + crispOffset(uyRaw, lineW, state.dpr);
+            ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + decoW, uy); ctx.stroke();
+          }
         }
 
         if (s.strikethrough || isDeletion) {

@@ -23,7 +23,7 @@ import { pptxUnderlineDashArray } from '../draw/dash.js';
  *   deliberately omits the offset.
  */
 export function drawUnderline(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x: number,
   baseline: number,
   width: number,

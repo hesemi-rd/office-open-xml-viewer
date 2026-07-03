@@ -47,6 +47,13 @@ export interface LayoutTextSeg {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  /** ECMA-376 §17.3.2.40 `<w:u w:val>` — raw ST_Underline (§17.18.99) style; the
+   *  renderer maps it to DrawingML §20.1.10.82 for `core.drawUnderline`. Absent
+   *  ⇒ plain single rule. */
+  underlineStyle?: string;
+  /** ECMA-376 §17.3.2.40 `<w:u w:color>` — underline-only colour (hex 6 or
+   *  `auto`). Absent ⇒ the underline follows the glyph colour. */
+  underlineColor?: string;
   strikethrough: boolean;
   fontSize: number;  // pt
   color: string | null;
@@ -1254,6 +1261,11 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         bold: cs ? csBold : base.bold,
         italic: cs ? csItalic : base.italic,
         underline: base.underline,
+        // §17.3.2.40 underline style / colour — carried only on DocxTextRun (a
+        // FieldRun draws single). Kept raw ST_Underline; the renderer normalizes
+        // to DrawingML §20.1.10.82 at draw time.
+        underlineStyle: (base as DocxTextRun).underlineStyle,
+        underlineColor: (base as DocxTextRun).underlineColor,
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
