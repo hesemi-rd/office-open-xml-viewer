@@ -41,8 +41,10 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 > CH1–CH4/CH11 は PR fix/chart-correctness(9 commits)。検証 = vitest 1757 / typecheck / cargo 3 点 / VRT 163 全 green・参照画像差分ゼロ。独立 4 観点レビュー(spec 忠実性・正しさ・横断統一・テスト品質)→ REQUEST_CHANGES 3 件(MAJOR)を修正済み。別トラック送りの発見: pptx の cat_axis_crosses/crossesAt None 固定(CH6 圏)、percentStacked 分母計算の三重実装の共通化(コスメティック)、stacked の null セル= dispBlanksAs zero 既定(CH9 圏)
 
 ### 正しさ(xlsx / DrawingML / docx)
-- [ ] XL1: date1904(+1900-02-29 バグ互換)
-- [ ] XL2: General 書式 11 有効桁
+- [x] XL1: date1904(+1900-02-29 バグ互換) — serial→date 変換を core `excel-date.ts` に集約(逆変換 `utcDateToExcelSerial` 込み、serial 60 は非生成)。**追加発見: 重複は 2 でなく 3 実装だった**(formula.ts の YEAR/MONTH/DAY/WEEKDAY 系も 1900 バグ未補正 → 委譲で解消)。**横断拡張: chart `c:date1904`(§21.2.2.38)も同じ穴** → ooxml-common `extract_chart_date1904` + xlsx/pptx 両パーサー + core renderer 全 19 箇所へ伝搬(chartEx は cx: スキーマに c:date1904 が無いため対象外)。chart spec の epoch 文言(Dec 31 基準)はセル定義 §18.17.4.1 と 1 日矛盾するため後者に統一(文言通りだと全日付が 1 日ズレることを数値検証)。TODAY/NOW volatile は「エンジンが 1900 系 serial を生成 → 1900 系で書式化」で自己一貫(formula エンジン自体の date1904 対応は別トラック)
+- [x] XL2: General 書式 11 有効桁 — `formatGeneralNumber`(toPrecision(11) + trailing zero 除去 + 12 桁以上/1e-6 未満は Excel 式指数表記 E+NN)。小さい数の切替閾値(< 1e-5)は Microsoft 未文書だが Excel 実挙動(1E-06)と一致する一貫則としてコメント明示(spec レビューで許容判定)。列幅依存の桁数調整はスコープ外と明記。チャートの `formatChartVal`(toFixed(6))は同じ穴でないことを確認し不変
+
+> XL1/XL2 は PR fix/xlsx-date-general(9 commits)。検証 = vitest 1806 / typecheck / cargo 3 点(304 tests)/ VRT 163 全 green・参照画像差分ゼロ。独立 4 観点レビュー → REQUEST_CHANGES 2 件(formula.ts の第 3 重複、TODAY/NOW×date1904 テスト欠落)+ LOW 群を全て同ブランチで解消。別トラック送り: formula エンジンへの date1904 伝搬(1904 ブックの TODAY() が 1904 系 serial を返すべき — 現設計は表示レベルで自己一貫)、mcp-server の cell_display は生値抽出面なので General 丸め対象外と判定
 - [ ] XF8: scrgbClr / hslClr / prstClr transforms
 - [ ] XF11: docx 下線 17 種(pptx drawUnderline の core hoist 込み)
 - [ ] XF12: cNvPr@hidden(3フォーマット)
