@@ -26,12 +26,46 @@ const PIXEL_THRESHOLD = 0.20;
 // Set to null to always pass (report-only mode).
 const FAIL_ABOVE_PCT = 20;
 const REGRESSION_PCT = 0.5;
+// Fidelity-score ratchet: fail if a slide's match-% vs its reference PNG drops
+// more than this below the committed score. Catches a renderer change that
+// quietly worsens fidelity against the PowerPoint ground truth even while
+// staying under the coarse FAIL_ABOVE_PCT ceiling.
+const RATCHET_DROP_PCT = 0.5;
 
 // UPDATE_REFS=1 pnpm vrt → adopt the current canvas output as the new reference.
 // Skips diff comparison and writes the screenshot straight into references/.
 const UPDATE_REFS = process.env.UPDATE_REFS === '1';
+// UPDATE_SCORES=1 pnpm vrt → record the current fidelity match-% into
+// references/<name>/scores.json WITHOUT touching the reference PNGs. This is how
+// the committed demo scores are (re)generated; it never rewrites ground truth.
+const UPDATE_SCORES = process.env.UPDATE_SCORES === '1';
 const SNAPSHOT = process.env.VRT_SNAPSHOT === '1';
 const RUN_MODE = process.env.VRT_MODE === 'regression' ? 'regression' : 'fidelity';
+
+// Per-sample fidelity scores live next to the reference PNGs
+// (references/<name>/scores.json), so they inherit the exact same commit policy:
+// demo scores are tracked, private scores are gitignored. Keyed by item id
+// (e.g. "slide-3") → match-% (2 dp). Read-modify-write is safe because the VRT
+// config runs sequentially (fullyParallel: false).
+function scoresPathFor(name: string): string {
+  return `tests/visual/references/${name}/scores.json`;
+}
+function readScores(name: string): Record<string, number> {
+  const p = scoresPathFor(name);
+  if (!existsSync(p)) return {};
+  try {
+    return JSON.parse(readFileSync(p, 'utf8')) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+function writeScore(name: string, key: string, matchPct: number): void {
+  const scores = readScores(name);
+  scores[key] = Math.round(matchPct * 100) / 100;
+  mkdirSync(`tests/visual/references/${name}`, { recursive: true });
+  const ordered = Object.fromEntries(Object.entries(scores).sort(([a], [b]) => a.localeCompare(b)));
+  writeFileSync(scoresPathFor(name), JSON.stringify(ordered, null, 2) + '\n');
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 test.describe('visual regression', () => {
@@ -137,6 +171,24 @@ test.describe('visual regression', () => {
             `${name} slide ${slideNum} pixel diff ${diffPct.toFixed(1)}% exceeds ` +
             `${limit}% in ${RUN_MODE} mode`
           );
+        }
+
+        // Fidelity-score ratchet (fidelity mode only; the regression mode above
+        // already gates against the captured baseline). UPDATE_SCORES rewrites
+        // the stored score; otherwise a committed score is a floor.
+        if (RUN_MODE === 'fidelity') {
+          const key = `slide-${slideNum}`;
+          if (UPDATE_SCORES) {
+            writeScore(name, key, matchPct);
+          } else {
+            const prior = readScores(name)[key];
+            if (prior !== undefined && matchPct < prior - RATCHET_DROP_PCT) {
+              throw new Error(
+                `${name} ${key} fidelity regressed: match ${matchPct.toFixed(2)}% ` +
+                `is >${RATCHET_DROP_PCT}pt below the recorded ${prior.toFixed(2)}%`
+              );
+            }
+          }
         }
       });
     }
