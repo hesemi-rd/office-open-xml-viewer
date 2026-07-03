@@ -92,16 +92,18 @@ export const WORD_MIN_LINE_START_PT = 72;
  *  sample-22 page 7: a frame authored so the gap is 72.0pt is beside). But a gap
  *  that is nominally 1 inch is computed as content-width − frame-width through
  *  twip→EMU→px conversions and lands slightly under 72: this renderer computes
- *  71.963716pt for the 72.0pt frame (a ~0.036pt deficit — half-twip authoring
- *  granularity, not pure IEEE-754). Without tolerance the inclusive boundary
- *  flips to below and disagrees with Word. Half a twip (1 twip = 1/20 pt) is the
- *  natural authoring granularity of a frame width, so a gap short of 1 inch by
- *  less than half a twip is treated as exactly 1 inch. This is ≫ the observed
- *  0.036pt deficit yet ≪ the 2pt step that discriminates the fixtures (70pt
- *  stays below, 72pt goes beside), so it never promotes a genuinely sub-inch
- *  gap. Applied in the render's px space as `× scale` (see resolveLineFloatWindow).
- *  Same half-unit-rounding rationale as FLOAT_PAGE_RIGHT_SLACK. */
-export const LINE_START_GAP_EPS_PT = 0.05; // half a twip
+ *  71.963716pt for the 72.0pt frame (a ~0.036pt deficit — sub-twip conversion
+ *  rounding, not pure IEEE-754). Without tolerance the inclusive boundary
+ *  flips to below and disagrees with Word. One twip (1/20 pt = 0.05pt) is the
+ *  authoring granularity of a frame width, so a gap short of 1 inch by less
+ *  than one twip is treated as exactly 1 inch. One twip covers the observed
+ *  0.036pt deficit (a half twip, 0.025pt, would NOT) yet is ≪ the 2pt step
+ *  that discriminates the fixtures (70pt stays below, 72pt goes beside), so it
+ *  never promotes a genuinely sub-inch gap. Applied in the render's px space
+ *  as `× scale` (see resolveLineFloatWindow). Same rationale as
+ *  FLOAT_PAGE_RIGHT_SLACK: a tolerance sized to the coordinate-rounding
+ *  granularity it absorbs. */
+export const LINE_START_GAP_EPS_PT = 0.05; // one twip (1/20 pt)
 
 /** The `requiredWidth` (px) every docx caller passes to `resolveLineFloatWindow`
  *  for a line-start probe: Word's 1-inch minimum side-gap, minus the half-twip
