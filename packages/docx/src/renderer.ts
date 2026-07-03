@@ -5688,6 +5688,15 @@ interface LayoutTextSeg {
    *  like "28-02-2026" in an Arabic complex-script run reorders to "2026-02-28"
    *  exactly as Word renders it (ECMA-376 §17.3.2.20 w:lang w:bidi). */
   digitsAsAN?: boolean;
+  /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`) DECLARED on the
+   *  originating run, retained purely for a line-box DESIGN-LINE FLOOR. Word
+   *  reserves the declared eastAsia face's line height even when this particular
+   *  segment renders Latin glyphs (the common Japanese encoding puts a tabled CJK
+   *  face — Meiryo — on eastAsia while ascii stays an untabled Latin default). The
+   *  BODY line breaker ignores this (its floor is `intendedSingleLinePx(fontFamily)`
+   *  per segment, so body behaviour is unchanged); the TEXT-BOX metrics
+   *  (`lineMetricsFor`) floor on it so a text box matches PR #640/#646/#648. */
+  eaFloorFamily?: string | null;
 }
 
 /**
@@ -5977,8 +5986,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     // ECMA-376 §17.3.2.26 eastAsia axis. Within a non-complex-script slice, CJK
     // code points take the eastAsia face while Latin/digits keep the ascii face
     // (`base.fontFamily`). Only `DocxTextRun` carries the axis; absent (field
-    // runs / single-axis parser output) ⇒ fall back to ascii, exactly like
-    // `shapeTokenFamily`. Bold/italic/size are NOT axis-specific here — eastAsia
+    // runs / single-axis parser output) ⇒ fall back to ascii. Text-box runs feed
+    // this same builder (via `shapeRunToDocRun`), so a text box's per-script face
+    // is picked here too. Bold/italic/size are NOT axis-specific here — eastAsia
     // shares the Latin (non-cs) toggles, so only the family differs.
     const eaFontFamily = (base as DocxTextRun).fontFamilyEastAsia ?? base.fontFamily;
 
@@ -6021,6 +6031,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         revision,
         rtl,
         digitsAsAN: digitsAsAN ? true : undefined,
+        // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
+        // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
+        eaFloorFamily: eaFontFamily,
       });
       firstSeg = false;
       gluePending = false; // glue applies only to a piece's FIRST segment
@@ -6343,10 +6356,11 @@ function splitByComplexScript(text: string): { text: string; cs: boolean }[] {
  * Split a (non-complex-script) string into maximal runs that are uniformly
  * East-Asian (CJK) or not, per the §17.3.2.26 ascii/eastAsia axis split. Returns
  * `[{text, ea}]` in logical order. CJK classification uses the canonical
- * {@link isCjkBreakChar} from `@silurus/ooxml-core` — the SAME predicate the
- * shape-text path ({@link shapeTokenFamily}) and the body wrap/justify paths
- * use, so the eastAsia face is picked consistently across renderers with no name
- * heuristics. Each returned slice stays single-font when emitted, preserving the
+ * {@link isCjkBreakChar} from `@silurus/ooxml-core` — the SAME predicate the body
+ * wrap/justify paths use. Text-box text now feeds this splitter too (its runs are
+ * adapted to body runs and run through {@link buildSegments}), so the eastAsia
+ * face is picked consistently across body and shape with no name heuristics. Each
+ * returned slice stays single-font when emitted, preserving the
  * measure==draw / docGrid char-grid invariant.
  *
  * Boundary rule: classification is purely per code point (every CJK code point
@@ -7405,7 +7419,7 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // sits on top of the panel. Rotation is intentionally not applied to body
   // text — the cover-template usage we care about uses anchor-only text.
   if (shape.textBlocks && shape.textBlocks.length > 0) {
-    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses, state.images);
+    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses, state.images, state);
   }
 }
 
@@ -7413,166 +7427,6 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
  *  natural pt size. If the natural width already fits, draw at natural size ×
  *  scale; otherwise scale down to innerW. Falls back to a square innerW box when
  *  the natural size is unknown (0). Returns px dimensions. */
-/** Greedy line-wrap for text-box body text within `maxWidth` px (ECMA-376
- *  §21.1.2.1.1 — text-box content wraps to the inset box width unless wrap is
- *  off). Latin words break at spaces (the space stays with the preceding word);
- *  CJK / ideographic characters may break between any two (they carry no
- *  inter-word spaces). `ctx.font` must already be the block's font. A single
- *  token wider than `maxWidth` is left to overflow its own line (no
- *  hyphenation). Always returns at least one line. */
-// Ideographic / CJK classification for the shape-text tokenizers uses the
-// canonical `isCjkBreakChar` from @silurus/ooxml-core (imported above), the same
-// predicate the body's wrap/justify paths use. It covers U+3000–U+9FFF, the
-// Hangul Syllables block U+AC00–U+D7A3, U+F900–U+FAFF and U+FF00–U+FFEF — so
-// Korean text-box text is classified as CJK (and takes the eastAsia face), which
-// the previous local `isCjkCp` dropped. NOTE: that local predicate also covered
-// the SIP Ext-B range U+20000–U+2FA1F; `isCjkBreakChar` does not, so it is
-// intentionally dropped here. If Ext-B ideographs ever need CJK treatment, the
-// fix belongs in the core predicate (shared by pptx/docx/xlsx), not a docx-local
-// re-fork.
-
-/** Per-token font family for a shape-text run, picked by the token's script
- *  (ECMA-376 §17.3.2.26): a CJK token (its first code point is East-Asian) uses
- *  the run's eastAsia axis, a Latin/digit token uses the ascii axis. The
- *  tokenizer ({@link tokenizeShapeText}) makes every token homogeneous — one CJK
- *  char, or a Latin word incl. its trailing space — so the first code point
- *  classifies the whole token. Falls back to the ascii `fontFamily` when the
- *  eastAsia axis is absent (older parser output / single-axis runs). The font
- *  CLASS (serif/sans) then comes from `fontFamilyClasses` (fontTable §17.8.3.10),
- *  so a serif ascii face and a gothic eastAsia face render in their own styles
- *  with no name heuristics. */
-function shapeTokenFamily(token: string, run: ShapeTextRun): string | null {
-  const cp = token.codePointAt(0) ?? 0;
-  return isCjkBreakChar(cp) ? (run.fontFamilyEastAsia ?? run.fontFamily ?? null) : (run.fontFamily ?? null);
-}
-
-/** Split a string into atomic wrap units: each CJK char alone, or a run of
- *  non-CJK characters up to and including a trailing space. Shared by the
- *  single-format ({@link wrapShapeText}) and rich ({@link wrapShapeRuns})
- *  text-box layout paths so they tokenize identically. */
-function tokenizeShapeText(text: string): string[] {
-  const tokens: string[] = [];
-  let buf = '';
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) ?? 0;
-    if (isCjkBreakChar(cp)) {
-      if (buf) {
-        tokens.push(buf);
-        buf = '';
-      }
-      tokens.push(ch);
-    } else if (ch === ' ') {
-      buf += ch;
-      tokens.push(buf);
-      buf = '';
-    } else {
-      buf += ch;
-    }
-  }
-  if (buf) tokens.push(buf);
-  return tokens;
-}
-
-function wrapShapeText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number,
-  // ECMA-376 §17.3.1.12 — the FIRST line wraps to this width (paraW − firstLine
-  // indent); continuation lines use `maxWidth` (paraW). Defaults to `maxWidth`
-  // so a no-indent caller keeps the original single-width wrap exactly.
-  firstLineWidth: number = maxWidth,
-): string[] {
-  if (!text) return [''];
-  if (maxWidth <= 0) return [text];
-  const tokens = tokenizeShapeText(text);
-
-  const lines: string[] = [];
-  let cur = '';
-  // The first line being filled uses firstLineWidth; once a line wraps the
-  // remaining lines use maxWidth.
-  let limit = firstLineWidth;
-  for (const tok of tokens) {
-    if (cur !== '' && ctx.measureText(cur + tok).width > limit) {
-      lines.push(cur.replace(/\s+$/, ''));
-      cur = tok.replace(/^\s+/, ''); // a wrapped line never starts with a space
-      limit = maxWidth;
-    } else {
-      cur += tok;
-    }
-  }
-  if (cur !== '') lines.push(cur.replace(/\s+$/, ''));
-  return lines.length ? lines : [text];
-}
-
-/** A single wrap unit tagged with the run it came from. `text` is a Latin word
- *  (incl. trailing space) or one CJK character (see {@link tokenizeShapeText}).
- *  `width` is its measured advance in px under the run's font (filled during
- *  greedy line-fill). */
-interface RichToken {
-  text: string;
-  run: ShapeTextRun;
-  width: number;
-}
-
-/** Greedy line-wrap for a rich (mixed-format) text-box paragraph. Builds one
- *  flat token stream across all `runs` (each token carrying its run's format),
- *  measures every token under its own font, and fills lines to `maxWidth` px —
- *  the same wrap rule {@link wrapShapeText} uses, but per-token-font-aware.
- *  A leading space is dropped when a line wraps (a wrapped line never starts
- *  with a space); a token wider than `maxWidth` stays on its own line. Mutates
- *  `ctx.font` while measuring. Always returns at least one (possibly empty)
- *  line. */
-function wrapShapeRuns(
-  ctx: CanvasRenderingContext2D,
-  runs: ShapeTextRun[],
-  maxWidth: number,
-  scale: number,
-  fontFamilyClasses: Record<string, string>,
-  // ECMA-376 §17.3.1.12 — first line wraps to this width (paraW − firstLine
-  // indent); continuation lines use `maxWidth` (paraW). Defaults to `maxWidth`
-  // so a no-indent caller keeps the original single-width wrap exactly.
-  firstLineWidth: number = maxWidth,
-): RichToken[][] {
-  const tokens: RichToken[] = [];
-  for (const run of runs) {
-    const fontPx = run.fontSizePt * scale;
-    for (const text of tokenizeShapeText(run.text)) {
-      // Measure each token under its OWN per-character font (ascii vs eastAsia
-      // axis, §17.3.2.26) so a CJK glyph's advance is read from the eastAsia face
-      // and a Latin/digit glyph's from the ascii face.
-      ctx.font = buildFont(run.bold ?? false, run.italic ?? false, fontPx, shapeTokenFamily(text, run), fontFamilyClasses);
-      tokens.push({ text, run, width: ctx.measureText(text).width });
-    }
-  }
-  if (tokens.length === 0) return [[]];
-
-  const lines: RichToken[][] = [];
-  let cur: RichToken[] = [];
-  let curW = 0;
-  // The first line being filled uses firstLineWidth; once a line wraps the
-  // remaining lines use maxWidth.
-  let limit = firstLineWidth;
-  for (const tok of tokens) {
-    if (cur.length > 0 && curW + tok.width > limit) {
-      lines.push(cur);
-      limit = maxWidth;
-      // A wrapped line never starts with a space — drop a leading space token.
-      if (tok.text.trim() === '') {
-        cur = [];
-        curW = 0;
-        continue;
-      }
-      cur = [tok];
-      curW = tok.width;
-    } else {
-      cur.push(tok);
-      curW += tok.width;
-    }
-  }
-  if (cur.length > 0) lines.push(cur);
-  return lines.length ? lines : [[]];
-}
-
 function fitShapeImage(
   widthPt: number,
   heightPt: number,
@@ -7590,9 +7444,73 @@ function fitShapeImage(
   return { w: innerW, h: natH * s };
 }
 
+/** Adapt a text-box run ({@link ShapeTextRun}) to the body run model
+ *  ({@link DocRun} of `type:'text'`) so text-box paragraphs feed the SAME
+ *  segment builder / line breaker the body uses ({@link buildSegments} +
+ *  {@link layoutLines}) — giving them kinsoku (§17.15.1.58–.60), UAX#9 bidi,
+ *  §17.18.44 justification and §17.3.1.37 tab stops. A `ShapeTextRun` carries a
+ *  strict SUBSET of `DocxTextRun`'s formatting (text, size, colour, the ascii +
+ *  eastAsia font axes §17.3.2.26, bold, italic); every field the shape model
+ *  lacks (underline/strike/highlight/border/ruby/rtl/cs/…) takes its neutral
+ *  default, so the run behaves exactly like a plain body text run. */
+function shapeRunToDocRun(run: ShapeTextRun): DocRun {
+  return {
+    type: 'text',
+    text: run.text,
+    bold: run.bold ?? false,
+    italic: run.italic ?? false,
+    underline: false,
+    strikethrough: false,
+    fontSize: run.fontSizePt,
+    color: run.color ?? null,
+    fontFamily: run.fontFamily ?? null,
+    // §17.3.2.26 eastAsia axis — routed per CJK code point by buildSegments, the
+    // SAME split the old shapeTokenFamily tokenizer performed, but now inside the
+    // shared builder so measure == draw with no bespoke tokenizer.
+    fontFamilyEastAsia: run.fontFamilyEastAsia ?? null,
+    isLink: false,
+    background: null,
+    vertAlign: null,
+    hyperlink: null,
+  } as unknown as DocRun;
+}
+
+/** Synthesize the `RenderState` fields {@link buildSegments} / {@link layoutLines}
+ *  need for text-box layout when the caller does not thread the document state
+ *  (unit tests call {@link renderShapeText} with just ctx/scale/fonts). Only the
+ *  fields those two functions actually read for PLAIN TEXT runs are populated —
+ *  buildSegments touches `state` solely on `field`/`noteRef` runs (which shape
+ *  runs never produce), so an empty note map + spec-default kinsoku / tab
+ *  interval is exact here. The production call site passes the real state, so
+ *  document-level kinsoku (§17.3.1.16) / defaultTabStop (§17.15.1.25) flow
+ *  through unchanged. */
+function shapeRenderState(
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+  fontFamilyClasses: Record<string, string>,
+  images: Map<string, DecodedImage>,
+): RenderState {
+  return {
+    ctx,
+    scale,
+    fontFamilyClasses,
+    images,
+    kinsoku: DEFAULT_KINSOKU_RULES,
+    defaultTabPt: DEFAULT_TAB_PT,
+  } as unknown as RenderState;
+}
+
 /** Render a shape's body text inside its bounding box, honoring lIns/tIns/
  *  rIns/bIns and the wps:bodyPr @anchor (t / ctr / b). Alignment within each
  *  line is read from the per-block paragraph alignment.
+ *
+ *  Text is laid out by the main line engine ({@link buildSegments} +
+ *  {@link layoutLines}), so a text box gets the SAME kinsoku (§17.15.1.58–.60),
+ *  UAX#9 bidi (§17.3.1.6), §17.18.44 justification and §17.3.1.37 tab stops the
+ *  body does. Shape-specific concerns — insets, the bodyPr @anchor, the
+ *  §21.1.2.1.1 noAutofit clip, per-paragraph §17.3.1.33 spacing, and inline
+ *  images — stay here; only the line-breaking/segmentation was moved onto the
+ *  shared engine.
  *
  *  Blocks carrying an `imagePath` (an inline image inside the text box, e.g. a
  *  WMF chart wrapped as the sole content of a paragraph) draw the decoded
@@ -7609,7 +7527,21 @@ export function renderShapeText(
   scale: number,
   fontFamilyClasses: Record<string, string> = {},
   images: Map<string, DecodedImage> = new Map(),
+  // The document render state. Threaded from the production caller so text-box
+  // text is laid out by the SAME segment builder / line breaker the body uses
+  // ({@link buildSegments} + {@link layoutLines}) with the document's resolved
+  // kinsoku (§17.3.1.16) and defaultTabStop (§17.15.1.25). Optional: unit tests
+  // call this with only ctx/scale/fonts, so a minimal state is synthesized from
+  // those (buildSegments reads `state` only on field/noteRef runs, which shape
+  // runs never produce — so the minimal state is exact for text-box content).
+  state?: RenderState,
 ): void {
+  const effState: RenderState =
+    state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
+  // Default glyph colour for tab leaders (§17.3.1.37) drawn on this path. Text
+  // runs carry their own colour; a leader has none, so it takes the document
+  // default (black when the caller threads no state — the unit-test path).
+  const defaultColor = effState.defaultColor ?? '#000000';
   const blocks = shape.textBlocks ?? [];
   const lIns = (shape.textInsetL ?? 0) * scale;
   const tIns = (shape.textInsetT ?? 0) * scale;
@@ -7643,10 +7575,23 @@ export function renderShapeText(
   // reserve their fitted height. The computed layout drives both vertical
   // anchoring (totalH) and the draw pass (no re-wrapping).
   type BlockIndent = { leftPx: number; firstPx: number; paraW: number; firstLineW: number };
+  // A text-box paragraph laid out by the MAIN engine: `lines` are the shared
+  // LayoutLine[] (from buildSegments → layoutLines, so kinsoku / bidi / justify /
+  // tabs all apply), `lineHeights`/`baselineOffsets` give each line its shape
+  // line-box height + centred baseline (PR #640 discipline, computed over the
+  // line's segments), and `baseRtl` is the paragraph base direction (§17.3.1.6
+  // `<w:bidi>` when set, else first-strong of the block text).
   type BlockLayout =
     | { kind: 'image'; fitW: number; fitH: number; ind: BlockIndent }
-    | { kind: 'text'; lines: string[]; lineH: number; baselineOffset: number; ind: BlockIndent }
-    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[]; baselineOffsets: number[]; ind: BlockIndent };
+    | {
+        kind: 'text';
+        lines: LayoutLine[];
+        lineHeights: number[];
+        baselineOffsets: number[];
+        baseRtl: boolean;
+        alignment: string;
+        ind: BlockIndent;
+      };
   // ECMA-376 line box: the font's NATURAL line height (OS/2 win metrics, read via
   // the browser's fontBoundingBox and corrected for substituted faces by
   // correctLineMetrics), NOT a flat 1.2×em. The flat factor understates real
@@ -7724,6 +7669,49 @@ export function renderShapeText(
     const baselineOffset = (lineH - glyphNatural) / 2 + c.ascent;
     return { lineH, baselineOffset };
   };
+  // Per-line shape metrics over the line's laid-out segments. The line-box FLOOR
+  // is the MAX intendedSingleLinePx across EVERY text segment (§17.3.2.26; each
+  // buildSegments segment is already single-font, so its own family is both the
+  // ascii and the eastAsia contribution) — mirrors the body's per-segment max
+  // (~5684) and the previous rich path. The measurement face + size come from the
+  // TALLEST text segment. A line with no text segment (e.g. only a tab) falls
+  // back to the block's own font.
+  const lineMetricsFor = (b: ShapeText, line: LayoutLine): { lineH: number; baselineOffset: number } => {
+    let tallest: LayoutTextSeg | null = null;
+    let floorPx = 0;
+    for (const seg of line.segments) {
+      if (!('text' in seg)) continue;
+      const ts = seg as LayoutTextSeg;
+      if (!tallest || ts.fontSize > tallest.fontSize) tallest = ts;
+      // Design-line FLOOR is the MAX intendedSingleLinePx over EVERY segment's
+      // ascii AND declared eastAsia face (§17.3.2.26), at that segment's size —
+      // mirrors the body's per-segment max and the pre-refactor per-run floor.
+      // The eastAsia term (`eaFloorFamily`) is what raises the box to Meiryo when
+      // the run declares it on eastAsia even though the glyphs are Latin. 0 for an
+      // all-untabled line ⇒ unchanged (a pure FLOOR, PR #640/#646/#648).
+      const segPx = ts.fontSize * scale;
+      floorPx = Math.max(
+        floorPx,
+        intendedSingleLinePx(ts.fontFamily ?? null, segPx),
+        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx),
+      );
+    }
+    const fontPx = (tallest?.fontSize ?? b.fontSizePt) * scale;
+    return shapeLineMetrics(
+      tallest?.fontFamily ?? b.fontFamily,
+      tallest?.bold ?? b.bold ?? false,
+      tallest?.italic ?? b.italic ?? false,
+      fontPx,
+      b,
+      // eastAsia axis of the TALLEST segment selects the MEASUREMENT face inside
+      // shapeLineMetrics (the glyph box read for the baseline) when it is the
+      // tabled face that wins the floor; the FLOOR itself is the all-segments max
+      // passed explicitly, so a shorter tabled segment still raises the box.
+      tallest?.eaFloorFamily ?? b.fontFamily,
+      floorPx,
+    );
+  };
+
   const layouts: BlockLayout[] = blocks.map((b) => {
     const ind = indentOf(b);
     if (b.imagePath) {
@@ -7732,77 +7720,59 @@ export function renderShapeText(
       const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, ind.firstLineW, scale);
       return { kind: 'image', fitW, fitH, ind };
     }
-    // Rich path: a paragraph with explicit per-run formatting lays out as mixed
-    // fonts. Each line's height is the TALLEST run's natural line box (ECMA-376
-    // line box ≈ largest font on the line).
-    if (b.runs && b.runs.length > 0) {
-      const lines = wrapShapeRuns(ctx, b.runs, ind.paraW, scale, fontFamilyClasses, ind.firstLineW);
-      const metrics = lines.map((toks) => {
-        const tallest = toks.reduce<RichToken | null>(
-          (best, t) => (best && best.run.fontSizePt >= t.run.fontSizePt ? best : t),
-          null,
-        );
-        const run = tallest?.run;
-        const fontPx = (run?.fontSizePt ?? b.fontSizePt) * scale;
-        // Design-line floor is the MAX intendedSingleLinePx over EVERY run on the
-        // line — both its ascii AND eastAsia face (§17.3.2.26), each at that run's
-        // own size — not just the tallest run's faces. The tallest run may be an
-        // untabled Latin face while a shorter-but-equal-or-smaller Meiryo run
-        // still raises the box to Meiryo's design line; flooring on the tallest
-        // run alone missed that. Mirrors the body's per-segment max (~5684-5685).
-        // 0 for an all-untabled line ⇒ unchanged.
-        const lineFloorPx = toks.reduce((floor, t) => {
-          const runPx = t.run.fontSizePt * scale;
-          return Math.max(
-            floor,
-            intendedSingleLinePx(t.run.fontFamily ?? null, runPx),
-            intendedSingleLinePx(t.run.fontFamilyEastAsia ?? null, runPx),
-          );
-        }, 0);
-        return shapeLineMetrics(
-          run?.fontFamily ?? b.fontFamily,
-          run?.bold ?? false,
-          run?.italic ?? false,
-          fontPx,
-          b,
-          // eastAsia axis (§17.3.2.26) of the TALLEST run selects the measurement
-          // face inside shapeLineMetrics (the glyph box read for the baseline).
-          // The design-line FLOOR, however, is the all-runs max computed above and
-          // passed explicitly — so a shorter tabled run still raises the box.
-          run?.fontFamilyEastAsia,
-          lineFloorPx,
-        );
-      });
-      return {
-        kind: 'rich',
-        lines,
-        lineHeights: metrics.map((x) => x.lineH),
-        baselineOffsets: metrics.map((x) => x.baselineOffset),
-        ind,
-      };
-    }
-    const fontPx = b.fontSizePt * scale;
-    // Single-format (legacy, run-less) fallback. SCOPED OUT of the eastAsia
-    // line-box floor: block-level `ShapeText` carries only the CONFLATED
-    // `fontFamily` (ascii → eastAsia → default, parser.rs resolve_font_with_default)
-    // and has NO block-level eastAsia field on the Rust `ShapeText` struct
-    // (types.rs) or the TS interface (types.ts) — so there is no untabled-ascii /
-    // tabled-eastAsia split to floor against here. In practice the parser emits a
-    // `ShapeTextRun` for every `<w:r>` with text (parser.rs, extract loop), so a
-    // TEXT paragraph always takes the rich path above; this branch only serves
-    // image-less legacy blocks. Wiring an eastAsia floor here would need a new
-    // block-level `font_family_east_asia` field threaded through types.rs + the
-    // parser + types.ts + a WASM rebuild — nontrivial plumbing for a path the
-    // current parser never feeds text into. Deferred as a follow-up rather than
-    // half-plumbed. The rich path (ShapeTextRun.fontFamilyEastAsia) fixes the
-    // common case (PR #646 mirror).
-    const { lineH, baselineOffset } = shapeLineMetrics(b.fontFamily, b.bold ?? false, b.italic ?? false, fontPx, b);
-    return { kind: 'text', lines: wrapShapeText(ctx, b.text, ind.paraW, ind.firstLineW), lineH, baselineOffset, ind };
+    // Text paragraph. Build body-model runs (per-run rich formatting when the
+    // parser surfaced `runs`; otherwise a single synthesized run from the block's
+    // conflated format fields — the image-less legacy path). buildSegments splits
+    // each run into single-font segments (ascii / eastAsia / cs), then layoutLines
+    // breaks them into lines honoring kinsoku + tab stops. Tabs are measured from
+    // the box content-left (`tabOriginPx = leftPx`, the same margin space the
+    // body's `indLeft` establishes). No float wrap context inside a shape, and
+    // shape text is not on the section docGrid character grid (gridDelta 0).
+    const runs: ShapeTextRun[] =
+      b.runs && b.runs.length > 0
+        ? b.runs
+        : [{
+            text: b.text,
+            fontSizePt: b.fontSizePt,
+            color: b.color,
+            fontFamily: b.fontFamily,
+            bold: b.bold,
+            italic: b.italic,
+          } as ShapeTextRun];
+    const docRuns = runs.map(shapeRunToDocRun);
+    const segs = buildSegments(docRuns, effState);
+    const lines = layoutLines(
+      ctx,
+      segs,
+      ind.paraW,
+      ind.firstPx, // signed first-line indent (px): narrows the first line's width
+      scale,
+      b.tabStops ?? [],
+      undefined,
+      fontFamilyClasses,
+      ind.leftPx, // tab origin = content-left indent (§17.3.1.37 margin space)
+      effState.kinsoku,
+      0,
+      effState.defaultTabPt,
+    );
+    const metrics = lines.map((line) => lineMetricsFor(b, line));
+    // Base direction (§17.3.1.6): honor an explicit `<w:bidi>` on the block, else
+    // first-strong of the concatenated block text (the pre-change per-line probe
+    // used the same auto rule; a set flag now overrides it as Word does).
+    const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
+    return {
+      kind: 'text',
+      lines,
+      lineHeights: metrics.map((m) => m.lineH),
+      baselineOffsets: metrics.map((m) => m.baselineOffset),
+      baseRtl,
+      alignment: b.alignment,
+      ind,
+    };
   });
   const blockHeight = (l: BlockLayout): number => {
     if (l.kind === 'image') return l.fitH;
-    if (l.kind === 'rich') return l.lineHeights.reduce((s, h) => s + h, 0);
-    return l.lines.length * l.lineH;
+    return l.lineHeights.reduce((s, h) => s + h, 0);
   };
   // ECMA-376 §17.3.1.33 — each text-box paragraph's own spaceBefore/After is
   // reserved inside the box (px). sample-13's "Journal homepage" line carries
@@ -7882,105 +7852,151 @@ export function renderShapeText(
       continue;
     }
 
-    if (layout.kind === 'rich') {
-      // Mixed-format paragraph: each token carries its own run's font/color.
-      // 'distribute' stays centered (no inter-word stretch in shape text), like
-      // the single-format path.
-      const edgeFor = (rtl: boolean) =>
-        block.alignment === 'distribute' ? 'center' : resolveAlignEdge(block.alignment, rtl);
+    if (layout.kind === 'text') {
+      // Text paragraph laid out by the MAIN engine. Draw each LayoutLine inside
+      // the box: align within the per-line INDENTED region (§17.3.1.12 — the first
+      // line carries the signed first-line indent), reorder segments per UAX#9
+      // (§17.18.44 bidi, base = block `<w:bidi>` / first-strong), distribute
+      // §17.18.44 justification slack on `both`/`distribute` lines, and honor tab
+      // widths (already resolved onto each tab seg by layoutLines). Numbering /
+      // floats / decimal-auto-tab / run decorations (body-only) do not apply —
+      // ShapeTextRun carries no underline/border/highlight/ruby/revision.
+      const { lines: lineList, baseRtl, ind } = layout;
+      // 'distribute' spreads every line; 'both' spreads all but the logical-last;
+      // otherwise resolve the physical edge from the block alignment + base dir.
+      const alignEdge = layout.alignment === 'distribute'
+        ? 'justify'
+        : resolveAlignEdge(layout.alignment, baseRtl);
+      const isJustified = alignEdge === 'justify';
+      const stretchLastLine = layout.alignment === 'distribute';
+      const paraNeedsBidi = baseRtl || lineList.some((ln) => segmentsHaveRtl(ln.segments));
       ctx.textAlign = 'left';
-      const ind = layout.ind;
-      for (let li = 0; li < layout.lines.length; li++) {
-        const lineToks = layout.lines[li];
-        const lineH = layout.lineHeights[li];
-        const lineW = lineToks.reduce((s, t) => s + t.width, 0);
-        // ECMA-376 §17.3.1.12 — align within the per-line INDENTED region: the
-        // first line carries the signed first-line indent, continuation lines do
-        // not. region-left = innerX + leftPx (+ firstPx on the first line);
-        // region-width = firstLineW (first) / paraW (continuation).
+      for (let li = 0; li < lineList.length; li++) {
+        const line = lineList[li];
         const isFirstLine = li === 0;
+        const isLastLine = li === lineList.length - 1;
+        const lineH = layout.lineHeights[li];
+        const baseline = cursorY + layout.baselineOffsets[li];
+        // Per-line indented region (§17.3.1.12): content-left = innerX + leftPx,
+        // shifted by the signed first-line indent on the first line; width =
+        // firstLineW (first) / paraW (continuation).
         const regionLeft = innerX + ind.leftPx + (isFirstLine ? ind.firstPx : 0);
         const regionW = isFirstLine ? ind.firstLineW : ind.paraW;
-        // Base direction (first-strong) from the line's own text, matching the
-        // single-format path's per-block resolution but resolved per line.
-        const lineText = lineToks.map((t) => t.text).join('');
-        const baseRtl = resolveBaseDirection(undefined, lineText) === 'rtl';
-        const edge = edgeFor(baseRtl);
-        let tx = regionLeft;
-        if (edge === 'center') {
-          tx = regionLeft + Math.max(0, (regionW - lineW) / 2);
-        } else if (edge === 'right') {
-          tx = regionLeft + Math.max(0, regionW - lineW);
+
+        const segCount = line.segments.length;
+        const visual: LineVisualOrder | null = paraNeedsBidi
+          ? computeLineVisualOrder(line.segments, baseRtl)
+          : null;
+        const lastDrawnSi = visual ? visual.order[segCount - 1] : segCount - 1;
+        const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
+
+        // §17.18.44: a `both` line justifies UNLESS it is the paragraph's true last
+        // line OR ends at a manual break; `distribute` spreads every line.
+        const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
+        const applyJustify = isJustified && (!endsLogicalLine || stretchLastLine);
+
+        // Alignment offset within the region. Justified lines keep 0 (slack is
+        // distributed into the gaps below); the unstretched last line of a
+        // justified RTL paragraph aligns to the leading (right) edge (§17.18.44).
+        let alignOffset = 0;
+        const lineSlack = regionW - lineWidth;
+        if (!applyJustify) {
+          if (alignEdge === 'right') alignOffset = Math.max(0, lineSlack);
+          else if (alignEdge === 'center') alignOffset = Math.max(0, lineSlack / 2);
+          else if (alignEdge === 'justify' && baseRtl) alignOffset = Math.max(0, lineSlack);
         }
-        // Baseline sits at the CENTERED offset below the line-box top (half-
-        // leading, metric-based): the natural line is centered within the
-        // (possibly expanded) line height used for advancing cursorY, matching
-        // the body renderer instead of top-aligning.
-        const baseline = cursorY + layout.baselineOffsets[li];
-        // UAX#9 visual reorder (rule L2), the SAME pass body paragraphs use. A
-        // rich line draws one token per fillText, so — unlike the single-fillText
-        // plain path below, where the canvas reorders internally — the tokens
-        // must be reordered HERE or RTL/mixed text draws in logical order (Word
-        // reverses it). Shape paragraphs carry no explicit rtl flag, so the base
-        // direction is the line's first-strong char; ctx.textAlign stays 'left'
-        // so tx is each token's left edge and ctx.direction is set per token to
-        // its resolved level (so a Latin/number island still shapes LTR).
-        const visual = computeLineVisualOrder(lineToks, baseRtl);
-        for (let vi = 0; vi < lineToks.length; vi++) {
-          const si = visual.order[vi];
-          const tok = lineToks[si];
-          ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
-          const fontPx = tok.run.fontSizePt * scale;
-          // Per-character font (ascii vs eastAsia axis, §17.3.2.26): a CJK token
-          // draws with the eastAsia family, a Latin/digit token with the ascii
-          // family. Mirrors the measure pass so advance and draw agree.
-          ctx.font = buildFont(tok.run.bold ?? false, tok.run.italic ?? false, fontPx, shapeTokenFamily(tok.text, tok.run), fontFamilyClasses);
-          ctx.fillStyle = tok.run.color ? `#${tok.run.color}` : '#000000';
-          ctx.fillText(tok.text, tx, baseline);
-          tx += tok.width;
+        let x = regionLeft + alignOffset;
+
+        // Justified-line slack distribution (§17.18.44) — the SAME kernel the body
+        // uses. Positive slack expands inter-word + inter-CJK gaps to fill the
+        // region; negative slack compresses spaces so the last glyph lands on the
+        // region edge. Leading whitespace (a 字下げ indent) is not stretched (LTR).
+        let segStretch: Map<number, SegStretch> | null = null;
+        let distPerGap = 0;
+        let firstContentSi = 0;
+        if (applyJustify) {
+          if (!paraNeedsBidi) {
+            for (let i = 0; i < segCount; i++) {
+              const seg = line.segments[i];
+              if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
+            }
+          }
+          const minPerGap = -line.ascent * 0.25;
+          const distSegs = line.segments.map((seg) =>
+            'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+          );
+          const dist = distributeLineSlack(
+            distSegs,
+            lineSlack,
+            firstContentSi,
+            paraNeedsBidi ? lastDrawnSi : segCount,
+            minPerGap,
+            lineSlack > 0,
+          );
+          segStretch = dist ? dist.perSeg : null;
+          distPerGap = dist ? dist.perGap : 0;
+        }
+
+        for (let vi = 0; vi < segCount; vi++) {
+          const si = visual ? visual.order[vi] : vi;
+          const seg = line.segments[si];
+          if (visual) ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
+          if ('isTab' in seg) {
+            // Tabs render as blank space, optionally with a leader (TOC dots etc.).
+            if (seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
+              drawTabLeader(ctx, seg.leader, x, baseline, seg.measuredWidth, seg.fontSize * scale, defaultColor, seg.bold, seg.italic);
+            }
+            x += seg.measuredWidth;
+            continue;
+          }
+          if ('imagePath' in seg || 'mathNodes' in seg) {
+            // Shape text builds only text runs, so image/math segments never
+            // appear here; advance defensively without drawing.
+            x += seg.measuredWidth;
+            continue;
+          }
+          const s = seg as LayoutTextSeg;
+          const stretch = segStretch?.get(si);
+          const internalStretch = stretch?.internalStretch ?? 0;
+          const effSizePx = calcEffectiveFontPx(s, scale);
+          const yOffset = s.vertAlign === 'super'
+            ? -s.fontSize * scale * 0.35
+            : s.vertAlign === 'sub'
+              ? s.fontSize * scale * 0.15
+              : 0;
+          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+          ctx.fillStyle = s.color ? `#${s.color}` : '#000000';
+          // Draw the glyphs (§17.18.44). Anchor each justified piece to the
+          // WHOLE-string cumulative advance plus accumulated pitch, the SAME core
+          // helper the body uses, so contextual CJK packing (約物半角) is honoured
+          // and the painted advance equals the segment box. A non-justified
+          // segment is a single fillText.
+          if (stretch && stretch.splitBefore.length > 0) {
+            const cps = [...s.text];
+            if (stretch.splitBefore.length === cps.length - 1) {
+              // Fully distributed (pure-CJK): uniform pitch via letterSpacing so
+              // the contextually-shaped run keeps its packing (PR #626 analog).
+              const prevLetterSpacing = ctx.letterSpacing;
+              ctx.letterSpacing = `${distPerGap}px`;
+              ctx.fillText(s.text, x, baseline + yOffset);
+              ctx.letterSpacing = prevLetterSpacing;
+            } else {
+              const measure = (str: string): number => ctx.measureText(str).width;
+              for (const { text: piece, dx } of justifiedPiecePositions(cps, stretch.splitBefore, distPerGap, measure)) {
+                ctx.fillText(piece, x + dx, baseline + yOffset);
+              }
+            }
+          } else {
+            ctx.fillText(s.text, x, baseline + yOffset);
+          }
+          x += s.measuredWidth + internalStretch;
+          // A trailing space this segment OWNS absorbs one inter-word gap on a
+          // justified LTR line (the widened advance belongs to this run).
+          if (stretch?.trailingGap && !paraNeedsBidi && /\s$/.test(s.text)) x += distPerGap;
         }
         cursorY += lineH;
       }
       continue;
-    }
-
-    const fontPx = block.fontSizePt * scale;
-    ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
-    ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
-    // Base direction (for neutral resolution) + alignment, derived from the
-    // content (first-strong) since shape paragraphs carry no explicit rtl flag.
-    const baseRtl = resolveBaseDirection(undefined, block.text) === 'rtl';
-    // No inter-word stretching in shape text, so 'distribute' stays centered
-    // rather than the justify edge resolveAlignEdge reports for paragraphs.
-    const edge = block.alignment === 'distribute'
-      ? 'center'
-      : resolveAlignEdge(block.alignment, baseRtl);
-    ctx.textAlign = 'left';
-    ctx.direction = baseRtl ? 'rtl' : 'ltr';
-    const ind = layout.ind;
-    for (let li = 0; li < layout.lines.length; li++) {
-      const line = layout.lines[li];
-      const m = ctx.measureText(line);
-      // ECMA-376 §17.3.1.12 — align within the per-line INDENTED region: the
-      // first line carries the signed first-line indent, continuation lines do
-      // not (region-left = innerX + leftPx (+ firstPx on the first line);
-      // region-width = firstLineW (first) / paraW (continuation)).
-      const isFirstLine = li === 0;
-      const regionLeft = innerX + ind.leftPx + (isFirstLine ? ind.firstPx : 0);
-      const regionW = isFirstLine ? ind.firstLineW : ind.paraW;
-      let tx = regionLeft;
-      if (edge === 'center') {
-        tx = regionLeft + Math.max(0, (regionW - m.width) / 2);
-      } else if (edge === 'right') {
-        tx = regionLeft + Math.max(0, regionW - m.width);
-      }
-      // Baseline = line top + the CENTERED offset (half-leading, metric-based):
-      // the natural line is centered within the (possibly expanded) line height
-      // used to advance cursorY, matching the body renderer instead of top-
-      // aligning.
-      const baseline = cursorY + layout.baselineOffset;
-      ctx.fillText(line, tx, baseline);
-      cursorY += layout.lineH;
     }
   }
   if (clipToBox) ctx.restore();
@@ -9314,7 +9330,7 @@ function buildFont(
 /** Resolve the list-marker glyph's font family (ECMA-376 §17.3.2.26 + §17.9.6).
  *  The marker is drawn/measured as a single `fillText`/`measureText`, so it must
  *  be one family. Pick it per the marker's leading code point, exactly like the
- *  body's per-character split and {@link shapeTokenFamily}: a CJK marker (e.g. an
+ *  body's per-character split ({@link splitByEastAsia}): a CJK marker (e.g. an
  *  ideographic bullet) → the eastAsia axis, anything else (a decimal "1", roman
  *  "i", letter, or "•") → the ascii axis. Realistic markers are single-script, so
  *  the leading code point classifies the whole glyph string. eastAsia falls back
