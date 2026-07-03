@@ -206,6 +206,55 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
                 // ECMA-376 §20.1.2.3.3 — additive offset to alpha.
                 alpha += attr_pct(&t, "val", 0.0);
             }
+            "comp" => {
+                // ECMA-376 §20.1.2.3.6 — the *complement*: the color which,
+                // mixed with the input, yields a shade of grey. The spec's
+                // worked example is red RGB(255,0,0) → cyan RGB(0,255,255),
+                // i.e. a 180° hue rotation with saturation and luminance held
+                // constant (red is HSL(0°,100%,50%); cyan is HSL(180°,100%,50%)).
+                // Rotating hue by half the wheel is the definition that both
+                // reproduces the spec example and keeps the "mix → grey"
+                // property (two hues 180° apart average to a neutral).
+                let (h, l, s) = rgb_to_hls(rf, gf, bf);
+                let (nr, ng, nb) = hls_to_rgb((h + 0.5).rem_euclid(1.0), l, s);
+                rf = nr;
+                gf = ng;
+                bf = nb;
+            }
+            "inv" => {
+                // ECMA-376 §20.1.2.3.17 — the per-channel RGB inverse. The
+                // spec example is red(1,0,0) → cyan(0,1,1), i.e. 1 − channel.
+                // (Distinct from `comp`: `inv` is a straight channel negation,
+                // which happens to also map red→cyan but differs for
+                // non-primary colors.)
+                rf = 1.0 - rf;
+                gf = 1.0 - gf;
+                bf = 1.0 - bf;
+            }
+            "gray" => {
+                // ECMA-376 §20.1.2.3.9 — grayscale weighted by the relative
+                // intensities of the RGB primaries (Rec. 601 luma coefficients,
+                // the standard perceptual weighting for sRGB primaries).
+                let y = 0.299 * rf + 0.587 * gf + 0.114 * bf;
+                rf = y;
+                gf = y;
+                bf = y;
+            }
+            "gamma" => {
+                // ECMA-376 §20.1.2.3.8 — the sRGB gamma shift of the input.
+                // Applying the sRGB *encoding* transfer function (linear→sRGB)
+                // to the channel values.
+                rf = linear_to_srgb(rf.clamp(0.0, 1.0));
+                gf = linear_to_srgb(gf.clamp(0.0, 1.0));
+                bf = linear_to_srgb(bf.clamp(0.0, 1.0));
+            }
+            "invGamma" => {
+                // ECMA-376 §20.1.2.3.18 — the inverse sRGB gamma shift: the
+                // sRGB *decoding* transfer function (sRGB→linear).
+                rf = srgb_to_linear(rf.clamp(0.0, 1.0));
+                gf = srgb_to_linear(gf.clamp(0.0, 1.0));
+                bf = srgb_to_linear(bf.clamp(0.0, 1.0));
+            }
             _ => {}
         }
     }
@@ -235,8 +284,33 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
 #[derive(Debug, Clone)]
 pub enum ColorSource<'a, 'input> {
     /// `<a:srgbClr val="RRGGBB">` — an explicit hex (ECMA-376 §20.1.2.3.32).
-    /// `val` is the raw authored string (case as-authored).
+    /// `val` is the raw authored string (case as-authored). "A perceptual gamma
+    /// of 2.2 is used" — the hex is already the display value, so no gamma
+    /// conversion is applied to the base.
     SrgbClr { val: String, node: Node<'a, 'input> },
+    /// `<a:scrgbClr r="50000" g="50000" b="50000">` — an RGB color in the
+    /// percentage variant (ECMA-376 §20.1.2.3.30). "A linear gamma of 1.0 is
+    /// assumed": r/g/b are *linear-light* percentages (ST_Percentage, 1/1000 %,
+    /// 0..100000). The base hex is obtained by gamma-*encoding* each linear
+    /// channel to sRGB. The spec's own example pins this — `r=g=b=50%` equals
+    /// `<a:srgbClr val="BCBCBC">` (0xBC = round(linear_to_srgb(0.5)·255)), NOT
+    /// the naive 0x80.
+    ScrgbClr {
+        r: f64,
+        g: f64,
+        b: f64,
+        node: Node<'a, 'input>,
+    },
+    /// `<a:hslClr hue="14400000" sat="100000" lum="50000">` — a color in the
+    /// HSL model (ECMA-376 §20.1.2.3.13). `hue` is ST_PositiveFixedAngle in
+    /// 1/60000 of a degree (0..21600000); `sat`/`lum` are ST_Percentage
+    /// (1/1000 %). Resolved via the shared HLS→RGB conversion.
+    HslClr {
+        hue: f64,
+        sat: f64,
+        lum: f64,
+        node: Node<'a, 'input>,
+    },
     /// `<a:sysClr val="windowText" lastClr="RRGGBB">` — a system color
     /// (§20.1.2.3.33). `last_clr` is the cached resolved hex; `val` is the
     /// system-color enum name, retained only as a last-ditch fallback (matches
@@ -248,7 +322,9 @@ pub enum ColorSource<'a, 'input> {
     },
     /// `<a:prstClr val="black">` — a named preset color (§20.1.2.3.22 /
     /// §20.1.10.48). Resolved through [`preset_color`](crate::theme::preset_color).
-    PrstClr { val: String },
+    /// The node is retained so color-transform children apply on the resolved
+    /// preset base (per CT_PresetColor's `EG_ColorTransform` content model).
+    PrstClr { val: String, node: Node<'a, 'input> },
     /// `<a:schemeClr val="accent1">` — a theme-slot reference (§20.1.2.3.29).
     /// `val` is the logical/slot name; the [`ThemeResolver`] maps it to a base
     /// hex. The node is retained for the transform children.
@@ -273,6 +349,46 @@ pub fn extract_color_source<'a, 'input>(
                     node: c,
                 });
             }
+            "scrgbClr" => {
+                // r/g/b are ST_Percentage (1/1000 of a percent). Missing/invalid
+                // attrs default to 0 — treat as black-linear rather than dropping
+                // the whole color (a required attr per XSD, but be lenient).
+                let pct = |name: &str| -> f64 {
+                    c.attribute(name)
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 100_000.0
+                };
+                return Some(ColorSource::ScrgbClr {
+                    r: pct("r"),
+                    g: pct("g"),
+                    b: pct("b"),
+                    node: c,
+                });
+            }
+            "hslClr" => {
+                return Some(ColorSource::HslClr {
+                    // hue: 1/60000 degree → [0,1) turns.
+                    hue: c
+                        .attribute("hue")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 60_000.0
+                        / 360.0,
+                    // sat/lum: ST_Percentage (1/1000 %).
+                    sat: c
+                        .attribute("sat")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 100_000.0,
+                    lum: c
+                        .attribute("lum")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 100_000.0,
+                    node: c,
+                });
+            }
             "sysClr" => {
                 return Some(ColorSource::SysClr {
                     last_clr: c.attribute("lastClr").map(str::to_owned),
@@ -283,6 +399,7 @@ pub fn extract_color_source<'a, 'input>(
             "prstClr" => {
                 return Some(ColorSource::PrstClr {
                     val: c.attribute("val")?.to_owned(),
+                    node: c,
                 });
             }
             "schemeClr" => {
@@ -322,9 +439,11 @@ pub trait ThemeResolver {
 /// children (lumMod/lumOff/shade/tint/… via [`apply_color_transforms`]):
 ///
 /// - `srgbClr` / `sysClr` → their hex + transforms;
-/// - `prstClr` → [`preset_color`](crate::theme::preset_color) (no transforms,
-///   matching the parsers' prior behavior — a transformed preset is a latent
-///   gap shared by all three);
+/// - `scrgbClr` → linear r/g/b gamma-encoded to sRGB (§20.1.2.3.30) + transforms;
+/// - `hslClr` → HLS→RGB (§20.1.2.3.13) + transforms;
+/// - `prstClr` → [`preset_color`](crate::theme::preset_color) + transforms
+///   (CT_PresetColor carries an `EG_ColorTransform` list — the prior no-transform
+///   behavior was a documented latent gap, now closed);
 /// - `schemeClr` → `resolver.resolve_scheme_color(val)` + transforms.
 ///
 /// The returned hex is uppercase and has **no** `#` prefix (that is what
@@ -339,6 +458,36 @@ pub fn parse_color_node<R: ThemeResolver + ?Sized>(
 ) -> Option<String> {
     match extract_color_source(container)? {
         ColorSource::SrgbClr { val, node } => Some(apply_color_transforms(&val, node, tint_mode)),
+        ColorSource::ScrgbClr { r, g, b, node } => {
+            // Linear-light r/g/b (0..1) → sRGB display hex, then transforms.
+            let base = format!(
+                "{:02X}{:02X}{:02X}",
+                (linear_to_srgb(r.clamp(0.0, 1.0)) * 255.0).round() as u8,
+                (linear_to_srgb(g.clamp(0.0, 1.0)) * 255.0).round() as u8,
+                (linear_to_srgb(b.clamp(0.0, 1.0)) * 255.0).round() as u8,
+            );
+            Some(apply_color_transforms(&base, node, tint_mode))
+        }
+        ColorSource::HslClr {
+            hue,
+            sat,
+            lum,
+            node,
+        } => {
+            // HLS→RGB (note the shared helper takes h, l, s order).
+            let (r, g, b) = hls_to_rgb(
+                hue.rem_euclid(1.0),
+                lum.clamp(0.0, 1.0),
+                sat.clamp(0.0, 1.0),
+            );
+            let base = format!(
+                "{:02X}{:02X}{:02X}",
+                (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+            );
+            Some(apply_color_transforms(&base, node, tint_mode))
+        }
         ColorSource::SysClr {
             last_clr,
             val,
@@ -349,7 +498,11 @@ pub fn parse_color_node<R: ThemeResolver + ?Sized>(
             let hex = last_clr.or(val)?;
             Some(apply_color_transforms(&hex, node, tint_mode))
         }
-        ColorSource::PrstClr { val } => crate::theme::preset_color(&val),
+        ColorSource::PrstClr { val, node } => {
+            // Resolve the preset base, then apply any EG_ColorTransform children.
+            let base = crate::theme::preset_color(&val)?;
+            Some(apply_color_transforms(&base, node, tint_mode))
+        }
         ColorSource::SchemeClr { val, node } => {
             let base = resolver.resolve_scheme_color(&val)?;
             Some(apply_color_transforms(&base, node, tint_mode))
@@ -529,8 +682,8 @@ mod tests {
         );
     }
 
-    /// prstClr resolves via the shared preset table, WITHOUT applying transforms
-    /// (matches the parsers' prior behavior — documented latent gap).
+    /// prstClr resolves via the shared preset table AND applies color-transform
+    /// children (§20.1.2.3.22 / CT_PresetColor carries EG_ColorTransform).
     #[test]
     fn parse_color_node_prstclr_via_preset_table() {
         let xml = format!(r#"<a:solidFill xmlns:a="{NS}"><a:prstClr val="orange"/></a:solidFill>"#);
@@ -538,14 +691,123 @@ mod tests {
             parse(&xml, TintMode::WordLiteral).as_deref(),
             Some("FFA500")
         );
-        // A transform child is intentionally ignored for prstClr.
+        // A lumMod=50% transform on white now darkens it to mid gray, proving
+        // transforms are applied to the preset base (was a latent gap).
         let xml2 = format!(
-            r#"<a:solidFill xmlns:a="{NS}"><a:prstClr val="black"><a:lumMod val="50000"/></a:prstClr></a:solidFill>"#
+            r#"<a:solidFill xmlns:a="{NS}"><a:prstClr val="white"><a:lumMod val="50000"/></a:prstClr></a:solidFill>"#
         );
         assert_eq!(
             parse(&xml2, TintMode::WordLiteral).as_deref(),
+            Some("808080")
+        );
+        // A full-range preset from the newly-complete table resolves too.
+        let xml3 =
+            format!(r#"<a:solidFill xmlns:a="{NS}"><a:prstClr val="chartreuse"/></a:solidFill>"#);
+        assert_eq!(
+            parse(&xml3, TintMode::WordLiteral).as_deref(),
+            Some("7FFF00")
+        );
+    }
+
+    /// scrgbClr's r/g/b are LINEAR percentages; the base must be gamma-encoded
+    /// to sRGB. The spec example pins r=g=b=50% == srgbClr "BCBCBC".
+    #[test]
+    fn parse_color_node_scrgbclr_linear_gamma_encoded() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:scrgbClr r="50000" g="50000" b="50000"/></a:solidFill>"#
+        );
+        // 0xBC, NOT the naive 0x80 — proves linear→sRGB encoding.
+        assert_eq!(
+            parse(&xml, TintMode::WordLiteral).as_deref(),
+            Some("BCBCBC")
+        );
+        // Endpoints round-trip exactly.
+        let black =
+            format!(r#"<a:solidFill xmlns:a="{NS}"><a:scrgbClr r="0" g="0" b="0"/></a:solidFill>"#);
+        assert_eq!(
+            parse(&black, TintMode::WordLiteral).as_deref(),
             Some("000000")
         );
+        let white = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:scrgbClr r="100000" g="100000" b="100000"/></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&white, TintMode::WordLiteral).as_deref(),
+            Some("FFFFFF")
+        );
+    }
+
+    /// hslClr resolves through HLS→RGB. hue in 1/60000 degree, sat/lum in
+    /// ST_Percentage. hue=0, sat=100%, lum=50% is pure red.
+    #[test]
+    fn parse_color_node_hslclr_to_rgb() {
+        // Pure red: hue=0, sat=100%, lum=50%.
+        let red = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:hslClr hue="0" sat="100000" lum="50000"/></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&red, TintMode::WordLiteral).as_deref(),
+            Some("FF0000")
+        );
+        // hue=120° (=7200000) green.
+        let green = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:hslClr hue="7200000" sat="100000" lum="50000"/></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&green, TintMode::WordLiteral).as_deref(),
+            Some("00FF00")
+        );
+        // sat=0 → gray at the given luminance (50% → 0x80).
+        let gray = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:hslClr hue="0" sat="0" lum="50000"/></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&gray, TintMode::WordLiteral).as_deref(),
+            Some("808080")
+        );
+    }
+
+    /// The five newly-added transforms behave per their §20.1.2.3 definitions.
+    #[test]
+    fn parse_color_node_new_transforms() {
+        // inv: red → cyan (1−channel), spec §20.1.2.3.17 example.
+        let inv = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="FF0000"><a:inv/></a:srgbClr></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&inv, TintMode::WordLiteral).as_deref(),
+            Some("00FFFF")
+        );
+        // comp: red → cyan (180° hue rotation), spec §20.1.2.3.6 example.
+        let comp = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="FF0000"><a:comp/></a:srgbClr></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&comp, TintMode::WordLiteral).as_deref(),
+            Some("00FFFF")
+        );
+        // gray: a saturated color collapses to its luma (equal channels).
+        let gray = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="FF0000"><a:gray/></a:srgbClr></a:solidFill>"#
+        );
+        let g = parse(&gray, TintMode::WordLiteral).unwrap();
+        assert_eq!(&g[0..2], &g[2..4]);
+        assert_eq!(&g[2..4], &g[4..6]);
+        // 0.299·255 ≈ 76 = 0x4C.
+        assert_eq!(g.as_str(), "4C4C4C");
+        // gamma then invGamma round-trips (within rounding).
+        let round = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="336699"><a:gamma/><a:invGamma/></a:srgbClr></a:solidFill>"#
+        );
+        let r = parse(&round, TintMode::WordLiteral).unwrap();
+        // Allow ±1 per channel for the double 8-bit round-trip.
+        for (i, exp) in [0x33u8, 0x66, 0x99].iter().enumerate() {
+            let got = u8::from_str_radix(&r[i * 2..i * 2 + 2], 16).unwrap();
+            assert!(
+                (got as i16 - *exp as i16).abs() <= 1,
+                "channel {i}: got {got:02X} exp {exp:02X}"
+            );
+        }
     }
 
     /// schemeClr resolves through the injected ThemeResolver, then transforms.
