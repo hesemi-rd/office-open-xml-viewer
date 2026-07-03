@@ -2190,6 +2190,27 @@ export class XlsxViewer {
   }
 
   private async renderCurrentSheet(): Promise<void> {
+    // PD14 render-error contract (shared with the scroll viewers): most callers
+    // invoke this `void`-style from scroll/resize/selection handlers, so an
+    // unguarded throw would surface as an unhandled promise rejection. Catch here
+    // and route to `onError` (or `console.error` — never silent), matching
+    // DocxViewer._render and the scroll viewers.
+    try {
+      await this._renderCurrentSheet();
+    } catch (err) {
+      this._reportRenderError(err);
+    }
+  }
+
+  /** Route a render failure to `onError`, or `console.error` when none is given
+   *  (never fully silent). Mirrors the scroll viewers' `_reportRenderError`. */
+  private _reportRenderError(err: unknown): void {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (this.opts.onError) this.opts.onError(e);
+    else console.error('[ooxml] XlsxViewer render failed:', e);
+  }
+
+  private async _renderCurrentSheet(): Promise<void> {
     if (!this.currentWorksheet) return;
     const ws = this.currentWorksheet;
     const w = this.canvasArea.clientWidth;

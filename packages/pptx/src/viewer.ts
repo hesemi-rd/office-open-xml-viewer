@@ -297,7 +297,7 @@ export class PptxViewer {
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
-      this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      this._reportRenderError(err);
     }
 
     if (this.textLayer && !isWorker) {
@@ -307,6 +307,15 @@ export class PptxViewer {
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
     buildPptxTextLayer(layer, runs, cssWidth, cssHeight);
+  }
+
+  /** PD14 render-error contract: route a render failure to `onError`, or
+   *  `console.error` when none is given (never fully silent). Mirrors the scroll
+   *  viewers' `_reportRenderError` so all three single-canvas viewers agree. */
+  private _reportRenderError(err: unknown): void {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (this.opts.onError) this.opts.onError(e);
+    else console.error('[ooxml] PptxViewer render failed:', e);
   }
 
   /**

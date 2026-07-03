@@ -176,6 +176,27 @@ export class DocxViewer {
   }
 
   private async _render(): Promise<void> {
+    // PD14 render-error contract (shared with the scroll viewers): navigation
+    // (`nextPage`/`prevPage`/`goToPage`) is often called `void`-style, so an
+    // unguarded throw would surface as an unhandled promise rejection. Catch here
+    // and route to `onError` (or `console.error` — never silent) so a page render
+    // failure is handled the same way in `load()` and every navigation.
+    try {
+      await this._renderPage();
+    } catch (err) {
+      this._reportRenderError(err);
+    }
+  }
+
+  /** Route a render failure to `onError`, or `console.error` when none is given
+   *  (never fully silent). Mirrors the scroll viewers' `_reportRenderError`. */
+  private _reportRenderError(err: unknown): void {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (this._opts.onError) this._opts.onError(e);
+    else console.error('[ooxml] DocxViewer render failed:', e);
+  }
+
+  private async _renderPage(): Promise<void> {
     if (!this._doc) return;
     const isWorker = this._mode === 'worker';
     // In worker mode rendering happens off the main thread, so the onTextRun
