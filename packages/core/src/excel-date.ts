@@ -49,3 +49,34 @@ export function excelSerialToUtcDate(serial: number, date1904 = false): Date {
   const adjusted = serial < 60 ? serial + 1 : serial;
   return new Date(BASE_1900_MS + adjusted * MS_PER_DAY);
 }
+
+/**
+ * Convert a UTC `Date` back to an Excel date-time serial — the exact inverse of
+ * {@link excelSerialToUtcDate} for every serial except the phantom 60.
+ *
+ * The fractional (time-of-day) part is preserved. For the 1900 date system the
+ * Lotus leap-year-bug compensation is undone so the round-trip holds:
+ *
+ *   • Dates on/before 1900-02-28 (raw offset ≤ 60 days from the 1899-12-30
+ *     base) map to serials 0…59 by subtracting the +1 day that
+ *     `excelSerialToUtcDate` added — 1900-01-01 → 1, 1900-02-28 → 59.
+ *   • Dates on/after 1900-03-01 (raw offset ≥ 61) map straight through —
+ *     1900-03-01 → 61, and so on.
+ *   • The phantom serial 60 (the non-existent 1900-02-29) is never produced:
+ *     the two branches meet at raw offset 60 → serial 59 and 61 → serial 61,
+ *     skipping 60 entirely.
+ *
+ * @param date     A UTC `Date` (read via its epoch milliseconds).
+ * @param date1904 `true` for the 1904 date system; `false`/omitted for 1900.
+ */
+export function utcDateToExcelSerial(date: Date, date1904 = false): number {
+  if (date1904) {
+    return (date.getTime() - BASE_1904_MS) / MS_PER_DAY;
+  }
+  // 1900 system: `rawDays` is the offset from the 1899-12-30 base, i.e. the
+  // "adjusted" value the forward function used. Raw offsets ≤ 60 correspond to
+  // serials < 60 (which had +1 added), so undo it; offsets ≥ 61 pass through.
+  // The boundary at 60 (→ serial 59) / 61 (→ serial 61) skips the phantom 60.
+  const rawDays = (date.getTime() - BASE_1900_MS) / MS_PER_DAY;
+  return rawDays <= 60 ? rawDays - 1 : rawDays;
+}

@@ -1,3 +1,4 @@
+import { excelSerialToUtcDate, utcDateToExcelSerial } from '@silurus/ooxml-core';
 import type { Cell, DefinedName } from './types.js';
 
 // ────────────────────────────────────────────────────────────────
@@ -572,30 +573,39 @@ function makeCriteriaPredicate(criteria: EvalValue): (v: EvalScalar) => boolean 
   };
 }
 
-// Excel date serial: 1 = 1900-01-01, treats 1900 as leap (serial 60 = fake
-// 1900-02-29). For dates ≥ 1900-03-01, offset to Unix epoch is 25569 days.
-const EXCEL_EPOCH_OFFSET = 25569;
-const MS_PER_DAY = 86400000;
+// Serial ↔ calendar-date conversions are delegated to the shared core
+// `excel-date` module (ECMA-376 §18.17.4.1) so the 1900 Lotus leap-year-bug
+// compensation and 1900/1904 epoch selection live in one place. Before this
+// the formula engine carried its own `EXCEL_EPOCH_OFFSET = 25569` arithmetic,
+// which had no leap-bug correction (serials < 60 read the wrong calendar day)
+// and no 1904 support.
+//
+// The formula engine always operates in the 1900 date system: its serials are
+// consumed by the number-format layer, whose volatile-recompute path formats
+// TODAY()/NOW() against the 1900 epoch regardless of `<workbookPr date1904>`
+// (see number-format.ts). So every core call below passes date1904=false.
+// Threading the workbook's date system into the formula engine is a separate
+// track; this change is purely about retiring the duplicate serial math.
 
 export function todaySerial(): number {
   const d = new Date();
-  const utcMid = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
-  return Math.floor(utcMid / MS_PER_DAY) + EXCEL_EPOCH_OFFSET;
+  const utcMid = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  return utcDateToExcelSerial(utcMid, false);
 }
 
 export function nowSerial(): number {
-  return Date.now() / MS_PER_DAY + EXCEL_EPOCH_OFFSET;
+  return utcDateToExcelSerial(new Date(Date.now()), false);
 }
 
 function dateToSerial(y: number, m: number, d: number): number {
   // Excel rolls over out-of-range months/days (e.g. DATE(2019, 13, 1) = Jan 2020).
-  const ms = Date.UTC(y, m - 1, d);
-  return Math.floor(ms / MS_PER_DAY) + EXCEL_EPOCH_OFFSET;
+  // `Date.UTC` performs the same normalization. Whole days only (no time), so
+  // floor to drop any sub-day residue the leap-bug boundary could introduce.
+  return Math.floor(utcDateToExcelSerial(new Date(Date.UTC(y, m - 1, d)), false));
 }
 
 function serialToJsDate(serial: number): Date {
-  const ms = (Math.floor(serial) - EXCEL_EPOCH_OFFSET) * MS_PER_DAY;
-  return new Date(ms);
+  return excelSerialToUtcDate(Math.floor(serial), false);
 }
 
 function serialToDate(serial: number): { y: number; m: number; d: number } {

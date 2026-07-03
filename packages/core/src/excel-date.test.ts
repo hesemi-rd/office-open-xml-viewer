@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { excelSerialToUtcDate } from './excel-date';
+import { excelSerialToUtcDate, utcDateToExcelSerial } from './excel-date';
 
 // Helper: read back the calendar date a serial maps to, as YYYY-MM-DD in UTC.
 function iso(serial: number, date1904: boolean): string {
@@ -70,5 +70,48 @@ describe('excelSerialToUtcDate — 1904 date system (ECMA-376 §18.17.4.1)', () 
     expect(d.getUTCMonth() + 1).toBe(1);
     expect(d.getUTCDate()).toBe(1);
     expect(d.getUTCHours()).toBe(12);
+  });
+});
+
+describe('utcDateToExcelSerial — inverse of excelSerialToUtcDate', () => {
+  it('maps the 1900 leap-bug boundary dates to serials 1/59/61 (never 60)', () => {
+    const serial = (y: number, m: number, d: number): number =>
+      utcDateToExcelSerial(new Date(Date.UTC(y, m - 1, d)), false);
+    expect(serial(1900, 1, 1)).toBe(1);   // base + 1 day, serial < 60 branch
+    expect(serial(1900, 2, 28)).toBe(59); // last day before the phantom leap day
+    expect(serial(1900, 3, 1)).toBe(61);  // first day after it — skips serial 60
+  });
+
+  it('round-trips every 1900-system serial except the phantom 60', () => {
+    // serial → date → serial must be the identity for all valid serials. Serial
+    // 60 has no real Gregorian date so it is deliberately excluded.
+    for (let s = 0; s <= 200; s++) {
+      if (s === 60) continue;
+      const back = utcDateToExcelSerial(excelSerialToUtcDate(s, false), false);
+      expect(back).toBe(s);
+    }
+    // A modern serial round-trips too.
+    expect(utcDateToExcelSerial(excelSerialToUtcDate(45292, false), false)).toBe(45292);
+  });
+
+  it('the phantom serial 60 is never emitted by the inverse', () => {
+    // Both the serial-59 date (1900-02-28) and the serial-61 date (1900-03-01)
+    // sit on either side of the phantom day; neither reverse-maps to 60.
+    expect(utcDateToExcelSerial(excelSerialToUtcDate(59, false), false)).toBe(59);
+    expect(utcDateToExcelSerial(excelSerialToUtcDate(61, false), false)).toBe(61);
+  });
+
+  it('round-trips 1904-system serials (no leap-year bug)', () => {
+    for (let s = 0; s <= 200; s++) {
+      const back = utcDateToExcelSerial(excelSerialToUtcDate(s, true), true);
+      expect(back).toBe(s);
+    }
+    expect(utcDateToExcelSerial(excelSerialToUtcDate(43830, true), true)).toBe(43830);
+  });
+
+  it('preserves the fractional time-of-day component', () => {
+    // Serial 45292.5 = noon on 2024-01-01. The reverse must carry the .5 back.
+    const back = utcDateToExcelSerial(excelSerialToUtcDate(45292.5, false), false);
+    expect(back).toBe(45292.5);
   });
 });

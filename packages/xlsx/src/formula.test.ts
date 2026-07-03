@@ -113,4 +113,57 @@ describe('evalFormulaToBool — DATE', () => {
     expect(ev('DATE(2024,1,1)=45292')).toBe(true);
     expect(ev('DATE(2024,1,15)=45306')).toBe(true);
   });
+
+  it('maps the 1900 leap-bug boundary to serials 1/59/61 (never the phantom 60)', () => {
+    // Now that DATE delegates to the shared excel-date module, the 1900 Lotus
+    // leap-year-bug compensation is honoured: 1900-01-01 → 1, 1900-02-28 → 59,
+    // and 1900-03-01 → 61. Serial 60 (the non-existent 1900-02-29) is skipped.
+    expect(ev('DATE(1900,1,1)=1')).toBe(true);
+    expect(ev('DATE(1900,2,28)=59')).toBe(true);
+    expect(ev('DATE(1900,3,1)=61')).toBe(true);
+  });
+});
+
+describe('evalFormulaToBool — YEAR / MONTH / DAY', () => {
+  it('reads a modern serial (45292 → 2024-01-01)', () => {
+    expect(ev('YEAR(45292)=2024')).toBe(true);
+    expect(ev('MONTH(45292)=1')).toBe(true);
+    expect(ev('DAY(45292)=1')).toBe(true);
+  });
+
+  it('reads serial 1 as 1900-01-01 (1900 leap-bug compensation)', () => {
+    // Before routing through the shared module the formula engine had no
+    // leap-bug correction and read serial 1 as 1899-12-31 (YEAR → 1899). It
+    // must now return the Excel value 1900-01-01.
+    expect(ev('YEAR(1)=1900')).toBe(true);
+    expect(ev('MONTH(1)=1')).toBe(true);
+    expect(ev('DAY(1)=1')).toBe(true);
+  });
+
+  it('reads the leap-bug boundary serials 59 and 61', () => {
+    // Serial 59 = 1900-02-28 (last day before the phantom leap day); serial 61
+    // = 1900-03-01 (first day after it).
+    expect(ev('MONTH(59)=2')).toBe(true);
+    expect(ev('DAY(59)=28')).toBe(true);
+    expect(ev('MONTH(61)=3')).toBe(true);
+    expect(ev('DAY(61)=1')).toBe(true);
+  });
+});
+
+describe('evalFormulaToBool — WEEKDAY', () => {
+  it('returns Sun=1..Sat=7 by default (2024-01-01 is a Monday → 2)', () => {
+    expect(ev('WEEKDAY(45292)=2')).toBe(true);
+    expect(ev('WEEKDAY(45292,1)=2')).toBe(true);
+  });
+
+  it('honours return-type 2 (Mon=1..Sun=7) and 3 (Mon=0..Sun=6)', () => {
+    // Monday: type 2 → 1, type 3 → 0.
+    expect(ev('WEEKDAY(45292,2)=1')).toBe(true);
+    expect(ev('WEEKDAY(45292,3)=0')).toBe(true);
+  });
+
+  it('reads the correct weekday for serial 1 after leap-bug compensation', () => {
+    // 1900-01-01 is a Monday → default return-type 1 gives 2.
+    expect(ev('WEEKDAY(1)=2')).toBe(true);
+  });
 });
