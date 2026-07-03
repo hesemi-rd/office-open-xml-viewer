@@ -2068,14 +2068,36 @@ export function computePages(
       // page/balance split path further down.
       const splittable = !para.keepLines || h > effContentH();
       // ECMA-376 §17.6.4 column balancing. Move the WHOLE paragraph to the next
-      // column when the current (non-last) column has reached the balanced target —
-      // but ONLY for a paragraph that cannot be split at a line boundary
-      // (keepLines). A splittable paragraph is instead split AT the balance target
-      // by the split path below, so a long paragraph fills column 0 up to the
-      // target and spills the remainder into column 1 (even columns), rather than
-      // being shoved whole into the next column (which left column 0 nearly empty
-      // and column 1 overfull, sample-12 p.2). No-op when balancing is off.
-      const balanceBreak = wantsBalanceBreak(fitHeight) && !splittable;
+      // column when the current (non-last) column has reached the balanced target,
+      // in either of two cases:
+      //
+      //   (a) keepLines (§17.3.1.14) — the paragraph itself cannot be split at a
+      //       line boundary, and its own height crosses the target. A splittable
+      //       paragraph is instead split AT the balance target by the split path
+      //       below (a long paragraph fills column 0 up to the target and spills the
+      //       remainder into column 1 — even columns, sample-12 p.2 — rather than
+      //       being shoved whole into the next column, leaving column 0 nearly empty).
+      //
+      //   (b) keepNext (§17.3.1.15) — the paragraph fits the target alone, but
+      //       placing it here would leave its required next block (needNext) in the
+      //       following column. §17.3.1.15 speaks only of pages; extending keepNext
+      //       to a newspaper COLUMN boundary mirrors Word's observed behavior (a
+      //       user-approved extension, analogous to the existing keepLines column
+      //       handling above), so relocate the whole paragraph to the next column
+      //       to keep it adjacent to its successor. This
+      //       fires even for a splittable paragraph — splitting it would still orphan
+      //       the paragraph mark above the column break. Guarded so the keep unit
+      //       (paragraph + next block) fits ONE balanced column; a unit taller than a
+      //       balanced column can never be reunited by moving forward, so leave it
+      //       and let the successor break normally (no infinite send — the column
+      //       analogue of the page path's `needed <= effContentH()`).
+      const balanceBreakKeepLines = wantsBalanceBreak(fitHeight) && !splittable;
+      const balanceBreakKeepNext =
+        needNext > 0 &&
+        balanceColH != null &&
+        wantsBalanceBreak(fitHeight + needNext) &&
+        fitHeight + needNext <= balanceColH;
+      const balanceBreak = balanceBreakKeepLines || balanceBreakKeepNext;
       if (breakForFloat || balanceBreak || (overflowsHere && keepIntact && needed <= effContentH())) {
         const pagesBeforeRelocate = pages.length;
         // Relocating THIS paragraph to a fresh page: pre-scan from `i` so the

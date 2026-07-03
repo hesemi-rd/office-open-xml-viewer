@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { computePages, computeColumns } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement } from './types';
+import type {
+  BodyElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
+} from './types';
 
 // Unit tests for computePages pagination behaviour that the renderer-path VRT
 // (local-only, private samples) cannot guard in CI. A deterministic stub canvas
@@ -53,7 +55,9 @@ function textRun(text: string, fontSize: number): DocRun {
 
 type DocRun = DocParagraph['runs'][number];
 
-function para(opts: { text?: string; fontSize?: number; widowControl?: boolean; keepLines?: boolean } = {}): BodyElement {
+function para(
+  opts: { text?: string; fontSize?: number; widowControl?: boolean; keepLines?: boolean; keepNext?: boolean } = {},
+): BodyElement {
   const fontSize = opts.fontSize ?? 20;
   const p: DocParagraph = {
     alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
@@ -62,6 +66,7 @@ function para(opts: { text?: string; fontSize?: number; widowControl?: boolean; 
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
     widowControl: opts.widowControl,
     keepLines: opts.keepLines,
+    keepNext: opts.keepNext,
   };
   return { type: 'paragraph', ...p } as BodyElement;
 }
@@ -114,6 +119,36 @@ function paraWith(runs: DocRun[], opts: { fontSize?: number } = {}): BodyElement
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
   };
   return { type: 'paragraph', ...p } as BodyElement;
+}
+
+/** A single-column block table whose rows each have a fixed `exact` height (pt),
+ *  so its measured height is deterministic and independent of cell-content
+ *  measurement (resolveTableRowHeights short-circuits on rowHeightRule="exact"). */
+function fixedTable(rowHeightsPt: number[]): BodyElement {
+  const rows: DocTableRow[] = rowHeightsPt.map((hPt) => ({
+    cells: [
+      {
+        content: [],
+        colSpan: 1,
+        vMerge: null,
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        background: null,
+        vAlign: 'top',
+        widthPt: null,
+      },
+    ],
+    rowHeight: hPt,
+    rowHeightRule: 'exact',
+    isHeader: false,
+  }));
+  const t: DocTable = {
+    colWidths: [70],
+    rows,
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  };
+  return { type: 'table', ...t } as BodyElement;
 }
 
 const sliceOf = (el: PaginatedBodyElement) =>
@@ -620,5 +655,105 @@ describe('computePages — newspaper column balancing (§17.6.4, non-final conti
     const pages = computePages(body, section({ columns: twoColSpec }), makeCtx());
     const col0 = pages[0].filter((e) => colOf(e) === 0).map(textOf);
     expect(col0).toEqual(['p0', 'p1', 'p2', 'p3', 'p4']); // greedy fill, NOT balanced
+  });
+});
+
+describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)', () => {
+  const twoColSpec = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
+
+  // section(): content height 100, content width 160, 2-col ⇒ col width 70. Every
+  // single-line para is 20px tall. 4 single-line paras ⇒ section total 80px ⇒
+  // balanced target balanceColH = 80/2 = 40px = 2 lines/column. So col0 fits p0
+  // (0..20) then a candidate at y=20 whose own line ends exactly AT the 40px
+  // target — it fits alone, but adding its keepNext successor (another 20px) would
+  // push the pair past the target.
+
+  it('moves a keepNext paragraph WHOLE to the next column so it stays with its successor', () => {
+    // p1 has keepNext: at y=20 it fits the balance target alone (20+20=40) but
+    // p1+p2 (40+20=60) exceeds it. Pre-fix the balance break ignored keepNext, so
+    // p1 stayed in col0 (0..40) and p2 spilled into col1 — orphaning the heading.
+    const body: BodyElement[] = [
+      para({ text: 'p0', fontSize: 20 }),
+      para({ text: 'p1', fontSize: 20, keepNext: true }),
+      para({ text: 'p2', fontSize: 20 }),
+      para({ text: 'p3', fontSize: 20 }),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    const colByText: Record<string, number | undefined> = {};
+    for (const e of pages[0]) {
+      const t = textOf(e);
+      if (t.startsWith('p')) colByText[t] = colOf(e) ?? 0;
+    }
+    // keepNext p1 and its successor p2 land in the SAME column (col1), not split.
+    expect(colByText.p1).toBe(1);
+    expect(colByText.p2).toBe(1);
+    expect(colByText.p1).toBe(colByText.p2);
+  });
+
+  it('moves a keepNext paragraph WHOLE when its successor is a TABLE (§17.11 keep-with-next block)', () => {
+    // Same geometry, but the block kept-with p1 is a 1-row 20px table. Its height
+    // folds into the section total (80px ⇒ target 40px) and into needNext, so p1
+    // must move to col1 rather than orphan above the table.
+    const body: BodyElement[] = [
+      para({ text: 'p0', fontSize: 20 }),
+      para({ text: 'p1', fontSize: 20, keepNext: true }),
+      fixedTable([20]),
+      para({ text: 'p3', fontSize: 20 }),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    const p1 = pages[0].find((e) => textOf(e) === 'p1');
+    const tbl = pages[0].find((e) => e.type === 'table');
+    expect(p1).toBeDefined();
+    expect(tbl).toBeDefined();
+    expect(colOf(p1 as PaginatedBodyElement) ?? 0).toBe(1);
+    // The table follows p1 in the SAME column.
+    expect(colOf(tbl as PaginatedBodyElement) ?? 0).toBe(1);
+  });
+
+  it('does NOT move a paragraph WITHOUT keepNext (unchanged greedy-to-target fill)', () => {
+    // Identical layout but p1 has no keepNext: it fills col0 up to the target
+    // (0..40 with p0) and p2 spills into col1 as before — the fix must not perturb
+    // ordinary balancing.
+    const body: BodyElement[] = [
+      para({ text: 'p0', fontSize: 20 }),
+      para({ text: 'p1', fontSize: 20 }),
+      para({ text: 'p2', fontSize: 20 }),
+      para({ text: 'p3', fontSize: 20 }),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    const colByText: Record<string, number | undefined> = {};
+    for (const e of pages[0]) {
+      const t = textOf(e);
+      if (t.startsWith('p')) colByText[t] = colOf(e) ?? 0;
+    }
+    expect(colByText.p0).toBe(0);
+    expect(colByText.p1).toBe(0); // stays in col0 (no keepNext)
+    expect(colByText.p2).toBe(1);
+  });
+
+  it('does NOT move a keepNext paragraph when the pair is taller than a balanced column (no infinite send)', () => {
+    // p1 keepNext (1 line) is followed by a 3-line successor. section total: p0(1)
+    // + p1(1) + p2(3) + p3(1) = 6 lines = 120px ⇒ target 60px = 3 lines. p1 at
+    // y=20: p1 alone (40) ≤ target, but p1+p2 = 20+20+60 = 100px > 60px target —
+    // the pair can never fit one balanced column, so moving p1 forward would loop.
+    // p1 must stay put (its successor breaks normally), exactly as pre-fix.
+    const body: BodyElement[] = [
+      para({ text: 'p0', fontSize: 20 }),
+      para({ text: 'p1', fontSize: 20, keepNext: true }),
+      para({ text: 'あ'.repeat(9), fontSize: 20 }), // 9/3 = 3 lines = 60px
+      para({ text: 'p3', fontSize: 20 }),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    const p1 = pages[0].find((e) => textOf(e) === 'p1');
+    expect(p1).toBeDefined();
+    expect(colOf(p1 as PaginatedBodyElement) ?? 0).toBe(0); // stays in col0
   });
 });
