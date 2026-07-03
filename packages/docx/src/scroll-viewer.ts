@@ -180,6 +180,23 @@ export class DocxScrollViewer {
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
+  /**
+   * Concurrent-load latch (generation token). Every self-loading `load()`
+   * increments this and captures the value; after its engine finishes loading it
+   * re-checks the live value and BAILS (destroying its own just-loaded engine) if
+   * a newer `load()` has since started. Without it, two overlapping
+   * `load(A)`/`load(B)` calls race the WASM parse / worker init, and whichever
+   * RESOLVES last wins the swap — even the stale `load(A)` resolving after
+   * `load(B)`; the loser's freshly created engine (never installed, or installed
+   * then overwritten) then leaks its worker + pinned WASM allocation. The latch
+   * composes with SC20: the check runs AFTER the new engine loads but BEFORE the
+   * field assignment, `previous?.destroy()`, and the recycle/relayout post-load
+   * work, so a superseded load never touches `this._doc` nor frees the current
+   * (newer) engine. Only the self-loading path uses it — the injected path throws
+   * up-front and never reaches here. `destroy()` also bumps it so a load in flight
+   * at teardown is treated as superseded and its engine cleaned up.
+   */
+  private _loadGen = 0;
   /** Worker mode: page indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  page whose first is still in flight — and lets us drop pages that scrolled
@@ -337,9 +354,10 @@ export class DocxScrollViewer {
     // re-load then keeps the current document rendered rather than going blank.
     // (The injected path returned above can never reach here, so this only ever
     // frees an engine we created.)
+    const gen = ++this._loadGen;
     const previous = this._doc;
     try {
-      this._doc = await DocxDocument.load(source, {
+      const doc = await DocxDocument.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         workerTimeoutMs: this._opts.workerTimeoutMs,
@@ -347,6 +365,16 @@ export class DocxScrollViewer {
         math: this._opts.math,
         mode: this._mode,
       });
+      if (gen !== this._loadGen) {
+        // A newer load() (or destroy()) started while this one was in flight — we
+        // lost the concurrent-load race. Destroy the engine we just loaded (it was
+        // never installed) and leave the winning load's engine + SC20 swap + its
+        // recycle/relayout work untouched: do NOT touch `this._doc` and do NOT
+        // destroy `previous` (irrelevant to the winner; possibly already stale).
+        doc.destroy();
+        return;
+      }
+      this._doc = doc;
       previous?.destroy();
       if (previous) {
         // Re-loading over a prior document: recycle every mounted slot (they hold
@@ -363,6 +391,9 @@ export class DocxScrollViewer {
       // appears.
       this.relayout();
     } catch (err) {
+      // Superseded loads own no error reporting — the winning load (or destroy())
+      // is the outcome the caller awaits; swallow this stale rejection.
+      if (gen !== this._loadGen) return;
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
         this._opts.onError(e);
@@ -1270,6 +1301,10 @@ export class DocxScrollViewer {
    */
   destroy(): void {
     this._destroyed = true;
+    // Bump the load generation so a self-loading load() still in flight is treated
+    // as superseded and its engine is cleaned up rather than installed onto a
+    // torn-down viewer.
+    this._loadGen++;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;
