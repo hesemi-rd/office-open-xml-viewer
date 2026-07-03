@@ -325,9 +325,30 @@ pub(crate) fn parse_rels(xml: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Pair diagramData rels with diagramDrawing rels in a slide's rels XML by filename
-/// number (data1.xml ↔ drawing1.xml, data2.xml ↔ drawing2.xml, ...), then load each
-/// drawing XML from the zip. Returns dm_rid → drawing_xml_content.
+/// Pair each SmartArt diagramData part with its prebaked diagramDrawing part and
+/// load the drawing XML from the zip. Returns `dm_rid → drawing_xml_content`,
+/// keyed by the diagramData relationship Id (i.e. the value of the slide's
+/// `<dgm:relIds r:dm>` — §21.4.2.22), which is what the shape walker looks up.
+///
+/// **Canonical path (ECMA-376 §21.4.2.22 + MS-ODRAWXML `dsp:dataModelExt`).**
+/// The link from a data model to its cached drawing is explicit, not positional:
+///
+/// 1. `<dgm:relIds r:dm="rId2">` on the slide points at the data part (e.g.
+///    `../diagrams/data1.xml`) via the containing part's rels.
+/// 2. The data part carries `<dsp:dataModelExt relId="rId6" .../>` in its
+///    `<a:extLst>`; `relId` names the diagramDrawing relationship.
+/// 3. That relationship (`rId6 → ../diagrams/drawing1.xml`) is resolved in the
+///    same rels file — Office authors the 2007 `diagramDrawing` relationship on
+///    the referencing part, not the data part (real PowerPoint output has no
+///    `ppt/diagrams/_rels/dataN.xml.rels`).
+///
+/// So a data part's `dataModelExt relId` is the authority for which drawing part
+/// belongs to it, even if the file-number suffixes disagree.
+///
+/// **Fallback.** For a malformed/older file whose data part lacks a
+/// `dataModelExt` (or whose `relId` doesn't resolve), fall back to matching the
+/// file-number suffix (`data1.xml ↔ drawing1.xml`). This is a heuristic kept
+/// only for compatibility; the spec-driven relId path above is primary.
 pub(crate) fn build_smartart_drawings(
     rels_xml: &str,
     zip: &mut PptxZip,
@@ -337,6 +358,10 @@ pub(crate) fn build_smartart_drawings(
         Ok(d) => d,
         Err(_) => return result,
     };
+    // Index every relationship as rId → (type-suffix-relevant target). We need
+    // both the diagramData rels (to key the result and load the data part) and a
+    // rId → target lookup for the drawing relId the data part names.
+    let mut rid_target: HashMap<String, String> = HashMap::new();
     let mut data_rels: Vec<(String, String)> = Vec::new();
     let mut drawing_targets: Vec<String> = Vec::new();
     for rel in doc.root_element().children().filter(|n| n.is_element()) {
@@ -344,37 +369,66 @@ pub(crate) fn build_smartart_drawings(
         let (Some(rid), Some(target)) = (attr(&rel, "Id"), attr(&rel, "Target")) else {
             continue;
         };
+        rid_target.insert(rid.clone(), target.clone());
         if rel_type.ends_with("/diagramData") {
             data_rels.push((rid, target));
         } else if rel_type.ends_with("/diagramDrawing") {
             drawing_targets.push(target);
         }
     }
-    fn trailing_num(target: &str) -> Option<u32> {
-        let file = target.rsplit('/').next().unwrap_or("");
-        let stem = file.split('.').next().unwrap_or("");
-        let digits: String = stem
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        digits.chars().rev().collect::<String>().parse().ok()
-    }
-    for (rid, data_target) in data_rels {
-        let Some(num) = trailing_num(&data_target) else {
-            continue;
-        };
-        let drawing_target = drawing_targets
-            .iter()
-            .find(|t| trailing_num(t) == Some(num));
+
+    for (dm_rid, data_target) in data_rels {
+        // 1) Canonical: read the data part's dataModelExt relId, resolve it in
+        //    this same rels map.
+        let drawing_target = smartart_drawing_relid(&data_target, zip)
+            .and_then(|drawing_rid| rid_target.get(&drawing_rid).cloned())
+            // 2) Fallback: file-number-suffix match (heuristic, compat only).
+            .or_else(|| {
+                trailing_num(&data_target).and_then(|num| {
+                    drawing_targets
+                        .iter()
+                        .find(|t| trailing_num(t) == Some(num))
+                        .cloned()
+                })
+            });
         if let Some(dt) = drawing_target {
-            let drawing_path = resolve_path("ppt/slides", dt);
+            // Diagram parts live at ppt/diagrams/; every referencing part
+            // (slide / master) is one level under ppt/, so a "../diagrams/…"
+            // target resolves the same from any ppt/*/ base.
+            let drawing_path = resolve_path("ppt/slides", &dt);
             if let Ok(xml) = read_zip_str(zip, &drawing_path) {
-                result.insert(rid, xml);
+                result.insert(dm_rid, xml);
             }
         }
     }
     result
+}
+
+/// Read a SmartArt data part and return the `relId` its `<dsp:dataModelExt>`
+/// names for the cached drawing part (MS-ODRAWXML; the `dsp` namespace is
+/// `.../office/drawing/2008/diagram`). Returns `None` when the data part can't
+/// be read or carries no `dataModelExt@relId`.
+fn smartart_drawing_relid(data_target: &str, zip: &mut PptxZip) -> Option<String> {
+    let data_path = resolve_path("ppt/slides", data_target);
+    let xml = read_zip_str(zip, &data_path).ok()?;
+    let doc = roxmltree::Document::parse(&xml).ok()?;
+    doc.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "dataModelExt")
+        .and_then(|n| n.attribute("relId"))
+        .map(str::to_owned)
+}
+
+/// Trailing decimal suffix of a part's file stem (`.../drawing12.xml` → 12).
+/// Used only by the compatibility fallback in [`build_smartart_drawings`].
+fn trailing_num(target: &str) -> Option<u32> {
+    let file = target.rsplit('/').next().unwrap_or("");
+    let stem = file.split('.').next().unwrap_or("");
+    let digits: String = stem
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
 }
 
 /// Find the Target of the first relationship whose Type ends with `type_suffix`.
@@ -1200,6 +1254,84 @@ mod tests {
         // Explicit truthy ⇒ shown.
         assert!(!parse(r#"show="1""#));
         assert!(!parse(r#"show="true""#));
+    }
+
+    /// A SmartArt data part's `<dsp:dataModelExt relId>` (MS-ODRAWXML) is the
+    /// authority for its cached drawing part — not the file-number suffix. This
+    /// fixture deliberately CROSSES the numbering: `data1.xml`'s dataModelExt
+    /// points at the drawing relationship whose target is `drawing2.xml`, and
+    /// `data2.xml`'s at `drawing1.xml`. The old trailing-number heuristic would
+    /// pair 1↔1 / 2↔2 (wrong); the relId path pairs them by the explicit link.
+    #[test]
+    fn build_smartart_drawings_uses_datamodelext_relid_not_filename() {
+        // dsp namespace per MS-ODRAWXML.
+        let dsp = "http://schemas.microsoft.com/office/drawing/2008/diagram";
+        let data1 = format!(
+            r#"<dsp:dataModel xmlns:dsp="{dsp}"><dsp:extLst><dsp:dataModelExt relId="rIdDrawB"/></dsp:extLst></dsp:dataModel>"#
+        );
+        let data2 = format!(
+            r#"<dsp:dataModel xmlns:dsp="{dsp}"><dsp:extLst><dsp:dataModelExt relId="rIdDrawA"/></dsp:extLst></dsp:dataModel>"#
+        );
+        // Distinct sentinel content so we can assert which drawing was paired.
+        let drawing1 = r#"<dsp:drawing>ONE</dsp:drawing>"#;
+        let drawing2 = r#"<dsp:drawing>TWO</dsp:drawing>"#;
+        let bytes = zip_with_parts(&[
+            ("ppt/diagrams/data1.xml", data1.as_bytes()),
+            ("ppt/diagrams/data2.xml", data2.as_bytes()),
+            ("ppt/diagrams/drawing1.xml", drawing1.as_bytes()),
+            ("ppt/diagrams/drawing2.xml", drawing2.as_bytes()),
+        ]);
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let rels = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>
+  <Relationship Id="rIdData2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data2.xml"/>
+  <Relationship Id="rIdDrawA" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/>
+  <Relationship Id="rIdDrawB" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing2.xml"/>
+</Relationships>"#;
+
+        let map = build_smartart_drawings(rels, &mut zip);
+        // Keyed by the diagramData rel Id (= the slide's r:dm value).
+        // data1 → dataModelExt relId rIdDrawB → drawing2.xml ("TWO").
+        assert!(
+            map.get("rIdData1").unwrap().contains("TWO"),
+            "data1 must pair with drawing2 via dataModelExt relId, got {:?}",
+            map.get("rIdData1")
+        );
+        // data2 → rIdDrawA → drawing1.xml ("ONE").
+        assert!(
+            map.get("rIdData2").unwrap().contains("ONE"),
+            "data2 must pair with drawing1 via dataModelExt relId, got {:?}",
+            map.get("rIdData2")
+        );
+    }
+
+    /// When a data part lacks a `dataModelExt` (older/malformed file), the
+    /// compatibility fallback pairs by file-number suffix.
+    #[test]
+    fn build_smartart_drawings_falls_back_to_filenumber_without_datamodelext() {
+        // data1.xml has no extLst/dataModelExt at all.
+        let data1 = r#"<dsp:dataModel xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"/>"#;
+        let drawing1 = r#"<dsp:drawing>ONE</dsp:drawing>"#;
+        let bytes = zip_with_parts(&[
+            ("ppt/diagrams/data1.xml", data1.as_bytes()),
+            ("ppt/diagrams/drawing1.xml", drawing1.as_bytes()),
+        ]);
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let rels = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>
+  <Relationship Id="rIdDraw1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/>
+</Relationships>"#;
+        let map = build_smartart_drawings(rels, &mut zip);
+        assert!(
+            map.get("rIdData1")
+                .map(|s| s.contains("ONE"))
+                .unwrap_or(false),
+            "fallback must pair data1↔drawing1 by file number, got {:?}",
+            map.get("rIdData1")
+        );
     }
 
     #[test]
