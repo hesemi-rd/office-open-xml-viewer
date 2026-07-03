@@ -35,7 +35,8 @@ export type RenderWorkerRequest =
   // exists only for protocol parity with worker.ts (so a stray extractImage
   // never hangs). The render worker reads bytes straight from its retained
   // rawData.
-  | { type: 'extractImage'; id: number; path: string };
+  | { type: 'extractImage'; id: number; path: string }
+  | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerResponse =
   // `imageExtracted` / `error` are reused from WorkerResponse. `parsed` and

@@ -81,6 +81,14 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       const out = archive.extract_image(req.path).buffer as ArrayBuffer;
       const res: WorkerResponse = { type: 'imageExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
+    } else if (req.type === 'toMarkdown') {
+      if (!archive) throw new Error('No xlsx loaded');
+      // Project the already-opened handle to markdown (no re-copy of the file,
+      // no re-scan of the central directory). A plain string has no transferable
+      // backing, so it is posted by structured clone like any other value.
+      const markdown = archive.to_markdown();
+      const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
+      self.postMessage(res);
     }
   } catch (err) {
     const res: WorkerResponse = { type: 'error', id, message: String(err) };

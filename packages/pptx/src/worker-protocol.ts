@@ -26,6 +26,7 @@ export type RenderWorkerRequest =
   | { kind: 'init'; wasmUrl: string }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
+  | { kind: 'toMarkdown'; id: number }
   | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
   | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions };
 

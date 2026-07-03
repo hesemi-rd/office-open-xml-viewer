@@ -3,6 +3,25 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+
+/**
+ * Locate a parser package's compiled `_bg.wasm` on disk. Tries the published
+ * layout first (the parser packages export `./wasm-binary`, so `require.resolve`
+ * finds it under `node_modules` after `npm i`, and via pnpm's symlinks inside
+ * this monorepo), then falls back to the monorepo-relative sibling path used
+ * when running straight from a raw source checkout (e.g. the GitHub Action,
+ * where the parser packages' `dist` may be absent but `src/wasm` is present).
+ */
+function resolveWasm(pkg, relFallback) {
+  try {
+    return require.resolve(`${pkg}/wasm-binary`);
+  } catch {
+    return resolve(here, relFallback);
+  }
+}
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -38,15 +57,15 @@ const {
 const buf = readFileSync(filePath);
 let md;
 if (ext === '.pptx') {
-  const wasm = readFileSync(resolve(here, '../../pptx/src/wasm/pptx_parser_bg.wasm'));
+  const wasm = readFileSync(resolveWasm('@silurus/ooxml-pptx', '../../pptx/src/wasm/pptx_parser_bg.wasm'));
   initPptxFromBytes(wasm);
   md = pptxToMarkdown(buf);
 } else if (ext === '.docx') {
-  const wasm = readFileSync(resolve(here, '../../docx/src/wasm/docx_parser_bg.wasm'));
+  const wasm = readFileSync(resolveWasm('@silurus/ooxml-docx', '../../docx/src/wasm/docx_parser_bg.wasm'));
   initDocxFromBytes(wasm);
   md = docxToMarkdown(buf);
 } else if (ext === '.xlsx') {
-  const wasm = readFileSync(resolve(here, '../../xlsx/src/wasm/xlsx_parser_bg.wasm'));
+  const wasm = readFileSync(resolveWasm('@silurus/ooxml-xlsx', '../../xlsx/src/wasm/xlsx_parser_bg.wasm'));
   initXlsxFromBytes(wasm);
   md = xlsxToMarkdown(buf);
 } else {

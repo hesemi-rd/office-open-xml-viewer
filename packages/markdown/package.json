@@ -1,6 +1,5 @@
 {
   "name": "@silurus/ooxml-markdown",
-  "private": true,
   "version": "0.70.2",
   "description": "Convert .pptx / .docx / .xlsx to GitHub-flavoured markdown using the workspace WASM parsers — browser / Node / CLI",
   "license": "MIT",
@@ -14,7 +13,19 @@
   "bugs": {
     "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
   },
+  "keywords": [
+    "ooxml",
+    "docx",
+    "xlsx",
+    "pptx",
+    "markdown",
+    "convert",
+    "llm",
+    "wasm",
+    "cli"
+  ],
   "type": "module",
+  "sideEffects": false,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
@@ -23,8 +34,21 @@
   "bin": {
     "ooxml-md": "./bin/ooxml-md.mjs"
   },
+  "files": [
+    "src",
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
+  },
+  "dependencies": {
+    "@silurus/ooxml-docx": "workspace:*",
+    "@silurus/ooxml-pptx": "workspace:*",
+    "@silurus/ooxml-xlsx": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
