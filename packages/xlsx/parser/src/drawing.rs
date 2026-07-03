@@ -7,6 +7,7 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 // `Cursor` is only used to build in-memory archives in this module's tests; the
 // production archive type is `crate::XlsxZip`.
@@ -1585,16 +1586,11 @@ fn parse_two_cell_marker(anchor: &roxmltree::Node) -> AnchorRect {
     }
 }
 
-/// A legacy VML anchor rect is a pixel-offset 8-value CSV. Excel writes offsets
-/// in **pixels (1/96 inch)**; the renderer wants EMU, so multiply by this. One
-/// inch = 914400 EMU and 96 px, so 1 px = 914400 / 96 = 9525 EMU.
-const VML_PX_TO_EMU: i64 = 9525;
-
 /// Parse a legacy VML `<x:ClientData><x:Anchor>` into the two-cell rect. The
 /// element's text is an 8-value CSV (`[MS-OI29500] 2.1.639 / VML §14.2`):
 /// `LeftCol, LeftOffsetPx, TopRow, TopOffsetPx, RightCol, RightOffsetPx,
 /// BottomRow, BottomOffsetPx`. Columns/rows are 0-based cell indices; the four
-/// offsets are **pixels** and are converted to EMU via [`VML_PX_TO_EMU`].
+/// offsets are **pixels** and are converted to EMU via [`EMU_PER_PX_96DPI`].
 /// Returns `None` when the CSV is malformed (< 8 numeric fields).
 fn parse_vml_client_anchor(client_data: &roxmltree::Node) -> Option<AnchorRect> {
     let anchor = client_data
@@ -1610,13 +1606,13 @@ fn parse_vml_client_anchor(client_data: &roxmltree::Node) -> Option<AnchorRect> 
     }
     Some(AnchorRect {
         from_col: vals[0].max(0) as u32,
-        from_col_off: vals[1] * VML_PX_TO_EMU,
+        from_col_off: vals[1] * EMU_PER_PX_96DPI,
         from_row: vals[2].max(0) as u32,
-        from_row_off: vals[3] * VML_PX_TO_EMU,
+        from_row_off: vals[3] * EMU_PER_PX_96DPI,
         to_col: vals[4].max(0) as u32,
-        to_col_off: vals[5] * VML_PX_TO_EMU,
+        to_col_off: vals[5] * EMU_PER_PX_96DPI,
         to_row: vals[6].max(0) as u32,
-        to_row_off: vals[7] * VML_PX_TO_EMU,
+        to_row_off: vals[7] * EMU_PER_PX_96DPI,
     })
 }
 

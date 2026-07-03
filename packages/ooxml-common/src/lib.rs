@@ -14,4 +14,5 @@ pub mod math;
 pub mod rels;
 pub mod text;
 pub mod theme;
+pub mod units;
 pub mod zip;

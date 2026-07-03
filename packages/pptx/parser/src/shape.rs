@@ -20,6 +20,7 @@ use crate::{
     PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 
 /// OOXML spec default positions for common placeholder types.
@@ -775,9 +776,6 @@ pub(crate) fn png_size_from_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
     let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
     Some((w, h))
 }
-
-/// EMU per CSS pixel at PowerPoint's default 96 DPI (914400 EMU/inch ÷ 96).
-pub(crate) const EMU_PER_PX_96DPI: i64 = 9525;
 
 /// If a `p:pic` declares an `a:audioFile` / `a:videoFile` in its `nvPr`
 /// (or the newer `p14:media` extension), emit a `MediaElement` with the
