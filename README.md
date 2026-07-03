@@ -39,7 +39,7 @@ pnpm add @silurus/ooxml
 > new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });
 > ```
 
-> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~4 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine tree-shake the ~4 MB away entirely.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math asset (`mathjax-stix2.js`, ~3 MB) that ships in the tarball, so the reported figure is much larger than any single app build. What actually lands in your app is smaller on two counts: import only the format you need (e.g. `@silurus/ooxml/pptx`), and the math engine is a **separate entry** (`@silurus/ooxml/math`). Its main-thread chunk is a ~1 KB loader that references the ~3 MB engine asset as a **sibling file** (not an inline data URL): the engine is fetched **lazily, only when a document actually contains equations** — and only if you imported `@silurus/ooxml/math` and passed it to a viewer in the first place (see [Rendering equations](#rendering-equations)). Never import the `math` entry and the loader chunk never enters your graph at all.
 
 ---
 
@@ -72,11 +72,14 @@ pptx.nextSlide();
 
 OMML equations (`m:oMath` / `m:oMathPara`) in `.docx`, `.pptx` and `.xlsx` are rendered with
 [MathJax](https://www.mathjax.org/) + [STIX Two Math](https://github.com/stipub/stixfonts).
-That engine is ~4 MB, so it is **opt-in**: import the `math` engine from the separate
+That engine is ~3 MB, so it is **opt-in**: import the `math` engine from the separate
 `@silurus/ooxml/math` entry and pass it to the viewer. Pass it and equations render;
-omit it and the engine is referenced nowhere, so a bundler **tree-shakes the ~4 MB
-away entirely** (equations are simply skipped). It is fully self-contained: no
-network, no cross-origin requests.
+omit it and the engine is referenced nowhere, so a bundler leaves it out of your build
+entirely (equations are simply skipped). When you *do* pass it, the ~3 MB engine ships
+as a **standalone asset file** next to the bundle rather than an inline data URL, and is
+fetched **on demand — only the first time a document actually contains an equation**, so
+equation-free documents never pay for it. It is fully self-contained: served from your own
+origin, no cross-origin requests.
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
@@ -560,7 +563,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
-| | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)) | ✅ |
+| | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
 | | WMF metafile images (legacy vector, incl. inside text boxes) — rasterized via a built-in player (window mapping, pens/brushes, poly/rect); true EMF detected but not yet rendered | ✅ |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
 | | Endnotes — reference markers + bodies at document end (`w:endnoteReference`, §17.11) | ✅ |

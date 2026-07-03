@@ -4,6 +4,105 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.70.0 — 2026-07-03
+
+Minor. Continuous-scroll viewers (`DocxScrollViewer` / `PptxScrollViewer`),
+hidden slide / sheet display modes, a docx text-box layout unification, a large
+performance pass (parse throughput, wasm chunk size, image-bitmap reuse), and the
+math engine reshaped into a lazily-fetched standalone asset. New public surface:
+the scroll viewers, `hiddenSlideMode` / `hiddenSheetMode`, and the `wasmUrl` load
+option.
+
+**Viewers**
+
+- **Continuous scroll viewers:** `DocxScrollViewer` / `PptxScrollViewer` render
+  the whole document as one vertically-scrolling, PDF-reader-style surface. They
+  take a container `<div>` (not a canvas), virtualize the page/slide list (only the
+  visible window + a small overscan is mounted), recycle canvases, and expose a
+  styleable "desk" (`background` / `gap` / `padding*` / `pageShadow`), flicker-free
+  Ctrl/⌘ + wheel (and trackpad-pinch) zoom, an optional per-page selectable text
+  overlay, and headless-engine injection to share one parse across panes. (#650,
+  #651, #652, #653, #654, #655, #656)
+- **destroy():** hardened to return the caller-owned canvas to its original DOM
+  position and to tolerate stale sibling refs / headless documents. (#659)
+
+**docx**
+
+- **Text boxes on the body engine:** text-box paragraphs now run through the same
+  line-layout engine as body text, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9
+  bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37)
+  all apply inside a box. (#697)
+- **Floating tables:** split a floating table across pages a row at a time, and
+  clamp a page/margin-anchored floating table into its container per Word's
+  observed behaviour (§17.4.57). (#691, #694)
+- **Text frames:** a page-overflowing text frame keeps with its anchor
+  (`w:framePr`, §17.3.1.11). (#690)
+- **Float wrap:** a line beside a floating object starts at Word's measured
+  one-inch rule rather than a computed offset. (#696)
+- **Shrink-to-fit:** draw shrink-fitted lines with the same compression the fit
+  judgment assumed, so the measured and painted widths agree. (#703)
+- **Paragraph shading / borders:** a paragraph's shading box paints its bottom edge
+  by replaying the painted paragraph height (#645-series follow-up, §17.3.1.7).
+- **WMF metafiles:** render `META_STRETCHDIBITS` (embedded DIB) via a shared
+  `core/image/dib` decoder instead of a black box (#639, cross-package with emf).
+- **Layout robustness:** page/line splitting is scale-invariant — the same line
+  breaks at any zoom (line rescaling is total over anchored-image segments). (#689)
+
+**pptx**
+
+- **Hidden slides:** `hiddenSlideMode` (`'show'` (default) / `'skip'` / `'dim'`)
+  controls how hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented — skip
+  keeps absolute indices and honors an explicit goToSlide; dim draws a translucent
+  overlay. `setHiddenSlideMode()` / `visibleSlideCount` accompany it. (#637)
+- **Callout line ends:** arrow / oval line-end decorations now render on every
+  callout series (`ST_LineEndType`, §20.1.8.3), not just callout-1 geometries.
+  (#634)
+- **Preset engine:** more shapes routed through the shared spec-correct preset
+  engine (math operators, matched flowchart shapes, spec-correct micro-geometry —
+  the A2 batches). (#687, #695, #704)
+- **Parser modularization:** `lib.rs` split into eight focused modules (text,
+  shapes, …) with no behaviour change. (#686)
+
+**xlsx**
+
+- **Hidden sheets:** `hiddenSheetMode` (`'show'` (default) / `'skip'` / `'dim'`)
+  controls how hidden / very-hidden sheets (`<sheet state>`, §18.2.19) appear in
+  the tab bar — skip removes the tab and jumps navigation over it; dim renders it at
+  reduced opacity. `setHiddenSheetMode()` accompanies it. (#638)
+- **Scroll:** wheel/scroll renders are coalesced onto a single rAF, and stale
+  worker bitmaps are dropped with a render-generation counter. (#667)
+- **Sheet switching:** parse results and sheet switches cross the worker boundary
+  as transferable JSON bytes. (#662, #666, #671)
+
+**perf**
+
+- **pptx parse:** a 15 MB deck parses in ~11 ms (was ~30 ms) — the model is parsed
+  once and the worker→main hand-off is a transferable ArrayBuffer decoded a single
+  time. (#666, #669)
+- **wasm chunks:** the three parser WASM modules ship as real streaming-compiled
+  assets (−85–89 % vs the old base64 data-URL inline), with a new `wasmUrl` load
+  option to serve them from a CDN or self-hosted path. (#681)
+- **math chunk:** the MathJax + STIX Two Math engine (~3 MB) is emitted as a
+  standalone sibling asset fetched lazily the first time a document has an equation;
+  the opt-in `math.mjs` chunk shrinks from 4.13 MB to a ~1.1 KB loader. (#702)
+- **image bitmaps:** a per-document decoded-bitmap LRU cache makes revisiting a
+  docx page ~9× faster (no re-decode). (#668)
+- **docx cells:** cell-paragraph line layout is stamped at measure and reused at
+  paint. (#705)
+- **misc:** stateful ZIP archive handles for repeat work, effect hot-path trims,
+  and an opt-in `workerTimeoutMs` for wedged-worker detection. (#663, #670, #672)
+
+**internal**
+
+- **Layout contract (B2):** the docx renderer's measure and paint paths are unified
+  behind a single line-layout contract, with `line-layout.ts` extracted and the
+  compute-once reuse gate hardened. (#684, #693, #700)
+- **Shared consolidation:** DrawingML color-node extraction, theme/rels parsing, and
+  TypeScript shared types consolidated into `ooxml-common` / `core`. (#677, #680,
+  #682)
+- **CI:** a rendering smoke test on the browser worker path, and the npm publish is
+  gated on tests + publint + attw + a tarball smoke test. (#658, #664)
+
 ## 0.69.0 — 2026-06-30
 
 Minor. A CJK text-layout fidelity pass across docx / pptx, plus indent, tab-stop,

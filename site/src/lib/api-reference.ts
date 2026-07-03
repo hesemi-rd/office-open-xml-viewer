@@ -20,10 +20,12 @@ export interface ApiClass {
   methods: ApiMethod[];
 }
 
-const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: '512 MiB', desc: 'Per-entry ZIP decompression cap (zip-bomb guard). Lower it for untrusted input.' };
+const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: '512 MiB', desc: 'Per-entry ZIP decompression cap (zip-bomb guard). Lower it for untrusted input. Zero / negative values fall back to the default.' };
 const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
-const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~4 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped — the engine tree-shakes away entirely.' };
+const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document URL). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.' };
+const WORKER_TIMEOUT = { name: 'workerTimeoutMs', type: 'number', def: 'unlimited', desc: 'Reject the parse if the worker does not answer within this many ms — an opt-in safety net for a wedged / crashed worker that would otherwise leave load() pending forever. Unlimited by default (a large document with heavy media can legitimately take tens of seconds). A worker that throws or fails to load already rejects immediately regardless; this only covers the "silent, never-responds" case.' };
+const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped, and the engine is left out of your build. When passed, the engine ships as a standalone asset fetched lazily the first time a document contains an equation.' };
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' parses AND renders entirely inside the worker; the main thread only paints the ImageBitmap returned by the render*ToBitmap method via a `bitmaprenderer` context. Requires Worker + OffscreenCanvas. The canvas-target render methods are unavailable in 'worker' mode, and equations require 'main'. Trade-off: each frame is transferred from the worker as an ImageBitmap, so a single render can be marginally slower than 'main' — the win is that the main thread never blocks." };
 const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the whole viewer off the main thread — every frame is produced in a Web Worker and painted via a `bitmaprenderer` context — so document rendering never blocks the UI. Scroll, sheet tabs, zoom and (xlsx) cell selection are unchanged. Requires Worker + OffscreenCanvas. The pptx/docx text-selection overlay is unavailable in 'worker' mode (onTextRun can't cross the worker boundary), and equations require 'main'. Trade-off: each frame crosses the worker boundary as an ImageBitmap, so an individual render can be marginally slower than 'main' — the win is a responsive main thread, not raw render speed." };
 
@@ -39,6 +41,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         GFONTS,
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer so users can select & copy slide text.' },
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive (the viewer draws its own play chrome).' },
+        { name: 'hiddenSlideMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented. `show` draws them like any other slide; `skip` makes sequential navigation (nextSlide/prevSlide and the initial load) jump over them while keeping absolute indices unchanged (an explicit goToSlide to a hidden slide is still honored); `dim` draws them under a translucent overlay (the PowerPoint thumbnail look).' },
+        { name: 'hiddenSlideDim', type: 'Partial<DimOptions>', def: "{ color: '#ffffff', opacity: 0.6 }", desc: 'Overrides for the `dim` overlay, merged over the default white 60% wash. A partial so it stays in sync if DimOptions gains a field.' },
         ZIP,
         MATH,
         VIEWER_MODE,
@@ -52,6 +56,9 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'prevSlide(): Promise<void>', desc: 'Go back one slide.' },
         { sig: 'get slideIndex(): number', desc: 'Current slide index.' },
         { sig: 'get slideCount(): number', desc: 'Total slides (0 until loaded).' },
+        { sig: 'get hiddenSlideMode(): "show" | "skip" | "dim"', desc: 'The current hidden-slide mode.' },
+        { sig: 'setHiddenSlideMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-slide mode at runtime and re-render. Entering `skip` while on a hidden slide advances to the nearest visible slide.' },
+        { sig: 'get visibleSlideCount(): number', desc: 'Number of non-hidden slides (the absolute slideCount is unchanged).' },
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based); null when the slide has no notes part or the index is out of range.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
@@ -61,12 +68,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [GFONTS, ZIP, MATH, MODE],
+      options: [GFONTS, WASM_URL, ZIP, WORKER_TIMEOUT, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
-        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. Equations render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderSlideToBitmap.' },
-        { sig: 'renderSlideToBitmap(index, opts?: { width?, dpr? }): Promise<ImageBitmap>', desc: 'Render one slide and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
+        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr?, onTextRun?, dim? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. `onTextRun` is called per rendered text segment so a caller can build a transparent selection overlay; `dim` (a DimOptions) paints a translucent wash over the finished slide (hidden-slide dimming). Equations render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderSlideToBitmap.' },
+        { sig: 'renderSlideToBitmap(index, opts?: { width?, dpr?, dim? }): Promise<ImageBitmap>', desc: 'Render one slide and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `dim` paints a translucent overlay over the slide (hidden-slide dimming). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'presentSlide(canvas, index, opts?: { width?, dpr?, onTextRun? }): Promise<PresentationHandle>', desc: 'Render a slide and attach canvas-native audio/video playback, returning a handle with play() / pause() / destroy(). Works in both modes — in `mode: "worker"` the base slide is rendered off the main thread and the video overlay is composited on the main thread; `onTextRun` is unavailable there (it cannot cross the worker boundary).' },
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based; ECMA-376 §13.3.5). Returns null when the slide has no notes part or the index is out of range.' },
         { sig: 'get slideWidth(): number', desc: 'Slide width in EMU (0 until loaded).' },
@@ -143,7 +150,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [GFONTS, ZIP, MATH, MODE],
+      options: [GFONTS, WASM_URL, ZIP, WORKER_TIMEOUT, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
         { sig: 'get pageCount(): number', desc: 'Total pages.' },
@@ -201,6 +208,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom slider bounds as scale factors (10%–400%).' },
         { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only — it changes the on-screen view only and never modifies the loaded file. Set false to disable.' },
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle (any CSS color). The fill is the same color at 8% opacity.' },
+        { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden / very-hidden sheets (`<sheet state>`, §18.2.19) appear in the tab bar. `show` renders a tab like any other; `skip` hides the tab (`display:none`) and makes sequential navigation jump over it; `dim` renders the tab at reduced opacity. Mirrors pptx `hiddenSlideMode`.' },
         GFONTS,
         ZIP,
         MATH,
@@ -221,6 +229,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get selection(): CellRange | null', desc: 'The current selected range.' },
         { sig: 'setScale(scale: number): void', desc: 'Set the zoom/scale factor at runtime (clamped to zoomMin/zoomMax, snapped to whole percent). View-only.' },
         { sig: 'setSelectionColor(color: string): void', desc: 'Change the selection accent color at runtime (any CSS color).' },
+        { sig: 'get hiddenSheetMode(): "show" | "skip" | "dim"', desc: 'The current hidden-sheet mode.' },
+        { sig: 'setHiddenSheetMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-sheet mode at runtime: restyle the tabs and re-render. Entering `skip` while on a hidden sheet advances to the nearest visible sheet.' },
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas the grid is drawn on.' },
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
@@ -230,7 +240,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [GFONTS, ZIP, MATH, MODE],
+      options: [GFONTS, WASM_URL, ZIP, WORKER_TIMEOUT, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
