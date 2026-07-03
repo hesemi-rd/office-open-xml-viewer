@@ -1,3 +1,4 @@
+use ooxml_common::ns::is_r_ns;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
@@ -286,18 +287,17 @@ pub(crate) fn children_vec<'a, 'i>(
         .collect()
 }
 
-pub(crate) const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-
 pub(crate) fn attr(node: &roxmltree::Node<'_, '_>, local: &str) -> Option<String> {
     node.attributes()
         .find(|a| a.name() == local && a.namespace().is_none())
         .map(|a| a.value().to_owned())
 }
 
-/// Attribute in the r: (relationships) namespace — e.g. r:id, r:embed
+/// Attribute in the r: (relationships) namespace — e.g. r:id, r:embed. Accepts
+/// both the Transitional and Strict (ISO/IEC 29500) relationships URIs.
 pub(crate) fn attr_r(node: &roxmltree::Node<'_, '_>, local: &str) -> Option<String> {
     node.attributes()
-        .find(|a| a.name() == local && a.namespace() == Some(R_NS))
+        .find(|a| a.name() == local && is_r_ns(a.namespace()))
         .map(|a| a.value().to_owned())
 }
 
