@@ -14,6 +14,14 @@
 //     real Gregorian date; we leave it unshifted (→ 1900-02-28), matching the
 //     long-standing core behaviour rather than inventing a mapping.
 //
+//     The +1 compensation for serial < 60 is a deliberate choice to match
+//     Excel's on-screen rendering, not the literal base-date arithmetic of
+//     §18.17.4.1 (whose worked example puts serial 1.5 at 1899-12-31T12:00,
+//     which would render serial 1 as 1899-12-31). We render serial 1 as
+//     1900-01-01 because that is what Excel displays; the spec's base-date
+//     formula and Excel's display diverge for serials below the phantom leap
+//     day, and we follow Excel.
+//
 //   • 1904 date system: base date is 1904-01-01 (serial 0), so serial 1 →
 //     1904-01-02. This system has no leap-year bug. The 1904 base is exactly
 //     1462 days after the 1900 base date, which is why a Mac-authored (1904)

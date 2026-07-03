@@ -48,8 +48,10 @@ export function formatCellValue(
   // `todaySerial`/`nowSerial` always emit a 1900-system serial (they encode
   // "today" as a calendar concept, independent of the workbook's date system),
   // so a recomputed volatile must be formatted against the 1900 epoch even in a
-  // 1904 workbook — otherwise it would render 1462 days early. Stored cell
-  // values, by contrast, use the workbook's own date system.
+  // 1904 workbook. Formatting a 1900-system serial against the (later) 1904
+  // base date would push it 1462 days into the future — i.e. render it 1462
+  // days late. Stored cell values, by contrast, use the workbook's own date
+  // system.
   const effectiveDate1904 = recomputed !== null ? false : date1904;
   return applyFormat(num, effectiveFmtId, effectiveFmt, effectiveDate1904);
 }
@@ -432,10 +434,10 @@ function formatGeneralExponential(abs: number): string {
  *   side — not a numerically-documented Microsoft threshold, but the
  *   consistent extrapolation of the documented large-number rule.
  *
- * Column-width-dependent narrowing of the *displayed* precision (Excel
- * shrinks General further to fit a narrow column) is intentionally not
- * modeled here; this function always targets the "standard column width"
- * output, matching how the rest of this renderer treats layout as
+ * Column-width narrowing is not modeled: Excel shrinks a General value's
+ * displayed precision further to fit a narrow column, but this function always
+ * emits the full 11-significant-digit form regardless of the destination
+ * column width, matching how the rest of this renderer treats layout as
  * independent of formatting.
  */
 function formatGeneralNumber(num: number): string {
