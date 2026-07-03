@@ -240,6 +240,7 @@ impl From<ChartData> for ChartModel {
             scatter_style: None,
             radar_style: c.radar_style,
             secondary_val_axis: None,
+            date1904: c.date1904,
         }
     }
 }
@@ -543,6 +544,13 @@ pub(crate) fn parse_chart_xml(
     let (chart_border_color, chart_border_width_emu) = chart_space_root
         .map(ooxml_common::chart::extract_chart_space_border)
         .unwrap_or((None, None));
+
+    // `<c:date1904>` (ECMA-376 §21.2.2.38) — a direct child of `<c:chartSpace>`.
+    // Shared with the pptx chart parser via ooxml-common so both stay in
+    // lockstep on the CT_Boolean val semantics (implied-true when present).
+    let date1904 = chart_space_root
+        .map(ooxml_common::chart::extract_chart_date1904)
+        .unwrap_or(false);
 
     // `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27).
     let title_manual_layout = chart_root
@@ -1070,6 +1078,7 @@ pub(crate) fn parse_chart_xml(
         val_axis_title_color,
         chart_border_color,
         chart_border_width_emu,
+        date1904,
     })
 }
 

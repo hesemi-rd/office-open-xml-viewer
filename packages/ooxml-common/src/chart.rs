@@ -165,6 +165,11 @@ pub struct ChartModel {
     pub radar_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
+    /// `<c:date1904>` (ECMA-376 §21.2.2.38). `true` = the chart's serial dates
+    /// resolve against the 1904 date system. Omitted from JSON when false (the
+    /// default 1900 system) for wire parity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub date1904: bool,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -664,6 +669,21 @@ pub fn extract_axis_title_with_props(
 /// `@w` (EMU) is captured as `u32` regardless of the fill. `<a:schemeClr>` is
 /// intentionally left unresolved here (theme not wired through to chart border
 /// parsing yet).
+/// `<c:date1904>` (ECMA-376 §21.2.2.38) as a direct child of `<c:chartSpace>`.
+/// The element is a `CT_Boolean`: `val` defaults to `true` when the element is
+/// present but the attribute is omitted, so `<c:date1904/>` alone means
+/// date1904=true. `val="0"` / `"false"` disable it. Absent element ⇒ false (the
+/// default 1900 date system, §18.17.4.1).
+pub fn extract_chart_date1904(chart_space_root: Node) -> bool {
+    match child(chart_space_root, "date1904") {
+        Some(n) => match n.attribute("val") {
+            None => true, // element present, val implied true
+            Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+        },
+        None => false,
+    }
+}
+
 pub fn extract_chart_space_border(chart_space_root: Node) -> (Option<String>, Option<u32>) {
     let Some(ln) = child(chart_space_root, "spPr").and_then(|sp| child(sp, "ln")) else {
         return (None, None);
@@ -977,6 +997,7 @@ mod tests {
             scatter_style: None,
             radar_style: None,
             secondary_val_axis: None,
+            date1904: false,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -994,6 +1015,8 @@ mod tests {
         assert!(!obj.contains_key("barGapWidth"));
         assert!(!obj.contains_key("secondaryValAxis"));
         assert!(!obj.contains_key("catAxisFontColor"));
+        // date1904 is dropped from the wire when false (default 1900 system).
+        assert!(!obj.contains_key("date1904"));
         // Series: required present, optional dropped; array null preserved.
         let s0 = &obj["series"][0];
         assert_eq!(s0["name"], "S1");
@@ -1392,5 +1415,27 @@ mod tests {
             r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
         let d = root_of(xml);
         assert_eq!(extract_chart_space_border(d.root_element()), (None, None));
+    }
+
+    #[test]
+    fn chart_date1904_variants() {
+        // §21.2.2.38: CT_Boolean. Element present + val omitted ⇒ true.
+        let ns = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+        let bare = format!(r#"<c:chartSpace xmlns:c="{ns}"><c:date1904/></c:chartSpace>"#);
+        assert!(extract_chart_date1904(root_of(&bare).root_element()));
+
+        let one = format!(r#"<c:chartSpace xmlns:c="{ns}"><c:date1904 val="1"/></c:chartSpace>"#);
+        assert!(extract_chart_date1904(root_of(&one).root_element()));
+
+        let word =
+            format!(r#"<c:chartSpace xmlns:c="{ns}"><c:date1904 val="true"/></c:chartSpace>"#);
+        assert!(extract_chart_date1904(root_of(&word).root_element()));
+
+        let zero = format!(r#"<c:chartSpace xmlns:c="{ns}"><c:date1904 val="0"/></c:chartSpace>"#);
+        assert!(!extract_chart_date1904(root_of(&zero).root_element()));
+
+        // Absent element ⇒ false (default 1900 system).
+        let absent = format!(r#"<c:chartSpace xmlns:c="{ns}"/>"#);
+        assert!(!extract_chart_date1904(root_of(&absent).root_element()));
     }
 }

@@ -790,6 +790,10 @@ pub struct ChartData {
     /// None = unset (renderer uses a 1px hairline when a color is present).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chart_border_width_emu: Option<u32>,
+    /// `<c:date1904>` (ECMA-376 §21.2.2.38). `true` = the chart's serial dates
+    /// resolve against the 1904 date system. Default false (1900 system).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub date1904: bool,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).

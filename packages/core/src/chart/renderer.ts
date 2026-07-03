@@ -636,7 +636,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       const val = axMin + si * step;
       const label = pct
         ? `${Math.round(val)}%`
-        : formatChartValWithCode(val, chart.valAxisFormatCode);
+        : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
       wmax = Math.max(wmax, ctx.measureText(label).width);
     }
     valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
@@ -652,7 +652,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     let wmax = 0;
     const sSteps = Math.round((sMax - sMin) / sStep);
     for (let si = 0; si <= sSteps; si++) {
-      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(sMin + si * sStep, sec.formatCode ?? null)).width);
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(sMin + si * sStep, sec.formatCode ?? null, chart.date1904)).width);
     }
     secLabelBandW = wmax + 18;
   }
@@ -734,7 +734,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       const isZero = Math.abs(val) < step * 1e-9;
       const label = pct
         ? `${Math.round(val)}%`
-        : formatChartValWithCode(val, chart.valAxisFormatCode);
+        : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
       if (!isH) {
         const gy = valY(val);
         strokeValueGridlineH(ctx, px0, pw, gy, isZero);
@@ -887,6 +887,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             : formatChartValWithCode(
                 sv,
                 chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
+                chart.date1904,
               );
           // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
           // a vertical column bar, "length" is the bar's height and
@@ -929,6 +930,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             : formatChartValWithCode(
                 sv,
                 chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
+                chart.date1904,
               );
           drawBarDataLabel(
             ctx, text,
@@ -960,7 +962,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     for (let ci = 0; ci < n; ci++) {
       // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
       // (e.g. dateAx serials → real dates). No-op for string categories.
-      const raw = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode);
+      const raw = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
       if (!isH) {
         const lx = px0 + ci * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -1027,7 +1029,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const gy = toYSecondary(sval);
         // Same tick geometry as the left axis, mirrored to the right edge.
         drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true);
-        ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null), axX + 14, gy);
+        ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, chart.date1904), axX + 14, gy);
       }
     }
     if (sec.title) {
@@ -1184,7 +1186,7 @@ function renderLineChart(
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 6, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
     }
   }
 
@@ -1256,7 +1258,7 @@ function renderLineChart(
       ctx.fillStyle = catLabelColor;
       // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
       // category-axis numFmt; string categories pass through unchanged.
-      const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode);
+      const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
       ctx.fillText(elideToWidth(ctx, label, catSlotMaxPx), tx, py0 + ph + 5);
     }
   }
@@ -1409,7 +1411,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 6, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
     }
   }
   // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`
@@ -1452,7 +1454,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // category-axis numFmt before measuring and drawing; string categories
     // pass through unchanged.
     const labels = cats.map(c =>
-      formatCategoryLabel((c ?? '').toString(), chart.catAxisFormatCode));
+      formatCategoryLabel((c ?? '').toString(), chart.catAxisFormatCode, chart.date1904));
     let maxLabelW = 0;
     for (let ci = 0; ci < n; ci++) {
       maxLabelW = Math.max(maxLabelW, ctx.measureText(labels[ci] ?? '').width);
@@ -1642,7 +1644,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
           : 2 * Math.min(plotRightX - lx, lx - plotLeftX);
     // §21.2.2.71: format numeric-serial categories via the category-axis
     // numFmt; string spoke labels pass through unchanged.
-    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode);
+    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
     ctx.fillText(elideToWidth(ctx, label, maxPx), lx, ly);
   }
 
@@ -1831,7 +1833,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
       // Scatter keeps its own undefined colour default (→ drawAxisTick's '#888'),
       // so only the width formula is shared. `axisLineWidthPx`'s 1 px fallback is
       // equivalent to undefined here (drawAxisTick treats both as a hairline).
@@ -1899,7 +1901,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     for (let si = 0; si < xSteps; si++) {
       const v = xMin + si * xStep; if (v > xMax + xStep * 0.01) break;
       const gx = toX(v);
-      ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, xAxisY + 4);
+      ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode, chart.date1904), gx, xAxisY + 4);
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx));
     }
@@ -2398,7 +2400,7 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
       // Locale-independent §18.8.30 formatting (honoring `<c:valAx><c:numFmt>`),
       // matching the other renderers — `toLocaleString()` grouped by the
       // viewer's OS locale, so the same chart read differently across machines.
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
     }
   }
 
@@ -2471,8 +2473,8 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     // marker and show the formatted magnitude below the bar.
     const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
     const labelText = rawVal < 0
-      ? `△ ${formatChartValWithCode(Math.abs(rawVal), labelFormat)}`
-      : formatChartValWithCode(rawVal, labelFormat);
+      ? `△ ${formatChartValWithCode(Math.abs(rawVal), labelFormat, chart.date1904)}`
+      : formatChartValWithCode(rawVal, labelFormat, chart.date1904);
     // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
     // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
     // then to neutral grey. PowerPoint paints negative-bar labels in
@@ -2506,7 +2508,7 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
     const ccx = px0 + gapW * i + gapW / 2;
     // §21.2.2.71: format numeric-serial categories via the category-axis
     // numFmt; string transaction labels pass through unchanged.
-    const label = formatCategoryLabel(cats[i], chart.catAxisFormatCode);
+    const label = formatCategoryLabel(cats[i], chart.catAxisFormatCode, chart.date1904);
     const lines = label.split(/\s+/);
     lines.forEach((line, li) => ctx.fillText(line, ccx, labelY + li * (fontSize + 2)));
   }

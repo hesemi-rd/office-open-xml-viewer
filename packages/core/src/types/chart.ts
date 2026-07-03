@@ -370,6 +370,15 @@ export interface ChartModel {
    * value axis (the common case). See {@link SecondaryValueAxis}.
    */
   secondaryValAxis?: SecondaryValueAxis | null;
+  /**
+   * `<c:date1904>` (ECMA-376 §21.2.2.38). When true the chart's serial
+   * date-times resolve against the 1904 date system (base 1904-01-01) instead
+   * of the default 1900 system. Threaded to the date formatters for date-axis
+   * category labels and value-axis tick labels. Omitted/false ⇒ 1900 system.
+   * Note: per §21.2.2.38 the element's `val` defaults to true when present but
+   * the attribute is omitted, so `<c:date1904/>` alone means date1904=true.
+   */
+  date1904?: boolean;
 }
 
 /**

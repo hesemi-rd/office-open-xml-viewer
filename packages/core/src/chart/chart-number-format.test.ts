@@ -54,6 +54,24 @@ describe('formatChartValWithCode — percent & null', () => {
   });
 });
 
+describe('chart date1904 (c:date1904 §21.2.2.38 / §18.17.4.1)', () => {
+  it('formatChartValWithCode shifts a date serial to the 1904 epoch when date1904=true', () => {
+    // 1900-system serial 44927 and 1904-system serial 43465 are both
+    // 2023-01-01 (offset 1462 days).
+    expect(formatChartValWithCode(44927, 'yyyy-mm-dd')).toBe('2023-01-01');
+    expect(formatChartValWithCode(43465, 'yyyy-mm-dd', true)).toBe('2023-01-01');
+    // Same serial without the flag reads 1462 days early.
+    expect(formatChartValWithCode(43465, 'yyyy-mm-dd')).toBe('2018-12-31');
+  });
+  it('formatCategoryLabel threads date1904 to the date formatter', () => {
+    expect(formatCategoryLabel('43465', 'yyyy-mm-dd', true)).toBe('2023-01-01');
+    expect(formatCategoryLabel('43465', 'yyyy-mm-dd')).toBe('2018-12-31');
+  });
+  it('date1904 does not affect non-date (numeric) codes', () => {
+    expect(formatChartValWithCode(1234567, '#,##0', true)).toBe('1,234,567');
+  });
+});
+
 describe('formatCategoryLabel — category-axis numFmt (§21.2.2.71)', () => {
   it('formats a numeric serial category through a date code', () => {
     // 44927 = 2023-01-01 in the 1900 date system.

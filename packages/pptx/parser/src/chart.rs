@@ -810,6 +810,11 @@ pub(crate) fn parse_legacy_chart(
     let (chart_border_color, chart_border_width_emu) =
         ooxml_common::chart::extract_chart_space_border(root);
 
+    // `<c:date1904>` (ECMA-376 §21.2.2.38) — direct child of `<c:chartSpace>`
+    // (`root`). Shared with the xlsx parser via ooxml-common so both honor the
+    // CT_Boolean implied-true semantics.
+    let date1904 = ooxml_common::chart::extract_chart_date1904(root);
+
     Some(ChartElement {
         x: 0,
         y: 0,
@@ -887,6 +892,7 @@ pub(crate) fn parse_legacy_chart(
             cat_axis_min: None,
             cat_axis_max: None,
             radar_style: None,
+            date1904,
         },
     })
 }
@@ -1135,6 +1141,10 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
             cat_axis_min: None,
             cat_axis_max: None,
             radar_style: None,
+            // chartEx (cx: namespace) has its own date-axis model; the legacy
+            // `<c:date1904>` element does not apply here, so keep the 1900
+            // default until/unless a chartEx date system is wired.
+            date1904: false,
         },
     })
 }

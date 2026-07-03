@@ -26,7 +26,13 @@ export function formatChartVal(v: number): string {
  * unquoted. Returns the default `formatChartVal` output when `code` is null
  * or an empty section tells the caller to hide the value.
  */
-export function formatChartValWithCode(v: number, code: string | null | undefined): string {
+export function formatChartValWithCode(
+  v: number,
+  code: string | null | undefined,
+  /** Chart date system (`<c:date1904>`, §21.2.2.38). `true` resolves serial
+   *  date codes against the 1904 epoch. Defaults to false (1900 system). */
+  date1904 = false,
+): string {
   // Absent `code`, or the reserved "General" keyword (ECMA-376 §18.8.30), both
   // mean the General number format. LibreOffice charts emit
   // `<c:numFmt formatCode="General">`; tokenizing it as a literal pattern would
@@ -36,7 +42,7 @@ export function formatChartValWithCode(v: number, code: string | null | undefine
   // route to the date formatter. Charts use this on the X axis of scatter
   // / time-series charts where the value is a serial date.
   if (isDateFormatCode(code)) {
-    return formatExcelDate(v, code);
+    return formatExcelDate(v, code, date1904);
   }
   const sections = splitFormatSections(code);
   // Section selection per §18.8.30: positive;negative;zero;text. When the
@@ -66,7 +72,13 @@ export function formatChartValWithCode(v: number, code: string | null | undefine
  * missing code, `"General"`, or a non-numeric category string falls through
  * to the raw text unchanged — no new interpretation is invented.
  */
-export function formatCategoryLabel(raw: string, code: string | null | undefined): string {
+export function formatCategoryLabel(
+  raw: string,
+  code: string | null | undefined,
+  /** Chart date system (`<c:date1904>`, §21.2.2.38). Threaded to the date
+   *  formatter for serial-date category labels. Defaults to false. */
+  date1904 = false,
+): string {
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text
@@ -74,7 +86,7 @@ export function formatCategoryLabel(raw: string, code: string | null | undefined
   if (raw.trim() === '') return raw;
   const num = Number(raw);
   if (!Number.isFinite(num)) return raw;
-  return formatChartValWithCode(num, code);
+  return formatChartValWithCode(num, code, date1904);
 }
 
 /**
