@@ -114,15 +114,11 @@ export class XlsxWorkbook {
     return wb;
   }
 
-  private async _load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
-    let data: ArrayBuffer;
-    if (typeof source === 'string') {
-      const res = await fetch(source);
-      if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
-      data = await res.arrayBuffer();
-    } else {
-      data = source;
-    }
+  // `load()` always resolves a URL/string source to an ArrayBuffer (via
+  // resolveOoxmlContainer, so decryption sees the container before the render
+  // worker is constructed) before calling `_load`, so this only ever receives
+  // an ArrayBuffer — no separate string-source fetch branch is needed here.
+  private async _load(data: ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
     this.math = opts.math;

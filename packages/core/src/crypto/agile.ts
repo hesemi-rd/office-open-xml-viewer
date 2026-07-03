@@ -305,9 +305,11 @@ export async function decryptPackage(
     encryptedPackage.byteOffset,
     encryptedPackage.byteLength,
   );
+  // getBigUint64 is unsigned, so Number(...) here is never negative — only
+  // the upper bound needs checking.
   const plaintextSize = Number(view.getBigUint64(0, true));
   const ciphertext = encryptedPackage.subarray(8);
-  if (plaintextSize < 0 || plaintextSize > ciphertext.length) {
+  if (plaintextSize > ciphertext.length) {
     throw new AgileDecryptError('corrupt', 'EncryptedPackage size prefix exceeds the ciphertext');
   }
 
