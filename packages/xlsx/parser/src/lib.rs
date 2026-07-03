@@ -2168,10 +2168,17 @@ impl XlsxArchive {
     /// `max_zip_entry_bytes` is retained and applied on every subsequent method
     /// call (identical semantics to the free functions' `scoped_max` guard). The
     /// shared workbook parts are parsed lazily on the first `parse`/`parse_sheet`.
+    ///
+    /// `data` is taken by value (`Vec<u8>`): wasm-bindgen copies the JS `Uint8Array`
+    /// once into a WASM-owned buffer and hands that allocation to Rust as this
+    /// `Vec`, which `Cursor` then takes by value — a single copy across the
+    /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
+    /// the `Cursor` could own its backing store, transiently doubling WASM
+    /// linear memory to ~2x the file size during construction.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<XlsxArchive, JsValue> {
+    pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<XlsxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        let archive = zip::ZipArchive::new(Cursor::new(data.to_vec()))
+        let archive = zip::ZipArchive::new(Cursor::new(data))
             .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
         Ok(XlsxArchive {
             archive,

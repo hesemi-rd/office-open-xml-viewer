@@ -75,10 +75,17 @@ impl DocxArchive {
     /// Copy `data` into WASM once and open the ZIP central directory once.
     /// `max_zip_entry_bytes` is retained and applied on every subsequent method
     /// call (identical semantics to the free functions' `scoped_max` guard).
+    ///
+    /// `data` is taken by value (`Vec<u8>`): wasm-bindgen copies the JS `Uint8Array`
+    /// once into a WASM-owned buffer and hands that allocation to Rust as this
+    /// `Vec`, which `Cursor` then takes by value — a single copy across the
+    /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
+    /// the `Cursor` could own its backing store, transiently doubling WASM
+    /// linear memory to ~2x the file size during construction.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<DocxArchive, JsValue> {
+    pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<DocxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        let archive = zip::ZipArchive::new(std::io::Cursor::new(data.to_vec()))
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(data))
             .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
         Ok(DocxArchive {
             archive,
