@@ -29,15 +29,23 @@ pnpm add @silurus/ooxml
 
 > **Bundler note**: the Rust parsers ship as real `.wasm` asset files next to the
 > JavaScript, referenced with the standard `new URL('…', import.meta.url)` form
-> and fetched (streaming-compiled) at load time. Vite, webpack 5, Rollup and
-> Parcel detect that reference and copy the asset automatically — no extra
-> WebAssembly plugin is required. esbuild and the Angular CLI (whose application
-> builder is esbuild-based) do **not** process that reference
-> ([esbuild#795](https://github.com/evanw/esbuild/issues/795)): copy the `.wasm`
-> into your served output yourself and point the viewer at it with the `wasmUrl`
-> load option — see the [Angular example](#framework-examples) for the two-step
-> setup. `wasmUrl` also serves the parser WASM from a CDN or any path you
-> control:
+> and fetched (streaming-compiled) at load time. Verified to work with zero
+> config: **webpack 5**, **Next.js** (Turbopack, dev and build), **Vite 8**
+> (dev and build), **Vite 7 production builds**, and a plain
+> `<script type="module">` with no bundler at all. Two setups need a hand:
+>
+> - **Vite 7 dev server**: the dependency optimizer rewrites the asset reference
+>   into its own cache path and the load fails (fixed in Vite 8). Add
+>   `optimizeDeps: { exclude: ['@silurus/ooxml'] }` to your `vite.config` —
+>   production builds are unaffected.
+> - **esbuild / Angular CLI** (whose application builder is esbuild-based):
+>   `new URL` asset references are not processed
+>   ([esbuild#795](https://github.com/evanw/esbuild/issues/795)). Copy the
+>   `.wasm` into your served output and point the viewer at it with the
+>   `wasmUrl` load option — see the [Angular example](#framework-examples) for
+>   the two-step setup.
+>
+> `wasmUrl` also serves the parser WASM from a CDN or any path you control:
 >
 > ```typescript
 > new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });

@@ -28,8 +28,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * `math/engine.ts`). We intercept the `?url` variant here, `emitFile` the bytes
  * as an asset next to the chunk, and hand back the standard ESM asset reference
  * `new URL('<name>', import.meta.url)` — the form Vite / webpack 5 / Rollup /
- * esbuild all rewrite when they re-bundle our `.mjs`, and which resolves
- * correctly for a plain `<script type=module>` too. wasm-bindgen's `--target web`
+ * Turbopack rewrite when they re-bundle our `.mjs`, and which resolves
+ * correctly for a plain `<script type=module>` too. (esbuild — and therefore
+ * the Angular CLI — does NOT process it; those consumers use the `wasmUrl`
+ * load option, see the README bundler note.) wasm-bindgen's `--target web`
  * glue then `fetch()`es its URL and hits `instantiateStreaming`; the math engine
  * is lazy-loaded via a `<script src>` pointed at the emitted asset.
  *
@@ -57,11 +59,17 @@ function wasmAssetUrl(): Plugin {
         name: basename(filePath),
         source,
       });
-      // `import.meta.ROLLUP_FILE_URL_<id>` expands to the emitted asset's URL at
-      // render time; wrapping it in `new URL(…, import.meta.url)` yields an
+      // `import.meta.ROLLUP_FILE_URL_<id>` expands at render time to Rollup's
+      // ES default resolution — `new URL('<name>', import.meta.url).href` — an
       // absolute href the worker (or the math engine's `<script>` loader) can
-      // fetch from any realm.
-      return `export default new URL(import.meta.ROLLUP_FILE_URL_${referenceId}, import.meta.url).href;`;
+      // fetch from any realm. It must be emitted BARE: wrapping it in another
+      // `new URL(…, import.meta.url)` ships a nested pattern that webpack 5
+      // compiles into a critical-dependency ContextModule (the outer first arg
+      // is now an expression, not a literal), throwing MODULE_NOT_FOUND at
+      // module evaluation — `import '@silurus/ooxml/docx'` alone crashed every
+      // webpack consumer. The single-level form is the exact shape webpack 5 /
+      // Turbopack / Vite statically rewrite when re-bundling our `.mjs`.
+      return `export default import.meta.ROLLUP_FILE_URL_${referenceId};`;
     },
   };
 }
