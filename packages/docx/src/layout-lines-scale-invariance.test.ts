@@ -253,10 +253,12 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     const mkWrap = (s: number): WrapLayoutCtx => ({
       startPageY: 0 * s,
       paraX: 0 * s,
-      floats: [{ x: 0 * s, y: 0 * s, w: 30 * s, h: 24 * s } as unknown as WrapLayoutCtx['floats'][number]],
+      floats: [{
+        mode: 'square', side: 'bothSides',
+        xLeft: 0 * s, xRight: 30 * s, yTop: 0 * s, yBottom: 24 * s,
+      } as unknown as WrapLayoutCtx['floats'][number]],
       lineBoxH: (asc: number, desc: number) => asc + desc, // linear in px → scales ×s
       pageH: 1000 * s,
-      markEmPx: 10 * s,
     });
     const { ctx: c1 } = makeLinearCtx();
     const base = layoutLines(c1, cloneSegs(segs()), 120, 0, 1, [], mkWrap(1), {}, 0);

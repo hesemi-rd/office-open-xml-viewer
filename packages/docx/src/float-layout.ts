@@ -71,9 +71,59 @@ export const FLOAT_OVERLAP_EPS = 0.01;
  *  full-width displacement, not an edge-touch test. */
 export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
 
-/** Minimum width (px) a free side-gap must have to hold a line start. Floors the
- *  required-width probe so a zero-width probe (an empty line with no content yet)
- *  still rejects sub-pixel slivers between full-width floats. */
+/** Minimum horizontal space (pt) a free side-gap must have before Word will
+ *  START a line beside a float, rather than flowing it below the float band.
+ *  Measured — NOT from ECMA-376, which mandates no side-gap minimum (§20.4.2.17
+ *  only says text wraps around the rectangle; §17.18.3 `<w:br w:clear>` is the
+ *  sole spec-mandated flow onto a float-free region). Word's rule is exactly
+ *  1 inch (1440 twips): established from the fixture set private/sample-19/20/22,
+ *  Word-exported PDF, pdftotext bbox — a gap of 70pt flows the line below, a gap
+ *  of 72pt starts the line beside. The threshold is INDEPENDENT of the line's
+ *  content (an empty paragraph mark and a text line switch at the same width),
+ *  of font size (8/12/24pt all switch at 72pt), and of line spacing
+ *  (single/1.5/double all switch at 72pt) — i.e. it is an absolute width, not
+ *  an em- or line-height-proportional quantity. See issue #676. Callers convert
+ *  to px with `WORD_MIN_LINE_START_PT * scale` (renderer scale is px/pt). */
+export const WORD_MIN_LINE_START_PT = 72;
+
+/** Tolerance (pt) subtracted from the 1-inch requirement when testing a side
+ *  gap, to make Word's INCLUSIVE ≥ 1-inch boundary robust to coordinate noise.
+ *  Word places a line beside a float at a gap of exactly 1 inch (issue #676 /
+ *  sample-22 page 7: a frame authored so the gap is 72.0pt is beside). But a gap
+ *  that is nominally 1 inch is computed as content-width − frame-width through
+ *  twip→EMU→px conversions and lands slightly under 72: this renderer computes
+ *  71.963716pt for the 72.0pt frame (a ~0.036pt deficit — sub-twip conversion
+ *  rounding, not pure IEEE-754). Without tolerance the inclusive boundary
+ *  flips to below and disagrees with Word. One twip (1/20 pt = 0.05pt) is the
+ *  authoring granularity of a frame width, so a gap short of 1 inch by less
+ *  than one twip is treated as exactly 1 inch. One twip covers the observed
+ *  0.036pt deficit (a half twip, 0.025pt, would NOT) yet is ≪ the 2pt step
+ *  that discriminates the fixtures (70pt stays below, 72pt goes beside), so it
+ *  never promotes a genuinely sub-inch gap. Applied in the render's px space
+ *  as `× scale` (see resolveLineFloatWindow). Same rationale as
+ *  FLOAT_PAGE_RIGHT_SLACK: a tolerance sized to the coordinate-rounding
+ *  granularity it absorbs. */
+export const LINE_START_GAP_EPS_PT = 0.05; // one twip (1/20 pt)
+
+/** The `requiredWidth` (px) every docx caller passes to `resolveLineFloatWindow`
+ *  for a line-start probe: Word's 1-inch minimum side-gap, minus the half-twip
+ *  rounding tolerance, at the render scale (px/pt). Single source of truth so the
+ *  paint pass and both paginator mirrors agree bit-for-bit on the flow/beside
+ *  decision. See WORD_MIN_LINE_START_PT and LINE_START_GAP_EPS_PT (issue #676). */
+export function wordMinLineStartPx(scale: number): number {
+  return (WORD_MIN_LINE_START_PT - LINE_START_GAP_EPS_PT) * scale;
+}
+
+/** Minimum width (px) a free side-gap must have to hold a line start. Internal
+ *  defensive floor of `resolveLineFloatWindow`: it floors a zero-width probe so
+ *  a `requiredWidth === 0` call still rejects sub-pixel slivers between
+ *  full-width floats. In the docx renderer this floor no longer GOVERNS the
+ *  line-start decision — every caller now passes `wordMinLineStartPx(scale)`
+ *  (≈ 54px even at scale 0.75), far above 1px, so `Math.max` always yields the
+ *  1-inch requirement (issue #676). Kept because `resolveLineFloatWindow` is an
+ *  exported pure function unit-tested on its own contract: a hypothetical
+ *  `requiredWidth = 0` caller must still not wedge a line into a coordinate-noise
+ *  sliver. */
 export const MIN_LINE_GAP = 1;
 
 export function isWrapFloat(mode?: string | null): boolean {
@@ -118,9 +168,12 @@ export function widestFreeGap(blocked: Gap[], left: number, right: number): Gap 
  * Resolve where a single line box may sit relative to the page's active floats.
  *
  * Given the line's intended top Y and the minimum horizontal width it needs to
- * be placeable (`requiredWidth` — the width of its first atomic token, or, for
- * an empty paragraph-mark line, one em of the mark font), this returns the Y at
- * which the line actually starts plus the horizontal sub-window it may use.
+ * be placeable (`requiredWidth`), this returns the Y at which the line actually
+ * starts plus the horizontal sub-window it may use. Every docx caller passes
+ * `wordMinLineStartPx(scale)` for `requiredWidth` — Word's measured 1-inch
+ * minimum side-gap less a half-twip rounding tolerance (see that helper,
+ * WORD_MIN_LINE_START_PT, and issue #676), applied uniformly to empty
+ * paragraph-mark lines and text lines alike.
  *
  * Two ECMA-376 wrap rules are applied, in order:
  *   1. topAndBottom floats (§20.4.2.16): a line intersecting one is pushed below
@@ -130,12 +183,16 @@ export function widestFreeGap(blocked: Gap[], left: number, right: number): Gap 
  *      horizontal gap. If no gap is wide enough for `requiredWidth` the line
  *      cannot sit here at all and flows below the obstruction (advance to the
  *      lowest blocking float bottom and re-evaluate). The square/topAndBottom
- *      geometry itself is spec-defined; but routing empty / anchor-only
- *      paragraph-mark lines through this with `requiredWidth` = one em (so they
- *      drop below a full-width float band) is an implementation-defined
- *      HEURISTIC (see resolveEmptyMarkTop): ECMA-376 does not require a
- *      float-free row for a paragraph mark — only `<w:br w:clear>` (§17.18.3)
- *      mandates flowing onto a float-free region.
+ *      geometry is spec-defined; the `requiredWidth` gate — how much clear space
+ *      a line needs before Word starts it beside a float rather than below —
+ *      is NOT in ECMA-376 (§17.18.3 `<w:br w:clear>` is the only spec-mandated
+ *      flow onto a float-free region). It is Word's observed 1-inch rule, a
+ *      GROUNDED runtime measurement (private/sample-19/20/22 PDF bbox, issue
+ *      #676), not a fitted constant: 70pt → below, 72pt → beside, independent of
+ *      content / font size / line spacing. A line placed beside the float whose
+ *      first word overruns the (≥1-inch) gap is force-broken there — Word breaks
+ *      the word rather than refusing the gap (observed "AFTE"/"R-10" wrap); the
+ *      caller's over-long-word char-break handles that.
  */
 export function resolveLineFloatWindow(
   topY: number,
@@ -173,8 +230,11 @@ export function resolveLineFloatWindow(
   // 2. Horizontal constraint from square floats.
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
-  // A gap must fit the line's first atomic token to be usable. Floor so a
-  // zero-width probe (no content yet) still rejects sub-pixel slivers.
+  // A gap must be at least `requiredWidth` wide to host a line start. Every docx
+  // caller passes Word's 1-inch rule already reduced by its rounding tolerance,
+  // `wordMinLineStartPx(scale)` (= (WORD_MIN_LINE_START_PT − LINE_START_GAP_EPS_PT)
+  // × scale). MIN_LINE_GAP floors a degenerate `requiredWidth === 0` probe against
+  // sub-pixel slivers; it does not govern when a real caller passes ≥ ~1 inch.
   const usableGap = Math.max(requiredWidth, MIN_LINE_GAP);
   let xOffset = 0;
   let lineMaxWidth = maxWidth;
@@ -203,6 +263,10 @@ export function resolveLineFloatWindow(
       break;
     }
     // Widest free horizontal gap between the blocked spans across the column.
+    // The caller's `requiredWidth` already carries the 1-inch tolerance
+    // (wordMinLineStartPx), so a gap meant to be exactly 1 inch but computed a
+    // hair under 72 (twip/px rounding noise) still meets Word's inclusive
+    // ≥ 1-inch boundary (issue #676, sample-22 p.7).
     const best = widestFreeGap(blocked, paraXLeft, paraXRight);
     if (best && best.r - best.l >= usableGap) {
       xOffset = Math.max(0, best.l - paraXLeft);

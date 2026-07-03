@@ -61,6 +61,7 @@ import {
   isWrapFloat,
   resolveLineFloatWindow,
   skipPastTopAndBottom,
+  wordMinLineStartPx,
 } from './float-layout.js';
 import {
   distributeLineSlack,
@@ -2672,9 +2673,12 @@ function estimateParagraphHeight(
   if (hasFloats) cursor = skipPastTopAndBottom(cursor, state.floats);
   const flowMarkLine = (): void => {
     // Empty / anchor-only paragraph: one paragraph-mark line box, flowed below a
-    // full-width float band exactly like renderEmptyMarkParagraph.
+    // full-width float band exactly like renderEmptyMarkParagraph. Uses Word's
+    // measured 1-inch minimum side-gap (wordMinLineStartPx; scale 1 here in the
+    // paginator's pt-space mirror), the SAME content-independent threshold as the
+    // paint pass — issue #676.
     if (hasFloats) {
-      const win = resolveLineFloatWindow(cursor, paragraphMarkEmPx(para, 1), 10, paraX, paraW, state.floats);
+      const win = resolveLineFloatWindow(cursor, wordMinLineStartPx(1), 10, paraX, paraW, state.floats);
       if (win.topY > cursor) cursor = win.topY;
     }
     cursor += paragraphMarkLineHeight(para, 1, grid, paraHasRuby, state.docEastAsian, state.ctx, state.fontFamilyClasses);
@@ -2691,7 +2695,6 @@ function estimateParagraphHeight(
       floats: state.floats,
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
       pageH: state.pageH,
-      markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt);
     if (lines.length === 0) {
@@ -2910,7 +2913,6 @@ function splitParagraphAcrossPages(
     floats: measureState.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0, paragraphIsEastAsian(para)),
     pageH: measureState.pageH,
-    markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt);
   if (lines.length === 0) {
@@ -4720,26 +4722,34 @@ function renderParagraph(
   // A paragraph with no inline content (literally empty, or anchor-only) still
   // produces ONE paragraph-mark line box (ECMA-376 §17.3.1.29 regulates only the
   // existence of that line; the horizontal wrap geometry around a square float is
-  // §20.4.2.17). The behavior below — firing an automatic "flow the mark line
-  // below the float band when it cannot sit beside it" displacement, and using
-  // ONE EM of the mark font as the width the gap must hold — is NOT specified by
-  // ECMA-376 Part 1. It is an implementation-defined HEURISTIC chosen to match
-  // Word: the only spec-mandated flow of a line onto a float-free region is the
-  // explicit `<w:br w:clear>` of §17.18.3, which is not what fires here. Without
-  // this heuristic an empty paragraph mark wedges into a sub-em sliver beside a
-  // full-width float band and the following paragraphs (and any wrapNone image
-  // they anchor) stay pinned inside the band. We resolve the mark line's flowed
-  // top here and use it for the mark advance, the shading/border rect, and the
-  // paragraph-relative base of any wrapNone anchor image drawn below.
+  // §20.4.2.17). The displacement below — flow the mark line below the float band
+  // when the side gap cannot hold a line start — has no dedicated §x.x.x: the
+  // only SPEC-mandated flow of a line onto a float-free region is the explicit
+  // `<w:br w:clear>` of §17.18.3, which is not what fires here. But the TRIGGER
+  // (how much clear side-space Word requires before it starts a line beside a
+  // float) is not implementation-free-choice — it is Word's measured behaviour:
+  // exactly 1 inch of horizontal gap (WORD_MIN_LINE_START_PT), independent of the
+  // line's content, font size, and line spacing. Grounded from Word-exported PDFs
+  // (fixtures private/sample-19/20/22, pdftotext bbox: 70pt gap → below, 72pt →
+  // beside), NOT fitted to a single sample — see issue #676, which this replaces
+  // (the prior code used a 1-em-of-the-mark-font width here as an admitted
+  // HEURISTIC; the 1-inch rule discriminated against it because at gap = 1.5em
+  // for a 24pt mark, i.e. 36pt < 1 inch, Word still refuses to start the line
+  // beside the band). Without this an empty paragraph mark wedges into a sub-inch
+  // sliver beside a full-width float band and the following paragraphs (and any
+  // wrapNone image they anchor) stay pinned inside the band. We resolve the mark
+  // line's flowed top here and use it for the mark advance, the shading/border
+  // rect, and the paragraph-relative base of any wrapNone anchor image drawn
+  // below.
   const resolveEmptyMarkTop = (): number => {
     if (state.floats.length === 0) return textAreaTopY;
-    // Required width for an empty mark line: one em of the mark font (HEURISTIC,
-    // see above — not a spec-defined threshold). A side gap narrower than this is
-    // treated as unable to hold the line start, so the line flows below.
-    const markEm = paragraphMarkEmPx(para, scale);
+    // Required side-gap for the mark line: Word's measured 1 inch
+    // (wordMinLineStartPx), the SAME threshold used for text lines — the rule is
+    // content-independent (issue #676). A gap narrower than 1 inch cannot hold
+    // the line start, so the mark line flows below the band.
     const probeH = 10 * scale;
     const win = resolveLineFloatWindow(
-      textAreaTopY, markEm, probeH, paraX, paraW, state.floats,
+      textAreaTopY, wordMinLineStartPx(scale), probeH, paraX, paraW, state.floats,
     );
     return win.topY;
   };
@@ -4760,7 +4770,6 @@ function renderParagraph(
     floats: state.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
     pageH: state.pageH,
-    markEmPx: paragraphMarkEmPx(para, scale),
   } : undefined;
 
   // ECMA-376 §17.3.1.12 (hanging) + §17.3.1.38 (a hanging indent implicitly
@@ -5880,11 +5889,6 @@ interface WrapLayoutCtx {
   lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
-  /** Paragraph-mark em width (px), from paragraphMarkEmPx(para). Shared with
-   *  resolveEmptyMarkTop so an empty / anchor-only mark line that has no
-   *  trailing-break font of its own falls below a float band on the SAME
-   *  threshold the empty-paragraph path uses. */
-  markEmPx: number;
 }
 
 /**
@@ -6490,13 +6494,30 @@ function layoutLines(
   let lineXOffset = 0;
   let currentLineTopY = wrapCtx?.startPageY ?? 0;
 
+  // Minimum clear side-space (px) a line needs before it may START beside a
+  // float rather than flow below the band. Word's measured rule is 1 inch
+  // (wordMinLineStartPx(scale) — the 1-inch requirement less a half-twip rounding
+  // tolerance), INDEPENDENT of the line's content — the same threshold for an
+  // empty paragraph mark, a short-token line, and a long-word line (a first word
+  // that overruns the ≥1-inch gap is force-broken there by the over-long-word
+  // char-break below, matching Word's "AFTE"/"R-10" wrapping). This replaces two
+  // former implementation-defined branches — a per-line first-atomic-token width
+  // probe for text lines, and a 1-em-of-the-mark-font reservation
+  // (`wrapCtx.markEmPx`) for empty/trailing-break lines — both of which
+  // mis-placed lines relative to Word (they wedged short-token lines into
+  // sub-inch gaps and refused ≥1-inch gaps to long-word lines). See issue #676
+  // (fixtures private/sample-19/20/22, pdftotext bbox). Shared by the paint pass
+  // and the paginator's two mirror layouts (they call layoutLines with scale 1),
+  // so the flow/beside decision agrees across passes.
+  const minLineStartWidth = (): number => wordMinLineStartPx(scale);
+
   // Compute wrap constraints for a new line about to start. Mutates
-  // lineXOffset/lineMaxWidth/currentLineTopY. `minWidth` is the smallest width
-  // the upcoming line must have to be placeable here (the width of its first
-  // atomic token, or the paragraph-mark em for an empty line); a free gap
-  // narrower than this is treated as unusable and the line is sent below the
-  // intervening float(s) — the ECMA-376 wrap rule that text which cannot fit
-  // beside a floating object flows past it.
+  // lineXOffset/lineMaxWidth/currentLineTopY. `minWidth` is the smallest clear
+  // side-space the upcoming line must have to START here (minLineStartWidth() —
+  // Word's 1-inch rule, §676); a free gap narrower than this is treated as
+  // unusable and the line is sent below the intervening float(s), which is how
+  // Word flows a line that cannot start beside a floating object (there is no
+  // ECMA-376 §x.x.x for this trigger — see resolveLineFloatWindow / issue #676).
   const startLine = (minWidth: number = 0): void => {
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
@@ -6547,7 +6568,7 @@ function layoutLines(
     lineIntendedSingle = 0;
     lineHasRuby = false;
     isFirst = false;
-    startLine(requiredLineWidth());
+    startLine(minLineStartWidth());
   };
 
   const addToLine = (
@@ -6626,44 +6647,6 @@ function layoutLines(
   // Use an explicit queue so CJK split-tails can be re-queued
   const queue: LayoutSeg[] = [...segs];
 
-  // Smallest width the NEXT line must have to be placeable beside a float: the
-  // width of its first atomic token. For text we measure the first wrap unit
-  // (CJK: one grapheme — kinsoku may force more, but one char is the floor;
-  // Latin: up to the first space). For an image/math the whole object. An empty
-  // line (no remaining content) still reserves the paragraph-mark em so a
-  // sliver gap between full-width floats does not "fit" it. Used by startLine to
-  // decide whether to wrap in a gap or send the line below the floats.
-  const requiredLineWidth = (): number => {
-    // First inline token that actually occupies width on the line. Anchor-image
-    // segments are floats (drawn separately, measuredWidth 0) and lineBreaks
-    // carry no width, so skip them — otherwise the float's own width would be
-    // mistaken for the line's required width and wrongly push every wrap line
-    // below the float.
-    const q = queue.find((s) => !('lineBreak' in s) && !('imagePath' in s && s.anchor));
-    if (!q) {
-      // Empty/paragraph-mark line: reserve one em so a sub-glyph gap is rejected
-      // and the mark line drops below the floats. A trailing `<w:br/>` carries
-      // its own (line-local) font size; otherwise use the shared paragraph-mark
-      // em (paragraphMarkEmPx, threaded via wrapCtx) so this fallback agrees with
-      // resolveEmptyMarkTop. Outside a float context the result is unused
-      // (startLine no-ops), so fall back to the legacy estimate.
-      if (trailingBreakFontSize !== null) return trailingBreakFontSize * scale;
-      if (wrapCtx) return wrapCtx.markEmPx;
-      return (segs[0] && 'fontSize' in segs[0] ? segs[0].fontSize : 10) * scale;
-    }
-    if ('isTab' in q) return q.measuredWidth || 0;
-    if ('imagePath' in q) return q.widthPt * scale;
-    if ('mathNodes' in q) return q.measuredWidth || 0;
-    const ts = q as LayoutTextSeg;
-    // First wrap unit: leading run up to the first space (Latin word) or the
-    // first character (CJK / no space). Whichever is shorter bounds the floor.
-    const sp = ts.text.indexOf(' ');
-    const head = sp > 0 ? ts.text.slice(0, sp) : ts.text;
-    const firstChar = [...head][0] ?? '';
-    const probe = { ...ts, text: firstChar };
-    return segAdvance(probe);
-  };
-
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
   // content of the paragraph that new line is an EMPTY line that still
   // occupies one line height (Word reserves it; visible e.g. as extra table
@@ -6671,7 +6654,7 @@ function layoutLines(
   let trailingBreakFontSize: number | null = null;
 
   // Establish the first line's wrap window now that the content queue exists.
-  startLine(requiredLineWidth());
+  startLine(minLineStartWidth());
 
   while (queue.length > 0) {
     const seg = queue.shift()!;
@@ -9624,16 +9607,6 @@ function picBulletSizePt(num: NumberingInfo, para: DocParagraph): { w: number; h
     w: num.picBulletWidthPt ?? fallback,
     h: num.picBulletHeightPt ?? fallback,
   };
-}
-
-/** Width (px) of the paragraph-mark "em" — the smallest horizontal gap a
- *  float-bordered empty / anchor-only paragraph-mark line is allowed to sit in
- *  before it flows below the float band. Single source of truth shared by the
- *  empty-mark float-window probe (resolveEmptyMarkTop) and the layoutLines
- *  empty-line fallback, so the two paths agree on what "one em of the mark
- *  font" means. HEURISTIC threshold (see resolveEmptyMarkTop), not spec. */
-function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
-  return getDefaultFontSize(para) * scale;
 }
 
 /** First text/field run's font family — used to size empty paragraphs whose
