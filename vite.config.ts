@@ -8,29 +8,38 @@ import { readFile } from 'fs/promises';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Emit `*.wasm?url` imports as real asset files instead of base64 `data:` URLs.
+ * Emit `?url` asset imports as real asset files instead of base64 `data:` URLs.
+ * (Named hashlessly here — `rollupOptions.output.assetFileNames` is `[name]`.)
  *
  * Vite **library mode** force-inlines every `?url` asset as a
- * `data:application/wasm;base64,…` string regardless of `assetsInlineLimit`
- * (a number or a `() => false` function does NOT override it). That inflates the
- * WASM by +33 % and blocks `WebAssembly.compileStreaming` (a data URL cannot be
- * fetch-streamed — the worker has to `atob` the base64 by hand).
+ * `data:<mime>;base64,…` string regardless of `assetsInlineLimit` (a number or a
+ * `() => false` function does NOT override it — `build.lib` unconditionally
+ * returns `true` from Vite's internal `shouldInline`). Two heavy asset kinds ride
+ * on this path:
+ *   - the three parser WASM modules (`*_parser_bg.wasm?url`, ~0.6–0.7 MB each) —
+ *     base64 inflates them +33 % and blocks `WebAssembly.compileStreaming`
+ *     (a data URL cannot be fetch-streamed; the worker must `atob` by hand);
+ *   - the MathJax + STIX Two Math engine (`assets/mathjax-stix2.js?url`, ~3 MB) —
+ *     inlined it turned the opt-in `math.mjs` chunk into a 4.1 MB base64 blob,
+ *     even though consumers only import it when a document actually has equations.
  *
- * The single `.wasm?url` import lives in each format's main-thread handle
- * (`document.ts` / `presentation.ts` / `workbook.ts`). We intercept it here,
- * `emitFile` the bytes as a hashless asset next to the chunk, and hand back the
- * standard ESM asset reference `new URL('<name>.wasm', import.meta.url)` — the
- * form Vite / webpack 5 / Rollup / esbuild all rewrite when they re-bundle our
- * `.mjs`, and which resolves correctly for a plain `<script type=module>` too.
- * wasm-bindgen's `--target web` glue then `fetch()`es that URL and hits
- * `instantiateStreaming`.
+ * All of these are `?url` imports in a single owner module each (the format
+ * main-thread handles — `document.ts` / `presentation.ts` / `workbook.ts` — and
+ * `math/engine.ts`). We intercept the `?url` variant here, `emitFile` the bytes
+ * as an asset next to the chunk, and hand back the standard ESM asset reference
+ * `new URL('<name>', import.meta.url)` — the form Vite / webpack 5 / Rollup /
+ * esbuild all rewrite when they re-bundle our `.mjs`, and which resolves
+ * correctly for a plain `<script type=module>` too. wasm-bindgen's `--target web`
+ * glue then `fetch()`es its URL and hits `instantiateStreaming`; the math engine
+ * is lazy-loaded via a `<script src>` pointed at the emitted asset.
  *
- * Runs with `enforce: 'pre'` and only claims the `?url` variant; the bare-`.wasm`
- * import (owned by `vite-plugin-wasm`) is untouched — though nothing in the tree
- * imports bare `.wasm`, so in practice this is the only WASM interception point.
+ * Runs with `enforce: 'pre'` and claims every `?url` import; a bare-`.wasm`
+ * import (owned by `vite-plugin-wasm`) is untouched. Nothing in the tree imports
+ * bare `.wasm`, and every `?url` here is a real on-disk asset we want emitted —
+ * exactly what Vite's non-lib mode would do anyway.
  */
 function wasmAssetUrl(): Plugin {
-  const SUFFIX = '.wasm?url';
+  const SUFFIX = '?url';
   return {
     name: 'wasm-asset-url',
     enforce: 'pre',
@@ -41,7 +50,7 @@ function wasmAssetUrl(): Plugin {
     apply: 'build',
     async load(id) {
       if (!id.endsWith(SUFFIX)) return null;
-      const filePath = id.slice(0, -'?url'.length);
+      const filePath = id.slice(0, -SUFFIX.length);
       const source = await readFile(filePath);
       const referenceId = this.emitFile({
         type: 'asset',
@@ -50,7 +59,8 @@ function wasmAssetUrl(): Plugin {
       });
       // `import.meta.ROLLUP_FILE_URL_<id>` expands to the emitted asset's URL at
       // render time; wrapping it in `new URL(…, import.meta.url)` yields an
-      // absolute href the worker can fetch from any realm.
+      // absolute href the worker (or the math engine's `<script>` loader) can
+      // fetch from any realm.
       return `export default new URL(import.meta.ROLLUP_FILE_URL_${referenceId}, import.meta.url).href;`;
     },
   };

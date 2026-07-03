@@ -16,6 +16,19 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+// `?url` (not a bare `new URL(..., import.meta.url)`) so the same `wasmAssetUrl`
+// build plugin that keeps the WASM parsers out of the base64 data-URL trap emits
+// this ~3 MB engine as a real asset too. In Vite **library mode** a bare
+// `new URL` is force-inlined as a `data:text/javascript;base64,…` string, which
+// turned the opt-in `math.mjs` chunk into a 4.1 MB base64 blob; the `?url` form
+// is intercepted by the plugin, `emitFile`d as a real asset next to the chunk,
+// and handed back as a plain URL the `<script>` loader below can fetch.
+//
+// The engine URL is not otherwise configurable: a consumer that needs to serve
+// it from elsewhere injects their own `MathRenderer` via the viewer `math`
+// option (the whole engine is already a swappable dependency), so no dedicated
+// `mathUrl`/asset-override option is warranted.
+import mathjaxAssetUrl from '../../assets/mathjax-stix2.js?url';
 import { type MathSvg, svgExtents } from './mathjax';
 
 interface Stix2Engine {
@@ -26,7 +39,11 @@ interface Stix2Engine {
 let enginePromise: Promise<Stix2Engine> | null = null;
 
 function resolveAssetUrl(): string {
-  return new URL('../../assets/mathjax-stix2.js', import.meta.url).href;
+  // `?url` yields the asset href directly — an absolute URL at build time, the
+  // dev-served path in dev. Resolve against the module URL so a bare relative
+  // dev value still becomes an absolute href fetchable from any realm (matches
+  // the `new URL(wasmAssetUrl, …)` pattern in the format handles).
+  return new URL(mathjaxAssetUrl, import.meta.url).href;
 }
 
 function loadScript(src: string): Promise<void> {
