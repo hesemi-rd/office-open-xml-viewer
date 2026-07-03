@@ -10,6 +10,11 @@ import { encryptedDocxSpin0 } from '@silurus/ooxml-core/testing';
  * routes through it correctly. The embedded fixture is the shared encrypted-OOXML
  * container; a correct password decrypts it and load() proceeds to worker
  * construction (a plain `ReferenceError` in Node, never an `OoxmlError`).
+ *
+ * Configuration coupling: the "reaches the worker" signal relies on vitest's
+ * default `environment: 'node'` (no `Worker` global). Switching this suite to
+ * `'jsdom'` / `'happy-dom'` would polyfill `Worker` and silently invalidate
+ * that assertion.
  */
 describe('PptxPresentation.load — Agile decryption', () => {
   const fixture = () => encryptedDocxSpin0().buffer;

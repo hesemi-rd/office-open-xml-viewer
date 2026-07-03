@@ -13,6 +13,59 @@
  *   - keyData.saltValue  = 000102...0f (16 bytes)
  *   - password salt      = 101112...1f (16 bytes)
  * See `packages/core/src/crypto/agile.test.ts` for the pinned vectors.
+ *
+ * ## Regenerating this fixture
+ *
+ * There is no script checked into the repo (Office binaries are not committed,
+ * and the generator is a one-off, not a build step) — regeneration means
+ * re-deriving the two pieces below from scratch:
+ *
+ *   1. **Plaintext container.** A minimal .docx built directly with `zipfile`
+ *      (no python-docx dependency): a stored/deflated ZIP with the standard
+ *      OOXML parts (`[Content_Types].xml`, `_rels/.rels`,
+ *      `word/document.xml`, `word/_rels/document.xml.rels`) and a single
+ *      paragraph run containing the literal text "Hello encrypted".
+ *   2. **Agile encryptor**, implementing [MS-OFFCRYPTO] §2.3.4 directly from
+ *      the spec formulas — no third-party encryption library:
+ *        - `H0 = Hash(saltValue || UTF-16LE(password))`, then `spinCount`
+ *          rounds of `H(n) = Hash(LE32(n) || H(n-1))` (§2.3.4.7). With
+ *          `spinCount = 0` this loop is skipped entirely, which is why key
+ *          derivation in tests is instant.
+ *        - Per-purpose block keys XORed onto the final iterated hash before
+ *          the last hash step (`blockKey`, §2.3.4.9): verifier input
+ *          `fea7d2763b4b9e79`, verifier hash `d7aa0f6d3061344e`, key value
+ *          `146e0be7abacd0d6`, HMAC key `5fb2ad010cb9e1f6`, HMAC value
+ *          `a0677f02b22c8433`.
+ *        - `EncryptedPackage` container (§2.3.4.15): `LE64(plaintextSize)`
+ *          prefix, then the plaintext ZIP split into 4096-byte segments, each
+ *          AES-CBC encrypted with an IV of
+ *          `H(keyData.saltValue || LE32(segmentIndex))` truncated/zero-padded
+ *          to `blockSize`.
+ *        - The `EncryptionInfo` stream is assembled by hand: an 8-byte
+ *          `vMajor=4, vMinor=4` header + 4-byte reserved (`0x00000040`),
+ *          followed by the `<encryption>` XML descriptor (`keyData`,
+ *          `keyEncryptors/keyEncryptor/encryptedKey`, `dataIntegrity`) with
+ *          the computed salts / verifier / key-value / HMAC fields base64'd
+ *          in.
+ *      Independently cross-verified by running the output through
+ *      `msoffcrypto-tool` (a maintained, spec-independent Python decryptor)
+ *      and confirming it recovers the original "Hello encrypted" plaintext —
+ *      this catches encoder bugs a self-consistent round-trip would hide.
+ *   3. **CFB container.** The `EncryptionInfo` and `EncryptedPackage` streams
+ *      are written into a compound file (OLE2 / [MS-CFB]) with a real FAT /
+ *      mini-FAT layout (mirrored for tests by
+ *      `packages/core/src/testing/cfb-fixture.ts`'s `buildCfbWithStreams`).
+ *   4. Base64-encode the resulting CFB bytes into `ENCRYPTED_DOCX_SPIN0_BASE64`
+ *      below.
+ *
+ * Fixed parameters to preserve if regenerating (changing any of these
+ * invalidates the pinned vectors in `agile.test.ts`):
+ *   - password: `test`
+ *   - hashAlgorithm: `SHA512`, keyBits: `256`, cipherAlgorithm: `AES`,
+ *     cipherChaining: `ChainingModeCBC`, blockSize: `16`, saltSize: `16`
+ *   - spinCount: `0`
+ *   - keyData.saltValue: `00 01 02 ... 0f` (16 bytes)
+ *   - password-encryptor saltValue: `10 11 12 ... 1f` (16 bytes)
  */
 export const ENCRYPTED_DOCX_SPIN0_BASE64 =
   '0M8R4KGxGuEAAAAAAAAAAAAAAAAAAAAAPgADAP7/CQAGAAAAAAAAAAAAAAABAAAAAQAAAAAAAAAAEAAAAgAAAAEAAAD+////AAAA' +

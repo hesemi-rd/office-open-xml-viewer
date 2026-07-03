@@ -20,6 +20,12 @@ import { encryptedDocxSpin0 } from '@silurus/ooxml-core/testing';
  * `Worker`, so a successful decrypt surfaces as a plain `ReferenceError`
  * ("Worker is not defined"), never an `OoxmlError`. That is the reliable signal
  * that decryption succeeded and the plaintext ZIP was handed onward to parse.
+ *
+ * Configuration coupling: this signal depends on vitest's default `environment:
+ * 'node'` (no `Worker` global). If this suite's environment is ever switched to
+ * `'jsdom'` / `'happy-dom'` (which polyfill `Worker`), the assertion below stops
+ * proving what it claims — worker construction would no longer throw, so a
+ * failure to reach the worker at all would go undetected.
  */
 describe('DocxDocument.load — Agile decryption', () => {
   const fixture = () => encryptedDocxSpin0().buffer;
