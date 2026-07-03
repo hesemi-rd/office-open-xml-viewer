@@ -20,6 +20,31 @@ use std::cell::Cell;
 /// rejecting real files.
 pub const DEFAULT_MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Upper bound on the buffer we pre-reserve from an entry's DECLARED size.
+///
+/// `entry.size()` is the uncompressed size recorded in the zip header, which is
+/// attacker-controlled: a zip-bomb variant can declare 512 MiB (up to the entry
+/// cap) while the real payload is a few bytes. Feeding that straight into
+/// `Vec::with_capacity` wastes up to `DEFAULT_MAX_ZIP_ENTRY_BYTES` of eager
+/// allocation per entry. We instead pre-reserve at most 1 MiB and let
+/// `read_to_end` grow the buffer for genuinely large parts.
+///
+/// 1 MiB is chosen because it comfortably fits the vast majority of OOXML parts
+/// (document.xml / sheetN.xml / slideN.xml are typically tens to a few hundred
+/// KiB) so they incur zero reallocation, while capping the wasted reserve for a
+/// forged header at 1 MiB. Genuinely large parts (multi-MB sharedStrings) grow
+/// via `read_to_end`'s amortized-O(n) doubling — a handful of reallocs, no
+/// measurable parse-time cost (verified against the parse bench).
+const INITIAL_RESERVE_CAP: usize = 1024 * 1024; // 1 MiB
+
+/// Buffer capacity to pre-reserve for an entry that declares `declared_size`
+/// uncompressed bytes: the declared size when small, else [`INITIAL_RESERVE_CAP`].
+/// Clamps the eager `with_capacity` so a forged declaration cannot force a giant
+/// up-front allocation; the read still completes in full via `read_to_end`.
+fn initial_reserve(declared_size: u64) -> usize {
+    declared_size.min(INITIAL_RESERVE_CAP as u64) as usize
+}
+
 thread_local! {
     static MAX_ZIP_ENTRY_BYTES: Cell<u64> = const { Cell::new(DEFAULT_MAX_ZIP_ENTRY_BYTES) };
 }
@@ -75,7 +100,9 @@ pub fn extract_zip_entry(
     if entry.size() > max {
         return Err(format!("ZIP entry exceeds size limit: {path}"));
     }
-    let mut buf = Vec::with_capacity(entry.size() as usize);
+    // Pre-reserve a capped amount, not the (attacker-controlled) declared size —
+    // `read_to_end` grows the buffer for genuinely large parts. See INITIAL_RESERVE_CAP.
+    let mut buf = Vec::with_capacity(initial_reserve(entry.size()));
     entry
         .by_ref()
         .take(max)
@@ -103,7 +130,9 @@ pub fn read_zip_bytes<R: std::io::Read + std::io::Seek>(
     if entry.size() > max {
         return Err(format!("ZIP entry exceeds size limit: {path}"));
     }
-    let mut buf = Vec::with_capacity(entry.size() as usize);
+    // Pre-reserve a capped amount, not the (attacker-controlled) declared size —
+    // `read_to_end` grows the buffer for genuinely large parts. See INITIAL_RESERVE_CAP.
+    let mut buf = Vec::with_capacity(initial_reserve(entry.size()));
     entry
         .by_ref()
         .take(max)
@@ -215,6 +244,143 @@ mod tests {
         );
         let err = read_zip_string(&mut ar, "xl/nope.xml").unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    /// Forge a STORED (compression=0) single-entry zip whose declared
+    /// `uncompressed_size` (in BOTH the local file header and the central
+    /// directory) is much larger than the real body. Returns the raw zip bytes.
+    ///
+    /// A stored entry lets us set uncompressed==compressed==declared cleanly.
+    /// We hand-lay the bytes so we control the size fields the way a malicious
+    /// archive would. `real` is the actual payload; `declared` is the lie.
+    #[cfg(test)]
+    fn forged_stored_zip(name: &str, real: &[u8], declared: u32) -> Vec<u8> {
+        let crc = {
+            // CRC-32 of the real body (zip stores the checksum of actual data).
+            const POLY: u32 = 0xEDB8_8320;
+            let mut c: u32 = 0xFFFF_FFFF;
+            for &b in real {
+                c ^= b as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
+                }
+            }
+            !c
+        };
+        let name_bytes = name.as_bytes();
+        let nlen = name_bytes.len() as u16;
+        let mut z = Vec::new();
+        // ── Local file header ──
+        z.extend_from_slice(&0x0403_4b50u32.to_le_bytes()); // signature PK\x03\x04
+        z.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        z.extend_from_slice(&0u16.to_le_bytes()); // flags
+        z.extend_from_slice(&0u16.to_le_bytes()); // method = 0 (stored)
+        z.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        z.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        z.extend_from_slice(&crc.to_le_bytes()); // crc-32
+        z.extend_from_slice(&declared.to_le_bytes()); // compressed size (LIE)
+        z.extend_from_slice(&declared.to_le_bytes()); // uncompressed size (LIE)
+        z.extend_from_slice(&nlen.to_le_bytes()); // file name length
+        z.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        z.extend_from_slice(name_bytes);
+        let data_start = z.len();
+        z.extend_from_slice(real); // only `real.len()` bytes actually present
+                                   // ── Central directory header ──
+        let cd_start = z.len();
+        z.extend_from_slice(&0x0201_4b50u32.to_le_bytes()); // signature PK\x01\x02
+        z.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        z.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        z.extend_from_slice(&0u16.to_le_bytes()); // flags
+        z.extend_from_slice(&0u16.to_le_bytes()); // method = 0 (stored)
+        z.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        z.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        z.extend_from_slice(&crc.to_le_bytes()); // crc-32
+        z.extend_from_slice(&declared.to_le_bytes()); // compressed size (LIE)
+        z.extend_from_slice(&declared.to_le_bytes()); // uncompressed size (LIE)
+        z.extend_from_slice(&nlen.to_le_bytes()); // file name length
+        z.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        z.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        z.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        z.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        z.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        z.extend_from_slice(&(data_start as u32 - 30 - nlen as u32).to_le_bytes()); // local header offset (=0)
+        z.extend_from_slice(name_bytes);
+        let cd_size = z.len() - cd_start;
+        // ── End of central directory ──
+        z.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // signature PK\x05\x06
+        z.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        z.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+        z.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+        z.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        z.extend_from_slice(&(cd_size as u32).to_le_bytes()); // cd size
+        z.extend_from_slice(&(cd_start as u32).to_le_bytes()); // cd offset
+        z.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        z
+    }
+
+    /// EMPIRICAL (RB11 attack-vector confirmation): `entry.size()` reports the
+    /// DECLARED (attacker-controlled, central-directory) uncompressed size, NOT
+    /// the actual decompressed byte count. This is the number the pre-fix code
+    /// fed straight into `Vec::with_capacity`, so a forged header declaring
+    /// 512 MiB over-reserved 512 MiB before reading a single byte. This test
+    /// pins the observed behavior so a future zip-crate upgrade that changes it
+    /// (returning the actual size, which would neutralize the vector) fails
+    /// loudly.
+    #[test]
+    fn entry_size_reports_declared_not_actual() {
+        use std::io::Cursor;
+        // Declare 64 MiB but supply only 8 real bytes.
+        const DECLARED: u32 = 64 * 1024 * 1024;
+        let real = b"realdata"; // 8 bytes
+        let raw = forged_stored_zip("word/document.xml", real, DECLARED);
+        let mut ar = zip::ZipArchive::new(Cursor::new(raw)).unwrap();
+        let entry = ar.by_name("word/document.xml").unwrap();
+        // The size field is read from the header at open time — BEFORE any
+        // decompression / CRC check. It is the attacker's declared value.
+        assert_eq!(
+            entry.size(),
+            DECLARED as u64,
+            "entry.size() must report the declared (attacker-controlled) size — \
+             if this fails, the zip crate now returns the actual size and RB11's \
+             reserve-inflation vector no longer exists"
+        );
+    }
+
+    #[test]
+    fn initial_reserve_caps_the_declared_size() {
+        // The reserve helper clamps an entry's declared size to INITIAL_RESERVE_CAP
+        // so a forged 512 MiB declaration reserves at most the cap, not 512 MiB.
+        // A small declared size is reserved exactly (no waste for legitimate files).
+        assert_eq!(
+            initial_reserve(8),
+            8,
+            "a small declared size is reserved exactly"
+        );
+        assert_eq!(
+            initial_reserve(INITIAL_RESERVE_CAP as u64),
+            INITIAL_RESERVE_CAP,
+            "a declared size equal to the cap reserves the cap"
+        );
+        assert_eq!(
+            initial_reserve(512 * 1024 * 1024),
+            INITIAL_RESERVE_CAP,
+            "a forged 512 MiB declaration is clamped to the cap, not honored"
+        );
+    }
+
+    #[test]
+    fn read_zip_bytes_reads_full_data_despite_huge_declared_reserve() {
+        // A legitimately-authored entry whose real body is small but sits in an
+        // archive is read in FULL regardless of the reserve cap — the cap only
+        // bounds the up-front `with_capacity`; `read_to_end` grows as needed.
+        // (Uses a normal entry: correctness of the read path is what we assert;
+        // the anti-over-reserve property is covered by initial_reserve_caps_*.)
+        let mut ar = archive_with("word/document.xml", b"<document>hello</document>");
+        assert_eq!(
+            read_zip_bytes(&mut ar, "word/document.xml").unwrap(),
+            b"<document>hello</document>",
+            "read must yield the complete real body, reserve cap notwithstanding"
+        );
     }
 
     #[test]
