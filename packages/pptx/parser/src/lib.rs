@@ -1009,6 +1009,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             _ => pres_master_path
                 .as_deref()
                 .map(|p| &master_cache[p])
+                // ast-grep-ignore: no-unwrap-in-parser-production
                 .unwrap_or_else(|| no_master_bundle.as_ref().unwrap()),
         };
 
@@ -1168,6 +1169,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             Some(pl) => pl,
             // Cached (no-override) path: `layout_path` is guaranteed present
             // because that is the only arm that leaves `fresh_layout` as `None`.
+            // ast-grep-ignore: no-unwrap-in-parser-production
             None => &layout_cache[raw.layout_path.as_deref().unwrap()],
         };
 

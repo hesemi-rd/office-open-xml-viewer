@@ -1115,6 +1115,9 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
             DocRun::Break {
                 break_type: BreakType::RenderedPage,
             } => { /* ignored hint */ }
+            // `chunks` is seeded with one Vec and only ever pushed to, so
+            // `last_mut()` is always Some.
+            // ast-grep-ignore: no-unwrap-in-parser-production
             _ => chunks.last_mut().unwrap().push(run),
         }
     }

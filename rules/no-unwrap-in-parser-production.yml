@@ -1,0 +1,32 @@
+id: no-unwrap-in-parser-production
+language: Rust
+severity: error
+rule:
+  pattern: $EXPR.unwrap()
+  not:
+    # Exclude every `#[cfg(test)] mod *tests { … }` block. The parser crates name
+    # their test modules `tests` or `<topic>_tests` (e.g. `sheet_view_tests`,
+    # `strict_namespace_tests`), so a `tests$`-suffix match on the enclosing
+    # module name covers both without leaking test *helper* fns (which a plain
+    # `#[test]`-attribute check would miss).
+    inside:
+      kind: mod_item
+      has:
+        field: name
+        regex: tests$
+      stopBy: end
+message: >-
+  Production parser code must not `.unwrap()` — a malformed OOXML part would
+  panic the WASM module (aborting the whole render) instead of degrading.
+note: |
+  Use `?` (propagate), `unwrap_or`/`unwrap_or_default` (graceful fallback), or
+  `expect("<invariant>")` when a panic is genuinely unreachable and the reason
+  is worth stating. The handful of pre-existing production unwraps are each
+  guarded by a structural invariant documented at the call site and annotated
+  with `// ast-grep-ignore: no-unwrap-in-parser-production`; a NEW production
+  unwrap without that annotation fails the build.
+files:
+  - "packages/pptx/parser/src/**/*.rs"
+  - "packages/xlsx/parser/src/**/*.rs"
+  - "packages/docx/parser/src/**/*.rs"
+  - "packages/ooxml-common/src/**/*.rs"

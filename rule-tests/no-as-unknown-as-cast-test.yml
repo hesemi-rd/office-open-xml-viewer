@@ -1,0 +1,10 @@
+id: no-as-unknown-as-cast
+valid:
+  # A single, honest cast is fine.
+  - "const c = document.getElementById('x') as HTMLCanvasElement;"
+  - "const v = raw as Foo;"
+  # `as unknown` alone (widening) is not the double-cast we flag.
+  - "const u = value as unknown;"
+invalid:
+  - "const x = foo as unknown as Bar;"
+  - "const ctx = stub as unknown as CanvasRenderingContext2D;"

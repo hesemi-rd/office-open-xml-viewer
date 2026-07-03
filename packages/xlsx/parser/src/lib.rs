@@ -1474,6 +1474,10 @@ fn parse_threaded_comments_xml(
     order
         .into_iter()
         .map(|cell_ref| {
+            // `order` holds exactly the keys inserted into `by_ref` (each ref is
+            // pushed to `order` the first time it is inserted), so `remove` is
+            // always Some.
+            // ast-grep-ignore: no-unwrap-in-parser-production
             let (author, text) = by_ref.remove(&cell_ref).unwrap();
             XlsxComment {
                 cell_ref,

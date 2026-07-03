@@ -541,6 +541,9 @@ fn split_align_cells(nodes: Vec<MathNode>) -> Vec<Vec<MathNode>> {
                         cells.push(Vec::new());
                     }
                     if !part.is_empty() {
+                        // `cells` is seeded with one Vec and only ever pushed to,
+                        // so `last_mut()` is always Some.
+                        // ast-grep-ignore: no-unwrap-in-parser-production
                         cells.last_mut().unwrap().push(MathNode::Run {
                             text: part.to_string(),
                             style: style.clone(),
@@ -550,6 +553,8 @@ fn split_align_cells(nodes: Vec<MathNode>) -> Vec<Vec<MathNode>> {
                 continue;
             }
         }
+        // Same invariant: `cells` always holds at least one Vec.
+        // ast-grep-ignore: no-unwrap-in-parser-production
         cells.last_mut().unwrap().push(node);
     }
     cells

@@ -1,0 +1,25 @@
+id: no-as-unknown-as-cast
+language: TypeScript
+severity: warning
+rule:
+  pattern: $EXPR as unknown as $TYPE
+message: >-
+  Avoid the `as unknown as T` double-cast — it fully defeats the type checker.
+  Prefer a proper type (a narrowing guard, a shared interface, or a typed
+  bridge in a `types.ts`) so a mismatch is caught at compile time.
+note: |
+  Tripwire (severity: warning) — `ast-grep scan` reports it but does NOT fail
+  CI, so the ~116 pre-existing production double-casts are surfaced without
+  turning the build red. The goal is to stop NEW ones from creeping in: when a
+  reviewer sees a fresh warning here, the cast should be replaced with a real
+  type rather than added to the pile.
+
+  Test files legitimately double-cast partial mock objects (mock canvas 2D
+  contexts, DOM stubs) to satisfy a full interface, so `*.test.ts` /
+  `*.spec.ts` / `*.stories.ts` are excluded.
+files:
+  - "packages/**/src/**/*.ts"
+ignores:
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "**/*.stories.ts"

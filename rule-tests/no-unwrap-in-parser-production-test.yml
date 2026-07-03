@@ -1,0 +1,32 @@
+id: no-unwrap-in-parser-production
+valid:
+  # `?` propagation and graceful fallbacks are fine.
+  - "fn f(o: Option<u32>) -> Option<u32> { let x = o?; Some(x) }"
+  - "fn f(o: Option<u32>) -> u32 { o.unwrap_or(0) }"
+  - "fn f(o: Option<u32>) -> u32 { o.expect(\"invariant\") }"
+  # unwrap inside a `#[cfg(test)] mod tests` block is allowed (test code).
+  - |
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn t() {
+            let x = foo().unwrap();
+        }
+    }
+  # …including inside a *helper* fn in the test module (no #[test] attr),
+  # and inside a topic-suffixed test module (`<topic>_tests`).
+  - |
+    #[cfg(test)]
+    mod sheet_view_tests {
+        fn helper() -> u32 {
+            bar().unwrap()
+        }
+    }
+invalid:
+  # A production unwrap outside any test module must be flagged.
+  - "fn prod() { let y = bar().unwrap(); }"
+  - |
+    fn parse() -> u32 {
+        let v = lookup().unwrap();
+        v
+    }
