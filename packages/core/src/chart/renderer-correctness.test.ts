@@ -211,6 +211,217 @@ describe('CH1 — negative bar/column values extend from the zero line', () => {
   });
 });
 
+describe('CH6 — negative bar data-label placement mirrors the positive convention (§21.2.2.16)', () => {
+  // Coverage for drawBarDataLabel's `negative` branch. A single chart holds two
+  // categories with a symmetric +37 / -37 value, so BOTH bars share one plot and
+  // one axis (a symmetric ±37 range) — the geometry is a clean mirror across the
+  // zero line. For each dLblPos the negative label must land on the mirror side
+  // of the positive label relative to that shared zero line. "37" / "-37" are
+  // not round gridline values, so each data-label text is unambiguous among the
+  // recorded fillText calls, and each bar is matched to its label by the shared
+  // cross-axis center.
+  function renderMirrorBars(
+    chartType: 'clusteredBar' | 'clusteredBarH',
+    dataLabelPosition: string,
+  ): Recorded {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType,
+      categories: ['P', 'N'],
+      series: [series({ name: 'S', values: [37, -37] })],
+      showDataLabels: true,
+      dataLabelPosition,
+    }), RECT, 1);
+    return rec;
+  }
+  const labelPos = (rec: Recorded, text: string): TextCall => {
+    const hit = rec.texts.find(t => t.text === text);
+    expect(hit, `data label "${text}" was drawn`).toBeDefined();
+    return hit as TextCall;
+  };
+  // Match each value bar to its label by the cross-axis center they share
+  // (x-center for columns, y-center for horizontal bars).
+  const barFor = (rec: Recorded, lbl: TextCall, axis: 'v' | 'h'): RectCall => {
+    const center = (b: RectCall) => axis === 'v' ? b.x + b.w / 2 : b.y + b.h / 2;
+    const key = axis === 'v' ? lbl.x : lbl.y;
+    let best: RectCall | undefined;
+    let bestD = Infinity;
+    for (const b of rec.rects) {
+      const d = Math.abs(center(b) - key);
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    expect(best).toBeDefined();
+    return best as RectCall;
+  };
+
+  describe('vertical columns', () => {
+    for (const pos of ['outEnd', 'inEnd', 'inBase', 'ctr']) {
+      it(`${pos}: the negative label mirrors the positive label across the zero line`, () => {
+        const rec = renderMirrorBars('clusteredBar', pos);
+        const posLbl = labelPos(rec, '37');
+        const negLbl = labelPos(rec, '-37');
+        const posBar = barFor(rec, posLbl, 'v');   // sits ABOVE the zero line
+        const negBar = barFor(rec, negLbl, 'v');   // hangs BELOW the zero line
+        // Each label is horizontally centered on its own bar.
+        expect(posLbl.x).toBeCloseTo(posBar.x + posBar.w / 2, 4);
+        expect(negLbl.x).toBeCloseTo(negBar.x + negBar.w / 2, 4);
+        // Symmetric ±37 → equal bar heights, bars meeting at the shared zero line.
+        expect(negBar.h).toBeCloseTo(posBar.h, 3);
+        const zeroLine = posBar.y + posBar.h;            // positive bottom == neg top
+        expect(negBar.y).toBeCloseTo(zeroLine, 3);
+        // The positive bar's value edge is its TOP; the negative's is its BOTTOM.
+        const posValueEdge = posBar.y;                   // top edge
+        const negValueEdge = negBar.y + negBar.h;        // bottom edge
+        if (pos === 'ctr') {
+          expect(posLbl.y).toBeCloseTo(posBar.y + posBar.h / 2, 4);
+          expect(negLbl.y).toBeCloseTo(negBar.y + negBar.h / 2, 4);
+          // The two centers are mirror images across the zero line.
+          expect(negLbl.y - zeroLine).toBeCloseTo(zeroLine - posLbl.y, 3);
+        } else if (pos === 'outEnd' || pos === 'inEnd') {
+          // Positive label offset from its top edge mirrors the negative label
+          // offset from its bottom edge (positive sits above → −, negative below → +).
+          const posOff = posLbl.y - posValueEdge;
+          const negOff = negLbl.y - negValueEdge;
+          expect(negOff).toBeCloseTo(-posOff, 3);
+        } else {
+          // inBase: anchored at the zero-line (base) edge for both signs.
+          const posBaseEdge = posBar.y + posBar.h;       // bottom (zero line)
+          const negBaseEdge = negBar.y;                  // top (zero line)
+          const posOff = posLbl.y - posBaseEdge;
+          const negOff = negLbl.y - negBaseEdge;
+          expect(negOff).toBeCloseTo(-posOff, 3);
+        }
+      });
+    }
+  });
+
+  describe('horizontal bars', () => {
+    for (const pos of ['outEnd', 'inEnd', 'inBase', 'ctr']) {
+      it(`${pos}: the negative label mirrors the positive label across the zero line`, () => {
+        const rec = renderMirrorBars('clusteredBarH', pos);
+        const posLbl = labelPos(rec, '37');
+        const negLbl = labelPos(rec, '-37');
+        const posBar = barFor(rec, posLbl, 'h');   // extends RIGHT of the zero line
+        const negBar = barFor(rec, negLbl, 'h');   // extends LEFT of the zero line
+        // Each label is vertically centered on its own bar. The recorded rect is
+        // fillRect(bx, by, barL, barW), so its HEIGHT is the bar thickness.
+        expect(posLbl.y).toBeCloseTo(posBar.y + posBar.h / 2, 4);
+        expect(negLbl.y).toBeCloseTo(negBar.y + negBar.h / 2, 4);
+        // Symmetric ±37 → equal bar lengths, meeting at the shared zero line.
+        expect(negBar.w).toBeCloseTo(posBar.w, 3);
+        const zeroLine = posBar.x;                        // positive left == neg right
+        expect(negBar.x + negBar.w).toBeCloseTo(zeroLine, 3);
+        if (pos === 'ctr') {
+          expect(posLbl.x).toBeCloseTo(posBar.x + posBar.w / 2, 4);
+          expect(negLbl.x).toBeCloseTo(negBar.x + negBar.w / 2, 4);
+          expect(negLbl.x - zeroLine).toBeCloseTo(zeroLine - posLbl.x, 3);
+        } else if (pos === 'outEnd' || pos === 'inEnd') {
+          // Positive value edge is the RIGHT edge; negative value edge the LEFT.
+          const posValueEdge = posBar.x + posBar.w;
+          const negValueEdge = negBar.x;
+          const posOff = posLbl.x - posValueEdge;
+          const negOff = negLbl.x - negValueEdge;
+          expect(negOff).toBeCloseTo(-posOff, 3);
+        } else {
+          // inBase: zero-line edge. Positive base is the LEFT edge, negative base
+          // the RIGHT edge — mirrored across the zero line.
+          const posBaseEdge = posBar.x;                  // left (zero line)
+          const negBaseEdge = negBar.x + negBar.w;       // right (zero line)
+          const posOff = posLbl.x - posBaseEdge;
+          const negOff = negLbl.x - negBaseEdge;
+          expect(negOff).toBeCloseTo(-posOff, 3);
+        }
+      });
+    }
+  });
+});
+
+describe('CH7 — percentStacked normalizes signed values against per-category Σ|v| (§21.2.2.76)', () => {
+  // Positive contributions stack up/right, negatives down/left; each series is
+  // normalized to (v / Σ|v|)·100 so the axis spans −100..100.
+  it('vertical percentStacked: positives stack above zero, negatives below, normalized to Σ|v|', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A'],
+      series: [
+        series({ name: 'P', values: [30] }),   // +30
+        series({ name: 'N', values: [-10] }),  // -10  → Σ|v| = 40
+      ],
+    }), RECT, 1);
+    const bars = rec.rects;
+    expect(bars.length).toBe(2);
+    const [p, nBar] = bars;
+    // Positive bar sits above the zero line, negative bar below; they meet at it.
+    expect(nBar.y).toBeCloseTo(p.y + p.h, 3);          // shared zero line
+    expect(nBar.y).toBeGreaterThan(p.y);               // negative is lower
+    // Normalized magnitudes: +30/40 = 75% up, -10/40 = 25% down. Same axis
+    // scale (px per percent) → the positive bar is 3× the negative bar's height.
+    expect(p.h / nBar.h).toBeCloseTo(3, 2);
+    // The value axis carries the ±100 percentStacked gridlines (plus headroom,
+    // so the outermost ticks sit at ±120, matching the line/area pct convention).
+    const nums = rec.texts.map(t => Number(String(t.text).replace('%', '')))
+      .filter(v => Number.isFinite(v));
+    expect(nums).toContain(100);
+    expect(nums).toContain(-100);
+    expect(Math.min(...nums)).toBeLessThanOrEqual(-100);
+    expect(Math.min(...nums)).toBeGreaterThanOrEqual(-120);
+    expect(Math.max(...nums)).toBeGreaterThanOrEqual(100);
+    expect(Math.max(...nums)).toBeLessThanOrEqual(120);
+  });
+
+  it('horizontal percentStacked: positives stack right, negatives left, normalized to Σ|v|', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarHPct',
+      categories: ['A'],
+      series: [
+        series({ name: 'P', values: [30] }),   // +30 → right
+        series({ name: 'N', values: [-10] }),  // -10 → left, Σ|v| = 40
+      ],
+    }), RECT, 1);
+    const bars = rec.rects;
+    expect(bars.length).toBe(2);
+    const [p, nBar] = bars;
+    // Positive bar extends right of the zero line, negative left; they meet at it.
+    expect(nBar.x + nBar.w).toBeCloseTo(p.x, 3);       // shared zero line
+    expect(nBar.x).toBeLessThan(p.x);                  // negative is to the left
+    // +30/40 = 75% right vs -10/40 = 25% left → 3× the width.
+    expect(p.w / nBar.w).toBeCloseTo(3, 2);
+    const nums = rec.texts.map(t => Number(String(t.text).replace('%', '')))
+      .filter(v => Number.isFinite(v));
+    expect(nums).toContain(100);
+    expect(nums).toContain(-100);
+    expect(Math.min(...nums)).toBeLessThanOrEqual(-100);
+    expect(Math.min(...nums)).toBeGreaterThanOrEqual(-120);
+    expect(Math.max(...nums)).toBeGreaterThanOrEqual(100);
+    expect(Math.max(...nums)).toBeLessThanOrEqual(120);
+  });
+
+  it('multi-category percentStacked: each category normalizes to its own Σ|v|', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'P', values: [10, 40] }),  // A: Σ|v|=20  B: Σ|v|=50
+        series({ name: 'N', values: [-10, -10] }),
+      ],
+    }), RECT, 1);
+    const bars = rec.rects;
+    // Two categories × two series = four bars, in draw order: A/P, A/N, B/P, B/N.
+    expect(bars.length).toBe(4);
+    const [aP, aN, bP, bN] = bars;
+    // Category A: 10 and -10 of Σ|v|=20 → 50% up, 50% down → equal heights.
+    expect(aP.h).toBeCloseTo(aN.h, 2);
+    // Category B: 40 and -10 of Σ|v|=50 → 80% up, 20% down → positive is 4× taller.
+    expect(bP.h / bN.h).toBeCloseTo(4, 2);
+    // Per-category normalization (not a global Σ): A's +50% bar and B's +80% bar
+    // are NOT the same height even though A/P is the larger raw share of A.
+    expect(bP.h).toBeGreaterThan(aP.h);
+  });
+});
+
 describe('CH2 — stackedLine / stackedLinePct stack cumulatively', () => {
   it('stackedLine plots the second series at the cumulative sum', () => {
     // Two flat series (all 10, all 20). Stacked, the second line rides at
