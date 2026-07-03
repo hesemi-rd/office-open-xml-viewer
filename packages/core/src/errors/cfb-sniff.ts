@@ -29,11 +29,11 @@
 /** CFB header signature (§2.2). */
 const CFB_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 
-// Special FAT sector values (§2.2 / §2.3).
-const FREESECT = 0xffffffff;
-const ENDOFCHAIN = 0xfffffffe;
-// FATSECT (0xFFFFFFFD) / DIFSECT (0xFFFFFFFC) are FAT-internal markers; the
-// walk treats any value >= MAXREGSECT as "stop", so they need no named use.
+// Special FAT sector values (§2.2 / §2.3): FREESECT (0xFFFFFFFF), ENDOFCHAIN
+// (0xFFFFFFFE), FATSECT (0xFFFFFFFD), DIFSECT (0xFFFFFFFC). All four are FAT-
+// internal markers that sit above MAXREGSECT, and the walk treats any value
+// >= MAXREGSECT as "stop" — so none of them needs an individually named
+// constant; a single upper-bound comparison in `isRegularSector` covers all.
 const MAXREGSECT = 0xfffffffa;
 
 const HEADER_SIZE = 512;
@@ -90,9 +90,14 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
   const sectorShift = view.getUint16(0x1e, true);
-  // [MS-CFB] §2.2: 0x0009 (512) for v3, 0x000C (4096) for v4. Accept the whole
-  // sane range [7, 20] (128 B .. 1 MiB) defensively; anything else is corrupt.
-  if (sectorShift < 7 || sectorShift > 20) return 'cfb-unknown';
+  // [MS-CFB] §2.2 mandates exactly 0x0009 (512 B) for major version 3 and
+  // 0x000C (4096 B) for major version 4 — no other value is a conformant CFB.
+  // A wider "sane range" is not merely permissive: with shift 7-8 (sectorSize
+  // 128/256), fileOffsetOfSector(N) = (N + 1) * sectorSize can land inside the
+  // 512-byte header region instead of past it, so the FAT/directory walk would
+  // silently misinterpret header bytes as sector data instead of failing
+  // closed. Reject anything else as 'cfb-unknown'.
+  if (sectorShift !== 9 && sectorShift !== 12) return 'cfb-unknown';
   const sectorSize = 1 << sectorShift;
 
   const firstDirSector = view.getUint32(0x30, true);
@@ -207,13 +212,18 @@ function readFatEntry(
 }
 
 /** File byte offset of logical sector N: the 512-byte header occupies "sector
- *  -1", so data sector N starts at (N + 1) * sectorSize (§2.2). */
+ *  -1", so data sector N starts at (N + 1) * sectorSize (§2.2). Assumes
+ *  sectorSize >= 512 (guaranteed by the {9, 12} shift check above) so the
+ *  512-byte header always fits within one sector and sector 0 cannot overlap
+ *  it. */
 function fileOffsetOfSector(sector: number, sectorSize: number): number {
   return (sector + 1) * sectorSize;
 }
 
-/** A regular (allocatable) sector number: 0 .. MAXREGSECT. ENDOFCHAIN /
- *  FREESECT / FATSECT / DIFSECT all sit above MAXREGSECT and terminate a walk. */
+/** A regular (allocatable) sector number: 0 .. MAXREGSECT. The special values
+ *  (FREESECT / ENDOFCHAIN / FATSECT / DIFSECT, see above) all sit above
+ *  MAXREGSECT and are already excluded by the upper bound, so no separate
+ *  check against them is needed. */
 function isRegularSector(sector: number): boolean {
-  return sector >= 0 && sector <= MAXREGSECT && sector !== FREESECT && sector !== ENDOFCHAIN;
+  return sector >= 0 && sector <= MAXREGSECT;
 }

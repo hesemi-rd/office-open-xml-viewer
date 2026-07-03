@@ -42,5 +42,16 @@ export function assertNotCfbContainer(bytes: Uint8Array | ArrayBuffer): void {
         'not-ooxml',
         'This file is an OLE2/Compound File container, not an OOXML (ZIP) document.',
       );
+    default:
+      // Exhaustiveness guard: if `CfbKind` grows a new member, this branch
+      // stops compiling (the assignment requires `never`) instead of letting
+      // an unrecognised CFB fall through and reach the ZIP parser worker
+      // un-rejected. Fail closed at runtime too, in case a future change
+      // drops the compile-time check (e.g. a widened return type upstream).
+      kind satisfies never;
+      throw new OoxmlError(
+        'not-ooxml',
+        'This file is an OLE2/Compound File container of an unrecognised kind, not an OOXML (ZIP) document.',
+      );
   }
 }
