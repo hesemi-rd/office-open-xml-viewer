@@ -215,6 +215,55 @@ describe('decodePackedDib — contiguous header+palette+bits (WMF-style)', () =>
   });
 });
 
+describe('decodeDib — dimension / megapixel budget (DoS guard)', () => {
+  // A crafted BITMAPINFOHEADER can declare enormous dimensions while carrying
+  // only a few bytes of pixel data. The decode must REJECT such headers before
+  // it reaches `new Uint8ClampedArray(width * height * 4)`, otherwise a 65535×
+  // 65535 DIB demands a ~16 GiB RGBA buffer and OOMs the tab.
+
+  it('returns null for a megapixel-budget-exceeding header (65535×65535, tiny pixel data)', () => {
+    // Header declares a 65535×65535 image (≈4.29e9 px → ~17 GB RGBA) but the
+    // buffer only holds the 40-byte header + a couple of pixel bytes. Before the
+    // fix, decodeDib allocates the giant Uint8ClampedArray up front and aborts.
+    const w = new Writer();
+    for (const b of bmih(65535, 65535, 24).build()) w.u8(b);
+    w.u8(0).u8(0).u8(0).u8(0); // 4 stray pixel bytes — nowhere near the claimed size
+    const bytes = w.build();
+    expect(decodeDib(dvOf(bytes), 0, 40, 40, bytes.length - 40)).toBeNull();
+  });
+
+  it('returns null when a single dimension exceeds the max canvas dimension (40000 wide, 1 tall)', () => {
+    // 40000 > 32767 (browser max canvas dimension) but < the old 65536 cap, so
+    // the PRE-fix code accepted it. Height is 1 and the row buffer is fully
+    // supplied, so the buffer-bounds check does NOT bail — decode would succeed
+    // pre-fix (returning a 40000×1 dib) and only the new dimension cap rejects
+    // it. Such a DIB could never be blitted to a canvas anyway (>32767).
+    const width = 40000;
+    const rowStride = (((width * 24 + 31) >> 5) << 2) >>> 0; // 4-byte aligned
+    const w = new Writer();
+    for (const b of bmih(width, 1, 24).build()) w.u8(b); // 40000 × 1, bottom-up
+    for (let i = 0; i < rowStride; i++) w.u8(0); // one full, in-bounds pixel row
+    const bytes = w.build();
+    expect(decodeDib(dvOf(bytes), 0, 40, 40, bytes.length - 40)).toBeNull();
+  });
+
+  it('still decodes a large-but-in-budget DIB (within dimension and megapixel caps)', () => {
+    // 2×2 is trivially in budget; this asserts the new guard does not reject
+    // legitimate small images. (The existing 24-bit tests already cover the
+    // happy path; this is an explicit regression sentinel for the guard.)
+    const { bytes, bitsOff } = dib24([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9],
+      [10, 11, 12],
+    ]);
+    const dib = decodeDib(dvOf(bytes), 0, 40, bitsOff, bytes.length - bitsOff);
+    expect(dib).not.toBeNull();
+    expect((dib as DecodedDib).width).toBe(2);
+    expect((dib as DecodedDib).height).toBe(2);
+  });
+});
+
 describe('blitDibToCtx — OffscreenCanvas absent', () => {
   it('returns false when OffscreenCanvas is undefined (node test env)', () => {
     expect(typeof OffscreenCanvas).toBe('undefined');
