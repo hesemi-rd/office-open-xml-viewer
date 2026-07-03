@@ -8220,6 +8220,11 @@ function computeTableLayout(
   // round-off ~1e-13 is a geometric equality, not a snap). A slice stamps only its
   // own rows, so `tableRowHeightsPt` aligns 1:1 with `table.rows`; the column stamp
   // is the full grid, shared by every slice.
+  // Kinsoku is deliberately NOT a gate input (unlike the paragraph reuse gate's
+  // kinsokuRulesEquivalent): the paragraph stamp re-lays lines out at paint and
+  // so must prove the layout inputs match, whereas this stamp is the finished
+  // heights — kinsoku was already applied when the paginator measured them, and
+  // both passes resolve kinsoku from the same immutable doc.settings.
   const stamped = table as PaginatedBodyElement;
   const contentWPt1 = contentWPx / scale;
   const reuseInputs = stamped.tableLayoutInputs;
