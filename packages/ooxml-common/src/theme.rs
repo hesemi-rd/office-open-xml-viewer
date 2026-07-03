@@ -18,11 +18,9 @@
 //! resolution and the runtime color transforms (lumMod/tint/…) are NOT here —
 //! they diverge per host and stay in each parser / the renderer.
 
+use crate::ns::is_a_ns;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-/// DrawingML main namespace — the `a:` elements a theme is built from.
-const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
 /// The twelve `<a:clrScheme>` slot names in ECMA-376 §20.1.6.2 declaration
 /// order: `dk1`, `lt1`, `dk2`, `lt2`, `accent1`..`accent6`, `hlink`,
@@ -192,7 +190,7 @@ pub fn parse_ln_style_widths(xml: &str) -> Vec<i64> {
         return Vec::new();
     };
     for node in doc.descendants() {
-        if node.tag_name().name() == "lnStyleLst" && node.tag_name().namespace() == Some(A_NS) {
+        if node.tag_name().name() == "lnStyleLst" && is_a_ns(node.tag_name().namespace()) {
             return node
                 .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "ln")
@@ -312,6 +310,28 @@ mod tests {
     fn ln_style_widths_reads_list_with_default() {
         // Third <a:ln> has no w → CT_LineProperties default 9525.
         assert_eq!(parse_ln_style_widths(THEME), vec![6350, 12700, 9525]);
+    }
+
+    /// Same fixture as [`ln_style_widths_reads_list_with_default`], but declared
+    /// under the ISO/IEC 29500 Strict `a:` URI
+    /// (`http://purl.oclc.org/ooxml/drawingml/main`) instead of the Transitional
+    /// one. `parse_ln_style_widths` must accept both — a document saved by
+    /// Office in Strict conformance still has a `<a:fmtScheme><a:lnStyleLst>` to
+    /// resolve `<a:lnRef idx="N">` line widths from.
+    #[test]
+    fn ln_style_widths_reads_list_with_default_strict_ns() {
+        const STRICT_THEME: &str = r#"<a:theme xmlns:a="http://purl.oclc.org/ooxml/drawingml/main">
+          <a:themeElements>
+            <a:fmtScheme name="Office">
+              <a:lnStyleLst>
+                <a:ln w="6350"/>
+                <a:ln w="12700"/>
+                <a:ln/>
+              </a:lnStyleLst>
+            </a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        assert_eq!(parse_ln_style_widths(STRICT_THEME), vec![6350, 12700, 9525]);
     }
 
     #[test]

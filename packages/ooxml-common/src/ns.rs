@@ -89,6 +89,39 @@ pub mod relationships {
     pub const STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
 }
 
+/// The well-known `<*:graphicData uri="…">` value that marks a graphicFrame's
+/// payload as a SmartArt diagram (`dgm:relIds`, ECMA-376 §20.1.2.2.16 /
+/// dml-diagram.xsd). Unlike the modules above this is not a namespace bound to
+/// an element via `xmlns:` — it is a plain attribute *value* compared as a
+/// string — but ECMA-376 defines one literal per conformance class, taken
+/// verbatim from `dml-diagram.xsd`'s `targetNamespace`:
+/// Transitional confirmed via Part 1 Annex L example markup
+/// (`xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"`,
+/// e.g. §L.4.3.4); Strict confirmed against the local
+/// `spec/ECMA-376-1_5th_edition_december_2016/OfficeOpenXML-XMLSchema-Strict/
+/// dml-diagram.xsd` (`targetNamespace="http://purl.oclc.org/ooxml/drawingml/
+/// diagram"`) and the Strict Annex L example
+/// (`uri="http://purl.oclc.org/ooxml/drawingml/diagram"`).
+pub mod diagram_uri {
+    pub const TRANSITIONAL: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+    pub const STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/diagram";
+}
+
+/// The well-known `<a:graphicData uri="…">` value that marks a
+/// `<p:graphicFrame>`'s payload as an embedded OLE object (`p:oleObj` child,
+/// ECMA-376 §19.3.2.4 CT_OleObject). As with [`diagram_uri`] this is a plain
+/// attribute value, not an `xmlns:`-bound namespace, and there is no dedicated
+/// `presentationml-ole.xsd` — `oleObj`/`CT_OleObject` live directly in
+/// `pml.xsd`'s main namespace in both conformance classes. The literal itself
+/// is confirmed by ECMA-376 Part 1 Annex L.7.2.5 "Embeddings in a
+/// PresentationML Document", whose Strict example markup is
+/// `<a:graphicData uri="http://purl.oclc.org/ooxml/presentationml/ole">`; the
+/// Transitional value is this parser's long-standing literal.
+pub mod ole_uri {
+    pub const TRANSITIONAL: &str = "http://schemas.openxmlformats.org/presentationml/2006/ole";
+    pub const STRICT: &str = "http://purl.oclc.org/ooxml/presentationml/ole";
+}
+
 /// True when `ns` is either the Transitional or Strict URI of `$module`.
 macro_rules! ns_predicate {
     ($(#[$doc:meta])* $fn_name:ident, $module:ident) => {
@@ -150,6 +183,20 @@ ns_predicate!(
     is_r_ns,
     relationships
 );
+
+/// True when `uri` is the Transitional or Strict `graphicData@uri` value for a
+/// SmartArt diagram. See [`diagram_uri`] for the literals and their sources.
+#[inline]
+pub fn is_diagram_uri(uri: &str) -> bool {
+    matches!(uri, diagram_uri::TRANSITIONAL | diagram_uri::STRICT)
+}
+
+/// True when `uri` is the Transitional or Strict `graphicData@uri` value for an
+/// embedded OLE object. See [`ole_uri`] for the literals and their sources.
+#[inline]
+pub fn is_pml_ole_uri(uri: &str) -> bool {
+    matches!(uri, ole_uri::TRANSITIONAL | ole_uri::STRICT)
+}
 
 /// Look up an attribute named `name` that may live under either the Transitional
 /// or the Strict URI of the same namespace, falling back to an unqualified
@@ -232,6 +279,22 @@ mod tests {
         // exact-match semantics (not prefix) so `a` does not swallow `c`.
         assert!(!is_a_ns(Some(chart::TRANSITIONAL)));
         assert!(!is_a_ns(Some(picture::TRANSITIONAL)));
+    }
+
+    #[test]
+    fn is_diagram_uri_accepts_both_conformance_classes() {
+        assert!(is_diagram_uri(diagram_uri::TRANSITIONAL));
+        assert!(is_diagram_uri(diagram_uri::STRICT));
+        assert!(!is_diagram_uri(ole_uri::STRICT));
+        assert!(!is_diagram_uri("http://example.com/other"));
+    }
+
+    #[test]
+    fn is_pml_ole_uri_accepts_both_conformance_classes() {
+        assert!(is_pml_ole_uri(ole_uri::TRANSITIONAL));
+        assert!(is_pml_ole_uri(ole_uri::STRICT));
+        assert!(!is_pml_ole_uri(diagram_uri::STRICT));
+        assert!(!is_pml_ole_uri("http://example.com/other"));
     }
 
     #[test]
