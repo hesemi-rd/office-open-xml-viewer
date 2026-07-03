@@ -88,6 +88,52 @@ export interface MathGroup {
   kind: 'group';
   items: MathNode[];
 }
+/** Phantom object (`m:phant`, §22.1.2.81): contributes the spacing of `base`
+ *  while optionally hiding it and/or zeroing individual dimensions. */
+export interface MathPhant {
+  kind: 'phant';
+  /** §22.1.2.96 `m:show` — `false` hides the base (invisible but occupies space,
+   *  i.e. `<mphantom>`); `true` (default) shows it and the phant only tweaks
+   *  spacing. */
+  show: boolean;
+  /** §22.1.2 zeroWid / zeroAsc / zeroDesc — suppress width / ascent / descent so
+   *  the base takes no space along that axis. Omitted ⇒ false. */
+  zeroWid?: boolean;
+  zeroAsc?: boolean;
+  zeroDesc?: boolean;
+  base: MathNode[];
+}
+/** Pre-sub-superscript object (`m:sPre`, §22.1.2.99): sub + sup to the LEFT of
+ *  the base (e.g. ²₁A). */
+export interface MathSPre {
+  kind: 'sPre';
+  sub: MathNode[];
+  sup: MathNode[];
+  base: MathNode[];
+}
+/** Box object (`m:box`, §22.1.2.13): a logical grouping (operator emulator /
+ *  line-break control). Draws NO border — a transparent group around `base`. */
+export interface MathBox {
+  kind: 'box';
+  base: MathNode[];
+}
+/** Border-box object (`m:borderBox`, §22.1.2.11): a border/strikes around the
+ *  base. Absent flags ⇒ a full rectangular box. */
+export interface MathBorderBox {
+  kind: 'borderBox';
+  /** §22.1.2 hide* — when true the corresponding edge is NOT drawn. */
+  hideTop?: boolean;
+  hideBot?: boolean;
+  hideLeft?: boolean;
+  hideRight?: boolean;
+  /** §22.1.2 strike* — strikeBLTR = bottom-left→top-right, strikeTLBR =
+   *  top-left→bottom-right diagonal. */
+  strikeH?: boolean;
+  strikeV?: boolean;
+  strikeBltr?: boolean;
+  strikeTlbr?: boolean;
+  base: MathNode[];
+}
 
 export type MathNode =
   | MathRun
@@ -102,7 +148,11 @@ export type MathNode =
   | MathBar
   | MathAccent
   | MathFunc
-  | MathGroup;
+  | MathGroup
+  | MathPhant
+  | MathSPre
+  | MathBox
+  | MathBorderBox;
 
 const KINDS = new Set([
   'run',
@@ -120,6 +170,10 @@ const KINDS = new Set([
   'accent',
   'func',
   'group',
+  'phant',
+  'sPre',
+  'box',
+  'borderBox',
 ]);
 
 export function isMathNode(v: unknown): v is MathNode {

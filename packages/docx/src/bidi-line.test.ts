@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { segmentsHaveRtl, computeLineVisualOrder, resolveAlignEdge } from './bidi-line.js';
+import {
+  segmentsHaveRtl,
+  computeLineVisualOrder,
+  resolveAlignEdge,
+  jcIsFullyJustified,
+  jcStretchesLastLine,
+} from './bidi-line.js';
 
 describe('segmentsHaveRtl', () => {
   it('detects Arabic/Hebrew, ignores Latin and objects', () => {
@@ -45,6 +51,43 @@ describe('resolveAlignEdge', () => {
     expect(resolveAlignEdge('right', true)).toBe('left');
     expect(resolveAlignEdge('left', false)).toBe('left');
     expect(resolveAlignEdge('right', false)).toBe('right');
+  });
+
+  // ECMA-376 §17.18.44 — the Arabic kashida variants and thaiDistribute are all
+  // forms of full justification; their physical edge is "justify", not the
+  // leading-edge default they previously fell through to.
+  it('maps kashida + thaiDistribute jc values to the justify edge', () => {
+    expect(resolveAlignEdge('lowKashida', false)).toBe('justify');
+    expect(resolveAlignEdge('mediumKashida', false)).toBe('justify');
+    expect(resolveAlignEdge('highKashida', false)).toBe('justify');
+    expect(resolveAlignEdge('thaiDistribute', false)).toBe('justify');
+    // Independent of base direction.
+    expect(resolveAlignEdge('lowKashida', true)).toBe('justify');
+    expect(resolveAlignEdge('thaiDistribute', true)).toBe('justify');
+  });
+});
+
+describe('jcIsFullyJustified (§17.18.44)', () => {
+  it('is true for every full-justification jc value incl. kashida/thai', () => {
+    for (const jc of ['both', 'justify', 'distribute', 'lowKashida', 'mediumKashida', 'highKashida', 'thaiDistribute']) {
+      expect(jcIsFullyJustified(jc), jc).toBe(true);
+    }
+  });
+  it('is false for non-justifying values', () => {
+    for (const jc of ['left', 'right', 'center', 'start', 'end', undefined, 'numTab']) {
+      expect(jcIsFullyJustified(jc), String(jc)).toBe(false);
+    }
+  });
+});
+
+describe('jcStretchesLastLine (§17.18.44)', () => {
+  it('stretches the last line only for distribute + thaiDistribute', () => {
+    expect(jcStretchesLastLine('distribute')).toBe(true);
+    expect(jcStretchesLastLine('thaiDistribute')).toBe(true);
+    // both/justify/kashida leave the last line as-is.
+    for (const jc of ['both', 'justify', 'lowKashida', 'mediumKashida', 'highKashida', 'left', undefined]) {
+      expect(jcStretchesLastLine(jc), String(jc)).toBe(false);
+    }
   });
 });
 

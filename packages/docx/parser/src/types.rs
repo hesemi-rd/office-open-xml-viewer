@@ -458,7 +458,7 @@ pub struct ParaBorderEdge {
 
 /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border ("box" around the run).
 /// Serialized shape matches `DocxRunBorder` on the TS side.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunBorder {
     /// "single" | "double" | "dashed" | ... (w:bdr/@w:val)
@@ -635,6 +635,34 @@ pub enum DocRun {
         /// Document-default (`m:defJc`) resolution is left to the renderer.
         #[serde(skip_serializing_if = "Option::is_none")]
         jc: Option<String>,
+    },
+    /// ECMA-376 §17.3.3.23 `<w:ptab>` — an absolute-position tab. Unlike a plain
+    /// `<w:tab>` (§17.3.3.22) it ignores the paragraph's custom tab stops and the
+    /// default-tab interval, advancing instead to a position derived from its own
+    /// `alignment` (§17.18.71) and `relativeTo` (§17.18.73) attributes, filling
+    /// the gap with the `leader` (§17.18.72) character. A separate variant (not a
+    /// `"\t"` Text run) so the layout can resolve the jump geometrically.
+    ///
+    /// `#[serde(rename = "ptab")]`: the enum-level `rename_all = "camelCase"`
+    /// treats a leading run of capitals as a single word, so `PTab` would
+    /// otherwise serialize its tag as `"pTab"` (only the leading `P`
+    /// lowercased). The TS discriminant union (types.ts) uses the fully
+    /// lowercase `'ptab'`, matching the other single/lowercase-joined
+    /// variant tags (`text`/`image`/`break`/`field`/`shape`/`math`) — so
+    /// without this override every `<w:ptab>` silently failed to match any
+    /// arm in the TS render switch and was dropped from the page.
+    #[serde(rename = "ptab", rename_all = "camelCase")]
+    PTab {
+        /// ST_PTabAlignment (§17.18.71): "left" | "center" | "right".
+        alignment: String,
+        /// ST_PTabRelativeTo (§17.18.73): "margin" | "indent".
+        relative_to: String,
+        /// ST_PTabLeader (§17.18.72): "none" | "dot" | "hyphen" | "underscore" |
+        /// "middleDot". Fills the space created by the tab.
+        leader: String,
+        /// Resolved run font size (pt) so the leader glyphs / gap height match the
+        /// surrounding text — mirrors how `<w:tab>` carries the run's font.
+        font_size: f64,
     },
 }
 

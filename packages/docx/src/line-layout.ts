@@ -118,6 +118,14 @@ export interface LayoutTabSeg {
    *  dot leader is bold). Threaded so {@link drawTabLeader} can match the font. */
   bold?: boolean;
   italic?: boolean;
+  /** ECMA-376 §17.3.3.23 `<w:ptab>` — when set, this is an ABSOLUTE-position tab.
+   *  It ignores the paragraph's custom tab stops and the default-tab interval and
+   *  advances to a position derived from `alignment` (§17.18.71) + `relativeTo`
+   *  (§17.18.73). Absent ⇒ an ordinary `<w:tab>` resolved against tab stops. */
+  ptab?: {
+    alignment: 'left' | 'center' | 'right';
+    relativeTo: 'margin' | 'indent';
+  };
 }
 
 export interface LayoutImageSeg {
@@ -1431,6 +1439,17 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         mathDescent: 0,
         jc: run.jc,
       });
+    } else if (run.type === 'ptab') {
+      // ECMA-376 §17.3.3.23 absolute-position tab. Emit a tab segment carrying the
+      // ptab descriptor; layoutLines resolves it to an absolute X (independent of
+      // the paragraph's tab stops) and fills the gap with the run's leader.
+      segs.push({
+        isTab: true,
+        fontSize: run.fontSize || findNearbyFontSize(runs, runs.indexOf(run)),
+        measuredWidth: 0,
+        leader: run.leader,
+        ptab: { alignment: run.alignment, relativeTo: run.relativeTo },
+      });
     }
   }
 
@@ -1493,6 +1512,13 @@ export function layoutLines(
   // grid (`nextTabStop`) multiplies this by `scale`; defaults to the spec absent
   // value (720 twips = 36pt) for callers without document settings.
   defaultTabPt: number = DEFAULT_TAB_PT,
+  // ECMA-376 §17.3.3.23 — paraX-relative X (px) of the TEXT-MARGIN right edge,
+  // used only to resolve a `<w:ptab w:relativeTo="margin">`. Equals
+  // `maxWidth + indentRightPx`; defaults to `maxWidth` (correct when the
+  // paragraph has no right indent — the common footer case). The margin LEFT
+  // edge is `-tabOriginPx`. `relativeTo="indent"` uses the content box
+  // (`[0, maxWidth]`) and needs neither.
+  marginRightPx: number = maxWidth,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -1700,6 +1726,84 @@ export function layoutLines(
     if ('isTab' in seg) {
       // Absolute position on the line measured from paraX (line origin for continuation lines)
       const absFromParaX = currentWidth + (isFirst ? firstIndent : 0);
+
+      // ── ECMA-376 §17.3.3.23 absolute-position tab (<w:ptab>) ──────────────
+      // A ptab ignores the paragraph's custom tab stops and the default-tab
+      // interval; it advances to a fixed position on the line derived from its
+      // `alignment` (§17.18.71) and `relativeTo` (§17.18.73). The `alignment`
+      // ALSO governs how the text after the ptab aligns to that position (left /
+      // centered / right). All coordinates below are paraX-relative px.
+      //
+      // NOTE: the ptab target is resolved in LOGICAL (LTR) coordinates — this
+      // block runs before the per-line bidi reorder pass, so it has no notion
+      // of the paragraph's base direction. Interaction with bidi mirroring in
+      // an RTL paragraph (where "left"/"right" alignment and the box edges
+      // ought to mirror) is unverified; the primary use case (an LTR footer's
+      // centered/right-aligned PAGE field) is correct.
+      if (seg.ptab) {
+        // Reference box: "indent" ⇒ the paragraph content box [0, maxWidth];
+        // "margin" ⇒ the text-margin box [-tabOriginPx, marginRightPx].
+        const boxLeft = seg.ptab.relativeTo === 'indent' ? 0 : -tabOriginPx;
+        const boxRight = seg.ptab.relativeTo === 'indent' ? maxWidth : marginRightPx;
+        const target =
+          seg.ptab.alignment === 'left'
+            ? boxLeft
+            : seg.ptab.alignment === 'center'
+              ? (boxLeft + boxRight) / 2
+              : boxRight;
+        // Width of the content that trails the ptab up to the next tab / line end
+        // — needed to right-/center-align it against `target` (the trailing text
+        // is what aligns to the stop, §17.18.71).
+        let followW = 0;
+        for (const q of queue) {
+          if ('isTab' in q || 'lineBreak' in q) break;
+          followW += tabFollowWidth(q);
+        }
+        const frac = seg.ptab.alignment === 'center' ? 0.5 : seg.ptab.alignment === 'right' ? 1 : 0;
+        let tabW = target - absFromParaX - followW * frac;
+        // §17.3.3.23: "If the alignment location … cannot be found on the current
+        // line, because the starting location is past that point, then the tab …
+        // shall advance to that location on the next available line." So when the
+        // pen already sits at/after the target, wrap the ptab (and its trailing
+        // content) to a fresh line — unless the line is empty (nowhere to wrap).
+        if (tabW <= 0) {
+          if (currentLine.length > 0) {
+            flush();
+            queue.unshift(seg);
+            continue;
+          }
+          // Empty line: cannot advance backwards; contribute no width but keep the
+          // segment so the line-height reflects the ptab's font.
+          tabW = 0;
+        }
+        seg.measuredWidth = tabW;
+        addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * 0.8, seg.fontSize * scale * 0.2);
+        // Commit the trailing content onto this line without a wrap re-check, so
+        // it sits exactly at the aligned position (mirrors the custom right/center
+        // tab path below).
+        if (seg.ptab.alignment !== 'left') {
+          while (queue.length > 0) {
+            const q = queue[0];
+            if ('isTab' in q || 'lineBreak' in q) break;
+            queue.shift();
+            if ('imagePath' in q) {
+              const w = q.widthPt * scale;
+              q.measuredWidth = w;
+              addToLine(q, w, q.heightPt, q.heightPt * scale, 0);
+            } else if ('mathNodes' in q) {
+              addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
+            } else {
+              const m = measureText(q);
+              const w = gridWidth(m.width, q.text, gridDeltaPx);
+              q.measuredWidth = w;
+              const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
+              const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
+              addToLine(q, w, q.fontSize, asc, desc);
+            }
+          }
+        }
+        continue;
+      }
       // ECMA-376 §17.3.1.37 / §17.15.1.25 — resolve the next stop in TEXT-MARGIN
       // coordinates (the same origin as custom stops): the current pen position is
       // `absFromParaX + tabOriginPx`, custom stops are `pos * scale`, and the

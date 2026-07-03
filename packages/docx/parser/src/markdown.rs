@@ -140,6 +140,12 @@ fn render_runs(runs: &[DocRun]) -> String {
                     out.push_str(&escape_inline_md(&text));
                 }
             }
+            DocRun::PTab { .. } => {
+                // §17.3.3.23 absolute-position tab. Markdown has no notion of an
+                // absolute tab position, so project it as a plain tab advance (the
+                // same whitespace projection a `<w:tab>`'s "\t" text run produces).
+                out.push('\t');
+            }
         }
     }
     out

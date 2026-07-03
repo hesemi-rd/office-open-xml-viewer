@@ -55,6 +55,8 @@ import {
   segmentsHaveRtl,
   computeLineVisualOrder,
   resolveAlignEdge,
+  jcIsFullyJustified,
+  jcStretchesLastLine,
   type AlignEdge,
   type LineVisualOrder,
 } from './bidi-line.js';
@@ -2746,7 +2748,7 @@ function estimateParagraphHeight(
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
       pageH: state.pageH,
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt, paraW + indRight);
     if (lines.length === 0) {
       // Anchor-only paragraph: no inline content, but the paragraph mark still
       // occupies one (possibly flowed) line (§17.3.1.29).
@@ -2957,7 +2959,7 @@ function splitParagraphAcrossPages(
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0, paragraphIsEastAsian(para)),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight);
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -4703,12 +4705,18 @@ function renderParagraph(
   //     page-absolute Y, which have no scale-1 form here (the stamp reuse excludes
   //     floats for the same reason). Pre-existing paginate(scale 1)/paint(scale s)
   //     float behaviour, unchanged.
+  // ECMA-376 §17.3.3.23 — paraX-relative X of the text-margin right edge, for
+  // resolving a `<w:ptab w:relativeTo="margin">` (paraW is the content box; add
+  // the right indent to reach the margin). Scale and scale-1 mirrors kept in sync.
+  const indRight1 = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight);
+  const marginRightPx = paraW + indRight;
+  const marginRightPx1 = paraW1 + indRight1;
   const lines = reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
-      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt)
+      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx)
       : rescaleLayoutLines(
-          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt),
+          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1),
           scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
         );
 
@@ -4811,16 +4819,15 @@ function renderParagraph(
     ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
 
-  // ECMA-376 §17.18.44 ST_Jc: "both" and "distribute" fully justify the line
-  // by expanding inter-word spaces. The last line of a "both" paragraph is
-  // traditionally left-aligned (not stretched); "distribute" also stretches
-  // the last line. We count whitespace chars in trailing positions of each
-  // segment and divide the slack proportionally across them.
-  const isJustified =
-    para.alignment === 'justify' ||
-    para.alignment === 'both' ||
-    para.alignment === 'distribute';
-  const stretchLastLine = para.alignment === 'distribute';
+  // ECMA-376 §17.18.44 ST_Jc: "both" / "justify" / "distribute" (and the kashida
+  // + thaiDistribute variants) fully justify the line by expanding inter-word
+  // spaces. The last line of a "both" paragraph is traditionally left-aligned
+  // (not stretched); "distribute"/"thaiDistribute" also stretch the last line. We
+  // count whitespace chars in trailing positions of each segment and divide the
+  // slack proportionally across them. (jc classification lives in bidi-line so the
+  // §17.18.44 knowledge stays single-source.)
+  const isJustified = jcIsFullyJustified(para.alignment);
+  const stretchLastLine = jcStretchesLastLine(para.alignment);
 
   // Bidirectional text. The paragraph's base direction comes from w:bidi
   // (ECMA-376 §17.3.1.6). We engage the (exact) bidi pass only when the base is
@@ -6410,13 +6417,14 @@ export function renderShapeText(
       // floats / decimal-auto-tab / run decorations (body-only) do not apply —
       // ShapeTextRun carries no underline/border/highlight/ruby/revision.
       const { lines: lineList, baseRtl, ind } = layout;
-      // 'distribute' spreads every line; 'both' spreads all but the logical-last;
-      // otherwise resolve the physical edge from the block alignment + base dir.
-      const alignEdge = layout.alignment === 'distribute'
+      // 'distribute'/'thaiDistribute' spread every line; 'both'/'justify'/kashida
+      // spread all but the logical-last; otherwise resolve the physical edge from
+      // the block alignment + base dir. (§17.18.44 classification in bidi-line.)
+      const alignEdge = jcIsFullyJustified(layout.alignment)
         ? 'justify'
         : resolveAlignEdge(layout.alignment, baseRtl);
       const isJustified = alignEdge === 'justify';
-      const stretchLastLine = layout.alignment === 'distribute';
+      const stretchLastLine = jcStretchesLastLine(layout.alignment);
       const paraNeedsBidi = baseRtl || lineList.some((ln) => segmentsHaveRtl(ln.segments));
       ctx.textAlign = 'left';
       for (let li = 0; li < lineList.length; li++) {
@@ -7294,6 +7302,23 @@ function measureParaHeight(
   const indLeftPx = para.indentLeft * scale;
   const indRightPx = para.indentRight * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
+  // RESERVATION: no `marginRightPx` argument is passed here, so a
+  // `<w:ptab w:relativeTo="margin">` inside a table cell resolves its target
+  // against the DEFAULT (`= paraW`, the cell's INNER content box after
+  // margins/indents) rather than the true text-margin right edge
+  // (`paraW + indRightPx`, matching how `renderParagraph`'s paint pass
+  // computes `marginRightPx`/`marginRightPx1` — see its "§17.3.3.23" comment
+  // a few hundred lines up). Left unwired deliberately: this scale-1 call is
+  // also where `stampParagraphLines` below caches the partition for
+  // `renderParagraph`'s paint-time reuse gate, and that gate's
+  // `layoutLinesInputs` (types + comparison, ~L4667–4689/L5632–5644) does NOT
+  // track `marginRightPx` at all — adding it correctly here means widening
+  // both the stamp payload and the reuse-equality check, not just this call
+  // site, to keep the two in sync. That's a real change to the Phase 4-1 B2
+  // compute-once mechanism for a narrow case (a ptab inside a cell, relative
+  // to the margin rather than the indent), so it's deferred rather than
+  // threaded through opportunistically. Revisit together with any other
+  // measure/paint mismatch cleanup in this area.
   const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
   // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
   // point a cell paragraph's lines are laid out at scale 1: the paginator sizes

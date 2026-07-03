@@ -371,6 +371,10 @@ export interface DocParagraph {
     | 'right' | 'end'
     | 'justify' | 'both'
     | 'distribute'
+    // §17.18.44 Arabic kashida + Thai justification variants — mapped onto the
+    // existing justify/distribute slack kernel (see bidi-line `resolveAlignEdge`).
+    | 'lowKashida' | 'mediumKashida' | 'highKashida'
+    | 'thaiDistribute'
     | string;
   indentLeft: number;   // pt
   indentRight: number;  // pt
@@ -559,7 +563,24 @@ export type DocRun =
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
   | { type: 'shape' } & ShapeRun
-  | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number; jc?: string };
+  | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number; jc?: string }
+  | { type: 'ptab' } & PTabRun;
+
+/** ECMA-376 §17.3.3.23 `<w:ptab>` — an absolute-position tab. Advances to a
+ *  position derived from {@link PTabRun.alignment} and {@link PTabRun.relativeTo},
+ *  independent of the paragraph's custom tab stops / default-tab interval. */
+export interface PTabRun {
+  /** ST_PTabAlignment (§17.18.71): where on the line the tab lands, and how the
+   *  following text aligns to it. */
+  alignment: 'left' | 'center' | 'right';
+  /** ST_PTabRelativeTo (§17.18.73): the base the position is measured from —
+   *  the text margins or the paragraph indents. */
+  relativeTo: 'margin' | 'indent';
+  /** ST_PTabLeader (§17.18.72): the character repeated to fill the tab gap. */
+  leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'middleDot';
+  /** Resolved run font size (pt) — matches the surrounding text's leader/gap. */
+  fontSize: number;
+}
 
 export type PathCmd =
   | { cmd: 'moveTo'; x: number; y: number }

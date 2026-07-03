@@ -2296,6 +2296,56 @@ fn classify_field(instr: &str) -> String {
     }
 }
 
+/// True when `a` and `b` would render identically but for their `text`
+/// content, so appending `b.text` onto `a.text` and dropping `b` changes
+/// nothing visible. Used to absorb a `<w:noBreakHyphen/>`-injected "-" into a
+/// visually-matching neighbour that Word happened to author as a separate
+/// `<w:r>` (see the "noBreakHyphen" arm above) — the split into multiple runs
+/// carries no formatting difference, so the RUN boundary itself must not
+/// become a line-breaking position (§17.3.3.18).
+///
+/// `ruby` / `revision` / `note_ref` are excluded from the field list on
+/// purpose: any run carrying one of those is semantically special (a ruby
+/// base, a tracked-change span, a footnote/endnote reference marker), so we
+/// require BOTH sides to have none of them rather than compare their
+/// contents — merging text into (or out of) such a run would be wrong even
+/// if the annotation happened to match.
+fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
+    a.ruby.is_none()
+        && b.ruby.is_none()
+        && a.revision.is_none()
+        && b.revision.is_none()
+        && a.note_ref.is_none()
+        && b.note_ref.is_none()
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline
+        && a.underline_style == b.underline_style
+        && a.underline_color == b.underline_color
+        && a.strikethrough == b.strikethrough
+        && a.font_size == b.font_size
+        && a.color == b.color
+        && a.font_family == b.font_family
+        && a.font_family_east_asia == b.font_family_east_asia
+        && a.is_link == b.is_link
+        && a.background == b.background
+        && a.color_auto == b.color_auto
+        && a.border == b.border
+        && a.vert_align == b.vert_align
+        && a.hyperlink == b.hyperlink
+        && a.all_caps == b.all_caps
+        && a.small_caps == b.small_caps
+        && a.double_strikethrough == b.double_strikethrough
+        && a.highlight == b.highlight
+        && a.rtl == b.rtl
+        && a.cs == b.cs
+        && a.font_family_cs == b.font_family_cs
+        && a.font_size_cs == b.font_size_cs
+        && a.bold_cs == b.bold_cs
+        && a.italic_cs == b.italic_cs
+        && a.lang_bidi == b.lang_bidi
+}
+
 // Same parse-context threading as handle_run_in_para.
 #[allow(clippy::too_many_arguments)]
 fn parse_run_inner(
@@ -2419,7 +2469,18 @@ fn parse_run_inner(
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
 
+    // Set by the "noBreakHyphen" arm below when it just pushed/extended a text
+    // run for a `<w:noBreakHyphen/>` — tells the VERY NEXT loop iteration's
+    // "t"/"delText" arm (if any) to merge into that same run rather than
+    // start a new segment, so a same-`<w:r>` `<w:noBreakHyphen/><w:t>…</w:t>`
+    // pair (the 2nd/3rd runs of the §17.3.3.18 spec example) collapses to one
+    // text run and carries no run-boundary line-break opportunity. Cleared at
+    // the top of every iteration so it only ever bridges ONE adjacent pair.
+    let mut merge_into_prev_text = false;
+
     for child in node.children().filter(|n| n.is_element()) {
+        let merge_here = merge_into_prev_text;
+        merge_into_prev_text = false;
         match child.tag_name().name() {
             "t" | "delText" => {
                 // ECMA-376 §17.13.5: text inside <w:del> is wrapped in
@@ -2427,7 +2488,7 @@ fn parse_run_inner(
                 // same content. Accept both and attach the revision below.
                 let text = child.text().unwrap_or("").to_string();
                 if !text.is_empty() {
-                    runs.push(DocRun::Text(Box::new(TextRun {
+                    let this = TextRun {
                         text,
                         bold,
                         italic,
@@ -2459,7 +2520,15 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         note_ref: None,
-                    })));
+                    };
+                    match runs.last_mut() {
+                        Some(DocRun::Text(prev))
+                            if merge_here && text_runs_mergeable(prev, &this) =>
+                        {
+                            prev.text.push_str(&this.text);
+                        }
+                        _ => runs.push(DocRun::Text(Box::new(this))),
+                    }
                 }
             }
             "sym" => {
@@ -2567,6 +2636,125 @@ fn parse_run_inner(
                     })
                     .unwrap_or(BreakType::Line);
                 runs.push(DocRun::Break { break_type });
+            }
+            "cr" => {
+                // ECMA-376 §17.3.3.4 <w:cr> — a carriage return. The spec defines
+                // its behaviour as "identical to a break character with null type
+                // and clear attributes", i.e. a text-wrapping line break: end the
+                // current line and continue on the next available one. So it emits
+                // exactly the same model as <w:br/> (BreakType::Line). Previously
+                // it fell into the `_ => {}` arm and silently vanished.
+                runs.push(DocRun::Break {
+                    break_type: BreakType::Line,
+                });
+            }
+            "noBreakHyphen" => {
+                // ECMA-376 §17.3.3.18 <w:noBreakHyphen> — a non-breaking hyphen.
+                // The spec: "display using the same glyph as the hyphen-minus
+                // character (U+002D) … without that hyphen being a line breaking
+                // position". We inject a real U+002D so it renders with the run's
+                // own font (avoiding the tofu risk of U+2011 in fonts lacking that
+                // glyph).
+                //
+                // Non-breaking is guaranteed WITHIN a single text token: the docx
+                // line layout (`splitTextForLayout`) only opens break opportunities
+                // at U+0020 spaces, never at hyphens, so a '-' embedded inside one
+                // run's `text` is never itself a wrap point. But the spec's own
+                // §17.3.3.18 example authors `<w:noBreakHyphen/>` as a SEPARATE
+                // `<w:r>` from its neighbours ("999" | noBreakHyphen+"99" |
+                // noBreakHyphen+"9999\", where"), and the TS line layout treats
+                // every `DocRun` as its own breakable segment — so without
+                // merging, the RUN BOUNDARY itself becomes an (incorrect) wrap
+                // point, e.g. "999" / "-99" splitting across lines. Guard against
+                // that by absorbing the hyphen into the immediately preceding run
+                // when the two are visually identical but for text content (see
+                // `text_runs_mergeable`) — this closes the exact case the spec
+                // example exercises, where the hyphen and its predecessor differ
+                // only by which `<w:r>` they were authored in. A same-`<w:r>`
+                // `<w:t>` immediately following this element merges the same way
+                // (see the "t" | "delText" arm above), so the whole spec example
+                // collapses to one run and the boundary vanishes entirely.
+                let this = TextRun {
+                    text: "-".to_string(),
+                    bold,
+                    italic,
+                    underline,
+                    underline_style: underline_style.clone(),
+                    underline_color: underline_color.clone(),
+                    strikethrough,
+                    font_size,
+                    color: color.clone(),
+                    font_family: font_family.clone(),
+                    font_family_east_asia: font_family_east_asia.clone(),
+                    is_link,
+                    background: fmt.background.clone(),
+                    color_auto,
+                    border: border.clone(),
+                    vert_align: vert_align.clone(),
+                    hyperlink: hyperlink.clone(),
+                    all_caps,
+                    small_caps,
+                    double_strikethrough,
+                    highlight: highlight.clone(),
+                    ruby: None,
+                    revision: revision.cloned(),
+                    rtl,
+                    cs: cs_toggle,
+                    font_family_cs: font_family_cs.clone(),
+                    font_size_cs,
+                    bold_cs,
+                    italic_cs,
+                    lang_bidi: lang_bidi.clone(),
+                    note_ref: None,
+                };
+                match runs.last_mut() {
+                    Some(DocRun::Text(prev)) if text_runs_mergeable(prev, &this) => {
+                        prev.text.push_str(&this.text);
+                    }
+                    _ => runs.push(DocRun::Text(Box::new(this))),
+                }
+                // A same-`<w:r>` `<w:t>` immediately following this element
+                // (the exact shape of the spec example's 2nd/3rd runs) should
+                // merge into the run we just pushed/extended above.
+                merge_into_prev_text = true;
+            }
+            "softHyphen" => {
+                // ECMA-376 §17.3.3.29 <w:softHyphen> — an OPTIONAL hyphen. The spec
+                // gives it two states: (a) when it is NOT the character used to
+                // break the line it "shall have zero width" and "shall not change
+                // the normal display of text"; (b) only when it IS the break point
+                // does it display a U+002D hyphen-minus. This renderer performs no
+                // automatic hyphenation, so a soft hyphen is never chosen as a break
+                // point — state (a) always applies. The minimal spec-correct
+                // behaviour is therefore to emit NOTHING: no glyph and no added
+                // break opportunity. (Always drawing a '-' would be wrong — Word
+                // shows it only at an actual line break.)
+                //
+                // TODO: when automatic hyphenation (§17.15.1.x autoHyphenation) is
+                // implemented, a soft hyphen at a chosen break must render a trailing
+                // '-' on the broken line; wire this element into that break-point
+                // logic then. Until then, dropping it is the correct display.
+            }
+            "ptab" => {
+                // ECMA-376 §17.3.3.23 <w:ptab> — an absolute-position tab. It reads
+                // three REQUIRED attributes (CT_PTab): alignment (§17.18.71),
+                // relativeTo (§17.18.73) and leader (§17.18.72). Unlike <w:tab> we
+                // keep it as a dedicated PTab run so the layout can jump to the
+                // resolved position rather than treating it as a plain "\t" (which
+                // would advance to the next ordinary tab stop — wrong for e.g. a
+                // default footer's centered/right-aligned PAGE field). Defaults
+                // mirror the schema's spirit for a malformed/absent attribute:
+                // left / margin / none.
+                let alignment = attr_w(child, "alignment").unwrap_or_else(|| "left".to_string());
+                let relative_to =
+                    attr_w(child, "relativeTo").unwrap_or_else(|| "margin".to_string());
+                let leader = attr_w(child, "leader").unwrap_or_else(|| "none".to_string());
+                runs.push(DocRun::PTab {
+                    alignment,
+                    relative_to,
+                    leader,
+                    font_size,
+                });
             }
             "lastRenderedPageBreak" => {
                 // ECMA-376 §17.3.1.20: Word stores a hint at the location
@@ -6252,6 +6440,290 @@ mod tests {
         );
         assert!(t.underline, "standalone link stays underlined");
         assert!(t.is_link);
+    }
+
+    // ── ECMA-376 §17.3.3 run-content elements that were previously dropped ──────
+    // These four elements fell into `parse_run_inner`'s `_ => {}` arm and lost
+    // their visible content; each test pins the emitted model.
+
+    // §17.3.3.4 <w:cr> — a carriage return is "identical to a break character with
+    // null type and clear attributes", i.e. a text-wrapping line break.
+    #[test]
+    fn cr_emits_a_line_break() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            r#"<w:r><w:t>a</w:t><w:cr/><w:t>b</w:t></w:r>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let breaks: Vec<&BreakType> = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Break { break_type } => Some(break_type),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(breaks.len(), 1, "cr yields exactly one break");
+        assert_eq!(*breaks[0], BreakType::Line, "cr is a line break");
+        // Surrounding text survives in order: a | <break> | b.
+        let texts: Vec<&str> = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["a", "b"]);
+    }
+
+    // §17.3.3.18 <w:noBreakHyphen> — displays a U+002D glyph (non-breaking).
+    #[test]
+    fn no_break_hyphen_emits_a_hyphen_glyph() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            r#"<w:r><w:t>999</w:t><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let joined: String = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            joined, "999-99",
+            "noBreakHyphen injects a U+002D hyphen-minus"
+        );
+        // It is a real hyphen-minus (U+002D), not U+2011, so it renders with the
+        // run's own font rather than risking tofu.
+        assert!(joined.contains('\u{002D}'));
+        assert!(!joined.contains('\u{2011}'));
+    }
+
+    // §17.3.3.29 <w:softHyphen> — zero width and no glyph when not a break point.
+    // With no automatic hyphenation, a soft hyphen is never a break point.
+    #[test]
+    fn soft_hyphen_is_invisible() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            r#"<w:r><w:t>br</w:t><w:softHyphen/><w:t>eaking</w:t></w:r>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let joined: String = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        // No hyphen character appears; the word is contiguous.
+        assert_eq!(joined, "breaking");
+        assert!(!joined.contains('-'));
+        // And it does NOT create a break run.
+        assert!(!runs.iter().any(|r| matches!(r, DocRun::Break { .. })));
+    }
+
+    // §17.3.3.23 <w:ptab> — an absolute-position tab surfaces as a PTab run
+    // carrying its three attributes, NOT a plain "\t" text run.
+    #[test]
+    fn ptab_emits_a_ptab_run_with_attrs() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            r#"<w:r><w:ptab w:alignment="center" w:relativeTo="margin" w:leader="dot"/></w:r>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let ptab = runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::PTab {
+                    alignment,
+                    relative_to,
+                    leader,
+                    ..
+                } => Some((alignment.as_str(), relative_to.as_str(), leader.as_str())),
+                _ => None,
+            })
+            .expect("expected a PTab run");
+        assert_eq!(ptab, ("center", "margin", "dot"));
+        // No "\t" text run was emitted for the ptab.
+        assert!(!runs
+            .iter()
+            .any(|r| matches!(r, DocRun::Text(t) if t.text == "\t")));
+    }
+
+    // §17.3.3.23 — a right-aligned ptab relative to the indent, no leader.
+    #[test]
+    fn ptab_right_indent_no_leader() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            r#"<w:r><w:ptab w:alignment="right" w:relativeTo="indent" w:leader="none"/></w:r>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let ptab = runs.iter().find_map(|r| match r {
+            DocRun::PTab {
+                alignment,
+                relative_to,
+                leader,
+                ..
+            } => Some((alignment.as_str(), relative_to.as_str(), leader.as_str())),
+            _ => None,
+        });
+        assert_eq!(ptab, Some(("right", "indent", "none")));
+    }
+
+    // §17.3.3.18 — the spec's OWN worked example: "999-99-9999" split across
+    // three <w:r> at the two noBreakHyphen positions, each hyphen sharing a
+    // <w:r> with the <w:t> immediately after it (the exact shape Word itself
+    // produces to mark a serial number's hyphens non-breaking). Regression
+    // guard for the merge in the "noBreakHyphen"/"t" arms of `parse_run_inner`:
+    // without it, the RUN boundaries left three separate DocRun::Text (one
+    // wrap point per boundary), silently reintroducing the very line breaks
+    // the author used noBreakHyphen to forbid.
+    #[test]
+    fn no_break_hyphen_merges_across_run_boundaries_per_spec_example() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            concat!(
+                r#"<w:r><w:t>Number of the form &#8220;999</w:t></w:r>"#,
+                r#"<w:r><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+                r#"<w:r><w:noBreakHyphen/><w:t>9999&#8221;, where</w:t></w:r>"#,
+            ),
+            &base,
+            &StyleMap::parse(""),
+        );
+        // All three runs collapse into ONE DocRun::Text: the two run
+        // boundaries the spec authored around the hyphens carry no formatting
+        // difference, so they must not surface as separate breakable segments
+        // in the TS line layout (which treats every DocRun as its own
+        // segment). A single run has, by construction, zero internal wrap
+        // points at the hyphens (`splitTextForLayout` only breaks on spaces).
+        let texts: Vec<&str> = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["Number of the form \u{201C}999-99-9999\u{201D}, where"],
+            "the two noBreakHyphen run boundaries must merge into the single \
+             surrounding text run, not remain separate breakable segments"
+        );
+    }
+
+    // Negative case: a noBreakHyphen must NOT absorb into a neighbour that
+    // differs in formatting — merging would silently drop the visual
+    // difference (the neighbour's bold would appear to extend over the
+    // hyphen, or vice versa). `text_runs_mergeable` gates on every formatting
+    // field, so a bold "999" beside a non-bold hyphen must stay two runs.
+    #[test]
+    fn no_break_hyphen_does_not_merge_across_a_formatting_change() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            concat!(
+                r#"<w:r><w:rPr><w:b/></w:rPr><w:t>999</w:t></w:r>"#,
+                r#"<w:r><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+            ),
+            &base,
+            &StyleMap::parse(""),
+        );
+        let texts: Vec<(&str, bool)> = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some((t.text.as_str(), t.bold)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![("999", true), ("-99", false)],
+            "a formatting difference must block the merge — the bold \"999\" \
+             and the non-bold \"-99\" stay separate runs"
+        );
+    }
+
+    /// Pins the `"type"` discriminant every `DocRun` variant serializes to on
+    /// the wire, so a `#[serde(rename_all = "camelCase")]` heuristic mismatch
+    /// (like the `PTab` → `"pTab"` bug fixed alongside this test — serde
+    /// treats a leading run of capitals, `PT`, as a single word and lowercases
+    /// only the first letter) can never again silently diverge from the TS
+    /// `DocRun` discriminant union (packages/docx/src/types.ts). If this test
+    /// fails after adding/renaming a variant, update BOTH sides together.
+    #[test]
+    fn doc_run_wire_tags_match_ts_discriminant_union() {
+        let image = ImageRun {
+            image_path: "word/media/image1.png".to_string(),
+            mime_type: "image/png".to_string(),
+            svg_image_path: None,
+            src_rect: None,
+            width_pt: 24.0,
+            height_pt: 24.0,
+            anchor: false,
+            anchor_x_pt: 0.0,
+            anchor_y_pt: 0.0,
+            anchor_x_from_margin: false,
+            anchor_y_from_para: false,
+            color_replace_from: None,
+            wrap_mode: None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            wrap_side: None,
+            allow_overlap: true,
+            anchor_x_align: None,
+            anchor_y_align: None,
+            anchor_x_relative_from: None,
+            anchor_y_relative_from: None,
+        };
+        let cases: Vec<(DocRun, &str)> = vec![
+            (DocRun::Text(Box::default()), "text"),
+            (DocRun::Image(image), "image"),
+            (
+                DocRun::Break {
+                    break_type: BreakType::Line,
+                },
+                "break",
+            ),
+            (DocRun::Field(FieldRun::default()), "field"),
+            (DocRun::Shape(Box::default()), "shape"),
+            (
+                DocRun::Math {
+                    nodes: Vec::new(),
+                    display: false,
+                    font_size: 12.0,
+                    jc: None,
+                },
+                "math",
+            ),
+            (
+                DocRun::PTab {
+                    alignment: "left".to_string(),
+                    relative_to: "margin".to_string(),
+                    leader: "none".to_string(),
+                    font_size: 12.0,
+                },
+                "ptab",
+            ),
+        ];
+        for (run, expected_tag) in cases {
+            let value = serde_json::to_value(&run).expect("serialize DocRun");
+            let actual_tag = value
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or_else(|| panic!("missing \"type\" field: {value}"));
+            assert_eq!(
+                actual_tag, expected_tag,
+                "DocRun wire tag mismatch — TS DocRun union (types.ts) expects \
+                 {expected_tag:?} but serde produced {actual_tag:?}; full JSON: {value}"
+            );
+        }
     }
 }
 

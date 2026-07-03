@@ -25,6 +25,9 @@ export type {
   BodyElement,
   DocParagraph,
   DocRun,
+  // Absolute-position tab run (reachable via the DocRun union's `ptab` arm,
+  // ECMA-376 §17.3.3.23).
+  PTabRun,
   DocxTextRun,
   FieldRun,
   ImageRun,

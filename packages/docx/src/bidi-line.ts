@@ -190,6 +190,18 @@ export function resolveAlignEdge(alignment: string | undefined, baseRtl: boolean
     case 'both':
     case 'justify':
     case 'distribute':
+    // ECMA-376 §17.18.44: the three kashida settings (lowKashida / mediumKashida /
+    // highKashida) and thaiDistribute are all forms of full justification between
+    // both text margins — they differ only in HOW the extra space is distributed
+    // (Arabic kashida elongation, Thai per-character spacing). The physical edge is
+    // "justify" for all of them. NOTE: this is a MAPPING to the existing
+    // inter-word/inter-character justification.
+    // TODO(§17.18.44): true kashida (U+0640 tatweel) elongation — tracked in
+    // https://github.com/yukiyokotani/office-open-xml-viewer/issues/724
+    case 'lowKashida':
+    case 'mediumKashida':
+    case 'highKashida':
+    case 'thaiDistribute':
       return 'justify';
     case 'end':
     case 'right':
@@ -200,4 +212,32 @@ export function resolveAlignEdge(alignment: string | undefined, baseRtl: boolean
     default:
       return baseRtl ? 'right' : 'left';
   }
+}
+
+/** ECMA-376 §17.18.44 — whether a `w:jc` value fully justifies each line by
+ *  expanding inter-word (and, for distribute/thaiDistribute, inter-character)
+ *  spacing. Covers `both` / `justify` / `distribute` plus the kashida and Thai
+ *  variants, which this renderer maps onto the same slack-distribution kernel
+ *  (see {@link resolveAlignEdge}; true kashida elongation is a follow-up). */
+export function jcIsFullyJustified(alignment: string | undefined): boolean {
+  switch (alignment) {
+    case 'both':
+    case 'justify':
+    case 'distribute':
+    case 'lowKashida':
+    case 'mediumKashida':
+    case 'highKashida':
+    case 'thaiDistribute':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** ECMA-376 §17.18.44 — whether a `w:jc` value also stretches the paragraph's
+ *  LAST line (unlike `both`, whose final line is left as-is). `distribute` and
+ *  its Thai optimization `thaiDistribute` both spread every line, including the
+ *  last. */
+export function jcStretchesLastLine(alignment: string | undefined): boolean {
+  return alignment === 'distribute' || alignment === 'thaiDistribute';
 }
