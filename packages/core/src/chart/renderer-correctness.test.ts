@@ -210,3 +210,76 @@ describe('CH1 — negative bar/column values extend from the zero line', () => {
     expect(nBar.h).toBeGreaterThan(0);
   });
 });
+
+describe('CH2 — stackedLine / stackedLinePct stack cumulatively', () => {
+  it('stackedLine plots the second series at the cumulative sum', () => {
+    // Two flat series (all 10, all 20). Stacked, the second line rides at
+    // y=30 across every category; unstacked it would ride at y=20. We detect
+    // stacking by the axis maximum: a cumulative 30 forces a taller axis than
+    // an un-stacked max of 20 would.
+    const stackedRec = recordingCtx();
+    renderChart(stackedRec.ctx, baseModel({
+      chartType: 'stackedLine',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ name: 'S1', values: [10, 10, 10] }),
+        series({ name: 'S2', values: [20, 20, 20] }),
+      ],
+    }), RECT, 1);
+
+    const plainRec = recordingCtx();
+    renderChart(plainRec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ name: 'S1', values: [10, 10, 10] }),
+        series({ name: 'S2', values: [20, 20, 20] }),
+      ],
+    }), RECT, 1);
+
+    const stackedTop = Math.max(...stackedRec.texts
+      .map(t => Number(t.text)).filter(v => Number.isFinite(v)));
+    const plainTop = Math.max(...plainRec.texts
+      .map(t => Number(t.text)).filter(v => Number.isFinite(v)));
+    // Stacking pushes the cumulative maximum (30) above the plain per-series
+    // maximum (20), so the auto axis top must be strictly higher.
+    expect(stackedTop).toBeGreaterThan(plainTop);
+  });
+
+  it('stackedLinePct normalizes each category to 100%', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedLinePct',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'S1', values: [10, 30] }),
+        series({ name: 'S2', values: [30, 10] }),
+      ],
+    }), RECT, 1);
+    const nums = rec.texts.map(t => Number(String(t.text).replace('%', '')))
+      .filter(v => Number.isFinite(v));
+    // The cumulative top series always reaches exactly 100% per category, so the
+    // axis carries a 100 gridline. Raw magnitudes (max cumulative 40) never
+    // appear — the axis is normalized, not driven by the raw sums.
+    expect(nums).toContain(100);
+    // ...and the axis top is a round value just above 100 (headroom), never the
+    // raw cumulative magnitude of 40.
+    expect(Math.max(...nums)).toBeGreaterThanOrEqual(100);
+    expect(Math.max(...nums)).toBeLessThanOrEqual(120);
+  });
+
+  it('plain line is unaffected (per-series max drives the axis)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'S1', values: [10, 10] }),
+        series({ name: 'S2', values: [20, 20] }),
+      ],
+    }), RECT, 1);
+    const top = Math.max(...rec.texts.map(t => Number(t.text)).filter(Number.isFinite));
+    // Un-stacked: axis reflects the single-series max (20) plus headroom, not 30.
+    expect(top).toBeLessThan(30);
+  });
+});

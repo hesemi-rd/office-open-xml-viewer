@@ -1069,6 +1069,31 @@ function renderLineChart(
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
 
+  // stackedLine (`<c:grouping val="stacked">`) draws each series at the running
+  // sum of the series below it; stackedLinePct (`percentStacked`) normalizes
+  // each category to 100% (ECMA-376 §21.2.2.75). Plain `line` is unstacked.
+  const stacked = chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
+  const pct = chart.chartType === 'stackedLinePct';
+  // Per-category |Σ| denominator for percent normalization (matches the bar
+  // percentStacked convention). Only computed when needed.
+  const pctTotals = pct
+    ? cats.map((_, ci) => {
+        let t = 0;
+        for (const s of chart.series) t += Math.abs(s.values[ci] ?? 0);
+        return t || 1;
+      })
+    : null;
+  // The plotted (cumulative) value for series `si` at category `ci`: the running
+  // sum of series 0..si, percent-normalized when pct. Un-stacked charts return
+  // the raw value. Null cells contribute 0 to the stack (matching the area
+  // renderer's `?? 0`); full dispBlanksAs support is tracked separately (CH9).
+  const plotted = (si: number, ci: number): number => {
+    if (!stacked) return chart.series[si].values[ci] as number;
+    let sum = 0;
+    for (let k = 0; k <= si; k++) sum += chart.series[k].values[ci] ?? 0;
+    return pct && pctTotals ? (sum / pctTotals[ci]) * 100 : sum;
+  };
+
   // Shared frame bands. The line family uses title pads 0.045 / 0.035 and the
   // default 0.22 side-legend reserve — passed as params so pixels are unchanged.
   // PowerPoint's auto-layout reserves a title band with air above and below
@@ -1112,8 +1137,17 @@ function renderLineChart(
     ctx.fillRect(px0, py0, pw, ph);
   }
 
+  // Axis extent is taken from the PLOTTED values, so a stacked chart's top line
+  // (the cumulative sum) drives the maximum rather than the tallest single
+  // series. Every category still contributes each series' cumulative value.
   let dataMin = Infinity; let dataMax = -Infinity;
-  for (const s of chart.series) for (const v of s.values) if (v != null) { dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v); }
+  for (let ci = 0; ci < n; ci++) {
+    for (let si = 0; si < chart.series.length; si++) {
+      if (!stacked && chart.series[si].values[ci] == null) continue;
+      const v = plotted(si, ci);
+      dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
+    }
+  }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   if (chart.valMin != null) dataMin = chart.valMin;
   else if (dataMin > 0) dataMin = 0;
@@ -1175,26 +1209,29 @@ function renderLineChart(
     ctx.beginPath();
     let started = false;
     for (let ci = 0; ci < n; ci++) {
-      const v = s.values[ci]; if (v == null) { started = false; continue; }
-      const px = toX(ci); const py = toY(v);
+      // Unstacked: a null cell breaks the line. Stacked: a null contributes 0
+      // to the running sum (no gap), matching the area renderer.
+      if (!stacked && s.values[ci] == null) { started = false; continue; }
+      const py = toY(plotted(si, ci)); const px = toX(ci);
       if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
     }
     ctx.stroke();
     ctx.fillStyle = color;
     // ECMA-376 §21.2.2.32 — when the series resolves to no marker, skip the
-    // data-point dots but keep data labels (which pin to each raw value, not
-    // to the marker).
+    // data-point dots but keep data labels. Markers / labels pin to the plotted
+    // (cumulative) value so they ride the stacked line, not the raw datum.
     const drawMarkers = s.showMarker !== false;
     for (let ci = 0; ci < n; ci++) {
-      const v = s.values[ci]; if (v == null) continue;
+      if (!stacked && s.values[ci] == null) continue;
+      const pv = plotted(si, ci);
       if (drawMarkers) {
-        ctx.beginPath(); ctx.arc(toX(ci), toY(v), markerR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(toX(ci), toY(pv), markerR, 0, Math.PI * 2); ctx.fill();
       }
       if (chart.showDataLabels) {
         ctx.font = `${dataLabelPx}px sans-serif`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         const labelOffset = drawMarkers ? markerR + 1 : 2;
-        ctx.fillText(formatChartVal(v), toX(ci), toY(v) - labelOffset);
+        ctx.fillText(formatChartVal(pv), toX(ci), toY(pv) - labelOffset);
         ctx.fillStyle = color;
       }
     }

@@ -2353,161 +2353,109 @@ fillText "0" 51.64,351.8 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 57.64,327.0538
-lineTo 620,327.0538
+moveTo 57.64,316.0556
+lineTo 620,316.0556
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,327.0538
-lineTo 57.64,327.0538
+moveTo 53.64,316.0556
+lineTo 57.64,316.0556
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "2" 51.64,327.0538 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "5" 51.64,316.0556 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,302.3077
-lineTo 620,302.3077
+moveTo 57.64,280.3111
+lineTo 620,280.3111
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,302.3077
-lineTo 57.64,302.3077
+moveTo 53.64,280.3111
+lineTo 57.64,280.3111
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "4" 51.64,302.3077 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "10" 51.64,280.3111 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,277.5615
-lineTo 620,277.5615
+moveTo 57.64,244.5667
+lineTo 620,244.5667
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,277.5615
-lineTo 57.64,277.5615
+moveTo 53.64,244.5667
+lineTo 57.64,244.5667
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "6" 51.64,277.5615 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "15" 51.64,244.5667 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,252.8154
-lineTo 620,252.8154
+moveTo 57.64,208.8222
+lineTo 620,208.8222
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,252.8154
-lineTo 57.64,252.8154
+moveTo 53.64,208.8222
+lineTo 57.64,208.8222
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "8" 51.64,252.8154 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "20" 51.64,208.8222 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,228.0692
-lineTo 620,228.0692
+moveTo 57.64,173.0778
+lineTo 620,173.0778
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,228.0692
-lineTo 57.64,228.0692
+moveTo 53.64,173.0778
+lineTo 57.64,173.0778
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "10" 51.64,228.0692 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "25" 51.64,173.0778 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,203.3231
-lineTo 620,203.3231
+moveTo 57.64,137.3333
+lineTo 620,137.3333
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,203.3231
-lineTo 57.64,203.3231
+moveTo 53.64,137.3333
+lineTo 57.64,137.3333
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "12" 51.64,203.3231 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "30" 51.64,137.3333 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,178.5769
-lineTo 620,178.5769
+moveTo 57.64,101.5889
+lineTo 620,101.5889
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,178.5769
-lineTo 57.64,178.5769
+moveTo 53.64,101.5889
+lineTo 57.64,101.5889
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "14" 51.64,178.5769 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "35" 51.64,101.5889 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 57.64,153.8308
-lineTo 620,153.8308
+moveTo 57.64,65.8444
+lineTo 620,65.8444
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 53.64,153.8308
-lineTo 57.64,153.8308
+moveTo 53.64,65.8444
+lineTo 57.64,65.8444
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "16" 51.64,153.8308 fs=#555 font=16.2px sans-serif al=right bl=middle
-beginPath
-moveTo 57.64,129.0846
-lineTo 620,129.0846
-stroke ss=#e0e0e0 lw=0.5 dash=
-set strokeStyle=#888
-set lineWidth=1
-beginPath
-moveTo 53.64,129.0846
-lineTo 57.64,129.0846
-stroke ss=#888 lw=1 dash=
-set strokeStyle=#e0e0e0
-set lineWidth=0.5
-fillText "18" 51.64,129.0846 fs=#555 font=16.2px sans-serif al=right bl=middle
-beginPath
-moveTo 57.64,104.3385
-lineTo 620,104.3385
-stroke ss=#e0e0e0 lw=0.5 dash=
-set strokeStyle=#888
-set lineWidth=1
-beginPath
-moveTo 53.64,104.3385
-lineTo 57.64,104.3385
-stroke ss=#888 lw=1 dash=
-set strokeStyle=#e0e0e0
-set lineWidth=0.5
-fillText "20" 51.64,104.3385 fs=#555 font=16.2px sans-serif al=right bl=middle
-beginPath
-moveTo 57.64,79.5923
-lineTo 620,79.5923
-stroke ss=#e0e0e0 lw=0.5 dash=
-set strokeStyle=#888
-set lineWidth=1
-beginPath
-moveTo 53.64,79.5923
-lineTo 57.64,79.5923
-stroke ss=#888 lw=1 dash=
-set strokeStyle=#e0e0e0
-set lineWidth=0.5
-fillText "22" 51.64,79.5923 fs=#555 font=16.2px sans-serif al=right bl=middle
-beginPath
-moveTo 57.64,54.8462
-lineTo 620,54.8462
-stroke ss=#e0e0e0 lw=0.5 dash=
-set strokeStyle=#888
-set lineWidth=1
-beginPath
-moveTo 53.64,54.8462
-lineTo 57.64,54.8462
-stroke ss=#888 lw=1 dash=
-set strokeStyle=#e0e0e0
-set lineWidth=0.5
-fillText "24" 51.64,54.8462 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "40" 51.64,65.8444 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,30.1
 lineTo 620,30.1
@@ -2520,7 +2468,7 @@ lineTo 57.64,30.1
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "26" 51.64,30.1 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "45" 51.64,30.1 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
@@ -2535,36 +2483,36 @@ set strokeStyle=#4472C4
 set lineWidth=2.3625
 setLineDash 
 beginPath
-moveTo 57.64,228.0692
-lineTo 338.82,54.8462
-lineTo 620,141.4577
+moveTo 57.64,280.3111
+lineTo 338.82,180.2267
+lineTo 620,230.2689
 stroke ss=#4472C4 lw=2.3625 dash=
 set fillStyle=#4472C4
 beginPath
-arc 57.64,228.0692,2.625,0,6.2832
+arc 57.64,280.3111,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 beginPath
-arc 338.82,54.8462,2.625,0,6.2832
+arc 338.82,180.2267,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 beginPath
-arc 620,141.4577,2.625,0,6.2832
+arc 620,230.2689,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 set strokeStyle=#ED7D31
 setLineDash 
 beginPath
-moveTo 57.64,252.8154
-lineTo 338.82,166.2038
-lineTo 620,79.5923
+moveTo 57.64,223.12
+lineTo 338.82,72.9933
+lineTo 620,72.9933
 stroke ss=#ED7D31 lw=2.3625 dash=
 set fillStyle=#ED7D31
 beginPath
-arc 57.64,252.8154,2.625,0,6.2832
+arc 57.64,223.12,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 beginPath
-arc 338.82,166.2038,2.625,0,6.2832
+arc 338.82,72.9933,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 beginPath
-arc 620,79.5923,2.625,0,6.2832
+arc 620,72.9933,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 set fillStyle=#555
 set textAlign=center
