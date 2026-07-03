@@ -2363,6 +2363,20 @@ fn parse_run_inner(
     let bold = fmt.bold.unwrap_or(false);
     let italic = fmt.italic.unwrap_or(false);
     let underline = fmt.underline.unwrap_or(false);
+    // §17.3.2.40 underline style / colour. Only carried when the run is actually
+    // underlined (a stale inherited style behind a `w:u val="none"` must not
+    // surface). `underline_style` stays raw ST_Underline (§17.18.99); the
+    // renderer maps it to DrawingML §20.1.10.82 for `core::drawUnderline`.
+    let underline_style = if underline {
+        fmt.underline_style.clone()
+    } else {
+        None
+    };
+    let underline_color = if underline {
+        fmt.underline_color.clone()
+    } else {
+        None
+    };
     let strikethrough = fmt.strikethrough.unwrap_or(false);
     let font_size = fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let color = fmt.color.clone();
@@ -2418,6 +2432,8 @@ fn parse_run_inner(
                         bold,
                         italic,
                         underline,
+                        underline_style: underline_style.clone(),
+                        underline_color: underline_color.clone(),
                         strikethrough,
                         font_size,
                         color: color.clone(),
@@ -2470,6 +2486,8 @@ fn parse_run_inner(
                         bold,
                         italic,
                         underline,
+                        underline_style: underline_style.clone(),
+                        underline_color: underline_color.clone(),
                         strikethrough,
                         font_size,
                         color: color.clone(),
@@ -2510,6 +2528,8 @@ fn parse_run_inner(
                     bold,
                     italic,
                     underline,
+                    underline_style: underline_style.clone(),
+                    underline_color: underline_color.clone(),
                     strikethrough,
                     font_size,
                     color: color.clone(),
@@ -2645,6 +2665,8 @@ fn parse_run_inner(
                     bold,
                     italic,
                     underline,
+                    underline_style: underline_style.clone(),
+                    underline_color: underline_color.clone(),
                     strikethrough,
                     font_size,
                     color: color.clone(),
@@ -6733,6 +6755,121 @@ mod cs_toggle_tests {
         // §17.3.2.7 <w:cs/> — the complex-script run toggle.
         let run = run_of(r#"<w:p><w:r><w:rPr><w:cs/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, Some(true));
+    }
+
+    /// §17.3.2.40 `<w:u w:val>` → ST_Underline (§17.18.99). All 18 enum values
+    /// must parse: `underline` stays true for every non-"none" value; the raw
+    /// value is carried through in `underline_style` EXCEPT for the plain single
+    /// rule (`single`), which needs no style hint (the renderer draws single from
+    /// the bool alone), and `none` (no underline at all).
+    #[test]
+    fn underline_val_all_st_underline_values_parse() {
+        // (val, expect_underline, expect_style)
+        let cases: &[(&str, bool, Option<&str>)] = &[
+            ("none", false, None),
+            ("single", true, None),
+            ("words", true, Some("words")),
+            ("double", true, Some("double")),
+            ("thick", true, Some("thick")),
+            ("dotted", true, Some("dotted")),
+            ("dottedHeavy", true, Some("dottedHeavy")),
+            ("dash", true, Some("dash")),
+            ("dashedHeavy", true, Some("dashedHeavy")),
+            ("dashLong", true, Some("dashLong")),
+            ("dashLongHeavy", true, Some("dashLongHeavy")),
+            ("dotDash", true, Some("dotDash")),
+            ("dashDotHeavy", true, Some("dashDotHeavy")),
+            ("dotDotDash", true, Some("dotDotDash")),
+            ("dashDotDotHeavy", true, Some("dashDotDotHeavy")),
+            ("wave", true, Some("wave")),
+            ("wavyHeavy", true, Some("wavyHeavy")),
+            ("wavyDouble", true, Some("wavyDouble")),
+        ];
+        for (val, exp_u, exp_s) in cases {
+            let body =
+                format!(r#"<w:p><w:r><w:rPr><w:u w:val="{val}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+            let run = run_of(&body);
+            assert_eq!(run.underline, *exp_u, "underline bool for val={val}");
+            assert_eq!(
+                run.underline_style.as_deref(),
+                *exp_s,
+                "underline_style for val={val}"
+            );
+        }
+    }
+
+    #[test]
+    fn underline_val_absent_leaves_style_none() {
+        // A run with no <w:u> at all: not underlined, no style.
+        let run = run_of(r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#);
+        assert!(!run.underline);
+        assert_eq!(run.underline_style, None);
+        assert_eq!(run.underline_color, None);
+    }
+
+    #[test]
+    fn underline_color_hex_and_auto_parse() {
+        // §17.3.2.40 w:u@color — underline-only colour (hex 6 or literal "auto").
+        let hex = run_of(
+            r#"<w:p><w:r><w:rPr><w:u w:val="single" w:color="FF0000"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(hex.underline_color.as_deref(), Some("FF0000"));
+        let auto = run_of(
+            r#"<w:p><w:r><w:rPr><w:u w:val="wave" w:color="auto"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(auto.underline_color.as_deref(), Some("auto"));
+        assert_eq!(auto.underline_style.as_deref(), Some("wave"));
+    }
+
+    #[test]
+    fn underline_none_drops_inherited_style_and_color() {
+        // A run that turns underline OFF must not surface any style/colour, even
+        // if a style chain set one earlier (drawn-off underline carries nothing).
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="Wavy">
+                <w:rPr><w:u w:val="wave" w:color="00FF00"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Wavy"/><w:u w:val="none"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!(!run.underline, "explicit none turns underline off");
+        assert_eq!(run.underline_style, None);
+        assert_eq!(run.underline_color, None);
+    }
+
+    #[test]
+    fn character_style_underline_style_propagates_to_referencing_run() {
+        // §17.3.2.40 through the style chain (styles::apply_run): a character
+        // style's dotted underline + colour reaches a run that references it.
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="Dotted">
+                <w:rPr><w:u w:val="dotted" w:color="0000FF"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Dotted"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!(run.underline);
+        assert_eq!(run.underline_style.as_deref(), Some("dotted"));
+        assert_eq!(run.underline_color.as_deref(), Some("0000FF"));
+    }
+
+    #[test]
+    fn direct_underline_style_overrides_style_chain() {
+        // A direct run rPr underline wins over the referenced character style's.
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="Dotted">
+                <w:rPr><w:u w:val="dotted"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Dotted"/><w:u w:val="wave"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.underline_style.as_deref(), Some("wave"));
     }
 
     #[test]

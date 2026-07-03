@@ -922,6 +922,17 @@ pub struct TextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// ECMA-376 §17.3.2.40 `<w:u w:val>` — the raw ST_Underline (§17.18.99) style
+    /// value (`double` / `thick` / `dotted` / `wave` / `dashLong` / …). `None`
+    /// for the plain single rule (or no underline). The renderer normalizes this
+    /// WordprocessingML vocabulary to the shared DrawingML ST_TextUnderlineType
+    /// (§20.1.10.82) that `core::drawUnderline` dispatches on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline_style: Option<String>,
+    /// ECMA-376 §17.3.2.40 `<w:u w:color>` — underline-only colour (hex 6, or the
+    /// literal `auto`). `None` ⇒ the underline follows the glyph colour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline_color: Option<String>,
     pub strikethrough: bool,
     /// pt
     pub font_size: f64,
