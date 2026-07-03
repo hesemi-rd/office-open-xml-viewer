@@ -1532,19 +1532,34 @@ pub(crate) fn load_sheet_images(
     all_anchors
 }
 
-/// Parse worksheet `<oleObjects>` (ECMA-376 §18.3.1.59) into preview
-/// `ImageAnchor`s. An embedded OLE object we can't run still ships a preview
-/// **image** referenced by `<objectPr r:id>` (§18.3.1.56), placed by the
-/// `<anchor>` two-cell markers. `sheet_rels` maps the objectPr rId → the
-/// media part's Target; `sheet_dir` (e.g. `xl/worksheets`) is the base the
-/// Target resolves against. Routing these into the sheet's ordinary image list
-/// makes the object visible instead of a blank region.
+/// Parse worksheet `<oleObjects>` (the collection element, ECMA-376
+/// §18.3.1.60) into preview `ImageAnchor`s. An embedded OLE object we can't run
+/// still needs a visible on-sheet representation, placed by the
+/// `<objectPr><anchor>` two-cell markers (§18.3.1.56 / §18.3.1.59).
+///
+/// **Caveat on `objectPr@r:id` (§18.3.1.56):** the ECMA-376 text says this
+/// relationship "targets the Embedded Object Part … of type `oleObject`", i.e.
+/// the object *data* part (a `.bin`), NOT a preview image. Empirically, Excel
+/// does not reference the on-sheet preview image from `objectPr@r:id` either —
+/// the preview EMF/BMP is carried by a legacy VML drawing (`v:imagedata r:id`
+/// in the sheet's `vmlDrawingN.vml`, connected via `oleObject@shapeId` ↔ the
+/// VML `v:shape@id`), exactly like Word's `<w:object><v:shape><v:imagedata>`
+/// path (see docx `parse_object_ole_image`). So `objectPr@r:id`, when present,
+/// points at object data, and resolving it as an image would push a `.bin` into
+/// the image pipeline.
+///
+/// Guard: after resolving `objectPr@r:id` to a part we require its MIME (via
+/// `mime_from_ext`) to be `image/*`; a non-image target (`.bin`,
+/// `application/octet-stream`) is skipped. This structurally prevents feeding
+/// object data to the renderer. The VML-drawing preview path is a follow-up;
+/// until then a `.bin`-only object silently skips (== main's "not drawn").
 ///
 /// `<oleObject>` is commonly wrapped in `mc:AlternateContent` where the Choice
 /// carries the full objectPr/anchor and the Fallback a bare oleObject; we skip
 /// any oleObject nested in an `mc:Fallback` so each object contributes exactly
-/// one anchor (no double-draw). An oleObject without a resolvable objectPr
-/// preview is skipped (icon-only / link-only), matching the prior silent-skip.
+/// one anchor (no double-draw). An oleObject without a resolvable image-typed
+/// objectPr preview is skipped (icon-only / data-only / link-only), matching
+/// the prior silent-skip.
 pub(crate) fn parse_ole_object_anchors(
     sheet_xml: &str,
     sheet_rels: &HashMap<String, String>,
@@ -1594,6 +1609,13 @@ pub(crate) fn parse_ole_object_anchors(
             continue;
         }
         let mime_type = mime_from_ext(&media_path).to_string();
+        // §18.3.1.56: objectPr@r:id nominally targets the *object data* part, not
+        // an image. Only route genuine image parts into the picture pipeline; a
+        // non-image target (e.g. a `.bin` ⇒ application/octet-stream) is skipped
+        // so object data can never reach the renderer as a bitmap.
+        if !mime_type.starts_with("image/") {
+            continue;
+        }
 
         // `<anchor><from>/<to>` two-cell markers (same CT_Marker grammar as a
         // drawing anchor; children matched by local name, namespace-tolerant).
@@ -1651,7 +1673,8 @@ pub(crate) fn parse_ole_object_anchors(
     anchors
 }
 
-/// Load a sheet's OLE-object preview images (§18.3.1.59) as `ImageAnchor`s,
+/// Load a sheet's OLE-object preview images (the `<oleObjects>` collection,
+/// §18.3.1.60) as `ImageAnchor`s,
 /// wiring the worksheet XML + its rels. Sibling of `load_sheet_images`; the
 /// caller appends the result to `ws.images` so previews draw through the same
 /// pipeline as ordinary pictures.
@@ -2896,5 +2919,42 @@ mod ole_object_tests {
         let mut archive = archive_with(&[]);
         let anchors = parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive);
         assert!(anchors.is_empty(), "no resolvable preview ⇒ no anchor");
+    }
+
+    /// Defensive guard (§18.3.1.56): when `objectPr@r:id` resolves to the object
+    /// *data* part (a `.bin` ⇒ `application/octet-stream`) rather than an image,
+    /// it must be skipped so object data never enters the picture pipeline.
+    #[test]
+    fn ole_object_pointing_at_bin_data_part_is_skipped() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject progId="Excel.Sheet.12" shapeId="5" r:id="rIdData">
+                  <objectPr r:id="rIdBin">
+                    <anchor>
+                      <from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></from>
+                      <to><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></to>
+                    </anchor>
+                  </objectPr>
+                </oleObject>
+              </oleObjects>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let mut rels = HashMap::new();
+        // objectPr@r:id points at the embedded object data (.bin), which is what
+        // the ECMA-376 §18.3.1.56 text actually says this relationship targets.
+        rels.insert(
+            "rIdBin".to_string(),
+            "../embeddings/oleObject1.bin".to_string(),
+        );
+        let mut archive = archive_with(&[("xl/embeddings/oleObject1.bin", b"\x00\x01datablob")]);
+
+        let anchors = parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive);
+        assert!(
+            anchors.is_empty(),
+            "a .bin (non-image) objectPr target must be skipped, got {} anchor(s)",
+            anchors.len()
+        );
     }
 }

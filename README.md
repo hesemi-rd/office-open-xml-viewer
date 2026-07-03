@@ -634,7 +634,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
-| | OLE embedded objects (`<oleObjects>` — the `objectPr` preview image is drawn at its two-cell anchor; the embedded app is not run) | ✅ |
+| | OLE embedded objects (`<oleObjects>` — an image-typed `objectPr` preview is drawn at its two-cell anchor; the embedded app is not run. Excel's canonical preview is a VML `v:imagedata` metafile keyed by `oleObject@shapeId`, not yet wired, so such embeds are not yet drawn) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody` — 186 preset geometries via the shared engine, with `avLst` adjust handles) | ✅ |
 | | Math equations in shapes (OMML `m:oMath` / `m:oMathPara` in `xdr:txBody`, incl. `a14:m` / `mc:AlternateContent`; rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |

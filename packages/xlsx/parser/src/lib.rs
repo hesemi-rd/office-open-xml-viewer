@@ -165,7 +165,8 @@ fn parse_sheet_with(
 
     // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(archive, &sheet_path);
-    // Embedded OLE object previews (§18.3.1.59) draw through the same image
+    // Embedded OLE object previews (the `<oleObjects>` collection, §18.3.1.60)
+    // draw through the same image
     // list; their preview parts are referenced from the worksheet XML + rels.
     ws.images
         .extend(load_sheet_ole_images(archive, &sheet_path, &sheet_xml));
