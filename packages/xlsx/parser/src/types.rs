@@ -5,6 +5,12 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase")]
 pub struct Workbook {
     pub sheets: Vec<SheetMeta>,
+    /// Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28).
+    /// `true` selects the 1904 date system (Mac-authored workbooks). Serial
+    /// dates in cells are resolved against this base (§18.17.4.1). Omitted from
+    /// JSON when false (the default 1900 system) for wire parity.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub date1904: bool,
 }
 
 /// Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`).
@@ -138,6 +144,12 @@ pub struct Worksheet {
     /// Used together with `default_font_family` to compute Max Digit Width.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_size: Option<f64>,
+    /// Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28),
+    /// denormalized onto every worksheet so the cell formatter can resolve
+    /// serial dates (§18.17.4.1) without a workbook back-reference. `true` =
+    /// 1904 date system. Omitted from JSON when false (default 1900 system).
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub date1904: bool,
 }
 
 /// Single sparkline group (`<x14:sparklineGroup>`). Holds the shared formatting

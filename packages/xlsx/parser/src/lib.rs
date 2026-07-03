@@ -85,6 +85,11 @@ struct WorkbookShared {
     sheets: Vec<SheetMeta>,
     theme_colors: Vec<String>,
     shared_strings: Vec<SharedString>,
+    /// Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28).
+    /// `true` = 1904 date system. Parsed once here and denormalized onto every
+    /// worksheet so the renderer/cell formatter can resolve serial dates
+    /// without a back-reference to the workbook.
+    date1904: bool,
 }
 
 impl WorkbookShared {
@@ -98,9 +103,12 @@ impl WorkbookShared {
     /// exactly as the old `?` on the rels read did.
     fn load(archive: &mut XlsxZip) -> Result<WorkbookShared, String> {
         let workbook_xml = read_zip_string(archive, "xl/workbook.xml")?;
-        let sheets = {
+        let (sheets, date1904) = {
             let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
-            parse_workbook_sheets(&wb_doc)
+            (
+                parse_workbook_sheets(&wb_doc),
+                parse_workbook_date1904(&wb_doc),
+            )
         };
         let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
         let theme_colors = parse_theme_colors(archive);
@@ -111,6 +119,7 @@ impl WorkbookShared {
             sheets,
             theme_colors,
             shared_strings,
+            date1904,
         })
     }
 }
@@ -169,6 +178,10 @@ fn parse_sheet_with(
     let (df_family, df_size) = parse_default_font(archive);
     ws.default_font_family = df_family;
     ws.default_font_size = df_size;
+    // Denormalize the workbook-wide date system onto this sheet so the cell
+    // formatter can resolve serial dates without a workbook back-reference
+    // (ECMA-376 §18.2.28 / §18.17.4.1).
+    ws.date1904 = shared.date1904;
 
     serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -218,7 +231,10 @@ fn parse_xlsx_inner_with(
     }
 
     Ok(ParsedWorkbook {
-        workbook: Workbook { sheets },
+        workbook: Workbook {
+            sheets,
+            date1904: shared.date1904,
+        },
         styles,
         shared_strings: shared.shared_strings.clone(),
     })
@@ -472,6 +488,19 @@ pub(crate) fn resolve_color_attrs(
     }
 
     None
+}
+
+/// Parse the workbook-level date system from `<workbookPr date1904>`
+/// (ECMA-376 §18.2.28). The attribute is an xsd:boolean; `"1"` or `"true"`
+/// select the 1904 date system. Absent attribute / element ⇒ false (the
+/// default 1900 date system). See §18.17.4.1 for the date-system definitions.
+fn parse_workbook_date1904(doc: &roxmltree::Document) -> bool {
+    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    doc.descendants()
+        .find(|n| n.tag_name().name() == "workbookPr" && n.tag_name().namespace() == Some(ns))
+        .and_then(|n| n.attribute("date1904"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
@@ -1274,6 +1303,10 @@ fn parse_worksheet(
             sparkline_groups: Vec::new(),
             default_font_family: None,
             default_font_size: None,
+            // Set by `parse_sheet_with` from the workbook-level `<workbookPr
+            // date1904>` (ECMA-376 §18.2.28); a bare `parse_worksheet` (tests)
+            // defaults to the 1900 date system.
+            date1904: false,
         },
         hyperlink_rids,
     ))
@@ -2672,5 +2705,47 @@ mod sheet_visibility_tests {
         assert_eq!(sheets[1].visibility, SheetVisibility::Hidden);
         assert_eq!(sheets[2].visibility, SheetVisibility::VeryHidden);
         assert_eq!(sheets[3].visibility, SheetVisibility::Visible);
+    }
+}
+
+#[cfg(test)]
+mod date1904_tests {
+    use super::*;
+
+    fn parse(xml: &str) -> bool {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        parse_workbook_date1904(&doc)
+    }
+
+    #[test]
+    fn workbook_pr_date1904_true() {
+        // ECMA-376 §18.2.28: date1904="1" ⇒ 1904 date system.
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="1"/></workbook>"#;
+        assert!(parse(xml));
+    }
+
+    #[test]
+    fn workbook_pr_date1904_true_word() {
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="true"/></workbook>"#;
+        assert!(parse(xml));
+    }
+
+    #[test]
+    fn workbook_pr_date1904_false() {
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="0"/></workbook>"#;
+        assert!(!parse(xml));
+    }
+
+    #[test]
+    fn workbook_pr_absent_attr_defaults_false() {
+        // §18.2.28: absent attribute ⇒ 1900 date system (false).
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr showObjects="all"/></workbook>"#;
+        assert!(!parse(xml));
+    }
+
+    #[test]
+    fn workbook_pr_absent_element_defaults_false() {
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#;
+        assert!(!parse(xml));
     }
 }

@@ -17,6 +17,10 @@ export function formatCellValue(
   cell: Cell,
   styles: Styles,
   cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  /** Workbook date system (`<workbookPr date1904>`, §18.2.28). `true` resolves
+   *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
+   *  date system) so callers that don't thread the flag are unaffected. */
+  date1904 = false,
 ): string {
   // Resolve the effective format once so both the numeric and text paths
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.17).
@@ -39,8 +43,15 @@ export function formatCellValue(
   // Volatile builtins: TODAY()/NOW() cells have a cached `<v>` from the last
   // save, which the viewer would otherwise show as a stale date. Recompute
   // them against the current system clock at render time.
-  const num = recomputeVolatile(cell.formula) ?? cell.value.number;
-  return applyFormat(num, effectiveFmtId, effectiveFmt);
+  const recomputed = recomputeVolatile(cell.formula);
+  const num = recomputed ?? cell.value.number;
+  // `todaySerial`/`nowSerial` always emit a 1900-system serial (they encode
+  // "today" as a calendar concept, independent of the workbook's date system),
+  // so a recomputed volatile must be formatted against the 1900 epoch even in a
+  // 1904 workbook — otherwise it would render 1462 days early. Stored cell
+  // values, by contrast, use the workbook's own date system.
+  const effectiveDate1904 = recomputed !== null ? false : date1904;
+  return applyFormat(num, effectiveFmtId, effectiveFmt, effectiveDate1904);
 }
 
 /**
@@ -367,17 +378,17 @@ function isDateFormatCode(code: string): boolean {
   return /[yd]/i.test(stripped) || /a{3,}/i.test(stripped);
 }
 
-function applyFormat(num: number, numFmtId: number, formatCode: string | null): string {
+function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): string {
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
-  if (builtinFmt) return formatExcelDateCode(num, builtinFmt);
+  if (builtinFmt) return formatExcelDateCode(num, builtinFmt, date1904);
   // ECMA-376 §18.8.30: "General" is the reserved General number format regardless
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
   if (formatCode && formatCode.trim().toLowerCase() === 'general') return String(num);
   if (formatCode) {
-    if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode);
+    if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode, date1904);
     return applyFormatCode(num, formatCode);
   }
   switch (numFmtId) {

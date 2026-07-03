@@ -301,7 +301,7 @@ export class XlsxWorkbook {
     return resolveListValues(parsed, (row, col) => {
       const cell = byRC.get(`${row}:${col}`);
       if (!cell) return null;
-      return formatCellValue(cell, styles);
+      return formatCellValue(cell, styles, null, ws.date1904);
     });
   }
 

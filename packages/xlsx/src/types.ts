@@ -2,6 +2,11 @@ import type { ChartModel, MathNode, SpaceLine } from '@silurus/ooxml-core';
 
 export interface Workbook {
   sheets: SheetMeta[];
+  /** Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28).
+   *  `true` selects the 1904 date system (Mac-authored workbooks); serial
+   *  dates are resolved against the 1904 epoch (§18.17.4.1). Omitted from the
+   *  parser JSON when false (default 1900 date system). */
+  date1904?: boolean;
 }
 
 /** Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`). */
@@ -99,6 +104,11 @@ export interface Worksheet {
   defaultFontFamily?: string;
   /** Point size of the workbook's Normal-style font (`<fonts>[N].sz.val`). */
   defaultFontSize?: number;
+  /** Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28),
+   *  denormalized onto every worksheet by the parser so the cell formatter can
+   *  resolve serial dates (§18.17.4.1) without a workbook back-reference.
+   *  `true` = 1904 date system. Omitted (⇒ false) for the default 1900 system. */
+  date1904?: boolean;
 }
 
 export interface SparklineGroup {

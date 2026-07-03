@@ -115,3 +115,26 @@ describe('date formats — 1900 Lotus leap-year-bug compat (§18.17.4.1)', () =>
     expect(fmt(45292, 'yyyy-mm-dd')).toBe('2024-01-01');
   });
 });
+
+describe('date formats — 1904 date system (§18.2.28 / §18.17.4.1)', () => {
+  // A 1904 (Mac-authored) workbook stores serials 1462 days lower than a 1900
+  // workbook for the same calendar date. `formatCellValue`'s 4th arg carries
+  // `<workbookPr date1904>` and shifts the epoch accordingly.
+  const fmt1904 = (n: number, code: string) =>
+    formatCellValue(numCell(n), styles(code), null, true);
+
+  it('renders the same calendar date from the 1904-system serial (43830 → 2024-01-01)', () => {
+    // 1900-system serial 45292 and 1904-system serial 43830 are both 2024-01-01.
+    expect(fmt1904(43830, 'yyyy-mm-dd')).toBe('2024-01-01');
+    // Without the date1904 flag the same serial reads 1462 days early.
+    expect(fmt(43830, 'yyyy-mm-dd')).toBe('2019-12-31');
+  });
+
+  it('serial 0 is the 1904 base date 1904-01-01', () => {
+    expect(fmt1904(0, 'yyyy-mm-dd')).toBe('1904-01-01');
+  });
+
+  it('serial 1 is 1904-01-02 (no 1900 leap-year bug in the 1904 system)', () => {
+    expect(fmt1904(1, 'yyyy-mm-dd')).toBe('1904-01-02');
+  });
+});

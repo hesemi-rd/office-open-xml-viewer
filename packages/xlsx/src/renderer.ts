@@ -1832,7 +1832,7 @@ function renderQuadrant(
     mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, dpr));
 
     if (!cell) continue;
-    const text = formatCellValue(cell, styles, cf.numFmt);
+    const text = formatCellValue(cell, styles, cf.numFmt, rc.worksheet.date1904);
     if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
     const effectiveBold = font.bold || !!cf.fontBold;
@@ -2210,7 +2210,7 @@ function renderQuadrant(
       }
 
       if (!cell) continue;
-      const text = formatCellValue(cell, styles, cf.numFmt);
+      const text = formatCellValue(cell, styles, cf.numFmt, rc.worksheet.date1904);
       if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
       textTasks.push(() => {
