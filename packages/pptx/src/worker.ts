@@ -81,10 +81,14 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
       return;
     }
     try {
-      const bytes = archive.extract_media(req.path);
-      const copy = new Uint8Array(bytes).slice().buffer;
-      const msg: WorkerResponse = { kind: 'mediaExtracted', id: req.id, bytes: copy };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [copy]);
+      // wasm-bindgen already hands back a fresh, standalone Uint8Array here (its
+      // glue does `getArrayU8FromWasm0(ptr,len).slice()` then frees the Rust Vec),
+      // so `bytes.buffer` is a full-span, non-WASM-backed ArrayBuffer we own
+      // outright — transfer it directly. A second `new Uint8Array(bytes).slice()`
+      // would just re-copy the whole entry for nothing.
+      const out = archive.extract_media(req.path).buffer as ArrayBuffer;
+      const msg: WorkerResponse = { kind: 'mediaExtracted', id: req.id, bytes: out };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
     } catch (err) {
       const msg: WorkerResponse = {
         kind: 'error',
@@ -103,10 +107,11 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
       return;
     }
     try {
-      const bytes = archive.extract_image(req.path);
-      const copy = new Uint8Array(bytes).slice().buffer;
-      const msg: WorkerResponse = { kind: 'imageExtracted', id: req.id, bytes: copy };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [copy]);
+      // See extractMedia above: the extracted Uint8Array already owns a
+      // standalone full-span buffer, so transfer it without a second copy.
+      const out = archive.extract_image(req.path).buffer as ArrayBuffer;
+      const msg: WorkerResponse = { kind: 'imageExtracted', id: req.id, bytes: out };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
     } catch (err) {
       const msg: WorkerResponse = {
         kind: 'error',

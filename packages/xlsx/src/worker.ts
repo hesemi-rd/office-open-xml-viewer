@@ -73,10 +73,14 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       ]);
     } else if (req.type === 'extractImage') {
       if (!archive) throw new Error('No xlsx loaded');
-      const bytes = archive.extract_image(req.path);
-      const copy = new Uint8Array(bytes).slice().buffer;
-      const res: WorkerResponse = { type: 'imageExtracted', id, bytes: copy };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [copy]);
+      // wasm-bindgen already hands back a fresh, standalone Uint8Array here (its
+      // glue does `getArrayU8FromWasm0(ptr,len).slice()` then frees the Rust Vec),
+      // so `.buffer` is a full-span, non-WASM-backed ArrayBuffer we own outright —
+      // transfer it directly. A second `new Uint8Array(bytes).slice()` would just
+      // re-copy the whole entry for nothing.
+      const out = archive.extract_image(req.path).buffer as ArrayBuffer;
+      const res: WorkerResponse = { type: 'imageExtracted', id, bytes: out };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
     }
   } catch (err) {
     const res: WorkerResponse = { type: 'error', id, message: String(err) };
