@@ -730,6 +730,18 @@ export interface ShapeText {
    *  applies a signed hanging first-line list-independently). Absent/0 ⇒ the
    *  first line aligns with the continuation lines. */
   indentFirst?: number;
+  /** ECMA-376 §17.3.1.37 `<w:tabs>` — explicit tab stops of this text-box
+   *  paragraph, resolved through the style chain like {@link DocParagraph.tabStops}.
+   *  Absent/empty ⇒ only the automatic default-tab grid applies. The renderer
+   *  feeds these to the SAME line engine the body uses so a `\t` inside a text box
+   *  advances to its stop (the old shape wrapper dropped tabs entirely). */
+  tabStops?: TabStop[];
+  /** ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left text-box paragraph, resolved
+   *  through the style chain like {@link DocParagraph.bidi}. `true` = RTL,
+   *  `false` = explicitly LTR, absent = unspecified. Consumed as the paragraph
+   *  base direction for the UAX#9 reordering pass (the body renderer reads the
+   *  identical field). */
+  bidi?: boolean;
   /** Zip path of an inline image inside this text-box paragraph
    *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
    *  Absent for a text-only paragraph. */

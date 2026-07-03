@@ -1143,6 +1143,21 @@ pub struct ShapeText {
     /// first-line indent list-independently (Word's behaviour).
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub indent_first: f64,
+    /// ECMA-376 §17.3.1.37 `<w:tabs>` — explicit tab stops of this text-box
+    /// paragraph, resolved through the style chain like the body paragraph's
+    /// `tab_stops`. Empty ⇒ only the automatic default-tab grid applies. Carried
+    /// so the shape text is laid out by the SAME line engine the body uses (tabs
+    /// were previously dropped on this path, so a `\t` in a text box collapsed to
+    /// nothing).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tab_stops: Vec<TabStop>,
+    /// ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left text-box paragraph, resolved
+    /// through the style chain like the body paragraph's `bidi`. `Some(true)` =
+    /// RTL, `Some(false)` = explicitly LTR, `None` = unspecified (inherit). The
+    /// renderer consumes it as the paragraph base direction for the UAX#9
+    /// reordering pass (the body renderer reads the identical field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bidi: Option<bool>,
     /// Embedded zip path of an inline image living inside this text-box
     /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
     /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved

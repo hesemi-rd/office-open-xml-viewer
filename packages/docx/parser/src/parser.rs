@@ -4174,6 +4174,30 @@ fn extract_simple_paragraph_text(
         .clone()
         .or_else(|| style_para.line_spacing_rule.clone());
 
+    // ECMA-376 §17.3.1.37 tab stops and §17.3.1.6 bidi — resolved with the SAME
+    // §17.7.2 precedence as the indent/spacing above (direct `<w:pPr>` via
+    // `direct_ind` = `parse_para_fmt`, else the style-chain-resolved `style_para`).
+    // `parse_para_fmt` already parses `<w:tabs>`/`<w:tab>` into `(pos, val, leader)`
+    // tuples (sorted, "clear" dropped) and `<w:bidi>` as an on/off toggle; the body
+    // paragraph path converts the SAME tuples into `TabStop` (parser.rs ~1843) — so
+    // do the identical conversion here rather than re-reading the XML (PR#613: no
+    // drift-prone re-implementation of an existing parse). Carried onto `ShapeText`
+    // so the text box is laid out by the main line engine (kinsoku/bidi/justify/
+    // tabs), which the old simplified wrapper never applied.
+    let tab_stops: Vec<TabStop> = direct_ind
+        .tab_stops
+        .clone()
+        .or_else(|| style_para.tab_stops.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(pos, alignment, leader)| TabStop {
+            pos,
+            alignment,
+            leader,
+        })
+        .collect();
+    let bidi = direct_ind.bidi.or(style_para.bidi);
+
     // Single block-level format fields come from the FIRST text run (kept for
     // backward compatibility with existing consumers and the image-block path).
     // The block-level `font_family` uses the conflated resolution captured above
@@ -4216,6 +4240,8 @@ fn extract_simple_paragraph_text(
         indent_left,
         indent_right,
         indent_first,
+        tab_stops,
+        bidi,
         image_path,
         mime_type,
         svg_image_path,
@@ -9633,6 +9659,121 @@ mod txbx_inline_image_tests {
             .is_none(),
             "empty paragraph (no text, no image) is dropped"
         );
+    }
+
+    /// ECMA-376 §17.3.1.37 — a text-box paragraph's `<w:tabs>` surfaces on the
+    /// `ShapeText` (previously dropped), converted to the SAME `TabStop` the body
+    /// paragraph emits (twips→pt, "clear" removed, sorted by position). Absent
+    /// `<w:tabs>` ⇒ empty (additive: the field is new, so a tab-less box is
+    /// unchanged aside from the empty vec).
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_tab_stops() {
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &StyleMap::default(),
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+        // Two custom stops (unsorted in source) + a "clear" that must be dropped.
+        // 2160 twips = 108 pt (right, dot leader); 720 twips = 36 pt (left).
+        let block = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:pPr><w:tabs>
+                    <w:tab w:val="right" w:pos="2160" w:leader="dot"/>
+                    <w:tab w:val="clear" w:pos="1440"/>
+                    <w:tab w:val="left" w:pos="720"/>
+                  </w:tabs></w:pPr>
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(block.tab_stops.len(), 2, "clear stop dropped, two remain");
+        // Sorted ascending by position: 36 pt (left) then 108 pt (right/dot).
+        assert!((block.tab_stops[0].pos - 36.0).abs() < 1e-6);
+        assert_eq!(block.tab_stops[0].alignment, "left");
+        assert_eq!(block.tab_stops[0].leader, "none");
+        assert!((block.tab_stops[1].pos - 108.0).abs() < 1e-6);
+        assert_eq!(block.tab_stops[1].alignment, "right");
+        assert_eq!(block.tab_stops[1].leader, "dot");
+
+        // Absent <w:tabs> ⇒ empty (the automatic default grid is applied at render).
+        let none = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!(none.tab_stops.is_empty());
+    }
+
+    /// ECMA-376 §17.3.1.37 — a text-box paragraph's tab stops resolve through the
+    /// paragraph STYLE chain (like indent/spacing) when the paragraph carries no
+    /// direct `<w:tabs>`. A direct `<w:tabs>` REPLACES the inherited set (§17.7.2 —
+    /// tabs merge as a whole set, mirroring the body's `apply_para`).
+    #[test]
+    fn extract_simple_paragraph_text_inherits_style_tab_stops() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Tabbed">
+                <w:pPr><w:tabs><w:tab w:val="center" w:pos="1440"/></w:tabs></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Tabbed"/></w:pPr>
+                 <w:r><w:t>x</w:t></w:r></w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        // 1440 twips = 72 pt, center — inherited from the style (no direct tabs).
+        assert_eq!(block.tab_stops.len(), 1);
+        assert!((block.tab_stops[0].pos - 72.0).abs() < 1e-6);
+        assert_eq!(block.tab_stops[0].alignment, "center");
+    }
+
+    /// ECMA-376 §17.3.1.6 — a text-box paragraph's `<w:bidi>` surfaces on the
+    /// `ShapeText` as the RTL base-direction flag (previously dropped). Present
+    /// (empty element ⇒ on) ⇒ Some(true); `w:val="0"` ⇒ Some(false); absent ⇒
+    /// None (unspecified/inherit). The renderer reads the identical field the body
+    /// paragraph exposes.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_bidi() {
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &StyleMap::default(),
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+        let on = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:pPr><w:bidi/></w:pPr>
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(on.bidi, Some(true), "empty <w:bidi/> ⇒ RTL on");
+
+        let off = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:pPr><w:bidi w:val="0"/></w:pPr>
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(off.bidi, Some(false), "w:val=0 ⇒ explicitly LTR");
+
+        let absent = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(absent.bidi, None, "absent ⇒ unspecified (inherit)");
     }
 }
 
