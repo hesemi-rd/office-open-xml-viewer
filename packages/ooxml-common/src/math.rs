@@ -99,6 +99,78 @@ pub enum MathNode {
     Group {
         items: Vec<MathNode>,
     },
+    /// ECMA-376 §22.1.2.81 `m:phant` — a phantom object: it contributes the
+    /// SPACING of its base `e` while optionally hiding the base and/or zeroing
+    /// individual dimensions (§22.1.2.82 phantPr children). Before this variant
+    /// existed the parser flattened `m:phant` and its (possibly hidden) base
+    /// leaked into the visible output.
+    #[serde(rename_all = "camelCase")]
+    Phant {
+        /// §22.1.2.96 `m:show` — `false` hides the base (invisible but occupies
+        /// space, i.e. MathML `<mphantom>`). Default `true`: the base is shown and
+        /// the phant only tweaks spacing via the zero* flags. Serialized always so
+        /// the TS side need not re-derive the default.
+        show: bool,
+        /// §22.1.2.122/.123 (+ zeroWid) — suppress width / ascent / descent so the
+        /// base occupies no space along that axis while still rendering (or, with
+        /// `show=false`, while reserving the other axes).
+        #[serde(default, skip_serializing_if = "is_false")]
+        zero_wid: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        zero_asc: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        zero_desc: bool,
+        base: Vec<MathNode>,
+    },
+    /// ECMA-376 §22.1.2.99 `m:sPre` — a pre-sub-superscript object: a subscript
+    /// and superscript placed to the LEFT of the base (e.g. ²₁A). Maps to MathML
+    /// `<mmultiscripts>` with an `<mprescripts/>` marker.
+    #[serde(rename_all = "camelCase")]
+    SPre {
+        sub: Vec<MathNode>,
+        sup: Vec<MathNode>,
+        base: Vec<MathNode>,
+    },
+    /// ECMA-376 §22.1.2.13 `m:box` — a logical grouping of equation components
+    /// (operator emulator / line-break control / grouping). It draws NO border;
+    /// it is a transparent `<mrow>` around its base for rendering purposes.
+    #[serde(rename_all = "camelCase")]
+    Box {
+        base: Vec<MathNode>,
+    },
+    /// ECMA-376 §22.1.2.11 `m:borderBox` — a border drawn around mathematical
+    /// text. `borderBoxPr` (§22.1.2.12) selects which edges/strikes appear;
+    /// absent ⇒ a full rectangular border. Maps to MathML `<menclose>`.
+    #[serde(rename_all = "camelCase")]
+    BorderBox {
+        /// §22.1.2 hideTop/hideBot/hideLeft/hideRight — when false the edge is
+        /// drawn. Default (all absent) ⇒ a full 4-edge box.
+        #[serde(default, skip_serializing_if = "is_false")]
+        hide_top: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hide_bot: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hide_left: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hide_right: bool,
+        /// §22.1.2 strikeH/strikeV/strikeBLTR/strikeTLBR — optional strike-through
+        /// lines. strikeBLTR = bottom-left→top-right, strikeTLBR = top-left→
+        /// bottom-right.
+        #[serde(default, skip_serializing_if = "is_false")]
+        strike_h: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        strike_v: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        strike_bltr: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        strike_tlbr: bool,
+        base: Vec<MathNode>,
+    },
+}
+
+/// serde skip helper: a `false` bool is the default and omitted from JSON.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Local-name child lookup (OMML elements live in the math namespace; this parser
@@ -120,6 +192,18 @@ fn mval(node: Node, child: &str) -> Option<String> {
         )
         .map(|s| s.to_string())
     })
+}
+
+/// ECMA-376 §22.9.2.7 CT_OnOff semantics for a math on/off child element.
+/// - element ABSENT      ⇒ `default`
+/// - element present, no `m:val` ⇒ `true` (the property is applied)
+/// - element present with `m:val` ⇒ `0`/`false` ⇒ false, otherwise true
+fn on_off(parent: Node, child: &str, default: bool) -> bool {
+    match mchild(parent, child) {
+        None => default,
+        // Present ⇒ true unless `m:val` explicitly turns it off.
+        Some(_) => !matches!(mval(parent, child).as_deref(), Some("0") | Some("false")),
+    }
 }
 
 /// Parse the math children directly under `el` into a node list.
@@ -248,6 +332,48 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 name: nodes_in(child, "fName"),
                 arg: nodes_in(child, "e"),
             }),
+            "phant" => {
+                // §22.1.2.81/.82 — read the phantPr on/off children. `show` defaults
+                // to TRUE (base shown) and is only turned off by <m:show m:val="0">;
+                // the zero* dimension flags default to FALSE.
+                let pr = mchild(child, "phantPr");
+                let show = pr
+                    .map(|p| on_off(p, "show", true)) // present-without-val ⇒ true
+                    .unwrap_or(true);
+                out.push(MathNode::Phant {
+                    show,
+                    zero_wid: pr.map(|p| on_off(p, "zeroWid", false)).unwrap_or(false),
+                    zero_asc: pr.map(|p| on_off(p, "zeroAsc", false)).unwrap_or(false),
+                    zero_desc: pr.map(|p| on_off(p, "zeroDesc", false)).unwrap_or(false),
+                    base: nodes_in(child, "e"),
+                });
+            }
+            "sPre" => out.push(MathNode::SPre {
+                sub: nodes_in(child, "sub"),
+                sup: nodes_in(child, "sup"),
+                base: nodes_in(child, "e"),
+            }),
+            "box" => out.push(MathNode::Box {
+                base: nodes_in(child, "e"),
+            }),
+            "borderBox" => {
+                // §22.1.2.11/.12 — the borderBoxPr on/off children select edges and
+                // strikes; absent borderBoxPr ⇒ a full rectangular border (all hide*
+                // false). The zero-default `on_off(..., false)` yields that full box.
+                let pr = mchild(child, "borderBoxPr");
+                let f = |name: &str| pr.map(|p| on_off(p, name, false)).unwrap_or(false);
+                out.push(MathNode::BorderBox {
+                    hide_top: f("hideTop"),
+                    hide_bot: f("hideBot"),
+                    hide_left: f("hideLeft"),
+                    hide_right: f("hideRight"),
+                    strike_h: f("strikeH"),
+                    strike_v: f("strikeV"),
+                    strike_bltr: f("strikeBLTR"),
+                    strike_tlbr: f("strikeTLBR"),
+                    base: nodes_in(child, "e"),
+                });
+            }
             // Containers / unknowns: descend so inner runs survive (degrade gracefully).
             _ => out.extend(parse_omath_nodes(child)),
         }
@@ -349,6 +475,21 @@ pub fn nodes_to_text(nodes: &[MathNode]) -> String {
             MathNode::GroupChr { base, .. } => s.push_str(&nodes_to_text(base)),
             MathNode::Bar { base, .. } => s.push_str(&nodes_to_text(base)),
             MathNode::Accent { base, .. } => s.push_str(&nodes_to_text(base)),
+            // §22.1.2.81 phant: a HIDDEN base (show=false) contributes no visible
+            // text; a shown phant projects its base. Box / borderBox are
+            // transparent groupings; sPre projects its scripts around the base.
+            MathNode::Phant { show, base, .. } => {
+                if *show {
+                    s.push_str(&nodes_to_text(base));
+                }
+            }
+            MathNode::SPre { sub, sup, base } => {
+                s.push_str(&nodes_to_text(sub));
+                s.push_str(&nodes_to_text(sup));
+                s.push_str(&nodes_to_text(base));
+            }
+            MathNode::Box { base } => s.push_str(&nodes_to_text(base)),
+            MathNode::BorderBox { base, .. } => s.push_str(&nodes_to_text(base)),
         }
     }
     s
@@ -583,6 +724,147 @@ mod tests {
                 assert_eq!(s1, "roman");
             }
             _ => panic!("expected two runs, got {nodes:?}"),
+        }
+    }
+
+    // ── §22.1.2.81 m:phant — previously flattened, leaking the base ─────────────
+    #[test]
+    fn phant_show_false_hides_base_but_wraps_it() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:phant>
+              <m:phantPr><m:show m:val="0"/><m:zeroDesc m:val="1"/></m:phantPr>
+              <m:e><m:r><m:t>y</m:t></m:r></m:e>
+            </m:phant></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::Phant {
+                show,
+                zero_desc,
+                base,
+                ..
+            } => {
+                assert!(!*show, "show=0 hides the base");
+                assert!(*zero_desc, "zeroDesc surfaced");
+                // The base is retained INSIDE the phant (not flattened out).
+                assert_eq!(base.len(), 1);
+                assert!(matches!(&base[0], MathNode::Run { text, .. } if text == "y"));
+            }
+            other => panic!("expected phant, got {other:?}"),
+        }
+        // The hidden base does not leak into the plain-text projection.
+        assert_eq!(nodes_to_text(&nodes), "");
+    }
+
+    #[test]
+    fn phant_defaults_show_true_when_pr_absent() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:phant>
+              <m:e><m:r><m:t>x</m:t></m:r></m:e>
+            </m:phant></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::Phant { show, .. } => assert!(*show, "absent phantPr ⇒ show=true"),
+            other => panic!("expected phant, got {other:?}"),
+        }
+        // A shown phant projects its base.
+        assert_eq!(nodes_to_text(&nodes), "x");
+    }
+
+    // ── §22.1.2.99 m:sPre — pre-sub-superscript ────────────────────────────────
+    #[test]
+    fn parses_spre_prescripts() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:sPre>
+              <m:sub><m:r><m:t>1</m:t></m:r></m:sub>
+              <m:sup><m:r><m:t>2</m:t></m:r></m:sup>
+              <m:e><m:r><m:t>A</m:t></m:r></m:e>
+            </m:sPre></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::SPre { sub, sup, base } => {
+                assert!(matches!(&sub[0], MathNode::Run { text, .. } if text == "1"));
+                assert!(matches!(&sup[0], MathNode::Run { text, .. } if text == "2"));
+                assert!(matches!(&base[0], MathNode::Run { text, .. } if text == "A"));
+            }
+            other => panic!("expected sPre, got {other:?}"),
+        }
+    }
+
+    // ── §22.1.2.13 m:box — logical grouping (no border) ────────────────────────
+    #[test]
+    fn parses_box_as_grouping() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:box>
+              <m:e><m:r><m:t>=</m:t></m:r></m:e>
+            </m:box></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::Box { base } => {
+                assert!(matches!(&base[0], MathNode::Run { text, .. } if text == "="));
+            }
+            other => panic!("expected box, got {other:?}"),
+        }
+    }
+
+    // ── §22.1.2.11 m:borderBox — border around math ────────────────────────────
+    #[test]
+    fn border_box_default_is_full_box() {
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:borderBox>
+              <m:e><m:r><m:t>abc</m:t></m:r></m:e>
+            </m:borderBox></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::BorderBox {
+                hide_top,
+                hide_bot,
+                hide_left,
+                hide_right,
+                base,
+                ..
+            } => {
+                // Absent borderBoxPr ⇒ full box: no edge hidden.
+                assert!(!hide_top && !hide_bot && !hide_left && !hide_right);
+                assert!(matches!(&base[0], MathNode::Run { text, .. } if text == "abc"));
+            }
+            other => panic!("expected borderBox, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn border_box_hides_edges_and_reads_strikes() {
+        // §22.1.2 example: left+bottom edges only ⇒ hideTop + hideRight; plus a
+        // top-left→bottom-right diagonal strike.
+        let xml = format!(
+            r#"<m:oMath xmlns:m="{M}"><m:borderBox>
+              <m:borderBoxPr>
+                <m:hideTop m:val="1"/><m:hideRight m:val="1"/>
+                <m:strikeTLBR m:val="1"/>
+              </m:borderBoxPr>
+              <m:e><m:r><m:t>x</m:t></m:r></m:e>
+            </m:borderBox></m:oMath>"#
+        );
+        let nodes = parse(&xml);
+        match &nodes[0] {
+            MathNode::BorderBox {
+                hide_top,
+                hide_bot,
+                hide_left,
+                hide_right,
+                strike_tlbr,
+                strike_bltr,
+                ..
+            } => {
+                assert!(*hide_top && *hide_right, "top/right hidden");
+                assert!(!*hide_bot && !*hide_left, "bottom/left drawn");
+                assert!(*strike_tlbr && !*strike_bltr);
+            }
+            other => panic!("expected borderBox, got {other:?}"),
         }
     }
 }

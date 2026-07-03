@@ -122,7 +122,63 @@ function nodeToMathML(node: MathNode): string {
       return accentToMathML(node);
     case 'func':
       return `<mrow>${row(node.name)}<mo>&#x2061;</mo>${row(node.arg)}</mrow>`;
+    case 'phant':
+      return phantToMathML(node);
+    case 'sPre':
+      // §22.1.2.99 pre-sub-superscript: base, then <mprescripts/>, then the
+      // prescript pair (sub before sup). No postscripts.
+      return `<mmultiscripts>${row(node.base)}<mprescripts/>${row(node.sub)}${row(node.sup)}</mmultiscripts>`;
+    case 'box':
+      // §22.1.2.13 box: a logical grouping with NO border — a transparent mrow.
+      return row(node.base);
+    case 'borderBox':
+      return borderBoxToMathML(node);
   }
+}
+
+/** §22.1.2.81 phant → MathML. `show=false` hides the base (`<mphantom>`, which
+ *  renders invisibly but reserves space). A shown phant that zeroes a dimension
+ *  suppresses that extent with `<mpadded>` (width/height/depth = 0). A plain
+ *  shown phant with no zero* flags is just its base. */
+function phantToMathML(node: Extract<MathNode, { kind: 'phant' }>): string {
+  const inner = node.show ? seq(node.base) : `<mphantom>${seq(node.base)}</mphantom>`;
+  // Map zeroWid/zeroAsc/zeroDesc to <mpadded> extent overrides. In MathML,
+  // width = advance, height = ascent (above baseline), depth = descent (below).
+  const attrs: string[] = [];
+  if (node.zeroWid) attrs.push('width="0"');
+  if (node.zeroAsc) attrs.push('height="0"');
+  if (node.zeroDesc) attrs.push('depth="0"');
+  return attrs.length ? `<mpadded ${attrs.join(' ')}>${inner}</mpadded>` : `<mrow>${inner}</mrow>`;
+}
+
+/** §22.1.2.11 borderBox → `<menclose>`. The hide* flags REMOVE edges from the
+ *  default full box, so we build the notation from the edges that remain (plus
+ *  any strikes). With no edges and no strikes, emit a plain mrow (no enclosure). */
+function borderBoxToMathML(node: Extract<MathNode, { kind: 'borderBox' }>): string {
+  const notation: string[] = [];
+  // Full box unless every edge is hidden — otherwise list the surviving edges.
+  const top = !node.hideTop;
+  const bot = !node.hideBot;
+  const left = !node.hideLeft;
+  const right = !node.hideRight;
+  if (top && bot && left && right) {
+    notation.push('box');
+  } else {
+    if (top) notation.push('top');
+    if (bot) notation.push('bottom');
+    if (left) notation.push('left');
+    if (right) notation.push('right');
+  }
+  if (node.strikeH) notation.push('horizontalstrike');
+  if (node.strikeV) notation.push('verticalstrike');
+  // strikeBLTR = bottom-left→top-right = updiagonalstrike;
+  // strikeTLBR = top-left→bottom-right = downdiagonalstrike.
+  if (node.strikeBltr) notation.push('updiagonalstrike');
+  if (node.strikeTlbr) notation.push('downdiagonalstrike');
+  const inner = seq(node.base);
+  return notation.length
+    ? `<menclose notation="${notation.join(' ')}">${inner}</menclose>`
+    : `<mrow>${inner}</mrow>`;
 }
 
 // Map an OMML accent character to a MathJax-friendly accent. Combining marks (zero
