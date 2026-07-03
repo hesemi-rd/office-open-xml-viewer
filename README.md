@@ -828,3 +828,20 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
 ## License
 
 MIT
+
+## Third-Party Notices
+
+The library's own code is MIT-licensed. It also bundles a small set of
+permissively-licensed third-party components — see
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) (included in the npm
+tarball) for the full list and license texts. Highlights:
+
+- **[MathJax](https://www.mathjax.org/) + STIX Two Math**
+  (Apache License 2.0) — the equation-rendering engine behind the
+  opt-in `@silurus/ooxml/math` entry described in
+  [Rendering equations](#rendering-equations). It ships in the tarball as
+  a standalone ~3 MB asset but is never loaded by a consuming app unless
+  that app imports `@silurus/ooxml/math` and the viewer is handed a
+  document that actually contains an equation.
+- **Rust crate dependencies** of the WASM parsers (docx/pptx/xlsx) — all
+  MIT / Apache-2.0 (or compatible permissive licenses), no copyleft.

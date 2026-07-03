@@ -20,7 +20,20 @@ await build({
   minify: true,
   format: 'iife',
   target: 'es2020',
-  legalComments: 'none',
+  // 'linked' preserves any `@license`/`@preserve`-tagged comment esbuild finds
+  // while bundling (extracted to a sibling `mathjax-stix2.js.LEGAL.txt`,
+  // referenced from a top-of-file comment) instead of the previous 'none',
+  // which silently discarded them. @mathjax/src and
+  // @mathjax/mathjax-stix2-font (both Apache-2.0) currently carry no
+  // per-file license banners in their compiled .mjs output — verified by
+  // diffing the bundle across all four `legalComments` modes, which produced
+  // byte-identical output and no .LEGAL.txt in every case — so this is a
+  // no-op today. It is still the correct setting: if upstream ever adds
+  // banners, they survive the build automatically instead of being stripped.
+  // The actual Apache-2.0 attribution for MathJax/STIX2 lives in
+  // THIRD_PARTY_NOTICES.md (repo root), which is bundled into the npm
+  // tarball regardless of what this bundler step finds.
+  legalComments: 'linked',
   outfile: path.join(dir, '../assets/mathjax-stix2.js'),
 });
 
