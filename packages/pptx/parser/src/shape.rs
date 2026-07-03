@@ -2039,6 +2039,12 @@ fn parse_smartart_drawing(
         let empty_smartart: HashMap<String, String> = HashMap::new();
         // Dispatch the relevant branches (sp/cxnSp/grpSp) directly rather than via
         // parse_sp_tree_node, since the dsp subtree never contains embedded pictures.
+        // §20.1.2.2.8 CT_NonVisualDrawingProps@hidden: this manual dsp:sp/cxnSp/
+        // grpSp dispatch bypasses parse_sp_tree_node's shared hidden check, so it
+        // needs its own — otherwise a hidden SmartArt fallback shape still renders.
+        if node_is_hidden(node) {
+            continue;
+        }
         match node.tag_name().name() {
             "sp" => {
                 if let Some(mut shape) =
@@ -2084,6 +2090,12 @@ fn parse_smartart_drawing(
                 let group_start = out.len();
                 let _ = (&empty_rels, &empty_smartart); // silence unused warnings when no nested picture
                 for child_node in node.children().filter(|n| n.is_element()) {
+                    // Same per-node hidden check as the top-level dispatch above —
+                    // a hidden shape/connector nested directly inside a (visible)
+                    // SmartArt group must still be elided individually.
+                    if node_is_hidden(child_node) {
+                        continue;
+                    }
                     match child_node.tag_name().name() {
                         "sp" => {
                             if let Some(mut shape) =
@@ -2676,6 +2688,104 @@ mod hidden_tests {
                 <p:txBody><a:bodyPr/><a:p><a:r><a:t>s</a:t></a:r></a:p></p:txBody></p:sp>
             </p:grpSp>"#,
             ns = NS,
+        );
+        let out = run(&xml);
+        assert_eq!(out.len(), 1, "expected only the visible child: {out:?}");
+    }
+}
+
+#[cfg(test)]
+mod smartart_hidden_tests {
+    // `parse_smartart_drawing` dispatches dsp:sp/cxnSp/grpSp manually (it never
+    // routes through `parse_sp_tree_node`), so its own hidden check is a
+    // separate code path from `hidden_tests` above and needs its own coverage.
+    use super::*;
+    use std::collections::HashMap;
+
+    const NS: &str = concat!(
+        r#"xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" "#,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#
+    );
+
+    fn run(sp_tree_children: &str) -> Vec<SlideElement> {
+        // parse_smartart_drawing parses the drawing XML itself (it is the
+        // dsp:drawing1.xml part, not a subtree passed in already-parsed).
+        let xml = format!(
+            r#"<dsp:drawing {ns}><dsp:spTree>{children}</dsp:spTree></dsp:drawing>"#,
+            ns = NS,
+            children = sp_tree_children,
+        );
+        let theme = HashMap::new();
+        let gf_xfrm = Transform::default();
+        let mut out = Vec::new();
+        let mut zip = {
+            use std::io::Cursor;
+            let mut buf = Vec::new();
+            {
+                let w = zip::ZipWriter::new(Cursor::new(&mut buf));
+                w.finish().unwrap();
+            }
+            zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        };
+        parse_smartart_drawing(&xml, &gf_xfrm, &theme, &mut out, &mut zip);
+        out
+    }
+
+    fn dsp_sp(name: &str, hidden_attr: &str) -> String {
+        format!(
+            r#"<dsp:sp>
+              <dsp:nvSpPr><dsp:cNvPr id="2" name="{name}"{hidden}/><dsp:cNvSpPr/><dsp:nvPr/></dsp:nvSpPr>
+              <dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></dsp:spPr>
+              <dsp:txBody><a:bodyPr/><a:p><a:r><a:t>{name}</a:t></a:r></a:p></dsp:txBody>
+            </dsp:sp>"#,
+            name = name,
+            hidden = hidden_attr,
+        )
+    }
+
+    #[test]
+    fn hidden_top_level_smartart_shape_is_not_emitted() {
+        let out = run(&dsp_sp("Hidden", r#" hidden="1""#));
+        assert!(out.is_empty(), "hidden top-level dsp:sp emitted: {out:?}");
+    }
+
+    #[test]
+    fn visible_top_level_smartart_shape_is_emitted_unchanged() {
+        let out = run(&dsp_sp("Visible", ""));
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], SlideElement::Shape(_)));
+    }
+
+    #[test]
+    fn hidden_smartart_group_elides_whole_subtree() {
+        let xml = format!(
+            r#"<dsp:grpSp>
+              <dsp:nvGrpSpPr><dsp:cNvPr id="2" name="Grp" hidden="1"/><dsp:cNvGrpSpPr/><dsp:nvPr/></dsp:nvGrpSpPr>
+              <dsp:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></dsp:grpSpPr>
+              {child}
+            </dsp:grpSp>"#,
+            child = dsp_sp("Child", ""),
+        );
+        assert!(
+            run(&xml).is_empty(),
+            "hidden SmartArt group leaked a child shape"
+        );
+    }
+
+    #[test]
+    fn hidden_child_inside_visible_smartart_group_is_skipped() {
+        let xml = format!(
+            r#"<dsp:grpSp>
+              <dsp:nvGrpSpPr><dsp:cNvPr id="2" name="Grp"/><dsp:cNvGrpSpPr/><dsp:nvPr/></dsp:nvGrpSpPr>
+              <dsp:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></dsp:grpSpPr>
+              {hidden}
+              {shown}
+            </dsp:grpSp>"#,
+            hidden = dsp_sp("Hidden", r#" hidden="1""#),
+            shown = dsp_sp("Shown", ""),
         );
         let out = run(&xml);
         assert_eq!(out.len(), 1, "expected only the visible child: {out:?}");

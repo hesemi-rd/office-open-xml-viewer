@@ -21,7 +21,7 @@ use std::io::Cursor;
 /// node's direct non-visual-properties wrapper is inspected, never a
 /// descendant, so a group's own props are not confused with a nested shape's.
 /// A hidden drawing object is not rendered — skipped at parse time.
-fn xdr_node_hidden(node: &roxmltree::Node) -> bool {
+pub(crate) fn xdr_node_hidden(node: &roxmltree::Node) -> bool {
     for wrapper in &[
         "nvSpPr",
         "nvPicPr",

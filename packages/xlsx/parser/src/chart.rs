@@ -372,6 +372,15 @@ pub(crate) fn load_sheet_charts(
                             .unwrap_or(0);
                     }
                     "graphicFrame" => {
+                        // ECMA-376 §20.1.2.2.8 CT_NonVisualDrawingProps@hidden:
+                        // a hidden chart's own `<xdr:nvGraphicFramePr>/<xdr:cNvPr
+                        // hidden="1">` marks it not rendered. This is the chart's
+                        // own graphicFrame walk (independent of the shared shape
+                        // walker in drawing.rs::collect_shapes), so it needs its
+                        // own check.
+                        if crate::drawing::xdr_node_hidden(&child) {
+                            continue;
+                        }
                         // Look for a:graphic/a:graphicData/c:chart[@r:id]
                         for gf_child in child.descendants() {
                             if gf_child.tag_name().name() == "chart"
@@ -2922,5 +2931,115 @@ mod strict_namespace_tests {
         assert_eq!(chart.series.len(), 1);
         assert_eq!(chart.series[0].values, vec![Some(10.0), Some(20.0)]);
         assert_eq!(chart.val_axis_format_code.as_deref(), Some("#,##0.00"));
+    }
+}
+
+/// §20.1.2.2.8 — an `<xdr:cNvPr hidden="1">` graphicFrame is not rendered.
+/// `load_sheet_charts` walks `<xdr:graphicFrame>` independently of the shared
+/// shape walker in `drawing.rs::collect_shapes`, so it needs its own hidden
+/// check — this covers that walk specifically (full sheet → drawing → chart
+/// zip round trip, since `load_sheet_charts` reads from the archive).
+#[cfg(test)]
+mod hidden_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    const NS: &str = concat!(
+        r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" "#,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#,
+    );
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    fn minimal_chart_xml() -> String {
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:layout/>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt></c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:barChart>
+      <c:valAx><c:axId val="1"/><c:axPos val="l"/></c:valAx>
+      <c:catAx><c:axId val="2"/><c:axPos val="b"/></c:catAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#
+            .to_string()
+    }
+
+    fn drawing_xml(hidden_attr: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>16</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:graphicFrame>
+                <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"{hidden}/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+                <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></xdr:xfrm>
+                <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+                  <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/>
+                </a:graphicData></a:graphic>
+              </xdr:graphicFrame>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#,
+            NS = NS,
+            hidden = hidden_attr,
+        )
+    }
+
+    /// Builds a minimal zip archive wiring `xl/worksheets/sheet1.xml`'s rels →
+    /// `xl/drawings/drawing1.xml` → its own rels → `xl/charts/chart1.xml`, the
+    /// same part chain `load_sheet_charts` walks in production.
+    fn archive_with_chart(hidden_attr: &str) -> crate::XlsxZip {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = SimpleFileOptions::default();
+
+            zw.start_file("xl/worksheets/_rels/sheet1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).unwrap();
+
+            zw.start_file("xl/drawings/drawing1.xml", o).unwrap();
+            zw.write_all(drawing_xml(hidden_attr).as_bytes()).unwrap();
+
+            zw.start_file("xl/drawings/_rels/drawing1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#).unwrap();
+
+            zw.start_file("xl/charts/chart1.xml", o).unwrap();
+            zw.write_all(minimal_chart_xml().as_bytes()).unwrap();
+
+            zw.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+    }
+
+    #[test]
+    fn hidden_chart_graphicframe_is_not_emitted() {
+        for attr in [r#" hidden="1""#, r#" hidden="true""#] {
+            let mut archive = archive_with_chart(attr);
+            let charts = load_sheet_charts(&mut archive, "worksheets/sheet1.xml", &theme());
+            assert!(charts.is_empty(), "hidden chart emitted (attr={attr})");
+        }
+    }
+
+    #[test]
+    fn visible_chart_graphicframe_is_emitted_unchanged() {
+        for attr in ["", r#" hidden="0""#, r#" hidden="false""#] {
+            let mut archive = archive_with_chart(attr);
+            let charts = load_sheet_charts(&mut archive, "worksheets/sheet1.xml", &theme());
+            assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
+        }
     }
 }

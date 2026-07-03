@@ -299,6 +299,14 @@ pub(crate) fn parse_slicer_anchors(
                         p = pp.parent();
                     }
                     let frame = p?;
+                    // ECMA-376 §20.1.2.2.8 CT_NonVisualDrawingProps@hidden: a
+                    // hidden slicer graphicFrame's own `<xdr:nvGraphicFramePr>/
+                    // <xdr:cNvPr hidden="1">` marks it not rendered. This walk
+                    // is independent of the shared shape walker in
+                    // drawing.rs::collect_shapes, so it needs its own check.
+                    if crate::drawing::xdr_node_hidden(&frame) {
+                        return None;
+                    }
                     let cnvpr = frame
                         .descendants()
                         .find(|d| d.is_element() && d.tag_name().name() == "cNvPr")?;
@@ -358,6 +366,85 @@ pub(crate) fn parse_slicer_anchors(
         });
     }
     out
+}
+
+/// §20.1.2.2.8 — an `<xdr:cNvPr hidden="1">` slicer graphicFrame is not
+/// rendered. `parse_slicer_anchors` resolves its graphicFrame via a manual
+/// `mc:AlternateContent` descent independent of the shared shape walker in
+/// `drawing.rs::collect_shapes`, so it needs its own hidden check.
+#[cfg(test)]
+mod hidden_tests {
+    use super::*;
+
+    const NS: &str = concat!(
+        r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" "#,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
+        r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" "#,
+        r#"xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main""#,
+    );
+
+    fn drawing_xml(hidden_attr: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <mc:AlternateContent>
+                <mc:Choice Requires="x14">
+                  <xdr:graphicFrame>
+                    <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Slicer_Region"{hidden}/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+                    <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="2743200"/></xdr:xfrm>
+                    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2010/slicer">
+                      <x14:slicer name="Region"/>
+                    </a:graphicData></a:graphic>
+                  </xdr:graphicFrame>
+                </mc:Choice>
+              </mc:AlternateContent>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#,
+            NS = NS,
+            hidden = hidden_attr,
+        )
+    }
+
+    fn slicer_defs() -> HashMap<String, SlicerDef> {
+        // Keyed by the graphicFrame's own cNvPr@name (the "Slicer_Region" in
+        // the fixture below), matching how parse_slicer_anchors resolves it.
+        let mut m = HashMap::new();
+        m.insert(
+            "Slicer_Region".to_string(),
+            SlicerDef {
+                caption: "Region".to_string(),
+                cache: "Slicer_Region".to_string(),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn hidden_slicer_graphicframe_is_not_emitted() {
+        for attr in [r#" hidden="1""#, r#" hidden="true""#] {
+            let out = parse_slicer_anchors(
+                &drawing_xml(attr),
+                &slicer_defs(),
+                &HashMap::new(),
+                &PivotCacheFields::default(),
+            );
+            assert!(out.is_empty(), "hidden slicer emitted (attr={attr})");
+        }
+    }
+
+    #[test]
+    fn visible_slicer_graphicframe_is_emitted_unchanged() {
+        for attr in ["", r#" hidden="0""#, r#" hidden="false""#] {
+            let out = parse_slicer_anchors(
+                &drawing_xml(attr),
+                &slicer_defs(),
+                &HashMap::new(),
+                &PivotCacheFields::default(),
+            );
+            assert_eq!(out.len(), 1, "visible slicer dropped (attr={attr})");
+        }
+    }
 }
 
 // ─── Chart loading ──────────────────────────────────────────────────────────
