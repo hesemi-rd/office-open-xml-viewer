@@ -9,6 +9,9 @@ import type { WireRenderPageOptions } from './worker-protocol';
  *  clientHeight/Width, event listeners, removeChild/remove, canvas ctx. */
 export interface FakeEl {
   tag: string;
+  /** Uppercase tag, mirroring the real DOM (`div` → `DIV`) — the viewer's
+   *  canvas-container guard reads it. */
+  tagName: string;
   textContent: string;
   innerHTML: string;
   style: Record<string, string> & { cssText: string };
@@ -55,6 +58,7 @@ export function makeEl(tag: string): FakeEl {
   const style: Record<string, string> = {};
   const el: FakeEl = {
     tag,
+    tagName: tag.toUpperCase(),
     textContent: '',
     innerHTML: '',
     width: 0,

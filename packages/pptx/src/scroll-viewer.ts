@@ -245,6 +245,17 @@ export class PptxScrollViewer {
   private readonly _pageShadow: string | false;
 
   constructor(container: HTMLElement, opts: PptxScrollViewerOptions = {}) {
+    // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
+    // used to the pager API (PptxViewer takes a canvas) from passing one — but
+    // canvas children never render, so the viewer would come up silently blank.
+    // Fail loudly with the fix instead. (tagName, not instanceof: cross-realm safe.)
+    if (container.tagName === 'CANVAS') {
+      throw new Error(
+        'PptxScrollViewer takes a container element (e.g. a <div>), not a <canvas> — ' +
+          'the viewer creates and manages its own canvases. Pass a block container; ' +
+          'for the single-slide canvas API use PptxViewer.',
+      );
+    }
     this._container = container;
     this._opts = opts;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
