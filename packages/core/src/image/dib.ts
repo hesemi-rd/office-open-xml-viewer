@@ -9,6 +9,26 @@
 
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
 
+/**
+ * Maximum width or height (px) accepted for a decoded DIB. 32767 is the largest
+ * dimension every major browser accepts for a `<canvas>` / `OffscreenCanvas`
+ * (Chrome/Firefox/Safari all top out at 32767 on at least one axis). A DIB
+ * exceeding this could never be blitted (`blitDibToCtx` allocates an aux canvas
+ * of exactly `dib.width × dib.height`), so it is rejected at decode time.
+ */
+const MAX_DIB_DIMENSION = 32767;
+
+/**
+ * Megapixel budget for a decoded DIB: 64 MP (2^26 px). The decode allocates a
+ * `width × height × 4` RGBA buffer, so 64 MP bounds it to 256 MiB — the
+ * practical ceiling for a metafile-embedded raster (a 600-DPI A4 scan is
+ * ~35 MP, well under this). A crafted 65535×65535 header (≈4.29e9 px → ~17 GB
+ * RGBA) exceeds the budget by ~64× and is refused before allocation. The
+ * product stays exact in an IEEE-754 double (max ≈ 32767² ≪ 2^53), so a plain
+ * numeric comparison suffices — no BigInt needed.
+ */
+const MAX_DIB_PIXELS = 1 << 26; // 67_108_864 px = 64 MP
+
 /** A decoded DIB as top-down RGBA (what `ImageData`/`putImageData` expects). */
 export interface DecodedDib {
   width: number;
@@ -40,7 +60,14 @@ export function decodeDib(
   const topDown = biHeightRaw < 0;
   const width = Math.abs(biWidth);
   const height = Math.abs(biHeightRaw);
-  if (width <= 0 || height <= 0 || width > 1 << 16 || height > 1 << 16) return null;
+  // Validate dimensions BEFORE the RGBA allocation. Reject non-positive dims,
+  // any dimension past the max canvas size, and any total pixel count over the
+  // megapixel budget — a crafted header (e.g. 65535×65535) otherwise reaches
+  // `new Uint8ClampedArray(width*height*4)` and OOMs the tab (~17 GB). See
+  // MAX_DIB_DIMENSION / MAX_DIB_PIXELS.
+  if (width <= 0 || height <= 0) return null;
+  if (width > MAX_DIB_DIMENSION || height > MAX_DIB_DIMENSION) return null;
+  if (width * height > MAX_DIB_PIXELS) return null;
 
   const out = new Uint8ClampedArray(width * height * 4);
   const rowStride = (((width * biBitCount + 31) >> 5) << 2) >>> 0; // 4-byte aligned

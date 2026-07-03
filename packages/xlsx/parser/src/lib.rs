@@ -1703,18 +1703,38 @@ pub(crate) fn resolve_fill_color(
     None
 }
 
+/// Build a [`CellRange`] from two corner cells, normalizing so `top <= bottom`
+/// and `left <= right` regardless of which corner was written first/second in
+/// the source reference.
+///
+/// ECMA-376 does not spell out corner order for `ST_Ref`/`ST_Sqref` (§18.18.62 /
+/// §18.18.76 describe the reference grammar, not a canonicalization rule), but
+/// Excel itself treats `A10:A1` and `A1:A10` as the identical range — the UI
+/// re-displays a reversed typed range in top-left/bottom-right order. Callers
+/// throughout this module (`extract_range_values`, dimension math) assume
+/// `bottom >= top` and `right >= left` and compute spans via unsigned
+/// subtraction; an un-normalized reversed range (e.g. a crafted `<xm:f>` of
+/// `A10:A1`) underflows that subtraction — silently wrapping in a release
+/// build (`overflow-checks` off) and panicking in debug/test builds. Defensive
+/// normalization here closes that off for every `parse_sqref` consumer at the
+/// source, matching Excel's actual interpretation rather than merely avoiding
+/// the crash.
+fn cell_range_from_corners(a: &str, b: &str) -> CellRange {
+    let (col_a, row_a) = parse_cell_ref(a);
+    let (col_b, row_b) = parse_cell_ref(b);
+    CellRange {
+        top: row_a.min(row_b),
+        bottom: row_a.max(row_b),
+        left: col_a.min(col_b),
+        right: col_a.max(col_b),
+    }
+}
+
 fn parse_sqref(s: &str) -> Vec<CellRange> {
     s.split_whitespace()
         .map(|range_str| {
             if let Some((a, b)) = range_str.split_once(':') {
-                let (left, top) = parse_cell_ref(a);
-                let (right, bottom) = parse_cell_ref(b);
-                CellRange {
-                    top,
-                    left,
-                    bottom,
-                    right,
-                }
+                cell_range_from_corners(a, b)
             } else {
                 let (col, row) = parse_cell_ref(range_str);
                 CellRange {
@@ -1753,9 +1773,34 @@ fn split_sheet_ref(s: &str) -> (Option<String>, String) {
 ///
 /// This is intentionally lighter than `parse_row_cells`: sparklines only need
 /// raw numbers, no styles, formulas, or shared strings.
+/// Upper bound on the number of cells a single sparkline data range may span
+/// before `extract_range_values` refuses to materialize the dense value buffer.
+///
+/// Rationale: a real sparkline plots a handful to a few hundred points; even a
+/// generous whole-column series is 1,048,576 cells (Excel's max rows, ECMA-376
+/// §18.3.1.73 — `SpreadsheetML` grid is 16384 cols × 1048576 rows). We cap at
+/// exactly one million cells, which:
+///   • comfortably covers any legitimate range (a full single column, or a
+///     1000×1000 block), and
+///   • bounds the dense `Vec<Option<f64>>` to 1e6 × 16 B = 16 MiB — trivially
+///     within the 512 MiB per-entry ZIP budget (`ooxml_common::zip`), so the
+///     sparkline allocation can never dominate the parse.
+/// A crafted `A1:XFD1048576` reference (16384 × 1048576 ≈ 1.7e10 cells ≈ 275 GB)
+/// exceeds this by four orders of magnitude and is refused: we return an empty
+/// `Vec` and the sparkline is simply not drawn (the renderer iterates the value
+/// slice by index, so an empty slice draws nothing — graceful degradation, not
+/// a hard error).
+const MAX_SPARKLINE_CELLS: usize = 1_000_000;
+
 fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> {
     let total = ((range.bottom - range.top + 1) as usize)
         .saturating_mul((range.right - range.left + 1) as usize);
+    // Guard the dense allocation: refuse pathological ranges (e.g. a full-sheet
+    // `<xm:f>`) that would demand a multi-hundred-GB buffer. Returning empty
+    // fails safe — no sparkline rather than OOM. See MAX_SPARKLINE_CELLS.
+    if total > MAX_SPARKLINE_CELLS {
+        return Vec::new();
+    }
     let mut values: Vec<Option<f64>> = vec![None; total];
     let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
         return values;
@@ -2862,5 +2907,201 @@ mod strict_namespace_cell_tests {
             CellValue::Number { number } => assert_eq!(*number, 42.5),
             other => panic!("expected a number, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod sparkline_range_cap_tests {
+    use super::*;
+
+    /// A malicious `<xm:f>` referencing a whole-sheet range (`A1:XFD1048576`,
+    /// 16384 × 1048576 ≈ 1.7e10 cells → ~275 GB of `Vec<Option<f64>>`) must NOT
+    /// attempt the dense allocation. The cap fires and `extract_range_values`
+    /// returns an empty `Vec`, so the sparkline simply is not drawn (the
+    /// downstream renderer iterates `values` by index, so an empty slice draws
+    /// nothing — no panic, no OOM).
+    #[test]
+    fn oversized_full_sheet_range_returns_empty_without_allocating() {
+        // parse_cell_ref("A1") = (col 1, row 1); ("XFD1048576") = (col 16384,
+        // row 1048576). This is Excel's entire grid — the worst case an
+        // attacker can express.
+        let range = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1_048_576,
+            right: 16_384,
+        };
+        // Minimal well-formed worksheet with a single real value inside the
+        // range. Before the fix, building `vec![None; 1.7e10]` OOMs/aborts here.
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>3.5</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert!(
+            values.is_empty(),
+            "an over-cap sparkline range must yield an empty Vec (no dense alloc), got len {}",
+            values.len()
+        );
+    }
+
+    /// A normal small sparkline range (a handful of cells) must still resolve
+    /// its numeric values in row-major order, unaffected by the cap.
+    #[test]
+    fn normal_small_range_still_resolves_values() {
+        // B2:B4 — three cells in one column.
+        let range = CellRange {
+            top: 2,
+            left: 2,
+            bottom: 4,
+            right: 2,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><v>10</v></c></row><row r="3"><c r="B3"><v>20</v></c></row><row r="4"><c r="B4" t="s"><v>0</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert_eq!(values.len(), 3, "3-cell range must yield 3 slots");
+        assert_eq!(values[0], Some(10.0));
+        assert_eq!(values[1], Some(20.0));
+        assert_eq!(values[2], None, "string cell (t=s) must map to None");
+    }
+
+    /// A range exactly at the cap must still allocate; one cell over must not.
+    /// Guards the boundary condition of `MAX_SPARKLINE_CELLS`.
+    #[test]
+    fn range_at_cap_allocates_over_cap_does_not() {
+        // 1000 columns × 1000 rows = 1_000_000 cells = exactly MAX_SPARKLINE_CELLS.
+        let at_cap = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1000,
+            right: 1000,
+        };
+        let empty_xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+        let at = extract_range_values(empty_xml, &at_cap);
+        assert_eq!(
+            at.len(),
+            MAX_SPARKLINE_CELLS,
+            "a range exactly at the cap must allocate all slots"
+        );
+
+        // One column wider → 1001 × 1000 = 1_001_000 > cap → empty.
+        let over_cap = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1000,
+            right: 1001,
+        };
+        assert!(
+            extract_range_values(empty_xml, &over_cap).is_empty(),
+            "a range one cell over the cap must yield empty"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reversed_range_normalization_tests {
+    use super::*;
+
+    /// A malicious (or merely hand-typed) `<xm:f>` reversed-row range like
+    /// `A10:A1` must normalize to `top=1, bottom=10` — matching Excel's own
+    /// interpretation of a backwards-typed range — rather than leaving
+    /// `bottom < top`. Before the fix, `parse_sqref` copied the corners
+    /// verbatim and `extract_range_values`'s `bottom - top` underflowed
+    /// (`u32` subtraction), wrapping silently in release and panicking
+    /// (`should_panic`-worthy, exit 101) in debug/test builds.
+    #[test]
+    fn parse_sqref_normalizes_reversed_row_range() {
+        let ranges = parse_sqref("A10:A1");
+        assert_eq!(ranges.len(), 1);
+        let r = &ranges[0];
+        assert_eq!(r.top, 1, "top must be the smaller row");
+        assert_eq!(r.bottom, 10, "bottom must be the larger row");
+        assert_eq!(r.left, 1);
+        assert_eq!(r.right, 1);
+    }
+
+    /// Same as above but for a reversed COLUMN range (`B1:A1`): `left`/`right`
+    /// must normalize independently of `top`/`bottom`.
+    #[test]
+    fn parse_sqref_normalizes_reversed_column_range() {
+        let ranges = parse_sqref("B1:A1");
+        assert_eq!(ranges.len(), 1);
+        let r = &ranges[0];
+        assert_eq!(r.left, 1, "left must be the smaller column");
+        assert_eq!(r.right, 2, "right must be the larger column");
+        assert_eq!(r.top, 1);
+        assert_eq!(r.bottom, 1);
+    }
+
+    /// A range reversed on BOTH axes (`B10:A1`) normalizes on both.
+    #[test]
+    fn parse_sqref_normalizes_reversed_both_axes() {
+        let ranges = parse_sqref("B10:A1");
+        let r = &ranges[0];
+        assert_eq!((r.top, r.bottom, r.left, r.right), (1, 10, 1, 2));
+    }
+
+    /// A normal, already-ordered range is unaffected (identical to what
+    /// `parse_sqref` produced before this fix).
+    #[test]
+    fn parse_sqref_leaves_ordered_range_unchanged() {
+        let ranges = parse_sqref("A1:A10");
+        let r = &ranges[0];
+        assert_eq!((r.top, r.bottom, r.left, r.right), (1, 10, 1, 1));
+    }
+
+    /// End-to-end: a reversed-row sparkline data range must not panic and
+    /// must resolve the SAME cell values as the equivalent ordered range —
+    /// proving normalization, not just crash-avoidance. Guards against a
+    /// regression to the pre-fix unsigned-subtraction underflow in
+    /// `extract_range_values` (`(range.bottom - range.top + 1)`), which
+    /// panics in debug/test builds (`overflow-checks` on) and silently wraps
+    /// in release, in both cases producing wrong/no data instead of the
+    /// correct cell set.
+    #[test]
+    fn reversed_range_resolves_same_values_as_ordered_range() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row><row r="3"><c r="A3"><v>3</v></c></row></sheetData></worksheet>"#;
+
+        let ordered = parse_sqref("A1:A3");
+        let reversed = parse_sqref("A3:A1");
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(reversed.len(), 1);
+        assert_eq!(
+            (
+                ordered[0].top,
+                ordered[0].bottom,
+                ordered[0].left,
+                ordered[0].right
+            ),
+            (
+                reversed[0].top,
+                reversed[0].bottom,
+                reversed[0].left,
+                reversed[0].right
+            ),
+            "reversed and ordered refs to the same cells must normalize identically"
+        );
+
+        let ordered_values = extract_range_values(xml, &ordered[0]);
+        let reversed_values = extract_range_values(xml, &reversed[0]);
+        assert_eq!(
+            ordered_values,
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            "ordered range resolves row-major"
+        );
+        assert_eq!(
+            reversed_values, ordered_values,
+            "a reversed-row range must resolve to the identical cell values, not empty/wrong"
+        );
+    }
+
+    /// A reversed column range (`B1:A1`) likewise does not panic and resolves
+    /// the same values as its ordered equivalent.
+    #[test]
+    fn reversed_column_range_resolves_same_values_as_ordered_range() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>7</v></c><c r="B1"><v>8</v></c></row></sheetData></worksheet>"#;
+
+        let ordered = parse_sqref("A1:B1");
+        let reversed = parse_sqref("B1:A1");
+        let ordered_values = extract_range_values(xml, &ordered[0]);
+        let reversed_values = extract_range_values(xml, &reversed[0]);
+        assert_eq!(ordered_values, vec![Some(7.0), Some(8.0)]);
+        assert_eq!(reversed_values, ordered_values);
     }
 }
