@@ -665,6 +665,82 @@ pub(crate) fn parse_picture(
     })
 }
 
+/// Build a `PictureElement` for an OLE preview `<p:pic>` that carries NO
+/// `<a:xfrm>` (so `parse_picture` returns None). The enclosing graphicFrame's
+/// `Transform` supplies placement and size. Only the blip resolution is
+/// borrowed from the ordinary picture path; every drawing decoration
+/// (custGeom, effects, srcRect …) that requires an spPr xfrm is irrelevant for
+/// an unstyled preview, so we keep them at their neutral defaults.
+pub(crate) fn parse_ole_preview_picture(
+    pic_node: roxmltree::Node<'_, '_>,
+    gf: &Transform,
+    slide_dir: &str,
+    rels: &HashMap<String, String>,
+    _theme: &HashMap<String, String>,
+    zip: &mut PptxZip,
+) -> Option<PictureElement> {
+    if gf.cx == 0 || gf.cy == 0 {
+        return None; // no drawable box
+    }
+    let blip_fill = child(pic_node, "blipFill")?;
+    let blip = child(blip_fill, "blip")?;
+
+    // MS 2016 SVG extension: prefer the vector original when present.
+    let svg_image_path = svg_blip_path(blip, slide_dir, rels, zip);
+
+    // Raster fallback (`<a:blip r:embed>` → zip path + intrinsic PNG size).
+    let raster: Option<(String, Option<(u32, u32)>)> = (|| {
+        let r_id = attr_r(&blip, "embed")?;
+        let rel_target = rels.get(&r_id)?;
+        let path = resolve_path(slide_dir, rel_target);
+        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        let size = png_size_from_bytes(&image_bytes);
+        Some((path, size))
+    })();
+
+    let (image_path, mime_type, intrinsic_width_px, intrinsic_height_px) =
+        match (raster, svg_image_path.as_ref()) {
+            (Some((path, size)), _) => {
+                let mime = mime_from_ext(&path).to_owned();
+                let (w, h) = match size {
+                    Some((w, h)) => (Some(w), Some(h)),
+                    None => (None, None),
+                };
+                (path, mime, w, h)
+            }
+            (None, Some(svg)) => (svg.clone(), "image/svg+xml".to_owned(), None, None),
+            (None, None) => return None,
+        };
+
+    Some(PictureElement {
+        x: gf.x,
+        y: gf.y,
+        width: gf.cx,
+        height: gf.cy,
+        rotation: gf.rot,
+        flip_h: gf.flip_h,
+        flip_v: gf.flip_v,
+        image_path,
+        mime_type,
+        svg_image_path,
+        intrinsic_width_px,
+        intrinsic_height_px,
+        stroke: None,
+        prst_geom: None,
+        prst_adjust: None,
+        src_rect: parse_src_rect(blip_fill),
+        alpha: parse_blip_alpha(blip_fill),
+        cust_geom: None,
+        shadow: None,
+        inner_shadow: None,
+        glow: None,
+        soft_edge: None,
+        reflection: None,
+        scene3d: None,
+        sp3d: None,
+    })
+}
+
 /// Decode (width, height) from raw PNG bytes by reading the IHDR chunk. Returns
 /// None for non-PNG payloads or malformed data (unchanged semantics from the
 /// former `png_size_from_data_url`, only the input is now raw bytes instead of
@@ -1724,6 +1800,49 @@ pub(crate) fn parse_sp_tree_node(
                     }
                 }
             }
+
+            // OLE embedded object (§19.3.2.4 CT_OleObject). We can't run the
+            // embedded application, but the OOXML author bakes a preview `<p:pic>`
+            // inside `<p:oleObj>` for exactly this case. Route that picture through
+            // the ordinary image pipeline so the object is visible instead of a
+            // silent hole.
+            if let Some(gd) = node
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
+            {
+                let uri = attr(&gd, "uri").unwrap_or_default();
+                if uri == "http://schemas.openxmlformats.org/presentationml/2006/ole" {
+                    // `<p:oleObj>` is frequently wrapped in `mc:AlternateContent`
+                    // where BOTH `mc:Choice` and `mc:Fallback` carry an identical
+                    // preview `<p:pic>`. Taking the FIRST oleObj in document order
+                    // (the Choice's, or the sole direct one) yields exactly one
+                    // picture — never a double-draw.
+                    let ole_pic = gd
+                        .descendants()
+                        .find(|n| n.is_element() && n.tag_name().name() == "oleObj")
+                        .and_then(|ole| child(ole, "pic"));
+                    if let Some(pic_node) = ole_pic {
+                        // The preview pic's own `<a:xfrm>` is 0,0-relative (or
+                        // absent), so the graphicFrame's `<p:xfrm>` is authoritative
+                        // for placement. Parse the blip, then stamp gf geometry.
+                        if let Some(mut pic) = parse_picture(pic_node, slide_dir, rels, theme, zip)
+                        {
+                            pic.x = t.x;
+                            pic.y = t.y;
+                            pic.width = t.cx;
+                            pic.height = t.cy;
+                            out.push(SlideElement::Picture(pic));
+                        } else if let Some(pic) =
+                            parse_ole_preview_picture(pic_node, &t, slide_dir, rels, theme, zip)
+                        {
+                            // The pic lacked an `<a:xfrm>` (parse_picture requires
+                            // one), but still carries a resolvable blip — build the
+                            // element directly on the graphicFrame geometry.
+                            out.push(SlideElement::Picture(pic));
+                        }
+                    }
+                }
+            }
         }
         "grpSp" => {
             let grp_sp_pr = child(node, "grpSpPr");
@@ -2131,4 +2250,187 @@ fn parse_connector(
         scene3d: parse_scene3d(sp_pr),
         sp3d: parse_sp3d(sp_pr),
     })
+}
+
+#[cfg(test)]
+mod ole_tests {
+    use super::*;
+    use crate::master::LayoutPlaceholders;
+    use std::io::{Cursor, Write};
+
+    /// A 2×2 PNG so `png_size_from_bytes` returns Some((2, 2)) and
+    /// `read_zip_bytes` succeeds. Only the 8-byte signature + IHDR are read.
+    fn tiny_png() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"\x89PNG\r\n\x1a\n"); // signature
+        b.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&2u32.to_be_bytes()); // width
+        b.extend_from_slice(&2u32.to_be_bytes()); // height
+        b.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth / colour type / etc.
+        b.extend_from_slice(&[0, 0, 0, 0]); // fake CRC (unread)
+        b
+    }
+
+    fn zip_with(parts: &[(&str, &[u8])]) -> PptxZip {
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (path, bytes) in parts {
+                w.start_file(*path, o).unwrap();
+                w.write_all(bytes).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+    }
+
+    const OLE_URI: &str = "http://schemas.openxmlformats.org/presentationml/2006/ole";
+
+    fn ns() -> &'static str {
+        concat!(
+            r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" "#,
+            r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
+            r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#,
+            r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#
+        )
+    }
+
+    fn run(xml: &str, zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<SlideElement> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let lph = LayoutPlaceholders::default();
+        let theme = HashMap::new();
+        let smart = HashMap::new();
+        let mut out = Vec::new();
+        parse_sp_tree_node(
+            doc.root_element(),
+            &lph,
+            "ppt/slides",
+            rels,
+            &smart,
+            zip,
+            &theme,
+            &mut out,
+            false,
+            None,
+        );
+        out
+    }
+
+    /// An OLE graphicFrame wrapped in mc:AlternateContent (Choice + Fallback both
+    /// carry a `<p:oleObj>` with a preview `<p:pic>`) must emit exactly ONE
+    /// PictureElement — the Choice's — never a second from the Fallback.
+    #[test]
+    fn ole_object_emits_single_preview_picture() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdImg".to_string(), "../media/oleImage1.png".to_string());
+        let mut zip = zip_with(&[("ppt/media/oleImage1.png", &tiny_png())]);
+
+        let pic = |embed: &str| {
+            format!(
+                r#"<p:oleObj r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/>
+                 <p:pic>
+                  <p:nvPicPr><p:cNvPr id="5" name="Object"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                  <p:blipFill><a:blip r:embed="{embed}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                  <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                 </p:pic>
+                </p:oleObj>"#
+            )
+        };
+        let xml = format!(
+            r#"<p:graphicFrame {ns}>
+              <p:xfrm><a:off x="1000000" y="2000000"/><a:ext cx="1828800" cy="914400"/></p:xfrm>
+              <a:graphic><a:graphicData uri="{uri}">
+                <mc:AlternateContent>
+                  <mc:Choice Requires="v">{choice}</mc:Choice>
+                  <mc:Fallback>{fallback}</mc:Fallback>
+                </mc:AlternateContent>
+              </a:graphicData></a:graphic>
+            </p:graphicFrame>"#,
+            ns = ns(),
+            uri = OLE_URI,
+            choice = pic("rIdImg"),
+            fallback = pic("rIdImg"),
+        );
+
+        let out = run(&xml, &mut zip, &rels);
+        let pics: Vec<_> = out
+            .iter()
+            .filter(|e| matches!(e, SlideElement::Picture(_)))
+            .collect();
+        assert_eq!(
+            pics.len(),
+            1,
+            "OLE Choice+Fallback must yield exactly one preview picture, got {}",
+            pics.len()
+        );
+        // Position must be the graphicFrame's (the inner pic xfrm is 0,0-relative).
+        if let SlideElement::Picture(p) = pics[0] {
+            assert_eq!((p.x, p.y), (1_000_000, 2_000_000));
+            assert_eq!((p.width, p.height), (1_828_800, 914_400));
+        }
+    }
+
+    /// A direct (un-wrapped) `<p:oleObj>` whose inner `<p:pic>` has NO xfrm must
+    /// still emit a picture, positioned/sized by the graphicFrame xfrm.
+    #[test]
+    fn ole_object_without_pic_xfrm_uses_graphicframe_xfrm() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdImg".to_string(), "../media/oleImage2.png".to_string());
+        let mut zip = zip_with(&[("ppt/media/oleImage2.png", &tiny_png())]);
+
+        let xml = format!(
+            r#"<p:graphicFrame {ns}>
+              <p:xfrm><a:off x="500000" y="600000"/><a:ext cx="2743200" cy="1371600"/></p:xfrm>
+              <a:graphic><a:graphicData uri="{uri}">
+                <p:oleObj r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/>
+                 <p:pic>
+                  <p:nvPicPr><p:cNvPr id="6" name="Object"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                  <p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill>
+                  <p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                 </p:pic>
+                </p:oleObj>
+              </a:graphicData></a:graphic>
+            </p:graphicFrame>"#,
+            ns = ns(),
+            uri = OLE_URI,
+        );
+
+        let out = run(&xml, &mut zip, &rels);
+        let SlideElement::Picture(p) = out
+            .iter()
+            .find(|e| matches!(e, SlideElement::Picture(_)))
+            .expect("a picture must be emitted from a pic without its own xfrm")
+        else {
+            unreachable!()
+        };
+        assert_eq!((p.x, p.y), (500_000, 600_000));
+        assert_eq!((p.width, p.height), (2_743_200, 1_371_600));
+    }
+
+    /// A `<p:oleObj>` with NO `<p:pic>` (icon-only / link form) emits nothing —
+    /// preserving the prior silent-skip behaviour rather than drawing a blank.
+    #[test]
+    fn ole_object_without_pic_emits_nothing() {
+        let rels = HashMap::new();
+        let mut zip = zip_with(&[]);
+        let xml = format!(
+            r#"<p:graphicFrame {ns}>
+              <p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm>
+              <a:graphic><a:graphicData uri="{uri}">
+                <p:oleObj r:id="rIdOle" progId="Equation.3" showAsIcon="1"><p:embed/></p:oleObj>
+              </a:graphicData></a:graphic>
+            </p:graphicFrame>"#,
+            ns = ns(),
+            uri = OLE_URI,
+        );
+        let out = run(&xml, &mut zip, &rels);
+        assert!(
+            out.is_empty(),
+            "an oleObj with no preview pic must emit nothing, got {} element(s)",
+            out.len()
+        );
+    }
 }
