@@ -58,7 +58,7 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 - [ ] RB3: sparkline レンジのセル数キャップ
 - [ ] RB4: DIB 検証順序 + megapixel 予算
 - [ ] RB11: zip reserve のキャップ
-- [ ] RB12: CFB シグネチャ検知 → typed error
+- [x] RB12: CFB シグネチャ検知 → typed error — **完了**(branch feat/encrypted-detection)。パスワード保護 OOXML と旧 .doc/.xls/.ppt は ZIP でなく CFB(先頭 `D0 CF 11 E0 A1 B1 1A E1`)。main 側で `sniffCfb`(core `errors/cfb-sniff.ts`、[MS-CFB] §2.2 ヘッダ + §2.3 FAT による directory チェーン走査 + §2.6 entry 名列挙。in-header DIFAT〔109 FAT sector〕のみで DIFAT-sector 拡張/mini FAT は不要。悪意入力への堅牢性ガード = 全 read の範囲検査・sector shift 検証・FAT walk の hard cap + cycle guard・directory scan cap → 構造破損は例外/hang でなく `cfb-unknown` に degrade。決定的シード付き 20k fuzz テストとして suite に固定〔`cfb-sniff.test.ts`、mulberry32 固定シード、ランダムバイト列/シグネチャ強制+ランダム本体/sectorShift・firstDirSector 異常値注入の3カテゴリ、throw なし・戻り値が `CfbKind | null` に収まることを assert、実測 ~1秒〕(+v4〔4096B sector〕fixture テストも追加))を **worker 送出前**に呼び、`EncryptionInfo`→`encrypted` / `WordDocument`・`Workbook`・`Book`・`PowerPoint Document`→`legacy-binary-format` / それ以外の CFB→`not-ooxml` を `OoxmlError`(core `errors/ooxml-error.ts`)へ。**設計判断: main 側検知**(worker 境界で `instanceof` が失われるため、CFB は worker に渡さず main で reject)。**`OoxmlError` の最小導入は PD4(typed errors)の部分前倒し**(3フォーマットの public index から re-export、拡張点として `'invalid-password'` 等を将来追加できる旨を型コメントに明記)。復号自体は次 PR(PD8、下記 Phase 8 参照)。
 - [ ] RB8: cargo audit / pnpm audit ゲート(report-only 開始)
 
 ### worker / ライフサイクル
@@ -176,16 +176,18 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 - [ ] QA6: cargo-fuzz(3 parser + handle + rels)、24h クリーン目標
 - [ ] QA7: proptest / fast-check
 
-## Phase 8 — プロダクト展開 【全項目見送り(2026-07-03 ユーザー決定)】
+## Phase 8 — プロダクト展開 【全項目見送り(2026-07-03 ユーザー決定)。ただし PD8 のみ個別復活(2026-07-03)】
 
 > ニーズが実証されていない段階でのプロダクト展開・エコシステム拡張は行わない。ユーザー需要が出た時点で個別に再検討する(PD7 も同判断で見送り)。Phase 1 の PD1(markdown 公開 — 既に全ユーザーの WASM に同梱済み機能の露出)と PD11(STABILITY.md — 運用ドキュメント)は対象外で存続。
+>
+> **PD8(暗号化対応)のみユーザー決定で個別復活(2026-07-03)**: RB12(CFB 検知 → typed error、本 PR feat/encrypted-detection)を第一段とし、次 PR で復号エンジン(TS/WebCrypto、`LoadOptions.password`、UI なし)を実装する。PD8 に付随して `OoxmlError`(= PD4 の最小前倒し)を先行導入済み。他 PD 項目は引き続き見送り。
 
 - ~~PD2: node 公開 + docx/xlsx サムネイル完成~~
 - ~~PD3: PDF(S: ラスタ印刷 → L: ベクター記録コンテキスト)~~
-- ~~PD4: OoxmlError typed errors~~
+- ~~PD4: OoxmlError typed errors~~(最小版 `OoxmlError` は RB12/PD8 に付随して 2026-07-03 に部分前倒し導入済み。全面 typed-error 化は別トラックで存続)
 - ~~PD5: @silurus/ooxml-react~~
 - ~~PD6: Web Component + 静的ホスト~~
-- ~~PD8: 暗号化対応(Agile Encryption)~~
+- [ ] PD8: 暗号化対応(Agile Encryption) — **ユーザー決定で個別復活(2026-07-03)**: RB12(本 PR feat/encrypted-detection、CFB 検知 → typed error)→ 復号エンジン(次 PR、TS/WebCrypto、[MS-OFFCRYPTO] §2.3.4 Agile Encryption の SHA-512 spin + AES、`LoadOptions.password`、UI なし)。
 - ~~PD9: fidelity スコアカード~~
 - ~~PD10: API リファレンス生成化~~
 

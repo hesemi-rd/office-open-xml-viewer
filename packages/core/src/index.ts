@@ -40,6 +40,16 @@ export type {
   SecondaryValueAxis,
 } from './types/chart';
 export type { LoadOptions } from './types/load-options';
+// Typed load-time error (PD4 seed): the `load()` factories throw this with a
+// stable `code` for container-level failures detected on the main thread.
+export { OoxmlError, type OoxmlErrorCode } from './errors/ooxml-error';
+// CFB (OLE2) container sniffer: the `load()` factories call this on the raw
+// bytes before touching the parser worker, so a password-protected or legacy
+// .doc/.xls/.ppt file becomes a typed OoxmlError instead of an opaque zip error.
+export { sniffCfb, type CfbKind } from './errors/cfb-sniff';
+// Shared load() guard: throws the right OoxmlError when the bytes are a CFB
+// container (encrypted / legacy-binary / other) instead of an OOXML ZIP.
+export { assertNotCfbContainer } from './errors/cfb-guard';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 // Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package

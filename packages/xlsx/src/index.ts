@@ -5,6 +5,10 @@ export { XlsxViewer } from './viewer.js';
 export type { ResolvedList } from './validation-list.js';
 export type { XlsxViewerOptions, HiddenSheetMode, CellAddress, CellRange, SelectionMode } from './viewer.js';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
+// Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
+// or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can
+// narrow on `err.code`.
+export { OoxmlError, type OoxmlErrorCode } from '@silurus/ooxml-core';
 export type {
   Workbook,
   SheetMeta,

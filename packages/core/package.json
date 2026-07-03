@@ -21,7 +21,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./types": "./src/types/common.ts",
-    "./testing": "./src/testing/export-completeness.ts",
+    "./testing": "./src/testing/index.ts",
     "./mathjax-stix2": "./assets/mathjax-stix2.js"
   },
   "scripts": {

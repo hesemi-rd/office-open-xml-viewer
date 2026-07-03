@@ -6,6 +6,7 @@ import {
   defaultDpr,
   dropSvgImageCache,
   dropBitmapCacheByPath,
+  assertNotCfbContainer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -73,13 +74,6 @@ export class DocxDocument {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
-    // The render worker is reachable only through this dynamic import, so
-    // main-mode bundles never pull in its (renderer-bearing) chunk.
-    const worker =
-      mode === 'worker'
-        ? (await import('./render-worker-host')).createRenderWorker()
-        : new InlineWorker();
-    const doc = new DocxDocument(worker, mode, opts.wasmUrl);
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
       const res = await fetch(source);
@@ -88,6 +82,18 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
+    // Reject password-protected / legacy-binary (CFB) files on the main thread —
+    // before spinning up the worker — with a typed OoxmlError, instead of the
+    // opaque zip error the parser would otherwise emit. Detecting here keeps the
+    // OoxmlError instance intact (it would not survive the worker boundary).
+    assertNotCfbContainer(buffer);
+    // The render worker is reachable only through this dynamic import, so
+    // main-mode bundles never pull in its (renderer-bearing) chunk.
+    const worker =
+      mode === 'worker'
+        ? (await import('./render-worker-host')).createRenderWorker()
+        : new InlineWorker();
+    const doc = new DocxDocument(worker, mode, opts.wasmUrl);
     if (opts.math && mode === 'worker') {
       console.warn(
         "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",

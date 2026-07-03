@@ -5,6 +5,7 @@ import {
   WorkerBridge,
   defaultDpr,
   dropSvgImageCache,
+  assertNotCfbContainer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -85,6 +86,21 @@ export class XlsxWorkbook {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
+    // Resolve the bytes first, then reject password-protected / legacy-binary
+    // (CFB) files on the main thread — before spinning up the worker — with a
+    // typed OoxmlError rather than the opaque zip error the parser would emit.
+    // Detecting here keeps the OoxmlError instance intact (it would not survive
+    // the worker boundary). The resolved buffer is handed to `_load` so a URL
+    // source is not fetched twice.
+    let buffer: ArrayBuffer;
+    if (typeof source === 'string') {
+      const res = await fetch(source);
+      if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
+      buffer = await res.arrayBuffer();
+    } else {
+      buffer = source;
+    }
+    assertNotCfbContainer(buffer);
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -92,7 +108,7 @@ export class XlsxWorkbook {
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
     const wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
-    await wb._load(source, opts);
+    await wb._load(buffer, opts);
     return wb;
   }
 
