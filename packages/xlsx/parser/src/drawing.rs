@@ -15,6 +15,35 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::io::Cursor;
 
+/// True when an `<xdr:sp>` / `<xdr:pic>` / `<xdr:grpSp>` (or `<xdr:cxnSp>`)
+/// node's own `<xdr:cNvPr hidden="1">` marks it hidden (ECMA-376 §20.1.2.2.8
+/// `CT_NonVisualDrawingProps@hidden`, `xsd:boolean`, default `false`). Only the
+/// node's direct non-visual-properties wrapper is inspected, never a
+/// descendant, so a group's own props are not confused with a nested shape's.
+/// A hidden drawing object is not rendered — skipped at parse time.
+fn xdr_node_hidden(node: &roxmltree::Node) -> bool {
+    for wrapper in &[
+        "nvSpPr",
+        "nvPicPr",
+        "nvGrpSpPr",
+        "nvCxnSpPr",
+        "nvGraphicFramePr",
+    ] {
+        if let Some(nv) = node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == *wrapper)
+        {
+            if let Some(cnv) = nv
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "cNvPr")
+            {
+                return ooxml_common::drawing::nv_props_hidden(cnv);
+            }
+        }
+    }
+    false
+}
+
 /// Parse `<xdr:twoCellAnchor>` elements from a drawing XML and resolve
 /// embedded pictures into data URLs. `drawing_dir` is the folder that
 /// contains `drawing_path` so relative `Target`s resolve correctly.
@@ -85,6 +114,12 @@ pub(crate) fn parse_drawing_anchors(
                     }
                 }
                 "pic" => {
+                    // §20.1.2.2.8 — a `<xdr:cNvPr hidden="1">` picture is not
+                    // rendered. Skip the whole anchor (a twoCellAnchor holds a
+                    // single drawing object).
+                    if xdr_node_hidden(&child) {
+                        continue;
+                    }
                     // <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
                     let blip_fill = child.children().find(|n| {
                         n.tag_name().name() == "blipFill" && is_xdr_ns(n.tag_name().namespace())
@@ -826,6 +861,12 @@ pub(crate) fn collect_shapes(
 ) {
     for child in node.children().filter(|n| n.is_element()) {
         let tag = child.tag_name().name();
+        // §20.1.2.2.8 — a shape/pic/group whose own `<xdr:cNvPr hidden="1">`
+        // marks it hidden is not rendered. Skipping a `grpSp` here elides its
+        // whole subtree (the recursion below never runs for it).
+        if matches!(tag, "sp" | "pic" | "grpSp" | "cxnSp") && xdr_node_hidden(&child) {
+            continue;
+        }
         if tag == "grpSp" {
             // Nested grpSp: compose the transform by the group's own xfrm.
             let grp_sp_pr = child
@@ -1252,6 +1293,10 @@ pub(crate) fn parse_shape_anchors(
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "grpSp")
         {
+            // §20.1.2.2.8 — a hidden top-level group elides its whole subtree.
+            if xdr_node_hidden(&grp) {
+                continue;
+            }
             let grp_sp_pr = grp
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
@@ -1311,6 +1356,10 @@ pub(crate) fn parse_shape_anchors(
             // for `oneCellAnchor`, which `parse_drawing_anchors` does not handle.
             t == "sp" || (t == "pic" && anchor_tag == "oneCellAnchor")
         }) {
+            // §20.1.2.2.8 — a hidden stand-alone shape/pic is not rendered.
+            if xdr_node_hidden(&sp) {
+                continue;
+            }
             // Stand-alone sp/pic: the shape's own xfrm gives its absolute EMU
             // rect, but for our rendering pipeline the anchor's from/to
             // already defines the on-sheet rect, and the leaf occupies it
@@ -2503,6 +2552,115 @@ mod style_lnref_tests {
     }
 }
 
+/// §20.1.2.2.8 — an `<xdr:cNvPr hidden="1">` drawing object is not rendered.
+/// Covers shapes (parse_shape_anchors), grouped shapes (collect_shapes) and
+/// pictures (parse_drawing_anchors).
+#[cfg(test)]
+mod hidden_tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+
+    fn theme() -> Vec<String> {
+        ["#000000", "#FFFFFF", "#222222", "#EEEEEE", "#4472C4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn sp_anchor(hidden_attr: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:sp>
+                <xdr:nvSpPr><xdr:cNvPr id="2" name="P"{hidden}/><xdr:cNvSpPr/></xdr:nvSpPr>
+                <xdr:spPr>
+                  <a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                  <a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>
+                </xdr:spPr>
+              </xdr:sp>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#,
+            NS = NS,
+            hidden = hidden_attr,
+        )
+    }
+
+    #[test]
+    fn hidden_standalone_shape_is_not_emitted() {
+        for attr in [r#" hidden="1""#, r#" hidden="true""#] {
+            let anchors =
+                parse_shape_anchors(&sp_anchor(attr), &theme(), &[6_350], &HashMap::new());
+            assert!(anchors.is_empty(), "hidden sp emitted (attr={attr})");
+        }
+    }
+
+    #[test]
+    fn visible_standalone_shape_is_emitted() {
+        for attr in ["", r#" hidden="0""#, r#" hidden="false""#] {
+            let anchors =
+                parse_shape_anchors(&sp_anchor(attr), &theme(), &[6_350], &HashMap::new());
+            assert_eq!(anchors.len(), 1, "visible sp dropped (attr={attr})");
+        }
+    }
+
+    #[test]
+    fn hidden_group_elides_children() {
+        // A visible group with one hidden and one visible child leaf emits only
+        // the visible child. A fully hidden group emits nothing.
+        let group = |grp_hidden: &str, child_hidden: &str| {
+            format!(
+                r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+                  <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+                  <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+                  <xdr:grpSp>
+                    <xdr:nvGrpSpPr><xdr:cNvPr id="2" name="G"{grp_hidden}/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                    <xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="1828800"/>
+                      <a:chOff x="0" y="0"/><a:chExt cx="1828800" cy="1828800"/></a:xfrm></xdr:grpSpPr>
+                    <xdr:sp>
+                      <xdr:nvSpPr><xdr:cNvPr id="3" name="C1"{child_hidden}/><xdr:cNvSpPr/></xdr:nvSpPr>
+                      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>
+                        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                        <a:ln w="6350"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln></xdr:spPr></xdr:sp>
+                    <xdr:sp>
+                      <xdr:nvSpPr><xdr:cNvPr id="4" name="C2"/><xdr:cNvSpPr/></xdr:nvSpPr>
+                      <xdr:spPr><a:xfrm><a:off x="457200" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>
+                        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                        <a:ln w="6350"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></xdr:spPr></xdr:sp>
+                  </xdr:grpSp>
+                  <xdr:clientData/>
+                </xdr:twoCellAnchor></xdr:wsDr>"#,
+                NS = NS,
+                grp_hidden = grp_hidden,
+                child_hidden = child_hidden,
+            )
+        };
+
+        // Visible group, one hidden child → only the visible child leaf remains.
+        let a = parse_shape_anchors(
+            &group("", r#" hidden="1""#),
+            &theme(),
+            &[6_350],
+            &HashMap::new(),
+        );
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].shapes.len(), 1, "hidden child leaked");
+
+        // Hidden group → no anchor at all.
+        let b = parse_shape_anchors(
+            &group(r#" hidden="1""#, ""),
+            &theme(),
+            &[6_350],
+            &HashMap::new(),
+        );
+        assert!(b.is_empty(), "hidden group leaked");
+    }
+}
+
 #[cfg(test)]
 mod geom_tests {
     use super::*;
@@ -2659,6 +2817,39 @@ mod blip_svg_tests {
         let anchors = parse_drawing_anchors(&xml, rels, "xl/drawings", &mut archive);
         assert_eq!(anchors.len(), 1, "exactly one picture anchor expected");
         anchors.into_iter().next().unwrap()
+    }
+
+    /// §20.1.2.2.8 — a `<xdr:pic>` whose `<xdr:cNvPr hidden="1">` marks it hidden
+    /// is not emitted as an image anchor. A visible pic still resolves.
+    #[test]
+    fn hidden_picture_is_not_emitted() {
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "../media/image1.png".to_string());
+        let data = build_media_zip(PNG_1X1, SVG);
+        for (hidden_attr, expect_len) in [(r#" hidden="1""#, 0usize), ("", 1usize)] {
+            let xml = format!(
+                r#"<xdr:wsDr
+  xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor editAs="oneCell">
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="P"{hidden}/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#,
+                hidden = hidden_attr,
+            );
+            let mut archive = zip::ZipArchive::new(Cursor::new(data.clone())).unwrap();
+            let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive);
+            assert_eq!(anchors.len(), expect_len, "hidden={hidden_attr}");
+        }
     }
 
     /// A `<xdr:pic>` carrying a PNG fallback blip plus an `asvg:svgBlip` extension

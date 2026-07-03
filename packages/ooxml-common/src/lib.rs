@@ -9,6 +9,7 @@
 pub mod blip;
 pub mod chart;
 pub mod color;
+pub mod drawing;
 pub mod fill;
 pub mod math;
 pub mod ns;

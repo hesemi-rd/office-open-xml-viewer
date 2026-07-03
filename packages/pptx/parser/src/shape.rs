@@ -96,16 +96,47 @@ pub(crate) fn is_placeholder(node: roxmltree::Node<'_, '_>) -> bool {
 /// Returns `(None, None)` when the wrapper is missing — both fields are
 /// optional in the JSON output.
 pub(crate) fn read_cnv_pr(sp_node: roxmltree::Node<'_, '_>) -> (Option<String>, Option<String>) {
-    for wrapper_name in &["nvSpPr", "nvCxnSpPr", "nvPicPr", "nvGraphicFramePr"] {
-        if let Some(nv) = child(sp_node, wrapper_name) {
+    if let Some(cnv) = own_cnv_pr(sp_node) {
+        let id = attr(&cnv, "id");
+        let name = attr(&cnv, "name").filter(|s| !s.is_empty());
+        return (id, name);
+    }
+    (None, None)
+}
+
+/// Locate the shape/tree node's OWN `<p:cNvPr>` — the `cNvPr` inside this
+/// node's direct non-visual-properties wrapper (`nvSpPr` / `nvCxnSpPr` /
+/// `nvPicPr` / `nvGraphicFramePr` / `nvGrpSpPr`). Only a *direct* wrapper child
+/// is inspected, never a descendant, so a group's own props are not confused
+/// with a nested shape's props.
+pub(crate) fn own_cnv_pr<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    for wrapper_name in &[
+        "nvSpPr",
+        "nvCxnSpPr",
+        "nvPicPr",
+        "nvGraphicFramePr",
+        "nvGrpSpPr",
+    ] {
+        if let Some(nv) = child(node, wrapper_name) {
             if let Some(cnv) = child(nv, "cNvPr") {
-                let id = attr(&cnv, "id");
-                let name = attr(&cnv, "name").filter(|s| !s.is_empty());
-                return (id, name);
+                return Some(cnv);
             }
         }
     }
-    (None, None)
+    None
+}
+
+/// True when a tree node's own `<p:cNvPr hidden="1">` marks it hidden
+/// (ECMA-376 §20.1.2.2.8 `CT_NonVisualDrawingProps@hidden`, `xsd:boolean`,
+/// default `false`). A hidden shape/picture/frame/connector/group is not
+/// rendered — skipped at parse time. A hidden `<p:grpSp>` hides its whole
+/// subtree (the early return elides all descendants).
+pub(crate) fn node_is_hidden(node: roxmltree::Node<'_, '_>) -> bool {
+    own_cnv_pr(node)
+        .map(ooxml_common::drawing::nv_props_hidden)
+        .unwrap_or(false)
 }
 
 pub(crate) fn parse_shape(
@@ -1448,6 +1479,14 @@ pub(crate) fn parse_sp_tree_node(
     skip_placeholders: bool,
     group_fill: Option<&Fill>,
 ) {
+    // §20.1.2.2.8 — a shape/pic/graphicFrame/cxnSp/grpSp whose own
+    // `<p:cNvPr hidden="1">` marks it hidden is not rendered. Skip at parse
+    // time (no viewer-side "show hidden" mode is meaningful for a shape, unlike
+    // a whole slide). A hidden grpSp elides its entire subtree here.
+    // `mc:AlternateContent` has no cNvPr of its own, so it recurses normally.
+    if node_is_hidden(node) {
+        return;
+    }
     match node.tag_name().name() {
         "sp" => {
             if skip_placeholders && is_placeholder(node) {
@@ -2514,6 +2553,132 @@ mod ole_tests {
             "an oleObj with no preview pic must emit nothing, got {} element(s)",
             out.len()
         );
+    }
+}
+
+/// §20.1.2.2.8 — `<p:cNvPr hidden="1">` marks a shape/pic/graphicFrame/cxnSp/
+/// grpSp as not-to-be-rendered. The parser must skip such nodes (and a hidden
+/// group's whole subtree) while leaving `hidden="0"` / absent shapes untouched.
+#[cfg(test)]
+mod hidden_tests {
+    use super::*;
+    use crate::master::LayoutPlaceholders;
+    use std::collections::HashMap;
+
+    const NS: &str = concat!(
+        r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" "#,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
+    );
+
+    fn run(xml: &str) -> Vec<SlideElement> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let lph = LayoutPlaceholders::default();
+        let theme = HashMap::new();
+        let smart = HashMap::new();
+        // No zip access needed for plain shapes; build an empty in-memory zip.
+        let mut zip = {
+            use std::io::Cursor;
+            let mut buf = Vec::new();
+            {
+                let w = zip::ZipWriter::new(Cursor::new(&mut buf));
+                w.finish().unwrap();
+            }
+            zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        };
+        let rels = HashMap::new();
+        let mut out = Vec::new();
+        parse_sp_tree_node(
+            doc.root_element(),
+            &lph,
+            "ppt/slides",
+            &rels,
+            &smart,
+            &mut zip,
+            &theme,
+            &mut out,
+            false,
+            None,
+        );
+        out
+    }
+
+    fn shape_xml(name: &str, hidden_attr: &str) -> String {
+        format!(
+            r#"<p:sp {ns}>
+              <p:nvSpPr><p:cNvPr id="2" name="{name}"{hidden}/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+              <p:txBody><a:bodyPr/><a:p><a:r><a:t>{name}</a:t></a:r></a:p></p:txBody>
+            </p:sp>"#,
+            ns = NS,
+            name = name,
+            hidden = hidden_attr,
+        )
+    }
+
+    #[test]
+    fn hidden_shape_is_not_emitted() {
+        // hidden="1" and hidden="true" both suppress the shape.
+        for attr in [r#" hidden="1""#, r#" hidden="true""#] {
+            let out = run(&shape_xml("Hidden", attr));
+            assert!(
+                out.is_empty(),
+                "hidden shape emitted (attr={attr}): {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_shape_is_emitted_unchanged() {
+        // Absent, "0", and "false" all keep the shape.
+        for attr in ["", r#" hidden="0""#, r#" hidden="false""#] {
+            let out = run(&shape_xml("Visible", attr));
+            assert_eq!(out.len(), 1, "visible shape dropped (attr={attr})");
+            assert!(matches!(out[0], SlideElement::Shape(_)));
+        }
+    }
+
+    #[test]
+    fn hidden_group_elides_whole_subtree() {
+        // A hidden grpSp must suppress its visible children too.
+        let xml = format!(
+            r#"<p:grpSp {ns}>
+              <p:nvGrpSpPr><p:cNvPr id="2" name="Grp" hidden="1"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+              <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></p:grpSpPr>
+              <p:sp><p:nvSpPr><p:cNvPr id="3" name="Child"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                <p:txBody><a:bodyPr/><a:p><a:r><a:t>c</a:t></a:r></a:p></p:txBody></p:sp>
+            </p:grpSp>"#,
+            ns = NS,
+        );
+        assert!(run(&xml).is_empty(), "hidden group leaked a child shape");
+    }
+
+    #[test]
+    fn hidden_child_inside_visible_group_is_skipped() {
+        // A visible group with one hidden and one visible child emits only the
+        // visible child — proves the check is per-node, not just top-level.
+        let xml = format!(
+            r#"<p:grpSp {ns}>
+              <p:nvGrpSpPr><p:cNvPr id="2" name="Grp"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+              <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></p:grpSpPr>
+              <p:sp><p:nvSpPr><p:cNvPr id="3" name="Hidden" hidden="1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                <p:txBody><a:bodyPr/><a:p><a:r><a:t>h</a:t></a:r></a:p></p:txBody></p:sp>
+              <p:sp><p:nvSpPr><p:cNvPr id="4" name="Shown"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="457200" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                <p:txBody><a:bodyPr/><a:p><a:r><a:t>s</a:t></a:r></a:p></p:txBody></p:sp>
+            </p:grpSp>"#,
+            ns = NS,
+        );
+        let out = run(&xml);
+        assert_eq!(out.len(), 1, "expected only the visible child: {out:?}");
     }
 }
 
