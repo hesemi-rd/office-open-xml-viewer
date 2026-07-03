@@ -30,8 +30,6 @@ describe('PptxPresentation.getImage', () => {
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._bridge = { request };
     instance._imageCache = new Map<string, Promise<Blob>>();
-    instance._workerReady = true;
-    instance._waitForWorker = () => Promise.resolve();
     const pres = instance as unknown as GetImageProbe;
     return { pres, request };
   }

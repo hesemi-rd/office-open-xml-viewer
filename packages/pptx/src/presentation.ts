@@ -98,8 +98,6 @@ export class PptxPresentation {
    *  reference across every render also lets those caches hit across slides. */
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImage(path, mime);
-  private _workerReady = false;
-  private _workerReadyCallbacks: Array<() => void> = [];
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderSlide` / `presentSlide` reuses it — equations render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
@@ -109,16 +107,10 @@ export class PptxPresentation {
     this._worker = worker;
     this._mode = mode;
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
-      // The init `ready` handshake carries no id; everything else does.
-      correlate: (msg) => ('id' in msg ? msg.id : undefined),
+      // Every response carries an id (no `ready` handshake — the worker `await`s
+      // its own init promise before each request, docx/xlsx pattern).
+      correlate: (msg) => msg.id,
       toError: (msg) => (msg.kind === 'error' ? msg.message : undefined),
-      onUnsolicited: (msg) => {
-        if (msg.kind === 'ready') {
-          this._workerReady = true;
-          for (const cb of this._workerReadyCallbacks) cb();
-          this._workerReadyCallbacks = [];
-        }
-      },
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -178,18 +170,12 @@ export class PptxPresentation {
     return pres;
   }
 
-  private _waitForWorker(): Promise<void> {
-    if (this._workerReady) return Promise.resolve();
-    return new Promise((resolve) => this._workerReadyCallbacks.push(resolve));
-  }
-
   private async _parse(
     buffer: ArrayBuffer,
     maxZipEntryBytes?: number,
     useGoogleFonts = false,
     timeoutMs?: number,
   ): Promise<void> {
-    await this._waitForWorker();
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
@@ -348,7 +334,6 @@ export class PptxPresentation {
     // re-types blobs from MediaElement.mimeType when it builds media controls.
     const mimeType = this._findMimeTypeForPath(mediaPath);
     const p = (async () => {
-      await this._waitForWorker();
       const res = await this._bridge.request(
         (id) => ({ kind: 'extractMedia', id, path: mediaPath }) satisfies WorkerRequest,
       );
@@ -375,7 +360,6 @@ export class PptxPresentation {
     const hit = this._imageCache.get(imagePath);
     if (hit) return hit;
     const p = (async () => {
-      await this._waitForWorker();
       const res = await this._bridge.request(
         (id) => ({ kind: 'extractImage', id, path: imagePath }) satisfies WorkerRequest,
       );

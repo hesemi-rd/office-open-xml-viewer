@@ -2,7 +2,7 @@ import { decodeDataUrl } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types';
 import init, { PptxArchive } from './wasm/pptx_parser.js';
 
-let ready = false;
+let initPromise: Promise<unknown> | null = null;
 // A `PptxArchive` handle over the opened zip: `new PptxArchive(bytes, max)`
 // copies the file into WASM ONCE and scans the central directory ONCE, then a
 // later `extractMedia` / `extractImage` reads by zip path straight from the
@@ -18,30 +18,24 @@ function disposeArchive(): void {
   }
 }
 
-async function initWasm(wasmUrl: string) {
-  await init(decodeDataUrl(wasmUrl) ?? wasmUrl);
-  ready = true;
-  const msg: WorkerResponse = { kind: 'ready' };
-  self.postMessage(msg);
-}
-
-self.onmessage = (e: MessageEvent<WorkerRequest>) => {
+self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
 
   if (req.kind === 'init') {
-    initWasm(req.wasmUrl).catch((err) => {
-      console.error('[pptx-worker] WASM init failed:', err);
-    });
+    // Retain the init promise (docx/xlsx pattern) rather than a `ready` flag +
+    // handshake. Every request below `await`s it, so a REJECTED init rejects the
+    // request (the catch posts an `error` response the bridge turns into a
+    // rejected `load()`), never a silent hang on a main-side `ready` wait.
+    initPromise = init(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
 
-  if (req.kind === 'parse') {
-    if (!ready) {
-      const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'WASM not initialized' };
-      self.postMessage(msg);
-      return;
-    }
-    try {
+  // Echo the correlation id so the client routes the response to the right
+  // pending promise (id correlation, not response-type matching).
+  const id = req.id;
+  try {
+    await initPromise;
+    if (req.kind === 'parse') {
       const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
@@ -59,67 +53,41 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
       // no decode here. The single decode + JSON.parse happens once, on main.
       const json = archive.parse();
       const presentationJson = json.buffer as ArrayBuffer;
-      const msg: WorkerResponse = { kind: 'parsed', id: req.id, presentationJson };
+      const msg: WorkerResponse = { kind: 'parsed', id, presentationJson };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [
         presentationJson,
       ]);
-    } catch (err) {
-      const msg: WorkerResponse = {
-        kind: 'error',
-        id: req.id,
-        message: err instanceof Error ? err.message : String(err),
-      };
-      self.postMessage(msg);
-    }
-    return;
-  }
-
-  if (req.kind === 'extractMedia') {
-    if (!archive) {
-      const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'No pptx loaded' };
-      self.postMessage(msg);
       return;
     }
-    try {
+
+    if (req.kind === 'extractMedia') {
+      if (!archive) throw new Error('No pptx loaded');
       // wasm-bindgen already hands back a fresh, standalone Uint8Array here (its
       // glue does `getArrayU8FromWasm0(ptr,len).slice()` then frees the Rust Vec),
       // so `bytes.buffer` is a full-span, non-WASM-backed ArrayBuffer we own
       // outright — transfer it directly. A second `new Uint8Array(bytes).slice()`
       // would just re-copy the whole entry for nothing.
       const out = archive.extract_media(req.path).buffer as ArrayBuffer;
-      const msg: WorkerResponse = { kind: 'mediaExtracted', id: req.id, bytes: out };
+      const msg: WorkerResponse = { kind: 'mediaExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
-    } catch (err) {
-      const msg: WorkerResponse = {
-        kind: 'error',
-        id: req.id,
-        message: err instanceof Error ? err.message : String(err),
-      };
-      self.postMessage(msg);
-    }
-    return;
-  }
-
-  if (req.kind === 'extractImage') {
-    if (!archive) {
-      const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'No pptx loaded' };
-      self.postMessage(msg);
       return;
     }
-    try {
+
+    if (req.kind === 'extractImage') {
+      if (!archive) throw new Error('No pptx loaded');
       // See extractMedia above: the extracted Uint8Array already owns a
       // standalone full-span buffer, so transfer it without a second copy.
       const out = archive.extract_image(req.path).buffer as ArrayBuffer;
-      const msg: WorkerResponse = { kind: 'imageExtracted', id: req.id, bytes: out };
+      const msg: WorkerResponse = { kind: 'imageExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
-    } catch (err) {
-      const msg: WorkerResponse = {
-        kind: 'error',
-        id: req.id,
-        message: err instanceof Error ? err.message : String(err),
-      };
-      self.postMessage(msg);
+      return;
     }
-    return;
+  } catch (err) {
+    const msg: WorkerResponse = {
+      kind: 'error',
+      id,
+      message: err instanceof Error ? err.message : String(err),
+    };
+    self.postMessage(msg);
   }
 };

@@ -1,0 +1,112 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/**
+ * AR4: a WASM-init failure must not leave `load()` hanging forever. The worker
+ * used to swallow the init error (log-only) and keep a `ready` flag false, so the
+ * main thread — which blocked on a `ready` handshake — never resolved. The fix
+ * moves pptx to the docx/xlsx `initPromise` pattern: every request `await`s the
+ * init promise, so a rejected init rejects the request (surfacing an `error`
+ * response the bridge turns into a rejected `load()`), never a silent hang.
+ *
+ * These drive the worker's `onmessage` directly against a mocked WASM module and
+ * a stubbed `self`, so no real Worker / WASM is needed.
+ */
+
+const initMock = vi.fn();
+class FakePptxArchive {
+  constructor(_bytes: Uint8Array, _max?: bigint) {}
+  parse(): Uint8Array {
+    return new TextEncoder().encode('{"slides":[],"slideWidth":0,"slideHeight":0}');
+  }
+  extract_media(_p: string): Uint8Array {
+    return new Uint8Array([1, 2, 3]);
+  }
+  extract_image(_p: string): Uint8Array {
+    return new Uint8Array([4, 5, 6]);
+  }
+  free(): void {}
+}
+
+vi.mock('./wasm/pptx_parser.js', () => ({
+  default: (arg: unknown) => initMock(arg),
+  PptxArchive: FakePptxArchive,
+}));
+
+interface FakeSelf {
+  onmessage: ((e: MessageEvent) => void) | null;
+  posted: unknown[];
+  postMessage: (msg: unknown, transfer?: Transferable[]) => void;
+}
+
+function installSelf(): FakeSelf {
+  const posted: unknown[] = [];
+  const fake: FakeSelf = {
+    onmessage: null,
+    posted,
+    postMessage: (msg: unknown) => {
+      posted.push(msg);
+    },
+  };
+  vi.stubGlobal('self', fake);
+  return fake;
+}
+
+/** Import the worker module fresh (its top-level `self.onmessage = …` runs on
+ *  import), after `self` and the WASM mock are installed. */
+async function loadWorker(): Promise<FakeSelf> {
+  const fake = installSelf();
+  vi.resetModules();
+  await import('./worker.js');
+  return fake;
+}
+
+beforeEach(() => {
+  initMock.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
+  it('a parse after a REJECTED init responds with an error (not a hang)', async () => {
+    initMock.mockRejectedValue(new Error('wasm boom'));
+    const fake = await loadWorker();
+
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({ data: { kind: 'parse', id: 7, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    // Let the awaited (rejected) initPromise settle and the handler run its catch.
+    await vi.waitFor(() => {
+      expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'error')).toBe(true);
+    });
+
+    const err = fake.posted.find((m) => (m as { kind?: string }).kind === 'error') as {
+      kind: string;
+      id: number;
+      message: string;
+    };
+    expect(err.id).toBe(7);
+    expect(err.message).toContain('boom');
+    // Crucially: the request settled — no pending promise is left hanging.
+  });
+
+  it('a parse after a SUCCESSFUL init responds with a parsed model', async () => {
+    initMock.mockResolvedValue(undefined);
+    const fake = await loadWorker();
+
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({ data: { kind: 'parse', id: 3, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    await vi.waitFor(() => {
+      expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'parsed')).toBe(true);
+    });
+
+    const parsed = fake.posted.find((m) => (m as { kind?: string }).kind === 'parsed') as {
+      kind: string;
+      id: number;
+    };
+    expect(parsed.id).toBe(3);
+    // No `ready` handshake is emitted anymore (initPromise pattern replaces it).
+    expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'ready')).toBe(false);
+  });
+});

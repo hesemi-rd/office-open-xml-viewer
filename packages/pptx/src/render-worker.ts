@@ -18,7 +18,7 @@ import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
 import { preloadGoogleFonts, decodeDataUrl } from '@silurus/ooxml-core';
 import type { RenderWorkerRequest, RenderWorkerResponse, PresentationMeta } from './worker-protocol';
 
-let ready = false;
+let initPromise: Promise<unknown> | null = null;
 let pres: Presentation | null = null;
 // A `PptxArchive` handle over the opened zip. `new PptxArchive(bytes, max)`
 // copies the file into WASM ONCE and opens it ONCE; the in-worker
@@ -40,12 +40,6 @@ function disposeArchive(): void {
     archive.free();
     archive = null;
   }
-}
-
-async function initWasm(wasmUrl: string) {
-  await init(decodeDataUrl(wasmUrl) ?? wasmUrl);
-  ready = true;
-  post({ kind: 'ready' });
 }
 
 function getMedia(path: string): Promise<Blob> {
@@ -80,15 +74,17 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   const req = e.data;
 
   if (req.kind === 'init') {
-    initWasm(req.wasmUrl).catch((err) => {
-      console.error('[pptx-render-worker] WASM init failed:', err);
-    });
+    // Retain the init promise (docx/xlsx pattern) rather than a `ready` flag +
+    // handshake. Every request below `await`s it, so a REJECTED init rejects the
+    // request (the outer catch posts an `error` response the bridge turns into a
+    // rejected `load()` / render), never a silent hang on a main-side wait.
+    initPromise = init(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
 
   try {
+    await initPromise;
     if (req.kind === 'parse') {
-      if (!ready) throw new Error('WASM not initialized');
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's media/image.
       mediaCache.clear();
