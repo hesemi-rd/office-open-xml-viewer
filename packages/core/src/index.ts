@@ -241,6 +241,11 @@ export {
 // Shared `double` border rail geometry (§17.18.2 / §18.18.3): floored-thirds
 // device-pixel rail/gap/rail bands + a fill-based painter.
 export { doubleRailGeometry, fillDoubleBorder } from './draw/double-border';
+// Shared run-underline painter (§20.1.10.82 ST_TextUnderlineType). Single source
+// of truth for underline geometry across the pptx / docx renderers; docx
+// normalizes its §17.18.99 ST_Underline vocabulary to this DrawingML vocabulary
+// before calling in.
+export { drawUnderline } from './text/underline';
 export {
   WorkerBridge,
   type WorkerLike,

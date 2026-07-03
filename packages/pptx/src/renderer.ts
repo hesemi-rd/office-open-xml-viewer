@@ -71,7 +71,7 @@ import {
   highlightBox,
   symbolFontToUnicode,
   isSymbolFontFamily,
-  pptxUnderlineDashArray,
+  drawUnderline,
   intendedSingleLinePx,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
@@ -200,89 +200,11 @@ function resolveShapeFill(
 
 // ===== Text layout helpers =====
 
-/**
- * Draw a text underline at the given baseline. ECMA-376 §21.1.2.3.16
- * defines the OOXML underline enum; we map each value to a Canvas dash
- * pattern + line-weight pair. "wavy*" is approximated by a sine curve
- * traced as a polyline so the glyph stays legibly distinct from "dotted".
- */
-function drawUnderline(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  baseline: number,
-  width: number,
-  sizePx: number,
-  color: string,
-  style: string | undefined,
-  dpr = 1,
-): void {
-  const baseLineW = Math.max(1, sizePx * 0.05);
-  const heavy = style?.endsWith('Heavy') ?? false;
-  const lineW = heavy ? baseLineW * 1.8 : baseLineW;
-  const y = baseline + Math.max(2, lineW);
-  // Crispness nudge (see crispOffset): a horizontal underline whose device-pixel
-  // width is odd straddles two device rows on a DPR=1 display (blurry). Snapping
-  // the line's y onto the nearest crisp device position centers an odd-width
-  // stroke on one device row → crisp. Applied to the straight / dbl / dashed
-  // branches only; the wavy variant is not axis-aligned per pixel, so it
-  // deliberately omits the offset.
-  const crispY = crispOffset(y, lineW, dpr);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = lineW;
-  ctx.setLineDash([]);
-
-  // Dash patterns scaled by lineW so they stay proportional at any font size,
-  // computed via core's shared pptxUnderlineDashArray (§20.1.10.82
-  // ST_TextUnderlineType — the run-underline enum, distinct from the
-  // §20.1.10.49 preset line dash though it reuses a few shape names) at the
-  // call site below.
-
-  if (style && style.startsWith('wavy')) {
-    // Sine wave with amplitude ≈ lineW and wavelength ≈ 6×lineW.
-    const amp = lineW;
-    const wavelength = lineW * 6;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    const step = Math.max(1, lineW * 0.5);
-    for (let dx = 0; dx <= width; dx += step) {
-      const yy = y + Math.sin((dx / wavelength) * Math.PI * 2) * amp;
-      ctx.lineTo(x + dx, yy);
-    }
-    ctx.stroke();
-    if (style === 'wavyDbl') {
-      // Second wave below, offset by 2.5×amp.
-      ctx.beginPath();
-      ctx.moveTo(x, y + amp * 2.5);
-      for (let dx = 0; dx <= width; dx += step) {
-        const yy = y + amp * 2.5 + Math.sin((dx / wavelength) * Math.PI * 2) * amp;
-        ctx.lineTo(x + dx, yy);
-      }
-      ctx.stroke();
-    }
-    return;
-  }
-
-  if (style === 'dbl') {
-    const offset = lineW * 1.4;
-    // Two parallel rules straddling y; snap each onto its own crisp device row.
-    const y1 = y - offset / 2;
-    const y2 = y + offset / 2;
-    ctx.beginPath();
-    ctx.moveTo(x, y1 + crispOffset(y1, lineW, dpr));
-    ctx.lineTo(x + width, y1 + crispOffset(y1, lineW, dpr));
-    ctx.moveTo(x, y2 + crispOffset(y2, lineW, dpr));
-    ctx.lineTo(x + width, y2 + crispOffset(y2, lineW, dpr));
-    ctx.stroke();
-    return;
-  }
-
-  ctx.setLineDash(pptxUnderlineDashArray(style ?? 'sng', lineW));
-  ctx.beginPath();
-  ctx.moveTo(x, y + crispY);
-  ctx.lineTo(x + width, y + crispY);
-  ctx.stroke();
-  ctx.setLineDash([]);
-}
+// The run-underline painter `drawUnderline` (ECMA-376 §20.1.10.82
+// ST_TextUnderlineType) was hoisted to core (`@silurus/ooxml-core`
+// `drawUnderline`) so the docx renderer can share the exact same geometry /
+// dash dispatch; it is imported at the top of this file and its behaviour is
+// byte-identical to the former local copy.
 
 // ── Math (OMML) rendering ──────────────────────────────────────────────────
 // Equations are converted to SVG by MathJax once, cached by their MathNode[]
