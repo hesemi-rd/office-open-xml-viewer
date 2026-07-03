@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
 import { DocxDocument } from './document.js';
-import { installDom, makeContainer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeEl, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as docxIndex from './index.js';
 
 afterEach(() => {
@@ -59,6 +59,19 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     installDom();
     const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {});
     expect(v.pageCount).toBe(0);
+    v.destroy();
+  });
+
+  // A <canvas> type-checks as HTMLElement (the pager API takes one), but canvas
+  // children never render — the viewer would come up silently blank. Rejected
+  // loudly at construction instead.
+  it('throws when the container is a <canvas> (pager-API confusion)', () => {
+    installDom();
+    expect(
+      () => new DocxScrollViewer(makeEl('canvas') as unknown as HTMLElement, {}),
+    ).toThrow(/container element .* not a <canvas>/i);
+    // A plain div (the documented contract) constructs fine.
+    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {});
     v.destroy();
   });
 
