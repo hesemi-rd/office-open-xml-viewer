@@ -340,6 +340,13 @@ export class PptxScrollViewer {
         'PptxScrollViewer.load() is unsupported when an engine is injected via opts.presentation; the injected engine is already loaded.',
       );
     }
+    // SC20 atomic swap: a self-loaded viewer OWNS its engine (destroy() tears it
+    // down when `!_injected`), so a re-load must not orphan the previous one.
+    // Retain it locally and free it only after the new engine loads — a FAILED
+    // re-load then keeps the current deck rendered rather than going blank. (The
+    // injected path returned above can never reach here, so this only ever frees
+    // an engine we created.)
+    const previous = this._pres;
     try {
       this._pres = await PptxPresentation.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
@@ -349,6 +356,16 @@ export class PptxScrollViewer {
         math: this._opts.math,
         mode: this._mode,
       });
+      previous?.destroy();
+      if (previous) {
+        // Re-loading over a prior deck: recycle every mounted slot (they hold the
+        // OLD deck's rendered canvases) and reset the top-index latch so the new
+        // deck's first window renders fresh. `_mountVisible` only RE-renders
+        // missing indices, so without this a still-mounted slide 0 would keep the
+        // previous deck's pixels.
+        for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+        this._lastTopIndex = -1;
+      }
       // Lay out + mount the first window now that the engine exists (mirrors the
       // injected-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width

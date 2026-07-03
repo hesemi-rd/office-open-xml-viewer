@@ -90,8 +90,15 @@ export class DocxViewer {
    * the error is rethrown so it is never silently swallowed.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // SC20 atomic swap: retain the previous engine locally and only tear it down
+    // AFTER the new one loads successfully. A re-load thus never orphans the old
+    // engine's worker + pinned WASM allocation (the leak this guards), yet a
+    // FAILED re-load keeps the current document + its rendered page intact rather
+    // than dropping to an empty viewer. The 2× memory window is bounded to the
+    // load itself (the old engine is freed the moment the new model arrives).
+    const previous = this._doc;
     try {
-      this._doc = await DocxDocument.load(source, {
+      const doc = await DocxDocument.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         workerTimeoutMs: this._opts.workerTimeoutMs,
@@ -99,6 +106,8 @@ export class DocxViewer {
         math: this._opts.math,
         mode: this._mode,
       });
+      this._doc = doc;
+      previous?.destroy();
       this._currentPage = 0;
       await this._render();
     } catch (err) {

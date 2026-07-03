@@ -608,8 +608,15 @@ export class XlsxViewer {
    * the error is rethrown so it is never silently swallowed.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // SC20 atomic swap: retain the previous workbook locally and only tear it down
+    // AFTER the new one loads successfully. A re-load thus never orphans the old
+    // workbook's worker + pinned WASM allocation (the leak this guards), yet a
+    // FAILED re-load keeps the current workbook + its rendered sheet intact rather
+    // than dropping to an empty viewer. The 2× memory window is bounded to the
+    // load itself (the old workbook is freed the moment the new model arrives).
+    const previous = this.wb;
     try {
-      this.wb = await XlsxWorkbook.load(source, {
+      const wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         workerTimeoutMs: this.opts.workerTimeoutMs,
@@ -617,6 +624,8 @@ export class XlsxViewer {
         math: this.opts.math,
         mode: this._mode,
       });
+      this.wb = wb;
+      previous?.destroy();
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(this._initialSheet());

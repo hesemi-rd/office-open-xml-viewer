@@ -134,8 +134,15 @@ export class PptxViewer {
    * the error is rethrown so it is never silently swallowed.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // SC20 atomic swap: retain the previous engine locally and only tear it down
+    // AFTER the new one loads successfully. A re-load thus never orphans the old
+    // engine's worker + pinned WASM allocation (the leak this guards), yet a
+    // FAILED re-load keeps the current engine + its rendered slide intact rather
+    // than dropping to an empty viewer. The 2× memory window is bounded to the
+    // load itself (the old engine is freed the moment the new model arrives).
+    const previous = this.engine;
     try {
-      this.engine = await PptxPresentation.load(source, {
+      const engine = await PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         workerTimeoutMs: this.opts.workerTimeoutMs,
@@ -143,6 +150,12 @@ export class PptxViewer {
         math: this.opts.math,
         mode: this._mode,
       });
+      // Discard the stale slide's media handle before swapping engines so its RAF
+      // loop / object URLs don't outlive the replaced presentation.
+      this.handle?.destroy();
+      this.handle = null;
+      this.engine = engine;
+      previous?.destroy();
       this.currentSlide = this._initialSlide();
       await this.renderCurrentSlide();
     } catch (err) {
