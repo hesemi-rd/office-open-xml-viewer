@@ -32,11 +32,13 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 ## Phase 1 — 即効の正しさ・安全網・クイックウィン
 
 ### 正しさ(チャート)
-- [ ] CH1: 棒チャート負値
-- [ ] CH2: stackedLine / stackedLinePct
-- [ ] CH3: xlsx チャート色解決の私的コピー排除(bg2/tx2 + HSL)
-- [ ] CH4: c:dateAx 認識
-- [ ] CH11: チャート数値のロケール固定(§18.8.30 エンジンへ)
+- [x] CH1: 棒チャート負値 — 縦棒/横棒とも実 dataMin からゼロライン基準の両方向描画に一般化。stacked は正負分離スタック、percentStacked は符号保持(分母 Σ|v| と逆側スタックは spec が定めない Excel/PowerPoint 実挙動である旨をコメント化)。正値のみチャートは byte-stable(snapshot 不変で証明)
+- [x] CH2: stackedLine / stackedLinePct — area の stackBase パターンを移植。**追加発見: 参照実装とされた stackedAreaPct 自体が正規化未実装** → 同 PR で修正(1c56f66)。bar/line/area の pct 分配規約(Σ|v|・符号保持)を 3 実装で統一
+- [x] CH3: xlsx チャート色解決の私的コピー排除(bg2/tx2 + HSL) — 私的 3 関数を削除し ooxml_common::color::parse_color_node + 共有 XlsxSchemeResolver へ委譲。横断点検の結果 **pptx は委譲済みでバグ無し**(xlsx が唯一の外れ値だった)。注: alpha 付き solidFill は 8 桁 hex になる(shape 経路と整合、旧実装は alpha を落としていた)
+- [x] CH4: c:dateAx 認識 — xlsx/pptx 両パーサーで catAx と同扱い(§21.2.2.39 の EG_AxShared 共有構造)。pptx は従来 None 固定だった cat_axis_format_code の配線も獲得。**レビューで発覚した穴: catAxisFormatCode の TS 側消費者が scatter のみで時系列 line/bar が生シリアル値のまま** → §21.2.2.71 の一般則として全カテゴリ軸ファミリーの目盛りラベル書式化(formatCategoryLabel)を core に追加実装(a39eca8)。baseTimeUnit / majorTimeUnit 等の日付単位制御は CH6 の範囲
+- [x] CH11: チャート数値のロケール固定(§18.8.30 エンジンへ) — **再定義: 実箇所は scatter でなく waterfall のみ**(scatter は formatChartValWithCode 対応済みだった)。waterfall の軸目盛り/データラベル 2+1 箇所を formatChartValWithCode へ(valAxisFormatCode / dataLabelFormatCode 配線込み)。renderer 内の toLocaleString は 0 件に
+
+> CH1–CH4/CH11 は PR fix/chart-correctness(9 commits)。検証 = vitest 1757 / typecheck / cargo 3 点 / VRT 163 全 green・参照画像差分ゼロ。独立 4 観点レビュー(spec 忠実性・正しさ・横断統一・テスト品質)→ REQUEST_CHANGES 3 件(MAJOR)を修正済み。別トラック送りの発見: pptx の cat_axis_crosses/crossesAt None 固定(CH6 圏)、percentStacked 分母計算の三重実装の共通化(コスメティック)、stacked の null セル= dispBlanksAs zero 既定(CH9 圏)
 
 ### 正しさ(xlsx / DrawingML / docx)
 - [ ] XL1: date1904(+1900-02-29 バグ互換)
