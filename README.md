@@ -241,6 +241,41 @@ here instead of crashing the scroll loop). The parse/render knobs from the
 headless engines (`mode`, `useGoogleFonts`, `maxZipEntryBytes`, `math`, `dpr`)
 are accepted too.
 
+### Markdown export
+
+Every headless engine can project its document to GitHub-flavoured markdown for
+LLM ingestion, full-text search, or diffing — headings, lists, tables, and (for
+docx) footnotes / comments are preserved; layout, fonts, and positioning are
+dropped. The projection is compiled into the parser WASM you already ship, so it
+adds **zero** bundle weight. `toMarkdown()` works in both `mode: 'main'` and
+`mode: 'worker'` (it runs off the archive opened at `load()`):
+
+```typescript
+import { DocxDocument } from '@silurus/ooxml/docx';
+
+const doc = await DocxDocument.load('/document.docx');
+const md = await doc.toMarkdown();
+```
+
+`PptxPresentation.toMarkdown()` (title slides → `#` headings, body → nested
+bullets, notes / comments collated) and `XlsxWorkbook.toMarkdown()` (each sheet →
+a `## SheetName` pipe table) are the twins.
+
+For a one-off conversion outside a viewer, the standalone
+`@silurus/ooxml-markdown` package exposes the low-level functions and a CLI:
+
+```typescript
+import { docxToMarkdown, initDocxFromBytes } from '@silurus/ooxml-markdown';
+
+initDocxFromBytes(wasmBytes);          // the docx parser's `_bg.wasm`
+const md = docxToMarkdown(fileBytes);  // ArrayBuffer | Uint8Array | Buffer
+```
+
+```bash
+npx ooxml-md document.docx            # → stdout
+npx ooxml-md deck.pptx -o deck.md     # → file
+```
+
 ---
 
 <details>
@@ -609,6 +644,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
 | | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
 | | Comments — author / date / text via the document model (`doc.comments`, §17.13.4; not drawn on the page) | ✅ |
+| | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 | | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
@@ -658,6 +694,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Pivot tables | ❌ Not planned |
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model, shown in an Excel-style hover popup) | ✅ |
 | | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell whose click opens a panel showing the allowed values — read-only) | ✅ |
+| | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
 | **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
@@ -681,6 +718,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Slide background (solid, gradient, image) | ✅ |
 | | Slide numbers | ✅ |
 | | Speaker notes (plain text via `getNotes()`) | ✅ |
+| | Markdown export (`PptxPresentation.toMarkdown()` — title slides → headings, body → nested bullets, notes / comments collated; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
