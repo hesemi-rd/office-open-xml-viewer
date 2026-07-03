@@ -6810,10 +6810,13 @@ mod cs_toggle_tests {
     #[test]
     fn underline_color_hex_and_auto_parse() {
         // §17.3.2.40 w:u@color — underline-only colour (hex 6 or literal "auto").
+        // Lowercased on parse like the sibling w:color@val field, so the
+        // renderer's `underlineColor !== 'auto'` sentinel check is reliable
+        // regardless of the source document's attribute casing.
         let hex = run_of(
             r#"<w:p><w:r><w:rPr><w:u w:val="single" w:color="FF0000"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
         );
-        assert_eq!(hex.underline_color.as_deref(), Some("FF0000"));
+        assert_eq!(hex.underline_color.as_deref(), Some("ff0000"));
         let auto = run_of(
             r#"<w:p><w:r><w:rPr><w:u w:val="wave" w:color="auto"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
         );
@@ -6854,7 +6857,7 @@ mod cs_toggle_tests {
         );
         assert!(run.underline);
         assert_eq!(run.underline_style.as_deref(), Some("dotted"));
-        assert_eq!(run.underline_color.as_deref(), Some("0000FF"));
+        assert_eq!(run.underline_color.as_deref(), Some("0000ff"));
     }
 
     #[test]

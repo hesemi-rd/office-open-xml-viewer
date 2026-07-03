@@ -207,7 +207,7 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
                 alpha += attr_pct(&t, "val", 0.0);
             }
             "comp" => {
-                // ECMA-376 §20.1.2.3.6 — the *complement*: the color which,
+                // ECMA-376 §20.1.2.3.7 — the *complement*: the color which,
                 // mixed with the input, yields a shade of grey. The spec's
                 // worked example is red RGB(255,0,0) → cyan RGB(0,255,255),
                 // i.e. a 180° hue rotation with saturation and luminance held
@@ -778,7 +778,7 @@ mod tests {
             parse(&inv, TintMode::WordLiteral).as_deref(),
             Some("00FFFF")
         );
-        // comp: red → cyan (180° hue rotation), spec §20.1.2.3.6 example.
+        // comp: red → cyan (180° hue rotation), spec §20.1.2.3.7 example.
         let comp = format!(
             r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="FF0000"><a:comp/></a:srgbClr></a:solidFill>"#
         );

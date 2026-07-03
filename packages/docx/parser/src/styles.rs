@@ -1114,7 +1114,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
             Some(val)
         };
         if let Some(color) = attr_w(u, "color") {
-            fmt.underline_color = Some(color);
+            // Lowercase like the sibling `color` field below: the renderer's
+            // `underlineColor !== 'auto'` check (§17.3.2.40's `color="auto"`
+            // sentinel) is a strict-case comparison, so a producer that emits
+            // "Auto" must still be normalized to the lowercase sentinel here.
+            fmt.underline_color = Some(color.to_lowercase());
         }
     }
 
@@ -1601,6 +1605,26 @@ mod tests {
     fn explicit_hex_color_is_lowercased() {
         let fmt = run_fmt_from(r#"<w:color w:val="FF0000"/>"#);
         assert_eq!(fmt.color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn underline_color_is_lowercased_like_sibling_color() {
+        // §17.3.2.40 w:u@color, hex case — must lowercase the same as the
+        // sibling w:color@val field above.
+        let fmt = run_fmt_from(r#"<w:u w:val="single" w:color="FF0000"/>"#);
+        assert_eq!(fmt.underline_color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn underline_color_auto_is_lowercased_so_renderer_sentinel_check_matches() {
+        // A producer that writes the capitalized "Auto" sentinel must still
+        // normalize to lowercase "auto": the TS renderer's underline-color
+        // override guard (`underlineColor !== 'auto'`) is a strict-case
+        // comparison, so an un-lowercased "Auto" would slip past it and be
+        // treated as a literal (invalid) hex color instead of "follow the
+        // glyph color".
+        let fmt = run_fmt_from(r#"<w:u w:val="single" w:color="Auto"/>"#);
+        assert_eq!(fmt.underline_color.as_deref(), Some("auto"));
     }
 
     #[test]
