@@ -1,4 +1,4 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
@@ -9,11 +9,33 @@ export default defineConfig({
     baseURL: 'http://localhost:6007',
     actionTimeout: 30_000,
   },
+  // The smoke assertion is canvasHasInk (a count of non-white pixels), which is
+  // font-independent, so it stays stable across engines. Running webkit and
+  // firefox alongside chromium catches engine-specific breakage in the
+  // parse -> render pipeline (OffscreenCanvas quirks, worker transfer, canvas
+  // API gaps) that a Chrome-only smoke would miss. (VRT match-% comparisons,
+  // which ARE font-sensitive, stay Chrome-only and local — see visual.spec.ts.)
   projects: [
     {
       name: 'chrome',
       use: {
         channel: 'chrome',
+        deviceScaleFactor: 1,
+        viewport: { width: 1400, height: 900 },
+      },
+    },
+    {
+      name: 'webkit',
+      use: {
+        ...devices['Desktop Safari'],
+        deviceScaleFactor: 1,
+        viewport: { width: 1400, height: 900 },
+      },
+    },
+    {
+      name: 'firefox',
+      use: {
+        ...devices['Desktop Firefox'],
         deviceScaleFactor: 1,
         viewport: { width: 1400, height: 900 },
       },

@@ -142,6 +142,13 @@ jobs:
           else
             pnpm exec playwright install chrome --with-deps
           fi
+      # webkit + firefox back the multi-engine smoke projects. The ink assertion
+      # (canvasHasInk) is font-independent, so it is stable across engines and
+      # catches engine-specific pipeline breakage a Chrome-only run would miss.
+      # Chrome is handled by the guarded step above (system Google Chrome), so we
+      # install only the two bundled engines here.
+      - name: Install Playwright WebKit + Firefox
+        run: pnpm exec playwright install webkit firefox --with-deps
       - name: Smoke tests
         run: pnpm smoke
 
