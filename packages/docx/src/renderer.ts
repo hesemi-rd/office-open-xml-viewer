@@ -2975,37 +2975,34 @@ function splitParagraphAcrossPages(
   return { endY: cursorY };
 }
 
-/** Per-row heights used by both pagination and the height estimate. Mirrors the
- *  renderer's row sizing (exact / atLeast / auto + vMerge span distribution,
- *  ECMA-376 §17.4.80, §17.4.85) via the shared {@link resolveTableRowHeights}
- *  skeleton. Works in pt (scale 1); the cell measurer is the paginator's
- *  float-aware `estimateParagraphHeight` cursor-walk. Adjacent paragraphs inside
- *  a cell collapse spacing the same way `renderCellContent` does (ECMA-376
- *  §17.3.1.33 contextualSpacing + spaceAfter/spaceBefore overlap = max not sum),
- *  so the measured height matches the painted height. Without this, a cell
- *  containing a nested table followed by a paragraph with `spaceBefore` would
- *  measure taller than it paints, leaving a gap below the nested table. */
+/** Per-row heights (pt) used by both pagination and the keep-with-next height
+ *  estimate. Mirrors the renderer's row sizing (exact / atLeast / auto + vMerge
+ *  span distribution, ECMA-376 §17.4.80, §17.4.85) via the shared
+ *  {@link resolveTableRowHeights} skeleton.
+ *
+ *  B2 table stage 1a — the cell CONTENT measurer is now the SAME single function
+ *  the paint pass uses ({@link measureCellContentHeightPx}), invoked at scale 1
+ *  so it returns pt. Previously the paginator measured each cell with its own
+ *  `estimateParagraphHeight` cursor-walk while the paint pass used
+ *  `measureCellElementHeight`; the two agreed for the common (non-empty, non-ruby,
+ *  float-free) paragraph but DIVERGED for empty paragraph marks (the paginator
+ *  used the corrected `paragraphMarkLineHeight`, the paint pass the synthetic
+ *  `emptyLineNaturalPx`) and ruby paragraphs (only the paginator applied the
+ *  docGrid uniform-pitch snap). That split sized the SAME table's rows with two
+ *  different measurers — the structural source of measure/paint row-height drift
+ *  (clip / overflow / page-split mismatch). Routing both through
+ *  `measureCellContentHeightPx` — whose empty/ruby branches were fixed in this
+ *  stage to equal what `renderParagraph` actually draws — makes "same input →
+ *  same formula → same height" hold, so the paginated row heights are exactly the
+ *  heights the paint pass will lay out. `measureCellContentHeightPx` already folds
+ *  in `effCellMargins`, the §17.4.7 trailing-structural-marker drop, and the
+ *  §17.3.1.33 contextual/overlap spacing collapse (via `sumCellContentHeight`), so
+ *  the caller is a thin delegation. */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
   const colWidths = resolveColumnWidths(table, contentWPt, state);
-  return resolveTableRowHeights(table, colWidths, 1, (cell, cellW) => {
-    const cm = effCellMargins(cell, table);
-    const innerW = Math.max(1, cellW - cm.left - cm.right);
-    // pt-space: estimateParagraphHeight emits the full spaceBefore (its
-    // suppressSpaceBefore flag is for page-break continuations, not intra-cell
-    // collapse), so sumCellContentHeight folds in contextualSuppressed
-    // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap to match the
-    // paint pass's renderCellContent. Drop the §17.4.7 trailing structural
-    // empty paragraph after a nested table for the SAME reason the paint-side
-    // measurer (measureCellContentHeightPx) does — otherwise the paginator
-    // would reserve more height than the paint pass uses and break the page
-    // early (the two are contracted to agree, per this function's docstring).
-    return cm.top + cm.bottom + sumCellContentHeight(trimTrailingStructuralMarker(cell.content), (ce) => {
-      if (ce.type === 'paragraph') {
-        return estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
-      }
-      return estimateTableHeight(state, ce as unknown as DocTable, innerW);
-    }, 1);
-  });
+  return resolveTableRowHeights(table, colWidths, 1, (cell, cellW) =>
+    measureCellContentHeightPx(cell, table, cellW, 1, state),
+  );
 }
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
@@ -8136,13 +8133,21 @@ function computeTableLayout(
   return { colWidths, tableW, rowHeights };
 }
 
-/** Content height (px, at `scale`) of a table cell laid out at total width
- *  `cellW`: cell top/bottom margins plus each content element measured at the
- *  paint pass's `measureCellElementHeight`. Adjacent paragraphs inside the cell
- *  collapse spacing the same way `renderCellContent` does (ECMA-376 §17.3.1.33
- *  contextualSpacing + spaceAfter/spaceBefore overlap = max not sum), so the
- *  measured height matches the painted height. Shared by the per-row skeleton
- *  (via computeTableLayout) and the exported {@link calculateRowHeight}. */
+/** Content height of a table cell laid out at total width `cellW`, in the target
+ *  units the caller works in: px when `scale` is the device scale (paint pass),
+ *  pt when `scale === 1` (paginator). Cell top/bottom margins plus each content
+ *  element measured at `measureCellElementHeight`. Adjacent paragraphs inside the
+ *  cell collapse spacing the same way `renderCellContent` does (ECMA-376
+ *  §17.3.1.33 contextualSpacing + spaceAfter/spaceBefore overlap = max not sum),
+ *  so the measured height matches the painted height.
+ *
+ *  B2 table stage 1a — this is the SINGLE cell-content measurer for the whole
+ *  package. The paginator ({@link computeTableRowHeights}, scale 1), the paint
+ *  layout ({@link computeTableLayout}, device scale), and the exported
+ *  {@link calculateRowHeight} all resolve a cell's height through here, so a
+ *  table's rows can never be sized by two different measurers. Unit-agnostic: it
+ *  is the same formula at any `scale`, and at scale 1 it returns exactly the pt
+ *  height the device-scale paint pass will produce ÷ scale. */
 function measureCellContentHeightPx(
   cell: DocTableCell,
   table: DocTable,
@@ -8383,9 +8388,24 @@ function measureParaHeight(
   const paraHasRuby = paragraphHasRuby(para);
   const grid = paraGrid(para, state);
   if (segs.length === 0) {
-    const fs = getDefaultFontSize(para);
-    const { asc, desc } = emptyLineNaturalPx(fs, scale);
-    return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), paragraphIsEastAsian(para));
+    // ECMA-376 §17.3.1.29: an empty (or anchor-only) paragraph still produces one
+    // paragraph-mark line box. Size it with the SAME `paragraphMarkLineHeight`
+    // (ctx-based, correctedLineMetrics) the paint pass draws with
+    // (renderEmptyMarkParagraph) — NOT the synthetic 0.8/0.2-em `emptyLineNaturalPx`,
+    // which under-measures every substituted (e.g. Latin ~1.15em) mark font and so
+    // reserved a shorter row than the mark actually paints. Using the drawn height
+    // makes this row measurer measure == draw for empty cell paragraphs, closing
+    // the measure/paint gap that the paginator's `estimateParagraphHeight` (which
+    // already used `paragraphMarkLineHeight`) did not share with the paint side.
+    return paragraphMarkLineHeight(
+      para,
+      scale,
+      grid,
+      paraHasRuby,
+      state.docEastAsian,
+      state.ctx,
+      state.fontFamilyClasses,
+    );
   }
   // ECMA-376 §17.3.1.12 (`<w:ind>`): the paragraph's own left/right indent
   // narrows the wrap width and `firstLine` insets the first line — exactly as
@@ -8411,7 +8431,21 @@ function measureParaHeight(
   const indRightPx = para.indentRight * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
   const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
+  if (paraHasRuby) {
+    // Ruby paragraph (§17.3.3.25 / §17.6.5): the paint pass (renderParagraph) and
+    // the paginator (estimateParagraphHeight) give EVERY line the same height —
+    // the tallest line's natural box snapped up to an integer docGrid pitch — so
+    // ruby-bearing and ruby-free lines share one baseline grid. Mirror that here
+    // (the row measurer previously summed each line's independent box, which
+    // under/over-measured a wrapped ruby cell relative to what it paints).
+    const uniform = snapParaLineToGrid(
+      Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphIsEastAsian(para)))),
+      grid,
+      scale,
+    );
+    return lines.length * uniform;
+  }
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 
 /** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376
