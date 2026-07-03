@@ -3029,16 +3029,14 @@ function splitParagraphAcrossPages(
     // state-sensitive segments (stampLines above): those keep the recompute
     // path so field text resolves against the real page context.
     if (stampLines) {
-      sliceEl.layoutLines = lines;
-      sliceEl.layoutLinesInputs = {
-        scale: 1,
+      stampParagraphLines(sliceEl, lines, {
         paraW,
         firstIndent: para.indentFirst,
         tabOriginPx: indLeft,
         gridDeltaPx: gridCharDeltaPx(paraGrid(para, measureState), 1),
         hasFloats: wrapCtx !== undefined,
         kinsoku: measureState.kinsoku,
-      };
+      });
     }
     pages[pages.length - 1].push(stamp(sliceEl));
     lineIdx = lastFitting;
@@ -5541,6 +5539,42 @@ type PaginatedElementWithLines = PaginatedBodyElement & {
   };
 };
 
+/** Phase 4-1 B2 — record a paragraph's scale-1 laid-out lines + the layout inputs
+ *  that produced them onto the paragraph object, so the paint pass can reuse the
+ *  wrap partition instead of re-running {@link layoutLines} (compute-once). Used
+ *  by both the BODY split path ({@link splitParagraphAcrossPages}, Stage 1) and
+ *  the table-CELL measure path ({@link measureParaHeight}, T2). Only ever called
+ *  at scale 1 (the paginator's pt space), so every recorded number is already in
+ *  pt and the paint gate compares against it without rescaling — see the
+ *  self-verifying reuse gate in {@link renderParagraph}, which fires ONLY when its
+ *  own reconstructed scale-1 inputs match every field here. The FULL line array is
+ *  stamped (never a slice) because the paint loop indexes lines by absolute number;
+ *  the array is immutable to the draw path, so it is safe to share across page
+ *  slices and repeated renderPage calls. Callers must have already excluded
+ *  state-sensitive paragraphs (`paragraphSegsStateSensitive`) whose segment TEXT
+ *  would go stale, and float contexts (`hasFloats` records whether one was active;
+ *  the cell path never wraps cell paragraphs around floats, so it always passes
+ *  false). */
+function stampParagraphLines(
+  // A DocParagraph (the table-cell path passes the paragraph directly) or an
+  // already-paginated paragraph slice (the body path passes its PaginatedElementWithLines
+  // slice). Both carry the two runtime line fields via the internal cast below.
+  para: DocParagraph | PaginatedElementWithLines,
+  lines: LayoutLine[],
+  inputs: {
+    paraW: number;
+    firstIndent: number;
+    tabOriginPx: number;
+    gridDeltaPx: number;
+    hasFloats: boolean;
+    kinsoku: KinsokuRules;
+  },
+): void {
+  const stamped = para as unknown as PaginatedElementWithLines;
+  stamped.layoutLines = lines;
+  stamped.layoutLinesInputs = { scale: 1, ...inputs };
+}
+
 /** Phase 4-1 B2 Stage 1 — master switch for the compute-once line reuse. Always
  *  ON in production; the pixel-identity characterization test flips it OFF to
  *  capture a fresh-recompute reference and assert the reuse path paints an
@@ -7200,6 +7234,49 @@ function measureParaHeight(
   const indRightPx = para.indentRight * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
   const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
+  // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
+  // point a cell paragraph's lines are laid out at scale 1: the paginator sizes
+  // every table row through computeTablePtLayout → resolveTableRowHeights →
+  // measureCellContentHeightPx → measureCellElementHeight → here (scale 1). Stamp
+  // those lines + inputs onto the paragraph so `renderParagraph`'s existing reuse
+  // gate (Stage 2) skips re-running layoutLines at paint. A cell paragraph is a
+  // PaginatedBodyElement in nothing but name (it is never split across pages), yet
+  // it IS a DocParagraph, so the same private line stamp rides on it and the same
+  // gate consumes it — no renderer-side change beyond this stamp is needed.
+  //
+  // Only at scale 1: the gate requires `layoutLinesInputs.scale === 1`, and the
+  // stamped numbers are the paginator's pt values that the paint gate reconstructs
+  // as `contentW/scale − ind…`. The paint-scale calls of this function
+  // (vAlign-centering measure in renderCell, and the dryRun measureCellContent
+  // path) MUST NOT overwrite the scale-1 stamp with paint-scale lines, so they are
+  // skipped here. `hasFloats` is always false: measureParaHeight passes `undefined`
+  // for the layoutLines wrap context (cell paragraphs are never wrapped around
+  // floats in the measure), and when a cell is painted inside a live float band
+  // renderParagraph takes its float path (case 3) and ignores this no-float stamp.
+  //
+  // Multiple scale-1 measures of the SAME cell (keepNext lookahead's
+  // estimateTableHeight, column-balancing's measureSectionColumnHeight, and the
+  // authoritative computeTablePtLayout that places the table) all reach here;
+  // last-writer-wins and the authoritative placement measure runs LAST, so its
+  // stamp — resolved at the SAME column width the paint pass uses — is the one that
+  // survives. Correctness never depends on which won: the paint gate re-derives the
+  // paragraph's width in scale-1 space and reuses the stamp ONLY when its recorded
+  // `paraW`/indent/grid/kinsoku match, else it recomputes (case 2). State-sensitive
+  // paragraphs (page/numPages fields, note refs) are excluded exactly as the body
+  // stamp excludes them — their segment text resolves against the real paint page.
+  // Nested tables recurse through the same path (measureCellElementHeight →
+  // estimateTableHeight → measureParaHeight at scale 1), so their inner cell
+  // paragraphs get stamped and reused by the same mechanism.
+  if (scale === 1 && !paragraphSegsStateSensitive(para)) {
+    stampParagraphLines(para, lines, {
+      paraW,
+      firstIndent: para.indentFirst,
+      tabOriginPx: indLeftPx, // == para.indentLeft at scale 1
+      gridDeltaPx: gridCharDeltaPx(grid, 1),
+      hasFloats: false,
+      kinsoku: state.kinsoku,
+    });
+  }
   if (paraHasRuby) {
     // Ruby paragraph (§17.3.3.25 / §17.6.5): the paint pass (renderParagraph) and
     // the paginator (estimateParagraphHeight) give EVERY line the same height —
