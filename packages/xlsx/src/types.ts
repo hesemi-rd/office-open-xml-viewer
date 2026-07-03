@@ -821,7 +821,12 @@ export type WorkerRequest =
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the
    *  `type` discriminant. */
-  | { type: 'extractImage'; id: number; path: string };
+  | { type: 'extractImage'; id: number; path: string }
+  /** Project the retained archive to GitHub-flavoured markdown
+   *  (`XlsxArchive.to_markdown`, the handle already opened at `parse` — no
+   *  re-copy of the file). Twin of `extractImage`: the archive stays in the
+   *  worker, only the string crosses back. */
+  | { type: 'toMarkdown'; id: number };
 
 export type WorkerResponse =
   // The workbook index / worksheet cross the worker boundary as raw UTF-8 JSON
@@ -831,4 +836,5 @@ export type WorkerResponse =
   | { type: 'parsed'; id: number; workbookJson: ArrayBuffer }
   | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
+  | { type: 'markdownRendered'; id: number; markdown: string }
   | { type: 'error'; id: number; message: string };

@@ -26,7 +26,8 @@ export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
-  | { type: 'extractImage'; id: number; path: string };
+  | { type: 'extractImage'; id: number; path: string }
+  | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { type: 'parsed' }>

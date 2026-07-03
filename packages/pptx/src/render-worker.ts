@@ -169,6 +169,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       post({ kind: 'imageExtracted', id: req.id, bytes }, [bytes]);
       return;
     }
+
+    if (req.kind === 'toMarkdown') {
+      // Project the retained archive to markdown, straight from the handle the
+      // worker already holds (same source as worker.ts's parse-mode arm).
+      if (!archive) throw new Error('No pptx loaded');
+      const markdown = archive.to_markdown();
+      post({ kind: 'markdownRendered', id: req.id, markdown });
+      return;
+    }
   } catch (err) {
     if ('id' in req) {
       post({ kind: 'error', id: req.id, message: err instanceof Error ? err.message : String(err) });

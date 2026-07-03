@@ -135,6 +135,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }
+    if (req.type === 'toMarkdown') {
+      // Project the retained archive to markdown, straight from the handle the
+      // worker already holds (same source as worker.ts's parse-mode arm).
+      if (!archive) throw new Error('No docx loaded');
+      const markdown = archive.to_markdown();
+      post({ type: 'markdownRendered', id, markdown });
+      return;
+    }
   } catch (err) {
     post({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
   }

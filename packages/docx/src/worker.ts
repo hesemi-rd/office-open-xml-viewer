@@ -72,6 +72,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
       return;
     }
+    if (req.type === 'toMarkdown') {
+      if (!archive) throw new Error('No docx loaded');
+      // Project the already-opened handle to markdown (no re-copy of the file,
+      // no re-scan of the central directory). A plain string has no transferable
+      // backing, so it is posted by structured clone like any other value.
+      const markdown = archive.to_markdown();
+      const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
+      self.postMessage(res);
+      return;
+    }
   } catch (err) {
     const res: WorkerResponse = { type: 'error', id, message: String(err) };
     self.postMessage(res);

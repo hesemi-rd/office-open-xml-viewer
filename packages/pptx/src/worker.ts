@@ -82,6 +82,17 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
       return;
     }
+
+    if (req.kind === 'toMarkdown') {
+      if (!archive) throw new Error('No pptx loaded');
+      // Project the already-opened handle to markdown (no re-copy of the file,
+      // no re-scan of the central directory). A plain string has no transferable
+      // backing, so it is posted by structured clone like any other value.
+      const markdown = archive.to_markdown();
+      const msg: WorkerResponse = { kind: 'markdownRendered', id, markdown };
+      self.postMessage(msg);
+      return;
+    }
   } catch (err) {
     const msg: WorkerResponse = {
       kind: 'error',
