@@ -10,21 +10,23 @@
  * stale sheets / images.
  */
 import init, { XlsxArchive } from './wasm/xlsx_parser.js';
-import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
+import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 
-let initPromise: Promise<unknown> | null = null;
+// RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
+// read recycles the instance so the next workbook renders on clean linear
+// memory. The host owns the `XlsxArchive` handle (`host.archive`): copies the
+// file into WASM ONCE; the workbook / sharedStrings / theme parts are parsed
+// ONCE and reused on every `parse_sheet`. Freed + replaced on a re-parse, freed +
+// nulled by the host on a trap.
+const host = new WasmParserHost<XlsxArchive>(init, {
+  freeArchive: (a) => a.free(),
+});
 let workbook: ParsedWorkbook | null = null;
-// An `XlsxArchive` handle over the opened zip. `new XlsxArchive(bytes, max)`
-// copies the file into WASM ONCE and opens it ONCE; the workbook / sharedStrings
-// / theme parts are parsed ONCE and reused on every `parse_sheet` (the D3 win).
-// `getImage` also reads bytes by zip path straight from the retained archive. No
-// JS-side buffer kept alive. Freed + replaced on a re-parse.
-let archive: XlsxArchive | null = null;
 let fontsLoaded: Promise<void> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
 const imageCache = new Map<string, CanvasImageSource | null>();
@@ -37,14 +39,6 @@ const imageBlobCache = new Map<string, Promise<Blob>>();
 const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
 
-/** Free the current handle (if any) and null it out — double-free / UAF guard. */
-function disposeArchive(): void {
-  if (archive) {
-    archive.free();
-    archive = null;
-  }
-}
-
 /** In-worker image-byte loader (twin of the docx render-worker `getImage`). The
  *  orchestrator's `fetchImage` routes here in worker mode, so image bytes are
  *  read straight from the retained archive with no main-thread round-trip.
@@ -53,8 +47,9 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
   const hit = imageBlobCache.get(path);
   if (hit) return hit;
   const p = (async () => {
-    if (!archive) throw new Error('Workbook not loaded');
-    const bytes = archive.extract_image(path);
+    const loaded = host.archive;
+    if (!loaded) throw new Error('Workbook not loaded');
+    const bytes = host.run(() => loaded.extract_image(path));
     return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
   })();
   imageBlobCache.set(path, p);
@@ -69,12 +64,14 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 function parseSheetLocally(sheetIndex: number): Worksheet {
   const cached = sheetCache.get(sheetIndex);
   if (cached) return cached;
-  if (!workbook || !archive) throw new Error('Workbook not loaded');
+  const loaded = host.archive;
+  if (!workbook || !loaded) throw new Error('Workbook not loaded');
   const sheetMeta = workbook.workbook.sheets[sheetIndex];
   if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
   // `parse_sheet` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); the
-  // render worker consumes the model in-worker, so decode + parse here.
-  const json = archive.parse_sheet(sheetIndex, sheetMeta.name);
+  // render worker consumes the model in-worker, so decode + parse here. Guarded
+  // so a trap on ONE sheet recycles the instance instead of wedging the workbook.
+  const json = host.run(() => loaded.parse_sheet(sheetIndex, sheetMeta.name));
   const ws = JSON.parse(new TextDecoder().decode(json)) as Worksheet;
   // Resolve `{ type: 'shared', si }` cells against the dedup'd sharedStrings
   // table so the renderer only ever sees fully-materialized text (worker-mode
@@ -87,12 +84,12 @@ function parseSheetLocally(sheetIndex: number): Worksheet {
 self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   const req = e.data;
   if (req.type === 'init') {
-    initPromise = init(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
   const id = req.id;
   try {
-    await initPromise;
+    await host.ensureReady();
     if (req.type === 'parse') {
       // A re-parse starts a fresh document: drop any cached sheets / images so
       // we never serve stale data from a previous load.
@@ -103,15 +100,16 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      // Constructing the handle copies `req.data` into WASM; the worker then
-      // holds no reference to those bytes (memory is not doubled). Replace any
-      // prior handle first so a re-parse frees the old archive.
-      disposeArchive();
-      archive = new XlsxArchive(new Uint8Array(req.data), max);
-      // `parse()` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
-      // parse the workbook index here (consumed in-worker, then a light copy is
-      // sent to the proxy as an object).
-      workbook = JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
+      // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
+      // + recycles the instance (and frees the archive). `setArchive` frees any
+      // prior handle first — the re-parse dispose. `parse()` returns UTF-8 JSON
+      // bytes (Result<Vec<u8>, JsValue>); decode + parse the workbook index here
+      // (consumed in-worker, then a light copy is sent to the proxy as an object).
+      workbook = host.run(() => {
+        const archive = new XlsxArchive(new Uint8Array(req.data), max);
+        host.setArchive(archive);
+        return JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
+      });
       if (req.useGoogleFonts) {
         // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for
         // every styled font name, plus the generic Arabic fallbacks. Fonts must
@@ -155,8 +153,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // this arm exists only for protocol parity with worker.ts. Raw bytes are
       // read straight from the retained archive (no mime needed for a byte
       // transfer).
+      const archive = host.archive;
       if (!archive) throw new Error('Workbook not loaded');
-      const raw = archive.extract_image(req.path);
+      const raw = host.run(() => archive.extract_image(req.path));
       const bytes = new Uint8Array(raw).slice().buffer;
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
@@ -164,8 +163,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'toMarkdown') {
       // Project the retained archive to markdown, straight from the handle the
       // worker already holds (same source as worker.ts's parse-mode arm).
+      const archive = host.archive;
       if (!archive) throw new Error('Workbook not loaded');
-      const markdown = archive.to_markdown();
+      const markdown = host.run(() => archive.to_markdown());
       post({ type: 'markdownRendered', id, markdown });
       return;
     }
