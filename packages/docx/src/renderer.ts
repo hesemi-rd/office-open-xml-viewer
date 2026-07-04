@@ -5440,7 +5440,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         continue;
       }
       if ('imagePath' in seg) {
-        if (!dryRun) renderInlineImage(ctx, seg as LayoutImageSeg, x, baseline, scale, state.images);
+        if (!dryRun) renderInlineImage(ctx, seg as LayoutImageSeg, x, baseline, scale, state.images, !!state.verticalCJK);
         x += seg.measuredWidth;
         continue;
       }
@@ -6020,23 +6020,40 @@ function renderInlineImage(
   baseline: number,
   scale: number,
   images: Map<string, DecodedImage>,
+  vertical: boolean,
 ): void {
   // Anchor images are skipped during layout (measuredWidth=0, not added to line.segments)
   // and are drawn later by renderAnchorImages — so this function only handles inline images.
   if (seg.anchor) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
+  const boxY = baseline - h;
+  // ECMA-376 §17.6.20 (tbRl) — an inline image/chart is a graphic, not text, so it
+  // stands UPRIGHT inside the +90°-rotated page. `drawUprightBox` counter-rotates
+  // the flow box (logical `x,boxY,w,h`) −90° about its centre and invokes the
+  // callback with the un-swapped upright rect, so the image/chart is painted right
+  // way up. On horizontal pages the callback runs with the box unchanged (no
+  // rotation), byte-identical to the pre-vertical inline draw.
+  const paint = (
+    draw: (dx: number, dy: number, dw: number, dh: number) => void,
+  ): void => {
+    if (vertical) drawUprightBox(ctx, x, boxY, w, h, draw);
+    else draw(x, boxY, w, h);
+  };
   // ECMA-376 §21.2 inline chart: paint through the shared core chart renderer
   // (the same entry point pptx/xlsx use), at the inline box's top-left. `scale`
   // is px-per-pt in this renderer, which is exactly the `ptToPx` renderChart
   // wants to scale the chart's point-sized fonts/axes — so pass it straight.
   if (seg.chart) {
-    renderChart(ctx as CanvasRenderingContext2D, seg.chart, { x, y: baseline - h, w, h }, scale);
+    const chart = seg.chart;
+    paint((dx, dy, dw, dh) =>
+      renderChart(ctx as CanvasRenderingContext2D, chart, { x: dx, y: dy, w: dw, h: dh }, scale),
+    );
     return;
   }
   const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom));
   if (!bmp) return;
-  drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
+  paint((dx, dy, dw, dh) => drawImageCropped(ctx, bmp, seg.srcRect, dx, dy, dw, dh));
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
