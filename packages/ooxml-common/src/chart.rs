@@ -2137,12 +2137,17 @@ pub fn collect_num_cache_positional(ser_node: Node, child_tag: &str) -> Vec<Opti
 /// delegate to. The graphic-frame geometry (`x`/`y`/`w`/`h`) stays in each
 /// crate's wrapper.
 ///
-/// Moved from the pptx `parse_legacy_chart` body with only the mechanical
-/// edits listed below: `parse_color_node(fill, theme)` became
+/// The core structure (series/axis/legend/title walk, the overall control
+/// flow) was moved from the pptx `parse_legacy_chart` body, with only the
+/// mechanical edits listed below: `parse_color_node(fill, theme)` became
 /// `color_resolver.resolve_solid_fill(fill)`, the `ooxml_common::chart::`
 /// self-prefix was dropped, the local `PptxColorResolver` was replaced by the
 /// passed `color_resolver`, and the `ChartElement` frame wrapper was replaced
-/// by a bare `ChartModel` return.
+/// by a bare `ChartModel` return. The richer series/axis extractors this
+/// function calls (markers, per-point overrides, data labels, error bars,
+/// positional num/str caches, radar style, axis crosses, manual layout, etc.)
+/// were moved here from the xlsx parser, which had the more complete
+/// implementation of each.
 pub fn parse_chart_part(
     chart_root: Node,
     color_resolver: &dyn ColorResolver,
@@ -4565,5 +4570,300 @@ mod tests {
             &FixtureResolver
         )
         .is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Direct unit tests for the extractors moved from the xlsx parser into
+    // this shared module. These call the functions themselves (not through
+    // `parse_chart_part`) so a regression in one is pinpointed rather than
+    // surfacing only as a diff in a much larger golden `ChartModel`.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_marker_block_symbol_size_fill_line() {
+        let xml = format!(
+            r#"<c:marker xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:symbol val="circle"/>
+              <c:size val="6"/>
+              <c:spPr>
+                <a:solidFill><a:srgbClr val="ff0000"/></a:solidFill>
+                <a:ln><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:ln>
+              </c:spPr>
+            </c:marker>"#
+        );
+        let d = root_of(&xml);
+        let (symbol, size, fill, line) =
+            parse_marker_block(Some(d.root_element()), &FixtureResolver);
+        assert_eq!(symbol.as_deref(), Some("circle"));
+        assert_eq!(size, Some(6.0));
+        assert_eq!(fill.as_deref(), Some("FF0000"));
+        assert_eq!(line.as_deref(), Some("4472C4"));
+    }
+
+    #[test]
+    fn parse_marker_block_none_node_returns_all_none() {
+        assert_eq!(
+            parse_marker_block(None, &FixtureResolver),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn parse_marker_block_symbol_none_no_sppr() {
+        let xml = format!(r#"<c:marker xmlns:c="{C_NS}"><c:symbol val="none"/></c:marker>"#);
+        let d = root_of(&xml);
+        let (symbol, size, fill, line) =
+            parse_marker_block(Some(d.root_element()), &FixtureResolver);
+        assert_eq!(symbol.as_deref(), Some("none"));
+        assert_eq!(size, None);
+        assert_eq!(fill, None);
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn parse_error_bars_fixed_val_both_directions() {
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:errBars>
+                <c:errDir val="y"/>
+                <c:errBarType val="both"/>
+                <c:errValType val="fixedVal"/>
+                <c:val val="2.5"/>
+                <c:spPr><a:ln w="12700"><a:solidFill><a:srgbClr val="333333"/></a:solidFill><a:prstDash val="dash"/></a:ln></c:spPr>
+              </c:errBars>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let values = vec![Some(10.0), Some(20.0), None];
+        let bars = parse_error_bars(d.root_element(), &values, &FixtureResolver);
+        assert_eq!(bars.len(), 1);
+        let b = &bars[0];
+        assert_eq!(b.dir, "y");
+        assert_eq!(b.bar_type, "both");
+        assert_eq!(b.plus, vec![Some(2.5), Some(2.5), Some(2.5)]);
+        assert_eq!(b.minus, vec![Some(2.5), Some(2.5), Some(2.5)]);
+        assert!(!b.no_end_cap);
+        assert_eq!(b.color.as_deref(), Some("333333"));
+        assert_eq!(b.line_width_emu, Some(12700));
+        assert_eq!(b.dash.as_deref(), Some("dash"));
+    }
+
+    #[test]
+    fn parse_error_bars_percentage_scales_per_point() {
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}">
+              <c:errBars>
+                <c:errDir val="x"/>
+                <c:errBarType val="plus"/>
+                <c:errValType val="percentage"/>
+                <c:val val="10"/>
+                <c:noEndCap val="1"/>
+              </c:errBars>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let values = vec![Some(100.0), Some(-50.0), None];
+        let bars = parse_error_bars(d.root_element(), &values, &FixtureResolver);
+        assert_eq!(bars.len(), 1);
+        let b = &bars[0];
+        assert_eq!(b.dir, "x");
+        assert!(b.no_end_cap);
+        // 10% of |value|; the None slot stays None (nothing to scale).
+        assert_eq!(b.plus, vec![Some(10.0), Some(5.0), None]);
+        assert_eq!(b.minus, vec![Some(10.0), Some(5.0), None]);
+    }
+
+    #[test]
+    fn parse_error_bars_absent_returns_empty() {
+        let xml = format!(r#"<c:ser xmlns:c="{C_NS}"><c:val/></c:ser>"#);
+        let d = root_of(&xml);
+        assert!(parse_error_bars(d.root_element(), &[], &FixtureResolver).is_empty());
+    }
+
+    #[test]
+    fn parse_series_data_labels_defaults_and_per_point_override() {
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:dLbls>
+                <c:numFmt formatCode="0.0%"/>
+                <c:dLbl>
+                  <c:idx val="1"/>
+                  <c:tx><c:rich><a:p><a:r><a:t>Custom</a:t></a:r></a:p></c:rich></c:tx>
+                  <c:dLblPos val="outEnd"/>
+                </c:dLbl>
+                <c:showVal val="1"/>
+                <c:showCatName val="0"/>
+                <c:showSerName val="0"/>
+                <c:showPercent val="1"/>
+                <c:dLblPos val="ctr"/>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (defaults, overrides) =
+            parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let defaults = defaults.expect("series-level dLbls present");
+        assert!(defaults.show_val);
+        assert!(!defaults.show_cat_name);
+        assert!(!defaults.show_ser_name);
+        assert!(defaults.show_percent);
+        assert_eq!(defaults.position.as_deref(), Some("ctr"));
+        assert_eq!(defaults.format_code.as_deref(), Some("0.0%"));
+
+        assert_eq!(overrides.len(), 1);
+        let o = &overrides[0];
+        assert_eq!(o.idx, 1);
+        assert_eq!(o.text, "Custom");
+        assert_eq!(o.position.as_deref(), Some("outEnd"));
+    }
+
+    #[test]
+    fn parse_series_data_labels_deleted_point_has_empty_text() {
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}">
+              <c:dLbls>
+                <c:dLbl><c:idx val="0"/><c:delete val="1"/></c:dLbl>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (_, overrides) = parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].text, "");
+    }
+
+    #[test]
+    fn parse_series_data_labels_absent_returns_none_and_empty() {
+        let xml = format!(r#"<c:ser xmlns:c="{C_NS}"></c:ser>"#);
+        let d = root_of(&xml);
+        let cache = std::collections::HashMap::new();
+        let (defaults, overrides) =
+            parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        assert!(defaults.is_none());
+        assert!(overrides.is_empty());
+    }
+
+    /// Sparse `<c:pt idx>` cache: `ptCount=11` but only two points are present
+    /// (`idx=1` and `idx=9`). The result must be sized to the declared
+    /// `ptCount`, not to the number of `<c:pt>` elements present, and every
+    /// unlisted index must stay the empty-string placeholder (not shifted).
+    #[test]
+    fn collect_str_cache_positional_sparse_ptcount_and_gaps() {
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}">
+              <c:cat><c:strCache>
+                <c:ptCount val="11"/>
+                <c:pt idx="1"><c:v>Feb</c:v></c:pt>
+                <c:pt idx="9"><c:v>Oct</c:v></c:pt>
+              </c:strCache></c:cat>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let cats = collect_str_cache_positional(d.root_element(), "cat");
+        assert_eq!(cats.len(), 11);
+        assert_eq!(cats[0], "");
+        assert_eq!(cats[1], "Feb");
+        assert_eq!(cats[9], "Oct");
+        assert_eq!(cats[10], "");
+    }
+
+    #[test]
+    fn collect_str_cache_positional_missing_container_is_empty() {
+        let xml = format!(r#"<c:ser xmlns:c="{C_NS}"></c:ser>"#);
+        let d = root_of(&xml);
+        assert!(collect_str_cache_positional(d.root_element(), "cat").is_empty());
+    }
+
+    /// Companion numeric collector: same sparse/idx=1-start shape, but with
+    /// `None` gaps instead of empty strings, and one genuinely missing `<c:v>`
+    /// (idx present, value absent) which must also collapse to `None`.
+    #[test]
+    fn collect_num_cache_positional_sparse_ptcount_and_gaps() {
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}">
+              <c:val><c:numCache>
+                <c:ptCount val="11"/>
+                <c:pt idx="1"><c:v>42</c:v></c:pt>
+                <c:pt idx="9"><c:v>7</c:v></c:pt>
+              </c:numCache></c:val>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let vals = collect_num_cache_positional(d.root_element(), "val");
+        assert_eq!(vals.len(), 11);
+        assert_eq!(vals[0], None);
+        assert_eq!(vals[1], Some(42.0));
+        assert_eq!(vals[9], Some(7.0));
+        assert_eq!(vals[10], None);
+    }
+
+    #[test]
+    fn collect_num_cache_positional_missing_container_is_empty() {
+        let xml = format!(r#"<c:ser xmlns:c="{C_NS}"></c:ser>"#);
+        let d = root_of(&xml);
+        assert!(collect_num_cache_positional(d.root_element(), "val").is_empty());
+    }
+
+    #[test]
+    fn extract_radar_style_present_and_absent() {
+        let xml = format!(
+            r#"<c:radarChart xmlns:c="{C_NS}"><c:radarStyle val="marker"/></c:radarChart>"#
+        );
+        let d = root_of(&xml);
+        assert_eq!(
+            extract_radar_style(d.root_element()).as_deref(),
+            Some("marker")
+        );
+
+        let none_xml = format!(r#"<c:barChart xmlns:c="{C_NS}"></c:barChart>"#);
+        let d2 = root_of(&none_xml);
+        assert!(extract_radar_style(d2.root_element()).is_none());
+    }
+
+    #[test]
+    fn extract_axis_crosses_reads_crosses_and_crosses_at() {
+        let xml = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:crosses val="max"/></c:valAx>"#);
+        let d = root_of(&xml);
+        assert_eq!(
+            extract_axis_crosses(d.root_element()),
+            (Some("max".to_string()), None)
+        );
+
+        let xml2 = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:crossesAt val="3.5"/></c:valAx>"#);
+        let d2 = root_of(&xml2);
+        assert_eq!(extract_axis_crosses(d2.root_element()), (None, Some(3.5)));
+
+        let xml3 = format!(r#"<c:valAx xmlns:c="{C_NS}"></c:valAx>"#);
+        let d3 = root_of(&xml3);
+        assert_eq!(extract_axis_crosses(d3.root_element()), (None, None));
+    }
+
+    #[test]
+    fn extract_manual_layout_full_and_defaults() {
+        let xml = format!(
+            r#"<c:layout xmlns:c="{C_NS}"><c:manualLayout>
+              <c:layoutTarget val="inner"/>
+              <c:xMode val="edge"/><c:yMode val="edge"/>
+              <c:x val="0.1"/><c:y val="0.2"/><c:w val="0.5"/><c:h val="0.6"/>
+            </c:manualLayout></c:layout>"#
+        );
+        let d = root_of(&xml);
+        let layout = extract_manual_layout(d.root_element()).expect("manualLayout present");
+        assert_eq!(layout.x_mode, "edge");
+        assert_eq!(layout.y_mode, "edge");
+        assert_eq!(layout.layout_target.as_deref(), Some("inner"));
+        assert_eq!(layout.x, 0.1);
+        assert_eq!(layout.y, 0.2);
+        assert_eq!(layout.w, Some(0.5));
+        assert_eq!(layout.h, Some(0.6));
+    }
+
+    #[test]
+    fn extract_manual_layout_absent_returns_none() {
+        let xml = format!(r#"<c:layout xmlns:c="{C_NS}"></c:layout>"#);
+        let d = root_of(&xml);
+        assert!(extract_manual_layout(d.root_element()).is_none());
     }
 }
