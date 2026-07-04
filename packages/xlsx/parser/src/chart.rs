@@ -85,6 +85,14 @@ pub(crate) fn load_sheet_charts(
             // oneCellAnchor size: `<xdr:ext cx cy>` in EMU.
             let (mut ext_cx, mut ext_cy) = (0i64, 0i64);
             let mut chart_rid: Option<String> = None;
+            // Modern chartEx (Microsoft `cx:` namespace, 2014) parts are wired the
+            // same way as a legacy chart — `<a:graphicData>` still carries a
+            // `<c:chart r:id>` child (the transitional `c:` local name, not `cx:`)
+            // — but the `graphicData@uri` is the chartex extension URI instead of
+            // the DrawingML chart URI. Track it alongside `chart_rid` so the part
+            // is dispatched to `parse_chartex_part`, matching pptx's
+            // `uri.contains("chartex")` detection in shape.rs.
+            let mut is_chartex = false;
 
             for child in anchor.children() {
                 if !child.is_element() {
@@ -139,6 +147,20 @@ pub(crate) fn load_sheet_charts(
                         if crate::drawing::xdr_node_hidden(&child) {
                             continue;
                         }
+                        // `<a:graphicData uri>` distinguishes a chartEx part
+                        // (`http://schemas.microsoft.com/office/drawing/2014/chartex`)
+                        // from a legacy DrawingML chart
+                        // (`http://schemas.openxmlformats.org/drawingml/2006/chart`).
+                        // Both wire the part through a `<c:chart r:id>` child, so
+                        // the rId resolution below is unchanged either way.
+                        if let Some(gd) = child
+                            .descendants()
+                            .find(|n| n.tag_name().name() == "graphicData")
+                        {
+                            if let Some(uri) = gd.attribute("uri") {
+                                is_chartex = uri.contains("chartex") || uri.contains("chartEx");
+                            }
+                        }
                         // Look for a:graphic/a:graphicData/c:chart[@r:id]
                         for gf_child in child.descendants() {
                             if gf_child.tag_name().name() == "chart"
@@ -183,6 +205,12 @@ pub(crate) fn load_sheet_charts(
             // (the single superset parser for pptx + xlsx). The xlsx theme
             // palette + major/minor Latin faces ride on the `XlsxColorResolver`,
             // so no `ChartData` intermediate / `From` adapter is needed.
+            //
+            // A chartEx part (`is_chartex`) has a `<cx:chartSpace>` root instead
+            // of `<c:chartSpace>` and uses the shared
+            // `parse_chartex_part` structure walk (waterfall / boxWhisker /
+            // treemap / sunburst / … — ECMA-376 does not cover these; they are
+            // the Microsoft 2014 chartex extension). Same `ColorResolver`.
             let Ok(chart_doc) = roxmltree::Document::parse(&chart_xml) else {
                 continue;
             };
@@ -191,9 +219,12 @@ pub(crate) fn load_sheet_charts(
                 theme_major_font_latin: theme_fonts.0,
                 theme_minor_font_latin: theme_fonts.1,
             };
-            let Some(chart) =
+            let chart_opt = if is_chartex {
+                ooxml_common::chart::parse_chartex_part(chart_doc.root_element(), &resolver)
+            } else {
                 ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &resolver)
-            else {
+            };
+            let Some(chart) = chart_opt else {
                 continue;
             };
 
@@ -497,5 +528,143 @@ mod hidden_tests {
             );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
+    }
+}
+
+/// CH14 — chartEx (Microsoft 2014 `cx:` namespace) recognition for xlsx.
+/// `xdr:graphicFrame` wires a chartEx part through the SAME `<c:chart r:id>`
+/// child a legacy chart uses (the transitional `c:` local name, not `cx:`); only
+/// `<a:graphicData@uri>` distinguishes it
+/// (`http://schemas.microsoft.com/office/drawing/2014/chartex` vs the
+/// DrawingML chart URI). No private xlsx fixture currently contains a chartEx
+/// part (`unzip -l ... | grep -i chartex` across every `packages/xlsx/public/
+/// private/*.xlsx` sample found none — all still use `<c:chartSpace>`), so this
+/// exercises the full zip → drawing → chartEx-part round trip with an inline
+/// waterfall fixture, mirroring `parse_chartex_part_waterfall_full_contract`
+/// in `ooxml-common`'s chart tests.
+#[cfg(test)]
+mod chartex_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    const NS: &str = concat!(
+        r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" "#,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#,
+    );
+    const CX_NS: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    /// A minimal waterfall chartEx part: one category dimension, one value
+    /// dimension with a negative point, and the `cx:series layoutId` that
+    /// `parse_chartex_part` reads as the chart type.
+    fn waterfall_chartex_xml() -> String {
+        format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <cx:chartData>
+                <cx:data id="0">
+                  <cx:strDim type="cat">
+                    <cx:lvl ptCount="3">
+                      <cx:pt idx="0">Start</cx:pt>
+                      <cx:pt idx="1">Change</cx:pt>
+                      <cx:pt idx="2">End</cx:pt>
+                    </cx:lvl>
+                  </cx:strDim>
+                  <cx:numDim type="val">
+                    <cx:lvl ptCount="3">
+                      <cx:pt idx="0">50</cx:pt>
+                      <cx:pt idx="1">-15</cx:pt>
+                      <cx:pt idx="2">35</cx:pt>
+                    </cx:lvl>
+                  </cx:numDim>
+                </cx:data>
+              </cx:chartData>
+              <cx:chart>
+                <cx:plotArea>
+                  <cx:plotAreaRegion>
+                    <cx:series layoutId="waterfall"/>
+                  </cx:plotAreaRegion>
+                </cx:plotArea>
+              </cx:chart>
+            </cx:chartSpace>"#
+        )
+    }
+
+    /// `<xdr:graphicFrame>` for a chartEx part. Structurally identical to the
+    /// legacy `drawing_xml` fixture in `hidden_tests` except for the
+    /// `graphicData@uri`, which is exactly the wire-format signal
+    /// `load_sheet_charts` now checks.
+    fn chartex_drawing_xml() -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>16</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:graphicFrame>
+                <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+                <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></xdr:xfrm>
+                <a:graphic><a:graphicData uri="{CX_NS}">
+                  <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/>
+                </a:graphicData></a:graphic>
+              </xdr:graphicFrame>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#,
+            NS = NS,
+            CX_NS = CX_NS,
+        )
+    }
+
+    /// Builds the same `sheet1.xml.rels` → `drawing1.xml` → `drawing1.xml.rels`
+    /// → `charts/chart1.xml` chain as `hidden_tests::archive_with_chart`, but
+    /// with a chartEx part at the end instead of a legacy one.
+    fn archive_with_chartex_chart() -> crate::XlsxZip {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = SimpleFileOptions::default();
+
+            zw.start_file("xl/worksheets/_rels/sheet1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).unwrap();
+
+            zw.start_file("xl/drawings/drawing1.xml", o).unwrap();
+            zw.write_all(chartex_drawing_xml().as_bytes()).unwrap();
+
+            zw.start_file("xl/drawings/_rels/drawing1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#).unwrap();
+
+            zw.start_file("xl/charts/chart1.xml", o).unwrap();
+            zw.write_all(waterfall_chartex_xml().as_bytes()).unwrap();
+
+            zw.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+    }
+
+    #[test]
+    fn chartex_graphicframe_parses_through_parse_chartex_part() {
+        let mut archive = archive_with_chartex_chart();
+        let charts = load_sheet_charts(
+            &mut archive,
+            "worksheets/sheet1.xml",
+            &theme(),
+            (None, None),
+        );
+        assert_eq!(
+            charts.len(),
+            1,
+            "chartEx graphicFrame did not produce a chart"
+        );
+        let chart = &charts[0].chart;
+        assert_eq!(chart.chart_type, "waterfall");
+        assert_eq!(chart.series.len(), 1, "expected exactly one chartEx series");
+        assert_eq!(
+            chart.categories,
+            vec!["Start".to_string(), "Change".to_string(), "End".to_string()]
+        );
     }
 }

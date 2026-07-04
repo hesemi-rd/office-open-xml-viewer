@@ -3146,13 +3146,28 @@ fn parse_inline_drawing(
         // relationship. When both resolve, emit a `ChartRun` from the pre-parsed
         // `chart_map` (keyed by the SAME rId), sized from `<wp:extent>` exactly like
         // an inline image. A non-chart graphicData falls through to the blip path.
+        //
+        // A modern chartEx chart (Microsoft 2014 chartex extension — waterfall,
+        // boxWhisker, treemap, sunburst, …) is wired identically: Word emits
+        // `<a:graphicData uri="http://schemas.microsoft.com/office/drawing/
+        // 2014/chartex">` wrapping the SAME `<c:chart r:id>` child (the
+        // transitional `c:` local name, not `cx:` — only the graphicData `uri`
+        // and the target part's own root namespace distinguish it), typically
+        // inside `<mc:AlternateContent><mc:Choice Requires="cx">` with a
+        // rendered-image `<mc:Fallback>`. `chart_map` already holds its
+        // `ChartModel` (via `load_chart_map` → `parse_docx_chart`, which
+        // dispatches on the part's root namespace), so accepting the chartex
+        // uri here — matching pptx's `uri.contains("chartex")` check in
+        // `shape.rs` — is the only change needed to stop silently dropping it.
         if let Some(graphic_data) = container
             .descendants()
             .find(|n| n.tag_name().name() == "graphicData")
         {
-            let is_chart = graphic_data
-                .attribute("uri")
-                .is_some_and(|uri| uri.contains("drawingml/2006/chart"));
+            let is_chart = graphic_data.attribute("uri").is_some_and(|uri| {
+                uri.contains("drawingml/2006/chart")
+                    || uri.contains("chartex")
+                    || uri.contains("chartEx")
+            });
             if is_chart {
                 if let Some(chart_node) = container
                     .descendants()
@@ -5227,17 +5242,36 @@ impl ooxml_common::chart::ColorResolver for DocxColorResolver<'_> {
     }
 }
 
-/// Parse a `word/charts/chartN.xml` part into the shared [`ChartModel`] via
-/// [`ooxml_common::chart::parse_chart_part`], resolving theme colours/fonts with
-/// [`DocxColorResolver`]. `None` when the XML is malformed or holds no
-/// recognized chart type.
+/// Parse a `word/charts/chartN.xml` part into the shared [`ChartModel`].
+/// Dispatches on the root element's namespace: a legacy DrawingML chart
+/// (`<c:chartSpace>`, ECMA-376 §21.2) goes through
+/// [`ooxml_common::chart::parse_chart_part`]; a modern chartEx part
+/// (`<cx:chartSpace>`, Microsoft 2014 chartex extension — waterfall,
+/// boxWhisker, treemap, sunburst, …) goes through
+/// [`ooxml_common::chart::parse_chartex_part`]. Both roots share the local
+/// name `chartSpace`, so the namespace URI (not the tag name) is the only
+/// reliable signal — the same "chartex" substring check pptx's
+/// `shape.rs`/`chart.rs` use on the `<a:graphicData>` `uri` attribute, applied
+/// here to the chart part's own root namespace instead (the part itself
+/// carries the same URI declaration). Theme colours/fonts resolve through
+/// [`DocxColorResolver`] either way. `None` when the XML is malformed or holds
+/// no recognized chart type.
 fn parse_docx_chart(
     chart_xml: &str,
     theme: &ThemeColors,
 ) -> Option<ooxml_common::chart::ChartModel> {
     let doc = XmlDoc::parse(chart_xml).ok()?;
+    let root = doc.root_element();
     let resolver = DocxColorResolver { theme };
-    ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver)
+    let is_chartex = root
+        .tag_name()
+        .namespace()
+        .is_some_and(|ns| ns.contains("chartex") || ns.contains("chartEx"));
+    if is_chartex {
+        ooxml_common::chart::parse_chartex_part(root, &resolver)
+    } else {
+        ooxml_common::chart::parse_chart_part(root, &resolver)
+    }
 }
 
 // ===== Table parsing =====
@@ -9582,6 +9616,206 @@ mod anchor_image_relative_from_tests {
         let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
         let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
         assert!(none.is_empty(), "unresolvable chart rId must emit nothing");
+    }
+
+    /// CH14 — `parse_docx_chart` dispatches on the chart part's root
+    /// namespace: a `<cx:chartSpace>` (Microsoft 2014 chartex extension) goes
+    /// through `parse_chartex_part`, not `parse_chart_part`. Before this, every
+    /// chartEx part silently returned `None` because `parse_chart_part` never
+    /// finds a `c:barChart`/`c:lineChart`/etc. element and short-circuits to
+    /// nothing draws. The chart type comes out as the raw `cx:series
+    /// layoutId` string ("boxWhisker" here, matching sample-24's box-and-
+    /// whisker chart), which the core renderer currently draws as a labeled
+    /// placeholder box until CH15 adds a real box-whisker renderer.
+    #[test]
+    fn parse_docx_chart_dispatches_chartex_to_parse_chartex_part() {
+        let theme = ThemeColors::default();
+        let chartex_xml = r#"<cx:chartSpace
+            xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <cx:chartData>
+            <cx:data id="0">
+              <cx:strDim type="cat">
+                <cx:lvl ptCount="3">
+                  <cx:pt idx="0">Category 1</cx:pt>
+                  <cx:pt idx="1">Category 2</cx:pt>
+                  <cx:pt idx="2">Category 3</cx:pt>
+                </cx:lvl>
+              </cx:strDim>
+              <cx:numDim type="val">
+                <cx:lvl ptCount="3">
+                  <cx:pt idx="0">-7</cx:pt>
+                  <cx:pt idx="1">36</cx:pt>
+                  <cx:pt idx="2">14</cx:pt>
+                </cx:lvl>
+              </cx:numDim>
+            </cx:data>
+          </cx:chartData>
+          <cx:chart>
+            <cx:plotArea>
+              <cx:plotAreaRegion>
+                <cx:series layoutId="boxWhisker"/>
+              </cx:plotAreaRegion>
+            </cx:plotArea>
+          </cx:chart>
+        </cx:chartSpace>"#;
+        let chart = parse_docx_chart(chartex_xml, &theme).expect("chartex part must parse");
+        assert_eq!(chart.chart_type, "boxWhisker");
+        assert_eq!(
+            chart.categories,
+            vec![
+                "Category 1".to_string(),
+                "Category 2".to_string(),
+                "Category 3".to_string()
+            ]
+        );
+        assert_eq!(chart.series.len(), 1);
+    }
+
+    /// CH14 — the inline-drawing chart gate accepts the chartex
+    /// `<a:graphicData uri>` (Microsoft 2014 extension) alongside the legacy
+    /// DrawingML chart uri. Mirrors Word's actual sample-24 wire format
+    /// exactly: `<a:graphicData uri=".../2014/chartex">` still wraps a
+    /// `<c:chart r:id>` child (the transitional `c:` local name, NOT `cx:`),
+    /// resolved through the SAME `chart_map` a legacy chart drawing uses.
+    /// Before this fix the uri gate only matched `drawingml/2006/chart`, so
+    /// this drawing fell all the way through to the blip/picture path and (no
+    /// blip present) emitted nothing.
+    #[test]
+    fn inline_chartex_drawing_emits_chart_run() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:r><w:drawing>
+            <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                       xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+              <wp:extent cx="5486400" cy="3200400"/>
+              <wp:docPr id="3" name="Chart 3"/>
+              <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex">
+                <c:chart r:id="rIdChartEx"/>
+              </a:graphicData></a:graphic>
+            </wp:inline>
+          </w:drawing></w:r>
+        </w:p>"#;
+        let doc = XmlDoc::parse(xml).unwrap();
+        let drawing = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "drawing")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+
+        let model = parse_docx_chart(
+            r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
+              <cx:chartData><cx:data id="0">
+                <cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="sunburst"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#,
+            &theme,
+        )
+        .expect("chartex model");
+        let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        chart_map.insert("rIdChartEx".to_string(), model);
+
+        let runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
+        assert_eq!(runs.len(), 1, "one chartex chart run expected");
+        match &runs[0] {
+            DocRun::Chart(c) => {
+                assert!(!c.anchor);
+                assert_eq!(c.chart.chart_type, "sunburst");
+                // 5486400 EMU / 12700 = 432pt; 3200400 / 12700 = 252pt.
+                assert!((c.width_pt - 432.0).abs() < 1e-6, "width_pt={}", c.width_pt);
+                assert!(
+                    (c.height_pt - 252.0).abs() < 1e-6,
+                    "height_pt={}",
+                    c.height_pt
+                );
+            }
+            other => panic!("expected DocRun::Chart, got {other:?}"),
+        }
+    }
+
+    /// CH14 end-to-end — `private/sample-24.docx` has 6 `<w:drawing>` chart
+    /// references total (`word/charts/chart1.xml`..`chart6.xml`, rId5..rId11
+    /// each used exactly once in `document.xml`). Two of the six parts —
+    /// `chart4.xml` (box-and-whisker) and `chart6.xml` (sunburst) — are
+    /// actually `<cx:chartSpace>` chartEx parts wrapped in
+    /// `<mc:AlternateContent><mc:Choice Requires="cx">` (with an `mc:Fallback`
+    /// rendered-image for older Word versions); the other four
+    /// (`chart1`/`chart2`/`chart3`/`chart5`) are legacy `<c:chartSpace>`
+    /// bar/line/radar/stock charts. Before this fix the uri gate in
+    /// `parse_inline_drawing` only matched the legacy DrawingML chart uri, so
+    /// chart4/chart6 fell through to the (blip-less) picture path and
+    /// produced nothing — this confirms the full zip → document.xml →
+    /// AlternateContent/Choice → inline drawing → chart_map pipeline now
+    /// surfaces both as `DocRun::Chart`, and that all 6 chart drawings still
+    /// produce exactly one `DocRun::Chart` each (no regression, no
+    /// duplication from the `mc:Fallback` branch). `stockChart` (chart5) is
+    /// not implemented by `parse_chart_part` and reports as "unknown" —  a
+    /// pre-existing legacy-chart gap, unrelated to and out of scope for this
+    /// chartex wiring task. Skips gracefully when the private,
+    /// non-redistributable fixture is not present (e.g. CI).
+    #[test]
+    fn sample24_chartex_charts_parse_as_chart_runs() {
+        const LOCAL_SAMPLE_24: &str = "../public/private/sample-24.docx";
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_24) else {
+            eprintln!(
+                "skipping sample24_chartex_charts_parse_as_chart_runs: local sample not found"
+            );
+            return;
+        };
+        let doc = parse_from_bytes(&data).expect("sample-24.docx must parse");
+
+        fn collect_from_paragraph(p: &DocParagraph, out: &mut Vec<String>) {
+            for run in &p.runs {
+                if let DocRun::Chart(c) = run {
+                    out.push(c.chart.chart_type.clone());
+                }
+            }
+        }
+        fn collect_from_table(t: &DocTable, out: &mut Vec<String>) {
+            for row in &t.rows {
+                for cell in &row.cells {
+                    for el in &cell.content {
+                        match el {
+                            CellElement::Paragraph(p) => collect_from_paragraph(p, out),
+                            CellElement::Table(t) => collect_from_table(t, out),
+                        }
+                    }
+                }
+            }
+        }
+        let mut chart_types = Vec::new();
+        for el in &doc.body {
+            match el {
+                BodyElement::Paragraph(p) => collect_from_paragraph(p, &mut chart_types),
+                BodyElement::Table(t) => collect_from_table(t, &mut chart_types),
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            chart_types.iter().filter(|t| *t == "boxWhisker").count(),
+            1,
+            "expected exactly one boxWhisker chartex chart, got {chart_types:?}"
+        );
+        assert_eq!(
+            chart_types.iter().filter(|t| *t == "sunburst").count(),
+            1,
+            "expected exactly one sunburst chartex chart, got {chart_types:?}"
+        );
+        // 6 chart drawings total: chart1(bar)/chart2(line)/chart3(radar)/
+        // chart5(stock, unimplemented → "unknown") legacy + chart4(boxWhisker)/
+        // chart6(sunburst) chartex. No duplication from mc:Fallback.
+        assert_eq!(
+            chart_types.len(),
+            6,
+            "expected 6 total chart runs (4 legacy + 2 chartex), got {chart_types:?}"
+        );
     }
 
     /// §20.4.2.5 — an anchored drawing whose `<wp:docPr hidden="1">` is set is
