@@ -1609,6 +1609,313 @@ pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
     (cat_hidden, val_hidden)
 }
 
+/// Parse a modern chartEx part (`<cx:chartSpace>`, MS 2014 chartex namespace)
+/// into the shared [`ChartModel`] — waterfall / treemap / etc.
+///
+/// This is the chartEx counterpart to [`parse_chart_part`]: the caller passes
+/// the `<cx:chartSpace>` root and a [`ColorResolver`], and receives a bare
+/// [`ChartModel`] (no graphic-frame geometry — the caller wraps it in its own
+/// container). It was lifted verbatim from the pptx `parse_chartex` body; the
+/// only behavioural change is that colour resolution routes through
+/// `resolver.resolve_solid_fill` (instead of pptx's local `parse_color_node`)
+/// and the theme fallback faces come from `resolver.theme_major_font_latin` /
+/// `theme_minor_font_latin` (instead of a direct `theme.get("+mj-lt")` read).
+/// A pptx `PptxColorResolver` returns identical values for both, so the emitted
+/// JSON is byte-identical to the previous per-crate parse.
+///
+/// The chart type is the series `layoutId` string as-is (`"waterfall"`,
+/// `"treemap"`, `"sunburst"`, `"boxWhisker"`, `"funnel"`, `"histogram"`, …);
+/// this function does not gate on which layouts the renderer supports, so
+/// adding a new chartEx layout is a renderer concern, not a parse concern.
+///
+/// Returns `None` when the part has no `<cx:series>` (not a chartEx chart).
+pub fn parse_chartex_part(
+    chartspace_root: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<ChartModel> {
+    let root = chartspace_root;
+
+    // Chart type from series layoutId attribute.
+    let series_node = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "series")?;
+    let layout_id = attr(&series_node, "layoutId").unwrap_or_default();
+    let chart_type = layout_id; // "waterfall", "treemap", etc.
+
+    // Categories from chartData > data > strDim[@type="cat"] > lvl > pt
+    let categories: Vec<String> = root
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "strDim"
+                && attr(n, "type").as_deref() == Some("cat")
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        })
+        .map(|lvl| {
+            lvl.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                .filter_map(|pt| pt.text().map(|t| t.replace('\n', " ")))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let pt_count = categories.len().max(1);
+
+    // Values from chartData > data > numDim[@type="val"] > lvl > pt
+    let raw_values: Vec<Option<f64>> = root
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "numDim"
+                && attr(n, "type").as_deref() == Some("val")
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        })
+        .map(|lvl| {
+            let mut vals: Vec<Option<f64>> = vec![None; pt_count];
+            for (i, pt) in lvl
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                .enumerate()
+            {
+                if i < vals.len() {
+                    vals[i] = pt.text().and_then(|t| t.parse().ok());
+                }
+            }
+            vals
+        })
+        .unwrap_or_else(|| vec![None; pt_count]);
+
+    // Subtotal indices (idx=0 is always implicit; add from cx:subtotals)
+    let mut subtotal_indices: Vec<u32> = vec![0];
+    if let Some(subtotals_node) = series_node
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "subtotals")
+    {
+        for idx_node in subtotals_node
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "idx")
+        {
+            if let Some(v) = attr(&idx_node, "val").and_then(|v| v.parse::<u32>().ok()) {
+                if v != 0 {
+                    subtotal_indices.push(v);
+                }
+            }
+        }
+    }
+
+    // Series color (first dataPt or series spPr)
+    let color = series_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+        .and_then(|sp| {
+            sp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+        })
+        .and_then(|fill| resolver.resolve_solid_fill(fill));
+
+    // Per-idx data-label colors. ChartEx writes `<cx:dataLabels>` with
+    // `<cx:dataLabel idx="N">` overrides; each carries its own `<cx:txPr>`
+    // whose first `<a:solidFill>` is the label colour for that bar. Sample-2
+    // waterfall uses this to paint negative-bar labels in accent1 (red) while
+    // positive-bar labels stay tx1 (black).
+    let mut data_label_colors_vec: Vec<Option<String>> = vec![None; raw_values.len().max(1)];
+    let mut has_per_label_color = false;
+    for dl in series_node
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dataLabel")
+    {
+        let Some(idx) = attr(&dl, "idx").and_then(|v| v.parse::<usize>().ok()) else {
+            continue;
+        };
+        if idx >= data_label_colors_vec.len() {
+            continue;
+        }
+        // First `<a:solidFill>` inside the per-idx <cx:txPr>.
+        let txpr = match dl
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "txPr")
+        {
+            Some(n) => n,
+            None => continue,
+        };
+        for desc in txpr.descendants().filter(|n| n.is_element()) {
+            if desc.tag_name().name() != "solidFill" {
+                continue;
+            }
+            if let Some(c) = resolver.resolve_solid_fill(desc) {
+                data_label_colors_vec[idx] = Some(c);
+                has_per_label_color = true;
+                break;
+            }
+        }
+    }
+
+    let series = vec![ChartSeries {
+        name: String::new(),
+        values: raw_values,
+        color,
+        data_point_colors: None,
+        data_label_colors: if has_per_label_color {
+            Some(data_label_colors_vec)
+        } else {
+            None
+        },
+        categories: None,
+        bubble_sizes: None,
+        val_format_code: None,
+        label_color: None,
+        series_type: None,
+        use_secondary_axis: None,
+        show_marker: None,
+        marker_symbol: None,
+        marker_size: None,
+        marker_fill: None,
+        marker_line: None,
+        data_point_overrides: None,
+        data_label_overrides: None,
+        series_data_labels: None,
+        err_bars: None,
+        // chartEx (waterfall) has no `<c:smooth>` concept.
+        smooth: None,
+        // chartEx series carry no classic `<c:trendline>`.
+        trend_lines: None,
+    }];
+
+    // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
+    // with its `<cx:catScaling>` / `<cx:valScaling>` child to disambiguate cat
+    // vs. val (chartEx doesn't declare axis kind via the `id` attribute).
+    let (cat_axis_hidden, val_axis_hidden) = extract_chartex_axis_hidden(root);
+
+    // `<cx:catScaling gapWidth>` (chartEx) — same semantics as legacy
+    // `<c:gapWidth>` but stored as a *fraction* (e.g. 0.8 ≡ 80%) instead of
+    // an integer percentage. Convert to the legacy percentage form so the
+    // shared renderer's `barW = catGap / (1 + gapWidth/100)` formula works
+    // uniformly across chart types. Default 1.5 (= legacy 150%) per PowerPoint
+    // when the attribute is omitted.
+    let bar_gap_width = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "catScaling")
+        .and_then(|n| attr(&n, "gapWidth"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|frac| (frac * 100.0).round() as i32);
+
+    Some(ChartModel {
+        chart_type,
+        title: None,
+        categories,
+        series,
+        val_max: None,
+        val_min: None,
+        subtotal_indices,
+        show_data_labels: false,
+        cat_axis_hidden,
+        val_axis_hidden,
+        plot_area_bg: None,
+        chart_bg: None,
+        show_legend: false,
+        cat_axis_cross_between: "between".to_string(),
+        val_axis_major_tick_mark: "cross".to_string(),
+        cat_axis_major_tick_mark: "cross".to_string(),
+        title_font_size_hpt: None,
+        title_font_color: None,
+        title_font_face: None,
+        cat_axis_font_size_hpt: None,
+        val_axis_font_size_hpt: None,
+        cat_axis_font_color: None,
+        val_axis_font_color: None,
+        cat_axis_line_color: None,
+        cat_axis_line_width_emu: None,
+        cat_axis_line_hidden: false,
+        val_axis_line_color: None,
+        val_axis_line_width_emu: None,
+        val_axis_line_hidden: false,
+        data_label_font_size_hpt: None,
+        legend_pos: None,
+        bar_gap_width,
+        bar_overlap: None,
+        data_label_position: None,
+        data_label_font_color: None,
+        data_label_format_code: None,
+        val_axis_format_code: None,
+        plot_area_manual_layout: None,
+        scatter_style: None,
+        // chartEx (waterfall/treemap/etc.) has its own axis model and is not
+        // wired for axis titles or an explicit chartSpace border yet.
+        cat_axis_title: None,
+        val_axis_title: None,
+        cat_axis_title_font_size_hpt: None,
+        cat_axis_title_font_bold: None,
+        cat_axis_title_font_color: None,
+        val_axis_title_font_size_hpt: None,
+        val_axis_title_font_bold: None,
+        val_axis_title_font_color: None,
+        title_font_bold: None,
+        cat_axis_font_bold: None,
+        val_axis_font_bold: None,
+        chart_border_color: None,
+        chart_border_width_emu: None,
+        secondary_val_axis: None,
+        // chartEx charts (waterfall/treemap/etc.) are not pie/doughnut and
+        // don't carry `<c:txPr>` axis/legend faces; only the theme fallback
+        // fonts are threaded so their data labels can pick up the body font.
+        hole_size: None,
+        first_slice_angle: None,
+        cat_axis_font_face: None,
+        val_axis_font_face: None,
+        cat_axis_title_font_face: None,
+        val_axis_title_font_face: None,
+        data_label_font_face: None,
+        legend_font_face: None,
+        legend_font_color: None,
+        legend_font_size_hpt: None,
+        legend_font_bold: None,
+        theme_major_font_latin: resolver.theme_major_font_latin(),
+        theme_minor_font_latin: resolver.theme_minor_font_latin(),
+        val_axis_minor_tick_mark: None,
+        cat_axis_minor_tick_mark: None,
+        legend_manual_layout: None,
+        title_manual_layout: None,
+        cat_axis_crosses: None,
+        cat_axis_crosses_at: None,
+        val_axis_crosses: None,
+        val_axis_crosses_at: None,
+        cat_axis_format_code: None,
+        cat_axis_min: None,
+        cat_axis_max: None,
+        radar_style: None,
+        // chartEx (cx: namespace) has its own date-axis model; the legacy
+        // `<c:date1904>` element does not apply here, so keep the 1900
+        // default until/unless a chartEx date system is wired.
+        date1904: false,
+        // chartEx waterfall has no line/area blanks to display.
+        disp_blanks_as: None,
+        // chartEx (cx:) has its own axis model (`<cx:axis>`); the classic
+        // `<c:catAx>`/`<c:valAx>` scale properties don't apply, so leave the
+        // CH6 fields unset — the renderer keeps its defaults (byte-stable).
+        val_axis_major_gridlines: None,
+        cat_axis_major_gridlines: None,
+        val_axis_gridline_color: None,
+        val_axis_gridline_width_emu: None,
+        cat_axis_gridline_color: None,
+        cat_axis_gridline_width_emu: None,
+        val_axis_minor_gridlines: None,
+        val_axis_major_unit: None,
+        val_axis_minor_unit: None,
+        val_axis_log_base: None,
+        val_axis_orientation: None,
+        cat_axis_orientation: None,
+        cat_axis_tick_label_pos: None,
+        val_axis_tick_label_pos: None,
+        cat_axis_label_rotation: None,
+    })
+}
+
 // ============================================================================
 // Series-detail extractors (markers, per-point overrides, data labels, error
 // bars) — moved verbatim from the xlsx crate so `parse_chart_part` populates
@@ -4986,5 +5293,194 @@ mod tests {
         let xml = format!(r#"<c:layout xmlns:c="{C_NS}"></c:layout>"#);
         let d = root_of(&xml);
         assert!(extract_manual_layout(d.root_element()).is_none());
+    }
+
+    // ── `parse_chartex_part` direct contract tests ──────────────────────────
+    //
+    // The chartEx counterpart to the `parse_chart_part_*` tests above. These
+    // call the shared `parse_chartex_part` (not the pptx wrapper) so a
+    // regression in the chartEx structure walk — categories, values, subtotal
+    // indices, series/per-label colours (resolved through the `ColorResolver`),
+    // axis visibility, gap-width fraction→percent conversion, and the theme
+    // fallback faces — is pinpointed here. `FixtureResolver` resolves
+    // `<a:schemeClr val="accent1">`→`4472C4`, `tx1`→`000000`, and reports
+    // `Calibri Light` / `Calibri` as the theme major/minor faces.
+
+    const CX_NS: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+
+    /// (a) Waterfall with the full decoration set: a category dimension, a value
+    /// dimension with negatives, `<cx:subtotals>` (idx 0 is implicit, idx 5 is
+    /// explicit), a series `<cx:spPr>` fill, per-idx `<cx:dataLabel>` colours
+    /// (positives → tx1, negatives → accent1), a hidden value axis, and a
+    /// `<cx:catScaling gapWidth="0.8">` fraction (→ legacy 80%). Mirrors the
+    /// sample-2 waterfall the golden JSON was captured from.
+    #[test]
+    fn parse_chartex_part_waterfall_full_contract() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData>
+                <cx:data id="0">
+                  <cx:strDim type="cat">
+                    <cx:lvl ptCount="4">
+                      <cx:pt idx="0">Start</cx:pt>
+                      <cx:pt idx="1">Up</cx:pt>
+                      <cx:pt idx="2">Down</cx:pt>
+                      <cx:pt idx="3">End</cx:pt>
+                    </cx:lvl>
+                  </cx:strDim>
+                  <cx:numDim type="val">
+                    <cx:lvl ptCount="4">
+                      <cx:pt idx="0">100</cx:pt>
+                      <cx:pt idx="1">40</cx:pt>
+                      <cx:pt idx="2">-30</cx:pt>
+                      <cx:pt idx="3">110</cx:pt>
+                    </cx:lvl>
+                  </cx:numDim>
+                </cx:data>
+              </cx:chartData>
+              <cx:chart>
+                <cx:plotArea>
+                  <cx:plotAreaRegion>
+                    <cx:series layoutId="waterfall">
+                      <cx:spPr><a:solidFill><a:srgbClr val="196eca"/></a:solidFill></cx:spPr>
+                      <cx:dataLabels pos="outEnd">
+                        <cx:dataLabel idx="0">
+                          <cx:txPr><a:p><a:pPr><a:defRPr><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:pPr></a:p></cx:txPr>
+                        </cx:dataLabel>
+                        <cx:dataLabel idx="2">
+                          <cx:txPr><a:p><a:pPr><a:defRPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:defRPr></a:pPr></a:p></cx:txPr>
+                        </cx:dataLabel>
+                      </cx:dataLabels>
+                      <cx:subtotals>
+                        <cx:idx val="0"/>
+                        <cx:idx val="3"/>
+                      </cx:subtotals>
+                    </cx:series>
+                  </cx:plotAreaRegion>
+                  <cx:axis id="0"><cx:catScaling gapWidth="0.8"/></cx:axis>
+                  <cx:axis id="1" hidden="1"><cx:valScaling/></cx:axis>
+                </cx:plotArea>
+              </cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("waterfall parses");
+
+        assert_eq!(m.chart_type, "waterfall");
+        assert_eq!(m.categories, vec!["Start", "Up", "Down", "End"]);
+        assert_eq!(m.series.len(), 1);
+        assert_eq!(
+            m.series[0].values,
+            vec![Some(100.0), Some(40.0), Some(-30.0), Some(110.0)]
+        );
+        // Series fill resolved through the resolver (srgbClr uppercased).
+        assert_eq!(m.series[0].color.as_deref(), Some("196ECA"));
+        // Per-idx label colours: idx0/idx3 unset (None), idx0 tx1→000000,
+        // idx2 accent1→4472C4. Presence of any override materializes the vec.
+        let dl = m.series[0]
+            .data_label_colors
+            .as_ref()
+            .expect("per-label colours present");
+        assert_eq!(dl.len(), 4);
+        assert_eq!(dl[0].as_deref(), Some("000000"));
+        assert_eq!(dl[1], None);
+        assert_eq!(dl[2].as_deref(), Some("4472C4"));
+        assert_eq!(dl[3], None);
+        // Subtotal indices: idx0 always implicit, explicit idx3 added, the
+        // redundant explicit idx0 is de-duplicated away (0 is skipped).
+        assert_eq!(m.subtotal_indices, vec![0, 3]);
+        // gapWidth fraction 0.8 → legacy percent 80.
+        assert_eq!(m.bar_gap_width, Some(80));
+        // Hidden value axis, visible category axis.
+        assert!(!m.cat_axis_hidden);
+        assert!(m.val_axis_hidden);
+        // Theme fallback faces threaded from the resolver (NIT-2: not a direct
+        // `theme.get("+mj-lt")`).
+        assert_eq!(m.theme_major_font_latin.as_deref(), Some("Calibri Light"));
+        assert_eq!(m.theme_minor_font_latin.as_deref(), Some("Calibri"));
+    }
+
+    /// (b) Treemap: leaf categories + values, no `<cx:subtotals>` (so only the
+    /// implicit idx 0), no per-label colours, and no `gapWidth` (→ `None`). The
+    /// generic dimension walk carries the treemap leaves exactly like the
+    /// waterfall bars, so the same parse serves both layouts.
+    #[test]
+    fn parse_chartex_part_treemap_hierarchy_values() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData>
+                <cx:data id="0">
+                  <cx:strDim type="cat">
+                    <cx:lvl ptCount="3">
+                      <cx:pt idx="0">North</cx:pt>
+                      <cx:pt idx="1">South</cx:pt>
+                      <cx:pt idx="2">East</cx:pt>
+                    </cx:lvl>
+                  </cx:strDim>
+                  <cx:numDim type="val">
+                    <cx:lvl ptCount="3">
+                      <cx:pt idx="0">50</cx:pt>
+                      <cx:pt idx="1">30</cx:pt>
+                      <cx:pt idx="2">20</cx:pt>
+                    </cx:lvl>
+                  </cx:numDim>
+                </cx:data>
+              </cx:chartData>
+              <cx:chart>
+                <cx:plotArea>
+                  <cx:plotAreaRegion>
+                    <cx:series layoutId="treemap"/>
+                  </cx:plotAreaRegion>
+                </cx:plotArea>
+              </cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("treemap parses");
+
+        assert_eq!(m.chart_type, "treemap");
+        assert_eq!(m.categories, vec!["North", "South", "East"]);
+        assert_eq!(m.series[0].values, vec![Some(50.0), Some(30.0), Some(20.0)]);
+        assert_eq!(m.series[0].color, None);
+        assert_eq!(m.series[0].data_label_colors, None);
+        // No `<cx:subtotals>` → only the implicit idx 0.
+        assert_eq!(m.subtotal_indices, vec![0]);
+        // No `<cx:catScaling gapWidth>` → unset (renderer default applies).
+        assert_eq!(m.bar_gap_width, None);
+        assert!(!m.cat_axis_hidden);
+        assert!(!m.val_axis_hidden);
+    }
+
+    /// (c) A `<cx:chartSpace>` with no `<cx:series>` is not a chartEx chart —
+    /// `parse_chartex_part` returns `None` rather than an empty model.
+    #[test]
+    fn parse_chartex_part_returns_none_without_series() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}"><cx:chart><cx:plotArea/></cx:chart></cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        assert!(parse_chartex_part(d.root_element(), &FixtureResolver).is_none());
+    }
+
+    /// (d) Newlines inside a category `<cx:pt>` are flattened to spaces (Office
+    /// writes multi-line axis labels this way; the renderer wants a single
+    /// line). Mirrors the sample-2 "FY2024\n1Q営業利益" categories.
+    #[test]
+    fn parse_chartex_part_category_newline_flattened() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat"><cx:lvl ptCount="1"><cx:pt idx="0">FY2024
+1Q</cx:pt></cx:lvl></cx:strDim>
+                <cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">5</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="waterfall"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("parses");
+        assert_eq!(m.categories, vec!["FY2024 1Q"]);
     }
 }
