@@ -109,6 +109,12 @@ export interface Worksheet {
    *  resolve serial dates (§18.17.4.1) without a workbook back-reference.
    *  `true` = 1904 date system. Omitted (⇒ false) for the default 1900 system. */
   date1904?: boolean;
+  /** RB7 partial degradation: set when THIS sheet's part could not be
+   *  read/parsed. The workbook still opens with the OTHER sheets intact; this one
+   *  is an empty placeholder (`rows` empty) whose `parseError` names the offending
+   *  part (e.g. `"xl/worksheets/sheet3.xml: <detail>"`). Absent (`undefined`) for
+   *  every healthy sheet. The renderer paints a visible error overlay. */
+  parseError?: string;
 }
 
 export interface SparklineGroup {

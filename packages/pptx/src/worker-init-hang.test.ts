@@ -29,6 +29,11 @@ class FakePptxArchive {
 
 vi.mock('./wasm/pptx_parser.js', () => ({
   default: (arg: unknown) => initMock(arg),
+  // RB6: the worker wires `reinit` (the forced-fresh-instance recovery hook) into
+  // WasmParserHost. These init-hang tests never trap, so route it through the same
+  // init mock as `default`; the recovery semantics are proven in the core / node
+  // suites against the real glue.
+  reinit: (arg: unknown) => initMock(arg),
   PptxArchive: FakePptxArchive,
 }));
 

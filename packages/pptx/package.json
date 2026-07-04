@@ -36,7 +36,7 @@
     "dev": "vite",
     "build": "tsc --build && vite build",
     "preview": "vite preview",
-    "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm",
+    "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/pptx_parser.js",
     "vrt": "playwright test --config playwright.config.ts",
     "vrt:worker": "playwright test --config playwright.config.ts worker-equivalence"
   },

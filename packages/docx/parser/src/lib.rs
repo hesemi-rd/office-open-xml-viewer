@@ -66,7 +66,12 @@ pub fn extract_image(
 /// functions.
 #[wasm_bindgen]
 pub struct DocxArchive {
-    archive: parser::Zip,
+    /// The opened archive, or the container-open error string when the ZIP itself
+    /// was truncated / corrupt (RB7 MAJOR). Deferring the failure here — instead of
+    /// erroring out of `new` — lets `parse()` return a degraded placeholder
+    /// document (symmetric with a corrupt inner part) rather than the constructor
+    /// throwing an opaque error the viewer can't turn into a placeholder page.
+    archive: Result<parser::Zip, String>,
     max: Option<u64>,
 }
 
@@ -85,38 +90,50 @@ impl DocxArchive {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<DocxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        let archive = zip::ZipArchive::new(std::io::Cursor::new(data))
-            .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+        // RB7 (MAJOR): a truncated / corrupt CONTAINER is deferred, not thrown, so
+        // `parse()` can degrade it to a placeholder document instead of the
+        // constructor failing with an opaque error.
         Ok(DocxArchive {
-            archive,
+            archive: parser::open_zip(data),
             max: max_zip_entry_bytes,
         })
     }
 
     /// Parse the retained archive and return the model as UTF-8 JSON bytes.
     /// Byte-for-byte identical to `parse_docx` on the same file — same parser,
-    /// same serializer, same error strings.
+    /// same serializer, same error strings. When the CONTAINER failed to open
+    /// (RB7 MAJOR) the model is a degraded placeholder tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        let doc = parser::parse(&mut self.archive)
-            .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+        let doc = match self.archive.as_mut() {
+            Ok(zip) => parser::parse(zip)
+                .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?,
+            Err(e) => parser::degraded_container_document(e.clone()),
+        };
         serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
     /// Extract raw bytes for one embedded entry (e.g. "word/media/image1.png")
     /// from the retained archive. Twin of the free `extract_image`, but reads
-    /// through the already-open archive instead of re-opening it.
+    /// through the already-open archive instead of re-opening it. A corrupt
+    /// container has no entries, so this surfaces the container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
-            .map_err(|e| JsValue::from_str(&e))
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+        ooxml_common::zip::read_zip_bytes(zip, path).map_err(|e| JsValue::from_str(&e))
     }
 
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `docx_to_markdown`.
+    /// free `docx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        let doc = parser::parse(&mut self.archive).map_err(|e| JsValue::from_str(&e))?;
+        let doc = match self.archive.as_mut() {
+            Ok(zip) => parser::parse(zip).map_err(|e| JsValue::from_str(&e))?,
+            Err(e) => parser::degraded_container_document(e.clone()),
+        };
         Ok(markdown::render_document(&doc))
     }
 }
@@ -158,24 +175,35 @@ mod tests {
         assert_eq!(extract_image(&buf, "word/media/i.png", None).unwrap(), b"X");
     }
 
-    /// `parse_docx` now returns `Result<String, JsValue>` (Err surfaces as a
-    /// thrown JS Error), replacing the old hand-built `{"error":"…"}` string.
-    /// The old path double-embedded the parser message into JSON *without
-    /// escaping*, so a message containing a `"` produced invalid JSON that made
-    /// the TS-side `JSON.parse` throw a confusing SyntaxError instead of the
-    /// real cause. We can't call the `#[wasm_bindgen]` fn from a plain unit
-    /// test (that needs wasm-bindgen-test), but `parse_docx` is now a thin
-    /// `parser::parse_from_bytes(...).map_err(...)?` wrapper, so proving the
-    /// internal parse returns a plain `Err(String)` for bad input is enough: the
-    /// JSON escaping hazard is gone *by construction* because the error never
-    /// round trips through hand-assembled JSON — wasm-bindgen serializes it.
+    /// The docx JSON path never hand-assembles `{"error":"…"}` — a message with a
+    /// `"` used to produce invalid JSON that made the TS-side `JSON.parse` throw a
+    /// confusing SyntaxError. Since RB7 (MAJOR) a non-zip / corrupt CONTAINER no
+    /// longer errors at all: `parse_from_bytes` degrades to a placeholder Document
+    /// whose `parse_error` field is serialized by serde, so any quotes in the
+    /// message are escaped by construction. This pins both facts: the input
+    /// degrades (does not panic / error out) AND the placeholder serializes to
+    /// valid JSON with the message intact.
     #[test]
-    fn parse_rejects_non_zip_bytes_without_json_escaping_hazard() {
-        // Not a zip archive — opening the archive must return Err, not panic.
-        let err = parser::parse_from_bytes(&[1, 2, 3]).expect_err("non-zip bytes must error");
-        // A raw String error is returned verbatim; even a `"`-laden message is
-        // carried as-is (no manual `{"error":"…"}` templating to corrupt).
-        let quoted = format!("boom: \"{}\"", err);
-        assert!(quoted.contains('"'), "sanity: message can contain quotes");
+    fn parse_non_zip_bytes_degrades_without_json_escaping_hazard() {
+        // Not a zip archive — degrades to a placeholder, does not error or panic.
+        let doc = parser::parse_from_bytes(&[1, 2, 3])
+            .expect("non-zip bytes degrade to a placeholder, not an error");
+        let err = doc
+            .parse_error
+            .as_deref()
+            .expect("placeholder carries a container-tagged parse_error");
+        assert!(
+            err.contains("zip container"),
+            "names the container; got {err:?}"
+        );
+        // serde escapes any quotes: the serialized model is valid JSON and the
+        // message round-trips through it unharmed (the old hand-built JSON hazard).
+        let json = serde_json::to_string(&doc).expect("serializes to valid JSON");
+        let round: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            round["parseError"],
+            serde_json::Value::String(err.to_string()),
+            "parse_error round-trips through serde JSON intact"
+        );
     }
 }

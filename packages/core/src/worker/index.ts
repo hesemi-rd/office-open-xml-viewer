@@ -5,3 +5,13 @@ export {
   type WorkerRequestOptions,
 } from './bridge.js';
 export { decodeDataUrl } from './decode-data-url.js';
+export {
+  WasmParserHost,
+  WasmTrapError,
+  isWasmTrap,
+  type WasmTrapErrorCode,
+  type WasmInit,
+  type WasmReinit,
+  type WasmInitInput,
+  type WasmParserHostOptions,
+} from './wasm-guard.js';

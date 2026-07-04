@@ -150,6 +150,53 @@ pub struct Worksheet {
     /// 1904 date system. Omitted from JSON when false (default 1900 system).
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub date1904: bool,
+    /// RB7 partial degradation: when THIS sheet's part could not be read/parsed,
+    /// the workbook still opens with the OTHER sheets intact and this one becomes
+    /// an empty placeholder carrying the part-tagged error (e.g.
+    /// `"xl/worksheets/sheet3.xml: <detail>"`). `None` (and omitted from JSON) for
+    /// every healthy sheet, so existing snapshots are byte-for-byte unchanged. The
+    /// renderer paints a visible error overlay on the sheet grid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
+}
+
+impl Worksheet {
+    /// A minimal empty sheet carrying a part-tagged parse error (RB7). Used when
+    /// one sheet's XML can't be read or parsed so the workbook still opens.
+    pub fn placeholder(name: &str, parse_error: String) -> Self {
+        Worksheet {
+            name: name.to_string(),
+            rows: Vec::new(),
+            col_widths: BTreeMap::new(),
+            row_heights: BTreeMap::new(),
+            default_col_width: 0.0,
+            default_row_height: 0.0,
+            merge_cells: Vec::new(),
+            freeze_rows: 0,
+            freeze_cols: 0,
+            conditional_formats: Vec::new(),
+            images: Vec::new(),
+            charts: Vec::new(),
+            shape_groups: Vec::new(),
+            show_zeros: true,
+            show_gridlines: true,
+            right_to_left: false,
+            tab_color: None,
+            auto_filter: None,
+            hyperlinks: Vec::new(),
+            comment_refs: Vec::new(),
+            comments: Vec::new(),
+            data_validations: Vec::new(),
+            defined_names: Vec::new(),
+            tables: Vec::new(),
+            slicers: Vec::new(),
+            sparkline_groups: Vec::new(),
+            default_font_family: None,
+            default_font_size: None,
+            date1904: false,
+            parse_error: Some(parse_error),
+        }
+    }
 }
 
 /// Single sparkline group (`<x14:sparklineGroup>`). Holds the shared formatting

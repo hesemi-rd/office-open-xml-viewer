@@ -44,6 +44,12 @@ export interface DocxDocumentModel {
    *  (kinsoku) configuration. Absent when settings.xml has no relevant
    *  elements (the renderer then uses spec defaults: kinsoku ON). */
   settings?: DocSettings;
+  /** RB7 partial degradation: set when `word/document.xml` (the body part) could
+   *  not be read or parsed. The document still "opens" — `body` is empty and this
+   *  part-tagged error (e.g. `"word/document.xml: <detail>"`) is carried — so the
+   *  viewer shows a visible placeholder page instead of throwing. Absent
+   *  (`undefined`) for every healthy document. */
+  parseError?: string;
 }
 
 /** ECMA-376 §17.8.3.3-.6 — one embedded font-style slot from

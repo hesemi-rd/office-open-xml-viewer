@@ -80,14 +80,40 @@ fn resolve_section_refs(
     out
 }
 
+/// Open a docx ZIP container, tagging a failure with the container part name.
+///
+/// RB7 (MAJOR): a truncated / corrupt ZIP is the MOST COMMON way a docx is broken
+/// (an incomplete download, a byte-mangled attachment). `ZipArchive::new` maps
+/// that to an opaque `zip::result::ZipError` that, if propagated, throws with no
+/// indication that the CONTAINER (not some inner part) is the problem. Naming the
+/// failure lets the caller build a `degraded_document` tagged with the container,
+/// symmetric with how a corrupt `word/document.xml` is tagged inside [`parse`].
+pub(crate) fn open_zip(data: Vec<u8>) -> Result<Zip, String> {
+    ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))
+}
+
+/// A placeholder [`Document`] for a docx whose ZIP CONTAINER could not be opened
+/// (truncated / corrupt / not a zip). No parts are readable, so there is no theme
+/// to derive fonts from — fall back to the theme defaults. Mirrors the per-part
+/// [`degraded_document`] used inside [`parse`], but for the whole-container case.
+pub(crate) fn degraded_container_document(parse_error: String) -> Document {
+    degraded_document(&ThemeColors::default(), parse_error)
+}
+
 /// Parse a docx from raw archive bytes. Thin wrapper that opens a fresh
 /// [`Zip`] (owning a copy of `data`) and delegates to [`parse`]. Kept so the
 /// free `parse_docx` WASM entry point and the native `parse_docx_native` path
 /// keep their `&[u8]` signature; the stateful `DocxArchive` handle calls
 /// [`parse`] directly on its retained archive to avoid re-opening it per call.
+///
+/// RB7 (MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
+/// (`degraded_container_document`) rather than erroring, consistent with a corrupt
+/// inner part — the viewer shows a "could not display" page instead of nothing.
 pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
-    let mut zip =
-        ZipArchive::new(std::io::Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    let mut zip = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(e) => return Ok(degraded_container_document(e)),
+    };
     parse(&mut zip)
 }
 
@@ -201,18 +227,40 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // threaded through the run walk) and looked up by rId during drawing parse.
     let chart_map = load_chart_map(zip, &rel_map, &theme);
 
-    let doc_xml = read_zip_string(zip, "word/document.xml")?;
+    // RB7 partial degradation: `word/document.xml` is the body part. When it
+    // can't be read (missing / zip error) or parsed (malformed / a `<w:body>`
+    // that isn't there), don't fail the whole `parse()` with an opaque error —
+    // return a Document that still "opens" as a placeholder (empty body, the
+    // theme-derived fonts we can compute without the body) carrying a part-tagged
+    // `parse_error`, so the viewer shows a visible "this document is corrupt"
+    // page instead of nothing. A healthy document.xml takes the normal path and
+    // is byte-for-byte unchanged (`parse_error` stays `None`).
+    let doc_xml = match read_zip_string(zip, "word/document.xml") {
+        Ok(xml) => xml,
+        Err(e) => return Ok(degraded_document(&theme, format!("word/document.xml: {e}"))),
+    };
     // `parse_guarded` runs the allocation-free depth pre-check BEFORE roxmltree's
     // tree builder (which recurses per element-nesting level and would overflow
     // the fixed WASM stack, trapping the whole parse, on a pathologically deep
     // `word/document.xml`). Every attacker-controllable part is parsed this way.
-    let xml_doc = parse_guarded(&doc_xml).map_err(|e| e.to_string())?;
+    let xml_doc = match parse_guarded(&doc_xml) {
+        Ok(doc) => doc,
+        Err(e) => return Ok(degraded_document(&theme, format!("word/document.xml: {e}"))),
+    };
 
-    let body_node = xml_doc
+    let body_node = match xml_doc
         .root_element()
         .descendants()
         .find(|n| n.tag_name().name() == "body")
-        .ok_or("No body element")?;
+    {
+        Some(n) => n,
+        None => {
+            return Ok(degraded_document(
+                &theme,
+                "word/document.xml: no <w:body> element".to_string(),
+            ))
+        }
+    };
 
     let sect_pr = body_node
         .children()
@@ -364,7 +412,22 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         footnotes,
         endnotes,
         settings: document_settings,
+        // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
+        parse_error: None,
     })
+}
+
+/// RB7: a placeholder Document for the case where `word/document.xml` (the body
+/// part) can't be read or parsed. Keeps the theme-derived fonts (computable
+/// without the body) so a placeholder page still renders in the document's
+/// typeface, and carries the part-tagged error. Everything else defaults.
+fn degraded_document(theme: &ThemeColors, parse_error: String) -> Document {
+    Document {
+        major_font: theme.theme_font("major", "latin"),
+        minor_font: theme.theme_font("minor", "latin"),
+        parse_error: Some(parse_error),
+        ..Document::default()
+    }
 }
 
 /// Walks the body looking for `<w:ins>` / `<w:del>` ancestors and returns one
@@ -13049,5 +13112,137 @@ mod embedded_font_tests {
         let fonts = parse_embedded_fonts(&xml, &rels, "word/");
         assert_eq!(fonts.len(), 1);
         assert_eq!(fonts[0].part_path, "word/fonts/font1.odttf");
+    }
+
+    // ===== RB7: whole-document partial degradation =====
+
+    /// Build a docx whose `word/document.xml` is exactly `document_xml` (pass raw
+    /// bytes to simulate corruption). A minimal healthy rels part is included.
+    fn build_docx_with_raw_document(document_xml: &[u8]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            use std::io::Write;
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(document_xml).unwrap();
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(rels_xml.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// NEUTRALIZATION: a docx whose `word/document.xml` is malformed still opens
+    /// (rather than throwing an opaque error) as a placeholder — empty body with a
+    /// part-tagged `parse_error`. A healthy body is unaffected (no parse_error).
+    #[test]
+    fn rb7_corrupt_document_xml_degrades_to_placeholder() {
+        // Healthy control: a normal body has no parse_error and keeps its content.
+        let ok = parse_from_bytes(&build_docx_with_raw_document(
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>"#,
+        ))
+        .expect("healthy docx parses");
+        assert!(
+            ok.parse_error.is_none(),
+            "healthy doc carries no parse_error"
+        );
+        assert!(!ok.body.is_empty(), "healthy doc keeps its body");
+
+        // Corrupt: unterminated <w:body> → parse_guarded fails.
+        let data = build_docx_with_raw_document(
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>"#,
+        );
+        let doc = parse_from_bytes(&data)
+            .expect("a corrupt document.xml must still open as a placeholder, not error out");
+        let err = doc
+            .parse_error
+            .as_deref()
+            .expect("degraded doc carries a parse_error");
+        assert!(
+            err.starts_with("word/document.xml:"),
+            "error names the offending part; got {err:?}"
+        );
+        assert!(
+            doc.body.is_empty(),
+            "placeholder document has an empty body"
+        );
+    }
+
+    /// A document.xml with no `<w:body>` element also degrades to a placeholder.
+    #[test]
+    fn rb7_missing_body_element_degrades() {
+        let data = build_docx_with_raw_document(
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:document>"#,
+        );
+        let doc = parse_from_bytes(&data).expect("no-body docx must open as a placeholder");
+        let err = doc.parse_error.as_deref().expect("carries a parse_error");
+        assert!(
+            err.contains("no <w:body>"),
+            "error explains the cause; got {err:?}"
+        );
+        assert!(doc.body.is_empty());
+    }
+
+    /// An entirely missing `word/document.xml` part degrades rather than aborting.
+    #[test]
+    fn rb7_missing_document_part_degrades() {
+        use zip::write::SimpleFileOptions;
+        // A zip with NO word/document.xml at all.
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            use std::io::Write;
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(b"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>").unwrap();
+            zw.finish().unwrap();
+        }
+        let doc = parse_from_bytes(&buf).expect("missing document.xml must open as a placeholder");
+        let err = doc.parse_error.as_deref().expect("carries a parse_error");
+        assert!(
+            err.starts_with("word/document.xml:"),
+            "error names the missing part; got {err:?}"
+        );
+    }
+
+    /// RB7 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a docx
+    /// is broken — degrades to a placeholder tagged with the container, rather than
+    /// throwing an opaque `ZipArchive::new` error before any part is read.
+    #[test]
+    fn rb7_corrupt_zip_container_degrades_to_placeholder() {
+        // Truncated container: a valid docx cut off partway is not a readable zip.
+        let full = build_docx_with_raw_document(
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let truncated = &full[..full.len() / 2];
+        let doc = parse_from_bytes(truncated)
+            .expect("a corrupt container must open as a placeholder, not error out");
+        let err = doc
+            .parse_error
+            .as_deref()
+            .expect("degraded container doc carries a parse_error");
+        assert!(
+            err.contains("zip container"),
+            "error names the container; got {err:?}"
+        );
+        assert!(
+            doc.body.is_empty(),
+            "placeholder document has an empty body"
+        );
+
+        // Not-a-zip-at-all also degrades (no local file header).
+        let garbage = parse_from_bytes(b"this is definitely not a zip file")
+            .expect("non-zip bytes must open as a placeholder");
+        assert!(
+            garbage
+                .parse_error
+                .as_deref()
+                .is_some_and(|e| e.contains("zip container")),
+            "non-zip degrades with a container-tagged error"
+        );
     }
 }

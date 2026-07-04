@@ -718,7 +718,24 @@ fn parse_slide(
         notes,
         comments,
         hidden,
+        parse_error: None,
     })
+}
+
+/// RB7: a placeholder for a slide whose part failed to parse. The deck keeps its
+/// other slides; this one renders as a visible error box. `part` is the ZIP path
+/// (e.g. `ppt/slides/slide3.xml`) so the message pinpoints which slide broke.
+fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
+    Slide {
+        index,
+        slide_number: index + 1,
+        background: None,
+        elements: Vec::new(),
+        notes: None,
+        comments: Vec::new(),
+        hidden: false,
+        parse_error: Some(format!("{part}: {detail}")),
+    }
 }
 
 /// Resolve the slide's `notesSlide` relationship, read the notes part, and
@@ -910,7 +927,13 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
-        slide_xml: String,
+        /// ZIP path of the slide part (e.g. `ppt/slides/slide3.xml`). Carried so
+        /// a parse failure in the build loop can name the offending part (RB7).
+        slide_path: String,
+        /// The slide XML, or `Err(detail)` when the part itself could not be
+        /// read (RB7 partial degradation) — the build loop turns that into a
+        /// placeholder slide instead of aborting the whole deck.
+        slide_xml: Result<String, String>,
         slide_rels: HashMap<String, String>,
         smartart_drawings: HashMap<String, String>,
         /// ZIP path of the slide's layout (e.g. `ppt/slideLayouts/slideLayout3.xml`).
@@ -948,7 +971,10 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             .to_owned();
         let rels_path = format!("ppt/slides/_rels/{slide_file}.rels");
 
-        let slide_xml = read_zip_str(zip, &slide_path)?;
+        // RB7: a slide part that can't be read no longer aborts the whole deck.
+        // Record the failure and let the build loop emit a placeholder for THIS
+        // slide while the others parse normally.
+        let slide_xml = read_zip_str(zip, &slide_path).map_err(|e| e.to_string());
         let slide_rels_xml = read_zip_str(zip, &rels_path).unwrap_or_default();
         let slide_rels = parse_rels(&slide_rels_xml);
         let smartart_drawings = build_smartart_drawings(&slide_rels_xml, zip);
@@ -985,6 +1011,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
 
         raw_slides.push(SlideRaw {
             index: idx,
+            slide_path,
             slide_xml,
             slide_rels,
             smartart_drawings,
@@ -998,6 +1025,15 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
 
     let mut slides = Vec::new();
     for raw in &raw_slides {
+        // RB7: a slide part that couldn't be READ (recorded above) degrades to a
+        // placeholder now, before any master/layout resolution touches it.
+        let slide_xml = match &raw.slide_xml {
+            Ok(xml) => xml.as_str(),
+            Err(detail) => {
+                slides.push(broken_slide(raw.index, &raw.slide_path, detail));
+                continue;
+            }
+        };
         // Resolve this slide's ParsedMaster: build (and cache) one for the
         // slide's own master when the layout→master chain resolved; otherwise
         // use the presentation-level fallback bundle. Building is keyed by
@@ -1043,7 +1079,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
         // break layout-override inheritance for the common case. Hence both
         // masterClrMapping and an absent clrMapOvr resolve to `None` here and fall
         // through to the layout's override (then the master).
-        let clr_map_ovr: Option<HashMap<String, String>> = parse_clr_map_ovr(&raw.slide_xml)
+        let clr_map_ovr: Option<HashMap<String, String>> = parse_clr_map_ovr(slide_xml)
             .or_else(|| raw.layout_xml.as_deref().and_then(parse_clr_map_ovr));
         // When an override applies, recompute the master's THEME-DEPENDENT fields
         // against the slide's effective mapping. §20.1.6.8 says the override is
@@ -1181,8 +1217,12 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             None => &layout_cache[raw.layout_path.as_deref().unwrap()],
         };
 
-        let slide = parse_slide(
-            &raw.slide_xml,
+        // RB7: a slide that reads but fails to PARSE (bad shape geometry, a
+        // dependency it needs that can't be read, etc.) degrades to a placeholder
+        // carrying the part-tagged error, so one broken slide never takes the
+        // whole presentation down. Healthy slides are byte-for-byte unchanged.
+        let slide = match parse_slide(
+            slide_xml,
             parsed_layout,
             raw.layout_xml.as_deref(),
             &raw.layout_rels,
@@ -1193,7 +1233,10 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             &raw.slide_rels,
             &raw.smartart_drawings,
             zip,
-        )?;
+        ) {
+            Ok(slide) => slide,
+            Err(e) => broken_slide(raw.index, &raw.slide_path, &e.to_string()),
+        };
         slides.push(slide);
     }
 
@@ -6070,5 +6113,154 @@ mod tests {
         let xml = date_axis_chart_xml(r#"<c:delete val="1"/>"#);
         let c = parse_legacy_chart(&xml, &theme).expect("dateAx chart should parse");
         assert!(c.chart.cat_axis_hidden);
+    }
+
+    // ===== RB7: per-slide partial degradation =====
+
+    /// Build a 3-slide deck; slide `broken_idx` (0-based) gets `broken_xml` as its
+    /// part body (pass malformed XML or "" to simulate a corrupt / unreadable
+    /// slide). The other slides carry one text shape so a successful parse is
+    /// distinguishable from a placeholder.
+    fn build_three_slide_deck(broken_idx: usize, broken_xml: &str) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let good_slide = |n: usize| {
+            // A shape with explicit geometry so it reliably materializes as an
+            // element (a geometry-less non-placeholder shape can be dropped).
+            format!(
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>slide {n}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+            )
+        };
+        let slide_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let layout = r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sldLayout>"#;
+        let master = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sldMaster>"#;
+        let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="t"><a:themeElements><a:clrScheme name="c"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="000000"/></a:dk2><a:lt2><a:srgbClr val="FFFFFF"/></a:lt2><a:accent1><a:srgbClr val="000000"/></a:accent1><a:accent2><a:srgbClr val="000000"/></a:accent2><a:accent3><a:srgbClr val="000000"/></a:accent3><a:accent4><a:srgbClr val="000000"/></a:accent4><a:accent5><a:srgbClr val="000000"/></a:accent5><a:accent6><a:srgbClr val="000000"/></a:accent6><a:hlink><a:srgbClr val="000000"/></a:hlink><a:folHlink><a:srgbClr val="000000"/></a:folHlink></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="s"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#;
+
+        let mut entries: Vec<(String, String)> = vec![
+            ("ppt/presentation.xml".into(), r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdM"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/></p:presentation>"#.into()),
+            ("ppt/_rels/presentation.xml.rels".into(), r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide3.xml"/><Relationship Id="rIdM" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/></Relationships>"#.into()),
+            ("ppt/slideLayouts/slideLayout1.xml".into(), layout.into()),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(), r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#.into()),
+            ("ppt/slideMasters/slideMaster1.xml".into(), master.into()),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels".into(), r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#.into()),
+            ("ppt/theme/theme1.xml".into(), theme.into()),
+        ];
+        for i in 0..3 {
+            let body = if i == broken_idx {
+                broken_xml.to_owned()
+            } else {
+                good_slide(i + 1)
+            };
+            entries.push((format!("ppt/slides/slide{}.xml", i + 1), body));
+            entries.push((
+                format!("ppt/slides/_rels/slide{}.xml.rels", i + 1),
+                slide_rels.to_owned(),
+            ));
+        }
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in &entries {
+                w.start_file(name.as_str(), o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    /// NEUTRALIZATION: a deck whose middle slide part is unparseable still opens;
+    /// the two healthy slides render and the broken one is a placeholder whose
+    /// `parseError` names the offending part (`ppt/slides/slide2.xml`).
+    #[test]
+    fn rb7_one_broken_slide_degrades_rest_render() {
+        // Malformed XML: unterminated element → roxmltree parse fails.
+        let data = build_three_slide_deck(1, "<p:sld><p:cSld><p:spTree>");
+        let json = parse_pptx_native(&data).expect("deck must still open with a broken slide");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let slides = v["slides"].as_array().expect("slides array");
+        assert_eq!(slides.len(), 3, "all three slide slots are present");
+
+        // Slide 0 and 2 parsed normally (have their text shape, no parseError).
+        for i in [0usize, 2] {
+            assert!(
+                slides[i]["parseError"].is_null(),
+                "healthy slide {i} must carry no parseError; got {}",
+                slides[i]
+            );
+            assert!(
+                !slides[i]["elements"].as_array().unwrap().is_empty(),
+                "healthy slide {i} keeps its content"
+            );
+        }
+
+        // Slide 1 is the placeholder: empty elements + a part-tagged error.
+        let broken = &slides[1];
+        let err = broken["parseError"]
+            .as_str()
+            .expect("broken slide carries a parseError string");
+        assert!(
+            err.starts_with("ppt/slides/slide2.xml:"),
+            "error must name the offending part; got {err:?}"
+        );
+        assert!(
+            broken["elements"].as_array().unwrap().is_empty(),
+            "placeholder slide has no elements"
+        );
+        // Index / slide number preserved so navigation stays 1:1 with the deck.
+        assert_eq!(broken["index"].as_u64(), Some(1));
+        assert_eq!(broken["slideNumber"].as_u64(), Some(2));
+    }
+
+    /// A slide part that is entirely MISSING from the zip (dangling rId Target)
+    /// also degrades to a placeholder rather than aborting the whole deck.
+    #[test]
+    fn rb7_unreadable_slide_part_degrades() {
+        // Build a normal deck, then rebuild the zip WITHOUT slide3.xml so its read
+        // fails. Simplest: point the broken slot at empty content the read path
+        // still returns, but assert the malformed-XML path already; here we cover
+        // the "read failed" arm by omitting the part via a deck missing slide 3.
+        let data = build_deck_missing_third_slide();
+        let json = parse_pptx_native(&data).expect("deck must open with a missing slide part");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let slides = v["slides"].as_array().expect("slides array");
+        assert_eq!(slides.len(), 3);
+        assert!(slides[0]["parseError"].is_null());
+        assert!(slides[1]["parseError"].is_null());
+        let err = slides[2]["parseError"]
+            .as_str()
+            .expect("missing slide part yields a placeholder + error");
+        assert!(
+            err.starts_with("ppt/slides/slide3.xml:"),
+            "error names the missing part; got {err:?}"
+        );
+    }
+
+    /// A 3-slide deck whose slide3.xml part is omitted from the archive entirely.
+    fn build_deck_missing_third_slide() -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        // Reuse the three-slide scaffold, then strip slide3.xml back out.
+        let full = build_three_slide_deck(2, "<unused/>");
+        // Re-open, copy every entry EXCEPT ppt/slides/slide3.xml, into a fresh zip.
+        let mut zip = zip::ZipArchive::new(Cursor::new(full)).unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for i in 0..zip.len() {
+                let mut f = zip.by_index(i).unwrap();
+                let name = f.name().to_owned();
+                if name == "ppt/slides/slide3.xml" {
+                    continue; // omit → its read fails → placeholder
+                }
+                use std::io::Read;
+                let mut body = Vec::new();
+                f.read_to_end(&mut body).unwrap();
+                w.start_file(name.as_str(), o).unwrap();
+                w.write_all(&body).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
     }
 }

@@ -1,32 +1,40 @@
-import { decodeDataUrl } from '@silurus/ooxml-core';
+import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types';
-import init, { PptxArchive } from './wasm/pptx_parser.js';
+import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 
-let initPromise: Promise<unknown> | null = null;
-// A `PptxArchive` handle over the opened zip: `new PptxArchive(bytes, max)`
-// copies the file into WASM ONCE and scans the central directory ONCE, then a
-// later `extractMedia` / `extractImage` reads by zip path straight from the
-// retained archive (no re-copy, no re-open, and no JS-side buffer kept alive —
-// the sole copy lives in WASM). Freed + replaced on a re-parse.
-let archive: PptxArchive | null = null;
-
-/** Free the current handle (if any) and null it out — double-free / UAF guard. */
-function disposeArchive(): void {
-  if (archive) {
-    archive.free();
-    archive = null;
-  }
-}
+// RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
+// stack overflow, poisoning this worker's single WASM instance so every LATER
+// file would crash on the corrupted memory too. `WasmParserHost` draws the line
+// between a graceful `Result::Err` (instance stays healthy) and a trap (instance
+// recycled): `host.run(...)` catches a trap, frees the archive, marks the
+// instance poisoned, and `host.ensureReady()` respawns a fresh module before the
+// next request — so one bad file fails alone and the next parses on clean memory.
+//
+// The host also OWNS the archive handle (`host.archive`): a
+// `PptxArchive(bytes, max)` copies the file into WASM ONCE and scans the central
+// directory ONCE, then a later `extractMedia` / `extractImage` reads by zip path
+// straight from the retained archive (no re-copy, no re-open, no JS-side buffer
+// kept alive — the sole copy lives in WASM). Freed + replaced on a re-parse, and
+// freed + nulled by the host itself on a trap so a later parse never
+// double-frees a handle from a discarded instance.
+const host = new WasmParserHost<PptxArchive>(init, {
+  freeArchive: (a) => a.free(),
+  // RB6 recovery: `init` re-run is a no-op against wasm-bindgen's cached
+  // singleton, so a trap would poison every LATER file. `reinit` nulls the
+  // singleton first, forcing a genuine re-instantiation on fresh linear memory.
+  reinit,
+});
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
 
   if (req.kind === 'init') {
-    // Retain the init promise (docx/xlsx pattern) rather than a `ready` flag +
-    // handshake. Every request below `await`s it, so a REJECTED init rejects the
-    // request (the catch posts an `error` response the bridge turns into a
-    // rejected `load()`), never a silent hang on a main-side `ready` wait.
-    initPromise = init(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+    // Retain the init lifecycle in the host rather than a `ready` flag +
+    // handshake. Every request below `await`s `ensureReady()`, so a REJECTED
+    // init rejects the request (the catch posts an `error` response the bridge
+    // turns into a rejected `load()`), never a silent hang on a main-side `ready`
+    // wait. After a trap, `ensureReady()` respawns a fresh module here.
+    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
 
@@ -34,24 +42,25 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   // pending promise (id correlation, not response-type matching).
   const id = req.id;
   try {
-    await initPromise;
+    await host.ensureReady();
     if (req.kind === 'parse') {
       const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      // Constructing the handle copies `req.buffer` into WASM; after that the
-      // worker holds no reference to those bytes (memory is not doubled — the
-      // sole copy lives in WASM linear memory). Replace any prior handle first so
-      // re-parsing a new file frees the old archive.
-      disposeArchive();
       const bytes = new Uint8Array(req.buffer);
-      archive = new PptxArchive(bytes, max);
+      // Both the construction and `parse()` run under `host.run` so a trap in
+      // EITHER poisons + recycles the instance (and frees the archive). Adopting
+      // via `setArchive` frees any prior handle first — the re-parse dispose.
       // `parse()` returns the model as UTF-8 JSON bytes (Result<Vec<u8>,
       // JsValue>). wasm-bindgen hands back a fresh Uint8Array that owns its
       // buffer, so forward it to the main thread as a transferable — no clone,
       // no decode here. The single decode + JSON.parse happens once, on main.
-      const json = archive.parse();
+      const json = host.run(() => {
+        const archive = new PptxArchive(bytes, max);
+        host.setArchive(archive);
+        return archive.parse();
+      });
       const presentationJson = json.buffer as ArrayBuffer;
       const msg: WorkerResponse = { kind: 'parsed', id, presentationJson };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [
@@ -60,6 +69,8 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       return;
     }
 
+    const archive = host.archive;
+
     if (req.kind === 'extractMedia') {
       if (!archive) throw new Error('No pptx loaded');
       // wasm-bindgen already hands back a fresh, standalone Uint8Array here (its
@@ -67,7 +78,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // so `bytes.buffer` is a full-span, non-WASM-backed ArrayBuffer we own
       // outright — transfer it directly. A second `new Uint8Array(bytes).slice()`
       // would just re-copy the whole entry for nothing.
-      const out = archive.extract_media(req.path).buffer as ArrayBuffer;
+      const out = host.run(() => archive.extract_media(req.path).buffer as ArrayBuffer);
       const msg: WorkerResponse = { kind: 'mediaExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
       return;
@@ -77,7 +88,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       if (!archive) throw new Error('No pptx loaded');
       // See extractMedia above: the extracted Uint8Array already owns a
       // standalone full-span buffer, so transfer it without a second copy.
-      const out = archive.extract_image(req.path).buffer as ArrayBuffer;
+      const out = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
       const msg: WorkerResponse = { kind: 'imageExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
       return;
@@ -88,7 +99,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // Project the already-opened handle to markdown (no re-copy of the file,
       // no re-scan of the central directory). A plain string has no transferable
       // backing, so it is posted by structured clone like any other value.
-      const markdown = archive.to_markdown();
+      const markdown = host.run(() => archive.to_markdown());
       const msg: WorkerResponse = { kind: 'markdownRendered', id, markdown };
       self.postMessage(msg);
       return;

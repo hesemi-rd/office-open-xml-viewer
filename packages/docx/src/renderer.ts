@@ -872,6 +872,69 @@ export function physicalPageSizePt(
     : { widthPt: w, heightPt: h };
 }
 
+/**
+ * RB7: paint a placeholder page for a document whose body part failed to parse.
+ * A neutral card, a warning glyph, a heading, and the part-tagged error wrapped
+ * to a few lines. Coordinates are in CSS px (the ctx is already dpr-scaled by the
+ * caller). Only ever called for a document carrying `parseError`.
+ */
+function drawParseErrorPlaceholder(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  widthPx: number,
+  heightPx: number,
+  message: string,
+): void {
+  ctx.save();
+  // The white page fill is already painted by the caller; add a dashed frame.
+  const pad = Math.max(24, Math.min(widthPx, heightPx) * 0.06);
+  ctx.strokeStyle = '#c8ccd2';
+  ctx.lineWidth = Math.max(1, Math.min(widthPx, heightPx) * 0.003);
+  ctx.setLineDash([ctx.lineWidth * 6, ctx.lineWidth * 5]);
+  ctx.strokeRect(pad, pad, widthPx - pad * 2, heightPx - pad * 2);
+  ctx.setLineDash([]);
+
+  const cx = widthPx / 2;
+  const base = Math.min(widthPx, heightPx);
+
+  const glyph = Math.max(24, base * 0.09);
+  ctx.fillStyle = '#b23b3b';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${glyph}px sans-serif`;
+  ctx.fillText('⚠', cx, heightPx * 0.34);
+
+  const headSize = Math.max(13, base * 0.032);
+  ctx.fillStyle = '#333333';
+  ctx.font = `600 ${headSize}px sans-serif`;
+  ctx.fillText('This document could not be displayed', cx, heightPx * 0.44);
+
+  const detailSize = Math.max(10, base * 0.02);
+  ctx.fillStyle = '#666666';
+  ctx.font = `${detailSize}px sans-serif`;
+  const maxLineWidth = widthPx - pad * 4;
+  const words = message.split(/\s+/);
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (ctx.measureText(candidate).width > maxLineWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+    if (lines.length >= 4) break;
+  }
+  if (line && lines.length < 4) lines.push(line);
+  const lineHeight = detailSize * 1.4;
+  let y = heightPx * 0.5 + lineHeight;
+  for (const l of lines.slice(0, 4)) {
+    ctx.fillText(l, cx, y);
+    y += lineHeight;
+  }
+  ctx.restore();
+}
+
 export async function renderDocumentToCanvas(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -962,6 +1025,17 @@ export async function renderDocumentToCanvas(
   ctx.scale(effectiveDpr, effectiveDpr);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+  // RB7 partial degradation: a document whose body part (`word/document.xml`)
+  // failed to parse (see the Rust `degraded_document`) carries `parseError` and
+  // an empty body. Paint a visible error placeholder page instead of a blank
+  // white sheet, and stop. Healthy documents (no parseError) are unaffected. This
+  // short-circuits BEFORE the vertical page rotation below: a degraded page has no
+  // logical flow to rotate, and the placeholder is laid out in physical space.
+  if (doc.parseError != null) {
+    drawParseErrorPlaceholder(ctx, cssWidth, cssHeight, doc.parseError);
+    return;
+  }
 
   // ECMA-376 §17.6.20 (tbRl): rotate the whole page paint +90° so the logical
   // horizontal layout (built in the swapped `sec`) lands in physical vertical

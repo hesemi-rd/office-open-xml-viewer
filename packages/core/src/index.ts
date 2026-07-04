@@ -278,6 +278,14 @@ export {
   type WorkerBridgeOptions,
   type WorkerRequestOptions,
   decodeDataUrl,
+  WasmParserHost,
+  WasmTrapError,
+  isWasmTrap,
+  type WasmTrapErrorCode,
+  type WasmInit,
+  type WasmReinit,
+  type WasmInitInput,
+  type WasmParserHostOptions,
 } from './worker';
 export {
   toVisualSegments,

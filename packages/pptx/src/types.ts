@@ -149,6 +149,14 @@ export interface Slide {
    * slide modes (read it via `PptxPresentation.isHidden`).
    */
   hidden?: boolean;
+  /**
+   * RB7 partial degradation: set when this slide's part could not be parsed. The
+   * deck still opens with the OTHER slides intact; this one is a placeholder
+   * (`elements` empty) whose `parseError` names the offending part (e.g.
+   * `"ppt/slides/slide3.xml: <detail>"`). Absent (`undefined`) for every healthy
+   * slide. The renderer paints a visible error box instead of slide content.
+   */
+  parseError?: string;
 }
 
 /**

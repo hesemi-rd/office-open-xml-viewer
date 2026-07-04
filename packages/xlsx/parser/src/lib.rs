@@ -165,10 +165,26 @@ fn parse_sheet_with(
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
 
     let theme_colors = &shared.theme_colors;
-    let sheet_xml = read_zip_string(archive, &format!("xl/{}", sheet_path))?;
-    let (mut ws, hyperlink_rids) =
-        parse_worksheet(&sheet_xml, &shared.shared_strings, theme_colors, name)
-            .map_err(|e| e.to_string())?;
+    let sheet_part = format!("xl/{}", sheet_path);
+    // RB7 partial degradation: the sheet's own XML read + parse are the two
+    // failure points that concern ONE sheet (the workbook-level parts above are
+    // shared, cached, and already lenient). If either fails, don't abort the
+    // whole workbook — return an empty placeholder sheet whose `parse_error`
+    // names the offending part, so the OTHER sheets stay openable. Everything
+    // after (images / charts / comments / …) is already lenient (returns empty
+    // on error), so it stays outside this guard.
+    let sheet_read_parse = read_zip_string(archive, &sheet_part).and_then(|xml| {
+        parse_worksheet(&xml, &shared.shared_strings, theme_colors, name)
+            .map(|parsed| (xml, parsed))
+            .map_err(|e| e.to_string())
+    });
+    let (sheet_xml, (mut ws, hyperlink_rids)) = match sheet_read_parse {
+        Ok((xml, parsed)) => (xml, parsed),
+        Err(detail) => {
+            let ws = Worksheet::placeholder(name, format!("{sheet_part}: {detail}"));
+            return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
+        }
+    };
 
     // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(archive, &sheet_path);
@@ -1343,6 +1359,9 @@ fn parse_worksheet(
             // date1904>` (ECMA-376 §18.2.28); a bare `parse_worksheet` (tests)
             // defaults to the 1900 date system.
             date1904: false,
+            // A successfully parsed sheet carries no error (RB7). Only the
+            // `Worksheet::placeholder` path sets this.
+            parse_error: None,
         },
         hyperlink_rids,
     ))
@@ -3159,5 +3178,115 @@ mod reversed_range_normalization_tests {
         let reversed_values = extract_range_values(xml, &reversed[0]);
         assert_eq!(ordered_values, vec![Some(7.0), Some(8.0)]);
         assert_eq!(reversed_values, ordered_values);
+    }
+}
+
+#[cfg(test)]
+mod rb7_partial_degradation_tests {
+    //! RB7: one corrupt sheet must not fail the whole workbook. `parse_sheet`
+    //! degrades a sheet whose XML can't be read/parsed into an empty placeholder
+    //! carrying a part-tagged `parseError`, so the other sheets stay openable.
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    /// Build a 3-sheet workbook. `broken` (0-based) sheet gets `broken_xml` as its
+    /// worksheet part; pass malformed XML to simulate corruption, or `None` to
+    /// omit the part entirely (an unreadable sheet). Healthy sheets carry one
+    /// cell so a real parse is distinguishable from a placeholder.
+    fn build_three_sheet_workbook(broken: usize, broken_xml: Option<&str>) -> Vec<u8> {
+        let good_sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="str"><v>ok</v></c></row></sheetData></worksheet>"#;
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Alpha" sheetId="1" r:id="rId1"/><sheet name="Beta" sheetId="2" r:id="rId2"/><sheet name="Gamma" sheetId="3" r:id="rId3"/></sheets></workbook>"#;
+        let wb_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#;
+
+        let mut entries: Vec<(String, String)> = vec![
+            ("xl/workbook.xml".into(), workbook.into()),
+            ("xl/_rels/workbook.xml.rels".into(), wb_rels.into()),
+        ];
+        for i in 0..3 {
+            if i == broken {
+                // `None` ⇒ omit the part entirely → its read fails → placeholder.
+                if let Some(xml) = broken_xml {
+                    entries.push((format!("xl/worksheets/sheet{}.xml", i + 1), xml.into()));
+                }
+            } else {
+                entries.push((
+                    format!("xl/worksheets/sheet{}.xml", i + 1),
+                    good_sheet.into(),
+                ));
+            }
+        }
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in &entries {
+                w.start_file(name.as_str(), o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    fn parse_sheet_json(data: &[u8], idx: u32, name: &str) -> serde_json::Value {
+        let json = parse_sheet_native(data, idx, name)
+            .unwrap_or_else(|e| panic!("sheet {idx} ({name}) must parse or degrade, got: {e}"));
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// NEUTRALIZATION: a workbook whose middle sheet XML is malformed still opens.
+    /// The healthy sheets parse; the broken one is an empty placeholder whose
+    /// `parseError` names the offending part (`xl/worksheets/sheet2.xml`).
+    #[test]
+    fn rb7_one_broken_sheet_degrades_rest_parse() {
+        // Unterminated element → parse_worksheet fails.
+        let data = build_three_sheet_workbook(1, Some("<worksheet><sheetData><row>"));
+
+        // Healthy sheets: real cell, no parseError.
+        for (idx, name) in [(0u32, "Alpha"), (2, "Gamma")] {
+            let ws = parse_sheet_json(&data, idx, name);
+            assert!(
+                ws["parseError"].is_null(),
+                "healthy sheet {name} must carry no parseError; got {ws}"
+            );
+            assert!(
+                !ws["rows"].as_array().unwrap().is_empty(),
+                "healthy sheet {name} keeps its cell data"
+            );
+        }
+
+        // Broken sheet: placeholder with a part-tagged error and no rows.
+        let broken = parse_sheet_json(&data, 1, "Beta");
+        let err = broken["parseError"]
+            .as_str()
+            .expect("broken sheet carries a parseError string");
+        assert!(
+            err.starts_with("xl/worksheets/sheet2.xml:"),
+            "error must name the offending part; got {err:?}"
+        );
+        assert!(
+            broken["rows"].as_array().unwrap().is_empty(),
+            "placeholder sheet has no rows"
+        );
+        // Name is preserved so the tab still shows.
+        assert_eq!(broken["name"].as_str(), Some("Beta"));
+    }
+
+    /// A sheet whose part is entirely missing from the archive also degrades to a
+    /// placeholder rather than failing the whole workbook.
+    #[test]
+    fn rb7_missing_sheet_part_degrades() {
+        let data = build_three_sheet_workbook(2, None); // sheet3.xml omitted
+                                                        // Healthy sheets still parse.
+        assert!(parse_sheet_json(&data, 0, "Alpha")["parseError"].is_null());
+        // Missing sheet degrades.
+        let broken = parse_sheet_json(&data, 2, "Gamma");
+        let err = broken["parseError"]
+            .as_str()
+            .expect("missing sheet part yields a placeholder + error");
+        assert!(
+            err.starts_with("xl/worksheets/sheet3.xml:"),
+            "error names the missing part; got {err:?}"
+        );
     }
 }

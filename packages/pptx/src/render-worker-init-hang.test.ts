@@ -25,6 +25,8 @@ class FakePptxArchive {
 
 vi.mock('./wasm/pptx_parser.js', () => ({
   default: (arg: unknown) => initMock(arg),
+  // RB6: mirror the worker's `reinit` recovery hook (see worker-init-hang.test).
+  reinit: (arg: unknown) => initMock(arg),
   PptxArchive: FakePptxArchive,
 }));
 

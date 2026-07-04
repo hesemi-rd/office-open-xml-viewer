@@ -66,6 +66,14 @@ pub(crate) struct Slide {
     /// Omitted from JSON when false so existing snapshots are unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub(crate) hidden: bool,
+    /// RB7 partial degradation: when this slide's part (`ppt/slides/slideN.xml`
+    /// or a dependency it needs) could not be parsed, the deck still opens with
+    /// the OTHER slides intact and this one becomes a placeholder carrying the
+    /// part-tagged error (e.g. `"ppt/slides/slide3.xml: <detail>"`). `None` (and
+    /// omitted from JSON) for every healthy slide, so existing snapshots are
+    /// byte-for-byte unchanged. The renderer paints a visible error placeholder.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) parse_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

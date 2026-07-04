@@ -268,5 +268,73 @@ export async function renderWorksheetViewport(
   // so its own dpr-dependent math stays aligned.
   ctx.setTransform(effectiveDpr, 0, 0, effectiveDpr, 0, 0);
 
+  // RB7 partial degradation: a sheet whose part failed to parse (see the Rust
+  // `Worksheet::placeholder`) carries `parseError` and no rows. Paint a visible
+  // error overlay in place of the grid so the workbook's OTHER sheets stay usable
+  // and this tab clearly reads as "broken". Healthy sheets never take this path.
+  if (ws.parseError) {
+    drawSheetParseErrorOverlay(ctx, width, height, ws.name, ws.parseError);
+    return;
+  }
+
   renderViewport(ctx, ws, styles, viewport, { ...opts, dpr: effectiveDpr, loadedImages: imageCache });
+}
+
+/**
+ * RB7: paint a placeholder overlay for a worksheet whose part failed to parse.
+ * A neutral fill, a warning glyph, a heading naming the sheet, and the
+ * part-tagged error wrapped to a few lines. Coordinates are in CSS px (the ctx
+ * is already dpr-scaled by the caller). Only ever called for a sheet carrying
+ * `parseError`.
+ */
+function drawSheetParseErrorOverlay(
+  ctx: CanvasRenderingContext2D,
+  widthPx: number,
+  heightPx: number,
+  sheetName: string,
+  message: string,
+): void {
+  ctx.save();
+  ctx.fillStyle = '#f7f7f8';
+  ctx.fillRect(0, 0, widthPx, heightPx);
+  const cx = widthPx / 2;
+  const base = Math.min(widthPx, heightPx);
+
+  const glyph = Math.max(20, base * 0.1);
+  ctx.fillStyle = '#b23b3b';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${glyph}px sans-serif`;
+  ctx.fillText('⚠', cx, heightPx * 0.32);
+
+  const headSize = Math.max(13, base * 0.035);
+  ctx.fillStyle = '#333333';
+  ctx.font = `600 ${headSize}px sans-serif`;
+  ctx.fillText(`Sheet "${sheetName}" could not be displayed`, cx, heightPx * 0.46);
+
+  const detailSize = Math.max(10, base * 0.022);
+  ctx.fillStyle = '#666666';
+  ctx.font = `${detailSize}px sans-serif`;
+  const maxLineWidth = Math.min(widthPx * 0.8, 640);
+  const words = message.split(/\s+/);
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (ctx.measureText(candidate).width > maxLineWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+    if (lines.length >= 4) break;
+  }
+  if (line && lines.length < 4) lines.push(line);
+  const lineHeight = detailSize * 1.4;
+  let y = heightPx * 0.52 + lineHeight;
+  for (const l of lines.slice(0, 4)) {
+    ctx.fillText(l, cx, y);
+    y += lineHeight;
+  }
+  ctx.restore();
 }

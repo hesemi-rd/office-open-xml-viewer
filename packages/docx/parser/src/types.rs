@@ -63,6 +63,15 @@ pub struct Document {
     /// (the renderer then uses spec defaults: kinsoku ON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<DocumentSettings>,
+    /// RB7 partial degradation: set when `word/document.xml` — the body part —
+    /// could not be read or parsed. The document still "opens" (so the viewer
+    /// shows a placeholder page instead of throwing an opaque error) with an
+    /// empty `body` and this part-tagged error (e.g.
+    /// `"word/document.xml: <detail>"`). `None` (and omitted from JSON) for every
+    /// healthy document, so existing snapshots are byte-for-byte unchanged. The
+    /// renderer paints a visible error placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
 }
 
 /// One embedded font-style slot from `word/fontTable.xml`. `style` is one of
