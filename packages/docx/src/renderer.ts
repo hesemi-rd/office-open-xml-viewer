@@ -135,6 +135,10 @@ import type {
   LayoutTextSeg,
   WrapLayoutCtx,
 } from './line-layout.js';
+import {
+  emphasisMarkCenters,
+  emphasisMarkGeometry,
+} from './emphasis-mark.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -5469,6 +5473,73 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // revColor for ruby).
           ctx.fillStyle = glyphColor;
           ctx.fillText(s.ruby.text, rubyX, rubyBaseline);
+          ctx.restore();
+        }
+
+        // ECMA-376 §17.3.2.12 emphasis mark (圏点): a small glyph stamped on every
+        // NON-SPACE character (§17.18.24), centred above each glyph (below for
+        // `underDot`). Drawn AFTER the text so it overlays; the advance is
+        // unchanged (no layout impact). The per-glyph centre uses the SAME
+        // contextual `measureText` cumulative advance the glyph draw is anchored
+        // to, plus the run's uniform per-glyph pitch so a docGrid cell delta /
+        // fully-distributed justify pitch keeps the mark centred. (A partial
+        // justify split — non-uniform pitch — falls back to pitch 0, which
+        // stays within a fraction of a glyph of centre and is not worth the
+        // complexity of re-deriving the sliced positions.)
+        if (s.emphasisMark) {
+          const geom = emphasisMarkGeometry(s.emphasisMark, effSizePx);
+          // Uniform per-glyph pitch matching the case the glyphs were drawn with.
+          const fullyDistributed =
+            !!stretch &&
+            stretch.splitBefore.length > 0 &&
+            stretch.splitBefore.length === [...s.text].length - 1;
+          const markPitch =
+            segGridDelta !== 0
+              ? drawGridDeltaPx
+              : fullyDistributed
+                ? distPerGap
+                : 0;
+          const measureMark = (str: string): number => ctx.measureText(str).width;
+          const centers = emphasisMarkCenters(s.text, measureMark, x, markPitch);
+          // Above marks sit a small gap above the glyph box top (the same
+          // ~0.85em ascent the box decorations use); below marks (underDot) sit
+          // just under the box bottom (baseline + ~0.25em). The gap keeps the
+          // mark clear of the glyph without stealing line height.
+          const markGap = effSizePx * 0.06;
+          const markCy = geom.above
+            ? boxTop - markGap - geom.radius
+            : boxTop + boxHeight + markGap + geom.radius;
+          ctx.save();
+          ctx.fillStyle = glyphColor;
+          ctx.strokeStyle = glyphColor;
+          for (const { centerX } of centers) {
+            if (geom.shape === 'circle') {
+              // Hollow circle (§17.18.24 "circle"): stroked ring.
+              ctx.lineWidth = Math.max(0.5, geom.radius * 0.35);
+              ctx.beginPath();
+              ctx.arc(centerX, markCy, geom.radius, 0, Math.PI * 2);
+              ctx.stroke();
+            } else if (geom.shape === 'comma') {
+              // Sesame / comma mark (§17.18.24 "comma"): a filled teardrop —
+              // a disc with a short tail down-right, approximating the boten
+              // sesame «﹅». Kept simple (disc + triangle) so it reads at body
+              // sizes without a font dependency.
+              ctx.beginPath();
+              ctx.arc(centerX, markCy, geom.radius, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.beginPath();
+              ctx.moveTo(centerX - geom.radius * 0.5, markCy + geom.radius * 0.2);
+              ctx.lineTo(centerX + geom.radius * 0.5, markCy + geom.radius * 0.2);
+              ctx.lineTo(centerX - geom.radius * 0.1, markCy + geom.radius * 1.4);
+              ctx.closePath();
+              ctx.fill();
+            } else {
+              // Filled dot (§17.18.24 "dot" / "underDot").
+              ctx.beginPath();
+              ctx.arc(centerX, markCy, geom.radius, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
           ctx.restore();
         }
 

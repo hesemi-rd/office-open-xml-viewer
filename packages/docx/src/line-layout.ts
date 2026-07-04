@@ -17,7 +17,7 @@
 
 import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
-  LineSpacing, TabStop, DocxRunBorder, DocSettings,
+  LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
 import type { MathNode, KinsokuRules, ChartModel } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
@@ -69,6 +69,10 @@ export interface LayoutTextSeg {
   joinPrev?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark stamped on
+   *  every non-space character of this segment (§17.18.24 ST_Em). The renderer
+   *  paints it per glyph after the text; it does not affect layout metrics. */
+  emphasisMark?: EmphasisMark;
   /** ECMA-376 §17.3.2.32 `<w:shd w:fill>` — run shading fill (hex 6). Painted as
    *  a solid rect behind the glyphs; also the effective background that an
    *  automatic text color resolves against. */
@@ -1292,6 +1296,9 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         joinPrev: gluePending ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
+        // §17.3.2.12 w:em — carried on both DocxTextRun and FieldRun (a field's
+        // resolved/fallback text stamps the mark the same as a plain run).
+        emphasisMark: base.emphasisMark,
         background: base.background ?? null,
         colorAuto: r.colorAuto ?? false,
         border: r.border ?? null,

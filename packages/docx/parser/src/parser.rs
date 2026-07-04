@@ -2434,6 +2434,7 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         small_caps: fmt.small_caps.unwrap_or(false),
         double_strikethrough: fmt.dstrike.unwrap_or(false),
         highlight: fmt.highlight.clone(),
+        emphasis_mark: fmt.emphasis_mark.clone(),
     })
 }
 
@@ -2491,6 +2492,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.small_caps == b.small_caps
         && a.double_strikethrough == b.double_strikethrough
         && a.highlight == b.highlight
+        && a.emphasis_mark == b.emphasis_mark
         && a.rtl == b.rtl
         && a.cs == b.cs
         && a.font_family_cs == b.font_family_cs
@@ -2597,6 +2599,9 @@ fn parse_run_inner(
     let small_caps = fmt.small_caps.unwrap_or(false);
     let double_strikethrough = fmt.dstrike.unwrap_or(false);
     let highlight = fmt.highlight.clone();
+    // ECMA-376 §17.3.2.12 w:em — emphasis mark (boten). Travels to the model so
+    // the renderer can stamp the per-glyph mark; does not affect layout metrics.
+    let emphasis_mark = fmt.emphasis_mark.clone();
     // Run-level color=auto (§17.3.2.6) and border/box (§17.3.2.4). color_auto
     // travels so the renderer can pick black/white from the effective
     // background (implementation-defined contrast; no normative algorithm); the
@@ -2665,6 +2670,7 @@ fn parse_run_inner(
                         small_caps,
                         double_strikethrough,
                         highlight: highlight.clone(),
+                        emphasis_mark: emphasis_mark.clone(),
                         ruby: None,
                         revision: revision.cloned(),
                         rtl,
@@ -2732,6 +2738,7 @@ fn parse_run_inner(
                         small_caps,
                         double_strikethrough,
                         highlight: highlight.clone(),
+                        emphasis_mark: emphasis_mark.clone(),
                         ruby: None,
                         revision: revision.cloned(),
                         rtl,
@@ -2769,6 +2776,7 @@ fn parse_run_inner(
                     small_caps,
                     double_strikethrough,
                     highlight: highlight.clone(),
+                    emphasis_mark: emphasis_mark.clone(),
                     ruby: None,
                     revision: revision.cloned(),
                     rtl,
@@ -2851,6 +2859,7 @@ fn parse_run_inner(
                     small_caps,
                     double_strikethrough,
                     highlight: highlight.clone(),
+                    emphasis_mark: emphasis_mark.clone(),
                     ruby: None,
                     revision: revision.cloned(),
                     rtl,
@@ -3031,6 +3040,7 @@ fn parse_run_inner(
                     small_caps,
                     double_strikethrough,
                     highlight: highlight.clone(),
+                    emphasis_mark: emphasis_mark.clone(),
                     ruby: None,
                     revision: revision.cloned(),
                     rtl,
@@ -6369,6 +6379,7 @@ mod tests {
         let mut base = RunFmt::default();
         let direct = RunFmt {
             highlight: Some("yellow".to_string()),
+            emphasis_mark: Some("dot".to_string()),
             border: Some(EdgeBorder {
                 width: 0.5,
                 color: Some("000000".to_string()),
@@ -6383,6 +6394,9 @@ mod tests {
         };
         apply_direct_run(&mut base, &direct);
         assert_eq!(base.highlight.as_deref(), Some("yellow"));
+        // §17.3.2.12 w:em — a directly-applied emphasis mark must survive the
+        // merge (same value-property shape as highlight).
+        assert_eq!(base.emphasis_mark.as_deref(), Some("dot"));
         assert!(base.border.is_some());
         assert_eq!(base.all_caps, Some(true));
         assert_eq!(base.small_caps, Some(true));
@@ -6407,6 +6421,80 @@ mod tests {
         apply_direct_run(&mut base, &direct);
         assert_eq!(base.color, None);
         assert!(base.color_auto);
+    }
+
+    // ECMA-376 §17.3.2.12 w:em / §17.18.24 ST_Em — each enumerated value parses
+    // onto the model as its literal token; `val="none"` collapses to `None`.
+    #[test]
+    fn emphasis_mark_each_value_parses_to_model() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        for val in ["dot", "comma", "circle", "underDot"] {
+            let body = format!(r#"<w:r><w:rPr><w:em w:val="{val}"/></w:rPr><w:t>圏点</w:t></w:r>"#);
+            let runs = parse_para(&body, &base, &styles);
+            let t = first_text(&runs);
+            assert_eq!(
+                t.emphasis_mark.as_deref(),
+                Some(val),
+                "w:em val={val} must round-trip to the model"
+            );
+        }
+        // val="none" means "no emphasis mark" (§17.18.24) → filters to None.
+        let none_body = r#"<w:r><w:rPr><w:em w:val="none"/></w:rPr><w:t>plain</w:t></w:r>"#;
+        let runs = parse_para(none_body, &base, &styles);
+        assert_eq!(first_text(&runs).emphasis_mark, None);
+        // No <w:em> at all → None.
+        let bare = r#"<w:r><w:t>plain</w:t></w:r>"#;
+        let runs = parse_para(bare, &base, &styles);
+        assert_eq!(first_text(&runs).emphasis_mark, None);
+    }
+
+    // §17.3.2.12 — an emphasis mark inherited from the style chain (modeled here
+    // as the paragraph base RunFmt) reaches the run when the run's direct rPr is
+    // silent, exactly like other inherited value properties (highlight/color).
+    #[test]
+    fn emphasis_mark_inherits_from_style_chain() {
+        let base = RunFmt {
+            emphasis_mark: Some("circle".to_string()),
+            ..Default::default()
+        };
+        let styles = StyleMap::parse("");
+        let body = r#"<w:r><w:t>継承</w:t></w:r>"#;
+        let runs = parse_para(body, &base, &styles);
+        assert_eq!(first_text(&runs).emphasis_mark.as_deref(), Some("circle"));
+
+        // A concrete direct value overrides the inherited one (set-wins).
+        let body_override = r#"<w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>上書き</w:t></w:r>"#;
+        let runs = parse_para(body_override, &base, &styles);
+        assert_eq!(first_text(&runs).emphasis_mark.as_deref(), Some("dot"));
+    }
+
+    // §17.3.2.12 w:em on a field run (§17.16.18 fldSimple → make_field_run).
+    // Regression guard: `FieldRun` used to lack `emphasis_mark` entirely (only
+    // `TextRun` carried it), so a PAGE/NUMPAGES field with `<w:em>` silently
+    // dropped its boten mark despite an ordinary emphasised run rendering it
+    // (asymmetric with `highlight`, which every field run already carried).
+    #[test]
+    fn field_run_carries_emphasis_mark() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let body = r#"<w:fldSimple w:instr="PAGE">
+            <w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>1</w:t></w:r>
+        </w:fldSimple>"#;
+        let runs = parse_para(body, &base, &styles);
+        let f = runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Field(f) => Some(f),
+                _ => None,
+            })
+            .expect("expected a field run");
+        assert_eq!(f.field_type, "page");
+        assert_eq!(
+            f.emphasis_mark.as_deref(),
+            Some("dot"),
+            "PAGE field run must carry w:em like a plain text run"
+        );
     }
 
     // A styles part defining a `Hyperlink` character style (blue + underline),

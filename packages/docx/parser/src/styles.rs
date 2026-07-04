@@ -55,6 +55,16 @@ pub struct RunFmt {
     pub web_hidden: Option<bool>,
     /// Highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     pub highlight: Option<String>,
+    /// ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten) mark applied to
+    /// each non-space character of the run (§17.18.24 ST_Em). One of "dot" |
+    /// "comma" | "circle" | "underDot"; `val="none"` filters to `None` (no mark).
+    /// Resolved through the same style chain as `highlight`: a level that sets a
+    /// concrete value wins. (Like `highlight`, `none` collapses to `None` at
+    /// parse time, so it reads as "unset" rather than an inherit-clearing
+    /// override — emphasis marks are effectively never inherited-then-cleared in
+    /// practice, and this keeps the value-property resolution identical to
+    /// `highlight`.)
+    pub emphasis_mark: Option<String>,
     /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border drawn as a box around
     /// the run's text. Reuses `EdgeBorder` (width pt, color, style, space pt).
     pub border: Option<EdgeBorder>,
@@ -781,6 +791,10 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.highlight.is_some() {
         dst.highlight = src.highlight.clone();
     }
+    // §17.3.2.12 w:em — value property, set-wins (same shape as highlight).
+    if src.emphasis_mark.is_some() {
+        dst.emphasis_mark = src.emphasis_mark.clone();
+    }
     if src.border.is_some() {
         dst.border = src.border.clone();
     }
@@ -1249,6 +1263,14 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // Highlight
     if let Some(hl) = child_w(rpr, "highlight") {
         fmt.highlight = attr_w(hl, "val").filter(|v| v != "none");
+    }
+
+    // Emphasis mark (ECMA-376 §17.3.2.12 w:em / §17.18.24 ST_Em). A single
+    // ST_Em value ("dot" | "comma" | "circle" | "underDot") drawn over (or,
+    // for underDot, under) each non-space character. `val="none"` = no mark, so
+    // it filters to `None` exactly like `highlight`.
+    if let Some(em) = child_w(rpr, "em") {
+        fmt.emphasis_mark = attr_w(em, "val").filter(|v| v != "none");
     }
 
     // Run border (ECMA-376 §17.3.2.4 w:bdr) — drawn as a box around the run.
