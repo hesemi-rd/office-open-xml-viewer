@@ -250,3 +250,58 @@ export function drawUprightBox(
   draw(-h / 2, -w / 2, h, w);
   ctx.restore();
 }
+
+/** A rectangle `{ x, y, w, h }` in some coordinate frame (px). */
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Map a DrawingML anchor's box from PHYSICAL page space into the SWAPPED LOGICAL
+ * layout frame the vertical (tbRl) renderer flows text in (ECMA-376 §17.6.20 +
+ * §20.4.3.x).
+ *
+ * A `<wp:positionH>` / `<wp:positionV>` anchor is resolved against the PHYSICAL
+ * page — Word places the drawing layer before/independently of the text-flow
+ * rotation, so the image stays upright at physical `(px, py, w, h)` exactly as in
+ * a horizontal document. The body text, however, is laid out in the logical frame
+ * that the page paint transform `physical = (cssWidth − logical.y, logical.x)`
+ * maps to physical. Inverting that transform (`logical.x = physical.y`,
+ * `logical.y = cssWidth − physical.x`) projects the physical image rectangle onto
+ * the logical frame:
+ *   - logical x-range = `[py, py + h]`         (physical y ↦ logical x, downward)
+ *   - logical y-range = `[cssWidth − (px + w), cssWidth − px]`
+ *                                               (physical x ↦ logical y, reversed)
+ * so the logical box has `w ↔ h` swapped: logical width = physical height and
+ * logical height = physical width.
+ *
+ * The returned box drives BOTH the float-exclusion rectangle (text wraps around
+ * this logical projection, in the same frame as the flow) AND {@link drawUprightBox}
+ * (which un-swaps it back to the upright physical image). Because the two derive
+ * from one box, the wrap band and the painted image stay locked together
+ * (packages/docx/CLAUDE.md — no duplicated geometry).
+ *
+ * @param px         Physical left of the image box (px).
+ * @param py         Physical top of the image box (px).
+ * @param w          Physical image width (px).
+ * @param h          Physical image height (px).
+ * @param cssWidthPx The canvas CSS width in px (= physical page width) — the
+ *                   `translate(cssWidth, 0)` term of the page transform.
+ */
+export function physicalToLogicalAnchorBox(
+  px: number,
+  py: number,
+  w: number,
+  h: number,
+  cssWidthPx: number,
+): Box {
+  return {
+    x: py,
+    y: cssWidthPx - (px + w),
+    w: h,
+    h: w,
+  };
+}

@@ -140,7 +140,11 @@ import {
   emphasisMarkCenters,
   emphasisMarkGeometry,
 } from './emphasis-mark.js';
-import { drawVerticalRun, drawUprightBox } from './vertical-text.js';
+import {
+  drawVerticalRun,
+  drawUprightBox,
+  physicalToLogicalAnchorBox,
+} from './vertical-text.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -330,6 +334,26 @@ export interface RenderState {
    *  false ⇒ horizontal (lrTb) — the whole layout + paint path is byte-identical
    *  to the pre-vertical renderer. */
   verticalCJK?: boolean;
+  /** ECMA-376 §17.6.20 + §20.4.3.x — the PHYSICAL page geometry for a vertical
+   *  (tbRl) page, in the SAME units the rest of RenderState uses (margins/page
+   *  size in pt; `cssWidthPx` in px). Present only when `verticalCJK` is set.
+   *  A DrawingML anchor's `<wp:positionH/V>` is resolved against the PHYSICAL page
+   *  (the drawing layer is placed independently of the text-flow rotation), so the
+   *  anchor path builds a PHYSICAL-geometry proxy RenderState from this and maps
+   *  the resolved physical box into the swapped logical frame via
+   *  {@link physicalToLogicalAnchorBox}. The four margins are the physical
+   *  pgMar values (already the body inset for the top/bottom, matching
+   *  `bodyMarginInsetPt`). `cssWidthPx` = physical page width in px = the page
+   *  transform's `translate(cssWidth, 0)` term. Absent ⇒ horizontal. */
+  verticalPhys?: {
+    pageWidth: number;
+    pageHeight: number;
+    marginLeft: number;
+    marginRight: number;
+    marginTop: number;
+    marginBottom: number;
+    cssWidthPx: number;
+  };
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1014,6 +1038,24 @@ export async function renderDocumentToCanvas(
     // (CJK) glyphs so they stand up inside the +90°-rotated page (see the page
     // transform above and `drawVerticalRun`).
     verticalCJK: vertical,
+    // ECMA-376 §20.4.3.x — physical page geometry for resolving DrawingML anchors
+    // against the un-rotated physical page (see `verticalPhys` docs and
+    // `resolveAnchorBox`). `sec` here is the LOGICAL (swapped) section, so un-swap
+    // it back to physical: physical left/top/right/bottom margin = logical
+    // bottom/left/top/right (the inverse of `verticalLayoutSection`). Top/bottom
+    // are stored as body insets (`bodyMarginInsetPt`) to match the horizontal
+    // path's `marginTop`/`marginBottom` (§17.6.11 text-margin = body edge).
+    verticalPhys: vertical
+      ? {
+          pageWidth: physPageWidth,
+          pageHeight: physPageHeight,
+          marginLeft: sec.marginBottom,
+          marginRight: sec.marginTop,
+          marginTop: bodyMarginInsetPt(sec.marginLeft),
+          marginBottom: bodyMarginInsetPt(sec.marginRight),
+          cssWidthPx: cssWidth,
+        }
+      : undefined,
   };
 
   // ECMA-376 §17.10.1 — per-section header/footer selection. resolvePageHeader and
@@ -6966,7 +7008,32 @@ export const __test_renderInlineImage = (
   baseline: number,
   scale: number,
   images: Map<string, DecodedImage>,
-): void => renderInlineImage(ctx, seg, x, baseline, scale, images);
+  vertical = false,
+): void => renderInlineImage(ctx, seg, x, baseline, scale, images, vertical);
+
+/** ECMA-376 §17.6.20 + §20.4.3.x — a RenderState view whose page/margin geometry
+ *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
+ *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
+ *  (Word places the drawing layer independently of the text-flow rotation). Only
+ *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
+ *  read are overridden (scale, page size, margins, `pageH`); everything else is
+ *  the live logical state. Callers map the resolved physical box back into the
+ *  logical layout frame with {@link physicalToLogicalAnchorBox}. */
+function physicalAnchorState(state: RenderState): RenderState {
+  const p = state.verticalPhys;
+  if (!p) return state;
+  return {
+    ...state,
+    pageWidth: p.pageWidth,
+    marginLeft: p.marginLeft,
+    marginRight: p.marginRight,
+    marginTop: p.marginTop,
+    marginBottom: p.marginBottom,
+    // yContainer reads `pageH` (px) for the page-relative bands; the physical
+    // page height in px is `pageHeight(pt) * scale`.
+    pageH: p.pageHeight * state.scale,
+  };
+}
 
 function resolveAnchorBox(
   img: ImageRun,
@@ -6976,6 +7043,10 @@ function resolveAnchorBox(
   const scale = state.scale;
   const w = img.widthPt * scale;
   const h = img.heightPt * scale;
+  const dl = (img.distLeft   ?? 0) * scale;
+  const dr = (img.distRight  ?? 0) * scale;
+  const dt = (img.distTop    ?? 0) * scale;
+  const db = (img.distBottom ?? 0) * scale;
   // ECMA-376 §20.4.3.1 wp:align — when positionH/V carry <wp:align>, the
   // renderer aligns the image within its relativeFrom container instead of
   // using the (discarded) posOffset. Mirrors resolveShapeBox (the ShapeRun
@@ -6990,6 +7061,32 @@ function resolveAnchorBox(
   // anchorXFromMargin / anchorYFromPara hints still gate page-vs-margin when
   // no raw relativeFrom is present. When align is absent, resolveAnchorX/Y
   // fall back to the offset path.
+  if (state.verticalPhys) {
+    // ECMA-376 §17.6.20 (tbRl): the anchor's positionH/V are PHYSICAL-page
+    // relative (the drawing layer is not rotated with the text flow). Resolve
+    // the box in physical space, then project it into the swapped logical layout
+    // frame the body text flows in — so the float-exclusion band and the
+    // (drawUprightBox-un-swapped) painted image share one geometry. paraBaseY is
+    // a LOGICAL flow coordinate and only feeds paragraph-relative positionV; the
+    // vertical samples in scope anchor page/margin-relative, so it is not
+    // physical-mapped here (paragraph-relative vertical anchors in tbRl are a
+    // follow-up — see the vertical-text stage-1 scope note).
+    const phys = physicalAnchorState(state);
+    const px = resolveAnchorX(
+      img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, phys,
+      img.anchorXRelativeFrom ?? null, null, null,
+    );
+    const py = resolveAnchorY(
+      img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, phys,
+      img.anchorYRelativeFrom ?? null, null, null,
+    );
+    const box = physicalToLogicalAnchorBox(px, py, w, h, state.verticalPhys.cssWidthPx);
+    // Rotate the dist* padding one quarter-turn with the box: physical top/bottom
+    // become logical left/right; physical right/left become logical top/bottom
+    // (logical y runs opposite physical x). Symmetric wrapSquare dist is common,
+    // but rotate the labels so asymmetric dist stays correct.
+    return { x: box.x, y: box.y, w: box.w, h: box.h, dl: dt, dr: db, dt: dr, db: dl };
+  }
   const x = resolveAnchorX(
     img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, state,
     img.anchorXRelativeFrom ?? null, null, null,
@@ -6998,16 +7095,7 @@ function resolveAnchorBox(
     img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, state,
     img.anchorYRelativeFrom ?? null, null, null,
   );
-  return {
-    x,
-    y,
-    w,
-    h,
-    dl: (img.distLeft   ?? 0) * scale,
-    dr: (img.distRight  ?? 0) * scale,
-    dt: (img.distTop    ?? 0) * scale,
-    db: (img.distBottom ?? 0) * scale,
-  };
+  return { x, y, w, h, dl, dr, dt, db };
 }
 
 /** ECMA-376 §20.4.3.2 / §20.4.3.5 — a `<wp:positionV>` `relativeFrom` value
