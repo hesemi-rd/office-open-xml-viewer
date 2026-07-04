@@ -29,6 +29,14 @@ pub struct Document {
     /// sorted), making the parser output byte-stable for identical input.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_classes: BTreeMap<String, String>,
+    /// ECMA-376 §17.8.3.3-.6 — embedded fonts declared in `word/fontTable.xml`
+    /// (`<w:embedRegular>` / `embedBold` / `embedItalic` / `embedBoldItalic`),
+    /// resolved through `word/_rels/fontTable.xml.rels` to their obfuscated
+    /// `.odttf` part paths. The renderer de-obfuscates (§17.8.1, via the
+    /// `fontKey`) and registers each as a FontFace so text draws with the
+    /// authored typeface. Empty when the document embeds no fonts.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub embedded_fonts: Vec<EmbeddedFont>,
     /// ECMA-376 §17.13.5 — track-changes events found in the body. Each entry
     /// is one `<w:ins>` or `<w:del>` block, with the change author / date /
     /// text content. Empty when the document has no tracked changes.
@@ -55,6 +63,21 @@ pub struct Document {
     /// (the renderer then uses spec defaults: kinsoku ON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<DocumentSettings>,
+}
+
+/// One embedded font-style slot from `word/fontTable.xml`. `style` is one of
+/// "regular" | "bold" | "italic" | "boldItalic" (the `<w:embed*>` element).
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedFont {
+    /// The `<w:font w:name>` this style belongs to (FontFace family name).
+    pub font_name: String,
+    /// Style slot: "regular" | "bold" | "italic" | "boldItalic".
+    pub style: String,
+    /// Resolved zip part path, e.g. "word/fonts/font1.odttf".
+    pub part_path: String,
+    /// `<w:embed* w:fontKey>` GUID for §17.8.1 de-obfuscation.
+    pub font_key: String,
 }
 
 /// Document-wide settings surfaced from `word/settings.xml`. Only the
