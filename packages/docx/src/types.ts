@@ -181,6 +181,17 @@ export interface SectionProps {
    *  spec default). Non-final sections carry their start type on their own
    *  SectionBreak marker. */
   sectionStart?: string | null;
+  /** ECMA-376 §17.6.20 `<w:textDirection w:val>` — the section's flow direction,
+   *  using the TRANSITIONAL ST_TextDirection enum Word writes (Part 4 §14.11.7:
+   *  `lrTb`|`tbRl`|`btLr`|`lrTbV`|`tbLrV`|`tbRlV`), NOT the Part 1 §17.18.93
+   *  Strict set. Absent / `null` ⇒ "lrTb" (horizontal, left→right / top→bottom,
+   *  the default). `"tbRl"` = vertical Japanese (glyphs stack top→bottom, lines
+   *  advance right→left); the renderer (see `isVerticalSection`) lays the page out
+   *  horizontally and rotates it +90° at paint for the vertical values
+   *  (`tbRl`/`tbRlV`/`tbLrV`), keeping CJK glyphs upright and Latin sideways. Only
+   *  a non-default value is emitted by the parser, so horizontal documents keep
+   *  byte-identical rendering. */
+  textDirection?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:type — "default" | "lines" | "linesAndChars" | "snapToChars". */
   docGridType?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:linePitch in pt. When docGridType is "lines" or
@@ -1243,8 +1254,11 @@ export interface RenderPageOptions {
   width?: number;
   dpr?: number;
   defaultTextColor?: string;
-  /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
-  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string }) => void;
+  /** Called for each rendered text segment. Used to build a transparent text
+   *  selection overlay. On a vertical (§17.6.20 tbRl) page `x`/`y` are the
+   *  PHYSICAL top-left and `transform` is the CSS rotation the overlay span
+   *  applies about its top-left; absent for horizontal pages. */
+  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string; transform?: string }) => void;
   /** Default `true`. When false, ECMA-376 §17.13.5 track-changes runs render
    *  in their normal style (no author colour, no underline / strikethrough)
    *  — equivalent to Word's "Final / No Markup" view. */

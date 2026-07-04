@@ -12,7 +12,7 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizePt } from './renderer';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type {
@@ -328,10 +328,14 @@ export class DocxDocument {
     const pages = this._getPages();
     const clamped = Math.max(0, Math.min(pageIndex, pages.length - 1));
     const g = pages[clamped]?.[0]?.sectionGeom;
-    return {
-      widthPt: g?.pageWidth ?? this._document.section.pageWidth,
-      heightPt: g?.pageHeight ?? this._document.section.pageHeight,
-    };
+    // The stamped `sectionGeom` is in LOGICAL dims for a vertical (tbRl) section
+    // (pagination runs on the swapped page); `physicalPageSizePt` un-swaps it so
+    // this reports the visible PHYSICAL page box (identity for horizontal docs).
+    return physicalPageSizePt(
+      this._document.section,
+      g?.pageWidth ?? this._document.section.pageWidth,
+      g?.pageHeight ?? this._document.section.pageHeight,
+    );
   }
 
   renderPage(

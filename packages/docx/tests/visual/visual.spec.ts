@@ -14,6 +14,10 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   // locally with UPDATE_REFS=1 — they are never committed.
   { name: 'private/sample-24', pageCount: 3, width: 595 },
   { name: 'private/sample-25', pageCount: 1, width: 595 },
+  // XF9 vertical writing (§17.6.20 tbRl): a landscape vertical-Japanese
+  // newspaper. width = physical page width (842pt, A4 landscape). Reference is
+  // private (gitignored) and generated locally with UPDATE_REFS=1.
+  { name: 'private/sample-26', pageCount: 1, width: 842 },
   { name: 'demo/sample-1', pageCount: 6, width: 595 },
 ];
 

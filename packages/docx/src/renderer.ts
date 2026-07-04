@@ -140,6 +140,12 @@ import {
   emphasisMarkCenters,
   emphasisMarkGeometry,
 } from './emphasis-mark.js';
+import {
+  drawVerticalRun,
+  drawUprightBox,
+  physicalToLogicalAnchorBox,
+  verticalTextLayerPlacement,
+} from './vertical-text.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -320,6 +326,35 @@ export interface RenderState {
    *  and replays them after the whole page's flow, so front floats land on top.
    *  `null`/absent ⇒ draw in place (headers/footers and measurement passes). */
   deferFront?: Array<() => void> | null;
+  /** ECMA-376 §17.6.20 vertical writing (tbRl). When true the page is laid out
+   *  in a SWAPPED logical coordinate space (logical width = physical page height)
+   *  and the whole page paint is rotated +90° into physical space by
+   *  {@link renderDocumentToCanvas}; the glyph-draw path then counter-rotates each
+   *  upright (CJK) glyph −90° about its own centre so ideographs stand upright
+   *  while Latin/digits stay sideways (correct for vertical Japanese). Absent /
+   *  false ⇒ horizontal (lrTb) — the whole layout + paint path is byte-identical
+   *  to the pre-vertical renderer. */
+  verticalCJK?: boolean;
+  /** ECMA-376 §17.6.20 + §20.4.3.x — the PHYSICAL page geometry for a vertical
+   *  (tbRl) page, in the SAME units the rest of RenderState uses (margins/page
+   *  size in pt; `cssWidthPx` in px). Present only when `verticalCJK` is set.
+   *  A DrawingML anchor's `<wp:positionH/V>` is resolved against the PHYSICAL page
+   *  (the drawing layer is placed independently of the text-flow rotation), so the
+   *  anchor path builds a PHYSICAL-geometry proxy RenderState from this and maps
+   *  the resolved physical box into the swapped logical frame via
+   *  {@link physicalToLogicalAnchorBox}. The four margins are the physical
+   *  pgMar values (already the body inset for the top/bottom, matching
+   *  `bodyMarginInsetPt`). `cssWidthPx` = physical page width in px = the page
+   *  transform's `translate(cssWidth, 0)` term. Absent ⇒ horizontal. */
+  verticalPhys?: {
+    pageWidth: number;
+    pageHeight: number;
+    marginLeft: number;
+    marginRight: number;
+    marginTop: number;
+    marginBottom: number;
+    cssWidthPx: number;
+  };
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -337,6 +372,13 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing (e.g. `"bold 16px Arial"`). */
   font: string;
+  /** ECMA-376 §17.6.20 (tbRl) — when the page is vertical the canvas is the
+   *  physical landscape page rotated +90° at paint, so this run's `x`/`y` are the
+   *  PHYSICAL top-left the overlay span must sit at, and `transform` is the CSS
+   *  rotation (`"rotate(90deg)"`, applied about the span's top-left) that lays the
+   *  horizontal DOM span along the drawn (rotated) glyph run. Absent for
+   *  horizontal pages (the span is placed at `x`/`y` untransformed). */
+  transform?: string;
 }
 
 export interface RenderDocumentOptions {
@@ -746,6 +788,90 @@ export async function preloadImages(
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
+/** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
+ *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
+ *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7; Word writes these, not the
+ *  Part 1 §17.18.93 Strict `tb|rl|lr|…` set):
+ *    - `tbRl`  (≡ Strict `rl`)  — vertical, lines right→left: standard vertical
+ *                                 Japanese; the only value in the samples.
+ *    - `tbRlV` (≡ Strict `rlV`) — vertical R→L, non-EA glyphs rotated 90° CW.
+ *    - `tbLrV` (≡ Strict `lrV`) — vertical L→R, non-EA glyphs rotated 90° CW.
+ *  These three share the +90° page rotation + upright-CJK glyph path (stage-1
+ *  approximates the `V` variants' non-EA rotation the same as `tbRl`, which the
+ *  glyph path already draws Latin sideways for).
+ *
+ *  Two values are VERTICAL but NOT handled by this stage-1 path, so they return
+ *  false (parsed and carried, but rendered as horizontal until implemented):
+ *    - `btLr`  (≡ Strict `lr`)  — vertical, but lines flow LEFT→RIGHT and glyphs
+ *                                 stack BOTTOM→TOP: needs the opposite page
+ *                                 rotation/flow, a separate follow-up.
+ *  And two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
+ *    - `lrTb`  (≡ Strict `tb`, the default) — dropped to null by the parser.
+ *    - `lrTbV` (≡ Strict `tbV`) — horizontal, EA glyphs rotated 270°; still a
+ *                                 horizontal flow, so not this vertical path. */
+function isVerticalSection(s: SectionProps): boolean {
+  const td = s.textDirection;
+  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV';
+}
+
+/** Map a vertical (tbRl) section's PHYSICAL page geometry to the SWAPPED LOGICAL
+ *  geometry the horizontal layout engine lays the page out in: logical width =
+ *  physical height, and the four margins rotate one quarter-turn so the logical
+ *  layout, once the page paint is rotated +90° back into physical space, lands
+ *  the margins on the correct physical edges (§17.6.11). With the page transform
+ *  `physical = (pageW_phys − logical.y, logical.x)`:
+ *    logical.marginLeft  (flow start / column top)  → physical TOP     margin
+ *    logical.marginTop   (before the first line)     → physical RIGHT   margin
+ *    logical.marginRight (after the last line)        → physical LEFT    margin
+ *    logical.marginBottom (flow end / column bottom)  → physical BOTTOM  margin
+ *  Non-geometry fields (docGrid, columns, textDirection, …) are preserved so the
+ *  logical layout keeps the section's grid pitch, columns and vertical flag. */
+function verticalLayoutSection(phys: SectionProps): SectionProps {
+  return {
+    ...phys,
+    pageWidth: phys.pageHeight,
+    pageHeight: phys.pageWidth,
+    marginLeft: phys.marginTop,
+    marginTop: phys.marginRight,
+    marginRight: phys.marginBottom,
+    marginBottom: phys.marginLeft,
+    // header/footer distances follow the top/bottom margins into the logical
+    // top/bottom (left/right in physical); vertical docs in scope carry no
+    // header/footer so this is a best-effort mapping, not yet exercised.
+    headerDistance: phys.headerDistance,
+    footerDistance: phys.footerDistance,
+  };
+}
+
+/** Return a shallow copy of `doc` with its body-level section (and any per-body
+ *  sectionBreak geometry) swapped to the vertical LOGICAL geometry, so the
+ *  pagination + layout engine — which reads `doc.section` and per-element
+ *  `sectionGeom` — organises the page as a rotated horizontal page. Only invoked
+ *  when the body section is vertical; horizontal docs are returned untouched
+ *  (referential identity), keeping the horizontal path byte-identical. */
+function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
+  if (!isVerticalSection(doc.section)) return doc;
+  return { ...doc, section: verticalLayoutSection(doc.section) };
+}
+
+/** Map a page's stamped `sectionGeom` width/height back to PHYSICAL page size.
+ *  Pagination for a vertical (tbRl) section runs on the SWAPPED logical geometry
+ *  (`verticalLayoutDoc`), so a page's stamped `pageWidth`/`pageHeight` are the
+ *  LOGICAL dims (width = physical height). Callers that report the visible page
+ *  box (e.g. `DocxDocument.pageSize`, the worker's `pageSizes` meta, a scroll
+ *  viewer's spacer) want the PHYSICAL size, so this un-swaps for vertical sections
+ *  and is identity for horizontal ones. `section` is the body-level section (its
+ *  `textDirection` decides the flow); `w`/`h` are the page's stamped dims. */
+export function physicalPageSizePt(
+  section: SectionProps,
+  w: number,
+  h: number,
+): { widthPt: number; heightPt: number } {
+  return isVerticalSection(section)
+    ? { widthPt: h, heightPt: w }
+    : { widthPt: w, heightPt: h };
+}
+
 export async function renderDocumentToCanvas(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -771,7 +897,15 @@ export async function renderDocumentToCanvas(
   // The pagination fallback (paginateWithHeaderFooterReserve) needs this ctx.
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   const kinsoku = resolveKinsokuRules(doc.settings);
-  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
+  // ECMA-376 §17.6.20 — for a vertical (tbRl) section the page is laid out in a
+  // SWAPPED logical space (logical width = physical page height) and rotated +90°
+  // into physical space at paint. `layoutDoc` carries the swapped geometry through
+  // pagination + per-page section resolution; horizontal docs get `doc` unchanged
+  // (referential identity ⇒ byte-identical). The vertical flag is read from the
+  // ORIGINAL section (the swap preserves textDirection).
+  const vertical = isVerticalSection(doc.section);
+  const layoutDoc = verticalLayoutDoc(doc);
+  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(layoutDoc, ctx, layoutDoc.fontFamilyClasses ?? {}, kinsoku, layoutDoc.footnotes ?? []);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -784,12 +918,25 @@ export async function renderDocumentToCanvas(
   // rails, so only the page-box geometry needs the per-page swap here. For a
   // single-section document `geom` equals `doc.section`, so `sec === doc.section` in
   // value — byte-identical output.
-  const pageGeom = resolvePageSection(pages, pageIndex, doc).geom;
-  const sec: SectionProps = { ...doc.section, ...pageGeom };
+  // `sec` is the LOGICAL section the body/header/footer are laid out in: for a
+  // vertical page that is the swapped geometry (from `layoutDoc`), for horizontal
+  // it equals the physical section. All RenderState geometry below (contentX/W,
+  // margins, pageWidth, docGrid) reads `sec`, so the entire layout is expressed
+  // in logical coordinates and the page transform maps it to physical space.
+  const pageGeom = resolvePageSection(pages, pageIndex, layoutDoc).geom;
+  const sec: SectionProps = { ...layoutDoc.section, ...pageGeom };
 
-  const cssWidth = opts.width ?? sec.pageWidth * PT_TO_PX;
-  const scale = cssWidth / sec.pageWidth;  // px per pt
-  const cssHeight = sec.pageHeight * scale;
+  // The CANVAS is sized to the PHYSICAL page (visible landscape page for tbRl):
+  // physical width = logical height, physical height = logical width. `scale`
+  // (px per pt) is isotropic, so the logical layout — whose logical width in px
+  // is `sec.pageWidth * scale = physicalHeight * scale = cssHeight` — maps 1:1
+  // onto the rotated physical box. For horizontal pages physW/H equal sec's and
+  // this is the pre-vertical computation unchanged.
+  const physPageWidth = vertical ? sec.pageHeight : sec.pageWidth;
+  const physPageHeight = vertical ? sec.pageWidth : sec.pageHeight;
+  const cssWidth = opts.width ?? physPageWidth * PT_TO_PX;
+  const scale = cssWidth / physPageWidth;  // px per pt
+  const cssHeight = physPageHeight * scale;
 
   // Clamp the backing store to browser canvas limits (RB5). A pathological page
   // size (or a large dpr × page size) can exceed the per-axis / total-area cap,
@@ -815,6 +962,19 @@ export async function renderDocumentToCanvas(
   ctx.scale(effectiveDpr, effectiveDpr);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+  // ECMA-376 §17.6.20 (tbRl): rotate the whole page paint +90° so the logical
+  // horizontal layout (built in the swapped `sec`) lands in physical vertical
+  // space. The map is `physical = (cssWidth − logical.y, logical.x)`
+  // (`translate(cssWidth, 0)` then `rotate(+90°)`): logical +x (character flow)
+  // → physical +y (down the column), logical +y (line stacking) → physical −x
+  // (columns advance right→left). The white background above stays in physical
+  // space (drawn before the rotate). Glyphs are counter-rotated per-glyph in the
+  // draw path (`state.verticalCJK`) so CJK ideographs stand upright.
+  if (vertical) {
+    ctx.translate(cssWidth, 0);
+    ctx.rotate(Math.PI / 2);
+  }
 
   const images = await preloadImages(doc, opts.fetchImage);
   // A newer render of this canvas started while we awaited image decode — stop
@@ -847,7 +1007,12 @@ export async function renderDocumentToCanvas(
     contentX: sec.marginLeft * scale,
     contentW: (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale,
     y: bodyTopPt * scale,
-    pageH: cssHeight,
+    // `pageH` is the LOGICAL page height in px (`sec.pageHeight * scale`). For a
+    // horizontal page that equals `cssHeight`; for a vertical page the logical
+    // height is the physical WIDTH, so it equals `cssWidth`. Using the logical
+    // height keeps the body-flow / footnote / bottom-margin math in the same
+    // (logical) coordinate space the page transform maps to physical.
+    pageH: sec.pageHeight * scale,
     defaultColor: opts.defaultTextColor ?? '#000000',
     pageIndex,
     totalPages,
@@ -877,6 +1042,28 @@ export async function renderDocumentToCanvas(
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
     noteNumbers,
+    // ECMA-376 §17.6.20 — when set, the glyph-draw path counter-rotates upright
+    // (CJK) glyphs so they stand up inside the +90°-rotated page (see the page
+    // transform above and `drawVerticalRun`).
+    verticalCJK: vertical,
+    // ECMA-376 §20.4.3.x — physical page geometry for resolving DrawingML anchors
+    // against the un-rotated physical page (see `verticalPhys` docs and
+    // `resolveAnchorBox`). `sec` here is the LOGICAL (swapped) section, so un-swap
+    // it back to physical: physical left/top/right/bottom margin = logical
+    // bottom/left/top/right (the inverse of `verticalLayoutSection`). Top/bottom
+    // are stored as body insets (`bodyMarginInsetPt`) to match the horizontal
+    // path's `marginTop`/`marginBottom` (§17.6.11 text-margin = body edge).
+    verticalPhys: vertical
+      ? {
+          pageWidth: physPageWidth,
+          pageHeight: physPageHeight,
+          marginLeft: sec.marginBottom,
+          marginRight: sec.marginTop,
+          marginTop: bodyMarginInsetPt(sec.marginLeft),
+          marginBottom: bodyMarginInsetPt(sec.marginRight),
+          cssWidthPx: cssWidth,
+        }
+      : undefined,
   };
 
   // ECMA-376 §17.10.1 — per-section header/footer selection. resolvePageHeader and
@@ -2657,12 +2844,20 @@ function paginateWithHeaderFooterReserve(
 export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return [doc.body];
+  // ECMA-376 §17.6.20 — a vertical (tbRl) section is laid out in the SWAPPED
+  // logical geometry (see `verticalLayoutDoc`), so pagination — which stamps each
+  // page's `sectionGeom` — must run on the swapped section. `renderDocumentToCanvas`
+  // reads that stamped geometry back through `resolvePageSection`, so paginating on
+  // the swapped doc here keeps the two passes consistent whether the pages are
+  // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
+  // (referential identity).
+  const layoutDoc = verticalLayoutDoc(doc);
   return paginateWithHeaderFooterReserve(
-    doc,
+    layoutDoc,
     ctx,
-    doc.fontFamilyClasses ?? {},
-    resolveKinsokuRules(doc.settings),
-    doc.footnotes ?? [],
+    layoutDoc.fontFamilyClasses ?? {},
+    resolveKinsokuRules(layoutDoc.settings),
+    layoutDoc.footnotes ?? [],
   );
 }
 
@@ -5151,7 +5346,15 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // shifted by lvlJc (§17.9.8) so a "right" level period-aligns its right
           // edge at firstLineX. The body was advanced past the marker above
           // (numBodyOffset).
-          ctx.fillText(markerDisplayText(para.numbering!), lineLeft + indFirst + markerJcShiftPx, baseline);
+          const markerText = markerDisplayText(para.numbering!);
+          const markerX = lineLeft + indFirst + markerJcShiftPx;
+          if (state.verticalCJK) {
+            // §17.6.20 (tbRl) — draw the bullet/number upright inside the rotated
+            // page, same per-glyph counter-rotation as body glyphs.
+            drawVerticalRun(ctx, markerText, markerX, baseline, numFontSize, 0);
+          } else {
+            ctx.fillText(markerText, markerX, baseline);
+          }
         }
       }
     }
@@ -5245,7 +5448,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         continue;
       }
       if ('imagePath' in seg) {
-        if (!dryRun) renderInlineImage(ctx, seg as LayoutImageSeg, x, baseline, scale, state.images);
+        if (!dryRun) renderInlineImage(ctx, seg as LayoutImageSeg, x, baseline, scale, state.images, !!state.verticalCJK);
         x += seg.measuredWidth;
         continue;
       }
@@ -5393,7 +5596,24 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //      `justifiedPiecePositions` slice-at-gaps path.
         //   3. Neither: a single fillText (the common path).
         const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
-        if (segGridDelta !== 0) {
+        if (state.verticalCJK) {
+          // ECMA-376 §17.6.20 (tbRl) — the run flows DOWN the column (logical
+          // +x). Draw each glyph advancing by its measured horizontal width plus
+          // the per-cell grid delta, counter-rotating upright (CJK) glyphs so
+          // they stand up inside the +90°-rotated page while Latin/digits stay
+          // sideways. The docGrid cell delta (segGridDelta, non-zero only on a
+          // pure-EA segment) becomes the vertical inter-glyph pitch; the
+          // horizontal-only justify slicing (cases below) does not apply in
+          // vertical stage-1 (the sample's columns are start-aligned).
+          drawVerticalRun(
+            ctx,
+            s.text,
+            x,
+            baseline + yOffset,
+            effSizePx,
+            segGridDelta !== 0 ? drawGridDeltaPx : 0,
+          );
+        } else if (segGridDelta !== 0) {
           const cps = [...s.text]; // code points (handles surrogate pairs)
           // Draw each CONTIGUOUS piece (sliced only at justify gaps) as ONE
           // contextually-shaped `fillText`, with the per-EA-glyph grid delta
@@ -5559,14 +5779,23 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         }
 
         if (state.onTextRun && s.text) {
+          // ECMA-376 §17.6.20 (tbRl) — `x`/`state.y` are LOGICAL flow coords; on a
+          // vertical page the overlay DOM lives on the physical (rotated) canvas,
+          // so project the logical top-left to physical and hand the span the +90°
+          // rotation. `verticalTextLayerPlacement` returns null on horizontal pages
+          // (the span stays at the logical `x`/`y`, byte-identical to before).
+          const place = verticalTextLayerPlacement(
+            x, state.y, state.verticalPhys?.cssWidthPx ?? 0, !!state.verticalCJK,
+          );
           state.onTextRun({
             text: s.text,
-            x,
-            y: state.y,
+            x: place ? place.left : x,
+            y: place ? place.top : state.y,
             w: spanW,
             h: lineH,
             fontSize: effSizePx,
             font: ctx.font,
+            transform: place?.transform,
           });
         }
 
@@ -5808,23 +6037,40 @@ function renderInlineImage(
   baseline: number,
   scale: number,
   images: Map<string, DecodedImage>,
+  vertical: boolean,
 ): void {
   // Anchor images are skipped during layout (measuredWidth=0, not added to line.segments)
   // and are drawn later by renderAnchorImages — so this function only handles inline images.
   if (seg.anchor) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
+  const boxY = baseline - h;
+  // ECMA-376 §17.6.20 (tbRl) — an inline image/chart is a graphic, not text, so it
+  // stands UPRIGHT inside the +90°-rotated page. `drawUprightBox` counter-rotates
+  // the flow box (logical `x,boxY,w,h`) −90° about its centre and invokes the
+  // callback with the un-swapped upright rect, so the image/chart is painted right
+  // way up. On horizontal pages the callback runs with the box unchanged (no
+  // rotation), byte-identical to the pre-vertical inline draw.
+  const paint = (
+    draw: (dx: number, dy: number, dw: number, dh: number) => void,
+  ): void => {
+    if (vertical) drawUprightBox(ctx, x, boxY, w, h, draw);
+    else draw(x, boxY, w, h);
+  };
   // ECMA-376 §21.2 inline chart: paint through the shared core chart renderer
   // (the same entry point pptx/xlsx use), at the inline box's top-left. `scale`
   // is px-per-pt in this renderer, which is exactly the `ptToPx` renderChart
   // wants to scale the chart's point-sized fonts/axes — so pass it straight.
   if (seg.chart) {
-    renderChart(ctx as CanvasRenderingContext2D, seg.chart, { x, y: baseline - h, w, h }, scale);
+    const chart = seg.chart;
+    paint((dx, dy, dw, dh) =>
+      renderChart(ctx as CanvasRenderingContext2D, chart, { x: dx, y: dy, w: dw, h: dh }, scale),
+    );
     return;
   }
   const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom));
   if (!bmp) return;
-  drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
+  paint((dx, dy, dw, dh) => drawImageCropped(ctx, bmp, seg.srcRect, dx, dy, dw, dh));
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -5892,7 +6138,15 @@ function renderAnchorImages(
     // does not displace text and is not displaced by other floats), so dist* is
     // unused here.
     const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
-    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
+    if (state.verticalCJK) {
+      // §17.6.20 (tbRl) — an anchored image is not text: keep it UPRIGHT inside
+      // the +90°-rotated page by counter-rotating about its box centre.
+      drawUprightBox(state.ctx, pageX, pageY, w, h, (dx, dy, dw, dh) =>
+        drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, dx, dy, dw, dh),
+      );
+    } else {
+      drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
+    }
   }
 }
 
@@ -6788,7 +7042,32 @@ export const __test_renderInlineImage = (
   baseline: number,
   scale: number,
   images: Map<string, DecodedImage>,
-): void => renderInlineImage(ctx, seg, x, baseline, scale, images);
+  vertical = false,
+): void => renderInlineImage(ctx, seg, x, baseline, scale, images, vertical);
+
+/** ECMA-376 §17.6.20 + §20.4.3.x — a RenderState view whose page/margin geometry
+ *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
+ *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
+ *  (Word places the drawing layer independently of the text-flow rotation). Only
+ *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
+ *  read are overridden (scale, page size, margins, `pageH`); everything else is
+ *  the live logical state. Callers map the resolved physical box back into the
+ *  logical layout frame with {@link physicalToLogicalAnchorBox}. */
+function physicalAnchorState(state: RenderState): RenderState {
+  const p = state.verticalPhys;
+  if (!p) return state;
+  return {
+    ...state,
+    pageWidth: p.pageWidth,
+    marginLeft: p.marginLeft,
+    marginRight: p.marginRight,
+    marginTop: p.marginTop,
+    marginBottom: p.marginBottom,
+    // yContainer reads `pageH` (px) for the page-relative bands; the physical
+    // page height in px is `pageHeight(pt) * scale`.
+    pageH: p.pageHeight * state.scale,
+  };
+}
 
 function resolveAnchorBox(
   img: ImageRun,
@@ -6798,6 +7077,10 @@ function resolveAnchorBox(
   const scale = state.scale;
   const w = img.widthPt * scale;
   const h = img.heightPt * scale;
+  const dl = (img.distLeft   ?? 0) * scale;
+  const dr = (img.distRight  ?? 0) * scale;
+  const dt = (img.distTop    ?? 0) * scale;
+  const db = (img.distBottom ?? 0) * scale;
   // ECMA-376 §20.4.3.1 wp:align — when positionH/V carry <wp:align>, the
   // renderer aligns the image within its relativeFrom container instead of
   // using the (discarded) posOffset. Mirrors resolveShapeBox (the ShapeRun
@@ -6812,6 +7095,32 @@ function resolveAnchorBox(
   // anchorXFromMargin / anchorYFromPara hints still gate page-vs-margin when
   // no raw relativeFrom is present. When align is absent, resolveAnchorX/Y
   // fall back to the offset path.
+  if (state.verticalPhys) {
+    // ECMA-376 §17.6.20 (tbRl): the anchor's positionH/V are PHYSICAL-page
+    // relative (the drawing layer is not rotated with the text flow). Resolve
+    // the box in physical space, then project it into the swapped logical layout
+    // frame the body text flows in — so the float-exclusion band and the
+    // (drawUprightBox-un-swapped) painted image share one geometry. paraBaseY is
+    // a LOGICAL flow coordinate and only feeds paragraph-relative positionV; the
+    // vertical samples in scope anchor page/margin-relative, so it is not
+    // physical-mapped here (paragraph-relative vertical anchors in tbRl are a
+    // follow-up — see the vertical-text stage-1 scope note).
+    const phys = physicalAnchorState(state);
+    const px = resolveAnchorX(
+      img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, phys,
+      img.anchorXRelativeFrom ?? null, null, null,
+    );
+    const py = resolveAnchorY(
+      img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, phys,
+      img.anchorYRelativeFrom ?? null, null, null,
+    );
+    const box = physicalToLogicalAnchorBox(px, py, w, h, state.verticalPhys.cssWidthPx);
+    // Rotate the dist* padding one quarter-turn with the box: physical top/bottom
+    // become logical left/right; physical right/left become logical top/bottom
+    // (logical y runs opposite physical x). Symmetric wrapSquare dist is common,
+    // but rotate the labels so asymmetric dist stays correct.
+    return { x: box.x, y: box.y, w: box.w, h: box.h, dl: dt, dr: db, dt: dr, db: dl };
+  }
   const x = resolveAnchorX(
     img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, state,
     img.anchorXRelativeFrom ?? null, null, null,
@@ -6820,16 +7129,7 @@ function resolveAnchorBox(
     img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, state,
     img.anchorYRelativeFrom ?? null, null, null,
   );
-  return {
-    x,
-    y,
-    w,
-    h,
-    dl: (img.distLeft   ?? 0) * scale,
-    dr: (img.distRight  ?? 0) * scale,
-    dt: (img.distTop    ?? 0) * scale,
-    db: (img.distBottom ?? 0) * scale,
-  };
+  return { x, y, w, h, dl, dr, dt, db };
 }
 
 /** ECMA-376 §20.4.3.2 / §20.4.3.5 — a `<wp:positionV>` `relativeFrom` value
@@ -7009,7 +7309,16 @@ function registerImageFloat(
 
   if (!state.dryRun) {
     const bmp = state.images.get(key);
-    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    if (bmp) {
+      if (state.verticalCJK) {
+        // §17.6.20 (tbRl) — keep the floated image UPRIGHT inside the rotated page.
+        drawUprightBox(state.ctx, rect.imageX, rect.imageY, rect.imageW, rect.imageH, (dx, dy, dw, dh) =>
+          drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, dx, dy, dw, dh),
+        );
+      } else {
+        drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+      }
+    }
     rect.drawn = true;
   }
 }
@@ -7659,6 +7968,13 @@ function renderCell(
     // cell edge.
     ctx.save();
     ctx.beginPath();
+    // `ctx.canvas.width` is the PHYSICAL device width; on a vertical (§17.6.20
+    // tbRl) page the ctx is rotated, so this clip rect is expressed in LOGICAL
+    // coordinates and the physical-width span makes it OVER-wide along the logical
+    // x-axis. That is harmless here — the clip is a Y-band anti-bleed guard, so an
+    // over-wide x-extent still fully contains the intended row band (it never
+    // UNDER-clips). Vertical tables are not yet exercised by a ground-truth
+    // fixture; when they are, tighten this to the logical content width.
     ctx.rect(0, y, ctx.canvas.width, h);
     ctx.clip();
     renderCellContent(cell.content, cellState);

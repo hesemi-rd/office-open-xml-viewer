@@ -10,7 +10,7 @@
 import init, { DocxArchive } from './wasm/docx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas } from './renderer';
+import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt } from './renderer';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
@@ -106,10 +106,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       const model = doc;
       const pageSizes = pages.map((els) => {
         const g = els[0]?.sectionGeom;
-        return {
-          widthPt: g?.pageWidth ?? model.section.pageWidth,
-          heightPt: g?.pageHeight ?? model.section.pageHeight,
-        };
+        // A vertical (tbRl) section paginates on the SWAPPED logical geometry, so
+        // un-swap the stamped dims back to the PHYSICAL page box the meta reports
+        // (identity for horizontal docs).
+        return physicalPageSizePt(
+          model.section,
+          g?.pageWidth ?? model.section.pageWidth,
+          g?.pageHeight ?? model.section.pageHeight,
+        );
       });
       const meta: DocumentMeta = {
         pageCount: pages.length,
