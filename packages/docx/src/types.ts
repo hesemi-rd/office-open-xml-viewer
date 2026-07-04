@@ -1,6 +1,6 @@
 // ===== Output JSON model (mirrors Rust types) =====
 
-import type { MathNode } from '@silurus/ooxml-core';
+import type { MathNode, ChartModel } from '@silurus/ooxml-core';
 
 export interface DocxDocumentModel {
   section: SectionProps;
@@ -560,11 +560,32 @@ export interface NumberingInfo {
 export type DocRun =
   | { type: 'text' } & DocxTextRun
   | { type: 'image' } & ImageRun
+  | { type: 'chart' } & ChartRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
   | { type: 'shape' } & ShapeRun
   | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number; jc?: string }
   | { type: 'ptab' } & PTabRun;
+
+/** ECMA-376 §21.2 — a DrawingML chart embedded in the run flow via
+ *  `<w:drawing><wp:inline>…<a:graphicData uri=".../chart"><c:chart r:id>`.
+ *  Mirrors the Rust `ChartRun`. `chart` is the shared {@link ChartModel} the
+ *  core `renderChart` consumes (identical to what pptx/xlsx pass), so a docx
+ *  chart draws at the same quality through the same code path. `widthPt`/
+ *  `heightPt` are the `<wp:extent>` natural size; the renderer flows the chart
+ *  as an inline box of that size and draws it with `renderChart`. */
+export interface ChartRun {
+  chart: ChartModel;
+  widthPt: number;
+  heightPt: number;
+  /** true = `<wp:anchor>` (absolute); false = `<wp:inline>` (flows). Only
+   *  inline charts are drawn today. */
+  anchor: boolean;
+  anchorXPt?: number;
+  anchorYPt?: number;
+  anchorXFromMargin?: boolean;
+  anchorYFromPara?: boolean;
+}
 
 /** ECMA-376 §17.3.3.23 `<w:ptab>` — an absolute-position tab. Advances to a
  *  position derived from {@link PTabRun.alignment} and {@link PTabRun.relativeTo},

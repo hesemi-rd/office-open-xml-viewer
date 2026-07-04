@@ -31,6 +31,9 @@ export type {
   DocxTextRun,
   FieldRun,
   ImageRun,
+  // DrawingML chart run (reachable via the DocRun union's `chart` arm,
+  // ECMA-376 §21.2).
+  ChartRun,
   ShapeRun,
   ShapeText,
   // Per-run shape-text formatting (reachable via ShapeText.runs).

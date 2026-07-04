@@ -189,6 +189,13 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
 
     let media_map = load_media_map(zip, &rel_map, "word/");
 
+    // ECMA-376 §21.2 — pre-resolve every chart part referenced from the document
+    // relationships into the shared `ChartModel`, keyed by the SAME rId a
+    // `<c:chart r:id>` in a `<w:drawing>` uses. Mirrors `load_media_map`: the
+    // model is resolved here (needs `zip` + the theme, neither of which is
+    // threaded through the run walk) and looked up by rId during drawing parse.
+    let chart_map = load_chart_map(zip, &rel_map, &theme);
+
     let doc_xml = read_zip_string(zip, "word/document.xml")?;
     let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
 
@@ -251,6 +258,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         &style_map,
         &mut num_map,
         &media_map,
+        &chart_map,
         &rel_map,
         &theme,
         &section_hf,
@@ -464,6 +472,7 @@ fn parse_notes(
     let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
     let local_rel_map = parse_rels(&rels_xml);
     let local_media_map = load_media_map(zip, &local_rel_map, &base_dir);
+    let local_chart_map = load_chart_map(zip, &local_rel_map, theme);
 
     let Ok(doc) = XmlDoc::parse(&xml) else {
         return Vec::new();
@@ -491,6 +500,7 @@ fn parse_notes(
             style_map,
             num_map,
             &local_media_map,
+            &local_chart_map,
             &local_rel_map,
             theme,
             &HashMap::new(),
@@ -868,6 +878,7 @@ fn parse_body_elements(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
@@ -899,7 +910,8 @@ fn parse_body_elements(
         match child.tag_name().name() {
             "p" => {
                 let result = parse_paragraph(
-                    child, style_map, num_map, media_map, rel_map, theme, None, &mut field,
+                    child, style_map, num_map, media_map, chart_map, rel_map, theme, None,
+                    &mut field,
                 );
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
@@ -957,7 +969,9 @@ fn parse_body_elements(
                 }
             }
             "tbl" => {
-                let tbl = parse_table(child, style_map, num_map, media_map, rel_map, theme);
+                let tbl = parse_table(
+                    child, style_map, num_map, media_map, chart_map, rel_map, theme,
+                );
                 body.push(BodyElement::Table(tbl));
             }
             // Mid-body loose sectPr (rare) defines the section that ENDS here.
@@ -1323,6 +1337,42 @@ fn load_media_map(
     media_map
 }
 
+/// Build a map of rId → parsed [`ChartModel`] for every document relationship
+/// whose Type is the DrawingML chart relationship (ECMA-376 §21.2). The chart
+/// part (`word/charts/chartN.xml`) is read now, parsed through the shared
+/// [`parse_docx_chart`] (with a [`DocxColorResolver`] over the document theme),
+/// and stored under the SAME rId a `<c:chart r:id>` inside a `<w:drawing>`
+/// references — so the drawing parse resolves its chart with a single map
+/// lookup, exactly like `media_map` does for blips. Relationships that don't
+/// resolve to a readable, parseable chart part are dropped (the drawing then
+/// renders nothing, matching the "drop unresolvable blip" behaviour).
+fn load_chart_map(
+    zip: &mut Zip,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+) -> HashMap<String, ooxml_common::chart::ChartModel> {
+    // Resolve the rId's Type via the raw rels: `rel_map` only carries Targets,
+    // but a chart Target is distinguishable by the part it lands on. Match on the
+    // resolved zip path living under `word/charts/` and ending in `.xml` — the
+    // canonical location for a DrawingML chart part. `parse_chart_part` returns
+    // `None` for a colors/style sidecar, so a stray non-chart `.xml` there is
+    // harmless.
+    let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+    for (rid, target) in rel_map {
+        let path = ooxml_common::rels::resolve_target("word/", target);
+        if !(path.contains("charts/") && path.ends_with(".xml")) {
+            continue;
+        }
+        let Ok(xml) = read_zip_string(zip, &path) else {
+            continue;
+        };
+        if let Some(chart) = parse_docx_chart(&xml, theme) {
+            chart_map.insert(rid.clone(), chart);
+        }
+    }
+    chart_map
+}
+
 fn load_header_footer_set(
     zip: &mut Zip,
     type_to_target: &HashMap<String, String>,
@@ -1345,6 +1395,7 @@ fn load_header_footer_set(
         let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
         let local_rel_map = parse_rels(&rels_xml);
         let local_media_map = load_media_map(zip, &local_rel_map, "word/");
+        let local_chart_map = load_chart_map(zip, &local_rel_map, theme);
 
         let xml_doc = match XmlDoc::parse(&xml) {
             Ok(d) => d,
@@ -1366,6 +1417,7 @@ fn load_header_footer_set(
             style_map,
             num_map,
             &local_media_map,
+            &local_chart_map,
             &local_rel_map,
             theme,
             &HashMap::new(),
@@ -1593,6 +1645,7 @@ fn parse_paragraph(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
@@ -1603,6 +1656,7 @@ fn parse_paragraph(
         style_map,
         num_map,
         media_map,
+        chart_map,
         rel_map,
         theme,
         table_style_id,
@@ -1620,6 +1674,7 @@ fn parse_paragraph_cond(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
@@ -1843,7 +1898,7 @@ fn parse_paragraph_cond(
     // Parse runs
     let mut runs = vec![];
     parse_para_content(
-        node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None, field,
+        node, &base_run, style_map, media_map, chart_map, rel_map, theme, &mut runs, None, field,
     );
 
     // NOTE: We do NOT force display-math paragraphs to center here. The math
@@ -1978,6 +2033,7 @@ fn parse_para_content(
     base_run: &RunFmt,
     style_map: &StyleMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
@@ -1992,7 +2048,8 @@ fn parse_para_content(
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(
-                    child, base_run, style_map, media_map, theme, runs, field, None, revision,
+                    child, base_run, style_map, media_map, chart_map, theme, runs, field, None,
+                    revision,
                 );
             }
             "hyperlink" => {
@@ -2013,6 +2070,7 @@ fn parse_para_content(
                         base_run,
                         style_map,
                         media_map,
+                        chart_map,
                         theme,
                         runs,
                         field,
@@ -2041,6 +2099,7 @@ fn parse_para_content(
                     base_run,
                     style_map,
                     media_map,
+                    chart_map,
                     rel_map,
                     theme,
                     runs,
@@ -2050,7 +2109,8 @@ fn parse_para_content(
             }
             "smartTag" => {
                 parse_para_content(
-                    child, base_run, style_map, media_map, rel_map, theme, runs, revision, field,
+                    child, base_run, style_map, media_map, chart_map, rel_map, theme, runs,
+                    revision, field,
                 );
             }
             "fldSimple" => {
@@ -2123,6 +2183,7 @@ fn handle_run_in_para(
     base_run: &RunFmt,
     style_map: &StyleMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     field: &mut FieldState,
@@ -2236,7 +2297,7 @@ fn handle_run_in_para(
     // Normal run
     let in_toc = field.in_toc();
     parse_run_inner(
-        r_node, base_run, style_map, media_map, theme, runs, link_href, revision, in_toc,
+        r_node, base_run, style_map, media_map, chart_map, theme, runs, link_href, revision, in_toc,
     );
 }
 
@@ -2356,6 +2417,7 @@ fn parse_run_inner(
     base_run: &RunFmt,
     style_map: &StyleMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     link_href: Option<Option<String>>,
@@ -2808,6 +2870,7 @@ fn parse_run_inner(
                             &fmt,
                             style_map,
                             media_map,
+                            chart_map,
                             theme,
                             runs,
                             link_href.clone(),
@@ -2830,7 +2893,7 @@ fn parse_run_inner(
                 }
             }
             "drawing" => {
-                for r in parse_inline_drawing(style_map, child, media_map, theme) {
+                for r in parse_inline_drawing(style_map, child, media_map, chart_map, theme) {
                     runs.push(r);
                 }
             }
@@ -2898,7 +2961,9 @@ fn parse_run_inner(
                 if let Some(choice) = child.children().find(|n| n.tag_name().name() == "Choice") {
                     for inner in choice.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
-                            for r in parse_inline_drawing(style_map, inner, media_map, theme) {
+                            for r in
+                                parse_inline_drawing(style_map, inner, media_map, chart_map, theme)
+                            {
                                 runs.push(r);
                             }
                         }
@@ -3061,6 +3126,7 @@ fn parse_inline_drawing(
     style_map: &StyleMap,
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     theme: &ThemeColors,
 ) -> Vec<DocRun> {
     // Distinguish inline vs anchor
@@ -3074,6 +3140,59 @@ fn parse_inline_drawing(
         // §20.4.2.5 — a `<wp:docPr hidden="1">` inline drawing is not rendered.
         if drawing_container_hidden(container) {
             return vec![];
+        }
+        // ECMA-376 §21.2 — a chart drawing. The `<a:graphicData>` container carries
+        // the chart namespace `uri`, and its `<c:chart r:id>` names the chart part's
+        // relationship. When both resolve, emit a `ChartRun` from the pre-parsed
+        // `chart_map` (keyed by the SAME rId), sized from `<wp:extent>` exactly like
+        // an inline image. A non-chart graphicData falls through to the blip path.
+        if let Some(graphic_data) = container
+            .descendants()
+            .find(|n| n.tag_name().name() == "graphicData")
+        {
+            let is_chart = graphic_data
+                .attribute("uri")
+                .is_some_and(|uri| uri.contains("drawingml/2006/chart"));
+            if is_chart {
+                if let Some(chart_node) = container
+                    .descendants()
+                    .find(|n| n.tag_name().name() == "chart")
+                {
+                    let rid = attr_ns(
+                        &chart_node,
+                        relationships::TRANSITIONAL,
+                        relationships::STRICT,
+                        "id",
+                    );
+                    if let Some(chart) = rid.and_then(|rid| chart_map.get(rid)) {
+                        // Require a parseable `<wp:extent>` (cx/cy EMU → pt), matching
+                        // the inline-image contract; a chart without one is dropped
+                        // rather than emitted at zero size. If absent, fall through to
+                        // the ordinary image path (which will also drop it).
+                        if let Some(extent) = container
+                            .descendants()
+                            .find(|n| n.tag_name().name() == "extent")
+                        {
+                            let cx: Option<f64> =
+                                extent.attribute("cx").and_then(|v| v.parse().ok());
+                            let cy: Option<f64> =
+                                extent.attribute("cy").and_then(|v| v.parse().ok());
+                            if let (Some(cx), Some(cy)) = (cx, cy) {
+                                return vec![DocRun::Chart(Box::new(ChartRun {
+                                    chart: chart.clone(),
+                                    width_pt: cx / 12700.0,
+                                    height_pt: cy / 12700.0,
+                                    anchor: false,
+                                    anchor_x_pt: 0.0,
+                                    anchor_y_pt: 0.0,
+                                    anchor_x_from_margin: false,
+                                    anchor_y_from_para: false,
+                                }))];
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Resolve the picture's blip + `<wp:extent>` natural size. The Microsoft
         // 2016 SVG extension is handled inside `resolve_inline_blip` →
@@ -5066,13 +5185,70 @@ fn resolve_color_element_with_phclr(
     )
 }
 
+/// `ooxml_common::chart::ColorResolver` implementation backed by the document
+/// theme. Modeled on pptx's `PptxColorResolver` / xlsx's `XlsxColorResolver`:
+/// the shared [`ooxml_common::chart::parse_chart_part`] delegates every
+/// `<a:solidFill>` / theme-font / default-accent lookup here so a docx chart
+/// resolves colours the SAME Word way body shapes do (via
+/// [`resolve_color_element`], which routes through the shared DrawingML colour
+/// grammar with `TintMode::WordLiteral`).
+struct DocxColorResolver<'a> {
+    theme: &'a ThemeColors,
+}
+
+impl ooxml_common::chart::ColorResolver for DocxColorResolver<'_> {
+    fn resolve_solid_fill(&self, node: roxmltree::Node<'_, '_>) -> Option<String> {
+        // The chart passes the `<a:solidFill>` element itself; its child is the
+        // color node — exactly the container `resolve_color_element` expects.
+        resolve_color_element(node, self.theme)
+    }
+
+    /// Chart shape fills (marker / dPt / errBars `<c:spPr>` / `<a:ln>`) sit one
+    /// level below their container and want the FULL DrawingML grammar. The
+    /// default trait impl finds the direct-child `<a:solidFill>` and delegates
+    /// to `resolve_solid_fill`, which already applies the full grammar for
+    /// docx — so no override is needed (mirrors pptx).
+    fn theme_major_font_latin(&self) -> Option<String> {
+        self.theme.theme_font("major", "latin")
+    }
+
+    fn theme_minor_font_latin(&self) -> Option<String> {
+        self.theme.theme_font("minor", "latin")
+    }
+
+    /// Default series fill when a series carries no explicit `<c:spPr>` fill:
+    /// Office cycles the six theme accents, `accent[(idx % 6) + 1]`
+    /// (ECMA-376 §21.2.2.84). Word draws charts with this accent palette exactly
+    /// like Excel/PowerPoint, so — unlike pptx, whose renderer owns a default
+    /// palette — the docx resolver supplies the resolved accent hex here.
+    fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+        let slot = format!("accent{}", (idx % 6) + 1);
+        self.theme.resolve(&slot)
+    }
+}
+
+/// Parse a `word/charts/chartN.xml` part into the shared [`ChartModel`] via
+/// [`ooxml_common::chart::parse_chart_part`], resolving theme colours/fonts with
+/// [`DocxColorResolver`]. `None` when the XML is malformed or holds no
+/// recognized chart type.
+fn parse_docx_chart(
+    chart_xml: &str,
+    theme: &ThemeColors,
+) -> Option<ooxml_common::chart::ChartModel> {
+    let doc = XmlDoc::parse(chart_xml).ok()?;
+    let resolver = DocxColorResolver { theme };
+    ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver)
+}
+
 // ===== Table parsing =====
 
+#[allow(clippy::too_many_arguments)]
 fn parse_table(
     node: roxmltree::Node,
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
 ) -> DocTable {
@@ -5398,6 +5574,7 @@ fn parse_table(
             style_map,
             num_map,
             media_map,
+            chart_map,
             rel_map,
             theme,
             // §17.7.4: the effective style id includes the
@@ -5533,6 +5710,7 @@ fn parse_table_row(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
@@ -5560,6 +5738,7 @@ fn parse_table_row(
             style_map,
             num_map,
             media_map,
+            chart_map,
             rel_map,
             theme,
             table_style_id,
@@ -5582,6 +5761,7 @@ fn parse_table_cell(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
@@ -5675,6 +5855,7 @@ fn parse_table_cell(
                 style_map,
                 num_map,
                 media_map,
+                chart_map,
                 rel_map,
                 theme,
                 table_style_id,
@@ -5684,7 +5865,7 @@ fn parse_table_cell(
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
             "tbl" => content.push(CellElement::Table(parse_table(
-                child, style_map, num_map, media_map, rel_map, theme,
+                child, style_map, num_map, media_map, chart_map, rel_map, theme,
             ))),
             _ => {}
         }
@@ -5982,6 +6163,7 @@ mod tests {
             &style_map,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
         )
@@ -6129,6 +6311,7 @@ mod tests {
             base_run,
             styles,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
             &mut runs,
@@ -6281,6 +6464,7 @@ mod tests {
             &styles,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
             &HashMap::new(),
@@ -6325,6 +6509,7 @@ mod tests {
             &style_map,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
         )
@@ -6880,6 +7065,7 @@ mod math_jc_tests {
             &style_map,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
             None,
@@ -6993,6 +7179,7 @@ mod sym_run_tests {
             &style_map,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
             None,
@@ -7106,6 +7293,7 @@ mod para_mark_rpr_tests {
             sm,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
             None,
@@ -7208,6 +7396,7 @@ mod cs_toggle_tests {
             body,
             &style_map,
             &mut num_map,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
@@ -7380,6 +7569,7 @@ mod cs_toggle_tests {
             body,
             &style_map,
             &mut num_map,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
@@ -7586,6 +7776,7 @@ mod rtl_tests {
             &style_map,
             &mut num_map,
             &media_map,
+            &HashMap::new(),
             &rel_map,
             &theme,
             &HashMap::new(),
@@ -8119,6 +8310,7 @@ mod footnote_tests {
             body_node,
             &style_map,
             &mut num_map,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
@@ -9260,6 +9452,138 @@ mod anchor_image_relative_from_tests {
         }
     }
 
+    /// ECMA-376 §21.2 — `parse_docx_chart` resolves a `word/charts/chartN.xml`
+    /// part through the shared `parse_chart_part` + `DocxColorResolver`: the
+    /// chart type, categories and single series come out of the caches, and a
+    /// series with no explicit `<c:spPr>` fill picks up the theme accent1 the
+    /// resolver supplies (Word's accent-cycling default palette).
+    #[test]
+    fn parse_docx_chart_resolves_bar_series_accent() {
+        let theme = ThemeColors::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <a:themeElements><a:clrScheme name="Office">
+                   <a:dk1><a:srgbClr val="000000"/></a:dk1>
+                   <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                   <a:dk2><a:srgbClr val="44546A"/></a:dk2>
+                   <a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+                   <a:accent1><a:srgbClr val="4472C4"/></a:accent1>
+                   <a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+                   <a:accent3><a:srgbClr val="A5A5A5"/></a:accent3>
+                   <a:accent4><a:srgbClr val="FFC000"/></a:accent4>
+                   <a:accent5><a:srgbClr val="5B9BD5"/></a:accent5>
+                   <a:accent6><a:srgbClr val="70AD47"/></a:accent6>
+                   <a:hlink><a:srgbClr val="0563C1"/></a:hlink>
+                   <a:folHlink><a:srgbClr val="954F72"/></a:folHlink>
+                 </a:clrScheme></a:themeElements>
+               </a:theme>"#,
+        );
+        // Bar chart, one series with NO <c:spPr> fill so the accent default applies.
+        let chart_xml = r#"<c:chartSpace
+            xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <c:chart><c:plotArea><c:barChart>
+            <c:barDir val="col"/><c:grouping val="clustered"/>
+            <c:ser>
+              <c:idx val="0"/><c:order val="0"/>
+              <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache>
+                <c:ptCount val="1"/><c:pt idx="0"><c:v>Revenue</c:v></c:pt>
+              </c:strCache></c:strRef></c:tx>
+              <c:cat><c:strRef><c:f>Sheet1!$A$2:$A$3</c:f><c:strCache>
+                <c:ptCount val="2"/>
+                <c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt>
+              </c:strCache></c:strRef></c:cat>
+              <c:val><c:numRef><c:f>Sheet1!$B$2:$B$3</c:f><c:numCache>
+                <c:ptCount val="2"/>
+                <c:pt idx="0"><c:v>120</c:v></c:pt><c:pt idx="1"><c:v>145</c:v></c:pt>
+              </c:numCache></c:numRef></c:val>
+            </c:ser>
+            <c:axId val="1"/><c:axId val="2"/>
+          </c:barChart></c:plotArea></c:chart>
+        </c:chartSpace>"#;
+        let chart = parse_docx_chart(chart_xml, &theme).expect("chart must parse");
+        assert_eq!(chart.chart_type, "clusteredBar");
+        assert_eq!(chart.categories, vec!["Q1".to_string(), "Q2".to_string()]);
+        assert_eq!(chart.series.len(), 1);
+        assert_eq!(chart.series[0].name, "Revenue");
+        // Series 0 with no explicit fill resolves to accent1 (the resolver's
+        // accent-cycling default, hex without '#').
+        assert_eq!(
+            chart.series[0].color.as_deref().map(str::to_uppercase),
+            Some("4472C4".to_string()),
+            "series 0 default fill must be theme accent1"
+        );
+    }
+
+    /// ECMA-376 §21.2 — an inline `<w:drawing>` whose `<a:graphicData uri>` is the
+    /// chart namespace and whose `<c:chart r:id>` resolves in the pre-built
+    /// `chart_map` emits a `DocRun::Chart`, sized from `<wp:extent>` (EMU → pt),
+    /// instead of an image. A `<c:chart>` whose rId is absent from the map yields
+    /// nothing (the graphicData carries no blip to fall back to).
+    #[test]
+    fn inline_chart_drawing_emits_chart_run() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:r><w:drawing>
+            <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                       xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+              <wp:extent cx="5029200" cy="2743200"/>
+              <wp:docPr id="1" name="Chart 1"/>
+              <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+                <c:chart r:id="rIdChart"/>
+              </a:graphicData></a:graphic>
+            </wp:inline>
+          </w:drawing></w:r>
+        </w:p>"#;
+        let doc = XmlDoc::parse(xml).unwrap();
+        let drawing = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "drawing")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+
+        // A minimal but valid chart model registered under the drawing's rId.
+        let model = parse_docx_chart(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:val><c:numRef><c:numCache><c:ptCount val="1"/>
+                    <c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+                </c:ser><c:axId val="1"/><c:axId val="2"/>
+              </c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &theme,
+        )
+        .expect("model");
+        let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        chart_map.insert("rIdChart".to_string(), model);
+
+        let runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
+        assert_eq!(runs.len(), 1, "one chart run expected");
+        match &runs[0] {
+            DocRun::Chart(c) => {
+                assert!(!c.anchor);
+                assert_eq!(c.chart.chart_type, "clusteredBar");
+                // 5029200 EMU / 12700 = 396pt; 2743200 / 12700 = 216pt.
+                assert!((c.width_pt - 396.0).abs() < 1e-6, "width_pt={}", c.width_pt);
+                assert!(
+                    (c.height_pt - 216.0).abs() < 1e-6,
+                    "height_pt={}",
+                    c.height_pt
+                );
+            }
+            other => panic!("expected DocRun::Chart, got {other:?}"),
+        }
+
+        // Unresolvable rId (empty map) → no run (no blip fallback).
+        let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        assert!(none.is_empty(), "unresolvable chart rId must emit nothing");
+    }
+
     /// §20.4.2.5 — an anchored drawing whose `<wp:docPr hidden="1">` is set is
     /// not rendered (and thus reserves no wrap band).
     #[test]
@@ -9336,6 +9660,7 @@ mod column_tests {
             &style_map,
             &mut num_map,
             &media_map,
+            &HashMap::new(),
             &rel_map,
             &theme,
             &HashMap::new(),
@@ -10748,6 +11073,7 @@ mod numbering_marker_font_tests {
             &mut num_map,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &ThemeColors::default(),
             &HashMap::new(),
         );
@@ -10835,6 +11161,7 @@ mod numbering_marker_font_tests {
             body,
             &style_map,
             &mut num_map,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
@@ -10945,6 +11272,7 @@ mod numbering_marker_font_tests {
             styles,
             &mut num_map,
             &media,
+            &HashMap::new(),
             &rels,
             &theme,
         )
@@ -11519,6 +11847,7 @@ mod ole_object_tests {
             &mut num_map,
             media,
             &HashMap::new(),
+            &HashMap::new(),
             &ThemeColors::default(),
             &HashMap::new(),
         );
@@ -11699,6 +12028,7 @@ mod strict_namespace_tests {
             &style_map,
             &mut num_map,
             &media,
+            &HashMap::new(),
             rels,
             &theme,
             None,

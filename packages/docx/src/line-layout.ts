@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings,
 } from './types';
-import type { MathNode, KinsokuRules } from '@silurus/ooxml-core';
+import type { MathNode, KinsokuRules, ChartModel } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -149,6 +149,14 @@ export interface LayoutImageSeg {
    *  `drawImage` to blit only `[l, t, 1−r, 1−b]` of the bitmap into the display
    *  box. `undefined` ⇒ draw the full bitmap. */
   srcRect?: { l: number; t: number; r: number; b: number };
+  /** ECMA-376 §21.2 — when set, this "image" box is actually a DrawingML chart.
+   *  The box flows and is sized exactly like an inline picture (via
+   *  {@link LayoutImageSeg.widthPt}/{@link LayoutImageSeg.heightPt}), but the
+   *  draw site paints it with the shared `renderChart` instead of blitting a
+   *  bitmap. `imagePath`/`mimeType` are empty sentinels for a chart seg — no
+   *  blip is fetched (the bitmap-prefetch walk keys off `run.type === 'image'`
+   *  and never sees a chart run). */
+  chart?: ChartModel;
   measuredWidth: number;
 }
 
@@ -1412,6 +1420,28 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         anchorYFromPara: img.anchorYFromPara ?? false,
         colorReplaceFrom: img.colorReplaceFrom,
         srcRect: img.srcRect ?? undefined,
+        measuredWidth: 0,
+      });
+    } else if (run.type === 'chart') {
+      // ECMA-376 §21.2 inline chart. Flow it as an inline picture box of the
+      // `<wp:extent>` natural size: the same LayoutImageSeg shape (empty
+      // `imagePath`/`mimeType` sentinels so `'imagePath' in seg` routes it
+      // through the image measurement/split path) but carrying the ChartModel,
+      // which the draw site paints with the shared `renderChart`. Anchor
+      // (floating) charts are not drawn yet — skip them so they occupy no box.
+      const chartRun = run as unknown as import('./types').ChartRun & { type: 'chart' };
+      if (chartRun.anchor) continue;
+      segs.push({
+        imagePath: '',
+        mimeType: '',
+        widthPt: chartRun.widthPt,
+        heightPt: chartRun.heightPt,
+        anchor: false,
+        anchorXPt: 0,
+        anchorYPt: 0,
+        anchorXFromMargin: false,
+        anchorYFromPara: false,
+        chart: chartRun.chart,
         measuredWidth: 0,
       });
     } else if (run.type === 'break') {

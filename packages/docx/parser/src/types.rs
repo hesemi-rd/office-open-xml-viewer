@@ -609,6 +609,12 @@ pub enum DocRun {
     // Box, so the JSON tag/shape is unchanged.
     Text(Box<TextRun>),
     Image(ImageRun),
+    /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
+    /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
+    /// model is the shared [`ooxml_common::chart::ChartModel`] (the same
+    /// superset pptx/xlsx emit), pre-resolved by `parse()` from the referenced
+    /// `word/charts/chartN.xml` part. Boxed because `ChartModel` is large.
+    Chart(Box<ChartRun>),
     /// `rename_all` on the enum only renames variant tags; the field
     /// `break_type` would otherwise serialize as snake_case while the TS
     /// side reads `breakType`. Re-apply camelCase at the variant level so
@@ -1324,6 +1330,42 @@ pub struct ImageRun {
 
 fn is_zero_f64(v: &f64) -> bool {
     *v == 0.0
+}
+
+/// A DrawingML chart embedded in the run flow (ECMA-376 §21.2). Positioned like
+/// an inline picture: the `<wp:inline><wp:extent cx/cy>` natural size in points
+/// governs the box the chart is drawn into. The `chart` payload is the shared
+/// [`ooxml_common::chart::ChartModel`] — identical to what pptx/xlsx pass to the
+/// core chart renderer — so the docx renderer draws charts at pptx/xlsx quality
+/// through the same `renderChart` entry point.
+///
+/// Anchor (floating) charts are modeled with the same anchor fields the
+/// `ImageRun` carries; the current renderer path only draws `anchor == false`
+/// (inline) charts. The fields are present so a follow-up can position a
+/// floating `<wp:anchor>` chart without a wire-format change.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartRun {
+    /// The shared chart model (barChart / lineChart / pie / …). Emitted 1:1 as
+    /// the `chart` object the core `renderChart` consumes.
+    pub chart: ooxml_common::chart::ChartModel,
+    /// Natural width from `<wp:extent cx>` (EMU → pt).
+    pub width_pt: f64,
+    /// Natural height from `<wp:extent cy>` (EMU → pt).
+    pub height_pt: f64,
+    /// true = `<wp:anchor>` (absolute page position), false = `<wp:inline>`
+    /// (flows with text). Only inline charts are drawn today.
+    pub anchor: bool,
+    /// Anchor X offset (pt). Anchor-only; interpretation mirrors `ImageRun`.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub anchor_x_pt: f64,
+    /// Anchor Y offset (pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub anchor_y_pt: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub anchor_x_from_margin: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub anchor_y_from_para: bool,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]

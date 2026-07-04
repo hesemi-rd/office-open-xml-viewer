@@ -47,6 +47,7 @@ import {
   docxBorderDashArray,
   fillDoubleBorder,
   drawUnderline,
+  renderChart,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { docxUnderlineToDrawingML } from './underline-map.js';
@@ -5710,10 +5711,18 @@ function renderInlineImage(
   // Anchor images are skipped during layout (measuredWidth=0, not added to line.segments)
   // and are drawn later by renderAnchorImages — so this function only handles inline images.
   if (seg.anchor) return;
-  const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom));
-  if (!bmp) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
+  // ECMA-376 §21.2 inline chart: paint through the shared core chart renderer
+  // (the same entry point pptx/xlsx use), at the inline box's top-left. `scale`
+  // is px-per-pt in this renderer, which is exactly the `ptToPx` renderChart
+  // wants to scale the chart's point-sized fonts/axes — so pass it straight.
+  if (seg.chart) {
+    renderChart(ctx as CanvasRenderingContext2D, seg.chart, { x, y: baseline - h, w, h }, scale);
+    return;
+  }
+  const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom));
+  if (!bmp) return;
   drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
 }
 
