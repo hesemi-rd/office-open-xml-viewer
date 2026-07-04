@@ -6,7 +6,8 @@
 import type { ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
 import {
   computeChartFrame,
-  chartTitleBand,
+  cartesianTitleBand,
+  catAxisLabelBandH,
   chartLegendReserve,
   chartLegendBands,
   chartAxisTitleBands,
@@ -892,13 +893,18 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // Honor the XML-specified title font size when present; otherwise fall back
   // to the proportional heuristic. Reserve the title band based on the actual
   // drawn height so the plot shrinks to avoid overlap.
-  // Shared frame bands (title / legend / axis-title). The bar family's title
-  // pad fractions (0.02 / 0.025) and default 0.22 side-legend reserve are passed
-  // as params, so the pixels are unchanged from the old inline math.
-  const titleBand = chartTitleBand(chart, h, ptToPx, 0.02, 0.025);
+  // Shared frame bands. Title + category-label bands follow PowerPoint's chart
+  // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
+  // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
+  // side-legend reserve is unchanged.
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
+  // Axis-label font (XML @sz when set) — sizes the bottom tick-label band the
+  // same way the line/area families do.
+  const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxLabelFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const leg = chartLegendReserve(chart, w, h, 0.22);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   // Axis-title bands sized from the *actual* title font (honoring XML @sz, e.g.
@@ -918,10 +924,15 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // and the value-axis length — are known before the scale + label measuring.
   // The value-axis LENGTH drives the auto major unit (Excel targets a roughly
   // constant gridline spacing, so a longer axis gets finer ticks).
-  const padT = titleH + legTopH + h * 0.02;
+  // Top: title band + a small breathing gap above the topmost gridline.
+  // Bottom: PowerPoint's tick-label band (gap + line-height + margin) sized to
+  // the label font — the category labels for columns, the value-axis labels for
+  // horizontal bars (both a single line of text). A hidden bottom axis keeps a
+  // minimal gap. Matches the line/area reserve so the four families agree.
+  const padT = titleH + legTopH + valAxLabelFontPx / 2 + 2;
   const padB = isH
-    ? (chart.valAxisHidden ? h * 0.02 : h * 0.08) + catTitleH + legBottomH
-    : h * 0.14 + catTitleH + legBottomH;
+    ? (chart.valAxisHidden ? h * 0.02 : catAxisLabelBandH(valAxLabelFontPx)) + catTitleH + legBottomH
+    : catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
   const phEst = h - padT - padB;
   // Horizontal bars run the value axis along the (wide) bottom, so its length is
   // the plot WIDTH. Estimate it from the fixed isH side pads (those don't depend
@@ -1517,11 +1528,11 @@ function renderLineChart(
     : null;
   const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
 
-  // Shared frame bands. The line family uses title pads 0.045 / 0.035 and the
-  // default 0.22 side-legend reserve — passed as params so pixels are unchanged.
-  // PowerPoint's auto-layout reserves a title band with air above and below
-  // the text; the proportional pads preserve that feel across scaling.
-  const titleBand = chartTitleBand(chart, h, ptToPx, 0.045, 0.035);
+  // Shared frame bands. Title + category-label bands follow PowerPoint's chart
+  // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
+  // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
+  // side-legend reserve is unchanged.
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
@@ -1539,9 +1550,11 @@ function renderLineChart(
 
   // Vertical pads (independent of the right gutter) so an estimated plot height
   // is known before the secondary-axis scale + right-gutter measurement — the
-  // same up-front ordering the bar renderer uses.
+  // same up-front ordering the bar renderer uses. The top adds half a value-axis
+  // label so the topmost gridline label rides above the plot; the bottom reserves
+  // PowerPoint's full category-label band (gap + line-height + margin).
   const padT = titleH + legTopH + valAxFontPx / 2 + 2;
-  const padB = catAxFontPx + 12 + catTitleH + legBottomH;
+  const padB = catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
   const phEst = h - padT - padB;
 
   // Secondary value-axis scale (shared helper). Its axis is the vertical right
@@ -1857,12 +1870,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     : null;
   const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
 
-  // Shared frame bands. Area uses title pads 0.035 / 0.035 and default 0.22
-  // side-legend reserve — params keep pixels unchanged.
-  const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
+  // Shared frame bands. Title + category-label bands follow PowerPoint's chart
+  // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
+  // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
+  // side-legend reserve is unchanged.
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
+  const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const leg = chartLegendReserve(chart, w, h, 0.22);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
@@ -1873,8 +1890,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 
   // Vertical pads first so the estimated plot height is known before the
   // secondary-axis scale + right-gutter measurement (same ordering as bar/line).
-  const padT = titleH + legTopH + h * 0.02;
-  const padB = h * 0.14 + catTitleH + legBottomH;
+  // Top: title band + half a value-axis label above the top gridline. Bottom:
+  // PowerPoint's category-label band (gap + line-height + margin).
+  const padT = titleH + legTopH + valAxFontPx / 2 + 2;
+  const padB = catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
   const phEst = h - padT - padB;
 
   const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
@@ -2534,11 +2553,17 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 // wired only into the category-axis families (bar already; line + area now).
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
-  // Shared frame bands. Scatter uses title pads 0.035 / 0.035 and default 0.22
-  // side-legend reserve.
-  const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
+  // Shared frame bands. Title + bottom axis-label bands follow PowerPoint's
+  // chart auto-layout (font-proportional, pinned to the demo slide-5 line-chart
+  // PDF); see cartesianTitleBand / catAxisLabelBandH in layout.ts. Scatter's X
+  // axis is a numeric value axis, so the bottom band holds its single line of
+  // X-value labels (sized like any value-axis label). Default 0.22 side-legend
+  // reserve unchanged.
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
+  const xAxLabelFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const yAxLabelFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const leg = chartLegendReserve(chart, w, h, 0.22);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
@@ -2565,9 +2590,9 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // identically (the inner padding stays the same). The pad is pure arithmetic
   // and is ignored by computeChartFrame when the manual layout applies.
   const pad = {
-    t: titleBand.bandH + legTopH + h * 0.02,
+    t: titleBand.bandH + legTopH + yAxLabelFontPx / 2 + 2,
     r: legRightW + w * 0.05,
-    b: (chart.catAxisHidden ? h * 0.04 : h * 0.12) + catTitleH + legBottomH,
+    b: (chart.catAxisHidden ? h * 0.04 : catAxisLabelBandH(xAxLabelFontPx)) + catTitleH + legBottomH,
     l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
   };
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {

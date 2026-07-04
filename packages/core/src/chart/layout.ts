@@ -219,6 +219,72 @@ export function chartAxisTitleBands(
   };
 }
 
+// ─── PowerPoint auto-layout plot bands (cartesian) ───────────────────────────
+//
+// The reserves below match PowerPoint's chart AUTO-layout (`<c:plotArea><c:layout/>`
+// with no `<c:manualLayout>`). ECMA-376 does not specify the auto-layout geometry
+// — it only says the plot area is positioned automatically — so these constants
+// model the RUNTIME behavior PowerPoint applies, pinned to the rendered ground
+// truth (the demo sample-1 slide-5 line chart PDF: plot/frame 0.611, title band
+// 0.236, category-label band 0.154). User-approved to match the PDF.
+//
+// They are expressed as multiples of the relevant TEXT size (title font / axis
+// label font), not of the chart height, because PowerPoint sizes each reserved
+// band to the text it holds: a chart's title point size and axis-label point size
+// are fixed by the XML regardless of the chart's pixel size, so a band tied to the
+// frame height would ride at a different fraction of its own text in tall vs short
+// frames (the same reasoning the title top-pad uses — see TITLE_TOP_PAD_FONT_FRAC).
+
+/** Total vertical band a chart TITLE reserves, as a multiple of the title font
+ *  size. PowerPoint centers the title text in a slot with air above and below;
+ *  `2.25 × fontPx` reserves that slot. Pinned so the demo slide-5 line chart's
+ *  title band lands at 0.236 of the frame (measured against the PowerPoint PDF).
+ *  Cross-checked against LibreOffice's independent auto-layout of the same chart
+ *  (title band 0.240). Replaces the old `fontPx + h·(top+bottom)` mix, whose
+ *  h-proportional pad made the band collapse to ~0.11 of the frame on large
+ *  charts (e.g. the xlsx demo charts) — a different fraction of the same-point
+ *  title per frame size. */
+export const TITLE_BAND_FONT_FRAC = 2.25;
+
+/** Total vertical band a single row of horizontal CATEGORY tick labels reserves
+ *  below the plot, as a multiple of the category-axis label font size. Models
+ *  PowerPoint's reserve = axis-to-label gap (≈0.4×) + one label line-height
+ *  (≈1.35×, ascent+descent+leading) + bottom outer margin (≈1.0×) = 2.75×fontPx.
+ *  Pinned so the demo slide-5 line chart's category band lands at 0.154 of the
+ *  frame (PowerPoint PDF). The old `fontPx + 12` (a fixed 12px gap) under-reserved
+ *  this — 0.106 of the frame on slide-5, and it did not scale, shrinking to a few
+ *  percent of the frame on the larger xlsx demo charts. */
+export const CAT_AXIS_LABEL_BAND_FONT_FRAC = 2.75;
+
+/** Font-proportional TITLE band for a cartesian chart (bar/line/area/scatter).
+ *  Replaces the frac-based {@link chartTitleBand} for these families: the total
+ *  band height is `titleFontPx × TITLE_BAND_FONT_FRAC` (independent of the chart
+ *  height) so the title reserves the same fraction of its own text regardless of
+ *  frame size. `topPad` (the draw offset) keeps the font-proportional inset from
+ *  {@link TITLE_TOP_PAD_FONT_FRAC}, clamped inside the band. Collapses to zero
+ *  when there is no title. The radial families (pie/radar) keep {@link
+ *  chartTitleBand} via `computeChartFrame`, so this change does not touch them. */
+export function cartesianTitleBand(
+  chart: ChartModel,
+  h: number,
+  ptToPx: number,
+): ChartTitleBand {
+  if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
+  const fontPx = chartTitleFontPx(chart, h, ptToPx);
+  const bandH = fontPx * TITLE_BAND_FONT_FRAC;
+  const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);
+  const bottomPad = bandH - fontPx - topPad;
+  return { fontPx, topPad, bottomPad, bandH };
+}
+
+/** Total bottom band (px) reserved for one row of horizontal category tick
+ *  labels. `catAxFontPx` is the resolved category-axis label font size. Callers
+ *  add the axis-title band and any bottom-legend reserve on top of this.
+ *  See {@link CAT_AXIS_LABEL_BAND_FONT_FRAC}. */
+export function catAxisLabelBandH(catAxFontPx: number): number {
+  return catAxFontPx * CAT_AXIS_LABEL_BAND_FONT_FRAC;
+}
+
 // ─── Frame parameters + computeChartFrame ────────────────────────────────────
 
 /** A resolved `{t,r,b,l}` plot pad (canvas px). The caller builds this from the
