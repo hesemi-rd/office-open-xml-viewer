@@ -9,6 +9,7 @@ import type { ChartModel } from '../types/chart';
 import {
   computeChartFrame,
   chartTitleBand,
+  cartesianTitleBand,
   chartLegendReserve,
   chartLegendBands,
   chartAxisTitleBands,
@@ -176,6 +177,23 @@ describe('computeChartFrame — cartesian', () => {
     expect(frame.title).toEqual(title);
     expect(frame.legendBands).toEqual(bands);
     expect(frame.axisTitles).toEqual(at);
+  });
+
+  it('an explicit titleBand overrides the frac params in frame.title', () => {
+    // The cartesian families fold `cartesianTitleBand` into pad.t and pass the
+    // SAME band as `titleBand`, so `frame.title` matches the reserved band
+    // (MINOR-1) rather than a frac-derived one that would disagree with the plot.
+    const chart = model({ title: 'T' });
+    const band = cartesianTitleBand(chart, H, PTPX);
+    const frame = computeChartFrame(chart, X, Y, W, H, PTPX, {
+      titleBand: band,
+      legendSideReserveFrac: 0.22,
+      pad: { t: band.bandH, r: 10, b: 20, l: 30 },
+    });
+    // frame.title is exactly the passed band, NOT a frac-derived chartTitleBand.
+    expect(frame.title).toEqual(band);
+    // …and it differs from what the old frac path would have produced.
+    expect(frame.title).not.toEqual(chartTitleBand(chart, H, PTPX, 0.02, 0.025));
   });
 
   it('honors a plotArea manual layout over the pad', () => {

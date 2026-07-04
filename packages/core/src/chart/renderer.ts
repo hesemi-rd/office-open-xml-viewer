@@ -1087,8 +1087,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // because the inner padding stays the same either way. computeChartFrame
   // applies the pad → plot rect and the manual-layout override.
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
-    titleTopPadFrac: 0.02,
-    titleBottomPadFrac: 0.025,
+    // The cartesian title band is already folded into `pad.t`; pass it so
+    // `frame.title` (if read) matches the reserved band instead of a stale frac.
+    titleBand,
     legendSideReserveFrac: 0.22,
     pad,
     honorPlotAreaManualLayout: true,
@@ -1627,8 +1628,7 @@ function renderLineChart(
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
-    titleTopPadFrac: 0.045,
-    titleBottomPadFrac: 0.035,
+    titleBand,
     legendSideReserveFrac: 0.22,
     pad,
   });
@@ -1960,8 +1960,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
-    titleTopPadFrac: 0.035,
-    titleBottomPadFrac: 0.035,
+    titleBand,
     legendSideReserveFrac: 0.22,
     pad,
   });
@@ -2632,8 +2631,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
   };
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
-    titleTopPadFrac: 0.035,
-    titleBottomPadFrac: 0.035,
+    titleBand,
     legendSideReserveFrac: 0.22,
     pad,
     honorPlotAreaManualLayout: true,

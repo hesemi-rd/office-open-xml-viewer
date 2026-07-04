@@ -225,8 +225,12 @@ export function chartAxisTitleBands(
 // with no `<c:manualLayout>`). ECMA-376 does not specify the auto-layout geometry
 // — it only says the plot area is positioned automatically — so these constants
 // model the RUNTIME behavior PowerPoint applies, pinned to the rendered ground
-// truth (the demo sample-1 slide-5 line chart PDF: plot/frame 0.611, title band
-// 0.236, category-label band 0.154). User-approved to match the PDF.
+// truth. The load-bearing pin is the PLOT/frame ratio: the demo sample-1 slide-5
+// line chart PDF places the plot rect at 0.611 of the frame height. The remaining
+// 0.389 splits into the top reserve above the plot (title band + the gap down to
+// the first gridline ≈ 0.236) and the bottom reserve (category-label band ≈
+// 0.154). The title BAND itself is ≈ 0.200 of the frame — 0.236 is the top pad,
+// not the band. User-approved to match the PDF.
 //
 // They are expressed as multiples of the relevant TEXT size (title font / axis
 // label font), not of the chart height, because PowerPoint sizes each reserved
@@ -237,13 +241,14 @@ export function chartAxisTitleBands(
 
 /** Total vertical band a chart TITLE reserves, as a multiple of the title font
  *  size. PowerPoint centers the title text in a slot with air above and below;
- *  `2.25 × fontPx` reserves that slot. Pinned so the demo slide-5 line chart's
- *  title band lands at 0.236 of the frame (measured against the PowerPoint PDF).
- *  Cross-checked against LibreOffice's independent auto-layout of the same chart
- *  (title band 0.240). Replaces the old `fontPx + h·(top+bottom)` mix, whose
- *  h-proportional pad made the band collapse to ~0.11 of the frame on large
- *  charts (e.g. the xlsx demo charts) — a different fraction of the same-point
- *  title per frame size. */
+ *  `2.25 × fontPx` reserves that slot. The reserve is pinned via the plot/frame
+ *  ratio (0.611 on the demo slide-5 line chart PDF, see the block comment above);
+ *  at that frame size the title BAND works out to ≈ 0.200 of the frame. (The
+ *  0.236 figure sometimes quoted is the TOP PAD — band plus the gap down to the
+ *  first gridline — not the band itself.) Replaces the old `fontPx + h·(top+bottom)`
+ *  mix, whose h-proportional pad made the band collapse to a much smaller fraction
+ *  of the frame on large charts (e.g. the xlsx demo charts) — a different fraction
+ *  of the same-point title per frame size. */
 export const TITLE_BAND_FONT_FRAC = 2.25;
 
 /** Total vertical band a single row of horizontal CATEGORY tick labels reserves
@@ -301,7 +306,13 @@ export interface ChartPad {
 /** Parameters that drive {@link computeChartFrame}. Exactly one of `pad`
  *  (cartesian) or `radialGapFrac` (radial) selects the frame shape.
  *
- *  - `titleTopPadFrac` / `titleBottomPadFrac`: title band pad fractions.
+ *  Title band: provide EITHER a pre-computed `titleBand` (the cartesian families
+ *  fold {@link cartesianTitleBand} into their `pad` and pass the SAME band here,
+ *  so `frame.title` matches the real reserved band) OR the frac pair
+ *  `titleTopPadFrac` / `titleBottomPadFrac` (the radial families let
+ *  `computeChartFrame` build the frac-based {@link chartTitleBand}). `titleBand`
+ *  wins when both are set.
+ *
  *  - `legendSideReserveFrac`: side (l/r) legend reserve fraction of `w`.
  *  - `pad`: fully-resolved cartesian plot pad. Its presence means "cartesian".
  *  - `plotAreaManualLayout`: honored (overrides `pad`) when present with w/h,
@@ -309,8 +320,12 @@ export interface ChartPad {
  *  - `radialGapFrac`: for pie/radar, the extra `h * frac` gap subtracted below
  *    the title/legend before centring the plot. Presence means "radial". */
 export interface FrameParams {
-  titleTopPadFrac: number;
-  titleBottomPadFrac: number;
+  /** Pre-computed title band (cartesian). When set, `frame.title` is exactly
+   *  this — matching the band the caller already folded into `pad.t` — instead
+   *  of a frac-derived band that would disagree with the plot rect. */
+  titleBand?: ChartTitleBand;
+  titleTopPadFrac?: number;
+  titleBottomPadFrac?: number;
   legendSideReserveFrac: number;
   pad?: ChartPad;
   radialGapFrac?: number;
@@ -343,7 +358,12 @@ export function computeChartFrame(
   ptToPx: number,
   params: FrameParams,
 ): ChartFrame {
-  const title = chartTitleBand(chart, h, ptToPx, params.titleTopPadFrac, params.titleBottomPadFrac);
+  // Cartesian callers pass the SAME band they folded into `pad.t` so `frame.title`
+  // agrees with the plot rect; radial callers pass the frac pair and let us build
+  // the frac-based band. `titleBand` wins when both are set.
+  const title =
+    params.titleBand ??
+    chartTitleBand(chart, h, ptToPx, params.titleTopPadFrac ?? 0, params.titleBottomPadFrac ?? 0);
   const legend = chartLegendReserve(chart, w, h, params.legendSideReserveFrac);
   const legendBands = chartLegendBands(legend);
   const axisTitles = chartAxisTitleBands(chart, w, h, ptToPx);
