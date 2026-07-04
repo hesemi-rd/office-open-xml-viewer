@@ -20,6 +20,7 @@ use crate::{
     table_style_presets, PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::depth::DepthGuard;
 use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
@@ -1475,6 +1476,7 @@ pub(crate) fn extract_decorative_shapes(
                 out,
                 true, // skip placeholder shapes
                 None, // no inherited group fill at top level
+                DepthGuard::root(),
             );
         }
     }
@@ -1482,6 +1484,11 @@ pub(crate) fn extract_decorative_shapes(
 
 // Recurses the shape tree carrying placeholder/layout context, theme, rels,
 // smartart drawings, the zip, the output buffer and inherited group fill.
+//
+// `depth` bounds the `<p:grpSp>` recursion: a hand-crafted, thousands-deep group
+// nest would otherwise blow the fixed WASM stack and trap the whole parse. Past
+// the shared limit the group's children are dropped and parsing continues with
+// the rest of the slide (graceful degradation). See `ooxml_common::depth`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_sp_tree_node(
     node: roxmltree::Node<'_, '_>,
@@ -1494,6 +1501,7 @@ pub(crate) fn parse_sp_tree_node(
     out: &mut Vec<SlideElement>,
     skip_placeholders: bool,
     group_fill: Option<&Fill>,
+    depth: DepthGuard,
 ) {
     // §20.1.2.2.8 — a shape/pic/graphicFrame/cxnSp/grpSp whose own
     // `<p:cNvPr hidden="1">` marks it hidden is not rendered. Skip at parse
@@ -1752,6 +1760,8 @@ pub(crate) fn parse_sp_tree_node(
             });
             if let Some(choice_node) = choice_node {
                 for child_node in choice_node.children().filter(|n| n.is_element()) {
+                    // `mc:AlternateContent` is a transparent wrapper, not a group
+                    // level — pass `depth` through unchanged.
                     parse_sp_tree_node(
                         child_node,
                         lph,
@@ -1763,6 +1773,7 @@ pub(crate) fn parse_sp_tree_node(
                         out,
                         skip_placeholders,
                         group_fill,
+                        depth,
                     );
                 }
             }
@@ -1783,6 +1794,7 @@ pub(crate) fn parse_sp_tree_node(
                             out,
                             skip_placeholders,
                             group_fill,
+                            depth,
                         );
                     }
                 }
@@ -1973,20 +1985,26 @@ pub(crate) fn parse_sp_tree_node(
                 group_fill.cloned()
             };
 
+            // Bound the group nesting: once the shared depth limit is reached,
+            // stop descending into this group's children (drop the subtree) so a
+            // pathologically deep `<p:grpSp>` nest cannot overflow the stack.
             let start = out.len();
-            for child_node in node.children().filter(|n| n.is_element()) {
-                parse_sp_tree_node(
-                    child_node,
-                    lph,
-                    slide_dir,
-                    rels,
-                    smartart_drawings,
-                    zip,
-                    theme,
-                    out,
-                    skip_placeholders,
-                    child_group_fill.as_ref(),
-                );
+            if let Some(child_depth) = depth.descend() {
+                for child_node in node.children().filter(|n| n.is_element()) {
+                    parse_sp_tree_node(
+                        child_node,
+                        lph,
+                        slide_dir,
+                        rels,
+                        smartart_drawings,
+                        zip,
+                        theme,
+                        out,
+                        skip_placeholders,
+                        child_group_fill.as_ref(),
+                        child_depth,
+                    );
+                }
             }
             if let Some(gt) = gt {
                 for el in &mut out[start..] {
@@ -2414,6 +2432,7 @@ mod ole_tests {
             &mut out,
             false,
             None,
+            DepthGuard::root(),
         );
         out
     }
@@ -2632,6 +2651,7 @@ mod hidden_tests {
             &mut out,
             false,
             None,
+            DepthGuard::root(),
         );
         out
     }
@@ -2713,6 +2733,75 @@ mod hidden_tests {
         let out = run(&xml);
         assert_eq!(out.len(), 1, "expected only the visible child: {out:?}");
     }
+
+    // ── Group-shape recursion depth guard (RB2) ────────────────────────────
+
+    /// `<p:grpSp>` nested `levels` deep (levels ≥ 1), with one visible leaf shape
+    /// at the very bottom. Each `<p:grpSp>` is a real `parse_sp_tree_node`
+    /// recursion. The outermost `<p:grpSp>` carries the namespace decls and is
+    /// returned as the root element (the `run` helper parses it as one node).
+    fn nested_groups(levels: usize) -> String {
+        assert!(levels >= 1);
+        let leaf = concat!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="99" name="Leaf"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+            r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>"#,
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>"#,
+            r#"<p:txBody><a:bodyPr/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        );
+        // Inner groups carry no xmlns (inherited from the root grpSp).
+        let open_inner = concat!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"#,
+            r#"<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/>"#,
+            r#"<a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></p:grpSpPr>"#,
+        );
+        let mut inner = leaf.to_string();
+        // levels-1 inner groups around the leaf …
+        for _ in 0..levels - 1 {
+            inner = format!("{open_inner}{inner}</p:grpSp>");
+        }
+        // … then the outermost group with the namespace declarations, as root.
+        format!(
+            r#"<p:grpSp xmlns:p="{P}" xmlns:a="{A}"><p:nvGrpSpPr><p:cNvPr id="1" name="Root"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></p:grpSpPr>{inner}</p:grpSp>"#,
+            P = P_NS,
+            A = A_NS,
+        )
+    }
+
+    fn run_deep(levels: usize) -> Vec<SlideElement> {
+        // roxmltree::Document::parse itself recurses on nesting, so parse on a
+        // generous stack; this test targets OUR grpSp guard. (The roxmltree layer
+        // is bounded separately by the raw-XML depth pre-check in
+        // `ooxml_common::depth`.)
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || run(&nested_groups(levels)))
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_groups_do_not_trap() {
+        // ~2 000 nested groups is ~30× the depth limit; pre-guard this recurses
+        // 2 000 frames and traps on the WASM stack. The guard caps the descent so
+        // parsing RETURNS instead of aborting. A group deeper than the limit drops
+        // its subtree, so the single leaf below it does NOT survive — the assertion
+        // is simply that we get here (no trap) with a bounded result.
+        let out = run_deep(2_000);
+        assert!(out.len() <= 1, "guard should bound the emitted shapes");
+    }
+
+    #[test]
+    fn shallow_nested_groups_keep_their_leaf() {
+        // A modest nest (well under the limit) parses in full: the leaf survives.
+        let out = run_deep(10);
+        assert_eq!(out.len(), 1, "leaf under a shallow group nest must survive");
+        assert!(matches!(out[0], SlideElement::Shape(_)));
+    }
+
+    // Namespaces for `nested_groups` (kept local to these depth tests).
+    const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 }
 
 #[cfg(test)]
@@ -2891,6 +2980,7 @@ mod strict_namespace_tests {
                 &mut out,
                 false,
                 None,
+                DepthGuard::root(),
             );
         }
         out

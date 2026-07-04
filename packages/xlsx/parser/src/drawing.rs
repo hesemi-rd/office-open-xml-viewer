@@ -7,6 +7,7 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::depth::DepthGuard;
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
@@ -842,6 +843,11 @@ pub(crate) fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
 // recursion (root offset/extent, accumulated scale/translation, theme + rels);
 // bundling them into a struct would only move the same fields elsewhere without
 // improving clarity.
+//
+// `depth` bounds the nested-`<xdr:grpSp>` recursion so a hand-crafted, thousands-
+// deep group nest cannot overflow the fixed WASM stack and trap the parse. Past
+// the shared limit the group's children are dropped and the rest of the drawing
+// still parses (graceful degradation). See `ooxml_common::depth`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_shapes(
     node: &roxmltree::Node,
@@ -858,6 +864,7 @@ pub(crate) fn collect_shapes(
     theme_ln_widths: &[i64],
     rid_urls: &HashMap<String, String>,
     out: &mut Vec<ShapeInfo>,
+    depth: DepthGuard,
 ) {
     for child in node.children().filter(|n| n.is_element()) {
         let tag = child.tag_name().name();
@@ -868,6 +875,12 @@ pub(crate) fn collect_shapes(
             continue;
         }
         if tag == "grpSp" {
+            // Bound the group nesting: once the shared depth limit is reached,
+            // drop this group's subtree rather than recurse into it, so a
+            // pathologically deep `<xdr:grpSp>` nest cannot overflow the stack.
+            let Some(child_depth) = depth.descend() else {
+                continue;
+            };
             // Nested grpSp: compose the transform by the group's own xfrm.
             let grp_sp_pr = child
                 .children()
@@ -917,6 +930,7 @@ pub(crate) fn collect_shapes(
                 theme_ln_widths,
                 rid_urls,
                 out,
+                child_depth,
             );
         } else if tag == "sp" {
             let sp_pr = child
@@ -1339,6 +1353,7 @@ pub(crate) fn parse_shape_anchors(
                 theme_ln_widths,
                 rid_urls,
                 &mut shapes,
+                DepthGuard::root(),
             );
         } else if let Some(sp) = content.children().find(|n| {
             if !n.is_element() {
@@ -1400,6 +1415,7 @@ pub(crate) fn parse_shape_anchors(
                 theme_ln_widths,
                 rid_urls,
                 &mut shapes,
+                DepthGuard::root(),
             );
         } else {
             continue;
@@ -2658,6 +2674,82 @@ mod hidden_tests {
             &HashMap::new(),
         );
         assert!(b.is_empty(), "hidden group leaked");
+    }
+
+    // ── Group-shape recursion depth guard (RB2) ────────────────────────────
+
+    /// A twoCellAnchor holding `<xdr:grpSp>` nested `levels` deep, with one leaf
+    /// `<xdr:sp>` at the bottom. Each `<xdr:grpSp>` is a real `collect_shapes`
+    /// recursion.
+    fn nested_group_anchor(levels: usize) -> String {
+        let leaf = concat!(
+            r#"<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="99" name="Leaf"/><xdr:cNvSpPr/></xdr:nvSpPr>"#,
+            r#"<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm>"#,
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+            r#"<a:ln w="6350"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln></xdr:spPr></xdr:sp>"#,
+        );
+        let open = concat!(
+            r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="2" name="G"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>"#,
+            r#"<xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="1828800"/>"#,
+            r#"<a:chOff x="0" y="0"/><a:chExt cx="1828800" cy="1828800"/></a:xfrm></xdr:grpSpPr>"#,
+        );
+        let mut inner = leaf.to_string();
+        for _ in 0..levels {
+            inner = format!("{open}{inner}</xdr:grpSp>");
+        }
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              {inner}
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#,
+            NS = NS,
+        )
+    }
+
+    fn anchors_deep(levels: usize) -> Vec<ShapeAnchor> {
+        // roxmltree::Document::parse itself recurses on nesting depth, so parse on
+        // a generous stack; this test targets OUR collect_shapes guard. (The
+        // roxmltree layer is bounded separately by the raw-XML depth pre-check in
+        // `ooxml_common::depth`.)
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                parse_shape_anchors(
+                    &nested_group_anchor(levels),
+                    &theme(),
+                    &[6_350],
+                    &HashMap::new(),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_groups_do_not_trap() {
+        // ~2 000 nested groups is ~30× the depth limit; pre-guard this recurses
+        // 2 000 frames and traps on the WASM stack. The guard caps the descent so
+        // parsing RETURNS instead of aborting. A group deeper than the limit drops
+        // its subtree (the single leaf below it does not survive) — the assertion
+        // is that we reach here with a bounded result and no trap.
+        let anchors = anchors_deep(2_000);
+        let leaves: usize = anchors.iter().map(|a| a.shapes.len()).sum();
+        assert!(leaves <= 1, "guard should bound the collected leaves");
+    }
+
+    #[test]
+    fn shallow_nested_groups_keep_their_leaf() {
+        // A modest nest (well under the limit) parses in full: the leaf survives.
+        let anchors = anchors_deep(10);
+        assert_eq!(anchors.len(), 1, "expected the one anchor");
+        assert_eq!(
+            anchors[0].shapes.len(),
+            1,
+            "leaf under a shallow group nest must survive"
+        );
     }
 }
 

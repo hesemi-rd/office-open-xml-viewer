@@ -1,4 +1,5 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::depth::DepthGuard;
 use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 use roxmltree::Document as XmlDoc;
@@ -197,6 +198,14 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let chart_map = load_chart_map(zip, &rel_map, &theme);
 
     let doc_xml = read_zip_string(zip, "word/document.xml")?;
+    // Guard against a pathologically deep `word/document.xml`: roxmltree's tree
+    // builder recurses per element-nesting level, so a document nested thousands
+    // deep overflows the fixed WASM stack and traps *inside* `XmlDoc::parse` before
+    // our own depth-guarded walk runs. Reject it up front. See
+    // `ooxml_common::depth::xml_too_deep`.
+    if ooxml_common::depth::xml_too_deep(doc_xml.as_bytes()) {
+        return Err("word/document.xml nesting depth exceeds the safe limit".to_string());
+    }
     let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
 
     let body_node = xml_doc
@@ -1060,7 +1069,14 @@ fn parse_body_elements(
             }
             "tbl" => {
                 let tbl = parse_table(
-                    child, style_map, num_map, media_map, chart_map, rel_map, theme,
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    DepthGuard::root(),
                 );
                 body.push(BodyElement::Table(tbl));
             }
@@ -5406,6 +5422,12 @@ fn parse_docx_chart(
 
 // ===== Table parsing =====
 
+// `depth` bounds the nested-table recursion (`<w:tbl>` inside a `<w:tc>`,
+// §17.4.38). A hand-crafted document nesting tables thousands deep would
+// otherwise overflow the fixed WASM stack via parse_table → parse_table_row →
+// parse_table_cell → parse_table and trap the whole parse; past the shared limit
+// the over-deep table is dropped and the rest of the document still parses. See
+// `ooxml_common::depth`.
 #[allow(clippy::too_many_arguments)]
 fn parse_table(
     node: roxmltree::Node,
@@ -5415,6 +5437,7 @@ fn parse_table(
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    depth: DepthGuard,
 ) -> DocTable {
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
@@ -5783,6 +5806,7 @@ fn parse_table(
             // attributes.
             effective_table_style_id,
             &cell_conds,
+            depth,
         );
         rows.push(row);
         all_cell_conds.push(cell_conds);
@@ -5914,6 +5938,8 @@ fn parse_table_row(
     // precedence order), threaded into each cell's content as a base layer below
     // paragraph/char styles. Indexed positionally against the row's `tc` nodes.
     cell_conds: &[CondFmt],
+    // Recursion-depth guard threaded from the owning table (see `parse_table`).
+    depth: DepthGuard,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
@@ -5939,6 +5965,7 @@ fn parse_table_row(
             theme,
             table_style_id,
             cond,
+            depth,
         );
         cells.push(cell);
     }
@@ -5963,6 +5990,8 @@ fn parse_table_cell(
     table_style_id: Option<&str>,
     // §17.7.6 resolved conditional formatting for the owning row.
     cond: Option<&CondFmt>,
+    // Recursion-depth guard threaded from the owning row (see `parse_table`).
+    depth: DepthGuard,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -6060,9 +6089,26 @@ fn parse_table_cell(
             ))),
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
-            "tbl" => content.push(CellElement::Table(parse_table(
-                child, style_map, num_map, media_map, chart_map, rel_map, theme,
-            ))),
+            //
+            // Descend the depth guard here — this `<w:tbl>` inside a `<w:tc>` is
+            // the one real recursion level. Once the shared limit is reached the
+            // nested table is dropped (not recursed into) so a pathologically deep
+            // table nest cannot overflow the stack; the cell's other content is
+            // unaffected.
+            "tbl" => {
+                if let Some(child_depth) = depth.descend() {
+                    content.push(CellElement::Table(parse_table(
+                        child,
+                        style_map,
+                        num_map,
+                        media_map,
+                        chart_map,
+                        rel_map,
+                        theme,
+                        child_depth,
+                    )));
+                }
+            }
             _ => {}
         }
     }
@@ -6378,7 +6424,89 @@ mod tests {
             &HashMap::new(),
             &rels,
             &theme,
+            DepthGuard::root(),
         )
+    }
+
+    // ── Nested-table recursion depth guard (RB2) ───────────────────────────
+    //
+    // A `<w:tbl>` may nest inside a `<w:tc>` (§17.4.38); the natural parser is
+    // directly recursive (parse_table → row → cell → parse_table). A hand-crafted
+    // document nesting tables thousands deep must NOT overflow the WASM stack and
+    // trap the parse — the depth guard bounds it and drops the over-deep tail.
+
+    /// Build `levels` tables nested one-per-cell as the *inner body* of an outer
+    /// `<w:tbl>` (which `parse_tbl` supplies). The innermost cell holds one
+    /// paragraph. Each `<w:tbl>` here plus the outer wrapper is one recursion.
+    fn nested_table_body(levels: usize) -> String {
+        let mut inner = String::from("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
+        for _ in 0..levels {
+            inner = format!("<w:tr><w:tc><w:tbl>{inner}</w:tbl></w:tc></w:tr>");
+        }
+        inner
+    }
+
+    /// Count nested-table depth by walking down the first cell's first table.
+    fn table_nesting_depth(t: &DocTable) -> usize {
+        let mut depth = 1;
+        let mut cur = t;
+        loop {
+            let next = cur
+                .rows
+                .first()
+                .and_then(|r| r.cells.first())
+                .and_then(|c| {
+                    c.content.iter().find_map(|e| match e {
+                        CellElement::Table(inner) => Some(inner),
+                        _ => None,
+                    })
+                });
+            match next {
+                Some(inner) => {
+                    depth += 1;
+                    cur = inner;
+                }
+                None => break,
+            }
+        }
+        depth
+    }
+
+    /// Parse on a generous stack: `roxmltree::Document::parse` itself recurses on
+    /// nesting depth, so give it room. This test targets OUR table-recursion
+    /// guard; the raw-XML depth pre-check in `ooxml_common::depth` guards the
+    /// roxmltree layer separately (with its own tests).
+    fn parse_tbl_deep(levels: usize) -> DocTable {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || parse_tbl(&nested_table_body(levels)))
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_tables_do_not_trap() {
+        // ~2 000 nested tables is ~30× the depth limit; pre-guard this recurses
+        // 2 000 frames and traps on the WASM stack. The guard caps the descent so
+        // parsing RETURNS a (truncated) table instead of aborting.
+        let table = parse_tbl_deep(2_000);
+        let observed = table_nesting_depth(&table);
+        // Bounded near the shared depth limit, never the full 2 000 levels.
+        let limit = ooxml_common::depth::MAX_PARSE_DEPTH as usize;
+        assert!(
+            observed <= limit + 1,
+            "nesting must be bounded by the guard, got {observed}"
+        );
+        assert!(observed >= 2, "at least a couple levels should survive");
+    }
+
+    #[test]
+    fn shallow_nested_tables_are_fully_preserved() {
+        // A modest nest (well under the limit) is parsed in full — the guard does
+        // not truncate legitimate documents. 5 inner tables + the outer = depth 6.
+        let table = parse_tbl_deep(5);
+        assert_eq!(table_nesting_depth(&table), 6);
     }
 
     // ECMA-376 §17.4.71 — a cell's `<w:tcW>` preferred width (type="dxa") reaches
@@ -6802,6 +6930,7 @@ mod tests {
             &HashMap::new(),
             &rels,
             &theme,
+            DepthGuard::root(),
         )
     }
 
@@ -11767,6 +11896,7 @@ mod numbering_marker_font_tests {
             &HashMap::new(),
             &rels,
             &theme,
+            DepthGuard::root(),
         )
     }
 

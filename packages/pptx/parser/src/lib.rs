@@ -567,6 +567,14 @@ fn parse_slide(
     }
 
     note_layout_master_parse();
+    // Guard against a pathologically deep slide XML: roxmltree's tree builder
+    // recurses per element-nesting level, so a slide nested thousands deep
+    // overflows the fixed WASM stack and traps *inside* `Document::parse` before
+    // our own depth-guarded shape walk runs. Reject it up front. See
+    // `ooxml_common::depth::xml_too_deep`.
+    if ooxml_common::depth::xml_too_deep(xml.as_bytes()) {
+        return Err("slide XML nesting depth exceeds the safe limit".into());
+    }
     let doc = roxmltree::Document::parse(xml)?;
     let root = doc.root_element(); // <p:sld>
     let hidden = slide_is_hidden(root);
@@ -676,6 +684,7 @@ fn parse_slide(
                         &mut elements,
                         true, // skip placeholder shapes
                         None, // no inherited group fill at top level
+                        ooxml_common::depth::DepthGuard::root(),
                     );
                 }
             }
@@ -695,6 +704,7 @@ fn parse_slide(
             &mut elements,
             false,
             None,
+            ooxml_common::depth::DepthGuard::root(),
         );
     }
 

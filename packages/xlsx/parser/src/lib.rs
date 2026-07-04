@@ -726,6 +726,14 @@ fn parse_worksheet(
     theme_colors: &[String],
     name: &str,
 ) -> Result<(Worksheet, HyperlinkRids), String> {
+    // Guard against a pathologically deep worksheet XML: roxmltree's tree builder
+    // recurses per element-nesting level, so a sheet nested thousands deep
+    // overflows the fixed WASM stack and traps *inside* `Document::parse` before
+    // our own depth-guarded drawing walk runs. Reject it up front. See
+    // `ooxml_common::depth::xml_too_deep`.
+    if ooxml_common::depth::xml_too_deep(xml.as_bytes()) {
+        return Err("worksheet XML nesting depth exceeds the safe limit".to_string());
+    }
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
 
     let mut rows = Vec::new();

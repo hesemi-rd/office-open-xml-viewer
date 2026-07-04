@@ -12,6 +12,8 @@
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 
+use crate::depth::DepthGuard;
+
 // `Deserialize` is derived for symmetry with the pptx/xlsx parser type trees
 // (every node there derives both); the math AST is only ever serialized in
 // practice. `default` on the skip-serialized fields keeps a round-trip valid.
@@ -207,7 +209,25 @@ fn on_off(parent: Node, child: &str, default: bool) -> bool {
 }
 
 /// Parse the math children directly under `el` into a node list.
+///
+/// OMML nests arbitrarily (a fraction's numerator can hold another fraction,
+/// etc.), so this recurses; the descent is bounded by a [`DepthGuard`] to stop a
+/// hand-crafted, thousands-deep math tree from overflowing the WASM stack and
+/// trapping the whole parse. Past the limit the subtree is dropped (its runs do
+/// not survive), which is graceful degradation — the surrounding document still
+/// renders.
 pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
+    parse_omath_nodes_d(el, DepthGuard::root())
+}
+
+fn parse_omath_nodes_d(el: Node, depth: DepthGuard) -> Vec<MathNode> {
+    // Stop descending once the shared depth limit is reached: a deeper subtree is
+    // dropped rather than recursed into. `descend()` yields the child guard used
+    // for every recursive call below (via `nodes_in`, `parse_matrix`,
+    // `parse_eqarr`, the delimiter map, and the container fallback).
+    let Some(depth) = depth.descend() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for child in el.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -221,25 +241,25 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 }
             }
             "f" => out.push(MathNode::Fraction {
-                num: nodes_in(child, "num"),
-                den: nodes_in(child, "den"),
+                num: nodes_in(child, "num", depth),
+                den: nodes_in(child, "den", depth),
                 bar: match mval(mchild(child, "fPr").unwrap_or(child), "type").as_deref() {
                     Some("noBar") => Some(false),
                     _ => None,
                 },
             }),
             "sSup" => out.push(MathNode::Sup {
-                base: nodes_in(child, "e"),
-                sup: nodes_in(child, "sup"),
+                base: nodes_in(child, "e", depth),
+                sup: nodes_in(child, "sup", depth),
             }),
             "sSub" => out.push(MathNode::Sub {
-                base: nodes_in(child, "e"),
-                sub: nodes_in(child, "sub"),
+                base: nodes_in(child, "e", depth),
+                sub: nodes_in(child, "sub", depth),
             }),
             "sSubSup" => out.push(MathNode::SubSup {
-                base: nodes_in(child, "e"),
-                sub: nodes_in(child, "sub"),
-                sup: nodes_in(child, "sup"),
+                base: nodes_in(child, "e", depth),
+                sub: nodes_in(child, "sub", depth),
+                sup: nodes_in(child, "sup", depth),
             }),
             "nary" => {
                 let pr = mchild(child, "naryPr");
@@ -250,9 +270,9 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 out.push(MathNode::Nary {
                     op,
                     lim_loc,
-                    sub: nodes_in(child, "sub"),
-                    sup: nodes_in(child, "sup"),
-                    body: nodes_in(child, "e"),
+                    sub: nodes_in(child, "sub", depth),
+                    sup: nodes_in(child, "sup", depth),
+                    body: nodes_in(child, "e", depth),
                 });
             }
             "d" => {
@@ -266,7 +286,7 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 let items: Vec<Vec<MathNode>> = child
                     .children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "e")
-                    .map(parse_omath_nodes)
+                    .map(|e| parse_omath_nodes_d(e, depth))
                     .collect();
                 out.push(MathNode::Delimiter {
                     beg_char,
@@ -275,21 +295,21 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 });
             }
             "rad" => out.push(MathNode::Radical {
-                index: nodes_in(child, "deg"),
-                radicand: nodes_in(child, "e"),
+                index: nodes_in(child, "deg", depth),
+                radicand: nodes_in(child, "e", depth),
             }),
             "limLow" => out.push(MathNode::Limit {
-                base: nodes_in(child, "e"),
-                lower: nodes_in(child, "lim"),
+                base: nodes_in(child, "e", depth),
+                lower: nodes_in(child, "lim", depth),
                 upper: Vec::new(),
             }),
             "limUpp" => out.push(MathNode::Limit {
-                base: nodes_in(child, "e"),
+                base: nodes_in(child, "e", depth),
                 lower: Vec::new(),
-                upper: nodes_in(child, "lim"),
+                upper: nodes_in(child, "lim", depth),
             }),
-            "m" => out.push(parse_matrix(child)),
-            "eqArr" => out.push(parse_eqarr(child)),
+            "m" => out.push(parse_matrix(child, depth)),
+            "eqArr" => out.push(parse_eqarr(child, depth)),
             "groupChr" => {
                 let pr = mchild(child, "groupChrPr");
                 let pos = pr
@@ -305,7 +325,7 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 out.push(MathNode::GroupChr {
                     chr,
                     pos,
-                    base: nodes_in(child, "e"),
+                    base: nodes_in(child, "e", depth),
                 });
             }
             "bar" => {
@@ -315,7 +335,7 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                     .unwrap_or_else(|| "top".to_string());
                 out.push(MathNode::Bar {
                     pos,
-                    base: nodes_in(child, "e"),
+                    base: nodes_in(child, "e", depth),
                 });
             }
             "acc" => {
@@ -325,12 +345,12 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                     .unwrap_or_else(|| "\u{0302}".to_string());
                 out.push(MathNode::Accent {
                     chr,
-                    base: nodes_in(child, "e"),
+                    base: nodes_in(child, "e", depth),
                 });
             }
             "func" => out.push(MathNode::Func {
-                name: nodes_in(child, "fName"),
-                arg: nodes_in(child, "e"),
+                name: nodes_in(child, "fName", depth),
+                arg: nodes_in(child, "e", depth),
             }),
             "phant" => {
                 // §22.1.2.81/.82 — read the phantPr on/off children. `show` defaults
@@ -345,16 +365,16 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                     zero_wid: pr.map(|p| on_off(p, "zeroWid", false)).unwrap_or(false),
                     zero_asc: pr.map(|p| on_off(p, "zeroAsc", false)).unwrap_or(false),
                     zero_desc: pr.map(|p| on_off(p, "zeroDesc", false)).unwrap_or(false),
-                    base: nodes_in(child, "e"),
+                    base: nodes_in(child, "e", depth),
                 });
             }
             "sPre" => out.push(MathNode::SPre {
-                sub: nodes_in(child, "sub"),
-                sup: nodes_in(child, "sup"),
-                base: nodes_in(child, "e"),
+                sub: nodes_in(child, "sub", depth),
+                sup: nodes_in(child, "sup", depth),
+                base: nodes_in(child, "e", depth),
             }),
             "box" => out.push(MathNode::Box {
-                base: nodes_in(child, "e"),
+                base: nodes_in(child, "e", depth),
             }),
             "borderBox" => {
                 // §22.1.2.11/.12 — the borderBoxPr on/off children select edges and
@@ -371,11 +391,11 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                     strike_v: f("strikeV"),
                     strike_bltr: f("strikeBLTR"),
                     strike_tlbr: f("strikeTLBR"),
-                    base: nodes_in(child, "e"),
+                    base: nodes_in(child, "e", depth),
                 });
             }
             // Containers / unknowns: descend so inner runs survive (degrade gracefully).
-            _ => out.extend(parse_omath_nodes(child)),
+            _ => out.extend(parse_omath_nodes_d(child, depth)),
         }
     }
     out
@@ -496,7 +516,11 @@ pub fn nodes_to_text(nodes: &[MathNode]) -> String {
 }
 
 /// `m:m` matrix -> array of rows (m:mr) of cells (m:e), centered.
-fn parse_matrix(el: Node) -> MathNode {
+///
+/// `depth` is the guard from the enclosing `parse_omath_nodes_d`; each cell body
+/// recurses under it so a matrix nested deep in a math tree still honours the
+/// shared depth limit.
+fn parse_matrix(el: Node, depth: DepthGuard) -> MathNode {
     let mut rows = Vec::new();
     for mr in el
         .children()
@@ -505,7 +529,7 @@ fn parse_matrix(el: Node) -> MathNode {
         let cells: Vec<Vec<MathNode>> = mr
             .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "e")
-            .map(parse_omath_nodes)
+            .map(|e| parse_omath_nodes_d(e, depth))
             .collect();
         rows.push(cells);
     }
@@ -516,13 +540,16 @@ fn parse_matrix(el: Node) -> MathNode {
 }
 
 /// `m:eqArr` -> array where each `m:e` is a row, split into cells at `&` alignment marks.
-fn parse_eqarr(el: Node) -> MathNode {
+///
+/// `depth` is threaded from the caller so each row body respects the shared
+/// recursion-depth limit (see [`parse_matrix`]).
+fn parse_eqarr(el: Node, depth: DepthGuard) -> MathNode {
     let mut rows = Vec::new();
     for e in el
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "e")
     {
-        rows.push(split_align_cells(parse_omath_nodes(e)));
+        rows.push(split_align_cells(parse_omath_nodes_d(e, depth)));
     }
     MathNode::Array {
         rows,
@@ -561,9 +588,9 @@ fn split_align_cells(nodes: Vec<MathNode>) -> Vec<Vec<MathNode>> {
 }
 
 /// Parse the math content of the named child element (`m:<name>`).
-fn nodes_in(parent: Node, name: &str) -> Vec<MathNode> {
+fn nodes_in(parent: Node, name: &str, depth: DepthGuard) -> Vec<MathNode> {
     match mchild(parent, name) {
-        Some(n) => parse_omath_nodes(n),
+        Some(n) => parse_omath_nodes_d(n, depth),
         None => Vec::new(),
     }
 }
@@ -871,5 +898,87 @@ mod tests {
             }
             other => panic!("expected borderBox, got {other:?}"),
         }
+    }
+
+    // ── Recursion depth guard (RB2) ─────────────────────────────────────────
+    //
+    // OMML nests without limit, and `parse_omath_nodes` recurses per level. A
+    // hand-crafted, thousands-deep math tree must NOT overflow the (small, fixed)
+    // WASM stack and trap the whole parse — the depth guard bounds the descent
+    // and drops the over-deep subtree instead.
+
+    /// Build `depth` nested `<m:f><m:num>…</m:num></m:f>` fractions with a single
+    /// run at the very bottom. Each `<m:f>` adds one real recursion level.
+    fn nested_fractions(depth: usize) -> String {
+        let mut s = String::new();
+        for _ in 0..depth {
+            s.push_str("<m:f><m:num>");
+        }
+        s.push_str("<m:r><m:t>x</m:t></m:r>");
+        for _ in 0..depth {
+            s.push_str("</m:num></m:f>");
+        }
+        format!(r#"<m:oMath xmlns:m="{M}">{s}</m:oMath>"#)
+    }
+
+    /// Run `f` on a thread with a generous stack so that `roxmltree::Document::parse`
+    /// itself — which recurses proportionally to XML nesting depth — has room for
+    /// the deep inputs below. That keeps these tests focused on OUR depth guard:
+    /// the roxmltree/parser layer is bounded separately by the raw-XML depth
+    /// pre-check in `crate::depth` (see its own tests). Without the big stack a
+    /// debug build overflows inside roxmltree before our code even runs.
+    fn on_deep_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn")
+            .join()
+            .expect("join")
+    }
+
+    #[test]
+    fn deeply_nested_omml_does_not_trap() {
+        // A math tree far deeper than MAX_PARSE_DEPTH must not overflow OUR
+        // recursion. 2 000 levels is ~30× the guard: pre-guard `parse_omath_nodes`
+        // would recurse 2 000 frames and trap on the small WASM stack; the guard
+        // caps the descent, so `parse` RETURNS a value instead of aborting.
+        let nodes = on_deep_stack(|| {
+            let xml = nested_fractions(2_000);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_omath_nodes(doc.root_element())
+        });
+        // A fraction chain always yields exactly one top-level node.
+        assert_eq!(nodes.len(), 1);
+        assert!(matches!(nodes[0], MathNode::Fraction { .. }));
+    }
+
+    #[test]
+    fn depth_guard_truncates_at_the_limit_but_keeps_shallow_content() {
+        // A chain deeper than MAX_PARSE_DEPTH is accepted (no trap) but the bottom
+        // is dropped: walking down the numerators, every level up to the limit is a
+        // Fraction, and beyond it the numerator is empty (the guard refused to
+        // descend). Content ABOVE the limit is fully preserved.
+        use crate::depth::MAX_PARSE_DEPTH;
+        let mut nodes = on_deep_stack(|| {
+            let xml = nested_fractions(MAX_PARSE_DEPTH as usize + 50);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_omath_nodes(doc.root_element())
+        });
+
+        let mut levels = 0u32;
+        // Follow the numerator chain down. Each level should be one Fraction whose
+        // `num` is the next level, until the guard stops producing children.
+        while let Some(MathNode::Fraction { num, .. }) = nodes.first() {
+            levels += 1;
+            nodes = num.clone();
+        }
+        // The top-level `parse_omath_nodes` call spends one descent budget, so the
+        // deepest surviving fraction sits at MAX_PARSE_DEPTH - 1 levels below it.
+        // The exact count is an implementation detail; what matters for the guard
+        // is that it is BOUNDED near the limit, never the full input depth.
+        assert!(
+            (MAX_PARSE_DEPTH - 2..=MAX_PARSE_DEPTH).contains(&levels),
+            "expected truncation near the {MAX_PARSE_DEPTH}-level limit, got {levels}"
+        );
     }
 }
