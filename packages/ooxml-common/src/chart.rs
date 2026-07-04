@@ -591,7 +591,10 @@ pub struct ChartexBoxSeries {
     /// `<cx:layoutPr><cx:visibility outliers>` — draw outlier points.
     pub show_outliers: bool,
     /// `<cx:layoutPr><cx:visibility nonoutliers>` — draw the non-outlier
-    /// (interior) points as dots in addition to the box.
+    /// (interior) points as dots in addition to the box. Flag parsed;
+    /// interior-dot rendering is pending a fixture that enables it (every
+    /// sample-24 series ships `nonoutliers="0"`, so there is nothing to verify
+    /// the overlay against yet).
     pub show_nonoutliers: bool,
     /// `<cx:layoutPr><cx:statistics quartileMethod>` — `"exclusive"` (Excel
     /// default, median excluded when splitting halves) or `"inclusive"`.

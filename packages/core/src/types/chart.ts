@@ -684,7 +684,10 @@ export interface ChartexBoxSeries {
   meanLine: boolean;
   /** `<cx:visibility outliers>` — draw outlier points. */
   showOutliers: boolean;
-  /** `<cx:visibility nonoutliers>` — draw interior (non-outlier) points too. */
+  /** `<cx:visibility nonoutliers>` — draw the interior (non-outlier) sample
+   *  points as jittered dots on top of the box. Flag parsed; interior-dot
+   *  rendering is pending a fixture that enables it (every sample-24 series
+   *  ships `nonoutliers="0"`, so there is nothing to verify against yet). */
   showNonoutliers: boolean;
   /** `<cx:statistics quartileMethod>` — "exclusive" (Excel default) | "inclusive". */
   quartileMethod: string;

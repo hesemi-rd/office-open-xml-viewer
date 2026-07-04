@@ -39,6 +39,29 @@ function pieSliceColor(idx: number, series: ChartSeries): string {
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
 }
 
+/**
+ * Scale a `#rrggbb` hex color's channels by `factor` (clamped 0..1), returning a
+ * new `#rrggbb`. Used for the box-and-whisker outline: PowerPoint's default
+ * modern chart style colors a boxWhisker series' outline (box edge / median /
+ * whisker / mean marker) at the series accent darkened by `lumMod 80%` (its
+ * `<cs:dataPoint>` line rides `phClr` and the style darkens it one variation
+ * step). Measured on sample-24.pdf p.2 the accent2 orange fill `ED7D31`
+ * darkens to `BE6427`, which is exactly a linear ×0.8 of each RGB channel
+ * (`lumMod` on a fully-saturated accent reduces to an RGB scale here), so a
+ * straight channel multiply reproduces Word's rendering. `#` prefix optional on
+ * input; always present on output.
+ */
+function scaleHexRgb(hex: string, factor: number): string {
+  const h = hex.startsWith('#') ? hex.slice(1) : hex;
+  if (h.length < 6) return `#${h}`;
+  const f = Math.max(0, Math.min(1, factor));
+  const r = Math.round(parseInt(h.slice(0, 2), 16) * f);
+  const g = Math.round(parseInt(h.slice(2, 4), 16) * f);
+  const b = Math.round(parseInt(h.slice(4, 6), 16) * f);
+  const to2 = (n: number): string => n.toString(16).padStart(2, '0');
+  return `#${to2(r)}${to2(g)}${to2(b)}`;
+}
+
 // ─── Font-face resolution (CH10) ─────────────────────────────────────────────
 // Chart text elements draw with, in priority order: the element's own
 // `<a:latin typeface>` (from its `<c:txPr>`), else the theme font-scheme face
@@ -4066,7 +4089,10 @@ interface BoxStats {
   whiskerHi: number;
   mean: number;
   outliers: number[];
-  /** Interior (non-outlier) points, for the optional inner-point dots. */
+  /** Interior (non-outlier) points. Kept alongside the outliers so the optional
+   *  interior-dot overlay (`ChartexBoxSeries.showNonoutliers`) has its data
+   *  ready; that overlay is not drawn yet (flag parsed; interior-dot rendering
+   *  pending a fixture that enables it — sample-24 ships `nonoutliers="0"`). */
   inner: number[];
 }
 
@@ -4223,10 +4249,15 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
     const fill = box.series[si].color ?? accent ?? CHART_PALETTE[si % CHART_PALETTE.length];
     return `#${fill}`;
   };
-  // A darker edge for the box border / median / whisker: reuse the fill so the
-  // outline reads as the same accent (Office draws box outlines in the series
-  // color at full strength over a lighter fill). We fill solid and stroke in a
-  // slightly darkened variant for legibility.
+  // Outline color for the box edge / median / whisker / mean marker: the series
+  // accent darkened by `lumMod 80%` — PowerPoint's default modern chart style
+  // (`<cs:dataPoint>` line = `phClr` + one variation step). On sample-24 p.2 the
+  // accent2 fill `ED7D31` darkens to `BE6427` (pixel-verified), which equals a
+  // linear RGB ×0.8, so `scaleHexRgb(fill, 0.8)` reproduces Word's outline. (The
+  // full style part isn't resolved here beyond the title size — this 80% is the
+  // documented boxWhisker constant; if a chart ever overrides the dataPoint line
+  // via `<cx:spPr>` that would need reading, none of the CH15 fixtures do.)
+  const LUM_MOD_80 = 0.8;
 
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   for (let ci = 0; ci < nCat; ci++) {
@@ -4238,6 +4269,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       const bx = slotLeft + si * (boxW + boxGutter);
       const cx = bx + boxW / 2;
       const fill = paletteOf(si);
+      const edge = scaleHexRgb(fill, LUM_MOD_80);
       const yQ1 = yOf(stats.q1);
       const yQ3 = yOf(stats.q3);
       const boxTop = Math.min(yQ1, yQ3);
@@ -4245,7 +4277,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
 
       // Whiskers: vertical line from box edges to whisker ends, with end caps.
       const capW = boxW * 0.4;
-      ctx.strokeStyle = fill;
+      ctx.strokeStyle = edge;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(cx, yOf(stats.whiskerHi)); ctx.lineTo(cx, yQ3);
@@ -4254,24 +4286,24 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       ctx.moveTo(cx - capW / 2, yOf(stats.whiskerLo)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerLo));
       ctx.stroke();
 
-      // IQR box: solid accent fill + a thin darker edge.
+      // IQR box: solid accent fill + a thin accent×0.8 edge.
       ctx.fillStyle = fill;
       ctx.fillRect(bx, boxTop, boxW, boxH);
-      ctx.strokeStyle = '#404040';
+      ctx.strokeStyle = edge;
       ctx.lineWidth = 0.75;
       ctx.strokeRect(bx + 0.375, boxTop + 0.375, boxW - 0.75, boxH - 0.75);
 
       // Median line across the box.
       const yMed = yOf(stats.median);
-      ctx.strokeStyle = '#404040';
+      ctx.strokeStyle = edge;
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(bx, yMed); ctx.lineTo(bx + boxW, yMed); ctx.stroke();
 
-      // Mean `×` marker.
+      // Mean `×` marker (same accent×0.8 as the rest of the outline).
       if (s.meanMarker) {
         const mY = yOf(stats.mean);
         const mR = Math.max(2, boxW * 0.14);
-        ctx.strokeStyle = '#595959';
+        ctx.strokeStyle = edge;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(cx - mR, mY - mR); ctx.lineTo(cx + mR, mY + mR);

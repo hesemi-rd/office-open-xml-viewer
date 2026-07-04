@@ -2428,6 +2428,22 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(rec.fillRects.length).toBe(6);
   });
 
+  it('strokes the box outline (median / whisker / mean ×) in the series accent × lumMod 80%', () => {
+    // PowerPoint's default modern chart style darkens a boxWhisker series'
+    // outline to its accent × 0.8 (`<cs:dataPoint>` line phClr + one variation
+    // step). sample-24 p.2's accent2 fill ED7D31 → outline BE6427 (pixel-
+    // verified). Assert every accent-derived stroke segment uses that color and
+    // that the plain fill accent (#ed7d31) is NOT used for any stroke.
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, boxModel(), RECT, 1);
+    const accentSegs = rec.segs.filter(s => s.ss.toLowerCase() === '#be6427');
+    // median + two whisker stems + two whisker caps + mean × (2 strokes) = ≥5
+    // accent-colored segments (gridlines/axis use gray, not the accent).
+    expect(accentSegs.length).toBeGreaterThanOrEqual(5);
+    // The un-darkened fill accent must never be a stroke color.
+    expect(rec.segs.some(s => s.ss.toLowerCase() === '#ed7d31')).toBe(false);
+  });
+
   it('sizes the title from titleFontSizeHpt (chartStyle part) rather than an area-proportional guess', () => {
     // With titleFontSizeHpt=1400 (14pt, Word's default modern chartStyle) at
     // scale 1 the title renders at 14px — far below the Math.max(10, h*0.085) ≈
