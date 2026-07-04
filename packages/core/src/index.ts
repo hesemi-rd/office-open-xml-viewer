@@ -67,6 +67,13 @@ export {
 } from './crypto';
 export { readCfbStream } from './errors/cfb-read';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
+// Embedded-font registration: docx `.odttf` (§17.8.1 obfuscated) + pptx
+// `.fntdata` (raw sfnt) faces turned into FontFace objects in the active set.
+export {
+  registerEmbeddedFonts,
+  deobfuscateOdttf,
+  type EmbeddedFontFace,
+} from './fonts/embedded';
 // Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
 // spreads this into its own map; script-fallback Noto faces live in

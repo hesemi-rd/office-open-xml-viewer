@@ -14,6 +14,7 @@ import {
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
 import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache } from './renderer';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { loadEmbeddedFonts } from './embedded-fonts';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
@@ -117,6 +118,13 @@ export class DocxDocument {
         DOCX_GOOGLE_FONTS,
       );
     }
+    // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
+    // the worker's zip-entry extraction) before the lazy first pagination, so
+    // text measures/draws with the authored typeface. Worker mode does this
+    // inside the worker (before it paginates); here it runs on the main thread.
+    if (mode === 'main' && doc._document?.embeddedFonts?.length) {
+      await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
+    }
     // Equations are converted + rasterized before pagination (which reads their
     // extents synchronously). Requires the opt-in `math` engine; without it,
     // equations are skipped (and the engine asset is never bundled). Math is
@@ -188,6 +196,22 @@ export class DocxDocument {
       });
     this._imageCache.set(imagePath, p);
     return p;
+  }
+
+  /**
+   * Extract raw bytes for an embedded font part by zip path (e.g.
+   * `word/fonts/font1.odttf`). Routes through the SAME persistent-worker
+   * `extractImage` message as {@link getImage} — `DocxArchive.extract_image`
+   * reads ANY zip entry, not just media — returning the raw (still obfuscated)
+   * `.odttf` bytes rather than a Blob. Consumed by {@link loadEmbeddedFonts},
+   * which de-obfuscates (ECMA-376 §17.8.1) and registers each as a FontFace.
+   */
+  async getFontBytes(partPath: string): Promise<Uint8Array> {
+    const res = await this._bridge.request(
+      (id) => ({ type: 'extractImage', id, path: partPath }) satisfies WorkerRequest,
+    );
+    const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
+    return new Uint8Array(bytes);
   }
 
   /**

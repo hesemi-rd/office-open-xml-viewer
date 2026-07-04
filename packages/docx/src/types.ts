@@ -20,6 +20,11 @@ export interface DocxDocumentModel {
    * entry is absent or classified as "auto".
    */
   fontFamilyClasses?: Record<string, string>;
+  /** ECMA-376 §17.8.3.3-.6 — embedded fonts from `word/fontTable.xml`, resolved
+   *  to their `.odttf` part paths + fontKey. The viewer de-obfuscates (§17.8.1)
+   *  and registers each as a FontFace before pagination so text measures/draws
+   *  with the authored typeface. */
+  embeddedFonts?: EmbeddedFontRef[];
   /** ECMA-376 §17.13.5 — flat list of `<w:ins>` / `<w:del>` events in the
    *  body. Each entry carries author / date / text. The renderer marks
    *  runs inline via {@link DocxTextRun.revision}; this array is primarily for
@@ -39,6 +44,15 @@ export interface DocxDocumentModel {
    *  (kinsoku) configuration. Absent when settings.xml has no relevant
    *  elements (the renderer then uses spec defaults: kinsoku ON). */
   settings?: DocSettings;
+}
+
+/** ECMA-376 §17.8.3.3-.6 — one embedded font-style slot from
+ *  `word/fontTable.xml`, resolved to its obfuscated part path + fontKey. */
+export interface EmbeddedFontRef {
+  fontName: string;
+  style: 'regular' | 'bold' | 'italic' | 'boldItalic';
+  partPath: string;
+  fontKey: string;
 }
 
 export interface DocSettings {

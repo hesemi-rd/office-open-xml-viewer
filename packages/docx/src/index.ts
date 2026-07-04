@@ -12,6 +12,9 @@ export { noteText } from './types';
 export type {
   DocxDocumentModel,
   DocSettings,
+  // Embedded-font reference (reachable via DocxDocumentModel.embeddedFonts,
+  // ECMA-376 §17.8.3.3-.6). The viewer de-obfuscates + registers these.
+  EmbeddedFontRef,
   SectionProps,
   // Per-section page geometry (reachable via the BodyElement sectionBreak arm's
   // `geom` and PaginatedBodyElement's `sectionGeom`, ECMA-376 §17.6.13/§17.6.11).

@@ -12,6 +12,7 @@ import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
 import { paginateDocument, renderDocumentToCanvas } from './renderer';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { loadEmbeddedFonts } from './embedded-fonts';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
 
 let initPromise: Promise<unknown> | null = null;
@@ -89,6 +90,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
           docxFontPreloadNames(doc),
           DOCX_GOOGLE_FONTS,
         );
+      }
+      // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
+      // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
+      // straight from the retained archive (extract_image reads any zip entry).
+      if (doc.embeddedFonts?.length) {
+        await loadEmbeddedFonts(doc, async (p) => {
+          if (!archive) throw new Error('No docx loaded');
+          return new Uint8Array(archive.extract_image(p)).slice();
+        });
       }
       pages = paginateDocument(doc);
       // ECMA-376 §17.6.13 / §17.6.11 — per-page size from each page's first

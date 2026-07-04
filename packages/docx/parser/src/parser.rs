@@ -282,9 +282,26 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
-    let font_family_classes = read_zip_string(zip, &font_table_path)
-        .map(|s| parse_font_table(&s))
-        .unwrap_or_default();
+    let font_table_xml = read_zip_string(zip, &font_table_path).unwrap_or_default();
+    let font_family_classes = parse_font_table(&font_table_xml);
+    // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
+    // through the fontTable part's OWN relationships (`word/_rels/fontTable.xml.rels`
+    // when the part is `word/fontTable.xml`): insert `_rels/` before the filename
+    // and append `.rels`. Missing rels ⇒ no embedded fonts (graceful).
+    let embedded_fonts = {
+        let stem = font_table_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&font_table_path);
+        let dir = font_table_path
+            .rsplit_once('/')
+            .map(|(d, _)| d)
+            .unwrap_or("word");
+        let font_rels_path = format!("{}/_rels/{}.rels", dir, stem);
+        let font_rels_xml = read_zip_string(zip, &font_rels_path).unwrap_or_default();
+        let font_rels = parse_rels(&font_rels_xml);
+        parse_embedded_fonts(&font_table_xml, &font_rels, &format!("{}/", dir))
+    };
 
     // Track-changes events live inline in the body XML; do a second pass to
     // surface them as a flat list with author/date metadata. The body parse
@@ -332,6 +349,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         major_font,
         minor_font,
         font_family_classes,
+        embedded_fonts,
         revisions,
         comments,
         footnotes,
@@ -829,6 +847,78 @@ fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
         }
     }
     map
+}
+
+/// Parse the embedded-font references from `word/fontTable.xml` (ECMA-376
+/// §17.8.3.3-.6 `<w:embedRegular>` / `<w:embedBold>` / `<w:embedItalic>` /
+/// `<w:embedBoldItalic>`), resolving each `r:id` through the fontTable's OWN
+/// relationships (`rels`, rId → raw Target) to a canonical zip part path.
+///
+/// `base_dir` is the fontTable part's directory (e.g. `word/`); each Target is
+/// resolved against it via the shared OPC resolver (root-absolute + `..`
+/// normalization), so `fonts/font1.odttf` becomes `word/fonts/font1.odttf`.
+///
+/// Each `<w:embed*>` also carries a `w:fontKey` GUID (§17.8.1) needed to
+/// de-obfuscate the `.odttf` bytes. A slot is skipped when its `r:id` is
+/// missing / unresolvable or its `w:fontKey` is absent — an embedded face
+/// cannot be registered without both the part and its key.
+fn parse_embedded_fonts(
+    font_table_xml: &str,
+    rels: &HashMap<String, String>,
+    base_dir: &str,
+) -> Vec<crate::types::EmbeddedFont> {
+    let mut out = Vec::new();
+    let Ok(doc) = XmlDoc::parse(font_table_xml) else {
+        return out;
+    };
+    for font in doc.root_element().descendants().filter(|n| {
+        n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
+    }) {
+        let Some(name) = attr_ns(
+            &font,
+            wordprocessingml::TRANSITIONAL,
+            wordprocessingml::STRICT,
+            "name",
+        ) else {
+            continue;
+        };
+        for child in font.children().filter(|n| n.is_element()) {
+            let style = match child.tag_name().name() {
+                "embedRegular" => "regular",
+                "embedBold" => "bold",
+                "embedItalic" => "italic",
+                "embedBoldItalic" => "boldItalic",
+                _ => continue,
+            };
+            let Some(rid) = attr_ns(
+                &child,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
+                "id",
+            ) else {
+                continue;
+            };
+            let Some(font_key) = attr_ns(
+                &child,
+                wordprocessingml::TRANSITIONAL,
+                wordprocessingml::STRICT,
+                "fontKey",
+            ) else {
+                continue;
+            };
+            let Some(target) = rels.get(rid) else {
+                continue;
+            };
+            let part_path = ooxml_common::rels::resolve_target(base_dir, target);
+            out.push(crate::types::EmbeddedFont {
+                font_name: name.to_string(),
+                style: style.to_string(),
+                part_path,
+                font_key: font_key.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// Body children with `<w:sdt>` wrappers unwrapped (identical node sequence to
@@ -12325,5 +12415,132 @@ mod strict_namespace_tests {
             Some(Some("left".to_string())),
             "Strict m:jc/@m:val must reach the Math run"
         );
+    }
+}
+
+/// ECMA-376 §17.8.3.3-.6 — embedded-font references (`<w:embed*>`) from
+/// `word/fontTable.xml`, resolved through the fontTable's own relationships.
+#[cfg(test)]
+mod embedded_font_tests {
+    use super::*;
+    use crate::xml_util::{R_NS, W_NS};
+
+    fn font_table(inner: &str) -> String {
+        format!(
+            r#"<w:fonts xmlns:w="{w}" xmlns:r="{r}">{inner}</w:fonts>"#,
+            w = W_NS,
+            r = R_NS,
+        )
+    }
+
+    /// A font declaring both `<w:embedRegular>` and `<w:embedBold>` yields two
+    /// `EmbeddedFont` entries, each carrying the family name, the style slot, the
+    /// resolved part path (Target resolved against `word/`), and the fontKey.
+    #[test]
+    fn regular_and_bold_slots_resolve() {
+        let xml = font_table(
+            r#"<w:font w:name="Ubuntu">
+                 <w:embedRegular r:id="rId1" w:fontKey="{KEY-REG}"/>
+                 <w:embedBold r:id="rId2" w:fontKey="{KEY-BOLD}"/>
+               </w:font>"#,
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "fonts/font1.odttf".to_string());
+        rels.insert("rId2".to_string(), "fonts/font2.odttf".to_string());
+
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        assert_eq!(fonts.len(), 2, "two embed slots ⇒ two entries");
+
+        let reg = fonts.iter().find(|f| f.style == "regular").unwrap();
+        assert_eq!(reg.font_name, "Ubuntu");
+        assert_eq!(reg.part_path, "word/fonts/font1.odttf");
+        assert_eq!(reg.font_key, "{KEY-REG}");
+
+        let bold = fonts.iter().find(|f| f.style == "bold").unwrap();
+        assert_eq!(bold.font_name, "Ubuntu");
+        assert_eq!(bold.part_path, "word/fonts/font2.odttf");
+        assert_eq!(bold.font_key, "{KEY-BOLD}");
+    }
+
+    /// All four `<w:embed*>` element names map to their style slot tokens.
+    #[test]
+    fn all_four_style_slots() {
+        let xml = font_table(
+            r#"<w:font w:name="Tahoma">
+                 <w:embedRegular r:id="rId1" w:fontKey="{K1}"/>
+                 <w:embedBold r:id="rId2" w:fontKey="{K2}"/>
+                 <w:embedItalic r:id="rId3" w:fontKey="{K3}"/>
+                 <w:embedBoldItalic r:id="rId4" w:fontKey="{K4}"/>
+               </w:font>"#,
+        );
+        let mut rels = HashMap::new();
+        for n in 1..=4 {
+            rels.insert(format!("rId{n}"), format!("fonts/font{n}.odttf"));
+        }
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        let mut styles: Vec<&str> = fonts.iter().map(|f| f.style.as_str()).collect();
+        styles.sort_unstable();
+        assert_eq!(styles, ["bold", "boldItalic", "italic", "regular"]);
+    }
+
+    /// A slot whose `r:id` has no entry in the rels map is skipped (the part
+    /// cannot be located, so it cannot be registered).
+    #[test]
+    fn slot_with_unresolvable_rid_is_skipped() {
+        let xml = font_table(
+            r#"<w:font w:name="Ubuntu">
+                 <w:embedRegular r:id="rId1" w:fontKey="{K1}"/>
+                 <w:embedBold r:id="rIdMissing" w:fontKey="{K2}"/>
+               </w:font>"#,
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "fonts/font1.odttf".to_string());
+        // rIdMissing deliberately absent.
+
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        assert_eq!(fonts.len(), 1, "only the resolvable slot survives");
+        assert_eq!(fonts[0].style, "regular");
+    }
+
+    /// A slot missing its `w:fontKey` is skipped — §17.8.1 de-obfuscation is
+    /// impossible without the key.
+    #[test]
+    fn slot_without_font_key_is_skipped() {
+        let xml = font_table(
+            r#"<w:font w:name="Ubuntu">
+                 <w:embedRegular r:id="rId1"/>
+               </w:font>"#,
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "fonts/font1.odttf".to_string());
+
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        assert!(fonts.is_empty(), "no fontKey ⇒ slot dropped");
+    }
+
+    /// A font with a `<w:family>` classification but NO `<w:embed*>` children
+    /// contributes nothing to the embedded-font list.
+    #[test]
+    fn font_without_embeds_yields_nothing() {
+        let xml = font_table(r#"<w:font w:name="Calibri"><w:family w:val="swiss"/></w:font>"#);
+        let fonts = parse_embedded_fonts(&xml, &HashMap::new(), "word/");
+        assert!(fonts.is_empty(), "no <w:embed*> ⇒ no embedded fonts");
+    }
+
+    /// A root-absolute Target (leading `/`) resolves from the package root,
+    /// ignoring `base_dir` (ECMA-376 Part 2 §9.3).
+    #[test]
+    fn root_absolute_target_resolves_from_package_root() {
+        let xml = font_table(
+            r#"<w:font w:name="Ubuntu">
+                 <w:embedRegular r:id="rId1" w:fontKey="{K1}"/>
+               </w:font>"#,
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "/word/fonts/font1.odttf".to_string());
+
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].part_path, "word/fonts/font1.odttf");
     }
 }

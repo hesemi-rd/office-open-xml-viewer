@@ -44,7 +44,11 @@ export interface FontPreloadEntry {
  */
 const HARD_CEILING_MS = 15000;
 
-function withCeiling<T>(p: Promise<T>): Promise<T | void> {
+/** Race a font-load promise against a generous hard ceiling so a wedged network
+ *  or a `FontFace.load()` that never settles cannot hang the caller forever.
+ *  Shared by the Google-Fonts and embedded-font loaders (same first-paint
+ *  determinism contract). */
+export function withFontCeiling<T>(p: Promise<T>): Promise<T | void> {
   return Promise.race([
     p,
     new Promise<void>((resolve) => setTimeout(resolve, HARD_CEILING_MS)),
@@ -104,8 +108,10 @@ export function parseFontFaceRules(css: string): ParsedFontFace[] {
 }
 
 /** The FontFaceSet of the current context: `document.fonts` on the main
- *  thread, `self.fonts` in a worker, null elsewhere (Node without a shim). */
-function activeFontSet(): FontFaceSet | null {
+ *  thread, `self.fonts` in a worker, null elsewhere (Node without a shim).
+ *  Exported so the embedded-font loader shares one FontFaceSet-resolution rule
+ *  with the Google-Fonts loader (both must register into the SAME set). */
+export function activeFontSet(): FontFaceSet | null {
   if (typeof document !== 'undefined' && document && document.fonts) return document.fonts;
   if (typeof self !== 'undefined' && self && 'fonts' in self) {
     return (self as unknown as { fonts: FontFaceSet }).fonts;
@@ -158,7 +164,7 @@ export async function preloadGoogleFonts(
   //    entries into the active FontFaceSet, keeping references to the faces we
   //    add. Canvas rendering never puts glyphs into the DOM, so registration
   //    alone is not enough — see (2).
-  const faceGroups = await withCeiling(
+  const faceGroups = await withFontCeiling(
     Promise.all(
       [...cssUrls].map((url) => {
         // Cache hit: AWAIT the in-flight registration so concurrent callers join
@@ -202,7 +208,7 @@ export async function preloadGoogleFonts(
   //    quotes (e.g. `"Nunito Sans"`), so a `family`-string filter silently
   //    matches nothing and the fonts never load — the bug this avoids.
   const addedFaces = (Array.isArray(faceGroups) ? faceGroups : []).flat();
-  await withCeiling(
+  await withFontCeiling(
     Promise.allSettled(addedFaces.map((f) => f.load())).then((results) => {
       results.forEach((res, i) => {
         if (res.status === 'rejected') {
