@@ -2338,3 +2338,212 @@ describe('CH14 — pie callout data labels', () => {
     expect(rec.rects.filter(r => r.fs === '#FFFFFF').length).toBe(0);
   });
 });
+
+// CH15 — chartEx box-and-whisker (MS 2014 chartex ext). Verify the derived
+// statistics (exclusive quartiles + 1.5·IQR outlier fence + mean) and the
+// value-axis scale drive observable geometry: the IQR box rects, the outlier
+// dots, and the nice-rounded axis labels.
+describe('CH15 — chartEx box-and-whisker', () => {
+  // The sample-24 Category-1 orange series: an obvious outlier at 128 sits far
+  // beyond Q3 + 1.5·IQR, so the whisker stops at 34 and 128 is drawn as a dot.
+  const CAT1_ORANGE = [-3, 1, -6, 10, 34, 128, 22, -12, -28];
+
+  function boxModel(over: Partial<ChartModel> = {}): ChartModel {
+    return baseModel({
+      chartType: 'boxWhisker',
+      title: 'box',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47'],
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [
+          {
+            name: 'S1',
+            color: 'ED7D31',
+            valuesByCategory: [CAT1_ORANGE],
+            meanMarker: true,
+            meanLine: false,
+            showOutliers: true,
+            showNonoutliers: false,
+            quartileMethod: 'exclusive',
+          },
+        ],
+      },
+      ...over,
+    });
+  }
+
+  it('labels the value axis with Excel nice-rounded gridline values including a negative bound', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel(), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    // The data spans −28..128, so the auto axis must reach BELOW zero (a
+    // negative label) and ABOVE the max (a label ≥ 128's rounded ceiling),
+    // and cross zero. Exact bounds depend on the axis length, so assert the
+    // scale SHAPE rather than pinned numbers.
+    expect(labels).toContain('0');
+    expect(labels.some(l => l.startsWith('-'))).toBe(true);
+    expect(labels.some(l => Number(l) >= 130)).toBe(true);
+  });
+
+  it('draws exactly one IQR box rect and one outlier dot for a single box with one outlier', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel(), RECT, 1);
+    // Exactly one filled IQR rect (Q1..Q3) for the single box.
+    expect(rec.fillRects.length).toBe(1);
+    // The 128 point is the sole outlier → one dot (arc). The box-and-whisker
+    // renderer draws arcs ONLY for outliers (the mean `×` and whiskers are line
+    // segments), so the arc count equals the outlier count.
+    expect(rec.arcs.length).toBe(1);
+    // The outlier dot sits ABOVE the box top (smaller y = higher value).
+    const box = rec.fillRects[0];
+    expect(rec.arcs[0].y).toBeLessThan(box.y);
+  });
+
+  it('suppresses outlier dots when <cx:visibility outliers="0">', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: true, meanLine: false, showOutliers: false, showNonoutliers: false,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.arcs.length).toBe(0);
+  });
+
+  it('draws one IQR box per (category, series) — 3 categories × 2 series = 6 boxes', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A', 'B', 'C'],
+        series: [
+          { name: 'S1', color: '5B9BD5', valuesByCategory: [[1, 2, 3], [4, 5, 6], [7, 8, 9]], meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: false, quartileMethod: 'exclusive' },
+          { name: 'S2', color: 'ED7D31', valuesByCategory: [[2, 3, 4], [5, 6, 7], [8, 9, 10]], meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: false, quartileMethod: 'exclusive' },
+        ],
+      },
+    }), RECT, 1);
+    expect(rec.fillRects.length).toBe(6);
+  });
+
+  it('strokes the box outline (median / whisker / mean ×) in the series accent × lumMod 80%', () => {
+    // PowerPoint's default modern chart style darkens a boxWhisker series'
+    // outline to its accent × 0.8 (`<cs:dataPoint>` line phClr + one variation
+    // step). sample-24 p.2's accent2 fill ED7D31 → outline BE6427 (pixel-
+    // verified). Assert every accent-derived stroke segment uses that color and
+    // that the plain fill accent (#ed7d31) is NOT used for any stroke.
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, boxModel(), RECT, 1);
+    const accentSegs = rec.segs.filter(s => s.ss.toLowerCase() === '#be6427');
+    // median + two whisker stems + two whisker caps + mean × (2 strokes) = ≥5
+    // accent-colored segments (gridlines/axis use gray, not the accent).
+    expect(accentSegs.length).toBeGreaterThanOrEqual(5);
+    // The un-darkened fill accent must never be a stroke color.
+    expect(rec.segs.some(s => s.ss.toLowerCase() === '#ed7d31')).toBe(false);
+  });
+
+  it('sizes the title from titleFontSizeHpt (chartStyle part) rather than an area-proportional guess', () => {
+    // With titleFontSizeHpt=1400 (14pt, Word's default modern chartStyle) at
+    // scale 1 the title renders at 14px — far below the Math.max(10, h*0.085) ≈
+    // 30.6px the fallback would produce for this 360px-tall rect. Capture the
+    // font active at each fillText so we can read the title's px size.
+    const drawn: Array<{ text: string; px: number }> = [];
+    const state: Record<string, unknown> = {
+      font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+      textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+    };
+    const px = (font: string): number => {
+      const m = /(\d+(?:\.\d+)?)px/.exec(font);
+      return m ? parseFloat(m[1]) : 10;
+    };
+    const ctx = new Proxy(state, {
+      get(_t, prop: string) {
+        if (prop in state && typeof state[prop] !== 'function') return state[prop];
+        if (prop === 'measureText') return (t: string) => ({ width: String(t).length * px(String(state.font)) * 0.6 });
+        if (prop === 'fillText') return (text: string) => { drawn.push({ text, px: px(String(state.font)) }); };
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => ({ addColorStop() {} });
+        return () => undefined;
+      },
+      set(_t, prop: string, value) { state[prop] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+
+    renderChart(ctx, boxModel({ title: 'the box title', titleFontSizeHpt: 1400 }), RECT, 1);
+    const titleDraw = drawn.find(d => d.text === 'the box title');
+    expect(titleDraw).toBeDefined();
+    // 1400 hpt → 14pt → 14px at scale 1. Assert it honored the size (14, not the
+    // ~30.6px area-proportional fallback).
+    expect(titleDraw?.px).toBeCloseTo(14, 5);
+  });
+});
+
+// CH15 — chartEx sunburst (MS 2014 chartex ext). Verify the hierarchy folds
+// into concentric rings, each branch's sub-tree shares its accent color, and
+// angular spans are size-proportional.
+describe('CH15 — chartEx sunburst', () => {
+  // Two branches, each with two stems, each stem with one leaf. Branch A is
+  // twice the total of Branch B (so it must sweep twice the angle).
+  function sunburstModel(over: Partial<ChartModel> = {}): ChartModel {
+    return baseModel({
+      chartType: 'sunburst',
+      title: 'sun',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47'],
+      chartexSunburst: {
+        rows: [
+          { path: ['Branch A', 'Stem 1', 'Leaf 1'], size: 30 },
+          { path: ['Branch A', 'Stem 2', 'Leaf 2'], size: 30 },
+          { path: ['Branch B', 'Stem 3', 'Leaf 3'], size: 15 },
+          { path: ['Branch B', 'Stem 4', 'Leaf 4'], size: 15 },
+        ],
+      },
+      ...over,
+    });
+  }
+
+  it('draws three concentric rings (Branch / Stem / Leaf) with distinct radii', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // Each ring segment emits an outer + inner arc; across all segments the
+    // distinct radii cluster into 3 outer + 3 inner boundaries → at least 3
+    // distinct radius bands (inner hole excluded).
+    const radii = [...new Set(rec.arcs.map(a => Math.round(a.r)))].sort((a, b) => a - b);
+    // 4 radius boundaries: hole, branch/stem, stem/leaf, outer.
+    expect(radii.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('colors every node in a branch with that branch\'s accent (branch A=accent1, B=accent2)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // Segment fills (excluding the white label fills). Branch A subtree (root +
+    // 2 stems + 2 leaves = 5 nodes) all accent1; Branch B (5 nodes) all accent2.
+    const segFills = rec.fills.filter(f => f !== '#ffffff' && f !== '#000');
+    const a1 = segFills.filter(f => f === '#5B9BD5').length;
+    const a2 = segFills.filter(f => f === '#ED7D31').length;
+    expect(a1).toBe(5);
+    expect(a2).toBe(5);
+  });
+
+  it('draws white segment labels for the branch/stem/leaf names', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    const whiteLabels = rec.fontTexts.filter(t => t.fill === '#ffffff').map(t => t.text);
+    // Labels are word-wrapped, so assert on the first word of each name.
+    expect(whiteLabels.some(t => t.includes('Branch'))).toBe(true);
+    expect(whiteLabels.some(t => t.includes('Stem'))).toBe(true);
+    expect(whiteLabels.some(t => t.includes('Leaf'))).toBe(true);
+  });
+
+  it('sweeps each branch proportional to its aggregated size (Branch A twice Branch B)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // The innermost ring (smallest non-hole outer radius) carries the two branch
+    // segments. Each segment's outer arc sweep = a1 − a0. Branch A (size 60) must
+    // sweep ~2× Branch B (size 30).
+    const innerOuterR = [...new Set(rec.arcs.map(a => Math.round(a.r)))].sort((a, b) => a - b)[1];
+    const branchArcs = rec.arcs.filter(a => Math.round(a.r) === innerOuterR && !a.ccw);
+    const sweeps = branchArcs.map(a => Math.abs(a.a1 - a.a0)).sort((x, y) => y - x);
+    expect(sweeps.length).toBeGreaterThanOrEqual(2);
+    expect(sweeps[0] / sweeps[1]).toBeCloseTo(2, 1);
+  });
+});

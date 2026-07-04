@@ -39,6 +39,29 @@ function pieSliceColor(idx: number, series: ChartSeries): string {
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
 }
 
+/**
+ * Scale a `#rrggbb` hex color's channels by `factor` (clamped 0..1), returning a
+ * new `#rrggbb`. Used for the box-and-whisker outline: PowerPoint's default
+ * modern chart style colors a boxWhisker series' outline (box edge / median /
+ * whisker / mean marker) at the series accent darkened by `lumMod 80%` (its
+ * `<cs:dataPoint>` line rides `phClr` and the style darkens it one variation
+ * step). Measured on sample-24.pdf p.2 the accent2 orange fill `ED7D31`
+ * darkens to `BE6427`, which is exactly a linear ×0.8 of each RGB channel
+ * (`lumMod` on a fully-saturated accent reduces to an RGB scale here), so a
+ * straight channel multiply reproduces Word's rendering. `#` prefix optional on
+ * input; always present on output.
+ */
+function scaleHexRgb(hex: string, factor: number): string {
+  const h = hex.startsWith('#') ? hex.slice(1) : hex;
+  if (h.length < 6) return `#${h}`;
+  const f = Math.max(0, Math.min(1, factor));
+  const r = Math.round(parseInt(h.slice(0, 2), 16) * f);
+  const g = Math.round(parseInt(h.slice(2, 4), 16) * f);
+  const b = Math.round(parseInt(h.slice(4, 6), 16) * f);
+  const to2 = (n: number): string => n.toString(16).padStart(2, '0');
+  return `#${to2(r)}${to2(g)}${to2(b)}`;
+}
+
 // ─── Font-face resolution (CH10) ─────────────────────────────────────────────
 // Chart text elements draw with, in priority order: the element's own
 // `<a:latin typeface>` (from its `<c:txPr>`), else the theme font-scheme face
@@ -4054,6 +4077,487 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   ctx.restore();
 }
 
+// ─── chartEx: box-and-whisker (CH15, MS 2014 chartex ext) ────────────────────
+
+/** Statistics of one box in a box-and-whisker plot. */
+interface BoxStats {
+  q1: number;
+  median: number;
+  q3: number;
+  /** Whisker ends = min/max of the NON-outlier points. */
+  whiskerLo: number;
+  whiskerHi: number;
+  mean: number;
+  outliers: number[];
+  /** Interior (non-outlier) points. Kept alongside the outliers so the optional
+   *  interior-dot overlay (`ChartexBoxSeries.showNonoutliers`) has its data
+   *  ready; that overlay is not drawn yet (flag parsed; interior-dot rendering
+   *  pending a fixture that enables it — sample-24 ships `nonoutliers="0"`). */
+  inner: number[];
+}
+
+/**
+ * Linear-interpolated quantile of `sorted` at probability `p` (0..1).
+ * `method === 'inclusive'` uses the R-7 / Excel `QUARTILE.INC` rank
+ * `p·(n−1)`; anything else uses the `exclusive` (R-6 / `QUARTILE.EXC`) rank
+ * `p·(n+1)` clamped into `[1, n]` — the box-and-whisker default Office writes
+ * (`<cx:statistics quartileMethod="exclusive">`).
+ */
+function boxQuantile(sorted: number[], p: number, method: string): number {
+  const n = sorted.length;
+  if (n === 0) return 0;
+  if (n === 1) return sorted[0];
+  let pos: number;
+  if (method === 'inclusive') {
+    pos = p * (n - 1) + 1; // 1-based rank
+  } else {
+    pos = p * (n + 1);
+    if (pos < 1) pos = 1;
+    if (pos > n) pos = n;
+  }
+  const lo = Math.floor(pos);
+  const frac = pos - lo;
+  if (lo >= n) return sorted[n - 1];
+  return sorted[lo - 1] + frac * (sorted[lo] - sorted[lo - 1]);
+}
+
+/**
+ * Compute the five-number summary + mean + outliers for one box, using the
+ * 1.5·IQR outlier fence (the Tukey rule Office applies; points beyond
+ * `Q1 − 1.5·IQR` / `Q3 + 1.5·IQR` are outliers and the whiskers stop at the
+ * most extreme non-outlier).
+ */
+function computeBoxStats(values: number[], method: string): BoxStats | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const q1 = boxQuantile(sorted, 0.25, method);
+  const median = boxQuantile(sorted, 0.5, method);
+  const q3 = boxQuantile(sorted, 0.75, method);
+  const iqr = q3 - q1;
+  const loFence = q1 - 1.5 * iqr;
+  const hiFence = q3 + 1.5 * iqr;
+  const inner: number[] = [];
+  const outliers: number[] = [];
+  for (const v of sorted) {
+    if (v < loFence || v > hiFence) outliers.push(v);
+    else inner.push(v);
+  }
+  const whiskerLo = inner.length ? inner[0] : sorted[0];
+  const whiskerHi = inner.length ? inner[inner.length - 1] : sorted[sorted.length - 1];
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  return { q1, median, q3, whiskerLo, whiskerHi, mean, outliers, inner };
+}
+
+/**
+ * Render a chartEx box-and-whisker chart (MS 2014 chartex extension — there is
+ * no ECMA-376 section; the structure is Microsoft's `<cx:chartSpace>` with a
+ * `<cx:series layoutId="boxWhisker">` per column, each referencing raw sample
+ * points via `<cx:dataId>`). The parser (`parse_chartex_boxwhisker`) groups the
+ * raw points by category and threads the `<cx:layoutPr>` visibility/statistics
+ * flags into `chart.chartexBox`; this renderer derives the five-number summary
+ * per (category, series) and draws, for each box: the IQR rectangle (Q1..Q3),
+ * the median line, whiskers to the non-outlier min/max (with end caps), the
+ * mean `×` marker, and outlier dots. Colors come from the theme accent palette
+ * (`chart.chartexAccents`, cycled by series) — the blue/orange/gray Office
+ * default — falling back to `CHART_PALETTE` when a resolver supplies no palette.
+ */
+function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+  const box = chart.chartexBox;
+  if (!box || box.categories.length === 0 || box.series.length === 0) return;
+  const { x, y, w, h } = r;
+
+  // Shared title band + cartesian plot rect. Reserve a category-label band at
+  // the bottom and a value-label gutter on the left; no legend (Office draws
+  // box-and-whisker without one by default).
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const catAxFontPx0 = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxFontPx0 = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const pad = {
+    t: titleBand.bandH + valAxFontPx0 / 2 + 2,
+    r: w * 0.02,
+    b: (chart.catAxisHidden ? h * 0.02 : catAxisLabelBandH(catAxFontPx0)),
+    l: chart.valAxisHidden ? w * 0.02 : w * 0.1,
+  };
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0,
+    pad,
+  });
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+
+  const cats = box.categories;
+  const nCat = cats.length;
+  const nSer = box.series.length;
+
+  // Value-axis extent across every sample point in every box.
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
+  for (const s of box.series) {
+    for (const group of s.valuesByCategory) {
+      for (const v of group) {
+        if (v < dataMin) dataMin = v;
+        if (v > dataMax) dataMax = v;
+      }
+    }
+  }
+  if (!isFinite(dataMin) || !isFinite(dataMax)) return;
+  // Excel's auto value axis (nice-rounded min/max/step). For the sample data
+  // (−78..128) this yields −100..150 step 50, matching PowerPoint.
+  const { min: axisMin, max: axisMax, step } = valueAxisScale(
+    dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit,
+  );
+  const span = axisMax - axisMin || 1;
+  const yOf = (v: number): number => py0 + ph * (1 - (v - axisMin) / span);
+
+  const font = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
+  const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+
+  // Value-axis gridlines + labels (unless the value axis is hidden).
+  ctx.save();
+  if (!chart.valAxisHidden) {
+    ctx.font = `${valFontPx}px ${font}`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let v = axisMin; v <= axisMax + 1e-6; v += step) {
+      const gy = yOf(v);
+      ctx.strokeStyle = '#e6e6e6';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
+    }
+  }
+  // Category-axis baseline.
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.strokeStyle = '#bfbfbf';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
+
+  // Category slots; each slot holds `nSer` boxes side by side. `<cx:catScaling
+  // gapWidth>` widens the inter-category gap (parser normalizes the fraction to
+  // the legacy percent, default 150%). The boxes fill the slot minus that gap,
+  // split evenly with a thin inter-box gutter.
+  const slotW = pw / nCat;
+  const gapWidthPct = chart.barGapWidth ?? 150;
+  const groupW = slotW / (1 + gapWidthPct / 100);
+  const boxGutter = groupW * 0.06;
+  const boxW = (groupW - boxGutter * (nSer - 1)) / nSer;
+  const paletteOf = (si: number): string => {
+    const accent = chart.chartexAccents?.[si % (chart.chartexAccents?.length ?? 1)];
+    const fill = box.series[si].color ?? accent ?? CHART_PALETTE[si % CHART_PALETTE.length];
+    return `#${fill}`;
+  };
+  // Outline color for the box edge / median / whisker / mean marker: the series
+  // accent darkened by `lumMod 80%` — PowerPoint's default modern chart style
+  // (`<cs:dataPoint>` line = `phClr` + one variation step). On sample-24 p.2 the
+  // accent2 fill `ED7D31` darkens to `BE6427` (pixel-verified), which equals a
+  // linear RGB ×0.8, so `scaleHexRgb(fill, 0.8)` reproduces Word's outline. (The
+  // full style part isn't resolved here beyond the title size — this 80% is the
+  // documented boxWhisker constant; if a chart ever overrides the dataPoint line
+  // via `<cx:spPr>` that would need reading, none of the CH15 fixtures do.)
+  const LUM_MOD_80 = 0.8;
+
+  const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  for (let ci = 0; ci < nCat; ci++) {
+    const slotLeft = px0 + slotW * ci + (slotW - groupW) / 2;
+    for (let si = 0; si < nSer; si++) {
+      const s = box.series[si];
+      const stats = computeBoxStats(s.valuesByCategory[ci] ?? [], s.quartileMethod);
+      if (!stats) continue;
+      const bx = slotLeft + si * (boxW + boxGutter);
+      const cx = bx + boxW / 2;
+      const fill = paletteOf(si);
+      const edge = scaleHexRgb(fill, LUM_MOD_80);
+      const yQ1 = yOf(stats.q1);
+      const yQ3 = yOf(stats.q3);
+      const boxTop = Math.min(yQ1, yQ3);
+      const boxH = Math.max(1, Math.abs(yQ1 - yQ3));
+
+      // Whiskers: vertical line from box edges to whisker ends, with end caps.
+      const capW = boxW * 0.4;
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx, yOf(stats.whiskerHi)); ctx.lineTo(cx, yQ3);
+      ctx.moveTo(cx, yQ1); ctx.lineTo(cx, yOf(stats.whiskerLo));
+      ctx.moveTo(cx - capW / 2, yOf(stats.whiskerHi)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerHi));
+      ctx.moveTo(cx - capW / 2, yOf(stats.whiskerLo)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerLo));
+      ctx.stroke();
+
+      // IQR box: solid accent fill + a thin accent×0.8 edge.
+      ctx.fillStyle = fill;
+      ctx.fillRect(bx, boxTop, boxW, boxH);
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 0.75;
+      ctx.strokeRect(bx + 0.375, boxTop + 0.375, boxW - 0.75, boxH - 0.75);
+
+      // Median line across the box.
+      const yMed = yOf(stats.median);
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(bx, yMed); ctx.lineTo(bx + boxW, yMed); ctx.stroke();
+
+      // Mean `×` marker (same accent×0.8 as the rest of the outline).
+      if (s.meanMarker) {
+        const mY = yOf(stats.mean);
+        const mR = Math.max(2, boxW * 0.14);
+        ctx.strokeStyle = edge;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx - mR, mY - mR); ctx.lineTo(cx + mR, mY + mR);
+        ctx.moveTo(cx + mR, mY - mR); ctx.lineTo(cx - mR, mY + mR);
+        ctx.stroke();
+      }
+
+      // Outlier dots.
+      if (s.showOutliers) {
+        ctx.fillStyle = fill;
+        const oR = Math.max(1.5, boxW * 0.06);
+        for (const o of stats.outliers) {
+          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+
+    // Category label (centered under the slot), word-wrapped like the other
+    // cartesian renderers.
+    if (!chart.catAxisHidden) {
+      ctx.font = `${catFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+      ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const label = cats[ci];
+      const ccx = px0 + slotW * ci + slotW / 2;
+      ctx.fillText(label, ccx, py0 + ph + 4);
+    }
+  }
+  ctx.restore();
+}
+
+// ─── chartEx: sunburst (CH15, MS 2014 chartex ext) ───────────────────────────
+
+/** A node in the sunburst ring tree. `value` is the sum of descendant leaf
+ *  sizes (or the node's own size when it is a leaf). `a0`/`a1` are its angular
+ *  span (radians, canvas convention) once laid out; `depth` is its ring index
+ *  (0 = innermost / root). */
+interface SunburstNode {
+  label: string;
+  value: number;
+  depth: number;
+  children: SunburstNode[];
+  /** Root-branch index (which top-level branch this node descends from) — used
+   *  to color the whole sub-tree in one accent. */
+  branchIndex: number;
+  a0: number;
+  a1: number;
+}
+
+/**
+ * Fold the flat `path`/`size` rows into a ring tree. Each row is a root→leaf
+ * label chain; walking the chain interns each label under its parent. The size
+ * is added at the DEEPEST node of the row (a node's `value` is the sum of the
+ * sizes beneath it). Children keep first-seen (source) order so the ring sweep
+ * order matches PowerPoint.
+ */
+function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNode {
+  const root: SunburstNode = {
+    label: '', value: 0, depth: -1, children: [], branchIndex: -1, a0: 0, a1: 0,
+  };
+  for (const row of rows) {
+    let node = root;
+    for (let d = 0; d < row.path.length; d++) {
+      const label = row.path[d];
+      let child = node.children.find(c => c.label === label);
+      if (!child) {
+        child = {
+          label,
+          value: 0,
+          depth: d,
+          children: [],
+          // Top-level nodes (d === 0) define the branch index; deeper nodes
+          // inherit their ancestor's.
+          branchIndex: d === 0 ? node.children.length : node.branchIndex,
+          a0: 0, a1: 0,
+        };
+        node.children.push(child);
+      }
+      child.value += row.size;
+      node = child;
+    }
+  }
+  root.value = root.children.reduce((s, c) => s + c.value, 0);
+  return root;
+}
+
+/** Assign angular spans top-down: each node partitions its `[a0, a1)` range
+ *  across its children proportional to their value, in child (source) order. */
+function layoutSunburstAngles(node: SunburstNode): void {
+  const total = node.children.reduce((s, c) => s + c.value, 0);
+  if (total <= 0) return;
+  let a = node.a0;
+  for (const child of node.children) {
+    const sweep = ((node.a1 - node.a0) * child.value) / total;
+    child.a0 = a;
+    child.a1 = a + sweep;
+    a = child.a1;
+    layoutSunburstAngles(child);
+  }
+}
+
+/** Maximum ring depth (number of levels below the root). */
+function sunburstMaxDepth(node: SunburstNode): number {
+  if (node.children.length === 0) return node.depth;
+  return Math.max(...node.children.map(sunburstMaxDepth));
+}
+
+/**
+ * Render a chartEx sunburst (MS 2014 chartex extension — no ECMA-376 section;
+ * the structure is a `<cx:series layoutId="sunburst">` over a `<cx:strDim
+ * type="cat">` of several `<cx:lvl>` and one `<cx:numDim type="size">`). The
+ * parser (`parse_chartex_sunburst`) yields the flat root→leaf `path`/`size`
+ * rows in `chart.chartexSunburst`; this renderer folds them into a ring tree,
+ * lays out each node's angular span proportional to its aggregated size, and
+ * draws concentric rings (inner = root/Branch, outward = Stem, Leaf) from 12
+ * o'clock clockwise. Every node in a branch shares that branch's theme accent
+ * (`chart.chartexAccents`, cycled by top-level index — the blue/orange/gray
+ * Office default). Labels are drawn white and centered in each segment, rotated
+ * to follow the arc and elided when the wedge is too small.
+ */
+function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+  const sb = chart.chartexSunburst;
+  if (!sb || sb.rows.length === 0) return;
+  const { x, y, w, h } = r;
+
+  // Radial frame (title band on top, no legend — Office draws sunburst without
+  // one). Reuse the pie frame params so the geometry matches the other radial
+  // charts.
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0,
+    radialGapFrac: 0.02,
+  });
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+  const cx = px0 + pw / 2;
+  const cy = py0 + ph / 2;
+  const outerR = Math.min(pw, ph) * 0.46;
+
+  const root = buildSunburstTree(sb.rows);
+  if (root.value <= 0 || root.children.length === 0) return;
+  // Full circle from 12 o'clock (−90°), clockwise (canvas angles grow CW), each
+  // parent partitioning its range across its children in source (first-seen)
+  // order. This is the natural spec-consistent reading of the `<cx:lvl>` point
+  // order. NB: Excel's own sunburst places the branches AFTER the first in a
+  // different rotational order (for sample-24 the observed clockwise order is
+  // Branch 1, 3, 2 rather than 1, 2, 3) — an undocumented runtime layout choice.
+  // Matching it exactly would require reverse-engineering that ordering, which
+  // the project's spec-first policy forbids without a documented rule, so the
+  // rings/hierarchy/proportions/colors match while the branch *placement* order
+  // is the straightforward source order.
+  root.a0 = -Math.PI / 2;
+  root.a1 = -Math.PI / 2 + Math.PI * 2;
+  layoutSunburstAngles(root);
+
+  const maxDepth = sunburstMaxDepth(root); // 0-based deepest ring index
+  const ringCount = maxDepth + 1;
+  // Small center hole (Office draws a modest hole, ~18% of the outer radius);
+  // the remaining band is split evenly across the rings.
+  const innerR = outerR * 0.18;
+  const ringBand = (outerR - innerR) / ringCount;
+
+  const accents = chart.chartexAccents;
+  const branchColor = (bi: number): string => {
+    const hex = accents?.[bi % accents.length] ?? CHART_PALETTE[bi % CHART_PALETTE.length];
+    return `#${hex}`;
+  };
+
+  const labelFont = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
+  const labelPx = Math.max(7, Math.min(13, outerR * 0.075));
+
+  // Draw every non-root node as a ring segment, deepest-last so borders read on
+  // top. Iterate breadth-first by depth.
+  const byDepth: SunburstNode[][] = Array.from({ length: ringCount }, () => []);
+  const collect = (n: SunburstNode): void => {
+    if (n.depth >= 0) byDepth[n.depth].push(n);
+    n.children.forEach(collect);
+  };
+  collect(root);
+
+  ctx.save();
+  for (let d = 0; d < ringCount; d++) {
+    const rInner = innerR + d * ringBand;
+    const rOuter = rInner + ringBand;
+    for (const node of byDepth[d]) {
+      const sweep = node.a1 - node.a0;
+      if (sweep <= 1e-4) continue;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rOuter, node.a0, node.a1);
+      ctx.arc(cx, cy, rInner, node.a1, node.a0, true);
+      ctx.closePath();
+      ctx.fillStyle = branchColor(node.branchIndex);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Label: white, centered at the mid-radius / mid-angle, rotated to run
+      // along the arc (tangential), word-wrapped and elided to the wedge.
+      const midA = (node.a0 + node.a1) / 2;
+      const midR = (rInner + rOuter) / 2;
+      // Radial room the label may occupy (the ring band, minus padding).
+      const radialRoom = ringBand - 4;
+      // Tangential arc length at the mid radius.
+      const arcLen = sweep * midR;
+      // Skip labels that plainly cannot fit even one glyph.
+      if (radialRoom < labelPx * 0.9 && arcLen < labelPx * 0.9) continue;
+
+      ctx.save();
+      ctx.translate(cx + Math.cos(midA) * midR, cy + Math.sin(midA) * midR);
+      // Orient the text so it reads along the ring: rotate to the tangent, and
+      // flip on the left half so it isn't upside-down.
+      let rot = midA + Math.PI / 2;
+      const deg = ((rot * 180) / Math.PI) % 360;
+      if (deg > 90 && deg < 270) rot += Math.PI;
+      ctx.rotate(rot);
+      ctx.font = `${labelPx}px ${labelFont}`;
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // The text runs along the tangent (rotated frame's x-axis), so its
+      // available width is the arc length and its stacking room (wrap lines) is
+      // the radial band.
+      const words = node.label.split(/\s+/).filter(Boolean);
+      const maxLineW = arcLen - 2;
+      const lines: string[] = [];
+      let cur = '';
+      for (const word of words) {
+        const trial = cur ? `${cur} ${word}` : word;
+        if (ctx.measureText(trial).width <= maxLineW || !cur) {
+          cur = trial;
+        } else {
+          lines.push(cur);
+          cur = word;
+        }
+      }
+      if (cur) lines.push(cur);
+      // Cap the number of lines to what the radial band holds.
+      const lineH = labelPx * 1.05;
+      const maxLines = Math.max(1, Math.floor(radialRoom / lineH));
+      const shown = lines.slice(0, maxLines).map(l => elideToWidth(ctx, l, maxLineW));
+      const totalH = shown.length * lineH;
+      shown.forEach((line, li) => {
+        if (line === '') return;
+        ctx.fillText(line, 0, -totalH / 2 + lineH / 2 + li * lineH);
+      });
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
 // ─── Background frame + dispatcher ──────────────────────────────────────────
 
 /**
@@ -4099,7 +4603,11 @@ export function renderChart(
     ctx.restore();
   }
 
-  if (chart.series.length === 0) {
+  // chartEx box-and-whisker / sunburst carry their data in the structured
+  // `chartexBox` / `chartexSunburst` fields, not the flat `series` array, so the
+  // empty-series "(no data)" guard must not fire for them.
+  const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null;
+  if (chart.series.length === 0 && !hasChartexData) {
     ctx.fillStyle = '#888';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
@@ -4137,6 +4645,10 @@ export function renderChart(
       renderWaterfallChart(ctx, chart, rect); break;
     case 'stock':
       renderStockChart(ctx, chart, rect, ptToPx); break;
+    case 'boxWhisker':
+      renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
+    case 'sunburst':
+      renderSunburstChart(ctx, chart, rect, ptToPx); break;
     default:
       ctx.fillStyle = '#888';
       ctx.font = '11px sans-serif';

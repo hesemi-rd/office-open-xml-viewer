@@ -1456,11 +1456,38 @@ fn load_chart_map(
         let Ok(xml) = read_zip_string(zip, &path) else {
             continue;
         };
-        if let Some(chart) = parse_docx_chart(&xml, theme) {
+        // A chartEx part reads its title font size from the associated
+        // chartStyle sidecar (`styleN.xml`), reached via the chart part's OWN
+        // rels (`word/charts/_rels/chartN.xml.rels`,
+        // `.../2011/relationships/chartStyle`). Resolve+read it best-effort;
+        // legacy `<c:>` charts ignore it (their title size is inline).
+        let style_xml = load_chart_style_xml(zip, &path);
+        if let Some(chart) = parse_docx_chart(&xml, style_xml.as_deref(), theme) {
             chart_map.insert(rid.clone(), chart);
         }
     }
     chart_map
+}
+
+/// Read the chartStyle part (`styleN.xml`) associated with a chart part at
+/// `chart_path` (e.g. `word/charts/chart6.xml`), following that part's own
+/// relationships (`word/charts/_rels/chart6.xml.rels`) to the
+/// `.../2011/relationships/chartStyle` target. Returns `None` when the chart
+/// has no chartStyle relationship or the part cannot be read (the chartEx
+/// title then falls back to its inline size, or the renderer's default).
+fn load_chart_style_xml(zip: &mut Zip, chart_path: &str) -> Option<String> {
+    // Split `word/charts/chart6.xml` into dir (`word/charts`) + file
+    // (`chart6.xml`) so the rels path is `word/charts/_rels/chart6.xml.rels`.
+    let (dir, file) = match chart_path.rsplit_once('/') {
+        Some((d, f)) => (d, f),
+        None => ("", chart_path),
+    };
+    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+    let rels_xml = read_zip_string(zip, &rels_path).ok()?;
+    let target =
+        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
+    let style_path = ooxml_common::rels::resolve_target(&format!("{}/", dir), &target);
+    read_zip_string(zip, &style_path).ok()
 }
 
 fn load_header_footer_set(
@@ -5358,6 +5385,7 @@ impl ooxml_common::chart::ColorResolver for DocxColorResolver<'_> {
 /// no recognized chart type.
 fn parse_docx_chart(
     chart_xml: &str,
+    style_xml: Option<&str>,
     theme: &ThemeColors,
 ) -> Option<ooxml_common::chart::ChartModel> {
     let doc = XmlDoc::parse(chart_xml).ok()?;
@@ -5368,7 +5396,9 @@ fn parse_docx_chart(
         .namespace()
         .is_some_and(|ns| ns.contains("chartex") || ns.contains("chartEx"));
     if is_chartex {
-        ooxml_common::chart::parse_chartex_part(root, &resolver)
+        // chartEx (waterfall/boxWhisker/…) reads its title font size from the
+        // associated chartStyle part when the `<cx:title>` itself carries none.
+        ooxml_common::chart::parse_chartex_part(root, &resolver, style_xml)
     } else {
         ooxml_common::chart::parse_chart_part(root, &resolver)
     }
@@ -6309,6 +6339,22 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
         .into_iter()
         .map(|(id, rel)| (id, rel.target))
         .collect()
+}
+
+/// Target of the first `<Relationship>` whose `Type` ends with `type_suffix`.
+/// Matched by `ends_with` so both the Transitional and Strict namespace
+/// prefixes resolve (mirrors pptx's `find_rel_target_by_type`). `None` when no
+/// relationship of that type is present.
+fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(rels_xml).ok()?;
+    for rel in doc.root_element().children().filter(|n| n.is_element()) {
+        if let Some(rel_type) = rel.attribute("Type") {
+            if rel_type.ends_with(type_suffix) {
+                return rel.attribute("Target").map(|t| t.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -9744,7 +9790,7 @@ mod anchor_image_relative_from_tests {
             <c:axId val="1"/><c:axId val="2"/>
           </c:barChart></c:plotArea></c:chart>
         </c:chartSpace>"#;
-        let chart = parse_docx_chart(chart_xml, &theme).expect("chart must parse");
+        let chart = parse_docx_chart(chart_xml, None, &theme).expect("chart must parse");
         assert_eq!(chart.chart_type, "clusteredBar");
         assert_eq!(chart.categories, vec!["Q1".to_string(), "Q2".to_string()]);
         assert_eq!(chart.series.len(), 1);
@@ -9799,6 +9845,7 @@ mod anchor_image_relative_from_tests {
                     <c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
                 </c:ser><c:axId val="1"/><c:axId val="2"/>
               </c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+            None,
             &theme,
         )
         .expect("model");
@@ -9869,7 +9916,7 @@ mod anchor_image_relative_from_tests {
             </cx:plotArea>
           </cx:chart>
         </cx:chartSpace>"#;
-        let chart = parse_docx_chart(chartex_xml, &theme).expect("chartex part must parse");
+        let chart = parse_docx_chart(chartex_xml, None, &theme).expect("chartex part must parse");
         assert_eq!(chart.chart_type, "boxWhisker");
         assert_eq!(
             chart.categories,
@@ -9925,6 +9972,7 @@ mod anchor_image_relative_from_tests {
                 <cx:series layoutId="sunburst"/>
               </cx:plotAreaRegion></cx:plotArea></cx:chart>
             </cx:chartSpace>"#,
+            None,
             &theme,
         )
         .expect("chartex model");

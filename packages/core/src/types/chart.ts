@@ -269,6 +269,8 @@ export type ChartType =
   | 'pie' | 'doughnut'
   | 'scatter' | 'bubble' | 'radar' | 'waterfall'
   | 'stock'
+  // chartEx (MS 2014 chartex ext) layouts CH15 renders.
+  | 'boxWhisker' | 'sunburst'
   | string;
 
 export interface ChartModel {
@@ -639,6 +641,80 @@ export interface ChartModel {
    * NOT yet draw them (tracked follow-up). null/undefined when absent.
    */
   stockUpDownBars?: boolean | null;
+  // ── chartEx box-and-whisker / sunburst (CH15, MS 2014 chartex ext) ─────────
+  /**
+   * Structured box-and-whisker data (`chartType === 'boxWhisker'`). Present
+   * ONLY for boxWhisker charts; null/absent otherwise so the flat
+   * `categories`/`series` model the other chartEx renderers consume is
+   * untouched. The renderer computes quartiles / mean / whiskers / outliers.
+   */
+  chartexBox?: ChartexBoxWhisker | null;
+  /**
+   * Structured sunburst hierarchy (`chartType === 'sunburst'`). Present ONLY
+   * for sunburst charts; null/absent otherwise.
+   */
+  chartexSunburst?: ChartexSunburst | null;
+  /**
+   * Theme accent palette (`accent1..6`, hex without '#') for chartEx charts
+   * that color by branch/series index (boxWhisker series, sunburst branches).
+   * null/absent when the resolver supplies no default palette (pptx); the
+   * renderer then falls back to its own `CHART_PALETTE`.
+   */
+  chartexAccents?: string[] | null;
+}
+
+/**
+ * One box-and-whisker series (chartEx `boxWhisker`, MS 2014 chartex ext). Each
+ * `<cx:series>` references its own raw sample points via `<cx:dataId>`; the
+ * parser groups them by category and threads the `<cx:layoutPr>` flags. The
+ * renderer derives the statistics.
+ */
+export interface ChartexBoxSeries {
+  /** Series display name (`<cx:tx><cx:v>`). */
+  name: string;
+  /** Fill (hex, no '#') — theme accent cycled by series index. null = fall
+   *  back to the renderer palette. */
+  color?: string | null;
+  /** Raw sample values grouped by category (outer = category index parallel to
+   *  {@link ChartexBoxWhisker.categories}, inner = the points in that group). */
+  valuesByCategory: number[][];
+  /** `<cx:visibility meanMarker>` — draw the mean `×`. */
+  meanMarker: boolean;
+  /** `<cx:visibility meanLine>` — draw a mean connector line across categories. */
+  meanLine: boolean;
+  /** `<cx:visibility outliers>` — draw outlier points. */
+  showOutliers: boolean;
+  /** `<cx:visibility nonoutliers>` — draw the interior (non-outlier) sample
+   *  points as jittered dots on top of the box. Flag parsed; interior-dot
+   *  rendering is pending a fixture that enables it (every sample-24 series
+   *  ships `nonoutliers="0"`, so there is nothing to verify against yet). */
+  showNonoutliers: boolean;
+  /** `<cx:statistics quartileMethod>` — "exclusive" (Excel default) | "inclusive". */
+  quartileMethod: string;
+}
+
+/** A chartEx box-and-whisker chart: unique categories + one series per column. */
+export interface ChartexBoxWhisker {
+  /** Unique category labels in first-seen order. */
+  categories: string[];
+  /** One entry per `<cx:series>`. */
+  series: ChartexBoxSeries[];
+}
+
+/**
+ * One row of a chartEx `sunburst`: the branch→…→leaf label chain (empty
+ * trailing segments trimmed) and its size value.
+ */
+export interface ChartexSunburstRow {
+  /** Label chain root→leaf. */
+  path: string[];
+  /** `<cx:numDim type="size">` value attaching to the deepest node in `path`. */
+  size: number;
+}
+
+/** A chartEx sunburst: the flat rows the renderer folds into a ring tree. */
+export interface ChartexSunburst {
+  rows: ChartexSunburstRow[];
 }
 
 /**
