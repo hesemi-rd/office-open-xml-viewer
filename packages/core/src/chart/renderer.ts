@@ -3,7 +3,7 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
+import type { ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../types/chart';
 import {
   computeChartFrame,
   chartTitleBand,
@@ -402,6 +402,57 @@ function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: numb
   return Math.max(8, h * 0.045);
 }
 
+/** Resolved secondary value-axis scale (combo charts). `min`/`max`/`step` are
+ *  the "nice" bounds + major unit; `makeToY(py0, ph)` builds the value→pixel
+ *  mapping once the final plot rect is known (the scale is computed BEFORE the
+ *  pad/gutter math from an estimated plot height, so the mapping factory is
+ *  split out). See {@link computeSecondaryAxis}. */
+interface SecondaryAxisScale {
+  min: number;
+  max: number;
+  step: number;
+  makeToY: (py0: number, ph: number) => (v: number) => number;
+}
+
+/** Compute the INDEPENDENT scale of a secondary value axis from the series that
+ *  opt into it (`useSecondaryAxis === true`). Shared by every axis family that
+ *  supports a secondary axis (bar-combo line series, and plain line / area
+ *  series): the axis has its own "nice" major unit / gridline count, anchored so
+ *  its min never sits above 0 (Excel keeps the zero line reachable), with an
+ *  explicit `<c:scaling><c:min/max>` (`sec.min`/`sec.max`) overriding. Returns
+ *  null when no `SecondaryValueAxis` was parsed OR no series opts into it — the
+ *  caller then keeps the single-axis path unchanged.
+ *
+ *  `plotHeightPt` is the estimated plot height in points (the axis is the
+ *  vertical right edge, so its length drives the auto major unit). `getValues`
+ *  yields each opted-in series' raw values.
+ *
+ *  This is a pure refactor of the bar renderer's inline secondary-scale math —
+ *  same `valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, len)` call,
+ *  same empty-data fallback (dMin→0, dMax→1). */
+function computeSecondaryAxis(
+  sec: SecondaryValueAxis | null,
+  seriesForSecondary: ChartSeries[],
+  plotHeightPt: number,
+): SecondaryAxisScale | null {
+  if (!sec) return null;
+  const secVals: number[] = [];
+  for (const s of seriesForSecondary) {
+    if (s.useSecondaryAxis !== true) continue;
+    for (const v of s.values) if (v != null) secVals.push(v);
+  }
+  const dMin = secVals.length ? Math.min(...secVals) : 0;
+  const dMax = secVals.length ? Math.max(...secVals) : 1;
+  const { min, max, step } = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, plotHeightPt);
+  const range = (max - min) || 1;
+  return {
+    min,
+    max,
+    step,
+    makeToY: (py0: number, ph: number) => (v: number): number => py0 + ph - ((v - min) / range) * ph,
+  };
+}
+
 function drawChartTitle(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -608,19 +659,13 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
   // own "nice" major unit / gridline count. Its axis is the vertical right edge,
-  // so its length is the plot height. Explicit `<c:scaling>` wins.
-  let sMin = 0, sMax = 1, sStep = 1;
-  if (sec) {
-    const lineVals: number[] = [];
-    for (const s of lineSeries) {
-      if (s.useSecondaryAxis !== true) continue;
-      for (const v of s.values) if (v != null) lineVals.push(v);
-    }
-    const dMin = lineVals.length ? Math.min(...lineVals) : 0;
-    const dMax = lineVals.length ? Math.max(...lineVals) : 1;
-    const scl = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, phEst / ptToPx);
-    sMin = scl.min; sMax = scl.max; sStep = scl.step;
-  }
+  // so its length is the plot height. Explicit `<c:scaling>` wins. Computed by
+  // the shared `computeSecondaryAxis` helper (same math the line/area families
+  // reuse); the fallback keeps the no-secondary path unchanged.
+  const secScale = computeSecondaryAxis(sec, lineSeries, phEst / ptToPx);
+  const sMin = secScale ? secScale.min : 0;
+  const sMax = secScale ? secScale.max : 1;
+  const sStep = secScale ? secScale.step : 1;
 
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const tickFontPx = Math.max(8, Math.min(11, phEst / 20));
@@ -715,7 +760,11 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const zeroY = valY(0); // column zero line
   const zeroX = valX(0); // horizontal-bar zero line
   const toYPrimaryLine = valY;
-  const toYSecondary   = (v: number): number => py0 + ph - ((v - sMin) / sRange) * ph;
+  // Secondary line series map through the shared scale's factory (identical to
+  // the old inline `py0 + ph - ((v - sMin) / sRange) * ph`; `makeToY` uses the
+  // same `(max - min) || 1` range). Falls back to the primary map when there is
+  // no secondary axis so `toYSecondary` stays callable.
+  const toYSecondary = secScale ? secScale.makeToY(py0, ph) : valY;
 
   const gridColor = '#e0e0e0';
   const steps = Math.round(axRange / step);
