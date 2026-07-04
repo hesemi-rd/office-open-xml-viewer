@@ -128,7 +128,6 @@ function buildInjected(): { ws: Worksheet; styles: Styles } {
   const injectedCell = {
     col: INJ_COL,
     row: INJ_ROW,
-    colRef: `${INJ_COL}`,
     value: { type: 'empty' as const },
     styleIndex,
   };
