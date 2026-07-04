@@ -47,16 +47,32 @@ export function niceAxisMin(dataMin: number, step: number): number {
  *  gridline count — it targets a roughly constant on-screen spacing, so a long
  *  axis (e.g. a horizontal bar chart's wide value axis) gets MORE, finer
  *  gridlines than a short one of the same data range. Empirically ~one major
- *  gridline per this many points reproduces PowerPoint across sample-14's
- *  column / area / horizontal-bar / secondary-axis charts. This is a runtime
- *  Excel behavior (not in ECMA-376); the constant is the one tunable. */
-const GRIDLINE_SPACING_PT = 40;
+ *  gridline per this many points reproduces PowerPoint. This is a runtime Excel
+ *  behavior (not in ECMA-376); the constant is the one tunable.
+ *
+ *  Calibrated against every value axis in the demo/sample-1 line chart plus
+ *  sample-14 (column / stacked / area / combo dual-axis / horizontal-bar) and
+ *  sample-2 (stacked-column / horizontal-bar) decks — 12 axes spanning
+ *  124–391 pt. Those axes uniquely pin the density: at ~243 pt one axis needs
+ *  6 intervals (range 79 → step 10) while another needs ≤6 (range 48.6 → step
+ *  10), so the target at 243 pt must be exactly 6 → ~40.6 pt/gridline; at
+ *  ~263 pt an area axis (range 48.6) must stay at 6 (step 10, not 5) → ≥43.9
+ *  pt/gridline. 42 sits in the satisfying band [40.5, 44.2] with the widest
+ *  margin to the nearest rounding flip (≈7.8 pt). The earlier value 40 rounded
+ *  the 263 pt area axis up to 7 gridlines, over-refining it to a step-5 axis
+ *  where PowerPoint draws step 10. */
+const GRIDLINE_SPACING_PT = 42;
 
 /** Pick the `niceStep` target-gridline count for an axis of `axisLenPt` points.
- *  Falls back to 5 (the legacy fixed target) when the length is unknown. */
+ *  Falls back to 5 (the legacy fixed target) when the length is unknown. The
+ *  floor is 4: PowerPoint keeps at least ~4 intervals on a value axis for
+ *  readability, so a short axis (e.g. the demo line chart's 124 pt axis, which
+ *  would otherwise round to 3) still gets a fine enough step — range 12 → step
+ *  2 (60,62,…,72), matching PowerPoint, rather than the coarse step 5 a target
+ *  of 3 produces. */
 function targetStepsForAxis(axisLenPt?: number): number {
   if (axisLenPt == null || !isFinite(axisLenPt) || axisLenPt <= 0) return 5;
-  return Math.min(15, Math.max(3, Math.round(axisLenPt / GRIDLINE_SPACING_PT)));
+  return Math.min(15, Math.max(4, Math.round(axisLenPt / GRIDLINE_SPACING_PT)));
 }
 
 export function valueAxisScale(

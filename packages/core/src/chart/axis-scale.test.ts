@@ -72,13 +72,28 @@ describe('valueAxisScale (one niceStep drives min, max and gridline step)', () =
     expect(valueAxisScale(0, 41, -5, null)).toEqual({ min: -5, max: 50, step: 10 });
   });
   it('a longer value axis gets a finer major unit (Excel axis-length model)', () => {
-    // Excel's auto major unit targets ~1 gridline per GRIDLINE_SPACING_PT (40),
+    // Excel's auto major unit targets ~1 gridline per GRIDLINE_SPACING_PT (42),
     // so the SAME data range yields more, finer gridlines on a longer axis.
     // range 44: default target (5) → step 10 (0–50, 5 intervals); a 380pt axis
-    // (target round(380/40)=10) → step 5 (0–50, 10 intervals) — matching the
+    // (target round(380/42)=9) → step 5 (0–50, 10 intervals) — matching the
     // horizontal-bar value axis (sample-14 slide-9) vs PowerPoint.
     expect(valueAxisScale(0, 44)).toEqual({ min: 0, max: 50, step: 10 });
     expect(valueAxisScale(0, 44, undefined, undefined, 380)).toEqual({ min: 0, max: 50, step: 5 });
+  });
+  it('a short axis keeps a fine step via the target floor of 4', () => {
+    // Regression: the demo/sample-1 line chart pins the value axis to an
+    // explicit 60–72 (ECMA-376 §21.2.2.90 min/max, range 12) on a ~124pt plot.
+    // round(124/42)=3 would niceStep(12,3)→step 5 (60,65,70). PowerPoint draws
+    // step 2 (60,62,…,72); the floor of 4 gives niceStep(12,4)→step 2. Without
+    // the floor this axis silently coarsens by one major unit.
+    expect(valueAxisScale(60, 72, 60, 72, 124.1)).toEqual({ min: 60, max: 72, step: 2 });
+  });
+  it('a medium axis is not over-refined (42pt/gridline density)', () => {
+    // Regression: sample-14 slide-6's area axis is range 48.6 on a ~263pt plot.
+    // At 40pt/gridline round(263/40)=7 → niceStep(48.6,7)→step 5, but PowerPoint
+    // draws step 10 (0,10,…,60). At 42pt/gridline round(263/42)=6 → step 10.
+    const { step } = valueAxisScale(0, 48.6, undefined, undefined, 263.2);
+    expect(step).toBe(10);
   });
   it('data 3.5 → max 4 with step 0.5 (fine-grained positive range)', () => {
     // step = niceStep(3.5) = 0.5; min = 0; max = niceAxisMax(3.5,0.5,0):
