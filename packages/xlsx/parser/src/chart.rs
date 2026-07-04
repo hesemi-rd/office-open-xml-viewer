@@ -1,7 +1,23 @@
 use crate::types::*;
-use crate::{parse_rels_map, resolve_fill_color, resolve_zip_path};
+use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
+
+/// Read the chartStyle part (`styleN.xml`) associated with a chart part at
+/// `chart_path` (e.g. `xl/charts/chart1.xml`), following that part's own
+/// relationships (`xl/charts/_rels/chart1.xml.rels`) to the
+/// `.../2011/relationships/chartStyle` target. Returns `None` when the chart
+/// has no chartStyle relationship or the part cannot be read (the chartEx
+/// title then falls back to its inline size, or the renderer's default).
+fn load_chart_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Option<String> {
+    let (dir, file) = chart_path.rsplit_once('/')?;
+    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+    let rels_xml = read_zip_string(archive, &rels_path).ok()?;
+    let target =
+        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
+    let style_path = resolve_zip_path(dir, &target);
+    read_zip_string(archive, &style_path).ok()
+}
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
 /// its drawing(s) for chart anchors (`<xdr:graphicFrame>` elements).
@@ -201,6 +217,13 @@ pub(crate) fn load_sheet_charts(
             let Ok(chart_xml) = read_zip_string(archive, &chart_path) else {
                 continue;
             };
+            // A chartEx part reads its title font size from the associated
+            // chartStyle sidecar (`styleN.xml`), reached via the chart part's
+            // OWN rels (`xl/charts/_rels/chartN.xml.rels`,
+            // `.../2011/relationships/chartStyle`). Read it best-effort now
+            // (before the chart doc is parsed, since both borrow `archive`);
+            // legacy `<c:>` charts ignore it (their title size is inline).
+            let style_xml = load_chart_style_xml(archive, &chart_path);
             // Parse the chart directly through the shared `parse_chart_part`
             // (the single superset parser for pptx + xlsx). The xlsx theme
             // palette + major/minor Latin faces ride on the `XlsxColorResolver`,
@@ -220,7 +243,11 @@ pub(crate) fn load_sheet_charts(
                 theme_minor_font_latin: theme_fonts.1,
             };
             let chart_opt = if is_chartex {
-                ooxml_common::chart::parse_chartex_part(chart_doc.root_element(), &resolver)
+                ooxml_common::chart::parse_chartex_part(
+                    chart_doc.root_element(),
+                    &resolver,
+                    style_xml.as_deref(),
+                )
             } else {
                 ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &resolver)
             };

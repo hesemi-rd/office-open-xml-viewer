@@ -67,11 +67,17 @@ pub(crate) fn parse_legacy_chart(
 /// wraps the resulting [`ChartModel`] in a pptx [`ChartElement`] graphic frame.
 /// The frame geometry (`x`/`y`/`width`/`height`) is filled in by the caller
 /// from the slide's `<p:graphicFrame><a:xfrm>`; here it defaults to 0.
-pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElement> {
+pub(crate) fn parse_chartex(
+    xml: &str,
+    style_xml: Option<&str>,
+    theme: &HashMap<String, String>,
+) -> Option<ChartElement> {
     let doc = roxmltree::Document::parse(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver { theme };
-    let chart = ooxml_common::chart::parse_chartex_part(root, &resolver)?;
+    // chartEx (waterfall/boxWhisker/…) reads its title font size from the
+    // associated chartStyle part when the `<cx:title>` itself carries none.
+    let chart = ooxml_common::chart::parse_chartex_part(root, &resolver, style_xml)?;
     Some(ChartElement {
         x: 0,
         y: 0,

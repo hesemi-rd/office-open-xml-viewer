@@ -1097,6 +1097,66 @@ pub fn extract_chart_title_size(node: Node) -> Option<i32> {
     })
 }
 
+/// chartEx (`<cx:chartSpace>`) title font size in hundredths of a point.
+///
+/// Unlike the legacy chart, whose `<c:title>` is a direct child of the chart
+/// node, a chartEx title lives at `<cx:chart><cx:title>` (a grandchild of the
+/// part root), so this walks all descendants to find the first `<cx:title>` and
+/// reads its first `<a:defRPr@sz>` / `<a:rPr@sz>`. `None` when the title carries
+/// no explicit size — which is the common case (see
+/// [`extract_chartex_style_title_size`]).
+fn extract_chartex_title_size(root: Node) -> Option<i32> {
+    let title = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
+    title.descendants().find_map(|n| {
+        if !n.is_element() {
+            return None;
+        }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" {
+            return None;
+        }
+        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+    })
+}
+
+/// Relationship-type suffix that a chart part's `.rels` uses to point at its
+/// chartStyle sidecar (`styleN.xml`). Matched by `ends_with` so both the
+/// Transitional and Strict namespace prefixes resolve. Shared by the pptx /
+/// xlsx / docx callers so they resolve the same relationship the same way.
+pub const CHART_STYLE_REL_TYPE_SUFFIX: &str = "office/2011/relationships/chartStyle";
+
+/// Title font size (hundredths of a point) declared by the chart's associated
+/// chartStyle part (`<cs:chartStyle><cs:title><cs:defRPr@sz>`).
+///
+/// A chartEx part almost never inlines the title size on its own `<cx:title>`;
+/// instead the size lives in the sibling `styleN.xml` reached via the chart
+/// part's `.../2011/relationships/chartStyle` relationship. Word's default
+/// modern chart style writes `<cs:title><cs:defRPr sz="1400">` (14pt), so
+/// without reading it a chartEx title would fall back to an area-proportional
+/// guess that is visibly too large. `None` when `style_xml` is absent, malformed,
+/// or declares no `<cs:title>` size.
+pub fn extract_chartex_style_title_size(style_xml: &str) -> Option<i32> {
+    let doc = roxmltree::Document::parse(style_xml).ok()?;
+    let title = doc
+        .root_element()
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
+    // `<cs:title>`'s size sits on its direct-child `<cs:defRPr@sz>`; scan
+    // descendants so a nested `<a:defRPr>`/`<a:rPr>` (if any) is also honored.
+    title.descendants().find_map(|n| {
+        if !n.is_element() {
+            return None;
+        }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" {
+            return None;
+        }
+        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+    })
+}
+
 /// First `<a:defRPr@b>` / `<a:rPr@b>` bold flag inside `node`'s direct-child
 /// `<c:title>`. `None` when not specified (renderer treats as not bold).
 pub fn extract_chart_title_bold(node: Node) -> Option<bool> {
@@ -1793,6 +1853,7 @@ pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
 pub fn parse_chartex_part(
     chartspace_root: Node,
     resolver: &dyn ColorResolver,
+    style_xml: Option<&str>,
 ) -> Option<ChartModel> {
     let root = chartspace_root;
 
@@ -1809,7 +1870,8 @@ pub fn parse_chartex_part(
     // identically. Only populated for the layouts CH15 renders (boxWhisker /
     // sunburst) so waterfall/treemap wire output stays byte-stable. `None`
     // otherwise.
-    let chartex_title = if chart_type == "boxWhisker" || chart_type == "sunburst" {
+    let renders_chartex = chart_type == "boxWhisker" || chart_type == "sunburst";
+    let chartex_title = if renders_chartex {
         root.descendants()
             .find(|n| n.is_element() && n.tag_name().name() == "title")
             .and_then(|t| {
@@ -1818,6 +1880,20 @@ pub fn parse_chartex_part(
             })
             .map(|rich| flatten_rich_text(rich, None))
             .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    // ── chartEx title font size (MS 2014 chartex ext) ────────────────────────
+    // Precedence: an explicit `sz` on the chartEx part's own `<cx:title>` rich
+    // text wins; otherwise fall back to the associated chartStyle part's
+    // `<cs:title><cs:defRPr@sz>` (Word's default modern style = 1400 = 14pt).
+    // Without the style part a chartEx title would be sized by the renderer's
+    // area-proportional guess (≈21pt on sample-24), 1.5× too large. Only
+    // populated for the rendered layouts so waterfall/treemap stay byte-stable.
+    let chartex_title_font_size_hpt = if renders_chartex {
+        extract_chartex_title_size(root)
+            .or_else(|| style_xml.and_then(extract_chartex_style_title_size))
     } else {
         None
     };
@@ -2035,7 +2111,7 @@ pub fn parse_chartex_part(
         cat_axis_cross_between: "between".to_string(),
         val_axis_major_tick_mark: "cross".to_string(),
         cat_axis_major_tick_mark: "cross".to_string(),
-        title_font_size_hpt: None,
+        title_font_size_hpt: chartex_title_font_size_hpt,
         title_font_color: None,
         title_font_face: None,
         cat_axis_font_size_hpt: None,
@@ -6079,6 +6155,7 @@ mod tests {
     // `Calibri Light` / `Calibri` as the theme major/minor faces.
 
     const CX_NS: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+    const CS_NS: &str = "http://schemas.microsoft.com/office/drawing/2012/chartStyle";
 
     /// (a) Waterfall with the full decoration set: a category dimension, a value
     /// dimension with negatives, `<cx:subtotals>` (idx 0 is implicit, idx 5 is
@@ -6136,7 +6213,8 @@ mod tests {
             </cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("waterfall parses");
+        let m =
+            parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("waterfall parses");
 
         assert_eq!(m.chart_type, "waterfall");
         assert_eq!(m.categories, vec!["Start", "Up", "Down", "End"]);
@@ -6208,7 +6286,8 @@ mod tests {
             </cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("treemap parses");
+        let m =
+            parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("treemap parses");
 
         assert_eq!(m.chart_type, "treemap");
         assert_eq!(m.categories, vec!["North", "South", "East"]);
@@ -6231,7 +6310,7 @@ mod tests {
             r#"<cx:chartSpace xmlns:cx="{CX_NS}"><cx:chart><cx:plotArea/></cx:chart></cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        assert!(parse_chartex_part(d.root_element(), &FixtureResolver).is_none());
+        assert!(parse_chartex_part(d.root_element(), &FixtureResolver, None).is_none());
     }
 
     /// (d) Newlines inside a category `<cx:pt>` are flattened to spaces (Office
@@ -6252,7 +6331,7 @@ mod tests {
             </cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("parses");
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("parses");
         assert_eq!(m.categories, vec!["FY2024 1Q"]);
     }
 
@@ -6310,7 +6389,8 @@ mod tests {
             </cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("boxWhisker parses");
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver, None)
+            .expect("boxWhisker parses");
         assert_eq!(m.chart_type, "boxWhisker");
         assert_eq!(m.title.as_deref(), Some("My box chart"));
         assert_eq!(
@@ -6373,7 +6453,8 @@ mod tests {
             </cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("sunburst parses");
+        let m =
+            parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("sunburst parses");
         assert_eq!(m.chart_type, "sunburst");
         assert_eq!(m.title.as_deref(), Some("My sunburst"));
         let sb = m.chartex_sunburst.expect("sunburst data present");
@@ -6406,11 +6487,77 @@ mod tests {
             </cx:chartSpace>"#
         );
         let d = chart_space_of(&xml);
-        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("waterfall parses");
+        let m =
+            parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("waterfall parses");
         assert!(m.chartex_box.is_none());
         assert!(m.chartex_sunburst.is_none());
         assert!(m.chartex_accents.is_none());
         assert!(m.title.is_none());
+    }
+
+    /// `<cs:title><cs:defRPr sz>` in a chartStyle part extracts the title size
+    /// (hpt). Word's default modern chart style writes 1400 (14pt).
+    #[test]
+    fn extract_chartex_style_title_size_reads_cs_defrpr() {
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:title><cs:defRPr sz="1400" b="0"/></cs:title>
+            </cs:chartStyle>"#
+        );
+        assert_eq!(extract_chartex_style_title_size(&style), Some(1400));
+        // No <cs:title> / no sz → None.
+        assert!(extract_chartex_style_title_size(&format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}"><cs:dataPoint/></cs:chartStyle>"#
+        ))
+        .is_none());
+        // Malformed XML → None (not a panic).
+        assert!(extract_chartex_style_title_size("<not xml").is_none());
+    }
+
+    /// A chartEx title with no inline `sz` falls back to the chartStyle part's
+    /// `<cs:title>` size; an inline `sz` on the `<cx:title>` rich text wins over
+    /// the style part; and with no style part at all the size is `None` (the
+    /// renderer's area-proportional fallback).
+    #[test]
+    fn parse_chartex_part_title_size_resolves_from_style_part() {
+        let chart_xml = |title_rpr: &str| {
+            format!(
+                r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+                  <cx:chartData><cx:data id="0">
+                    <cx:strDim type="cat"><cx:lvl ptCount="1"><cx:pt idx="0">Leaf</cx:pt></cx:lvl></cx:strDim>
+                    <cx:numDim type="size"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim>
+                  </cx:data></cx:chartData>
+                  <cx:chart>
+                    <cx:title><cx:tx><cx:rich><a:p><a:pPr>{title_rpr}</a:pPr>
+                      <a:r><a:t>T</a:t></a:r></a:p></cx:rich></cx:tx></cx:title>
+                    <cx:plotArea><cx:plotAreaRegion>
+                      <cx:series layoutId="sunburst"><cx:dataId val="0"/></cx:series>
+                    </cx:plotAreaRegion></cx:plotArea>
+                  </cx:chart>
+                </cx:chartSpace>"#
+            )
+        };
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}"><cs:title><cs:defRPr sz="1400"/></cs:title></cs:chartStyle>"#
+        );
+
+        // No inline sz + style part → style part's 1400.
+        let x0 = chart_xml("<a:defRPr/>");
+        let d0 = chart_space_of(&x0);
+        let m0 = parse_chartex_part(d0.root_element(), &FixtureResolver, Some(&style)).unwrap();
+        assert_eq!(m0.title_font_size_hpt, Some(1400));
+
+        // Inline sz on the title wins over the style part.
+        let x1 = chart_xml(r#"<a:defRPr sz="2000"/>"#);
+        let d1 = chart_space_of(&x1);
+        let m1 = parse_chartex_part(d1.root_element(), &FixtureResolver, Some(&style)).unwrap();
+        assert_eq!(m1.title_font_size_hpt, Some(2000));
+
+        // No style part and no inline sz → None (renderer fallback).
+        let x2 = chart_xml("<a:defRPr/>");
+        let d2 = chart_space_of(&x2);
+        let m2 = parse_chartex_part(d2.root_element(), &FixtureResolver, None).unwrap();
+        assert_eq!(m2.title_font_size_hpt, None);
     }
 
     // ── CH13: 3D flattening / stock / ofPie type detection ───────────────────

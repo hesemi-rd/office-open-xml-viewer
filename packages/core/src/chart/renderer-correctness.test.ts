@@ -2427,6 +2427,39 @@ describe('CH15 — chartEx box-and-whisker', () => {
     }), RECT, 1);
     expect(rec.fillRects.length).toBe(6);
   });
+
+  it('sizes the title from titleFontSizeHpt (chartStyle part) rather than an area-proportional guess', () => {
+    // With titleFontSizeHpt=1400 (14pt, Word's default modern chartStyle) at
+    // scale 1 the title renders at 14px — far below the Math.max(10, h*0.085) ≈
+    // 30.6px the fallback would produce for this 360px-tall rect. Capture the
+    // font active at each fillText so we can read the title's px size.
+    const drawn: Array<{ text: string; px: number }> = [];
+    const state: Record<string, unknown> = {
+      font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+      textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+    };
+    const px = (font: string): number => {
+      const m = /(\d+(?:\.\d+)?)px/.exec(font);
+      return m ? parseFloat(m[1]) : 10;
+    };
+    const ctx = new Proxy(state, {
+      get(_t, prop: string) {
+        if (prop in state && typeof state[prop] !== 'function') return state[prop];
+        if (prop === 'measureText') return (t: string) => ({ width: String(t).length * px(String(state.font)) * 0.6 });
+        if (prop === 'fillText') return (text: string) => { drawn.push({ text, px: px(String(state.font)) }); };
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => ({ addColorStop() {} });
+        return () => undefined;
+      },
+      set(_t, prop: string, value) { state[prop] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+
+    renderChart(ctx, boxModel({ title: 'the box title', titleFontSizeHpt: 1400 }), RECT, 1);
+    const titleDraw = drawn.find(d => d.text === 'the box title');
+    expect(titleDraw).toBeDefined();
+    // 1400 hpt → 14pt → 14px at scale 1. Assert it honored the size (14, not the
+    // ~30.6px area-proportional fallback).
+    expect(titleDraw?.px).toBeCloseTo(14, 5);
+  });
 });
 
 // CH15 — chartEx sunburst (MS 2014 chartex ext). Verify the hierarchy folds

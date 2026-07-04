@@ -1747,7 +1747,7 @@ mod tests {
             .read_to_string(&mut xml)
             .unwrap();
         let theme = HashMap::new();
-        let result = parse_chartex(&xml, &theme);
+        let result = parse_chartex(&xml, None, &theme);
         println!("parse_chartex result: {:?}", result.is_some());
         if let Some(ref c) = result {
             println!("  chart_type: {}", c.chart.chart_type);
@@ -1859,7 +1859,7 @@ mod tests {
 
         if let Ok(chart_xml) = result {
             let theme = HashMap::new();
-            let r = parse_chartex(&chart_xml, &theme);
+            let r = parse_chartex(&chart_xml, None, &theme);
             println!("parse_chartex: {:?}", r.is_some());
         }
     }
