@@ -202,7 +202,7 @@ function legendSwatchStyle(chartType: string | undefined): LegendSwatchStyle {
   if (!chartType) return 'fill';
   if (
     chartType === 'line' || chartType === 'stackedLine' || chartType === 'stackedLinePct' ||
-    chartType === 'radar' || chartType === 'scatter'
+    chartType === 'radar' || chartType === 'scatter' || chartType === 'stock'
   ) {
     return 'line';
   }
@@ -1869,6 +1869,240 @@ function renderLineChart(
       ctx, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
     );
+  }
+
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stock chart (ECMA-376 §21.2.2.198)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * High-low-close (and open-high-low-close) stock chart. Series order is fixed
+ * by the spec: a 3-series chart is High, Low, Close; a 4-series chart is Open,
+ * High, Low, Close. For each category we draw:
+ *   - a thin vertical "hi-lo line" from the Low value to the High value
+ *     (`<c:hiLowLines>`, §21.2.2.60) — always, when hiLowLines is present;
+ *   - the Close series marker at its value (a short tick / dot);
+ *   - the Open series marker (4-series only).
+ * The value axis, date/category axis, title and legend reuse the shared
+ * Cartesian scaffolding (identical to the line renderer). `<c:upDownBars>`
+ * (§21.2.2.227) is recognized at parse time but not drawn here.
+ */
+function renderStockChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+): void {
+  const { x, y, w, h } = r;
+  const cats = chartCategories(chart);
+  const n = cats.length;
+  if (n === 0) return;
+
+  // Fixed spec series roles by position. With 4 series the first is Open; the
+  // last three are always High, Low, Close. Fewer than 3 series can't form a
+  // hi-lo-close plot, so fall back to plotting each series' markers only.
+  const series = chart.series;
+  const hasOpen = series.length >= 4;
+  const openIdx = hasOpen ? 0 : -1;
+  const highIdx = hasOpen ? 1 : 0;
+  const lowIdx = hasOpen ? 2 : 1;
+  const closeIdx = hasOpen ? 3 : 2;
+  const highS = series[highIdx];
+  const lowS = series[lowIdx];
+  const closeS = series[closeIdx] as ChartSeries | undefined;
+  const openS = openIdx >= 0 ? series[openIdx] : undefined;
+
+  // ── Shared Cartesian frame (mirrors renderLineChart's band computation) ──
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legBottomH, legTopH } = chartLegendBands(leg);
+  const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
+
+  const padT = titleH + legTopH + valAxFontPx / 2 + 2;
+  const padB = catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
+
+  const pad = {
+    t: padT,
+    r: legRightW + w * 0.05,
+    b: padB,
+    l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
+  };
+
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0.22,
+    pad,
+  });
+  if (pw <= 0 || ph <= 0) return;
+
+  if (chart.plotAreaBg) {
+    ctx.fillStyle = `#${chart.plotAreaBg}`;
+    ctx.fillRect(px0, py0, pw, ph);
+  }
+
+  // ── Value-axis extent: across every series' plotted values (the hi-lo line
+  // needs both the low and high extremes). Anchored at 0 for positive data
+  // (matching Excel's stock chart) unless the file sets an explicit min. ──
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
+  for (const s of series) {
+    for (let ci = 0; ci < n; ci++) {
+      const v = s.values[ci];
+      if (v == null) continue;
+      dataMin = Math.min(dataMin, v);
+      dataMax = Math.max(dataMax, v);
+    }
+  }
+  if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
+  if (chart.valMin != null) dataMin = chart.valMin;
+  else if (dataMin > 0) dataMin = 0;
+  if (chart.valMax != null) dataMax = chart.valMax;
+  else if (dataMax < 0) dataMax = 0;
+  if (dataMax === dataMin) dataMax = dataMin + 1;
+
+  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
+  if (plan.max - plan.min === 0) return;
+  const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
+
+  // Category X mapping — stock charts use crossBetween="between" by default so
+  // the first/last hi-lo line isn't flush against the axes (matches Excel).
+  const between = isCrossBetween(chart);
+  const catRev = catAxisReversed(chart);
+  const toX = between
+    ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
+    : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
+
+  // ── Value axis: gridlines + ticks + labels (identical to the line renderer) ──
+  if (!chart.valAxisHidden) {
+    ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.textBaseline = 'middle';
+    const grid = valGridStroke(chart, ptToPx);
+    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false, grid);
+    const drawMajorGrid = drawValMajorGridlines(chart);
+    const drawLabels = chart.valAxisTickLabelPos !== 'none';
+    for (const v of plan.majorLines) {
+      const gy = toY(v);
+      if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0, grid);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
+      if (drawLabels) {
+        ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+        ctx.textAlign = 'right';
+        ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+      }
+    }
+  }
+
+  // Axis rules (bottom = category, left = value).
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
+  if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
+
+  // ── Hi-lo lines: vertical Low↔High per category. Drawn when the file declares
+  // `<c:hiLowLines>` (the normal case) OR whenever both High and Low series are
+  // present — a stock chart without them is degenerate. Color from the resolved
+  // `<c:hiLowLines>` line fill, else a neutral gray. ──
+  const drawHiLo = (chart.stockHiLowLines ?? true) && highS != null && lowS != null;
+  if (drawHiLo && highS && lowS) {
+    ctx.strokeStyle = chart.stockHiLowLineColor ? `#${chart.stockHiLowLineColor}` : '#595959';
+    ctx.lineWidth = Math.max(1, 0.75 * ptToPx);
+    ctx.setLineDash([]);
+    for (let ci = 0; ci < n; ci++) {
+      const hi = highS.values[ci];
+      const lo = lowS.values[ci];
+      if (hi == null || lo == null) continue;
+      const cx = toX(ci);
+      ctx.beginPath();
+      ctx.moveTo(cx, toY(hi));
+      ctx.lineTo(cx, toY(lo));
+      ctx.stroke();
+    }
+  }
+
+  // ── Close (and Open) markers. A stock chart's close is drawn as a short tick.
+  // If the series carries an explicit `<c:marker>` (symbol/size/fill), honor it;
+  // otherwise draw a left/right tick in the series color. ──
+  const drawStockTick = (
+    s: ChartSeries | undefined,
+    seriesIndex: number,
+    side: 'left' | 'right' | 'both',
+  ): void => {
+    if (!s) return;
+    const color = chartColor(seriesIndex, s);
+    const symbol = s.markerSymbol ?? null;
+    const hasExplicitMarker = symbol != null && symbol !== 'none' && seriesHasMarkerDetail(s);
+    const tickLen = Math.max(3, (pw / n) * 0.22);
+    for (let ci = 0; ci < n; ci++) {
+      const v = s.values[ci];
+      if (v == null) continue;
+      const cx = toX(ci);
+      const cy = toY(v);
+      if (hasExplicitMarker) {
+        drawMarker(
+          ctx, cx, cy, symbol as string,
+          s.markerSize ?? 3, s.markerFill ?? color, s.markerLine ?? null, ptToPx,
+        );
+        continue;
+      }
+      // Horizontal tick: close ticks to the RIGHT of the line, open ticks to the
+      // LEFT (Excel's open-high-low-close convention). `both` centers it.
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1, 0.75 * ptToPx);
+      ctx.beginPath();
+      const x0 = side === 'right' ? cx : side === 'left' ? cx - tickLen : cx - tickLen / 2;
+      const x1 = side === 'right' ? cx + tickLen : side === 'left' ? cx : cx + tickLen / 2;
+      ctx.moveTo(x0, cy);
+      ctx.lineTo(x1, cy);
+      ctx.stroke();
+    }
+  };
+  drawStockTick(openS, openIdx, 'left');
+  drawStockTick(closeS, closeIdx, 'right');
+
+  // If fewer than 3 series (not a real hi-lo-close), still plot each series'
+  // markers so nothing is silently dropped.
+  if (series.length < 3) {
+    for (let si = 0; si < series.length; si++) {
+      drawStockTick(series[si], si, 'both');
+    }
+  }
+
+  // ── Category (date) axis labels — same path as the line renderer. ──
+  if (!chart.catAxisHidden) {
+    const labelInterval = Math.max(1, Math.ceil(n / 8));
+    const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
+    ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    const catSlotMaxPx = (pw / n) * labelInterval - 4;
+    const showLabels = catLabelsVisible(chart);
+    const rotRad = catLabelRotationRad(chart);
+    for (let ci = 0; ci < n; ci += labelInterval) {
+      const tx = toX(ci);
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
+      if (!showLabels) continue;
+      ctx.fillStyle = catLabelColor;
+      const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
+      const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
+      drawRotatedCatLabel(ctx, elideToWidth(ctx, label, budget), tx, py0 + ph + 5, rotRad);
+    }
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
@@ -3673,6 +3907,8 @@ export function renderChart(
       renderScatterChart(ctx, chart, rect, ptToPx); break;
     case 'waterfall':
       renderWaterfallChart(ctx, chart, rect); break;
+    case 'stock':
+      renderStockChart(ctx, chart, rect, ptToPx); break;
     default:
       ctx.fillStyle = '#888';
       ctx.font = '11px sans-serif';

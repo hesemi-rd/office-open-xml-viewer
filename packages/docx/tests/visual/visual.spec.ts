@@ -9,6 +9,11 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   { name: 'private/sample-3', pageCount: 3, width: 595 },
   { name: 'private/sample-4', pageCount: 1, width: 595 },
   { name: 'private/sample-5', pageCount: 7, width: 595 },
+  // CH13 chart coverage: sample-24 p.3 carries a stockChart (hi-lo-close);
+  // sample-25 is a pie3DChart. References are private (gitignored) and generated
+  // locally with UPDATE_REFS=1 — they are never committed.
+  { name: 'private/sample-24', pageCount: 3, width: 595 },
+  { name: 'private/sample-25', pageCount: 1, width: 595 },
   { name: 'demo/sample-1', pageCount: 6, width: 595 },
 ];
 

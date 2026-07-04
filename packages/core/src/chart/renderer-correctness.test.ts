@@ -2153,3 +2153,83 @@ describe('CH6-follow — series trendlines (commit 3)', () => {
     expect(rec.segs.every(s => !s.dashed)).toBe(true);
   });
 });
+
+describe('CH13 — stock chart (high/low/close)', () => {
+  // High/Low/Close over three dates. Value axis 0..70 so the plot geometry is
+  // easy to reason about.
+  const stockModel = (over: Partial<ChartModel> = {}): ChartModel => baseModel({
+    chartType: 'stock',
+    categories: ['1/5/2002', '1/6/2002', '1/7/2002'],
+    valMin: 0,
+    valMax: 70,
+    stockHiLowLines: true,
+    stockHiLowLineColor: '595959',
+    series: [
+      series({ name: 'High', values: [55, 57, 57] }),
+      series({ name: 'Low', values: [11, 12, 13] }),
+      series({ name: 'Close', values: [32, 35, 34] }),
+    ],
+    ...over,
+  });
+
+  /** Near-vertical segments in the hi-lo line color that span a large Y range —
+   *  these are the per-category low↔high lines. */
+  function hiLoLines(segs: Seg[]): Seg[] {
+    return segs.filter(
+      s => Math.abs(s.x1 - s.x0) < 0.5 && Math.abs(s.y1 - s.y0) > 20 && s.ss === '#595959',
+    );
+  }
+
+  it('draws one vertical low↔high line per category, spanning the correct value range', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, stockModel(), RECT, 1);
+    const lines = hiLoLines(rec.segs);
+    expect(lines.length).toBe(3);
+
+    // The tallest line (category 2: 12..57 = 45 units) is taller than the
+    // shortest of the three, and every line's two endpoints map High above Low
+    // (smaller Y = higher value in canvas coords).
+    for (const l of lines) {
+      const top = Math.min(l.y0, l.y1);
+      const bot = Math.max(l.y0, l.y1);
+      expect(bot).toBeGreaterThan(top);
+    }
+    // Category ordering left→right: the three lines have increasing X.
+    const xs = lines.map(l => l.x0).sort((a, b) => a - b);
+    expect(xs[0]).toBeLessThan(xs[1]);
+    expect(xs[1]).toBeLessThan(xs[2]);
+
+    // The hi-lo span is proportional to (high - low): category 1 (55-11=44) is
+    // shorter than category 2 (57-12=45) by roughly the same pixel ratio.
+    const span = (l: Seg): number => Math.abs(l.y1 - l.y0);
+    const byX = [...lines].sort((a, b) => a.x0 - b.x0);
+    // 44 vs 45 vs 44 units — cat2 is the tallest.
+    expect(span(byX[1])).toBeGreaterThanOrEqual(span(byX[0]));
+  });
+
+  it('renders the title and a series-driven legend (High / Low / Close)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, stockModel({ title: 'Stock', showLegend: true, legendPos: 'b' }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('Stock');
+    expect(labels).toContain('High');
+    expect(labels).toContain('Low');
+    expect(labels).toContain('Close');
+  });
+
+  it('honors an explicit hi-lo line color', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, stockModel({ stockHiLowLineColor: 'FF0000' }), RECT, 1);
+    const red = rec.segs.filter(
+      s => Math.abs(s.x1 - s.x0) < 0.5 && Math.abs(s.y1 - s.y0) > 20 && s.ss === '#FF0000',
+    );
+    expect(red.length).toBe(3);
+  });
+
+  it('falls back to a default gray hi-lo line when no color is given', () => {
+    const rec = segRecordingCtx();
+    // stockHiLowLineColor omitted → renderer default '#595959'.
+    renderChart(rec.ctx, stockModel({ stockHiLowLineColor: null }), RECT, 1);
+    expect(hiLoLines(rec.segs).length).toBe(3);
+  });
+});

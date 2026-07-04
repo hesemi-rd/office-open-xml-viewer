@@ -288,6 +288,23 @@ pub struct ChartModel {
     /// tick-label rotation. `None`/0 = horizontal (byte-stable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_label_rotation: Option<i32>,
+    // ── Stock chart (CH13, §21.2.2.198) ──────────────────────────────────────
+    /// `<c:stockChart><c:hiLowLines>` (§21.2.2.80) presence. When `Some(true)`
+    /// the stock renderer draws a vertical line spanning each category's
+    /// low↔high value. Only emitted for a stock chart (`chart_type == "stock"`);
+    /// `None` on every other chart type keeps the wire byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_hi_low_lines: Option<bool>,
+    /// `<c:hiLowLines><c:spPr><a:ln><a:solidFill>` resolved color (hex, no `#`).
+    /// `None` = the renderer's default gray. Only meaningful with
+    /// `stock_hi_low_lines == Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_hi_low_line_color: Option<String>,
+    /// `<c:stockChart><c:upDownBars>` (§21.2.2.218) presence. Parsed so a file
+    /// that carries open-close up/down bars is recognized; the stock renderer
+    /// does NOT yet draw them (tracked as a follow-up). `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_up_down_bars: Option<bool>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -1913,6 +1930,9 @@ pub fn parse_chartex_part(
         cat_axis_tick_label_pos: None,
         val_axis_tick_label_pos: None,
         cat_axis_label_rotation: None,
+        stock_hi_low_lines: None,
+        stock_hi_low_line_color: None,
+        stock_up_down_bars: None,
     })
 }
 
@@ -2524,57 +2544,104 @@ pub fn parse_chart_part(
             .find(|n| n.is_element() && n.tag_name().name() == name)
     };
 
-    let chart_type = if let Some(bc) = find_chart("barChart") {
-        let grouping = bc
+    // ECMA-376 3D chart types (§21.2.2.15 bar3DChart, §21.2.2.96 line3DChart,
+    // §21.2.2.4 area3DChart, §21.2.2.140 pie3DChart) are FLATTENED to their 2D
+    // equivalents: the child data structure (`<c:ser>`/`<c:cat>`/`<c:val>`/
+    // grouping/`<c:dLbls>`) is identical to the 2D form, so a 3D chart is drawn
+    // as the corresponding 2D chart. The 3D-only elements (`<c:view3D>`
+    // §21.2.2.228, the 3D chart-space surfaces `<c:floor>` §21.2.2.69 /
+    // `<c:sideWall>` §21.2.2.191 / `<c:backWall>` §21.2.2.11 (all `CT_Surface`),
+    // `<a:scene3d>`/`<a:sp3d>` shape 3D and `<c:gapDepth>` §21.2.2.74) are
+    // ignored. This 2D-flattening is the established strategy of web chart
+    // engines (Google Slides, Keynote) and was approved in the CH13 plan; a
+    // faithful isometric 3D projection is out of scope.
+    // `surfaceChart`/`surface3DChart` are NOT flattened (they have no 2D
+    // analogue) and stay "unknown".
+    let read_grouping = |group: &Node, default: &str| -> String {
+        group
             .children()
             .find(|c| c.is_element() && c.tag_name().name() == "grouping")
             .and_then(|n| attr(&n, "val"))
-            .unwrap_or_else(|| "clustered".into());
+            .unwrap_or_else(|| default.into())
+    };
+    let chart_type = if let Some(bc) = find_chart("barChart").or_else(|| find_chart("bar3DChart")) {
+        // §21.2.2.17 barDir + §21.2.2.77 grouping (Bar Grouping). bar3DChart shares both
+        // (its extra `<c:gapDepth>` is ignored). `clustered` is the 2D default;
+        // `standard` (the bar3DChart default) folds to clustered as well since
+        // `canonical_chart_type` treats any non-stacked grouping as clustered.
+        let grouping = read_grouping(&bc, "clustered");
         let bar_dir = bc
             .children()
             .find(|c| c.is_element() && c.tag_name().name() == "barDir")
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "col".into());
-        let horizontal = bar_dir == "bar";
-        match (grouping.as_str(), horizontal) {
-            ("stacked" | "percentStacked", false) => "stackedBar".to_string(),
-            ("stacked" | "percentStacked", true) => "stackedBarH".to_string(),
-            (_, false) => "clusteredBar".to_string(),
-            (_, true) => "clusteredBarH".to_string(),
-        }
-    } else if let Some(lc) = find_chart("lineChart") {
-        let grouping = lc
-            .children()
-            .find(|c| c.is_element() && c.tag_name().name() == "grouping")
-            .and_then(|n| attr(&n, "val"))
-            .unwrap_or_else(|| "standard".into());
-        match grouping.as_str() {
-            "stacked" => "stackedLine".to_string(),
-            "percentStacked" => "stackedLinePct".to_string(),
-            _ => "line".to_string(),
-        }
-    } else if find_chart("pieChart").is_some() {
+        canonical_chart_type("bar", &bar_dir, &grouping)
+    } else if let Some(lc) = find_chart("lineChart").or_else(|| find_chart("line3DChart")) {
+        let grouping = read_grouping(&lc, "standard");
+        canonical_chart_type("line", "col", &grouping)
+    } else if find_chart("pieChart").is_some() || find_chart("pie3DChart").is_some() {
+        "pie".to_string()
+    } else if find_chart("ofPieChart").is_some() {
+        // §21.2.2.126 ofPieChart (pie-of-pie / bar-of-pie). DECISION: draw the
+        // whole series as ONE plain pie (main-pie-only fallback) rather than
+        // splitting the tail data points into the secondary pie/bar. The
+        // split is governed by `<c:splitType>` (§21.2.2.196: `auto` / `cust` /
+        // `percent` / `pos` / `val`), `<c:splitPos>` (§21.2.2.195) and
+        // `<c:custSplit>`, plus `<c:secondPieSize>` and `<c:serLines>` for the
+        // connector geometry — all of which need a validated fixture to lay out
+        // correctly. Without one, splitting risks assigning the wrong points to
+        // the secondary plot; a single combined pie is a lossless, always-correct
+        // representation of the same data (every point is shown as a slice). The
+        // secondary-plot elements are ignored (not errors). A `bar` `ofPieType`
+        // is likewise flattened to a pie — the bar-of-pie's detail column is the
+        // same subset-of-points concern. `<c:varyColors>` still cycles the accent
+        // palette across the slices (handled by the shared pie color path below).
         "pie".to_string()
     } else if find_chart("doughnutChart").is_some() {
         "doughnut".to_string()
-    } else if let Some(ac) = find_chart("areaChart") {
-        let grouping = ac
-            .children()
-            .find(|c| c.is_element() && c.tag_name().name() == "grouping")
-            .and_then(|n| attr(&n, "val"))
-            .unwrap_or_else(|| "standard".into());
-        match grouping.as_str() {
-            "stacked" => "stackedArea".to_string(),
-            _ => "area".to_string(),
-        }
+    } else if let Some(ac) = find_chart("areaChart").or_else(|| find_chart("area3DChart")) {
+        let grouping = read_grouping(&ac, "standard");
+        canonical_chart_type("area", "col", &grouping)
     } else if find_chart("scatterChart").is_some() {
         "scatter".to_string()
     } else if find_chart("bubbleChart").is_some() {
         "bubble".to_string()
     } else if find_chart("radarChart").is_some() {
         "radar".to_string()
+    } else if find_chart("stockChart").is_some() {
+        // §21.2.2.198 stockChart — high/low/close[/open] series drawn as
+        // per-category hi-lo lines + close ticks by the core stock renderer.
+        "stock".to_string()
     } else {
         "unknown".to_string()
+    };
+
+    // §21.2.2.198 stockChart decoration: `<c:hiLowLines>` (§21.2.2.80) and
+    // `<c:upDownBars>` (§21.2.2.218). Both are direct children of `<c:stockChart>`.
+    // The hi-lo line spans each category's low↔high; its `<c:spPr><a:ln>` fill is
+    // resolved so the renderer strokes it in the file's color (else a gray
+    // default). up/down bars are recognized but not yet drawn (follow-up). Every
+    // field stays `None` for non-stock charts (byte-stable wire).
+    let (stock_hi_low_lines, stock_hi_low_line_color, stock_up_down_bars) = if chart_type == "stock"
+    {
+        let stock = find_chart("stockChart");
+        let hi_low = stock.and_then(|s| child(s, "hiLowLines"));
+        let hi_low_color = hi_low
+            .and_then(|hl| child(hl, "spPr"))
+            .and_then(|sp| child(sp, "ln"))
+            .and_then(|ln| {
+                ln.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+            })
+            .and_then(|fill| color_resolver.resolve_solid_fill(fill));
+        let up_down = stock.and_then(|s| child(s, "upDownBars")).is_some();
+        (
+            Some(hi_low.is_some()),
+            hi_low_color,
+            if up_down { Some(true) } else { None },
+        )
+    } else {
+        (None, None, None)
     };
 
     // Title text. The CHART title is the direct-child `<c:title>` of `<c:chart>`
@@ -2587,7 +2654,7 @@ pub fn parse_chart_part(
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "chart");
     let title_node_opt = chart_node.and_then(|c| child(c, "title"));
-    let title = title_node_opt.and_then(|title_node| {
+    let mut title = title_node_opt.and_then(|title_node| {
         let texts: Vec<String> = title_node
             .descendants()
             .filter(|n| n.is_element() && n.tag_name().name() == "t")
@@ -2749,15 +2816,19 @@ pub fn parse_chart_part(
     // renderer dispatches on (mixed bar+line charts key line vs. non-line off
     // this field). Mirrors the xlsx `type_map`; `bubbleChart` folds to
     // `scatter` like everything else.
+    // 3D groups fold to the same series type as their 2D equivalent (they are
+    // flattened above); `stockChart`/`ofPieChart` have no combo-mixing role so
+    // map to a plain type too.
     let group_series_type = |group_name: &str| -> Option<String> {
         match group_name {
-            "barChart" => Some("bar"),
-            "lineChart" => Some("line"),
-            "areaChart" => Some("area"),
-            "pieChart" => Some("pie"),
+            "barChart" | "bar3DChart" => Some("bar"),
+            "lineChart" | "line3DChart" => Some("line"),
+            "areaChart" | "area3DChart" => Some("area"),
+            "pieChart" | "pie3DChart" | "ofPieChart" => Some("pie"),
             "doughnutChart" => Some("doughnut"),
             "radarChart" => Some("radar"),
             "scatterChart" | "bubbleChart" => Some("scatter"),
+            "stockChart" => Some("stock"),
             _ => None,
         }
         .map(|s| s.to_string())
@@ -2957,6 +3028,36 @@ pub fn parse_chart_part(
                 })
                 .collect();
 
+            // §21.2.2.227 `<c:varyColors>`: a pie/doughnut varies each DATA POINT
+            // by the theme accent palette (`accent[(i % 6) + 1]`), rather than
+            // giving the whole series one fill. It defaults to ON for the pie
+            // family, so an absent element still cycles the accents. When on, fill
+            // every slice that lacks an explicit `<c:dPt>` fill from the resolver's
+            // accent for that point index — this is the same palette Office draws,
+            // so a docx/xlsx pie matches Word/Excel instead of falling back to the
+            // renderer's built-in default colors. Resolvers that own their own
+            // palette (pptx `resolve_series_accent` → None) contribute nothing here
+            // and stay byte-stable. Non-pie families are unaffected: only the pie
+            // renderer consumes `data_point_colors`, and a multi-series pie (rare)
+            // still varies by point within series[0].
+            let is_pie_family = chart_type == "pie" || chart_type == "doughnut";
+            let mut data_point_colors = data_point_colors;
+            if is_pie_family {
+                let vary = group
+                    .and_then(|g| child(g, "varyColors"))
+                    .and_then(|n| attr(&n, "val"))
+                    // ECMA-376 default for the pie family is "vary" (true); the
+                    // `<c:varyColors>` element `val` attribute is xsd:boolean.
+                    .map(|v| v != "0" && v != "false")
+                    .unwrap_or(true);
+                if vary {
+                    for (i, slot) in data_point_colors.iter_mut().enumerate() {
+                        if slot.is_none() {
+                            *slot = color_resolver.resolve_series_accent(i);
+                        }
+                    }
+                }
+            }
             let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
 
             // Per-point `<c:dPt>` overrides (§21.2.2.39): marker (symbol/size/
@@ -3092,6 +3193,41 @@ pub fn parse_chart_part(
             }
         })
         .collect();
+
+    // Auto-title (ECMA-376 §21.2.2.7 `<c:autoTitleDeleted>`). When the chart has
+    // no explicit title text but auto-titling is enabled, Word synthesizes a
+    // title and shows it in the chart frame. §21.2.2.7 says the element only
+    // governs WHETHER an auto title may be shown ("val=0/false ⇒ the chart title
+    // SHALL be shown" when otherwise absent; "val=1/true ⇒ it SHALL NOT be
+    // shown"); the spec leaves the auto title's TEXT implementation-defined.
+    // Word's observed rule — the ground truth here is sample-25.docx / .pdf,
+    // whose `<c:title>` carries a `<c:txPr>` (fonts, `cap="all"`) but NO `<c:tx>`
+    // text, `<c:autoTitleDeleted val="0"/>`, and exactly one series named
+    // "Production in 2017" — is:
+    //   * exactly ONE series  → the auto title is that single series' name
+    //   * two or more series   → NO auto title (a lone series name would be
+    //                            misleading, so Word shows none)
+    // We adopt only the single-series case; multi-series charts stay untitled,
+    // matching Word. The title's `<a:defRPr cap="all">` would uppercase the
+    // rendered glyphs ("PRODUCTION IN 2017"); chart-title `cap` is a display
+    // transform we do not yet apply, so the model carries the series name
+    // VERBATIM ("Production in 2017"). Making the title APPEAR is the goal; the
+    // caps transform is a separate, tracked rendering-layer limitation.
+    if title.is_none() {
+        let auto_title_deleted = chart_node
+            .and_then(|c| child(c, "autoTitleDeleted"))
+            .and_then(|n| attr(&n, "val"))
+            // CT_Boolean: default false (auto title may be shown) when the
+            // element or its `val` is absent.
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        if !auto_title_deleted && series.len() == 1 {
+            let ser_name = series[0].name.trim();
+            if !ser_name.is_empty() {
+                title = Some(ser_name.to_string());
+            }
+        }
+    }
 
     // Data labels are on when `<c:dLbls>` enables `<c:showVal>` OR
     // `<c:showPercent>` (ECMA-376 §21.2.2.189 / §21.2.2.187) — at chart level
@@ -3570,6 +3706,9 @@ pub fn parse_chart_part(
         cat_axis_tick_label_pos,
         val_axis_tick_label_pos,
         cat_axis_label_rotation,
+        stock_hi_low_lines,
+        stock_hi_low_line_color,
+        stock_up_down_bars,
     })
 }
 
@@ -3763,6 +3902,9 @@ mod tests {
             cat_axis_tick_label_pos: None,
             val_axis_tick_label_pos: None,
             cat_axis_label_rotation: None,
+            stock_hi_low_lines: None,
+            stock_hi_low_line_color: None,
+            stock_up_down_bars: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -4918,15 +5060,14 @@ mod tests {
         assert!(!m.cat_axis_hidden);
     }
 
-    /// (e) `chart_type` normalization for stacked/percentStacked, as actually
-    /// computed inline by `parse_chart_part` (a separate code path from the
-    /// standalone `canonical_chart_type` helper — pptx's `ChartModel` only
-    /// keeps the resolved string, not the raw `grouping`/`barDir`, so this
-    /// inline match IS the contract for the pptx wire value). Pins the real
-    /// (not necessarily "clean") existing behavior: for BAR, `stacked` and
-    /// `percentStacked` collapse to the SAME string (no `Pct` variant at this
-    /// layer); for LINE they're distinguished; a `percentStacked` AREA isn't
-    /// matched at all and falls through to plain `"area"`.
+    /// (e) `chart_type` normalization for stacked/percentStacked. As of CH13,
+    /// `parse_chart_part` routes bar/line/area type detection through the shared
+    /// `canonical_chart_type` helper (previously an inline match duplicated the
+    /// logic and — as a latent bug — folded a percentStacked BAR down to plain
+    /// `stackedBar`, so the renderer's `stackedBarPct` 100%-normalization never
+    /// fired for a parsed chart). It now distinguishes the percent variant for
+    /// BAR (`stackedBarPct` / `stackedBarHPct`) and AREA (`stackedAreaPct`),
+    /// matching the LINE behavior and the standalone helper's own matrix test.
     #[test]
     fn parse_chart_part_stacked_percent_stacked_chart_type() {
         fn bar_chart_type(grouping: &str, bar_dir: &str) -> String {
@@ -4966,11 +5107,11 @@ mod tests {
         }
 
         assert_eq!(bar_chart_type("stacked", "col"), "stackedBar");
-        // NOT "stackedBarPct" — parse_chart_part's inline bar match folds
-        // percentStacked into the same bucket as stacked.
-        assert_eq!(bar_chart_type("percentStacked", "col"), "stackedBar");
-        assert_eq!(bar_chart_type("percentStacked", "bar"), "stackedBarH");
-        // Line DOES distinguish percentStacked, unlike bar.
+        // CH13: percentStacked now maps to the Pct canonical variant (the
+        // renderer normalizes those to 100%), fixing the prior fold-to-stacked.
+        assert_eq!(bar_chart_type("percentStacked", "col"), "stackedBarPct");
+        assert_eq!(bar_chart_type("percentStacked", "bar"), "stackedBarHPct");
+        // Line + area also distinguish percentStacked.
         assert_eq!(line_chart_type("percentStacked"), "stackedLinePct");
     }
 
@@ -5482,5 +5623,352 @@ mod tests {
         let d = chart_space_of(&xml);
         let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("parses");
         assert_eq!(m.categories, vec!["FY2024 1Q"]);
+    }
+
+    // ── CH13: 3D flattening / stock / ofPie type detection ───────────────────
+
+    /// Build a minimal `<c:chartSpace>` whose plot area holds a single
+    /// chart-group element (`group_xml`) with one series. Used by the CH13
+    /// type-detection probes below.
+    fn chart_space_with_group(group_xml: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                {group_xml}
+                <c:catAx><c:axId val="1"/><c:axPos val="b"/></c:catAx>
+                <c:valAx><c:axId val="2"/><c:axPos val="l"/></c:valAx>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        )
+    }
+
+    const CH13_SER: &str = r#"<c:ser><c:idx val="0"/>
+        <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:cat>
+        <c:val><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:val>
+      </c:ser>"#;
+
+    /// §21.2.2.140 pie3DChart flattens to a plain 2D `pie`. The `<a:scene3d>` /
+    /// `<c:varyColors>` decoration is ignored; the series/cat/val flow through.
+    #[test]
+    fn parse_chart_part_pie3d_flattens_to_pie() {
+        let group = format!(r#"<c:pie3DChart><c:varyColors val="1"/>{CH13_SER}</c:pie3DChart>"#);
+        let xml_p = chart_space_with_group(&group);
+        let d = chart_space_of(&xml_p);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("pie3D parses");
+        assert_eq!(m.chart_type, "pie");
+        assert_eq!(m.series.len(), 1);
+        assert_eq!(m.series[0].values, vec![Some(3.0), Some(7.0)]);
+        assert_eq!(m.categories, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    /// §21.2.2.15 bar3DChart with `barDir=col` + `grouping=stacked` flattens to
+    /// `stackedBar` (the `<c:gapDepth>` 3D-only attr is ignored).
+    #[test]
+    fn parse_chart_part_bar3d_flattens_by_grouping_and_dir() {
+        let group = format!(
+            r#"<c:bar3DChart><c:barDir val="col"/><c:grouping val="stacked"/><c:gapDepth val="150"/>{CH13_SER}</c:bar3DChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("bar3D parses");
+        assert_eq!(m.chart_type, "stackedBar");
+
+        // barDir=bar (horizontal) + clustered → clusteredBarH.
+        let group_h = format!(
+            r#"<c:bar3DChart><c:barDir val="bar"/><c:grouping val="clustered"/>{CH13_SER}</c:bar3DChart>"#
+        );
+        let xml_h = chart_space_with_group(&group_h);
+        let d2 = chart_space_of(&xml_h);
+        let m2 = parse_chart_part(d2.root_element(), &FixtureResolver).expect("bar3D-h parses");
+        assert_eq!(m2.chart_type, "clusteredBarH");
+    }
+
+    /// §21.2.2.96 line3DChart → `line`; §21.2.2.4 area3DChart(stacked) →
+    /// `stackedArea`.
+    #[test]
+    fn parse_chart_part_line3d_area3d_flatten() {
+        let line = format!(r#"<c:line3DChart>{CH13_SER}</c:line3DChart>"#);
+        let xml_l = chart_space_with_group(&line);
+        let dl = chart_space_of(&xml_l);
+        assert_eq!(
+            parse_chart_part(dl.root_element(), &FixtureResolver)
+                .unwrap()
+                .chart_type,
+            "line"
+        );
+        let area =
+            format!(r#"<c:area3DChart><c:grouping val="stacked"/>{CH13_SER}</c:area3DChart>"#);
+        let xml_a = chart_space_with_group(&area);
+        let da = chart_space_of(&xml_a);
+        assert_eq!(
+            parse_chart_part(da.root_element(), &FixtureResolver)
+                .unwrap()
+                .chart_type,
+            "stackedArea"
+        );
+    }
+
+    /// §21.2.2.198 stockChart → `stock` (its high/low/close series flow through
+    /// the shared collectors unchanged).
+    #[test]
+    fn parse_chart_part_stock_detected() {
+        let hi = r#"<c:ser><c:idx val="0"/><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>High</c:v></c:pt></c:strCache></c:strRef></c:tx>
+            <c:cat><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:cat>
+            <c:val><c:numCache><c:pt idx="0"><c:v>55</c:v></c:pt></c:numCache></c:val></c:ser>"#;
+        let group = format!(
+            r#"<c:stockChart>{hi}<c:hiLowLines><c:spPr><a:ln><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr></c:hiLowLines></c:stockChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("stock parses");
+        assert_eq!(m.chart_type, "stock");
+        assert_eq!(m.series.len(), 1);
+        assert_eq!(m.series[0].name, "High");
+        assert_eq!(m.series[0].values, vec![Some(55.0)]);
+        // hiLowLines present + its resolved line color; no upDownBars in fixture.
+        assert_eq!(m.stock_hi_low_lines, Some(true));
+        assert_eq!(m.stock_hi_low_line_color.as_deref(), Some("808080"));
+        assert_eq!(m.stock_up_down_bars, None);
+    }
+
+    /// A stock chart WITHOUT `<c:hiLowLines>` but WITH `<c:upDownBars>`: the
+    /// hi-lo flag is `Some(false)` (element absent) and up/down bars are
+    /// recognized as `Some(true)` even though the renderer does not draw them.
+    #[test]
+    fn parse_chart_part_stock_up_down_bars_recognized() {
+        let ser = r#"<c:ser><c:idx val="0"/>
+            <c:cat><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:cat>
+            <c:val><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt></c:numCache></c:val></c:ser>"#;
+        let group = format!(r#"<c:stockChart>{ser}<c:upDownBars/></c:stockChart>"#);
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("stock parses");
+        assert_eq!(m.stock_hi_low_lines, Some(false));
+        assert_eq!(m.stock_hi_low_line_color, None);
+        assert_eq!(m.stock_up_down_bars, Some(true));
+    }
+
+    /// §21.2.2.126 ofPieChart → `pie` (main-pie-only fallback). Uses the
+    /// two-point CH13_SER for the type-only assertion; the full-contract test
+    /// below adds the secondary-plot elements.
+    #[test]
+    fn parse_chart_part_ofpie_flattens_to_pie() {
+        let group = format!(
+            r#"<c:ofPieChart><c:ofPieType val="pie"/><c:varyColors val="1"/>{CH13_SER}</c:ofPieChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("ofPie parses");
+        assert_eq!(m.chart_type, "pie");
+        assert_eq!(m.series[0].values, vec![Some(3.0), Some(7.0)]);
+    }
+
+    /// Full ofPieChart contract: the secondary-plot elements (`<c:splitType>`,
+    /// `<c:splitPos>`, `<c:secondPieSize>`, `<c:serLines>`) are IGNORED — the
+    /// whole series still becomes a single `pie` whose every data point is a
+    /// slice, and `<c:varyColors>` cycles the accent palette across the slices.
+    /// A `bar` `ofPieType` flattens the same way. Pins the "draw one combined
+    /// pie" decision so a future edit can't silently start honoring the split.
+    #[test]
+    fn parse_chart_part_ofpie_full_contract_ignores_split() {
+        let ser = r#"<c:ser><c:idx val="0"/>
+            <c:cat><c:strCache>
+              <c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt>
+              <c:pt idx="2"><c:v>C</c:v></c:pt><c:pt idx="3"><c:v>D</c:v></c:pt>
+            </c:strCache></c:cat>
+            <c:val><c:numCache>
+              <c:pt idx="0"><c:v>40</c:v></c:pt><c:pt idx="1"><c:v>30</c:v></c:pt>
+              <c:pt idx="2"><c:v>20</c:v></c:pt><c:pt idx="3"><c:v>10</c:v></c:pt>
+            </c:numCache></c:val></c:ser>"#;
+        // bar-of-pie with a custom split of the last two points into the bar,
+        // plus connector series-lines — all of which we ignore.
+        let group = format!(
+            r#"<c:ofPieChart>
+                <c:ofPieType val="bar"/>
+                <c:varyColors val="1"/>
+                {ser}
+                <c:gapWidth val="100"/>
+                <c:splitType val="pos"/>
+                <c:splitPos val="2"/>
+                <c:secondPieSize val="75"/>
+                <c:serLines/>
+            </c:ofPieChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("ofPie parses");
+        assert_eq!(m.chart_type, "pie");
+        // Every one of the four points is present as a slice value (nothing was
+        // diverted to a phantom secondary plot).
+        assert_eq!(
+            m.series[0].values,
+            vec![Some(40.0), Some(30.0), Some(20.0), Some(10.0)]
+        );
+        // varyColors cycled the accent palette across all four slices.
+        let colors = m.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("varyColors slice palette");
+        assert_eq!(colors[0].as_deref(), Some("4472C4")); // accent1
+        assert_eq!(colors[1].as_deref(), Some("ED7D31")); // accent2
+        assert_eq!(colors[2].as_deref(), Some("A5A5A5")); // accent3
+        assert_eq!(colors[3].as_deref(), Some("FFC000")); // accent4
+    }
+
+    /// A resolver that DOES supply the default series accent palette (like the
+    /// real docx/xlsx resolvers), used to pin the §21.2.2.227 `<c:varyColors>`
+    /// per-slice accent fill. `FixtureResolver` returns `None` for accents so it
+    /// cannot exercise this path.
+    struct AccentResolver;
+    impl ColorResolver for AccentResolver {
+        fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+            node.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "srgbClr")
+                .and_then(|n| attr(&n, "val"))
+                .map(|v| v.to_uppercase())
+        }
+        fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+            // Six-accent cycle, matching `theme.accent[(idx % 6) + 1]`.
+            const ACCENTS: [&str; 6] = ["4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"];
+            Some(ACCENTS[idx % 6].to_string())
+        }
+    }
+
+    /// §21.2.2.227 varyColors (default ON for pie): each slice without an
+    /// explicit `<c:dPt>` fill takes the theme accent for its point index, so a
+    /// docx/xlsx pie matches Office instead of the renderer's built-in palette.
+    /// The one slice that DOES carry a `<c:dPt>` fill keeps it.
+    #[test]
+    fn parse_chart_part_pie_vary_colors_fills_accents() {
+        let ser = r#"<c:ser><c:idx val="0"/>
+            <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></c:spPr></c:dPt>
+            <c:cat><c:strCache>
+              <c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt><c:pt idx="2"><c:v>C</c:v></c:pt>
+            </c:strCache></c:cat>
+            <c:val><c:numCache>
+              <c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt><c:pt idx="2"><c:v>3</c:v></c:pt>
+            </c:numCache></c:val></c:ser>"#;
+        // No <c:varyColors> element → defaults to ON for the pie family.
+        let group = format!(r#"<c:pieChart>{ser}</c:pieChart>"#);
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("pie parses");
+        let colors = m.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("varyColors populates slice palette");
+        assert_eq!(colors[0].as_deref(), Some("112233")); // explicit dPt wins
+        assert_eq!(colors[1].as_deref(), Some("ED7D31")); // accent2
+        assert_eq!(colors[2].as_deref(), Some("A5A5A5")); // accent3
+
+        // varyColors="0" disables the per-slice accent fill: only the explicit
+        // dPt color remains, the rest fall back to None (renderer palette).
+        let group_off = format!(r#"<c:pieChart><c:varyColors val="0"/>{ser}</c:pieChart>"#);
+        let xml_off = chart_space_with_group(&group_off);
+        let d2 = chart_space_of(&xml_off);
+        let m2 = parse_chart_part(d2.root_element(), &AccentResolver).expect("pie parses");
+        let colors2 = m2.series[0].data_point_colors.as_ref().unwrap();
+        assert_eq!(colors2[0].as_deref(), Some("112233"));
+        assert_eq!(colors2[1], None);
+        assert_eq!(colors2[2], None);
+    }
+
+    /// A NON-pie chart (bar) never gets varyColors slice accents even when the
+    /// resolver supplies them — only the pie renderer consumes
+    /// `data_point_colors`, so a bar's slice palette must stay empty (`None`).
+    #[test]
+    fn parse_chart_part_bar_no_vary_colors_slice_fill() {
+        let group = format!(
+            r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{CH13_SER}</c:barChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("bar parses");
+        assert!(m.series[0].data_point_colors.is_none());
+    }
+
+    /// A named single series in `<c:tx>` — reused by the auto-title tests. `idx`
+    /// distinguishes the two series in the multi-series fixture.
+    fn named_ser(idx: u32, name: &str) -> String {
+        format!(
+            r#"<c:ser><c:idx val="{idx}"/>
+              <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>{name}</c:v></c:pt></c:strCache></c:strRef></c:tx>
+              <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt></c:strCache></c:cat>
+              <c:val><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:val>
+            </c:ser>"#
+        )
+    }
+
+    /// A `<c:chart>` with an optional `<c:autoTitleDeleted val=…>`, NO explicit
+    /// `<c:title>` text, and the given series in a bar plot area. Models the
+    /// sample-25 shape (auto-title chart: title frame present but empty, so the
+    /// synthesized title comes from the series name).
+    fn chart_space_auto_title(auto_title_deleted: Option<&str>, sers: &str) -> String {
+        let atd = auto_title_deleted
+            .map(|v| format!(r#"<c:autoTitleDeleted val="{v}"/>"#))
+            .unwrap_or_default();
+        format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                {atd}
+                <c:plotArea>
+                  <c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{sers}</c:barChart>
+                  <c:catAx><c:axId val="1"/><c:axPos val="b"/></c:catAx>
+                  <c:valAx><c:axId val="2"/><c:axPos val="l"/></c:valAx>
+                </c:plotArea>
+              </c:chart>
+            </c:chartSpace>"#
+        )
+    }
+
+    /// ECMA-376 §21.2.2.7 auto-title: a chart with NO explicit title text,
+    /// `autoTitleDeleted` absent (⇒ auto title may show), and EXACTLY ONE named
+    /// series adopts that series' name as the chart title. Ground truth:
+    /// sample-25.docx — pie3D with a lone "Production in 2017" series and an
+    /// empty title frame — where Word shows "Production in 2017" as the title.
+    #[test]
+    fn parse_chart_part_auto_title_single_series() {
+        let xml = chart_space_auto_title(None, &named_ser(0, "Production in 2017"));
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
+        // The series name is promoted VERBATIM (the `cap="all"` uppercase is a
+        // rendering-layer transform we do not apply at parse time).
+        assert_eq!(m.title.as_deref(), Some("Production in 2017"));
+
+        // An explicit `autoTitleDeleted val="0"` behaves identically (0 ⇒ auto
+        // title may be shown).
+        let xml0 = chart_space_auto_title(Some("0"), &named_ser(0, "Production in 2017"));
+        let d0 = chart_space_of(&xml0);
+        let m0 = parse_chart_part(d0.root_element(), &FixtureResolver).expect("parses");
+        assert_eq!(m0.title.as_deref(), Some("Production in 2017"));
+    }
+
+    /// §21.2.2.7 `autoTitleDeleted val="1"` (or `"true"`) suppresses the auto
+    /// title even for a single named series — Word shows no title.
+    #[test]
+    fn parse_chart_part_auto_title_deleted_shows_no_title() {
+        for v in ["1", "true"] {
+            let xml = chart_space_auto_title(Some(v), &named_ser(0, "Production in 2017"));
+            let d = chart_space_of(&xml);
+            let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
+            assert_eq!(m.title, None, "autoTitleDeleted={v} should suppress title");
+        }
+    }
+
+    /// §21.2.2.7 auto-title applies ONLY to single-series charts. With TWO
+    /// series, Word shows no synthesized title (a lone series name would be
+    /// misleading), so `title` stays `None`.
+    #[test]
+    fn parse_chart_part_auto_title_multi_series_none() {
+        let sers = format!(
+            "{}{}",
+            named_ser(0, "Series One"),
+            named_ser(1, "Series Two")
+        );
+        let xml = chart_space_auto_title(None, &sers);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
+        assert_eq!(m.series.len(), 2);
+        assert_eq!(m.title, None);
     }
 }
