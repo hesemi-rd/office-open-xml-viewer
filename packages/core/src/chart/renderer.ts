@@ -15,7 +15,7 @@ import {
   type ChartLegendReserve,
 } from './layout.js';
 import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } from './axis-scale.js';
-import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
+import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
 import { hexToRgba } from '../shape/paint.js';
@@ -444,26 +444,54 @@ function drawAxisTick(
 }
 
 /** Stroke one horizontal value-axis gridline spanning the plot width at `gy`.
- *  Verbatim extraction of the identical stroke that the column-bar, line and
- *  area renderers each emitted inline: the baseline (value 0) gridline is a
- *  darker `#aaa` 1px rule, every other gridline is a faint `#e0e0e0` 0.5px
- *  hairline. `isZero` is the caller's "this is the value-0 line" predicate
- *  (`si === 0` / `v === 0`). Callers set their own font/label BEFORE/AFTER this
- *  call, which is why those (drifted) parts stay at the call sites. Scatter is
- *  deliberately NOT a caller — it has no baseline special-case. */
+ *  Extracted from the identical stroke the column-bar, line and area renderers
+ *  each emitted inline. `isZero` is the caller's "this is the value-0 line"
+ *  predicate (`si === 0` / `v === 0`). Callers set their own font/label
+ *  BEFORE/AFTER this call, which is why those (drifted) parts stay at the call
+ *  sites. Scatter is deliberately NOT a caller — it has no baseline special-case.
+ *
+ *  `grid` is the resolved `{ color, width }` from `resolveGridline` (the file's
+ *  `<c:majorGridlines><c:spPr><a:ln>` or the faint `#e0e0e0`/0.5 px default).
+ *  When the file supplies NO explicit gridline color (`grid.explicit === false`)
+ *  the historical baseline emphasis applies: the value-0 line is a darker
+ *  `#aaa` 1 px rule. When the file DOES pin a gridline color, PowerPoint strokes
+ *  every major gridline in that one color/width uniformly, so the zero-line
+ *  override is suppressed. Omitting `grid` reproduces the pre-CH-gridline
+ *  default exactly (byte-stable for callers that haven't resolved a style). */
 function strokeValueGridlineH(
   ctx: CanvasRenderingContext2D,
   px0: number,
   pw: number,
   gy: number,
   isZero: boolean,
+  grid?: { color: string; width: number; explicit: boolean },
 ): void {
-  ctx.strokeStyle = isZero ? '#aaa' : '#e0e0e0';
-  ctx.lineWidth = isZero ? 1 : 0.5;
+  if (grid && grid.explicit) {
+    ctx.strokeStyle = grid.color;
+    ctx.lineWidth = grid.width;
+  } else {
+    ctx.strokeStyle = isZero ? '#aaa' : grid?.color ?? '#e0e0e0';
+    ctx.lineWidth = isZero ? 1 : grid?.width ?? 0.5;
+  }
   ctx.beginPath();
   ctx.moveTo(px0, gy);
   ctx.lineTo(px0 + pw, gy);
   ctx.stroke();
+}
+
+/** Resolve the value-axis MAJOR gridline stroke for `chart` at the current
+ *  display scale. `explicit` is true when the file pinned a gridline color via
+ *  `<c:valAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` — that flag tells
+ *  `strokeValueGridlineH` to stroke every gridline in the resolved color
+ *  uniformly (no `#aaa` zero-line emphasis), matching PowerPoint. With no
+ *  explicit color the resolved `{ color: '#e0e0e0', width: 0.5 }` reproduces the
+ *  historical faint hairline (byte-stable). */
+function valGridStroke(
+  chart: ChartModel,
+  ptToPx: number,
+): { color: string; width: number; explicit: boolean } {
+  const { color, width } = resolveGridline(chart.valAxisGridlineColor, chart.valAxisGridlineWidthEmu, ptToPx);
+  return { color, width, explicit: chart.valAxisGridlineColor != null };
 }
 
 /** True when the value axis is reversed (`<c:valAx><c:scaling><c:orientation
@@ -1095,7 +1123,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // no secondary axis so `toYSecondary` stays callable.
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : valY;
 
-  const gridColor = '#e0e0e0';
+  // Resolved value-axis gridline stroke (`<c:majorGridlines><c:spPr><a:ln>` or
+  // the faint `#e0e0e0`/0.5 px default). The vertical (horizontal-bar) path
+  // strokes gridlines inline, so it reads `grid.color`/`grid.width` directly.
+  const grid = valGridStroke(chart, ptToPx);
   const steps = Math.round(axRange / step);
   ctx.textBaseline = 'middle';
   ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
@@ -1108,10 +1139,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // Minor gridlines (under the majors) when the file declares them.
     for (const val of plan.minorLines) {
       if (!isH) {
-        strokeValueGridlineH(ctx, px0, pw, valY(val), false);
+        strokeValueGridlineH(ctx, px0, pw, valY(val), false, grid);
       } else {
         const gx = valX(val);
-        ctx.strokeStyle = gridColor; ctx.lineWidth = 0.5;
+        ctx.strokeStyle = grid.color; ctx.lineWidth = grid.width;
         ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
       }
     }
@@ -1126,7 +1157,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
       if (!isH) {
         const gy = valY(val);
-        if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, isZero);
+        if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, isZero, grid);
         if (drawLabels) {
           ctx.textAlign = 'right';
           ctx.fillText(label, px0 - 12, gy);
@@ -1134,8 +1165,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       } else {
         const gx = valX(val);
         if (drawMajorGrid) {
-          ctx.strokeStyle = isZero ? '#aaa' : gridColor;
-          ctx.lineWidth = isZero ? 1 : 0.5;
+          // Explicit gridline color ⇒ uniform stroke (no zero-line emphasis),
+          // matching PowerPoint; otherwise keep the `#aaa`/1 px baseline rule.
+          ctx.strokeStyle = grid.explicit ? grid.color : isZero ? '#aaa' : grid.color;
+          ctx.lineWidth = grid.explicit ? grid.width : isZero ? 1 : grid.width;
           ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
         }
         if (drawLabels) {
@@ -1656,14 +1689,16 @@ function renderLineChart(
   if (!chart.valAxisHidden) {
     ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
+    // Resolved gridline stroke (`<c:majorGridlines><c:spPr><a:ln>` or default).
+    const grid = valGridStroke(chart, ptToPx);
     // Minor gridlines first (under the majors), then major gridlines + ticks +
     // labels. Minor lines are only populated when the file declares them.
-    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false);
+    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false, grid);
     const drawMajorGrid = drawValMajorGridlines(chart);
     const drawLabels = chart.valAxisTickLabelPos !== 'none';
     for (const v of plan.majorLines) {
       const gy = toY(v);
-      if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
+      if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0, grid);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
       if (drawLabels) {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
@@ -2108,10 +2143,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (!chart.valAxisHidden) {
     ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
+    const grid = valGridStroke(chart, ptToPx);
     const steps = Math.round(axMax / step);
     for (let si = 0; si <= steps; si++) {
       const v = si * step; const gy = toY(v);
-      strokeValueGridlineH(ctx, px0, pw, gy, si === 0);
+      strokeValueGridlineH(ctx, px0, pw, gy, si === 0, grid);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
@@ -2663,7 +2699,9 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
 
-  // Y-axis gridlines + labels + major tick marks.
+  // Y-axis gridlines + labels + major tick marks. Scatter has no baseline
+  // special-case, so it strokes every gridline in the resolved color/width.
+  const grid = valGridStroke(chart, ptToPx);
   if (!chart.valAxisHidden) {
     const yTickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
@@ -2671,7 +2709,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     for (let si = 0; si < ySteps; si++) {
       const v = yMin + si * yAxisStep; if (v > yMax + yAxisStep * 0.01) break;
       const gy = toY(v);
-      ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 0.5;
+      ctx.strokeStyle = grid.color; ctx.lineWidth = grid.width;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);

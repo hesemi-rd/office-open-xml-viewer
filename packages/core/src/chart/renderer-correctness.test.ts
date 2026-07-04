@@ -1742,6 +1742,35 @@ describe('CH6 — axis scale model', () => {
     expect(off.texts.some(t => t.text === '10')).toBe(true);
   });
 
+  it('an explicit valAxisGridlineColor strokes the gridlines in that color (§21.2.2.100)', () => {
+    // Flat plot-spanning segments in the explicit gridline color.
+    const flatOfColor = (segs: Seg[], color: string): Seg[] =>
+      segs.filter(s => Math.abs(s.y0 - s.y1) < 0.5 && Math.abs(s.x1 - s.x0) > 50 && s.ss === color);
+
+    // Default (no explicit gridline color) → the faint #e0e0e0 hairline.
+    const def = segRecordingCtx();
+    renderChart(def.ctx, lineModel({}), RECT, 1);
+    expect(flatOfColor(def.segs, '#e0e0e0').length).toBeGreaterThan(0);
+    expect(flatOfColor(def.segs, '#8fa878').length).toBe(0);
+
+    // sample-1 slide 5: accent3 (#8FA878) 0.25 pt gridlines. The renderer strokes
+    // every major gridline in that color — no faint #e0e0e0 lines remain — and
+    // suppresses the #aaa zero-line emphasis (uniform per PowerPoint).
+    const styled = segRecordingCtx();
+    renderChart(styled.ctx, lineModel({ valAxisGridlineColor: '8fa878', valAxisGridlineWidthEmu: 3175 }), RECT, 1);
+    const colored = flatOfColor(styled.segs, '#8fa878');
+    expect(colored.length).toBeGreaterThan(0);
+    expect(flatOfColor(styled.segs, '#e0e0e0').length).toBe(0);
+    // Same gridline COUNT as the default — only the stroke style changed.
+    // The default splits its gridlines across #e0e0e0 (non-zero) and a single
+    // #aaa zero-line; the explicit color unifies all of them into #8fa878, so
+    // the count matches `horizGridlines` (which sums both, dropping the
+    // cat-axis rule).
+    expect(colored.length).toBe(horizGridlines(def.segs).length);
+    // Width floors at 0.5 px (0.25 pt × ptToPx=1 = 0.25 px → floored).
+    expect(colored.every(s => s.lw === 0.5)).toBe(true);
+  });
+
   it('valAxisTickLabelPos="none" hides value tick labels (gridlines stay)', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, lineModel({ valAxisTickLabelPos: 'none' }), RECT, 1);
