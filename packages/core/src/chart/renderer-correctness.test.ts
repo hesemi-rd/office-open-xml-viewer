@@ -2547,3 +2547,102 @@ describe('CH15 — chartEx sunburst', () => {
     expect(sweeps[0] / sweeps[1]).toBeCloseTo(2, 1);
   });
 });
+
+// ─── canvas state leak (#766) ───────────────────────────────────────────────
+//
+// renderChart() previously had no top-level save/restore: per-family
+// renderers (pie labels, "(no data)"/default-case text, etc.) set
+// textAlign='center' / textBaseline='middle' and never restored them, so the
+// mutated state leaked into whatever the caller drew next on the same ctx.
+// docx/pptx call renderChart() bare (no wrapping save/restore of their own),
+// so a chart followed by more text on the same page/slide would render that
+// text center-aligned and vertically mis-baselined. xlsx happened to be
+// immune only because its call site already wraps renderChart() in its own
+// save/clip/restore.
+//
+// Unlike the Proxy-based recordingCtx() above (which no-ops save/restore),
+// this mock implements a real state stack so the fix is actually exercised.
+function stackfulMockCtx(): { ctx: CanvasRenderingContext2D; texts: TextCall[] } {
+  const texts: TextCall[] = [];
+  const defaults = {
+    font: '10px sans-serif',
+    fillStyle: '#000000',
+    strokeStyle: '#000000',
+    lineWidth: 1,
+    textAlign: 'start',
+    textBaseline: 'alphabetic',
+    lineCap: 'butt',
+    lineJoin: 'miter',
+    globalAlpha: 1,
+  };
+  let state: Record<string, unknown> = { ...defaults };
+  const stack: Record<string, unknown>[] = [];
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'save':
+          return () => stack.push({ ...state });
+        case 'restore':
+          return () => { const s = stack.pop(); if (s) state = s; };
+        case 'measureText':
+          return (t: string) => ({ width: String(t).length * 6 });
+        case 'fillText':
+          return (text: string, x: number, y: number) =>
+            texts.push({ text, x, y, align: String(state.textAlign), baseline: String(state.textBaseline) });
+        case 'createLinearGradient':
+        case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        default:
+          return () => undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, texts };
+}
+
+describe('canvas state leak (#766) — renderChart restores ctx state', () => {
+  it('restores textAlign/textBaseline/font/fillStyle after a pie chart (which sets them for its outer-ring labels)', () => {
+    const { ctx } = stackfulMockCtx();
+    // Snapshot the exact props renderChart is known to mutate.
+    const before = {
+      textAlign: ctx.textAlign, textBaseline: ctx.textBaseline,
+      font: ctx.font, fillStyle: ctx.fillStyle,
+    };
+    renderChart(ctx, pieCalloutModel(), RECT, 1);
+    expect(ctx.textAlign).toBe(before.textAlign);
+    expect(ctx.textBaseline).toBe(before.textBaseline);
+    expect(ctx.font).toBe(before.font);
+    expect(ctx.fillStyle).toBe(before.fillStyle);
+  });
+
+  it('restores state via the "(no data)" early-return path (empty series)', () => {
+    const { ctx } = stackfulMockCtx();
+    const before = { textAlign: ctx.textAlign, textBaseline: ctx.textBaseline };
+    renderChart(ctx, baseModel({ chartType: 'pie', series: [] }), RECT, 1);
+    expect(ctx.textAlign).toBe(before.textAlign);
+    expect(ctx.textBaseline).toBe(before.textBaseline);
+  });
+
+  it('restores state via the unknown-chart-type default-case path', () => {
+    const { ctx } = stackfulMockCtx();
+    const before = { textAlign: ctx.textAlign, textBaseline: ctx.textBaseline };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- deliberately invalid chartType to hit the default branch
+    renderChart(ctx, baseModel({ chartType: 'bogus' as any, series: [series({ values: [1] })] }), RECT, 1);
+    expect(ctx.textAlign).toBe(before.textAlign);
+    expect(ctx.textBaseline).toBe(before.textBaseline);
+  });
+
+  it('a fillText drawn immediately after renderChart is not center-aligned (regression for the leaked pie-label state)', () => {
+    const { ctx, texts } = stackfulMockCtx();
+    renderChart(ctx, pieCalloutModel(), RECT, 1);
+    // Simulate the caller (docx/pptx) drawing more text right after the chart,
+    // exactly as it would when a chart shares a page/slide with other content.
+    ctx.fillText('Other countries', 10, 500);
+    const after = texts[texts.length - 1];
+    expect(after.text).toBe('Other countries');
+    expect(after.align).toBe('start');
+    expect(after.baseline).toBe('alphabetic');
+  });
+});

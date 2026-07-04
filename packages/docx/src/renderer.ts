@@ -6760,6 +6760,21 @@ export const __test_computeTableLayout = (
 ): { colWidths: number[]; tableW: number; rowHeights: number[] } =>
   computeTableLayout(table, contentWPx, state);
 
+/** Exported for the chart-canvas-state-leak regression test (#766): drives the
+ *  exact call site (line ~5807) that invokes the shared core `renderChart`
+ *  for an inline `<c:chart>` segment, so a unit test can assert that a
+ *  `fillText` issued on the SAME ctx right after a chart segment is not left
+ *  center-aligned / mis-baselined by chart-internal state that used to leak
+ *  past `renderChart` (it now wraps its body in save/restore). */
+export const __test_renderInlineImage = (
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  seg: LayoutImageSeg,
+  x: number,
+  baseline: number,
+  scale: number,
+  images: Map<string, DecodedImage>,
+): void => renderInlineImage(ctx, seg, x, baseline, scale, images);
+
 function resolveAnchorBox(
   img: ImageRun,
   state: RenderState,

@@ -1,7 +1,8 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`renderChart draw-call signature (characterization) > is stable for: area+legend 1`] = `
-"set font=bold 30.6px Calibri, Arial, sans-serif
+"save
+set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
@@ -208,11 +209,13 @@ set font=bold 10px sans-serif
 set fillStyle=#555
 set textAlign=center
 fillText "Month" 284,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
 restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: bubble 1`] = `
-"set font=11px sans-serif
+"save
+set font=11px sans-serif
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
@@ -352,11 +355,13 @@ save
 beginPath
 arc 620,152.24,31.9343,0,6.2832
 fill fs=#4472C4 ga=1
+restore
 restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: clusteredBar+title+legendR+dataLabels+axisTitles 1`] = `
-"set font=10.725px sans-serif
+"save
+set font=10.725px sans-serif
 set font=10px sans-serif
 set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
@@ -509,11 +514,13 @@ fillText "Units" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
 restore
 save
 fillText "Quarter" 279.835,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
 restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: clusteredBarH+dataLabels 1`] = `
-"set font=bold 30.6px Calibri, Arial, sans-serif
+"save
+set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
@@ -713,11 +720,13 @@ fillText "Beta" 529.2,207.2 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
 fillRect 515.2,217.2,10,12 fs=#ED7D31
 set fillStyle=#333
-fillText "Alpha" 529.2,223.2 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Alpha" 529.2,223.2 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: clusteredBarH+valAxisHidden(manual-ish) 1`] = `
-"set textBaseline=middle
+"save
+set textBaseline=middle
 set font=11px sans-serif
 set fillStyle=#555
 set fillStyle=#4472C4
@@ -731,11 +740,13 @@ fillRect 374.9714,178.6033,214.8571,45.6933 fs=#ED7D31
 set fillStyle=#4472C4
 fillRect 31.2,64.37,243.5048,45.6933 fs=#4472C4
 set fillStyle=#ED7D31
-fillRect 274.7048,64.37,315.1238,45.6933 fs=#ED7D31"
+fillRect 274.7048,64.37,315.1238,45.6933 fs=#ED7D31
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: combo bar+line secondary 1`] = `
-"set font=11px sans-serif
+"save
+set font=11px sans-serif
 set font=10px sans-serif
 set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
@@ -928,11 +939,13 @@ fillText "Rev" 529.2,207.2 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
 fillRect 515.2,217.2,10,12 fs=#ED7D31
 set fillStyle=#333
-fillText "Margin" 529.2,223.2 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Margin" 529.2,223.2 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: doughnut+legendBottom 1`] = `
-"beginPath
+"save
+beginPath
 arc 332,189.2,136.08,-1.5708,0.3142
 arc 332,189.2,68.04,0.3142,-1.5708
 closePath
@@ -976,11 +989,13 @@ fillText "Q2" 331.8,365.6 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#CC0000
 fillRect 358.2,359.6,10,12 fs=#CC0000
 set fillStyle=#333
-fillText "Q3" 372.2,365.6 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Q3" 372.2,365.6 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: line+markers+legend+axisTitles+12cats 1`] = `
-"set font=bold 30.6px Calibri, Arial, sans-serif
+"save
+set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
@@ -1409,19 +1424,23 @@ fillText "Value" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
 restore
 save
 fillText "Month" 281.82,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
 restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: no-data 1`] = `
-"set fillStyle=#888
+"save
+set fillStyle=#888
 set font=12px sans-serif
 set textAlign=center
 set textBaseline=middle
-fillText "(no data)" 332,200 fs=#888 font=12px sans-serif al=center bl=middle"
+fillText "(no data)" 332,200 fs=#888 font=12px sans-serif al=center bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: pie+legendR+dataLabels 1`] = `
-"set font=bold 30.6px Calibri, Arial, sans-serif
+"save
+set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
@@ -1469,11 +1488,13 @@ fillText "Q2" 490.8,229.5 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#A9D18E
 fillRect 476.8,239.5,10,12 fs=#A9D18E
 set fillStyle=#333
-fillText "Q3" 490.8,245.5 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Q3" 490.8,245.5 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: radar+filled+legend 1`] = `
-"set font=bold 30.6px Calibri, Arial, sans-serif
+"save
+set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
@@ -1613,11 +1634,13 @@ lineTo 525.2,237.5
 stroke ss=#ED7D31 lw=1.8 dash=
 set lineWidth=2
 set fillStyle=#333
-fillText "Y" 529.2,237.5 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Y" 529.2,237.5 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: scatter+lineMarker+axisTitles 1`] = `
-"set font=bold 30.6px Calibri, Arial, sans-serif
+"save
+set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
@@ -1851,11 +1874,13 @@ fillText "Y" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
 restore
 save
 fillText "X" 297.4,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+restore
 restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: stackedArea 1`] = `
-"beginPath
+"save
+beginPath
 moveTo 177.3333,286.2856
 lineTo 354.4,243.2667
 lineTo 531.4667,200.2478
@@ -2053,11 +2078,13 @@ fillText "Alpha" 316,36.4 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
 fillRect 364,30.4,10,12 fs=#ED7D31
 set fillStyle=#333
-fillText "Beta" 378,36.4 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Beta" 378,36.4 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: stackedBar+legendBottom 1`] = `
-"set font=10.385000000000002px sans-serif
+"save
+set font=10.385000000000002px sans-serif
 set font=10px sans-serif
 set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
@@ -2176,11 +2203,13 @@ fillText "Alpha" 298.231,365.6 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
 fillRect 346.231,359.6,10,12 fs=#ED7D31
 set fillStyle=#333
-fillText "Beta" 360.231,365.6 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Beta" 360.231,365.6 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: stackedBarPct+legendLeft 1`] = `
-"set font=11px sans-serif
+"save
+set font=11px sans-serif
 set font=10px sans-serif
 set textBaseline=middle
 set font=11px sans-serif
@@ -2347,11 +2376,13 @@ fillText "Alpha" 30,172.775 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
 fillRect 16,182.775,10,12 fs=#ED7D31
 set fillStyle=#333
-fillText "Beta" 30,188.775 fs=#333 font=12px sans-serif al=left bl=middle"
+fillText "Beta" 30,188.775 fs=#333 font=12px sans-serif al=left bl=middle
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: stackedLine+midCat 1`] = `
-"set font=16.2px sans-serif
+"save
+set font=16.2px sans-serif
 set textBaseline=middle
 set strokeStyle=#aaa
 beginPath
@@ -2560,11 +2591,13 @@ lineTo 620,335.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
-fillText "Q3" 620,340.45 fs=#555 font=16.2px sans-serif al=center bl=top"
+fillText "Q3" 620,340.45 fs=#555 font=16.2px sans-serif al=center bl=top
+restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: waterfall 1`] = `
 "save
+save
 set font=15px sans-serif
 set strokeStyle=#e8e8e8
 set lineWidth=0.7
@@ -2670,11 +2703,13 @@ fillText "Start" 152.8,333.6 fs=#666 font=14px sans-serif al=center bl=top
 fillText "Q1" 293.6,333.6 fs=#666 font=14px sans-serif al=center bl=top
 fillText "Q2" 434.4,333.6 fs=#666 font=14px sans-serif al=center bl=top
 fillText "End" 575.2,333.6 fs=#666 font=14px sans-serif al=center bl=top
+restore
 restore"
 `;
 
 exports[`renderChart draw-call signature (characterization) > is stable for: waterfall+valAxisHidden 1`] = `
 "save
+save
 set font=15px sans-serif
 set strokeStyle=#bbb
 beginPath
@@ -2733,5 +2768,6 @@ fillText "Start" 96.8,333.6 fs=#666 font=14px sans-serif al=center bl=top
 fillText "Q1" 253.6,333.6 fs=#666 font=14px sans-serif al=center bl=top
 fillText "Q2" 410.4,333.6 fs=#666 font=14px sans-serif al=center bl=top
 fillText "End" 567.2,333.6 fs=#666 font=14px sans-serif al=center bl=top
+restore
 restore"
 `;

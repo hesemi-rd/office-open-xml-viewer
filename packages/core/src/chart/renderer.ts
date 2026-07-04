@@ -4576,84 +4576,96 @@ export function renderChart(
    */
   ptToPx: number = PT_TO_PX,
 ): void {
-  const { x, y, w, h } = rect;
-  // Only fill the outer chartSpace when chartBg is set; a null means noFill
-  // (transparent) per OOXML, so the underlying slide/sheet shows through.
-  if (chart.chartBg) {
-    ctx.fillStyle = `#${chart.chartBg}`;
-    ctx.fillRect(x, y, w, h);
-  }
+  // The per-family renderers (and the early-return/default text paths below)
+  // mutate shared canvas state — textAlign, textBaseline, font, fillStyle,
+  // etc. — without restoring it. Callers (docx/pptx draw chart shapes inline
+  // with surrounding text; xlsx happens to wrap the call in its own
+  // save/clip/restore) must not observe those mutations afterward. Wrapping
+  // the whole body in a single save/restore here fixes it once for every
+  // caller instead of requiring each call site to remember to do so.
+  ctx.save();
+  try {
+    const { x, y, w, h } = rect;
+    // Only fill the outer chartSpace when chartBg is set; a null means noFill
+    // (transparent) per OOXML, so the underlying slide/sheet shows through.
+    if (chart.chartBg) {
+      ctx.fillStyle = `#${chart.chartBg}`;
+      ctx.fillRect(x, y, w, h);
+    }
 
-  // Explicit chart border — drawn ONLY when the XML declared a paintable
-  // `<c:chartSpace><c:spPr><a:ln><a:solidFill>` (chartBorderColor is null
-  // otherwise; there is no default Excel-style frame). Width comes from
-  // `<a:ln@w>` (EMU → pt → px); absent width falls back to a 1px hairline.
-  if (chart.chartBorderColor) {
-    ctx.save();
-    ctx.strokeStyle = `#${chart.chartBorderColor}`;
-    // `<a:ln>` with no `@w` means width 0 per ECMA-376 §20.1.2.2.24, i.e. invisible;
-    // but Excel renders a fill-without-width line as a ~hairline, so we draw 1px to
-    // match the app rather than dropping a declared border.
-    ctx.lineWidth = chart.chartBorderWidthEmu
-      ? Math.max(0.5, chart.chartBorderWidthEmu / EMU_PER_PT) * ptToPx
-      : 1;
-    // Inset by half the line width so the full stroke stays inside the rect.
-    const lw = ctx.lineWidth;
-    ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
-    ctx.restore();
-  }
+    // Explicit chart border — drawn ONLY when the XML declared a paintable
+    // `<c:chartSpace><c:spPr><a:ln><a:solidFill>` (chartBorderColor is null
+    // otherwise; there is no default Excel-style frame). Width comes from
+    // `<a:ln@w>` (EMU → pt → px); absent width falls back to a 1px hairline.
+    if (chart.chartBorderColor) {
+      ctx.save();
+      ctx.strokeStyle = `#${chart.chartBorderColor}`;
+      // `<a:ln>` with no `@w` means width 0 per ECMA-376 §20.1.2.2.24, i.e. invisible;
+      // but Excel renders a fill-without-width line as a ~hairline, so we draw 1px to
+      // match the app rather than dropping a declared border.
+      ctx.lineWidth = chart.chartBorderWidthEmu
+        ? Math.max(0.5, chart.chartBorderWidthEmu / EMU_PER_PT) * ptToPx
+        : 1;
+      // Inset by half the line width so the full stroke stays inside the rect.
+      const lw = ctx.lineWidth;
+      ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
+      ctx.restore();
+    }
 
-  // chartEx box-and-whisker / sunburst carry their data in the structured
-  // `chartexBox` / `chartexSunburst` fields, not the flat `series` array, so the
-  // empty-series "(no data)" guard must not fire for them.
-  const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null;
-  if (chart.series.length === 0 && !hasChartexData) {
-    ctx.fillStyle = '#888';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('(no data)', x + w / 2, y + h / 2);
-    return;
-  }
-
-  switch (chart.chartType) {
-    case 'clusteredBar':
-    case 'clusteredBarH':
-    case 'stackedBar':
-    case 'stackedBarH':
-    case 'stackedBarPct':
-    case 'stackedBarHPct':
-      renderBarChart(ctx, chart, rect, ptToPx); break;
-    case 'line':
-    case 'stackedLine':
-    case 'stackedLinePct':
-      renderLineChart(ctx, chart, rect, ptToPx); break;
-    case 'area':
-    case 'stackedArea':
-    case 'stackedAreaPct':
-      renderAreaChart(ctx, chart, rect, ptToPx); break;
-    case 'pie':
-      renderPieChart(ctx, chart, rect, false, ptToPx); break;
-    case 'doughnut':
-      renderPieChart(ctx, chart, rect, true, ptToPx); break;
-    case 'radar':
-      renderRadarChart(ctx, chart, rect, ptToPx); break;
-    case 'scatter':
-    case 'bubble':
-      renderScatterChart(ctx, chart, rect, ptToPx); break;
-    case 'waterfall':
-      renderWaterfallChart(ctx, chart, rect); break;
-    case 'stock':
-      renderStockChart(ctx, chart, rect, ptToPx); break;
-    case 'boxWhisker':
-      renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
-    case 'sunburst':
-      renderSunburstChart(ctx, chart, rect, ptToPx); break;
-    default:
+    // chartEx box-and-whisker / sunburst carry their data in the structured
+    // `chartexBox` / `chartexSunburst` fields, not the flat `series` array, so the
+    // empty-series "(no data)" guard must not fire for them.
+    const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null;
+    if (chart.series.length === 0 && !hasChartexData) {
       ctx.fillStyle = '#888';
-      ctx.font = '11px sans-serif';
+      ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(`Chart: ${chart.chartType}`, x + w / 2, y + h / 2);
+      ctx.fillText('(no data)', x + w / 2, y + h / 2);
+      return;
+    }
+
+    switch (chart.chartType) {
+      case 'clusteredBar':
+      case 'clusteredBarH':
+      case 'stackedBar':
+      case 'stackedBarH':
+      case 'stackedBarPct':
+      case 'stackedBarHPct':
+        renderBarChart(ctx, chart, rect, ptToPx); break;
+      case 'line':
+      case 'stackedLine':
+      case 'stackedLinePct':
+        renderLineChart(ctx, chart, rect, ptToPx); break;
+      case 'area':
+      case 'stackedArea':
+      case 'stackedAreaPct':
+        renderAreaChart(ctx, chart, rect, ptToPx); break;
+      case 'pie':
+        renderPieChart(ctx, chart, rect, false, ptToPx); break;
+      case 'doughnut':
+        renderPieChart(ctx, chart, rect, true, ptToPx); break;
+      case 'radar':
+        renderRadarChart(ctx, chart, rect, ptToPx); break;
+      case 'scatter':
+      case 'bubble':
+        renderScatterChart(ctx, chart, rect, ptToPx); break;
+      case 'waterfall':
+        renderWaterfallChart(ctx, chart, rect); break;
+      case 'stock':
+        renderStockChart(ctx, chart, rect, ptToPx); break;
+      case 'boxWhisker':
+        renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
+      case 'sunburst':
+        renderSunburstChart(ctx, chart, rect, ptToPx); break;
+      default:
+        ctx.fillStyle = '#888';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`Chart: ${chart.chartType}`, x + w / 2, y + h / 2);
+    }
+  } finally {
+    ctx.restore();
   }
 }
