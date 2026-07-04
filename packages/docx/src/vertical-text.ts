@@ -305,3 +305,36 @@ export function physicalToLogicalAnchorBox(
     h: w,
   };
 }
+
+/**
+ * CSS placement (top-left + transform) for one vertical-page text-selection
+ * overlay span (ECMA-376 §17.6.20 tbRl). The renderer emits each run's geometry
+ * in the SWAPPED LOGICAL frame (`onTextRun` reports logical `x`/`y`/`w`/`h`); the
+ * canvas is the PHYSICAL landscape page rotated +90° at paint. A DOM overlay span
+ * is horizontal text, so to land it on the drawn (rotated) glyphs we place it at
+ * the physical point the logical top-left maps to and rotate it +90° about that
+ * corner — matching the page transform.
+ *
+ * Page transform: `physical = (cssWidth − logical.y, logical.x)`. The logical
+ * run top-left `(x, y)` therefore lands at physical `(cssWidth − y, x)`. Applying
+ * `transform: rotate(90deg)` with `transform-origin: top left` sends the span's
+ * own advance axis (+x local) to physical +y (down the column) and its line-box
+ * thickness (+y local) to physical −x — exactly the drawn run's footprint, so the
+ * transparent span overlays the glyphs and native selection/search hit-tests land
+ * correctly. (CJK glyphs are drawn upright while the span text is rotated sideways;
+ * the span still covers the same cell rectangle, which is what selection needs.
+ * Per-glyph upright overlay spans are a follow-up.)
+ *
+ * @returns `{ left, top }` in physical CSS px and the `transform` string, or
+ *          `null` when `!vertical` (horizontal pages place the span at `(x, y)`
+ *          untransformed — the byte-identical legacy path).
+ */
+export function verticalTextLayerPlacement(
+  x: number,
+  y: number,
+  cssWidthPx: number,
+  vertical: boolean,
+): { left: number; top: number; transform: string } | null {
+  if (!vertical) return null;
+  return { left: cssWidthPx - y, top: x, transform: 'rotate(90deg)' };
+}

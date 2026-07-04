@@ -1254,8 +1254,11 @@ export interface RenderPageOptions {
   width?: number;
   dpr?: number;
   defaultTextColor?: string;
-  /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
-  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string }) => void;
+  /** Called for each rendered text segment. Used to build a transparent text
+   *  selection overlay. On a vertical (§17.6.20 tbRl) page `x`/`y` are the
+   *  PHYSICAL top-left and `transform` is the CSS rotation the overlay span
+   *  applies about its top-left; absent for horizontal pages. */
+  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string; transform?: string }) => void;
   /** Default `true`. When false, ECMA-376 §17.13.5 track-changes runs render
    *  in their normal style (no author colour, no underline / strikethrough)
    *  — equivalent to Word's "Final / No Markup" view. */

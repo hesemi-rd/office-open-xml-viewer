@@ -144,6 +144,7 @@ import {
   drawVerticalRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
+  verticalTextLayerPlacement,
 } from './vertical-text.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -371,6 +372,13 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing (e.g. `"bold 16px Arial"`). */
   font: string;
+  /** ECMA-376 §17.6.20 (tbRl) — when the page is vertical the canvas is the
+   *  physical landscape page rotated +90° at paint, so this run's `x`/`y` are the
+   *  PHYSICAL top-left the overlay span must sit at, and `transform` is the CSS
+   *  rotation (`"rotate(90deg)"`, applied about the span's top-left) that lays the
+   *  horizontal DOM span along the drawn (rotated) glyph run. Absent for
+   *  horizontal pages (the span is placed at `x`/`y` untransformed). */
+  transform?: string;
 }
 
 export interface RenderDocumentOptions {
@@ -5771,14 +5779,23 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         }
 
         if (state.onTextRun && s.text) {
+          // ECMA-376 §17.6.20 (tbRl) — `x`/`state.y` are LOGICAL flow coords; on a
+          // vertical page the overlay DOM lives on the physical (rotated) canvas,
+          // so project the logical top-left to physical and hand the span the +90°
+          // rotation. `verticalTextLayerPlacement` returns null on horizontal pages
+          // (the span stays at the logical `x`/`y`, byte-identical to before).
+          const place = verticalTextLayerPlacement(
+            x, state.y, state.verticalPhys?.cssWidthPx ?? 0, !!state.verticalCJK,
+          );
           state.onTextRun({
             text: s.text,
-            x,
-            y: state.y,
+            x: place ? place.left : x,
+            y: place ? place.top : state.y,
             w: spanW,
             h: lineH,
             fontSize: effSizePx,
             font: ctx.font,
+            transform: place?.transform,
           });
         }
 
