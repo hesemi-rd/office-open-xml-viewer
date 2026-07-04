@@ -1296,8 +1296,9 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         joinPrev: gluePending ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
-        // §17.3.2.12 w:em — carried only on DocxTextRun (FieldRun has no em).
-        emphasisMark: r.emphasisMark,
+        // §17.3.2.12 w:em — carried on both DocxTextRun and FieldRun (a field's
+        // resolved/fallback text stamps the mark the same as a plain run).
+        emphasisMark: base.emphasisMark,
         background: base.background ?? null,
         colorAuto: r.colorAuto ?? false,
         border: r.border ?? null,

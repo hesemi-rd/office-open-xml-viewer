@@ -947,6 +947,12 @@ pub struct FieldRun {
     pub double_strikethrough: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub highlight: Option<String>,
+    /// ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark, mirrors
+    /// `TextRun::emphasis_mark` (§17.18.24 ST_Em). `None` when unset or
+    /// `val="none"`. A field's displayed text (its resolved PAGE/NUMPAGES value
+    /// or fallback text) draws through the same per-glyph stamp as a plain run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emphasis_mark: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

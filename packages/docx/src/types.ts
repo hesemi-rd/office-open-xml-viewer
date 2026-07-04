@@ -828,6 +828,10 @@ export interface FieldRun {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark, mirrors
+   *  {@link DocxTextRun.emphasisMark} (§17.18.24 ST_Em). Absent (or the
+   *  authored `val="none"`) ⇒ no mark. */
+  emphasisMark?: EmphasisMark;
 }
 
 export interface DocxTextRun {

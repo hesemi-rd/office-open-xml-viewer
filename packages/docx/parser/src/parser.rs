@@ -2344,6 +2344,7 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         small_caps: fmt.small_caps.unwrap_or(false),
         double_strikethrough: fmt.dstrike.unwrap_or(false),
         highlight: fmt.highlight.clone(),
+        emphasis_mark: fmt.emphasis_mark.clone(),
     })
 }
 
@@ -6376,6 +6377,34 @@ mod tests {
         let body_override = r#"<w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>上書き</w:t></w:r>"#;
         let runs = parse_para(body_override, &base, &styles);
         assert_eq!(first_text(&runs).emphasis_mark.as_deref(), Some("dot"));
+    }
+
+    // §17.3.2.12 w:em on a field run (§17.16.18 fldSimple → make_field_run).
+    // Regression guard: `FieldRun` used to lack `emphasis_mark` entirely (only
+    // `TextRun` carried it), so a PAGE/NUMPAGES field with `<w:em>` silently
+    // dropped its boten mark despite an ordinary emphasised run rendering it
+    // (asymmetric with `highlight`, which every field run already carried).
+    #[test]
+    fn field_run_carries_emphasis_mark() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let body = r#"<w:fldSimple w:instr="PAGE">
+            <w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>1</w:t></w:r>
+        </w:fldSimple>"#;
+        let runs = parse_para(body, &base, &styles);
+        let f = runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Field(f) => Some(f),
+                _ => None,
+            })
+            .expect("expected a field run");
+        assert_eq!(f.field_type, "page");
+        assert_eq!(
+            f.emphasis_mark.as_deref(),
+            Some("dot"),
+            "PAGE field run must carry w:em like a plain text run"
+        );
     }
 
     // A styles part defining a `Hyperlink` character style (blue + underline),
