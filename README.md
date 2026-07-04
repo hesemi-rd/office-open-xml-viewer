@@ -1,5 +1,20 @@
 > **This entire codebase — Rust parsers, TypeScript renderers, tests, and tooling — was implemented by [Claude](https://claude.ai)** (Anthropic's AI assistant) through iterative prompting. No human-written application code exists in this repository.
 
+<details>
+<summary><b>Why this project exists — a note from the author</b></summary>
+
+<br>
+
+OOXML's behavior is defined by a written specification (ECMA-376 / ISO-29500), and there is a clear answer to compare against: Word, Excel, and PowerPoint themselves. In principle, anyone with enough patience could have built a faithful viewer — the spec says what to implement, and the Office applications show whether you got it right.
+
+In practice, it didn't happen. For more than a decade, no free, open-source library reached a rendering quality good enough for real use. There are a few commercial libraries with decent fidelity (and editing support), but their pricing makes them hard to adopt casually. I think the reason is simply cost: the specification is huge, and reading and implementing it faithfully takes far more effort than volunteers can afford.
+
+Generative AI changed that. A viewer is an unusually good fit for AI-driven iterative development ("vibe coding"): there is a spec to read and a correct output to aim for, so the work comes down to interpreting the specification and refining the rendering until it matches. Limiting the scope to viewing also avoids the most serious risk an Office library can carry — corrupting a user's files.
+
+So I'm building this library with Claude, spec-first, and keeping it free to use. For some documents it already reproduces the desktop Office applications more faithfully than commercial libraries — and sometimes even the official Microsoft 365 web apps.
+
+</details>
+
 <p align="center">
   <img src="docs/images/icon.png" alt="office-open-xml-viewer" width="160" height="160">
 </p>
