@@ -366,7 +366,12 @@ pub struct ChartDataPointOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_line: Option<String>,
     /// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out
-    /// percentage (0–100). `None`/absent = 0 (byte-stable).
+    /// amount. The schema type is `CT_UnsignedInt` (unbounded `xsd:unsignedInt`);
+    /// the spec text itself doesn't define a 0–100 range or "percentage" unit,
+    /// only "the amount the data point shall be moved from the center of the
+    /// pie". Renderers interpret it as a de-facto percentage of the outer
+    /// radius (0–100 typical), matching Office's Point Explosion UI slider
+    /// rather than a spec-mandated bound. `None`/absent = 0 (byte-stable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explosion: Option<u32>,
 }
@@ -922,7 +927,10 @@ pub fn extract_first_slice_angle(root: Node) -> Option<u32> {
 }
 
 /// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out
-/// percentage. Caller passes a `<c:dPt>` node. `None` when absent.
+/// amount, parsed as the unbounded `xsd:unsignedInt` the schema (`CT_UnsignedInt`)
+/// actually specifies (no 0–100 clamp here; see `ChartDataPointOverride::explosion`
+/// for how renderers interpret the value). Caller passes a `<c:dPt>` node.
+/// `None` when absent.
 pub fn extract_dpt_explosion(dpt_node: Node) -> Option<u32> {
     child(dpt_node, "explosion")
         .and_then(|n| n.attribute("val"))

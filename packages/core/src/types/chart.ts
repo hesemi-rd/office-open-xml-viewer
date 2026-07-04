@@ -172,10 +172,15 @@ export interface ChartDataPointOverride {
   markerFill?: string;
   markerLine?: string;
   /**
-   * `<c:dPt><c:explosion val>` (ECMA-376 §21.2.2.61) — the amount, as a
-   * percentage 0–100, that this pie/doughnut slice is moved out from the
-   * center. undefined/absent = 0 (no explosion, flush with the ring). Only
-   * consulted by the pie/doughnut renderer.
+   * `<c:dPt><c:explosion val>` (ECMA-376 §21.2.2.61) — the amount this
+   * pie/doughnut slice is moved out from the center. The schema type is
+   * `CT_UnsignedInt` (unbounded `xsd:unsignedInt`); the spec text only says
+   * "the amount the data point shall be moved from the center of the pie"
+   * and does not itself define units or a 0–100 range. We treat it as a
+   * de-facto percentage of the outer radius (0–100 typical), matching
+   * Office's UI (the Point Explosion slider caps at 100%) rather than a
+   * spec-mandated bound. undefined/absent = 0 (no explosion, flush with the
+   * ring). Only consulted by the pie/doughnut renderer.
    */
   explosion?: number;
 }

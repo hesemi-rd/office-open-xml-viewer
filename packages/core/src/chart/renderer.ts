@@ -2219,8 +2219,12 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const ringBand = (outerR - innerR) / rings.length;
 
   // Explosion offset for slice `i` of series `ser`: move the slice out from the
-  // center by `explosion`% of the outer radius along its mid-angle. Absent /
-  // zero explosion → no offset (byte-stable).
+  // center along its mid-angle by `explosion`% of the outer radius. §21.2.2.61
+  // only defines `explosion` as an unbounded `xsd:unsignedInt` "amount the data
+  // point shall be moved from the center of the pie" — the 0-100-as-percent
+  // interpretation is a de-facto Office convention (the Point Explosion UI
+  // slider), not a spec-mandated range (see `ChartDataPointOverride.explosion`
+  // in types/chart.ts). Absent / zero explosion → no offset (byte-stable).
   const explodeOffset = (ser: ChartSeries, i: number): number => {
     const e = (ser.dataPointOverrides ?? []).find(d => d.idx === i)?.explosion ?? 0;
     return e > 0 ? (e / 100) * outerR : 0;

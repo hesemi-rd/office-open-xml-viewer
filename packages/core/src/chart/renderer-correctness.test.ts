@@ -1464,6 +1464,10 @@ describe('CH8 — pie / doughnut geometry', () => {
   });
 
   it('explosion offsets the slice center outward (arc center moves)', () => {
+    const base = ringRecordingCtx();
+    renderChart(base.ctx, pieModel({
+      series: [series({ name: 'S', values: [30, 45, 25] })],
+    }), RECT, 1);
     const rec = ringRecordingCtx();
     renderChart(rec.ctx, pieModel({
       series: [series({
@@ -1476,6 +1480,39 @@ describe('CH8 — pie / doughnut geometry', () => {
     // center is displaced. Collect the distinct arc centers.
     const centers = new Set(rec.arcs.map(a => `${Math.round(a.x)},${Math.round(a.y)}`));
     expect(centers.size).toBeGreaterThan(1);
+    // The non-exploded pie's shared center — every arc (all 3 slices) is drawn
+    // around this single point.
+    const trueCenter = base.arcs[0];
+    expect(base.arcs.every(a => a.x === trueCenter.x && a.y === trueCenter.y)).toBe(true);
+    // Slice 0 and slice 2 (not exploded) still share the true center in the
+    // exploded render — only slice 1 moves.
+    const outerR = Math.max(...rec.arcs.map(a => a.r));
+    const slice0Arcs = rec.arcs.filter(a => a.a0 === base.arcs[0].a0 && a.a1 === base.arcs[0].a1);
+    expect(slice0Arcs.length).toBeGreaterThan(0);
+    for (const a of slice0Arcs) {
+      expect(a.x).toBeCloseTo(trueCenter.x, 6);
+      expect(a.y).toBeCloseTo(trueCenter.y, 6);
+    }
+    // Slice 1 (idx 1, explosion 40): §21.2.2.61 explosion, interpreted (de facto,
+    // see ChartDataPointOverride.explosion) as a percentage of the outer radius
+    // the slice is displaced outward along its own mid-angle.
+    // Values [30, 45, 25] over 2π starting at -π/2 (12 o'clock, clockwise) put
+    // slice 1's span at [-π/2 + 0.6π, -π/2 + 1.5π]; its mid-angle is -π/2 + 1.05π.
+    const total = 100;
+    const startAngle = -Math.PI / 2;
+    const slice0Frac = 30 / total;
+    const slice1Frac = 45 / total;
+    const midAngle = startAngle + slice0Frac * 2 * Math.PI + (slice1Frac * 2 * Math.PI) / 2;
+    const expectedOffset = 0.4 * outerR;
+    const expectedX = trueCenter.x + Math.cos(midAngle) * expectedOffset;
+    const expectedY = trueCenter.y + Math.sin(midAngle) * expectedOffset;
+    const slice1Arc = rec.arcs.find(a => Math.abs(a.x - trueCenter.x) > 1 || Math.abs(a.y - trueCenter.y) > 1);
+    expect(slice1Arc).toBeDefined();
+    expect(slice1Arc?.x).toBeCloseTo(expectedX, 4);
+    expect(slice1Arc?.y).toBeCloseTo(expectedY, 4);
+    // Displacement magnitude is exactly 40% of the outer radius.
+    const dist = Math.hypot((slice1Arc?.x ?? 0) - trueCenter.x, (slice1Arc?.y ?? 0) - trueCenter.y);
+    expect(dist).toBeCloseTo(expectedOffset, 4);
   });
 
   it('a multi-series doughnut draws concentric rings (multiple distinct radii)', () => {
@@ -1494,6 +1531,32 @@ describe('CH8 — pie / doughnut geometry', () => {
     // would produce.
     const distinctRadii = new Set(rec.arcs.map(a => Math.round(a.r * 10) / 10));
     expect(distinctRadii.size).toBeGreaterThanOrEqual(3);
+    // The single-series doughnut geometry (asserted in the tests above) gives
+    // us an independently-derived outer radius for this RECT — reuse it so the
+    // band boundaries below aren't just copied from the renderer's own formula.
+    const single = ringRecordingCtx();
+    renderChart(single.ctx, baseModel({
+      chartType: 'doughnut', categories: ['A'], series: [series({ name: 'S', values: [1] })], holeSize: 40,
+    }), RECT, 1);
+    // Use the RAW (unrounded) outer radius so the derived band boundaries below
+    // don't compound `ringRadii`'s rounding into a spurious mismatch.
+    const outerR = Math.max(...single.arcs.map(a => a.r));
+    const innerR = outerR * 0.4; // holeSize 40 → hole is 40% of the outer radius
+    const ringBand = (outerR - innerR) / 2; // band from hole to outer edge, split evenly across 2 rings
+    const expectRadiiCloseTo = (arcs: RingArc[], expected: number[]): void => {
+      const actual = [...new Set(arcs.map(a => Math.round(a.r * 1000) / 1000))].sort((a, b) => b - a);
+      const wanted = [...expected].sort((a, b) => b - a);
+      expect(actual.length).toBe(wanted.length);
+      actual.forEach((r, i) => expect(r).toBeCloseTo(wanted[i], 2));
+    };
+    // Each ring draws 2 arcs (outer + inner annulus edge) per category (A, B) →
+    // 4 arcs per ring, 8 total. Ring 0 ("Outer" series) is drawn FIRST and
+    // occupies the OUTERMOST band.
+    expectRadiiCloseTo(rec.arcs.slice(0, 4), [outerR, outerR - ringBand]);
+    // Ring 1 ("Inner" series) is drawn SECOND and occupies the band adjacent to
+    // the hole; its outer edge meets ring 0's inner edge, its inner edge is the
+    // hole radius.
+    expectRadiiCloseTo(rec.arcs.slice(4), [outerR - ringBand, innerR]);
   });
 
   it('rich pie dLbls compose showCatName + showPercent', () => {
@@ -1717,12 +1780,32 @@ describe('CH6 — axis scale model', () => {
     }), RECT, 1);
     // Normal: taller value (30) → shorter y (higher up) and greater height.
     // Reversed: the axis flips, so the bar for 30 grows DOWNWARD from the top.
-    const nBig = normal.rects[1];
-    const rBig = reversed.rects[1];
+    const [nSmall, nBig] = normal.rects;
+    const [rSmall, rBig] = reversed.rects;
     // In the reversed axis the "30" bar's top edge sits at the plot top area
     // and it extends toward the (now-inverted) zero at the bottom-flipped end;
     // its y origin differs from the normal orientation.
     expect(rBig.y).not.toBeCloseTo(nBig.y, 1);
+    // §21.2.2.130 orientation="maxMin" is a true mirror of the value axis, not
+    // just "a different y": every value's pixel position reflects across the
+    // plot's vertical midline. Both bars are zero-anchored (clustered, single
+    // series), so — independent of any internal renderer constant — the
+    // reversed zero line is the SHARED top edge of both reversed bars, and the
+    // normal zero line is the SHARED bottom edge of both normal bars.
+    const reversedZeroY = rSmall.y; // = rBig.y — both bars start at the (flipped) zero line
+    expect(rBig.y).toBeCloseTo(reversedZeroY, 6);
+    const normalZeroY = nSmall.y + nSmall.h; // = nBig.y + nBig.h — both bars end at zero
+    expect(nBig.y + nBig.h).toBeCloseTo(normalZeroY, 6);
+    // The mirror axis: for any value v, reversedBottom(v) = 2*reversedZeroY +
+    // (normalZeroY - reversedZeroY) - normalTop(v). A reversed bar's BOTTOM
+    // edge is the mirror image of the corresponding normal bar's TOP edge
+    // around the (reversedZeroY, normalZeroY) span.
+    const mirror = (yNormalTop: number): number => 2 * reversedZeroY + (normalZeroY - reversedZeroY) - yNormalTop;
+    expect(rSmall.y + rSmall.h).toBeCloseTo(mirror(nSmall.y), 4);
+    expect(rBig.y + rBig.h).toBeCloseTo(mirror(nBig.y), 4);
+    // The smaller value (10) still produces the smaller bar on the reversed
+    // axis too — reversal flips direction, not relative magnitude.
+    expect(rSmall.h).toBeLessThan(rBig.h);
   });
 
   it('valAxisLogBase=10 places gridlines on powers of ten', () => {
