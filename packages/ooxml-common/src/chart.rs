@@ -288,6 +288,23 @@ pub struct ChartModel {
     /// tick-label rotation. `None`/0 = horizontal (byte-stable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_label_rotation: Option<i32>,
+    // ── Stock chart (CH13, §21.2.2.198) ──────────────────────────────────────
+    /// `<c:stockChart><c:hiLowLines>` (§21.2.2.60) presence. When `Some(true)`
+    /// the stock renderer draws a vertical line spanning each category's
+    /// low↔high value. Only emitted for a stock chart (`chart_type == "stock"`);
+    /// `None` on every other chart type keeps the wire byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_hi_low_lines: Option<bool>,
+    /// `<c:hiLowLines><c:spPr><a:ln><a:solidFill>` resolved color (hex, no `#`).
+    /// `None` = the renderer's default gray. Only meaningful with
+    /// `stock_hi_low_lines == Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_hi_low_line_color: Option<String>,
+    /// `<c:stockChart><c:upDownBars>` (§21.2.2.227) presence. Parsed so a file
+    /// that carries open-close up/down bars is recognized; the stock renderer
+    /// does NOT yet draw them (tracked as a follow-up). `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_up_down_bars: Option<bool>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -1913,6 +1930,9 @@ pub fn parse_chartex_part(
         cat_axis_tick_label_pos: None,
         val_axis_tick_label_pos: None,
         cat_axis_label_rotation: None,
+        stock_hi_low_lines: None,
+        stock_hi_low_line_color: None,
+        stock_up_down_bars: None,
     })
 }
 
@@ -2581,6 +2601,34 @@ pub fn parse_chart_part(
         "stock".to_string()
     } else {
         "unknown".to_string()
+    };
+
+    // §21.2.2.198 stockChart decoration: `<c:hiLowLines>` (§21.2.2.60) and
+    // `<c:upDownBars>` (§21.2.2.227). Both are direct children of `<c:stockChart>`.
+    // The hi-lo line spans each category's low↔high; its `<c:spPr><a:ln>` fill is
+    // resolved so the renderer strokes it in the file's color (else a gray
+    // default). up/down bars are recognized but not yet drawn (follow-up). Every
+    // field stays `None` for non-stock charts (byte-stable wire).
+    let (stock_hi_low_lines, stock_hi_low_line_color, stock_up_down_bars) = if chart_type == "stock"
+    {
+        let stock = find_chart("stockChart");
+        let hi_low = stock.and_then(|s| child(s, "hiLowLines"));
+        let hi_low_color = hi_low
+            .and_then(|hl| child(hl, "spPr"))
+            .and_then(|sp| child(sp, "ln"))
+            .and_then(|ln| {
+                ln.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+            })
+            .and_then(|fill| color_resolver.resolve_solid_fill(fill));
+        let up_down = stock.and_then(|s| child(s, "upDownBars")).is_some();
+        (
+            Some(hi_low.is_some()),
+            hi_low_color,
+            if up_down { Some(true) } else { None },
+        )
+    } else {
+        (None, None, None)
     };
 
     // Title text. The CHART title is the direct-child `<c:title>` of `<c:chart>`
@@ -3610,6 +3658,9 @@ pub fn parse_chart_part(
         cat_axis_tick_label_pos,
         val_axis_tick_label_pos,
         cat_axis_label_rotation,
+        stock_hi_low_lines,
+        stock_hi_low_line_color,
+        stock_up_down_bars,
     })
 }
 
@@ -3803,6 +3854,9 @@ mod tests {
             cat_axis_tick_label_pos: None,
             val_axis_tick_label_pos: None,
             cat_axis_label_rotation: None,
+            stock_hi_low_lines: None,
+            stock_hi_low_line_color: None,
+            stock_up_down_bars: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -5613,7 +5667,9 @@ mod tests {
         let hi = r#"<c:ser><c:idx val="0"/><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>High</c:v></c:pt></c:strCache></c:strRef></c:tx>
             <c:cat><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:cat>
             <c:val><c:numCache><c:pt idx="0"><c:v>55</c:v></c:pt></c:numCache></c:val></c:ser>"#;
-        let group = format!(r#"<c:stockChart>{hi}<c:hiLowLines/></c:stockChart>"#);
+        let group = format!(
+            r#"<c:stockChart>{hi}<c:hiLowLines><c:spPr><a:ln><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr></c:hiLowLines></c:stockChart>"#
+        );
         let xml = chart_space_with_group(&group);
         let d = chart_space_of(&xml);
         let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("stock parses");
@@ -5621,6 +5677,27 @@ mod tests {
         assert_eq!(m.series.len(), 1);
         assert_eq!(m.series[0].name, "High");
         assert_eq!(m.series[0].values, vec![Some(55.0)]);
+        // hiLowLines present + its resolved line color; no upDownBars in fixture.
+        assert_eq!(m.stock_hi_low_lines, Some(true));
+        assert_eq!(m.stock_hi_low_line_color.as_deref(), Some("808080"));
+        assert_eq!(m.stock_up_down_bars, None);
+    }
+
+    /// A stock chart WITHOUT `<c:hiLowLines>` but WITH `<c:upDownBars>`: the
+    /// hi-lo flag is `Some(false)` (element absent) and up/down bars are
+    /// recognized as `Some(true)` even though the renderer does not draw them.
+    #[test]
+    fn parse_chart_part_stock_up_down_bars_recognized() {
+        let ser = r#"<c:ser><c:idx val="0"/>
+            <c:cat><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:cat>
+            <c:val><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt></c:numCache></c:val></c:ser>"#;
+        let group = format!(r#"<c:stockChart>{ser}<c:upDownBars/></c:stockChart>"#);
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("stock parses");
+        assert_eq!(m.stock_hi_low_lines, Some(false));
+        assert_eq!(m.stock_hi_low_line_color, None);
+        assert_eq!(m.stock_up_down_bars, Some(true));
     }
 
     /// §21.2.2.126 ofPieChart → `pie` (main-pie-only fallback; the secondary
@@ -5651,8 +5728,7 @@ mod tests {
         }
         fn resolve_series_accent(&self, idx: usize) -> Option<String> {
             // Six-accent cycle, matching `theme.accent[(idx % 6) + 1]`.
-            const ACCENTS: [&str; 6] =
-                ["4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"];
+            const ACCENTS: [&str; 6] = ["4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"];
             Some(ACCENTS[idx % 6].to_string())
         }
     }
@@ -5686,8 +5762,7 @@ mod tests {
 
         // varyColors="0" disables the per-slice accent fill: only the explicit
         // dPt color remains, the rest fall back to None (renderer palette).
-        let group_off =
-            format!(r#"<c:pieChart><c:varyColors val="0"/>{ser}</c:pieChart>"#);
+        let group_off = format!(r#"<c:pieChart><c:varyColors val="0"/>{ser}</c:pieChart>"#);
         let xml_off = chart_space_with_group(&group_off);
         let d2 = chart_space_of(&xml_off);
         let m2 = parse_chart_part(d2.root_element(), &AccentResolver).expect("pie parses");

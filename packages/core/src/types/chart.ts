@@ -239,6 +239,7 @@ export type ChartType =
   | 'area' | 'stackedArea' | 'stackedAreaPct'
   | 'pie' | 'doughnut'
   | 'scatter' | 'bubble' | 'radar' | 'waterfall'
+  | 'stock'
   | string;
 
 export interface ChartModel {
@@ -590,6 +591,25 @@ export interface ChartModel {
    * /0 ⇒ horizontal labels (byte-stable).
    */
   catAxisLabelRotation?: number | null;
+  // ── Stock chart (CH13, §21.2.2.198) ──────────────────────────────────────
+  /**
+   * `<c:stockChart><c:hiLowLines>` presence (ECMA-376 §21.2.2.60). When true
+   * the stock renderer draws a vertical line spanning each category's low↔high
+   * value. Only set for `chartType === "stock"`; null/undefined on every other
+   * chart type (byte-stable).
+   */
+  stockHiLowLines?: boolean | null;
+  /**
+   * `<c:hiLowLines><c:spPr><a:ln><a:solidFill>` resolved color (hex, no `#`).
+   * null = the renderer's default gray hi-lo line.
+   */
+  stockHiLowLineColor?: string | null;
+  /**
+   * `<c:stockChart><c:upDownBars>` presence (ECMA-376 §21.2.2.227). Parsed so a
+   * stock file carrying open-close up/down bars is recognized; the renderer does
+   * NOT yet draw them (tracked follow-up). null/undefined when absent.
+   */
+  stockUpDownBars?: boolean | null;
 }
 
 /**
