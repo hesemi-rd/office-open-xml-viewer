@@ -611,8 +611,12 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
  *     unreliable — sample-10's chart is a standard WMF mislabeled `.emf`),
  *     rasterizing a WMF via the minimal player at a size from `widthPt`/`heightPt`,
  *     returning `null` for a true EMF (or a geometry-less metafile), else
- *     `createImageBitmap`. A `null` throws so `preloadImages` drops the image
- *     (the existing "missing image" behavior, no crash).
+ *     `createImageBitmap`. That `null` is a LEGITIMATE "no drawable output" (not
+ *     an error), so we propagate it as `null` and `preloadImages` drops the image
+ *     — the existing "missing image" behavior, no crash. (A *transient* fetch/
+ *     decode failure still rejects; `preloadImages`' per-image catch absorbs that
+ *     too.) Every draw site null-checks the map lookup, matching pptx's
+ *     `if (!bitmap) return` and xlsx's "skip if falsy" draw guards.
  *  2. when a clrChange is requested, the make-transparent result is memoized per
  *     (imagePath, colorReplaceFrom) in {@link colorReplacedCacheFor} so the
  *     expensive getImageData/putImageData pass runs once per document.
@@ -631,14 +635,19 @@ export async function decodeRaster(
   fetchImage: (path: string, mime: string) => Promise<Blob>,
   widthPt = 0,
   heightPt = 0,
-): Promise<ImageBitmap> {
+): Promise<ImageBitmap | null> {
   // Base bitmap (no colour replacement): shared, path-keyed, per-document cache.
   const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, {
     widthPt,
     heightPt,
     suppressBoundaryFrame: true,
   });
-  if (!base) throw new Error(`${imagePath} produced no drawable output`);
+  // A `null` base is a legitimate "no drawable output" (a true EMF or a
+  // geometry-less metafile), NOT an error: propagate it so `preloadImages`
+  // drops the image and every draw site skips it via its null-check. We return
+  // null rather than throw so this expected outcome never travels the exception
+  // path (a transient fetch/decode failure still rejects and is caught upstream).
+  if (!base) return null;
   if (!colorReplaceFrom) return base;
   // Second layer: memoize the make-transparent result per (path, colour). The
   // recolor reads the SHARED base bitmap and produces a fresh independent raster,
@@ -683,7 +692,11 @@ export async function preloadImages(
       // undefined case). When true, `blip.svgImagePath` is narrowed to string.
       const blip = { svgImagePath: pair.svgImagePath, srcRect: pair.hasCrop || null };
       try {
-        let img: DecodedImage;
+        // `decodeRaster` may resolve to `null` for a legitimately undrawable
+        // metafile (true EMF / geometry-less WMF). That is not an error, so it
+        // does not travel the `catch` below — we detect it explicitly and drop
+        // the map entry, exactly as the caught (transient-failure) path does.
+        let img: DecodedImage | null;
         if (preferVectorBlip(blip)) {
           // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
           // fall back to the raster on any SVG decode failure. With an
@@ -705,6 +718,8 @@ export async function preloadImages(
         } else {
           img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
         }
+        // Undrawable metafile → drop the entry (draw sites skip a missing key).
+        if (!img) return null;
         return [imageKey(pair.imagePath, pair.colorReplaceFrom), img];
       } catch {
         return null;
