@@ -11554,6 +11554,16 @@ mod numbering_marker_font_tests {
         })?
     }
 
+    fn cell_text_bold(cell: &DocTableCell) -> Option<bool> {
+        cell.content.iter().find_map(|el| match el {
+            CellElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t.bold),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
     // A cell carrying an explicit firstCol cnfStyle (`001000000000`) on its tcPr
     // inherits the firstCol conditional run color (blue), while a plain body cell
     // keeps the whole-table gray. This is the calibre sample-11 Calendar3 Sun
@@ -11587,18 +11597,58 @@ mod numbering_marker_font_tests {
         );
     }
 
+    // A style whose firstRow and firstCol conditions are VISUALLY DISTINCT and
+    // on DIFFERENT properties, mirroring the sample-25 header structure:
+    // firstRow paints a white run color (like a Word header band) while
+    // firstCol contributes no run color of its own — only bold (like a plain
+    // bold-only first-column emphasis in that sample). Sharing
+    // `calendar_like_styles()` (firstRow == firstCol == `365F91`) would make
+    // the two conditions indistinguishable in a merged cell — a test that only
+    // exercises the firstCol branch would still read back the firstRow color
+    // and pass whether or not the row scope was ever unioned in. Using a
+    // distinct color for firstRow and no color (only bold) for firstCol makes
+    // both assertions load-bearing: a merged color of "ffffff" can only have
+    // come from the row scope threading through, and a merged bold of `true`
+    // can only have come from the column scope surviving alongside it.
+    // Reverting the union in `cell_cond` (treating the cell's own cnfStyle as
+    // its complete, authoritative condition set) makes a cell that states only
+    // one scope on its own tcPr silently drop the other scope's contribution
+    // instead — a real, observable regression that the old fixture (identical
+    // colors on both conditions) could not detect.
+    fn calendar_like_styles_distinct_row_col() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                    <w:pPr/><w:rPr/>
+                </w:style>
+                <w:style w:type="table" w:styleId="Cal3D">
+                    <w:rPr><w:color w:val="7F7F7F"/></w:rPr>
+                    <w:tblStylePr w:type="firstRow">
+                        <w:rPr><w:color w:val="FFFFFF"/></w:rPr>
+                    </w:tblStylePr>
+                    <w:tblStylePr w:type="firstCol">
+                        <w:rPr><w:b w:val="1"/></w:rPr>
+                    </w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
     // §17.4.7 / §17.4.8 UNION: a firstColumn cell whose ROW carries an explicit
     // firstRow cnfStyle inherits BOTH conditions. This is the sample-25 header
     // "Country" cell: the row's trPr states firstRow, the cell's tcPr states only
-    // firstColumn, and Word paints the cell with the firstRow shading + white
-    // text (the top-left corner = firstRow ∩ firstCol). Before the union fix the
+    // firstColumn, and Word paints the cell with the firstRow white run color
+    // (the top-left corner = firstRow ∩ firstCol). Before the union fix the
     // cell's cnfStyle was treated as its complete condition set, dropping the row
-    // scope's firstRow. Here firstRow sets a distinct color (365F91) that firstCol
-    // (no color) does not override, so the corner resolves to firstRow's color.
+    // scope's firstRow. `calendar_like_styles_distinct_row_col`'s firstCol layer
+    // sets NO color (only bold), so the white color assigned below can only have
+    // come from the row scope's firstRow layer — a cell that lost the row scope
+    // would fall back to the whole-table gray (7F7F7F) instead.
     #[test]
     fn cell_firstcol_in_firstrow_row_inherits_row_scope() {
         let t = parse_tbl_styled(
-            r#"<w:tblPr><w:tblStyle w:val="Cal3"/>
+            r#"<w:tblPr><w:tblStyle w:val="Cal3D"/>
                  <w:tblLook w:val="0580"/></w:tblPr>
                <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
                <w:tr>
@@ -11608,18 +11658,19 @@ mod numbering_marker_font_tests {
                  <w:tc>
                    <w:p><w:r><w:t>Production</w:t></w:r></w:p></w:tc>
                </w:tr>"#,
-            &calendar_like_styles(),
+            &calendar_like_styles_distinct_row_col(),
         );
-        // "Country" = firstRow ∩ firstCol; firstRow color wins (firstCol sets none).
+        // "Country" = firstRow ∩ firstCol; firstCol's own layer sets no color, so
+        // white can only be present if the row scope's firstRow was unioned in.
         assert_eq!(
             cell_text_color(&t.rows[0].cells[0]).as_deref(),
-            Some("365f91"),
-            "firstCol cell in a firstRow row still inherits firstRow"
+            Some("ffffff"),
+            "firstCol cell in a firstRow row still inherits firstRow's white run color"
         );
         // "Production" (no cell cnfStyle) inherits firstRow from the row scope.
         assert_eq!(
             cell_text_color(&t.rows[0].cells[1]).as_deref(),
-            Some("365f91"),
+            Some("ffffff"),
             "cell with no cnfStyle inherits the row's firstRow"
         );
     }
@@ -11627,14 +11678,24 @@ mod numbering_marker_font_tests {
     // §17.4.8 completeness: if a producer states the ROW-scope condition on the
     // CELL's own cnfStyle (as the spec's top-right corner example does — it lists
     // firstRow on the tcPr) instead of on trPr, and neither trPr/cnfStyle nor
-    // tblLook carries firstRow, the cell must STILL inherit firstRow. The union
-    // folds the cell's own row-membership bits into the row scope. Here tblLook is
+    // tblLook carries firstRow, the cell must STILL inherit firstRow — WITHOUT
+    // losing the column scope tblLook still derives for it. Here tblLook is
     // `0080` (firstColumn only — no firstRow) and the row has no cnfStyle, so the
-    // firstRow color can only come from the cell's own `100000000000` bit.
+    // firstRow color can only come from the cell's own `100000000000` bit, while
+    // the firstColumn bold can only come from tblLook's geometry (col 0).
+    //
+    // This is the load-bearing regression check for the union: the pre-union
+    // code treated a non-empty cell cnfStyle as the cell's COMPLETE condition
+    // set, so a cell stating only `firstRow` on its own tcPr would resolve
+    // ONLY `firstRow` and silently drop the tblLook-derived `firstCol` bold
+    // that `col_conds(0)` would otherwise contribute. The union folds the
+    // cell's own row-membership bit into the row scope while still layering
+    // the column scope (own column bits ∪ tblLook geometry) on top, so both
+    // firstRow's white color AND firstCol's bold survive together.
     #[test]
     fn cell_cnfstyle_stating_row_scope_inherits_firstrow() {
         let t = parse_tbl_styled(
-            r#"<w:tblPr><w:tblStyle w:val="Cal3"/>
+            r#"<w:tblPr><w:tblStyle w:val="Cal3D"/>
                  <w:tblLook w:val="0080"/></w:tblPr>
                <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
                <w:tr>
@@ -11643,20 +11704,35 @@ mod numbering_marker_font_tests {
                  <w:tc><w:tcPr><w:cnfStyle w:val="000000000000"/></w:tcPr>
                    <w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:tc>
                </w:tr>"#,
-            &calendar_like_styles(),
+            &calendar_like_styles_distinct_row_col(),
         );
-        // The cell that states firstRow on its own cnfStyle inherits firstRow blue.
+        // The cell that states firstRow on its own cnfStyle inherits firstRow's
+        // white run color.
         assert_eq!(
             cell_text_color(&t.rows[0].cells[0]).as_deref(),
-            Some("365f91"),
+            Some("ffffff"),
             "cell-scope firstRow bit is honored"
         );
+        // ...AND still picks up tblLook's firstColumn bold (col 0), which the
+        // pre-union code dropped once the cell's own cnfStyle was treated as its
+        // complete condition set.
+        assert_eq!(
+            cell_text_bold(&t.rows[0].cells[0]),
+            Some(true),
+            "tblLook-derived firstCol bold is unioned in alongside the cell-scope firstRow"
+        );
         // The sibling states an all-zero cnfStyle and has no column/tblLook
-        // condition (firstColumn applies to col 0 only), so it stays whole-table gray.
+        // condition (firstColumn applies to col 0 only), so it stays whole-table
+        // gray and non-bold.
         assert_eq!(
             cell_text_color(&t.rows[0].cells[1]).as_deref(),
             Some("7f7f7f"),
             "all-zero cell cnfStyle adds no condition"
+        );
+        assert_eq!(
+            cell_text_bold(&t.rows[0].cells[1]),
+            Some(false),
+            "col 1 has no firstCol condition"
         );
     }
 
