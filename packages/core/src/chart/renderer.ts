@@ -13,7 +13,7 @@ import {
   axisTitleMargin,
   type ChartLegendReserve,
 } from './layout.js';
-import { niceStep, valueAxisScale } from './axis-scale.js';
+import { niceStep, valueAxisScale, axisFraction, logAxisScale } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
@@ -465,6 +465,91 @@ function strokeValueGridlineH(
   ctx.stroke();
 }
 
+/** True when the value axis is reversed (`<c:valAx><c:scaling><c:orientation
+ *  val="maxMin">`, ECMA-376 §21.2.2.130). Absent/"minMax" ⇒ false (byte-stable). */
+function valAxisReversed(chart: ChartModel): boolean {
+  return chart.valAxisOrientation === 'maxMin';
+}
+
+/** True when the category axis is reversed (`<c:catAx>…orientation="maxMin">`). */
+function catAxisReversed(chart: ChartModel): boolean {
+  return chart.catAxisOrientation === 'maxMin';
+}
+
+/** Whether to draw value-axis MAJOR gridlines. Office writes `<c:majorGridlines>`
+ *  on the value axis by default, so the historical always-on behavior maps to
+ *  "draw unless the model explicitly says the element is absent". `undefined`
+ *  (parser didn't model it) ⇒ true (byte-stable); `false` (axis present without
+ *  the element) ⇒ off. */
+function drawValMajorGridlines(chart: ChartModel): boolean {
+  return chart.valAxisMajorGridlines !== false;
+}
+
+/** A resolved value-axis plan: rounded bounds, the major gridline VALUES to
+ *  stroke, an optional minor gridline VALUES list, and the value→fraction map
+ *  (0 at the axis min end, 1 at the max end — before any pixel flip). Centralizes
+ *  the CH6 major unit / logBase / orientation handling so every value-axis
+ *  family shares one spec-faithful code path. With no CH6 fields set the plan is
+ *  byte-identical to the old inline math: `step`/bounds from `valueAxisScale`,
+ *  `majorLines = [min, min+step, … max]`, `frac(v) = (v-min)/(max-min)`. */
+interface ValueAxisPlan {
+  min: number;
+  max: number;
+  step: number;
+  majorLines: number[];
+  minorLines: number[];
+  /** 0..1 position of `v` from the axis minimum toward the maximum (log-aware,
+   *  orientation-aware). Renderers turn this into a pixel with
+   *  `plotBottom - frac(v) * plotHeight` (vertical) — the reversal is already
+   *  baked in, so callers keep their existing `- frac*len` form. */
+  frac: (v: number) => number;
+}
+
+/** Build a {@link ValueAxisPlan} for the primary value axis. `dataMin`/`dataMax`
+ *  are the raw data extents already massaged by the caller (0-anchoring, pct
+ *  normalization, explicit valMin/valMax). `axisLenPt` drives the auto major
+ *  unit. Reversal is read from the chart's value-axis orientation. */
+function planValueAxis(
+  chart: ChartModel, dataMin: number, dataMax: number, axisLenPt?: number,
+): ValueAxisPlan {
+  const reversed = valAxisReversed(chart);
+  const logBase = chart.valAxisLogBase;
+  if (logBase != null && isFinite(logBase) && logBase >= 2) {
+    // Logarithmic axis (ECMA-376 §21.2.2.98): bounds snap to powers of the base,
+    // gridlines fall on those decades, values map in log space.
+    const { min, max, lines } = logAxisScale(dataMin, dataMax, logBase, chart.valMin, chart.valMax);
+    return {
+      min, max,
+      step: lines.length > 1 ? lines[1] - lines[0] : max - min,
+      majorLines: lines,
+      minorLines: [],
+      frac: (v: number) => axisFraction(v, min, max, { logBase, reversed }),
+    };
+  }
+  const { min, max, step } = valueAxisScale(
+    dataMin, dataMax, chart.valMin, chart.valMax, axisLenPt, chart.valAxisMajorUnit,
+  );
+  const range = (max - min) || 1;
+  const majorLines: number[] = [];
+  const steps = Math.round((max - min) / step);
+  for (let si = 0; si <= steps; si++) majorLines.push(min + si * step);
+  // Minor gridlines (ECMA-376 §21.2.2.109/§21.2.2.112): only when the file both
+  // declares `<c:minorGridlines>` AND a positive `<c:minorUnit>`; the minor lines
+  // between the majors are the interior multiples of the minor unit.
+  const minorLines: number[] = [];
+  const mu = chart.valAxisMinorUnit;
+  if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
+    for (let v = min + mu; v < max - 1e-9; v += mu) {
+      // Skip values that coincide with a major line.
+      if (Math.abs((v - min) / step - Math.round((v - min) / step)) > 1e-6) minorLines.push(v);
+    }
+  }
+  return {
+    min, max, step, majorLines, minorLines,
+    frac: (v: number) => (reversed ? 1 - (v - min) / range : (v - min) / range),
+  };
+}
+
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
  *  fallback. ptToPx comes from the host renderer (EMU/px scale at display). */
 function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
@@ -792,7 +877,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (chart.valMax != null) dataMax = chart.valMax;
   if (chart.valMin != null) dataMin = chart.valMin;
   if (dataMax === 0 && dataMin === 0) dataMax = 1;
-  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax, valAxisLenPt);
+  // `planValueAxis` folds in the CH6 major unit / logBase / orientation; with
+  // none set it is byte-identical to `valueAxisScale` + a linear map.
+  const plan = planValueAxis(chart, dataMin, dataMax, valAxisLenPt);
+  const { min: axMin, max: axMax, step } = plan;
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
   // own "nice" major unit / gridline count. Its axis is the vertical right edge,
@@ -894,8 +982,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // mapping is unchanged. `valX`/`valY` give the on-axis pixel for a value on
   // the value axis (X for horizontal bars, Y for columns).
   const axRange = (axMax - axMin) || 1;
-  const valY = (v: number): number => py0 + ph - ((v - axMin) / axRange) * ph;
-  const valX = (v: number): number => px0 + ((v - axMin) / axRange) * pw;
+  const valY = (v: number): number => py0 + ph - plan.frac(v) * ph;
+  const valX = (v: number): number => px0 + plan.frac(v) * pw;
   const zeroY = valY(0); // column zero line
   const zeroX = valX(0); // horizontal-bar zero line
   const toYPrimaryLine = valY;
@@ -915,8 +1003,19 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   ctx.fillStyle = valLabelColor;
 
   if (!chart.valAxisHidden) {
-    for (let si = 0; si <= steps; si++) {
-      const val = axMin + si * step;
+    // Minor gridlines (under the majors) when the file declares them.
+    for (const val of plan.minorLines) {
+      if (!isH) {
+        strokeValueGridlineH(ctx, px0, pw, valY(val), false);
+      } else {
+        const gx = valX(val);
+        ctx.strokeStyle = gridColor; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+      }
+    }
+    const drawMajorGrid = drawValMajorGridlines(chart);
+    const drawLabels = chart.valAxisTickLabelPos !== 'none';
+    for (const val of plan.majorLines) {
       // The zero line is the emphasized gridline (`si === 0` was that line only
       // while the axis was anchored at 0; with a negative minimum it moves up).
       const isZero = Math.abs(val) < step * 1e-9;
@@ -925,16 +1024,22 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
       if (!isH) {
         const gy = valY(val);
-        strokeValueGridlineH(ctx, px0, pw, gy, isZero);
-        ctx.textAlign = 'right';
-        ctx.fillText(label, px0 - 12, gy);
+        if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, isZero);
+        if (drawLabels) {
+          ctx.textAlign = 'right';
+          ctx.fillText(label, px0 - 12, gy);
+        }
       } else {
         const gx = valX(val);
-        ctx.strokeStyle = isZero ? '#aaa' : gridColor;
-        ctx.lineWidth = isZero ? 1 : 0.5;
-        ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
-        ctx.textAlign = 'center';
-        ctx.fillText(label, gx, py0 + ph + 10);
+        if (drawMajorGrid) {
+          ctx.strokeStyle = isZero ? '#aaa' : gridColor;
+          ctx.lineWidth = isZero ? 1 : 0.5;
+          ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+        }
+        if (drawLabels) {
+          ctx.textAlign = 'center';
+          ctx.fillText(label, gx, py0 + ph + 10);
+        }
       }
     }
   }
@@ -1405,18 +1510,25 @@ function renderLineChart(
     }
   }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
+  // A log axis can't anchor at 0 (log undefined) — keep the positive data
+  // minimum so `logAxisScale` can floor it to a decade. Linear axes keep the
+  // historical 0-anchor for positive data (byte-stable).
+  const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
   if (chart.valMin != null) dataMin = chart.valMin;
-  else if (dataMin > 0) dataMin = 0;
+  else if (dataMin > 0 && !isLogAxis) dataMin = 0;
   if (chart.valMax != null) dataMax = chart.valMax;
   else if (dataMax < 0) dataMax = 0;
   if (dataMax === dataMin) dataMax = dataMin + 1;
 
   // Value axis is vertical → its length is the plot height (axis-length-aware
-  // auto major unit, same model as the bar/column renderer).
-  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx);
-  const range = axMax - axMin; if (range === 0) return;
+  // auto major unit, same model as the bar/column renderer). `planValueAxis`
+  // folds in the CH6 major unit / logBase / orientation; with none set it is
+  // byte-identical to the old `valueAxisScale` + linear `toY`.
+  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
+  const { min: axMin, max: axMax, step } = plan;
+  if (axMax - axMin === 0) return;
 
-  const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
+  const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
   // Secondary series map through their own scale; `secScale` is null on the
   // common single-axis path so `yMapFor` always returns the primary `toY`.
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
@@ -1430,17 +1542,22 @@ function renderLineChart(
     : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
 
   if (!chart.valAxisHidden) {
-    const steps = Math.round((axMax - axMin) / step);
     ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
-    for (let si = 0; si <= steps; si++) {
-      const v = axMin + si * step;
+    // Minor gridlines first (under the majors), then major gridlines + ticks +
+    // labels. Minor lines are only populated when the file declares them.
+    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false);
+    const drawMajorGrid = drawValMajorGridlines(chart);
+    const drawLabels = chart.valAxisTickLabelPos !== 'none';
+    for (const v of plan.majorLines) {
       const gy = toY(v);
-      strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
+      if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
-      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
-      ctx.textAlign = 'right';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+      if (drawLabels) {
+        ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+        ctx.textAlign = 'right';
+        ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+      }
     }
   }
 

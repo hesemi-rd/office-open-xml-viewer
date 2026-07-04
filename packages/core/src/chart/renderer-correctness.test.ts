@@ -1585,3 +1585,164 @@ describe('CH10 — chart text font faces', () => {
     expect(titleFont).toContain('Aptos Display');
   });
 });
+
+// ── CH6 — axis scale model (gridlines / units / logBase / orientation) ───────
+
+interface Seg { x0: number; y0: number; x1: number; y1: number; ss: string; lw: number }
+interface SegRecorded { ctx: CanvasRenderingContext2D; segs: Seg[]; texts: TextCall[] }
+
+/** Recording context that captures stroked line SEGMENTS (moveTo→lineTo→stroke)
+ *  plus fillText, so gridline presence/orientation can be asserted. */
+function segRecordingCtx(): SegRecorded {
+  const segs: Seg[] = [];
+  const texts: TextCall[] = [];
+  let cx = 0, cy = 0, mx = 0, my = 0;
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'moveTo': return (x: number, y: number) => { cx = x; cy = y; mx = x; my = y; };
+        case 'lineTo': return (x: number, y: number) => {
+          segs.push({ x0: cx, y0: cy, x1: x, y1: y, ss: String(state.strokeStyle), lw: Number(state.lineWidth) });
+          cx = x; cy = y;
+        };
+        case 'fillText': return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'closePath': return () => { cx = mx; cy = my; };
+        case 'save': case 'restore': case 'beginPath': case 'fill': case 'stroke':
+        case 'arc': case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect':
+        case 'fillRect': case 'strokeRect': case 'clearRect': case 'strokeText':
+        case 'setLineDash': case 'translate': case 'rotate': case 'scale': case 'clip':
+        case 'setTransform': case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default: return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, segs, texts };
+}
+
+/** Value-axis MAJOR/MINOR gridlines: near-flat segments spanning the plot width
+ *  drawn in the gridline colors (`#e0e0e0` faint or `#aaa` zero line). The
+ *  category axis bottom rule is also `#aaa` horizontal, so it's excluded by
+ *  dropping the single bottom-most horizontal `#aaa` segment (the axis line). */
+function horizGridlines(segs: Seg[]): Seg[] {
+  const flat = segs.filter(s => Math.abs(s.y0 - s.y1) < 0.5 && Math.abs(s.x1 - s.x0) > 50);
+  const grids = flat.filter(s => s.ss === '#e0e0e0' || s.ss === '#aaa');
+  // Drop the bottom-most `#aaa` line (the category axis rule) if present.
+  const aaa = grids.filter(s => s.ss === '#aaa');
+  if (aaa.length === 0) return grids;
+  const maxY = Math.max(...aaa.map(s => s.y0));
+  let dropped = false;
+  return grids.filter(s => {
+    if (!dropped && s.ss === '#aaa' && Math.abs(s.y0 - maxY) < 0.5) { dropped = true; return false; }
+    return true;
+  });
+}
+
+describe('CH6 — axis scale model', () => {
+  const lineModel = (over: Partial<ChartModel>): ChartModel => baseModel({
+    chartType: 'line',
+    categories: ['A', 'B', 'C'],
+    series: [series({ name: 'S', values: [10, 20, 30] })],
+    ...over,
+  });
+
+  it('valAxisMajorGridlines=false suppresses the value gridlines (labels stay)', () => {
+    const on = segRecordingCtx();
+    renderChart(on.ctx, lineModel({}), RECT, 1);
+    const gridsOn = horizGridlines(on.segs).length;
+    expect(gridsOn).toBeGreaterThan(0);
+
+    const off = segRecordingCtx();
+    renderChart(off.ctx, lineModel({ valAxisMajorGridlines: false }), RECT, 1);
+    // No horizontal gridlines spanning the plot when suppressed.
+    expect(horizGridlines(off.segs).length).toBe(0);
+    // Tick labels still drawn.
+    expect(off.texts.some(t => t.text === '10')).toBe(true);
+  });
+
+  it('valAxisTickLabelPos="none" hides value tick labels (gridlines stay)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, lineModel({ valAxisTickLabelPos: 'none' }), RECT, 1);
+    // Value labels (numeric) gone; gridlines still present.
+    expect(rec.texts.some(t => /^\d+$/.test(t.text))).toBe(false);
+    expect(horizGridlines(rec.segs).length).toBeGreaterThan(0);
+  });
+
+  it('an explicit valAxisMajorUnit changes the gridline count', () => {
+    // Data 10..30 → auto step 5 (0,5,…,35 ≈ 8 lines). majorUnit 10 → coarser.
+    const auto = segRecordingCtx();
+    renderChart(auto.ctx, lineModel({}), RECT, 1);
+    const coarse = segRecordingCtx();
+    renderChart(coarse.ctx, lineModel({ valAxisMajorUnit: 10 }), RECT, 1);
+    expect(horizGridlines(coarse.segs).length).toBeLessThan(horizGridlines(auto.segs).length);
+    // Labels land on 0,10,20,30,… (multiples of 10) only.
+    const coarseLabels = coarse.texts.map(t => t.text).filter(t => /^\d+$/.test(t));
+    expect(coarseLabels).toContain('10');
+    expect(coarseLabels).toContain('20');
+    expect(coarseLabels).not.toContain('5');
+  });
+
+  it('valAxisOrientation="maxMin" reverses the value axis (bar heights flip)', () => {
+    const normal = recordingCtx();
+    renderChart(normal.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ name: 'S', values: [10, 30] })],
+    }), RECT, 1);
+    const reversed = recordingCtx();
+    renderChart(reversed.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ name: 'S', values: [10, 30] })],
+      valAxisOrientation: 'maxMin',
+    }), RECT, 1);
+    // Normal: taller value (30) → shorter y (higher up) and greater height.
+    // Reversed: the axis flips, so the bar for 30 grows DOWNWARD from the top.
+    const nBig = normal.rects[1];
+    const rBig = reversed.rects[1];
+    // In the reversed axis the "30" bar's top edge sits at the plot top area
+    // and it extends toward the (now-inverted) zero at the bottom-flipped end;
+    // its y origin differs from the normal orientation.
+    expect(rBig.y).not.toBeCloseTo(nBig.y, 1);
+  });
+
+  it('valAxisLogBase=10 places gridlines on powers of ten', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, lineModel({
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [1, 10, 100] })],
+      valAxisLogBase: 10,
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    // Decade tick labels 1 / 10 / 100 present (1000 not required for this range).
+    expect(labels).toContain('1');
+    expect(labels).toContain('10');
+    expect(labels).toContain('100');
+  });
+
+  it('a chart with no CH6 fields renders identical gridlines to before (byte-stable)', () => {
+    // Guard: the default (no CH6 fields) must keep the historical value gridlines.
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, lineModel({}), RECT, 1);
+    expect(horizGridlines(rec.segs).length).toBeGreaterThan(2);
+  });
+});

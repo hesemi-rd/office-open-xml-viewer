@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { niceStep, niceAxisMax, niceAxisMin, valueAxisScale } from './axis-scale.js';
+import {
+  niceStep,
+  niceAxisMax,
+  niceAxisMin,
+  valueAxisScale,
+  axisFraction,
+  logAxisScale,
+} from './axis-scale.js';
 
 describe('niceStep', () => {
   it('picks 1/2/5 × 10ⁿ for ~5 gridlines', () => {
@@ -84,5 +91,79 @@ describe('valueAxisScale (one niceStep drives min, max and gridline step)', () =
     expect(min).toBe(0);
     expect(step).toBeCloseTo(0.02, 12);
     expect(max).toBeCloseTo(0.12, 12);
+  });
+
+  it('an explicit majorUnit overrides the auto step (min/max still auto)', () => {
+    // <c:valAx><c:majorUnit val="25"/> forces the gridline spacing.
+    expect(valueAxisScale(0, 41, undefined, undefined, undefined, 25)).toEqual({
+      min: 0,
+      max: 50,
+      step: 25,
+    });
+  });
+  it('a null/undefined majorUnit keeps the auto step (byte-stable)', () => {
+    expect(valueAxisScale(0, 41, undefined, undefined, undefined, null)).toEqual(
+      valueAxisScale(0, 41),
+    );
+    expect(valueAxisScale(0, 41, undefined, undefined, undefined, undefined)).toEqual(
+      valueAxisScale(0, 41),
+    );
+  });
+  it('a non-positive majorUnit is ignored (no infinite gridline loop)', () => {
+    expect(valueAxisScale(0, 41, undefined, undefined, undefined, 0)).toEqual(
+      valueAxisScale(0, 41),
+    );
+    expect(valueAxisScale(0, 41, undefined, undefined, undefined, -5)).toEqual(
+      valueAxisScale(0, 41),
+    );
+  });
+});
+
+describe('axisFraction (value → 0..1 position along an axis)', () => {
+  it('linear, normal orientation is exactly (v - min) / (max - min) — byte-stable', () => {
+    expect(axisFraction(5, 0, 10)).toBe(0.5);
+    expect(axisFraction(0, 0, 10)).toBe(0);
+    expect(axisFraction(10, 0, 10)).toBe(1);
+    expect(axisFraction(2, -10, 10)).toBe(0.6);
+  });
+  it('reversed orientation (maxMin) flips the fraction', () => {
+    expect(axisFraction(5, 0, 10, { reversed: true })).toBe(0.5);
+    expect(axisFraction(0, 0, 10, { reversed: true })).toBe(1);
+    expect(axisFraction(10, 0, 10, { reversed: true })).toBe(0);
+  });
+  it('log axis maps in log space', () => {
+    // base-10 axis 1..1000 → 10 sits at log10(10/1)/log10(1000/1) = 1/3
+    expect(axisFraction(10, 1, 1000, { logBase: 10 })).toBeCloseTo(1 / 3, 12);
+    expect(axisFraction(100, 1, 1000, { logBase: 10 })).toBeCloseTo(2 / 3, 12);
+    expect(axisFraction(1, 1, 1000, { logBase: 10 })).toBe(0);
+    expect(axisFraction(1000, 1, 1000, { logBase: 10 })).toBeCloseTo(1, 12);
+  });
+  it('log axis + reversed composes both', () => {
+    expect(axisFraction(10, 1, 1000, { logBase: 10, reversed: true })).toBeCloseTo(2 / 3, 12);
+  });
+  it('degenerate zero range returns 0 (no NaN)', () => {
+    expect(axisFraction(5, 5, 5)).toBe(0);
+  });
+});
+
+describe('logAxisScale (power-of-base bounds + gridline exponents)', () => {
+  it('snaps bounds down/up to powers of the base and lists the decade lines', () => {
+    // data 3..700, base 10 → min 1 (10^0), max 1000 (10^3), lines 1,10,100,1000
+    const s = logAxisScale(3, 700, 10);
+    expect(s.min).toBe(1);
+    expect(s.max).toBe(1000);
+    expect(s.lines).toEqual([1, 10, 100, 1000]);
+  });
+  it('explicit min/max override the snapped bounds', () => {
+    const s = logAxisScale(3, 700, 10, 1, 100);
+    expect(s.min).toBe(1);
+    expect(s.max).toBe(100);
+    expect(s.lines).toEqual([1, 10, 100]);
+  });
+  it('clamps a non-positive data minimum up to the base (log undefined at <= 0)', () => {
+    // data 0..500 can't take log(0); floor to the base's smallest positive decade.
+    const s = logAxisScale(0, 500, 10);
+    expect(s.min).toBeGreaterThan(0);
+    expect(s.max).toBe(1000);
   });
 });

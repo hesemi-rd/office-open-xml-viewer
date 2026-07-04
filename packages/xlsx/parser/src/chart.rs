@@ -259,6 +259,18 @@ impl From<ChartData> for ChartModel {
             theme_minor_font_latin: c.theme_minor_font_latin,
             date1904: c.date1904,
             disp_blanks_as: c.disp_blanks_as,
+            // ── Axis scale model (CH6) ──────────────────────────────────────
+            val_axis_major_gridlines: c.val_axis_major_gridlines,
+            cat_axis_major_gridlines: c.cat_axis_major_gridlines,
+            val_axis_minor_gridlines: c.val_axis_minor_gridlines,
+            val_axis_major_unit: c.val_axis_major_unit,
+            val_axis_minor_unit: c.val_axis_minor_unit,
+            val_axis_log_base: c.val_axis_log_base,
+            val_axis_orientation: c.val_axis_orientation,
+            cat_axis_orientation: c.cat_axis_orientation,
+            cat_axis_tick_label_pos: c.cat_axis_tick_label_pos,
+            val_axis_tick_label_pos: c.val_axis_tick_label_pos,
+            cat_axis_label_rotation: c.cat_axis_label_rotation,
         }
     }
 }
@@ -659,6 +671,21 @@ pub(crate) fn parse_chart_xml(
     let mut cat_axis_crosses_at: Option<f64> = None;
     let mut val_axis_crosses: Option<String> = None;
     let mut val_axis_crosses_at: Option<f64> = None;
+    // ── Axis scale model (CH6) — gridlines / units / logBase / orientation ──
+    // Populated in the catAx/valAx branches via the shared ooxml-common
+    // extractors. Gridline flags stay None unless the corresponding axis is
+    // seen, so a chart with no value axis keeps the renderer's default gridlines.
+    let mut val_axis_major_gridlines: Option<bool> = None;
+    let mut cat_axis_major_gridlines: Option<bool> = None;
+    let mut val_axis_minor_gridlines: Option<bool> = None;
+    let mut val_axis_major_unit: Option<f64> = None;
+    let mut val_axis_minor_unit: Option<f64> = None;
+    let mut val_axis_log_base: Option<f64> = None;
+    let mut val_axis_orientation: Option<String> = None;
+    let mut cat_axis_orientation: Option<String> = None;
+    let mut cat_axis_tick_label_pos: Option<String> = None;
+    let mut val_axis_tick_label_pos: Option<String> = None;
+    let mut cat_axis_label_rotation: Option<i32> = None;
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
     let mut radar_style: Option<String> = None;
@@ -740,6 +767,22 @@ pub(crate) fn parse_chart_xml(
                 }
                 if cat_axis_minor_tick_mark.is_none() {
                     cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
+                }
+                // ── Axis scale model (CH6) — category axis ──────────────────
+                if cat_axis_major_gridlines.is_none() {
+                    cat_axis_major_gridlines =
+                        Some(ooxml_common::chart::axis_has_major_gridlines(child));
+                }
+                if cat_axis_orientation.is_none() {
+                    cat_axis_orientation = ooxml_common::chart::extract_axis_orientation(child);
+                }
+                if cat_axis_tick_label_pos.is_none() {
+                    cat_axis_tick_label_pos =
+                        ooxml_common::chart::extract_axis_tick_label_pos(child);
+                }
+                if cat_axis_label_rotation.is_none() {
+                    cat_axis_label_rotation =
+                        ooxml_common::chart::extract_axis_tick_label_rotation(child);
                 }
                 if let Some((mn, mx)) = extract_axis_scaling(&child) {
                     if cat_axis_min.is_none() {
@@ -827,6 +870,22 @@ pub(crate) fn parse_chart_xml(
                     if cat_axis_minor_tick_mark.is_none() {
                         cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
                     }
+                    // ── Axis scale model (CH6) — scatter X (category) axis ──
+                    if cat_axis_major_gridlines.is_none() {
+                        cat_axis_major_gridlines =
+                            Some(ooxml_common::chart::axis_has_major_gridlines(child));
+                    }
+                    if cat_axis_orientation.is_none() {
+                        cat_axis_orientation = ooxml_common::chart::extract_axis_orientation(child);
+                    }
+                    if cat_axis_tick_label_pos.is_none() {
+                        cat_axis_tick_label_pos =
+                            ooxml_common::chart::extract_axis_tick_label_pos(child);
+                    }
+                    if cat_axis_label_rotation.is_none() {
+                        cat_axis_label_rotation =
+                            ooxml_common::chart::extract_axis_tick_label_rotation(child);
+                    }
                     let (cr, cra) = extract_axis_crosses(&child);
                     if cat_axis_crosses.is_none() {
                         cat_axis_crosses = cr;
@@ -894,6 +953,31 @@ pub(crate) fn parse_chart_xml(
                     }
                     if val_axis_minor_tick_mark.is_none() {
                         val_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
+                    }
+                    // ── Axis scale model (CH6) — value axis ─────────────────
+                    if val_axis_major_gridlines.is_none() {
+                        val_axis_major_gridlines =
+                            Some(ooxml_common::chart::axis_has_major_gridlines(child));
+                    }
+                    if val_axis_minor_gridlines.is_none() {
+                        val_axis_minor_gridlines =
+                            Some(ooxml_common::chart::axis_has_minor_gridlines(child));
+                    }
+                    if val_axis_major_unit.is_none() {
+                        val_axis_major_unit = ooxml_common::chart::extract_axis_major_unit(child);
+                    }
+                    if val_axis_minor_unit.is_none() {
+                        val_axis_minor_unit = ooxml_common::chart::extract_axis_minor_unit(child);
+                    }
+                    if val_axis_log_base.is_none() {
+                        val_axis_log_base = ooxml_common::chart::extract_axis_log_base(child);
+                    }
+                    if val_axis_orientation.is_none() {
+                        val_axis_orientation = ooxml_common::chart::extract_axis_orientation(child);
+                    }
+                    if val_axis_tick_label_pos.is_none() {
+                        val_axis_tick_label_pos =
+                            ooxml_common::chart::extract_axis_tick_label_pos(child);
                     }
                     if axis_is_deleted(&child) {
                         val_axis_hidden = true;
@@ -1146,6 +1230,18 @@ pub(crate) fn parse_chart_xml(
         legend_font_bold,
         theme_major_font_latin: theme_major_font_latin.map(|s| s.to_string()),
         theme_minor_font_latin: theme_minor_font_latin.map(|s| s.to_string()),
+        // ── Axis scale model (CH6) ──────────────────────────────────────────
+        val_axis_major_gridlines,
+        cat_axis_major_gridlines,
+        val_axis_minor_gridlines,
+        val_axis_major_unit,
+        val_axis_minor_unit,
+        val_axis_log_base,
+        val_axis_orientation,
+        cat_axis_orientation,
+        cat_axis_tick_label_pos,
+        val_axis_tick_label_pos,
+        cat_axis_label_rotation,
     })
 }
 

@@ -882,6 +882,28 @@ pub(crate) fn parse_legacy_chart(
     let hole_size = ooxml_common::chart::extract_hole_size(root);
     let first_slice_angle = ooxml_common::chart::extract_first_slice_angle(root);
 
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+    // Gridline presence, manual major/minor units, log scale and orientation —
+    // all via the shared ooxml-common extractors on the primary val/cat axes.
+    // `<c:majorGridlines>` presence: Office writes it on the value axis by
+    // default (renderer keeps its historical always-on when the field is None),
+    // so we only emit `Some(false)` when a value axis EXISTS without the element.
+    let val_axis_major_gridlines =
+        val_ax.map(|ax| ooxml_common::chart::axis_has_major_gridlines(ax));
+    let cat_axis_major_gridlines =
+        cat_ax.map(|ax| ooxml_common::chart::axis_has_major_gridlines(ax));
+    let val_axis_minor_gridlines =
+        val_ax.map(|ax| ooxml_common::chart::axis_has_minor_gridlines(ax));
+    let val_axis_major_unit = val_ax.and_then(ooxml_common::chart::extract_axis_major_unit);
+    let val_axis_minor_unit = val_ax.and_then(ooxml_common::chart::extract_axis_minor_unit);
+    let val_axis_log_base = val_ax.and_then(ooxml_common::chart::extract_axis_log_base);
+    let val_axis_orientation = val_ax.and_then(ooxml_common::chart::extract_axis_orientation);
+    let cat_axis_orientation = cat_ax.and_then(ooxml_common::chart::extract_axis_orientation);
+    let cat_axis_tick_label_pos = cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_pos);
+    let val_axis_tick_label_pos = val_ax.and_then(ooxml_common::chart::extract_axis_tick_label_pos);
+    let cat_axis_label_rotation =
+        cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_rotation);
+
     // Chart title font face (`<c:title>…<a:latin>`) — parity with xlsx, which
     // already extracts it. `extract_axis_title_face` scopes to a node's
     // direct-child `<c:title>`, so pass the title's parent (`<c:chart>`).
@@ -982,6 +1004,18 @@ pub(crate) fn parse_legacy_chart(
             radar_style: None,
             date1904,
             disp_blanks_as,
+            // ── Axis scale model (CH6) ──────────────────────────────────────
+            val_axis_major_gridlines,
+            cat_axis_major_gridlines,
+            val_axis_minor_gridlines,
+            val_axis_major_unit,
+            val_axis_minor_unit,
+            val_axis_log_base,
+            val_axis_orientation,
+            cat_axis_orientation,
+            cat_axis_tick_label_pos,
+            val_axis_tick_label_pos,
+            cat_axis_label_rotation,
         },
     })
 }
@@ -1254,6 +1288,20 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
             date1904: false,
             // chartEx waterfall has no line/area blanks to display.
             disp_blanks_as: None,
+            // chartEx (cx:) has its own axis model (`<cx:axis>`); the classic
+            // `<c:catAx>`/`<c:valAx>` scale properties don't apply, so leave the
+            // CH6 fields unset — the renderer keeps its defaults (byte-stable).
+            val_axis_major_gridlines: None,
+            cat_axis_major_gridlines: None,
+            val_axis_minor_gridlines: None,
+            val_axis_major_unit: None,
+            val_axis_minor_unit: None,
+            val_axis_log_base: None,
+            val_axis_orientation: None,
+            cat_axis_orientation: None,
+            cat_axis_tick_label_pos: None,
+            val_axis_tick_label_pos: None,
+            cat_axis_label_rotation: None,
         },
     })
 }

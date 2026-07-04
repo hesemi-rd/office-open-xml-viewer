@@ -224,6 +224,52 @@ pub struct ChartModel {
     /// when the file sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disp_blanks_as: Option<String>,
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+    /// `<c:valAx><c:majorGridlines>` presence (§21.2.2.100). `Some(false)` when
+    /// the value axis exists but omits the element — Office suppresses the value
+    /// gridlines then. `None` when there is no value axis (or the parser path
+    /// doesn't model it); the renderer keeps its historical always-on value
+    /// gridlines, so a `None`/absent field is byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_gridlines: Option<bool>,
+    /// `<c:catAx><c:majorGridlines>` presence (§21.2.2.100). `Some(true)` turns
+    /// on category-axis gridlines (Office omits them by default). `None`/absent
+    /// keeps the renderer's historical no-category-gridlines behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_major_gridlines: Option<bool>,
+    /// `<c:valAx><c:minorGridlines>` presence (§21.2.2.109).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_gridlines: Option<bool>,
+    /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major gridline
+    /// step, overriding the auto "nice" step. `None` = auto (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_unit: Option<f64>,
+    /// `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor gridline step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_unit: Option<f64>,
+    /// `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98) — logarithmic value
+    /// axis base (>= 2). `None` = linear (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_log_base: Option<f64>,
+    /// `<c:valAx><c:scaling><c:orientation val>` (§21.2.2.130) — `"minMax"`
+    /// (normal) | `"maxMin"` (reversed). `None`/`"minMax"` = normal (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_orientation: Option<String>,
+    /// `<c:catAx><c:scaling><c:orientation val>` — reverses the category axis
+    /// left↔right when `"maxMin"`. `None`/`"minMax"` = normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_orientation: Option<String>,
+    /// `<c:catAx><c:tickLblPos val>` (§21.2.2.207) — `"nextTo"` (default) |
+    /// `"low"` | `"high"` | `"none"` (labels hidden). `None` = nextTo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_label_pos: Option<String>,
+    /// `<c:valAx><c:tickLblPos val>` (§21.2.2.207).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_tick_label_pos: Option<String>,
+    /// `<c:catAx><c:txPr><a:bodyPr rot>` (60000ths of a degree) — category
+    /// tick-label rotation. `None`/0 = horizontal (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_label_rotation: Option<i32>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -1027,6 +1073,99 @@ pub fn extract_axis_line_style(
     (color, width, no_fill)
 }
 
+// ============================================================================
+// Axis scale model (CH6) — gridlines / units / logBase / orientation / labels
+// ============================================================================
+//
+// All helpers take the already-located `<c:catAx>` / `<c:valAx>` node (per
+// EG_AxShared, ECMA-376 §21.2.2). `<c:majorGridlines>` / `<c:minorGridlines>`
+// are direct children of the axis; `<c:logBase>` / `<c:orientation>` live under
+// `<c:scaling>`; `<c:majorUnit>` / `<c:minorUnit>` are direct children of a
+// `<c:valAx>` (after `<c:crossBetween>`).
+
+/// `<c:catAx|valAx><c:majorGridlines>` presence (ECMA-376 §21.2.2.100,
+/// `CT_ChartLines`). The element carries only an optional `<c:spPr>` line
+/// style; its mere PRESENCE requests gridlines. Returns `true` when the axis
+/// declares `<c:majorGridlines>`. Office writes it on the value axis by default
+/// and omits it on the category axis, so this maps directly to "draw them".
+pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
+    child(axis_node, "majorGridlines").is_some()
+}
+
+/// `<c:catAx|valAx><c:minorGridlines>` presence (ECMA-376 §21.2.2.109). Same
+/// presence-only semantics as [`axis_has_major_gridlines`]. Minor gridlines
+/// require a minor unit to place them; the renderer only draws them when both a
+/// `<c:minorGridlines>` element and a resolvable minor step exist.
+pub fn axis_has_minor_gridlines(axis_node: Node) -> bool {
+    child(axis_node, "minorGridlines").is_some()
+}
+
+/// `<c:valAx><c:majorUnit val>` (ECMA-376 §21.2.2.103, `ST_AxisUnit`
+/// §21.2.3.1) — an explicit distance between major ticks/gridlines. Must be a
+/// positive floating-point number; non-positive values are rejected so they
+/// can't wedge the renderer into an infinite gridline loop. `None` when absent
+/// (the renderer keeps its Excel-style auto "nice" step).
+pub fn extract_axis_major_unit(axis_node: Node) -> Option<f64> {
+    child(axis_node, "majorUnit")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// `<c:valAx><c:minorUnit val>` (ECMA-376 §21.2.2.112) — explicit distance
+/// between minor ticks/gridlines. Positive floating-point; `None` when absent.
+pub fn extract_axis_minor_unit(axis_node: Node) -> Option<f64> {
+    child(axis_node, "minorUnit")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// `<c:catAx|valAx><c:scaling><c:logBase val>` (ECMA-376 §21.2.2.98,
+/// `ST_LogBase` §21.2.3.25) — the base of a logarithmic value axis. Per the
+/// spec the base shall be `>= 2`; smaller/invalid values are rejected. `None`
+/// when the axis is linear (the common case).
+pub fn extract_axis_log_base(axis_node: Node) -> Option<f64> {
+    let scaling = child(axis_node, "scaling")?;
+    child(scaling, "logBase")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 2.0)
+}
+
+/// `<c:catAx|valAx><c:scaling><c:orientation val>` (ECMA-376 §21.2.2.130,
+/// `ST_Orientation` §21.2.3.30) — axis direction. Returns the raw enum string
+/// `"minMax"` (normal, the default) or `"maxMin"` (reversed). `None` when the
+/// element is absent (the renderer treats absent and `"minMax"` identically, so
+/// omitting it is byte-stable).
+pub fn extract_axis_orientation(axis_node: Node) -> Option<String> {
+    let scaling = child(axis_node, "scaling")?;
+    child(scaling, "orientation")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
+}
+
+/// `<c:catAx|valAx><c:tickLblPos val>` (ECMA-376 §21.2.2.207, `ST_TickLblPos`
+/// §21.2.3.47) — where the tick labels sit: `"high"` | `"low"` | `"nextTo"`
+/// (default) | `"none"` (labels not drawn). Returns the raw enum string; `None`
+/// when absent (renderer treats absent as `"nextTo"`, byte-stable).
+pub fn extract_axis_tick_label_pos(axis_node: Node) -> Option<String> {
+    child(axis_node, "tickLblPos")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
+}
+
+/// `<c:catAx|valAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
+/// degree — §20.1.10.3) — tick-label rotation. Scoped to the axis's `<c:txPr>`
+/// body properties so a title's rotation isn't misread. Returns the raw
+/// 60000ths-degree integer; `None` when absent or 0 is not written (renderer
+/// treats absent as 0, byte-stable). A value like `-2700000` = -45°.
+pub fn extract_axis_tick_label_rotation(axis_node: Node) -> Option<i32> {
+    let txpr = child(axis_node, "txPr")?;
+    let body_pr = child(txpr, "bodyPr")?;
+    body_pr.attribute("rot").and_then(|v| v.parse::<i32>().ok())
+}
+
 /// chartEx (`<cx:chartSpace>`) axis visibility. ChartEx encodes the
 /// scale type via a `<cx:catScaling>` / `<cx:valScaling>` child rather
 /// than separate `<c:catAx>` / `<c:valAx>` elements, so callers can't just
@@ -1236,6 +1375,17 @@ mod tests {
             theme_minor_font_latin: None,
             date1904: false,
             disp_blanks_as: None,
+            val_axis_major_gridlines: None,
+            cat_axis_major_gridlines: None,
+            val_axis_minor_gridlines: None,
+            val_axis_major_unit: None,
+            val_axis_minor_unit: None,
+            val_axis_log_base: None,
+            val_axis_orientation: None,
+            cat_axis_orientation: None,
+            cat_axis_tick_label_pos: None,
+            val_axis_tick_label_pos: None,
+            cat_axis_label_rotation: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -1853,6 +2003,114 @@ mod tests {
         assert_eq!(
             extract_axis_tick_label_face(root_of(&xml).root_element()).as_deref(),
             Some("+mn-lt")
+        );
+    }
+
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+
+    #[test]
+    fn axis_gridlines_presence() {
+        // Value axis with `<c:majorGridlines>` → true; category axis without → false.
+        let val = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:majorGridlines/></c:valAx>"#);
+        assert!(axis_has_major_gridlines(root_of(&val).root_element()));
+        assert!(!axis_has_minor_gridlines(root_of(&val).root_element()));
+
+        let cat = format!(r#"<c:catAx xmlns:c="{C_NS}"/>"#);
+        assert!(!axis_has_major_gridlines(root_of(&cat).root_element()));
+
+        let both = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:majorGridlines/><c:minorGridlines/></c:valAx>"#
+        );
+        assert!(axis_has_major_gridlines(root_of(&both).root_element()));
+        assert!(axis_has_minor_gridlines(root_of(&both).root_element()));
+    }
+
+    #[test]
+    fn axis_major_minor_unit() {
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:crossBetween val="between"/><c:majorUnit val="500"/><c:minorUnit val="100"/></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_major_unit(root_of(&xml).root_element()),
+            Some(500.0)
+        );
+        assert_eq!(
+            extract_axis_minor_unit(root_of(&xml).root_element()),
+            Some(100.0)
+        );
+        // Absent → None (auto step).
+        let bare = format!(r#"<c:valAx xmlns:c="{C_NS}"/>"#);
+        assert_eq!(extract_axis_major_unit(root_of(&bare).root_element()), None);
+        // Non-positive rejected (would wedge the gridline loop).
+        let zero = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:majorUnit val="0"/></c:valAx>"#);
+        assert_eq!(extract_axis_major_unit(root_of(&zero).root_element()), None);
+    }
+
+    #[test]
+    fn axis_log_base() {
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:logBase val="10"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_log_base(root_of(&xml).root_element()),
+            Some(10.0)
+        );
+        // Base < 2 is invalid per ST_LogBase → rejected.
+        let bad = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:logBase val="1"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(extract_axis_log_base(root_of(&bad).root_element()), None);
+        // Absent scaling / logBase → None (linear).
+        let bare = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:scaling/></c:valAx>"#);
+        assert_eq!(extract_axis_log_base(root_of(&bare).root_element()), None);
+    }
+
+    #[test]
+    fn axis_orientation() {
+        let rev = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:orientation val="maxMin"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_orientation(root_of(&rev).root_element()).as_deref(),
+            Some("maxMin")
+        );
+        let norm = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:orientation val="minMax"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_orientation(root_of(&norm).root_element()).as_deref(),
+            Some("minMax")
+        );
+        // Absent → None (renderer treats as minMax).
+        let bare = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:scaling/></c:valAx>"#);
+        assert_eq!(
+            extract_axis_orientation(root_of(&bare).root_element()),
+            None
+        );
+    }
+
+    #[test]
+    fn axis_tick_label_pos_and_rotation() {
+        let xml = format!(
+            r#"<c:catAx xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:tickLblPos val="low"/><c:txPr><a:bodyPr rot="-2700000"/></c:txPr></c:catAx>"#
+        );
+        assert_eq!(
+            extract_axis_tick_label_pos(root_of(&xml).root_element()).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            extract_axis_tick_label_rotation(root_of(&xml).root_element()),
+            Some(-2_700_000)
+        );
+        // Absent → None (renderer treats as nextTo / 0°).
+        let bare = format!(r#"<c:catAx xmlns:c="{C_NS}"/>"#);
+        assert_eq!(
+            extract_axis_tick_label_pos(root_of(&bare).root_element()),
+            None
+        );
+        assert_eq!(
+            extract_axis_tick_label_rotation(root_of(&bare).root_element()),
+            None
         );
     }
 }

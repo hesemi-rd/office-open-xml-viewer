@@ -463,6 +463,66 @@ export interface ChartModel {
    * consulted for the line and area families. null/undefined = "gap".
    */
   dispBlanksAs?: string | null;
+  // ── Axis scale model (CH6) ───────────────────────────────────────────────
+  // Gridline presence, manual major/minor units, log scale and orientation.
+  // Every field is byte-stable when absent: the renderer keeps its historical
+  // "value gridlines always on, category gridlines off, linear minMax axis"
+  // behavior unless one of these is explicitly set.
+  /**
+   * `<c:valAx><c:majorGridlines>` presence (ECMA-376 §21.2.2.100). `false` when
+   * the value axis exists but omits the element (Office suppresses value
+   * gridlines). null/undefined ⇒ the renderer's historical always-on value
+   * gridlines (byte-stable). `true` is redundant with the default but honored.
+   */
+  valAxisMajorGridlines?: boolean | null;
+  /**
+   * `<c:catAx><c:majorGridlines>` presence (§21.2.2.100). `true` turns on
+   * category-axis gridlines (Office omits them by default). null/undefined/false
+   * ⇒ no category gridlines (the historical default, byte-stable).
+   */
+  catAxisMajorGridlines?: boolean | null;
+  /** `<c:valAx><c:minorGridlines>` presence (§21.2.2.109). Only drawn when a
+   *  minor step is resolvable (see {@link valAxisMinorUnit}). */
+  valAxisMinorGridlines?: boolean | null;
+  /**
+   * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between major
+   * gridlines/ticks, overriding the Excel-style auto "nice" step. null/undefined
+   * ⇒ auto step (byte-stable).
+   */
+  valAxisMajorUnit?: number | null;
+  /** `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step. Drives
+   *  minor gridlines/ticks when present. null ⇒ no minor divisions. */
+  valAxisMinorUnit?: number | null;
+  /**
+   * `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98, `ST_LogBase` §21.2.3.25)
+   * — logarithmic value-axis base (>= 2). When set, values map to pixels in log
+   * space and gridlines fall on powers of the base. null/undefined ⇒ linear
+   * (byte-stable).
+   */
+  valAxisLogBase?: number | null;
+  /**
+   * `<c:valAx><c:scaling><c:orientation val>` (§21.2.2.130, `ST_Orientation`
+   * §21.2.3.30) — "minMax" (normal) | "maxMin" (reversed, so the value axis runs
+   * top→bottom max→min). null/undefined/"minMax" ⇒ normal (byte-stable).
+   */
+  valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
+  /** `<c:catAx><c:scaling><c:orientation val>` — "maxMin" reverses the category
+   *  axis left↔right. null/"minMax" ⇒ normal. */
+  catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
+  /**
+   * `<c:catAx><c:tickLblPos val>` (§21.2.2.207, `ST_TickLblPos` §21.2.3.47) —
+   * "nextTo" (default) | "low" | "high" | "none". "none" hides the category tick
+   * labels. null/undefined ⇒ nextTo (byte-stable).
+   */
+  catAxisTickLabelPos?: string | null;
+  /** `<c:valAx><c:tickLblPos val>` (§21.2.2.207). "none" hides value tick labels. */
+  valAxisTickLabelPos?: string | null;
+  /**
+   * `<c:catAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
+   * degree) — category tick-label rotation. e.g. -2700000 = -45°. null/undefined
+   * /0 ⇒ horizontal labels (byte-stable).
+   */
+  catAxisLabelRotation?: number | null;
 }
 
 /**

@@ -849,6 +849,41 @@ pub struct ChartData {
     /// Theme body (minorFont) Latin face — fallback for ticks/data labels/legend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme_minor_font_latin: Option<String>,
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+    /// `<c:valAx><c:majorGridlines>` presence (§21.2.2.100). `Some(false)` when
+    /// the value axis exists without the element. `None` = no value axis parsed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_gridlines: Option<bool>,
+    /// `<c:catAx><c:majorGridlines>` presence (§21.2.2.100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_major_gridlines: Option<bool>,
+    /// `<c:valAx><c:minorGridlines>` presence (§21.2.2.109).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_gridlines: Option<bool>,
+    /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_unit: Option<f64>,
+    /// `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_unit: Option<f64>,
+    /// `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98) — log base (>= 2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_log_base: Option<f64>,
+    /// `<c:valAx><c:scaling><c:orientation val>` (§21.2.2.130) — minMax|maxMin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_orientation: Option<String>,
+    /// `<c:catAx><c:scaling><c:orientation val>` — minMax|maxMin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_orientation: Option<String>,
+    /// `<c:catAx><c:tickLblPos val>` (§21.2.2.207).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_label_pos: Option<String>,
+    /// `<c:valAx><c:tickLblPos val>` (§21.2.2.207).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_tick_label_pos: Option<String>,
+    /// `<c:catAx><c:txPr><a:bodyPr rot>` (60000ths of a degree) — label rotation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_label_rotation: Option<i32>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
