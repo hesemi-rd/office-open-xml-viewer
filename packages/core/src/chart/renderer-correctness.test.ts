@@ -13,7 +13,7 @@ import { renderChart } from './renderer.js';
 import { formatChartValWithCode } from './chart-number-format.js';
 
 interface RectCall { x: number; y: number; w: number; h: number; fs: string }
-interface TextCall { text: string; x: number; y: number }
+interface TextCall { text: string; x: number; y: number; align: string; baseline: string }
 
 interface Recorded {
   ctx: CanvasRenderingContext2D;
@@ -56,7 +56,8 @@ function recordingCtx(): Recorded {
           return (x: number, y: number, w: number, h: number) =>
             rects.push({ x, y, w, h, fs: String(state.fillStyle) });
         case 'fillText':
-          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+          return (text: string, x: number, y: number) =>
+            texts.push({ text, x, y, align: String(state.textAlign), baseline: String(state.textBaseline) });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -781,7 +782,8 @@ function pathRecordingCtx(): {
         case 'arc':
           return (x: number, y: number) => push(x, y);
         case 'fillText':
-          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+          return (text: string, x: number, y: number) =>
+            texts.push({ text, x, y, align: String(state.textAlign), baseline: String(state.textBaseline) });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -962,7 +964,8 @@ function markerRecordingCtx(): {
         case 'bezierCurveTo':
           return () => { beziers += 1; };
         case 'fillText':
-          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+          return (text: string, x: number, y: number) =>
+            texts.push({ text, x, y, align: String(state.textAlign), baseline: String(state.textBaseline) });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -1159,6 +1162,138 @@ describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
       expect(rec.texts.some(t => t.text === '7')).toBe(true);
     });
   }
+});
+
+describe('CH11 — line/area/scatter data labels honor <c:dLblPos> (§21.2.2.16)', () => {
+  // drawDataLabelText encodes each position purely through textAlign/textBaseline
+  // (+ a directional offset), so the recorded align/baseline of a value label is
+  // a faithful witness of the resolved <c:dLblPos>:
+  //   r → left/middle   l → right/middle   t → center/bottom
+  //   b → center/top     ctr → center/middle
+  const expectPos: Record<string, { align: string; baseline: string }> = {
+    r: { align: 'left', baseline: 'middle' },
+    l: { align: 'right', baseline: 'middle' },
+    t: { align: 'center', baseline: 'bottom' },
+    b: { align: 'center', baseline: 'top' },
+    ctr: { align: 'center', baseline: 'middle' },
+  };
+  // Find the value label for the single data point (text "42").
+  const valLabel = (rec: Recorded): TextCall => {
+    const hit = rec.texts.find(t => t.text === '42');
+    if (!hit) throw new Error('value label "42" not drawn');
+    return hit;
+  };
+
+  it('line: the default position is r (right of the point) per PowerPoint', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A'],
+      series: [series({ name: 'S', values: [42], showMarker: true })],
+      showDataLabels: true,       // family-level value dump (legacy path)
+    }), RECT, 1);
+    const lbl = valLabel(rec);
+    expect(lbl.align).toBe('left');    // right-of-point → left-aligned text
+    expect(lbl.baseline).toBe('middle');
+  });
+
+  it('line: seriesDataLabels default position is r when no dLblPos is set', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A'],
+      series: [series({
+        name: 'S', values: [42], showMarker: true,
+        seriesDataLabels: { showVal: true, showCatName: false, showSerName: false, showPercent: false },
+      })],
+    }), RECT, 1);
+    const lbl = valLabel(rec);
+    expect(lbl.align).toBe('left');
+    expect(lbl.baseline).toBe('middle');
+  });
+
+  for (const pos of ['t', 'b', 'l', 'r', 'ctr'] as const) {
+    it(`line: an explicit <c:dLblPos val="${pos}"> places the label ${pos}`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line',
+        categories: ['A'],
+        series: [series({
+          name: 'S', values: [42], showMarker: true,
+          seriesDataLabels: {
+            showVal: true, showCatName: false, showSerName: false, showPercent: false,
+            position: pos,
+          },
+        })],
+      }), RECT, 1);
+      const lbl = valLabel(rec);
+      expect(lbl.align).toBe(expectPos[pos].align);
+      expect(lbl.baseline).toBe(expectPos[pos].baseline);
+    });
+
+    it(`line: a chart-level dataLabelPosition="${pos}" flows to the family value dump`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line',
+        categories: ['A'],
+        series: [series({ name: 'S', values: [42], showMarker: true })],
+        showDataLabels: true,
+        dataLabelPosition: pos,
+      }), RECT, 1);
+      const lbl = valLabel(rec);
+      expect(lbl.align).toBe(expectPos[pos].align);
+      expect(lbl.baseline).toBe(expectPos[pos].baseline);
+    });
+  }
+
+  it('line: a per-point override position beats the series-level position', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A'],
+      series: [series({
+        name: 'S', values: [42], showMarker: true,
+        seriesDataLabels: {
+          showVal: true, showCatName: false, showSerName: false, showPercent: false,
+          position: 'r',
+        },
+        dataLabelOverrides: [{ idx: 0, text: '42', position: 't' }],
+      })],
+    }), RECT, 1);
+    const lbl = valLabel(rec);
+    expect(lbl.align).toBe('center');  // 't' wins over series 'r'
+    expect(lbl.baseline).toBe('bottom');
+  });
+
+  it('area: the default position is ctr (centered on the point) per the areaChart group', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'area',
+      categories: ['A'],
+      series: [series({
+        name: 'S', values: [42], showMarker: true,
+        seriesDataLabels: { showVal: true, showCatName: false, showSerName: false, showPercent: false },
+      })],
+    }), RECT, 1);
+    const lbl = valLabel(rec);
+    expect(lbl.align).toBe('center');
+    expect(lbl.baseline).toBe('middle');
+  });
+
+  it('scatter: the default position stays r (unchanged)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      categories: ['1'],
+      series: [series({
+        name: 'S', values: [42],
+        seriesDataLabels: { showVal: true, showCatName: false, showSerName: false, showPercent: false },
+      })],
+    }), RECT, 1);
+    const lbl = valLabel(rec);
+    expect(lbl.align).toBe('left');
+    expect(lbl.baseline).toBe('middle');
+  });
 });
 
 describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
@@ -1684,7 +1819,8 @@ function segRecordingCtx(): SegRecorded {
           segs.push({ x0: cx, y0: cy, x1: x, y1: y, ss: String(state.strokeStyle), lw: Number(state.lineWidth) });
           cx = x; cy = y;
         };
-        case 'fillText': return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        case 'fillText': return (text: string, x: number, y: number) =>
+          texts.push({ text, x, y, align: String(state.textAlign), baseline: String(state.textBaseline) });
         case 'createLinearGradient': case 'createRadialGradient':
           return () => ({ addColorStop() {} });
         case 'closePath': return () => { cx = mx; cy = my; };

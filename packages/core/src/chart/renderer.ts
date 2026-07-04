@@ -1789,6 +1789,10 @@ function renderLineChart(
       // "zero" mode plots the null at 0 — both cases get a label too.
       stacked || dispBlanks === 'zero',
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+      // §21.2.2.16 `<c:dLblPos>` precedence: per-point/series positions win, else
+      // the chart-level position, else PowerPoint's line-chart default `'r'`
+      // (right of the point).
+      chart.dataLabelPosition ?? 'r',
     );
     if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
@@ -1811,10 +1815,18 @@ function renderLineChart(
         }
       }
       if (chart.showDataLabels && !perPointLabels) {
-        ctx.font = `${dataLabelPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-        ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-        const labelOffset = drawMarkers ? markerR + 1 : 2;
-        ctx.fillText(formatChartVal(pv), toX(ci), yOf(pv) - labelOffset);
+        // §21.2.2.16 `<c:dLblPos>`: the family-level `showDataLabels` value dump
+        // honors the chart-level position (else PowerPoint's line default `'r'`,
+        // right of the point) instead of the old fixed "above the point". Offset
+        // in the label's direction by the marker radius + 1px gap so the text
+        // clears the dot (2px when there is no marker), matching the prior clear
+        // distance but now direction-aware.
+        drawDataLabelText(
+          ctx, toX(ci), yOf(pv), formatChartVal(pv),
+          chart.dataLabelPosition ?? 'r', dataLabelPx, undefined, false,
+          chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+          drawMarkers ? markerR + 1 : 2,
+        );
         ctx.fillStyle = color;
       }
     }
@@ -2135,6 +2147,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       drawCategoryDataLabels(
         ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, true,
         chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+        // §21.2.2.16 `<c:dLblPos>` precedence: chart-level position, else the
+        // area-chart default `'ctr'` (centered on the point, ECMA-376 default
+        // for the areaChart group).
+        chart.dataLabelPosition ?? 'ctr',
       );
     }
   }
@@ -2892,6 +2908,9 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     drawSeriesDataLabels(
       ctx, s, cats, useIndexX, toX, toY, ph, ptToPx, chart.date1904,
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+      // §21.2.2.16 `<c:dLblPos>`: chart-level position, else the scatter default
+      // `'r'` (right of the marker) — unchanged from the previous hardcoded 'r'.
+      chart.dataLabelPosition ?? 'r',
     );
   }
 
@@ -3090,6 +3109,10 @@ function drawSeriesDataLabels(
   date1904 = false,
   /** Resolved data-label CSS font-family; defaults to sans-serif (byte-stable). */
   fontFamily = 'sans-serif',
+  /** Fallback `<c:dLblPos>` (§21.2.2.16) when neither the per-point override nor
+   *  the series-level block sets one: the chart-level position, else the
+   *  per-chart-type default (scatter defaults to `'r'`). */
+  defaultPos = 'r',
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   if (overrides.length === 0 && !s.seriesDataLabels) return;
@@ -3116,7 +3139,7 @@ function drawSeriesDataLabels(
     } else {
       continue;
     }
-    const pos = ovr?.position ?? seriesDef?.position ?? 'r';
+    const pos = ovr?.position ?? seriesDef?.position ?? defaultPos;
     const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
     const fontSizePx = sizeHpt
       ? (sizeHpt / 100) * ptToPx
@@ -3136,11 +3159,15 @@ function drawDataLabelText(
   color: string | undefined,
   bold: boolean,
   fontFamily = 'sans-serif',
+  /** Extra gap (px) added to the text offset in the label's direction so the
+   *  text clears an anchor glyph (e.g. a line-chart marker). 0 keeps the
+   *  historical `fontSizePx * 0.6` offset (byte-stable for scatter/area). */
+  markerGap = 0,
 ): void {
   ctx.save();
   ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
   ctx.fillStyle = color ? `#${color}` : '#333';
-  const offset = fontSizePx * 0.6;
+  const offset = fontSizePx * 0.6 + markerGap;
   let tx = cx, ty = cy;
   switch (position) {
     case 'l':
@@ -3318,6 +3345,11 @@ function drawCategoryDataLabels(
   // sans-serif). Defaults to sans-serif so callers that don't pass it stay
   // byte-stable.
   fontFamily = 'sans-serif',
+  /** Fallback `<c:dLblPos>` (§21.2.2.16) when neither the per-point override nor
+   *  the series-level block sets one: the chart-level position, else the
+   *  per-chart-type default. Line defaults to `'r'` (PowerPoint), area to
+   *  `'ctr'`. */
+  defaultPos = 't',
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const seriesDef = s.seriesDataLabels;
@@ -3340,7 +3372,7 @@ function drawCategoryDataLabels(
     } else {
       continue;
     }
-    const pos = ovr?.position ?? seriesDef?.position ?? 't';
+    const pos = ovr?.position ?? seriesDef?.position ?? defaultPos;
     const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
     const fontSizePx = sizeHpt ? (sizeHpt / 100) * ptToPx : Math.max(9, Math.min(11, ph / 25));
     const color = ovr?.fontColor ?? seriesDef?.fontColor;
