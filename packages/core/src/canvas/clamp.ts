@@ -54,8 +54,10 @@ export interface ClampedCanvasSize {
  * Clamp a requested canvas backing size to the per-axis and total-area limits,
  * preserving aspect ratio.
  *
- * The requested `width`/`height` are first floored to `≥ 1` and rounded to
- * integers. If either the per-axis cap ({@link MAX_CANVAS_DIMENSION}) or the
+ * The requested `width`/`height` are first rounded to integers and floored to
+ * `≥ 1` (so a sub-0.5px request, which `Math.round` would send to 0, still
+ * yields a real 1×1 backing store rather than a 0×0 one that renders blank). If
+ * either the per-axis cap ({@link MAX_CANVAS_DIMENSION}) or the
  * area cap ({@link MAX_CANVAS_AREA}) is exceeded, both axes are multiplied by the
  * single largest factor `s ≤ 1` that brings the size within BOTH caps, so the
  * result keeps the requested aspect ratio.
@@ -65,9 +67,12 @@ export interface ClampedCanvasSize {
  * inputs collapse to a 1×1 canvas.
  */
 export function clampCanvasSize(width: number, height: number): ClampedCanvasSize {
-  // Normalize: non-finite / non-positive → 1. Round to integer pixels.
-  const reqW = Number.isFinite(width) && width > 0 ? Math.round(width) : 1;
-  const reqH = Number.isFinite(height) && height > 0 ? Math.round(height) : 1;
+  // Normalize: non-finite / non-positive → 1. Round to integer pixels, then
+  // floor to ≥ 1 so a sub-0.5px request (which `Math.round` sends to 0) still
+  // becomes a real 1×1 backing store instead of a blank 0×0 one — the unclamped
+  // return path below trusts these to already be valid dimensions.
+  const reqW = Number.isFinite(width) && width > 0 ? Math.max(1, Math.round(width)) : 1;
+  const reqH = Number.isFinite(height) && height > 0 ? Math.max(1, Math.round(height)) : 1;
 
   // Per-axis factor: shrink until each axis is within the dimension cap.
   const dimScale = Math.min(

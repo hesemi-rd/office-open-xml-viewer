@@ -115,4 +115,18 @@ describe('clampCanvasSize — degenerate inputs collapse to a 1×1 canvas', () =
     expect(r.width).toBeGreaterThanOrEqual(1);
     expect(r.height).toBeGreaterThanOrEqual(1);
   });
+
+  it('floors a sub-0.5px positive request to 1×1 (Math.round would send it to 0)', () => {
+    // RB5 regression: a positive-but-tiny request (e.g. a 0.4px page at a small
+    // DPR) rounds to 0 and previously fell through the UNCLAMPED branch as a 0×0
+    // backing store, blanking the viewer. It must become a real 1×1 canvas.
+    const r = clampCanvasSize(0.4, 0.4);
+    expect(r).toEqual({ width: 1, height: 1, scale: 1, clamped: false });
+    // Asymmetric sub-pixel request: each axis floored independently to ≥ 1.
+    const r2 = clampCanvasSize(0.2, 3.6);
+    expect(r2.width).toBe(1);
+    expect(r2.height).toBe(4);
+    expect(r2.width).toBeGreaterThanOrEqual(1);
+    expect(r2.height).toBeGreaterThanOrEqual(1);
+  });
 });
