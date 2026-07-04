@@ -15,6 +15,7 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
+import { resolveSharedStrings } from './shared-strings.js';
 import {
   parseListFormula,
   resolveListValues,
@@ -234,6 +235,10 @@ export class XlsxWorkbook {
       const { worksheetJson } = res as Extract<WorkerResponse, { type: 'parsedSheet' }>;
       ws = JSON.parse(new TextDecoder().decode(new Uint8Array(worksheetJson))) as Worksheet;
     }
+    // Resolve shared-string references (`{ type: 'shared', si }`) against the
+    // workbook's dedup'd sharedStrings table so no consumer downstream ever
+    // sees an unresolved cell. Covers BOTH decode paths above.
+    resolveSharedStrings(ws, this.parsedWorkbook.sharedStrings);
     this.sheetCache.set(sheetIndex, ws);
     return ws;
   }

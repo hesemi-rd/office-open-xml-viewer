@@ -10,6 +10,10 @@ function cellValueText(value: CellValue): string {
     case 'number': return String(value.number);
     case 'bool': return value.bool ? 'TRUE' : 'FALSE';
     case 'error': return value.error;
+    // `shared` cells are resolved to `text` (see shared-strings.ts) before any
+    // consumer runs, so this is unreachable at runtime — present only to keep
+    // the switch exhaustive over CellValue.
+    case 'shared': return '';
   }
 }
 

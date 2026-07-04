@@ -2126,7 +2126,7 @@ function renderQuadrant(
       // only as the neighbour's bottom/right still shows at the viewport edge.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
       const aboveBottom = aboveCell
-        ? resolveXf(styles, aboveCell.styleIndex).border.bottom
+        ? resolveXf(styles, aboveCell.styleIndex ?? 0).border.bottom
         : null;
       if (aboveBottom?.style && (ri === 0 || mergedBorder.top?.style)) {
         mergedBorder = { ...mergedBorder, top: pickStrongerEdge(mergedBorder.top, aboveBottom) };
@@ -2137,7 +2137,7 @@ function renderQuadrant(
         // neighbour's xf.right re-introduces the internal vertical we just hid.
         const leftCell = cellMap.get(`${rowIndex}:${colIndex - 1}`);
         const leftRight = leftCell
-          ? resolveXf(styles, leftCell.styleIndex).border.right
+          ? resolveXf(styles, leftCell.styleIndex ?? 0).border.right
           : null;
         if (leftRight?.style && (ci === 0 || mergedBorder.left?.style)) {
           mergedBorder = { ...mergedBorder, left: pickStrongerEdge(mergedBorder.left, leftRight) };
@@ -3931,7 +3931,7 @@ function resolveMergeBorder(
     if (r === anchorRow && c === anchorCol) return null;
     const cell = cellMap.get(`${r}:${c}`);
     if (!cell) return null;
-    return resolveXf(styles, cell.styleIndex).border;
+    return resolveXf(styles, cell.styleIndex ?? 0).border;
   };
   const rightB  = edgeBorder(anchorRow, rightCol);
   const bottomB = edgeBorder(bottomRow, anchorCol);

@@ -13,6 +13,7 @@ import init, { XlsxArchive } from './wasm/xlsx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import { resolveSharedStrings } from './shared-strings.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 
@@ -75,6 +76,10 @@ function parseSheetLocally(sheetIndex: number): Worksheet {
   // render worker consumes the model in-worker, so decode + parse here.
   const json = archive.parse_sheet(sheetIndex, sheetMeta.name);
   const ws = JSON.parse(new TextDecoder().decode(json)) as Worksheet;
+  // Resolve `{ type: 'shared', si }` cells against the dedup'd sharedStrings
+  // table so the renderer only ever sees fully-materialized text (worker-mode
+  // twin of workbook.ts getWorksheet).
+  resolveSharedStrings(ws, workbook.sharedStrings);
   sheetCache.set(sheetIndex, ws);
   return ws;
 }

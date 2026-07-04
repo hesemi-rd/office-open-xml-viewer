@@ -2013,7 +2013,10 @@ fn load_sheet_sparklines(
 
 fn parse_row_cells(
     row_node: &roxmltree::Node,
-    shared_strings: &[SharedString],
+    // Shared-string cells now ship an `si` reference (resolved consumer-side),
+    // so this table is no longer read here. Kept in the signature for symmetry
+    // with `parse_worksheet`'s threading; prefixed `_` to silence the warning.
+    _shared_strings: &[SharedString],
     theme_colors: &[String],
 ) -> Vec<Cell> {
     let mut cells = Vec::new();
@@ -2064,18 +2067,13 @@ fn parse_row_cells(
         } else {
             match cell_type {
                 "s" => {
+                    // Ship only the shared-string index; the consumer resolves
+                    // it against the workbook `sharedStrings` table (once per
+                    // workbook, not cloned per cell). Emit `Shared`
+                    // unconditionally — an out-of-range index resolves to empty
+                    // text consumer-side, matching the historical fallback.
                     let idx: usize = v_text.parse().unwrap_or(0);
-                    if let Some(ss) = shared_strings.get(idx) {
-                        CellValue::Text {
-                            text: ss.text.clone(),
-                            runs: ss.runs.clone(),
-                        }
-                    } else {
-                        CellValue::Text {
-                            text: String::new(),
-                            runs: None,
-                        }
-                    }
+                    CellValue::Shared { si: idx }
                 }
                 "str" => CellValue::Text {
                     text: v_text,
@@ -2101,7 +2099,6 @@ fn parse_row_cells(
         cells.push(Cell {
             col,
             row,
-            col_ref: cell_ref,
             value,
             style_index,
             formula,
@@ -2301,7 +2298,7 @@ fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
             })?;
         let sheet: serde_json::Value =
             serde_json::from_slice(&sheet_json).map_err(|e| e.to_string())?;
-        markdown::render_sheet(&sheet, &mut out);
+        markdown::render_sheet(&sheet, &shared.shared_strings, &mut out);
     }
     Ok(out)
 }
@@ -2925,9 +2922,11 @@ mod strict_namespace_cell_tests {
         let cells = &ws.rows[0].cells;
         assert_eq!(cells.len(), 3, "Strict <c> must be found via is_x_ns");
 
+        // The wire now ships an `si` reference for `t="s"`; the text
+        // ("Shared Hello") resolves consumer-side from `shared[0]`.
         match &cells[0].value {
-            CellValue::Text { text, .. } => assert_eq!(text, "Shared Hello"),
-            other => panic!("expected shared-string text, got {other:?}"),
+            CellValue::Shared { si } => assert_eq!(*si, 0),
+            other => panic!("expected shared-string reference, got {other:?}"),
         }
         assert_eq!(
             cells[0].style_index, 2,

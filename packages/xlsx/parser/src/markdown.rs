@@ -10,7 +10,9 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-pub(crate) fn render_sheet(sheet: &Value, out: &mut String) {
+use crate::types::SharedString;
+
+pub(crate) fn render_sheet(sheet: &Value, shared_strings: &[SharedString], out: &mut String) {
     let name = sheet["name"].as_str().unwrap_or("(unnamed)");
     let _ = writeln!(out, "## {}\n", name);
 
@@ -32,7 +34,7 @@ pub(crate) fn render_sheet(sheet: &Value, out: &mut String) {
             continue;
         };
         for cell in cells {
-            let s = cell_display(cell);
+            let s = cell_display(cell, shared_strings);
             if s.is_empty() {
                 continue;
             }
@@ -78,7 +80,7 @@ pub(crate) fn render_sheet(sheet: &Value, out: &mut String) {
             }
             let r = (row_idx - min_row) as usize;
             let c = (col - min_col) as usize;
-            grid[r][c] = cell_display(cell);
+            grid[r][c] = cell_display(cell, shared_strings);
         }
     }
 
@@ -123,13 +125,21 @@ fn escape_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', "<br>")
 }
 
-fn cell_display(cell: &Value) -> String {
+fn cell_display(cell: &Value, shared_strings: &[SharedString]) -> String {
     // CellValue has `rename_all = "camelCase"` so the JSON tag is lowercase
     // ("text"/"number"/...). PascalCase would silently never match — same
     // class of bug that hid pptx_extract_text earlier.
     let value = &cell["value"];
     match value["type"].as_str().unwrap_or("empty") {
         "text" => value["text"].as_str().unwrap_or("").to_string(),
+        // A `t="s"` cell ships only an `si` index now; resolve it back to the
+        // shared-string table's plain text (markdown drops runs anyway,
+        // matching the `"text"` arm).
+        "shared" => value["si"]
+            .as_u64()
+            .and_then(|i| shared_strings.get(i as usize))
+            .map(|s| s.text.clone())
+            .unwrap_or_default(),
         "number" => value["number"]
             .as_f64()
             .map(format_number)
@@ -192,4 +202,67 @@ fn collect_merge_continuation_cells(merge_cells: &Value) -> HashSet<(u32, u32)> 
         }
     }
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A `{"type":"shared","si":N}` cell must resolve to the sharedStrings
+    /// table's text — the wire ships only the index, so markdown has to look
+    /// it up (mirrors the runtime `t="s"` path).
+    #[test]
+    fn shared_cell_resolves_against_table() {
+        let shared = vec![
+            SharedString {
+                text: "Alpha".to_string(),
+                runs: None,
+            },
+            SharedString {
+                text: "Beta".to_string(),
+                runs: None,
+            },
+        ];
+        let sheet = json!({
+            "name": "Sheet1",
+            "rows": [
+                {
+                    "index": 1,
+                    "cells": [
+                        { "col": 1, "row": 1, "value": { "type": "shared", "si": 1 } },
+                        { "col": 2, "row": 1, "value": { "type": "number", "number": 3.0 } }
+                    ]
+                }
+            ]
+        });
+        let mut out = String::new();
+        render_sheet(&sheet, &shared, &mut out);
+        assert!(
+            out.contains("Beta"),
+            "si=1 must resolve to shared[1] text, got:\n{out}"
+        );
+    }
+
+    /// An out-of-range `si` resolves to empty text (historical fallback),
+    /// leaving no populated cell — the sheet renders as empty.
+    #[test]
+    fn shared_cell_out_of_range_is_empty() {
+        let shared: Vec<SharedString> = Vec::new();
+        let sheet = json!({
+            "name": "Sheet1",
+            "rows": [
+                {
+                    "index": 1,
+                    "cells": [
+                        { "col": 1, "row": 1, "value": { "type": "shared", "si": 9 } }
+                    ]
+                }
+            ]
+        });
+        let mut out = String::new();
+        render_sheet(&sheet, &shared, &mut out);
+        // No populated cells → only the heading is emitted (no table body).
+        assert!(!out.contains('|'), "empty sheet must have no table: {out}");
+    }
 }

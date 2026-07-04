@@ -3,7 +3,7 @@ import { evalFormulaToBool } from './formula.js';
 import type { Cell } from './types.js';
 
 function numCell(row: number, col: number, n: number): Cell {
-  return { row, col, colRef: '', value: { type: 'number', number: n }, styleIndex: 0 };
+  return { row, col, value: { type: 'number', number: n }, styleIndex: 0 };
 }
 
 function ctx(opts: { cells?: Cell[]; row?: number; col?: number } = {}) {

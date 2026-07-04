@@ -29,7 +29,6 @@ function numCell(row: number, col: number, n: number): Cell {
   return {
     col,
     row,
-    colRef: `${String.fromCharCode(65 + col)}${row + 1}`,
     value: { type: 'number', number: n } as CellValue,
     styleIndex: 0,
   };
@@ -40,7 +39,6 @@ function textCell(row: number, col: number, t: string): Cell {
   return {
     col,
     row,
-    colRef: `${String.fromCharCode(65 + col)}${row + 1}`,
     value: { type: 'text', text: t } as CellValue,
     styleIndex: 0,
   };

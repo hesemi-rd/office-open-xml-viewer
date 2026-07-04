@@ -1441,13 +1441,20 @@ pub struct Row {
     pub cells: Vec<Cell>,
 }
 
+/// serde `skip_serializing_if` predicate: drop the common unstyled `0` so the
+/// per-cell JSON doesn't carry a redundant `styleIndex` on every plain cell.
+/// The TS side reads it as `styleIndex ?? 0`, so an omitted field is equivalent.
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Cell {
     pub col: u32,
     pub row: u32,
-    pub col_ref: String,
     pub value: CellValue,
+    #[serde(skip_serializing_if = "is_zero_u32")]
     pub style_index: u32,
     /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The
     /// renderer uses this to recompute volatile functions like TODAY() /
@@ -1475,6 +1482,13 @@ pub enum CellValue {
     },
     Error {
         error: String,
+    },
+    /// Shared-string reference into the workbook `sharedStrings` table
+    /// (ECMA-376 §18.4.8 `<si>` / §18.3.1.4 cell `t="s"`), resolved on the
+    /// consumer side so the full string + runs are shipped once in the
+    /// workbook, not cloned per cell.
+    Shared {
+        si: usize,
     },
 }
 

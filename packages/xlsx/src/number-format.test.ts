@@ -16,7 +16,7 @@ function styles(formatCode: string): Styles {
 }
 
 function numCell(n: number): Cell {
-  return { row: 1, col: 1, colRef: 'A1', value: { type: 'number', number: n }, styleIndex: 0 };
+  return { row: 1, col: 1, value: { type: 'number', number: n }, styleIndex: 0 };
 }
 
 /** Format a number with a custom format code, as Excel would render it. */
@@ -135,7 +135,7 @@ describe('General format — 11 significant digit rounding (XL2)', () => {
 
 describe('non-numeric cells', () => {
   it('passes text through when no 4th section', () => {
-    const cell: Cell = { row: 1, col: 1, colRef: 'A1', value: { type: 'text', text: 'hello' }, styleIndex: 0 };
+    const cell: Cell = { row: 1, col: 1, value: { type: 'text', text: 'hello' }, styleIndex: 0 };
     expect(formatCellValue(cell, styles('0.00'))).toBe('hello');
   });
 });
@@ -239,7 +239,7 @@ describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
     // irrelevant — the volatile path recomputes it) and the style is a date
     // format. We deliberately store a serial that would misrender if the flag
     // were NOT overridden.
-    return { row: 1, col: 1, colRef: 'A1', value: { type: 'number', number: 0 }, styleIndex: 0, formula };
+    return { row: 1, col: 1, value: { type: 'number', number: 0 }, styleIndex: 0, formula };
   }
 
   it('TODAY() in a 1904 workbook renders the correct 1900-system today (not 1462 days off)', () => {
@@ -262,7 +262,7 @@ describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
   it('a non-volatile stored serial in a 1904 workbook still honors the 1904 epoch', () => {
     // Contrast: without a volatile formula the stored serial uses the workbook
     // date system. 1904-system serial 43830 = 2024-01-01.
-    const cell: Cell = { row: 1, col: 1, colRef: 'A1', value: { type: 'number', number: 43830 }, styleIndex: 0 };
+    const cell: Cell = { row: 1, col: 1, value: { type: 'number', number: 43830 }, styleIndex: 0 };
     expect(formatCellValue(cell, styles('yyyy-mm-dd'), null, true)).toBe('2024-01-01');
   });
 

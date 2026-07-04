@@ -598,9 +598,10 @@ export interface Row {
 export interface Cell {
   col: number;
   row: number;
-  colRef: string;
   value: CellValue;
-  styleIndex: number;
+  /** Style index into the styles table. Omitted on the wire when `0` (the
+   *  common unstyled case), so read it as `styleIndex ?? 0`. */
+  styleIndex?: number;
   /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The renderer
    *  uses this to recompute volatile functions (TODAY, NOW) at display time
    *  so the cached `<v>` — frozen when the file was last saved — doesn't
@@ -613,7 +614,12 @@ export type CellValue =
   | { type: 'text'; text: string; runs?: Run[] }
   | { type: 'number'; number: number }
   | { type: 'bool'; bool: boolean }
-  | { type: 'error'; error: string };
+  | { type: 'error'; error: string }
+  /** Shared-string reference into `ParsedWorkbook.sharedStrings` (ECMA-376
+   *  §18.4.8). Resolved to `{ type: 'text', ... }` by the workbook before the
+   *  renderer (or any other consumer) sees it, so downstream code never
+   *  encounters this variant. */
+  | { type: 'shared'; si: number };
 
 export interface Run {
   text: string;

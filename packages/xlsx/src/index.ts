@@ -5,6 +5,10 @@ export { XlsxViewer } from './viewer.js';
 export type { ResolvedList } from './validation-list.js';
 export type { XlsxViewerOptions, HiddenSheetMode, CellAddress, CellRange, SelectionMode } from './viewer.js';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
+// Resolve `{type:'shared',si}` cells against a workbook's sharedStrings table
+// (ECMA-376 §18.4.8). Exported so headless callers that parse a Worksheet
+// directly (e.g. @silurus/ooxml-node's parseXlsxSheet) can concretize cell text.
+export { resolveSharedStrings } from './shared-strings.js';
 // Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
 // or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can
 // narrow on `err.code`.

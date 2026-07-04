@@ -108,7 +108,7 @@ function buildSynthetic(): { ws: Worksheet; styles: Styles } {
       index: r,
       height: null,
       cells: [
-        { col: MERGE_COL, row: r, colRef: `${MERGE_COL}`, value: { type: 'empty' }, styleIndex: 1 },
+        { col: MERGE_COL, row: r, value: { type: 'empty' }, styleIndex: 1 },
       ],
     });
   }
