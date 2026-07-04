@@ -1100,3 +1100,24 @@ describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
     });
   }
 });
+
+describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: smooth series draws a bezier spline; non-smooth draws straight segments`, () => {
+      const smooth = markerRecordingCtx();
+      renderChart(smooth.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C', 'D'],
+        series: [series({ name: 'S', values: [3, 5, 4, 6], smooth: true })],
+      }), RECT, 1);
+      const straight = markerRecordingCtx();
+      renderChart(straight.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C', 'D'],
+        series: [series({ name: 'S', values: [3, 5, 4, 6] })],
+      }), RECT, 1);
+      expect(smooth.beziers).toBeGreaterThan(0);
+      expect(straight.beziers).toBe(0);
+    });
+  }
+});

@@ -458,6 +458,11 @@ pub struct ChartSeries {
     /// time so the renderer just draws lines.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub err_bars: Vec<ErrBars>,
+    /// `<c:ser><c:smooth val>` (ECMA-376 §21.2.2.194) — line/area smoothing
+    /// flag. None = straight polyline (default); Some(true/false) when the
+    /// element is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<bool>,
 }
 
 /// Per-point override pulled from `<c:dPt idx="N">` siblings of a series

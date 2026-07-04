@@ -113,6 +113,14 @@ export interface ChartSeries {
    * series.
    */
   bubbleSizes?: (number | null)[] | null;
+  /**
+   * `<c:ser><c:smooth val>` (ECMA-376 §21.2.2.194) — line/area series flag
+   * requesting a smoothed (spline) curve through the points instead of straight
+   * segments. Only consulted for the line and area families (scatter carries its
+   * smoothing in `ChartModel.scatterStyle`). null/undefined/false = straight
+   * polyline (the default; byte-stable for series that never set it).
+   */
+  smooth?: boolean | null;
 }
 
 export interface ChartDataPointOverride {

@@ -1383,14 +1383,26 @@ function renderLineChart(
     const yOf = yMapFor(s);
     ctx.strokeStyle = color; ctx.lineWidth = lineWidthPx; ctx.setLineDash([]);
     ctx.beginPath();
-    let started = false;
+    // Collect runs of consecutive present points (a null breaks the line into a
+    // fresh run; stacked charts have no nulls in the plotted sum). Each run is
+    // stroked as a polyline or a smooth spline (§21.2.2.194) via appendCurve.
+    // For a non-smooth series this emits the exact prior moveTo/lineTo sequence
+    // (byte-stable); smooth swaps the straight segments for a Bézier curve.
+    const smooth = s.smooth === true;
+    let run: Array<{ x: number; y: number }> = [];
+    const flushRun = (): void => {
+      if (run.length === 0) return;
+      ctx.moveTo(run[0].x, run[0].y);
+      appendCurve(ctx, run, smooth);
+      run = [];
+    };
     for (let ci = 0; ci < n; ci++) {
       // Unstacked: a null cell breaks the line. Stacked: a null contributes 0
       // to the running sum (no gap), matching the area renderer.
-      if (!stacked && s.values[ci] == null) { started = false; continue; }
-      const py = yOf(plotted(si, ci)); const px = toX(ci);
-      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+      if (!stacked && s.values[ci] == null) { flushRun(); continue; }
+      run.push({ x: toX(ci), y: yOf(plotted(si, ci)) });
     }
+    flushRun();
     ctx.stroke();
 
     // Error bars (`<c:errBars>`, §21.2.2.20) — drawn under the markers so the
@@ -1639,20 +1651,29 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // stacked), so its `toY` mapping stays the primary one.
     const yOf = yMapFor(s);
 
+    // Smooth (`<c:ser><c:smooth>`, §21.2.2.194) curves the top edge through the
+    // points; the baseline connection stays straight. Non-smooth keeps the exact
+    // prior moveTo/lineTo sequence (byte-stable) — appendCurve with smooth=false
+    // emits identical lineTo calls.
+    const smooth = s.smooth === true;
     ctx.beginPath();
     if (stacked && stackBase) {
+      const topPts = [];
       for (let ci = 0; ci < n; ci++) {
-        const v = stackedValue(si, ci) + stackBase[ci];
-        const px = toX(ci); const py = toY(v);
-        if (ci === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        topPts.push({ x: toX(ci), y: toY(stackedValue(si, ci) + stackBase[ci]) });
       }
+      ctx.moveTo(topPts[0].x, topPts[0].y);
+      appendCurve(ctx, topPts, smooth);
       for (let ci = n - 1; ci >= 0; ci--) {
         ctx.lineTo(toX(ci), toY(stackBase[ci]));
       }
       for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(si, ci);
     } else {
+      const topPts = [];
+      for (let ci = 0; ci < n; ci++) topPts.push({ x: toX(ci), y: yOf(s.values[ci] ?? 0) });
       ctx.moveTo(toX(0), baseY);
-      for (let ci = 0; ci < n; ci++) ctx.lineTo(toX(ci), yOf(s.values[ci] ?? 0));
+      ctx.lineTo(topPts[0].x, topPts[0].y);
+      appendCurve(ctx, topPts, smooth);
       ctx.lineTo(toX(n - 1), baseY);
     }
     ctx.closePath();
@@ -2626,6 +2647,36 @@ function drawDataLabelText(
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** Append `pts` to the CURRENT path starting from `pts[0]` (which the caller has
+ *  already `moveTo`'d, or the first point is the current pen position). When
+ *  `smooth` and there are ≥3 points, draw a Catmull-Rom → cubic-Bézier curve
+ *  through the points (tangents from neighbours, the same formula scatter uses,
+ *  ECMA-376 §21.2.2.194); otherwise straight `lineTo` segments. The caller owns
+ *  `beginPath`/`moveTo`/`stroke`/`fill` so this composes into both the line
+ *  stroke and the area fill's top edge. */
+function appendCurve(
+  ctx: CanvasRenderingContext2D,
+  pts: Array<{ x: number; y: number }>,
+  smooth: boolean,
+): void {
+  if (pts.length === 0) return;
+  if (smooth && pts.length >= 3) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] ?? pts[i];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[i + 2] ?? p2;
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+  } else {
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  }
 }
 
 function dashPatternForPreset(preset: string | undefined): number[] {

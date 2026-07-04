@@ -144,6 +144,7 @@ impl From<ChartSeries> for CmSeries {
             series_data_labels: s.series_data_labels.map(CmSeriesDataLabels::from),
             err_bars: some_if_nonempty(s.err_bars),
             bubble_sizes: None,
+            smooth: s.smooth,
             // `order` is xlsx parse-time only (used for stacking/legend sort
             // before emit); core `ChartSeries` has no such field.
         }
@@ -1450,6 +1451,9 @@ pub(crate) fn parse_chart_series(
     let (series_data_labels, data_label_overrides) =
         parse_data_labels(node, theme_colors, &dlbl_range_cache);
     let err_bars = parse_error_bars(node, &values, theme_colors);
+    // `<c:ser><c:smooth>` (§21.2.2.194) — line/area spline flag. Shared with the
+    // pptx parser so both honor the CT_Boolean implied-true semantics.
+    let smooth = ooxml_common::chart::extract_series_smooth(*node);
 
     ChartSeries {
         name,
@@ -1469,6 +1473,7 @@ pub(crate) fn parse_chart_series(
         data_label_overrides,
         series_data_labels,
         err_bars,
+        smooth,
     }
 }
 
@@ -2387,6 +2392,31 @@ mod pie_doughnut_tests {
         let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
         assert_eq!(m.chart_type, "line");
         assert!(m.series[0].categories.is_none());
+    }
+
+    /// `<c:ser><c:smooth val="1"/>` (ECMA-376 §21.2.2.194) surfaces as
+    /// `ChartSeries.smooth = Some(true)` through the adapter; a series without
+    /// `<c:smooth>` stays `None` (straight-polyline default).
+    #[test]
+    fn adapter_series_smooth_flag() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart><c:plotArea><c:lineChart>
+    <c:ser><c:idx val="0"/><c:order val="0"/>
+      <c:smooth val="1"/>
+      <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+    </c:ser>
+    <c:ser><c:idx val="1"/><c:order val="1"/>
+      <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val>
+    </c:ser>
+  </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
+        assert_eq!(m.series[0].smooth, Some(true));
+        assert_eq!(m.series[1].smooth, None);
     }
 
     /// `<c:date1904/>` as a direct child of `<c:chartSpace>` (ECMA-376

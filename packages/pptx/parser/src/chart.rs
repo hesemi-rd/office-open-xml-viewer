@@ -530,6 +530,10 @@ pub(crate) fn parse_legacy_chart(
                 data_label_overrides: None,
                 series_data_labels: None,
                 err_bars: None,
+                // `<c:ser><c:smooth>` (§21.2.2.194) — line/area spline flag.
+                // Shared with the xlsx parser via ooxml-common so both honor the
+                // CT_Boolean implied-true semantics.
+                smooth: ooxml_common::chart::extract_series_smooth(*ser),
             }
         })
         .collect();
@@ -1048,6 +1052,8 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
         data_label_overrides: None,
         series_data_labels: None,
         err_bars: None,
+        // chartEx (waterfall) has no `<c:smooth>` concept.
+        smooth: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
