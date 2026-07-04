@@ -1444,6 +1444,10 @@ function renderLineChart(
     // precedence over the family's simple `showDataLabels` value dump.
     const perPointLabels = drawCategoryDataLabels(
       ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false,
+      // Mirror the marker loop's gate just below: stacked series never see a
+      // plotted null (a stacked sum already reads null as 0), and unstacked
+      // "zero" mode plots the null at 0 — both cases get a label too.
+      stacked || dispBlanks === 'zero',
     );
     if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
@@ -1675,6 +1679,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // points; the baseline connection stays straight. Non-smooth keeps the exact
     // prior moveTo/lineTo sequence (byte-stable) — appendCurve with smooth=false
     // emits identical lineTo calls.
+    //
+    // NB: `CT_AreaSer` (§A.5.1) has no `<c:smooth>` child (only `CT_LineSer` /
+    // `CT_ScatterSer` do), so `extract_series_smooth` never sets `s.smooth` for
+    // a real area series and this branch is dead against actual chart XML —
+    // it only fires for a model constructed directly (tests / other producers).
+    // Kept for symmetry with the line renderer above rather than dropped.
     const smooth = s.smooth === true;
     ctx.beginPath();
     if (stacked && stackBase) {
@@ -1717,12 +1727,17 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // (where "gap" is the historical default).
   {
     const areaMarkerR = Math.max(2, 2.5 * ptToPx);
-    // Cumulative top of each series' band per category (stacked); the raw value
-    // otherwise. Rebuilt here independently of the fill loop's mutated stackBase.
+    // Top of each series' band per category (stacked); the raw value otherwise.
+    // Rebuilt here independently of the fill loop's mutated stackBase. The fill
+    // loop above draws bands back-to-front (si = length-1 → 0) and accumulates
+    // stackBase AFTER each band, so band si's top edge is the REVERSE-cumulative
+    // sum Σ_{k=si..length-1} — series 0 (drawn last, on top) reaches the full
+    // stack total; the last series (drawn first, at the bottom) has only its
+    // own value. A forward sum (Σ_{k=0..si}) would swap that ordering.
     const topValue = (si: number, ci: number): number => {
       if (stacked) {
         let sum = 0;
-        for (let k = 0; k <= si; k++) sum += stackedValue(k, ci);
+        for (let k = si; k < chart.series.length; k++) sum += stackedValue(k, ci);
         return sum;
       }
       return chart.series[si].values[ci] ?? 0;
@@ -1756,9 +1771,13 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
           }
         }
       }
-      // Per-point / series-level data labels.
+      // Per-point / series-level data labels. Area's filled region has always
+      // read a blank cell as 0 (`?? 0`, see the topValue/plottedOf comment
+      // above), so every category index is a "plotted" point here regardless
+      // of dispBlanksAs — pass true unconditionally (byte-stable: unchanged
+      // from before this parameter existed).
       drawCategoryDataLabels(
-        ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false,
+        ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, true,
       );
     }
   }
@@ -2788,7 +2807,15 @@ function drawCategoryErrorBars(
  *  ({@link drawSeriesDataLabels}), but maps points by CATEGORY INDEX with the
  *  series' plotted value → px mapping. Returns true when it handled the labels
  *  for this series (so the caller skips the family's legacy `showDataLabels`
- *  path), false when the series has no override/series-level label config. */
+ *  path), false when the series has no override/series-level label config.
+ *
+ *  `plotNullAsZero` mirrors the marker loop's dispBlanksAs gate (§21.2.2.42):
+ *  a null cell normally has no label (gap/span leave the point unplotted), but
+ *  in "zero" mode the blank IS a plotted point (value 0) and gets a label like
+ *  any other — the line-chart caller passes `dispBlanks === 'zero'`. The area
+ *  caller passes `true` unconditionally: area's fill has always read a blank
+ *  cell as 0 (`?? 0`, dispBlanksAs is a no-op for the filled region), so its
+ *  per-point labels have likewise always covered every category index. */
 function drawCategoryDataLabels(
   ctx: CanvasRenderingContext2D,
   s: ChartSeries,
@@ -2800,12 +2827,13 @@ function drawCategoryDataLabels(
   ph: number,
   ptToPx: number,
   date1904: boolean,
+  plotNullAsZero: boolean,
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const seriesDef = s.seriesDataLabels;
   if (overrides.length === 0 && !seriesDef) return false;
   for (let ci = 0; ci < n; ci++) {
-    if (s.values[ci] == null) continue;
+    if (s.values[ci] == null && !plotNullAsZero) continue;
     const pv = plotted(ci);
     const ovr = overrides.find(o => o.idx === ci);
     let text: string;

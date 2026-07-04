@@ -1029,6 +1029,66 @@ describe('CH9 — line/area consume marker detail (§21.2.2.32)', () => {
   }
 });
 
+describe('CH9 — stacked-area markers/labels sit on the fill\'s band top (§21.2.2.32)', () => {
+  // The fill loop draws bands back-to-front (si = length-1 → 0), accumulating
+  // stackBase AFTER each band, so band si's top edge is the REVERSE-cumulative
+  // sum Σ_{k=si..length-1}. Series 0 (drawn last, on top of the stack) ends up
+  // with the FULL total as its top edge; series 1 (drawn first, at the bottom
+  // of the stack) has only its own value as its top edge. A marker/label pass
+  // that instead used a forward-cumulative Σ_{k=0..si} would misplace both.
+  it('a 2-series stacked area places each series\' marker at its own band top, not a forward-cumulative sum', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A'],
+      series: [
+        series({ name: 'S0', values: [10], showMarker: true }),
+        series({ name: 'S1', values: [40], showMarker: true }),
+      ],
+    }), RECT, 1);
+    // One marker arc per series (single category).
+    expect(rec.arcs.length).toBe(2);
+    const ys = rec.arcs.map(a => a.y).sort((a, b) => a - b);
+    // toY is monotonically decreasing in value, so the HIGHER cumulative value
+    // (S0's band top = 10 + 40 = 50) must plot at the SMALLER y (higher on
+    // screen) than S1's band top (= 40 alone). The two must be DISTINCT —
+    // the forward-cumulative bug placed S0 at 10 and S1 at 50, i.e. swapped
+    // relative to the correct reverse-cumulative 50/40 split.
+    const [higherY, lowerY] = ys; // higherY = smaller number = higher on screen
+    expect(higherY).toBeLessThan(lowerY);
+    // Recover the plotted axis value from screen y using the chart's own
+    // scale invariants: with valMax defaulting to the data max (50, rounded up
+    // by valueAxisScale) and a linear py0..py0+ph mapping, the S0 marker (band
+    // top 50) must sit strictly above (smaller y) the S1 marker (band top 40).
+    // Concretely assert the two are NOT equal to the forward-cumulative
+    // (wrong) values, which would give band tops of 10 (S0) and 50 (S1) —
+    // i.e. S0 LOWER on screen (larger y) than S1. Reverse-cumulative flips
+    // that: S0 must be the topmost (smallest y) of the two.
+    const s0Y = rec.arcs[0].y;
+    const s1Y = rec.arcs[1].y;
+    expect(s0Y).toBeLessThan(s1Y);
+  });
+
+  it('a 3-series stacked area orders markers by reverse-cumulative band top (series 0 highest, last series lowest)', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A'],
+      series: [
+        series({ name: 'S0', values: [5], showMarker: true }),
+        series({ name: 'S1', values: [15], showMarker: true }),
+        series({ name: 'S2', values: [30], showMarker: true }),
+      ],
+    }), RECT, 1);
+    expect(rec.arcs.length).toBe(3);
+    // Reverse-cumulative band tops: S0 = 5+15+30 = 50 (highest, smallest y),
+    // S1 = 15+30 = 45, S2 = 30 (lowest, largest y).
+    const [s0Y, s1Y, s2Y] = rec.arcs.map(a => a.y);
+    expect(s0Y).toBeLessThan(s1Y);
+    expect(s1Y).toBeLessThan(s2Y);
+  });
+});
+
 describe('CH9 — line/area draw per-series error bars (§21.2.2.20)', () => {
   for (const chartType of ['line', 'area'] as const) {
     it(`${chartType}: a series with errBars strokes a vertical bar around each point`, () => {
@@ -1189,5 +1249,85 @@ describe('CH9 — dispBlanksAs controls null-cell handling (§21.2.2.42)', () =>
     const lastX = RECT.x + RECT.w * (2.5 / 3);
     expect(line.some(p => Math.abs(p.x - firstX) < RECT.w * 0.12)).toBe(true);
     expect(line.some(p => Math.abs(p.x - lastX) < RECT.w * 0.12)).toBe(true);
+  });
+});
+
+describe('CH9 — dispBlanksAs="zero" applies to per-point data labels too (§21.2.2.42)', () => {
+  // The marker loop (line 1452 in renderer.ts) already draws a marker for a
+  // null point in "zero" mode. drawCategoryDataLabels must agree: a null cell
+  // reads as 0 for BOTH the marker and its label, so "0" is drawn at the null
+  // category — matching the spec's "treat the blank cell as zero" semantics
+  // (a zero value gets a value label like any other plotted point).
+  function labelHoleModel(dispBlanksAs?: string): ChartModel {
+    return baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [series({
+        name: 'S',
+        values: [10, null, 20],
+        seriesDataLabels: { showVal: true, showSerName: false, showCatName: false, showPercent: false },
+      })],
+      ...(dispBlanksAs ? { dispBlanksAs } : {}),
+    });
+  }
+
+  /** Data labels only — excludes the value-axis tick column (fixed left x) and
+   *  the category-axis row (fixed bottom y), which also emit plain numeric /
+   *  "A"/"B"/"C" text via fillText. */
+  function dataLabelTexts(texts: TextCall[]): string[] {
+    const axisTickX = Math.min(...texts.map(t => t.x));
+    const catAxisY = Math.max(...texts.map(t => t.y));
+    return texts
+      .filter(t => Math.abs(t.x - axisTickX) > 1 && Math.abs(t.y - catAxisY) > 1)
+      .map(t => t.text);
+  }
+
+  it('zero: the null category gets a "0" label alongside 10 and 20', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, labelHoleModel('zero'), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts).toContain('0');
+  });
+
+  it('gap (default when absent): the null category gets no label at all', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, labelHoleModel(), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts.some(t => t === '0')).toBe(false);
+  });
+
+  it('span: the null category is skipped (no label), same as gap', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, labelHoleModel('span'), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts.some(t => t === '0')).toBe(false);
+  });
+
+  it('a stacked line always labels a null cell at 0, regardless of dispBlanksAs (a stacked sum already reads null as 0)', () => {
+    // Mirrors the marker loop's own gate (renderer.ts ~line 1453): stacked
+    // series never skip a null point, independent of dispBlanksAs — a null
+    // contributes 0 to the running stack sum either way. No dispBlanksAs set
+    // (defaults to "gap" for an unstacked series) must NOT suppress the label
+    // here, since this series is stacked.
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedLine',
+      categories: ['A', 'B', 'C'],
+      series: [series({
+        name: 'S',
+        values: [10, null, 20],
+        seriesDataLabels: { showVal: true, showSerName: false, showCatName: false, showPercent: false },
+      })],
+    }), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts).toContain('0');
   });
 });
