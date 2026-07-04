@@ -166,7 +166,7 @@ pub struct ChartModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
     // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
-    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60, `ST_HoleSizePercent`
+    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82, `ST_HoleSizePercent`
     /// §21.2.3.55) — hole diameter as 1–90% of the outer diameter. `None` when
     /// absent; the renderer defaults an absent doughnut hole to 50%.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,6 +425,36 @@ pub struct ChartDataLabelOverride {
     pub font_size_hpt: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_bold: Option<bool>,
+    /// Per-point label callout box style (`<c:dLbl>` §21.2.2.47 `<c:spPr>`
+    /// §21.2.2.197): background fill / border, mirroring the series-level
+    /// defaults. Present only when the point's `<c:spPr>` overrides the shape
+    /// (e.g. a differently tinted callout for one slice). See [`ChartLabelBox`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_box: Option<ChartLabelBox>,
+}
+
+/// Callout-box style for a pie/doughnut data label — the white (or themed)
+/// rounded rectangle with a thin border that Word draws around a `bestFit`
+/// label placed outside its slice. Parsed from the label's `<c:spPr>`
+/// (§21.2.2.197, the shape properties of a `<c:dLbl>` §21.2.2.47 /
+/// `<c:dLbls>` §21.2.2.49): the direct `<a:solidFill>` is the box fill and the
+/// `<a:ln>` is its border.
+///
+/// A `None` on `ChartSeriesDataLabels::label_box` means the file wrote no box
+/// shape, so the renderer keeps the historical plain-text label (no callout).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartLabelBox {
+    /// `<c:spPr><a:solidFill>` resolved hex (no `#`). The box background;
+    /// `<a:noFill>`/absent leaves this `None` (transparent box).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// `<c:spPr><a:ln><a:solidFill>` resolved hex (no `#`) — border stroke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
+    /// `<c:spPr><a:ln w>` border width in EMU (12700 EMU = 1 pt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_width_emu: Option<u32>,
 }
 
 /// Mirror of TS `ChartSeriesDataLabels`.
@@ -445,6 +475,27 @@ pub struct ChartSeriesDataLabels {
     pub font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size_hpt: Option<i32>,
+    /// Series-default callout-box style (`<c:dLbls>` §21.2.2.49 `<c:spPr>`
+    /// §21.2.2.197) — the box drawn around each pie/doughnut label. When present
+    /// the pie renderer switches from plain outer-ring text to Word's boxed
+    /// callout layout (box + optional leader line); `None` keeps the plain
+    /// labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_box: Option<ChartLabelBox>,
+    /// `<c:dLbls><c:showLeaderLines val>` (§21.2.2.183) — whether leader lines
+    /// connect a label pulled away from its slice back to the slice. Absent =
+    /// `false` (Office omits the element when leader lines are off). Only
+    /// consulted by the pie/doughnut callout renderer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_leader_lines: bool,
+    /// `<c:dLbls><c:leaderLines>` (§21.2.2.92) `<c:spPr><a:ln><a:solidFill>`
+    /// resolved hex (no `#`) — the leader-line stroke color. `None` falls back
+    /// to a neutral grey in the renderer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_line_color: Option<String>,
+    /// `<c:dLbls><c:leaderLines><c:spPr><a:ln w>` leader-line width in EMU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_line_width_emu: Option<u32>,
 }
 
 /// Mirror of TS `ChartErrBars`.
@@ -1169,7 +1220,7 @@ pub fn extract_legend_font_color(root: Node, resolver: &dyn ColorResolver) -> Op
 // Pie / doughnut geometry (CH8)
 // ============================================================================
 
-/// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60) — hole diameter percentage
+/// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82) — hole diameter percentage
 /// (1–90). Clamped to the ECMA range. `None` when absent. `root` is the chart
 /// space (or `<c:chart>`); the search is scoped to a `<c:doughnutChart>` so a
 /// hole size only ever comes from a doughnut plot.
@@ -2087,6 +2138,59 @@ pub fn flatten_rich_text(rich_root: Node, cellrange_cache: Option<&str>) -> Stri
     out
 }
 
+/// Parse a data-label `<c:spPr>` (§21.2.2.197) into a callout [`ChartLabelBox`]
+/// (fill + border). Returns `None` when the shape node is absent OR carries
+/// neither a resolvable fill nor a border — i.e. nothing that would draw a box.
+/// The direct-child `<a:solidFill>` is the box fill; the `<a:ln>` solidFill and
+/// its `w` attribute are the border. Colors resolve through
+/// [`ColorResolver::resolve_shape_fill`] so a `<a:sysClr>`/`<a:schemeClr>` picks
+/// up its transforms (Office writes the default white box as
+/// `<a:sysClr val="window">`).
+fn parse_label_box(sp_pr: Option<Node>, resolver: &dyn ColorResolver) -> Option<ChartLabelBox> {
+    let sp = sp_pr?;
+    let fill = resolver.resolve_shape_fill(sp);
+    let (border_color, border_width_emu) = match child(sp, "ln") {
+        None => (None, None),
+        Some(ln) => {
+            let color = resolver.resolve_shape_fill(ln);
+            let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
+            (color, width)
+        }
+    };
+    if fill.is_none() && border_color.is_none() && border_width_emu.is_none() {
+        return None;
+    }
+    Some(ChartLabelBox {
+        fill,
+        border_color,
+        border_width_emu,
+    })
+}
+
+/// Parse `<c:dLbls><c:leaderLines>` into `(show_leader_lines, color, width_emu)`.
+/// `show` comes from the sibling `<c:showLeaderLines val>` (§21.2.2.183); the
+/// stroke style comes from `<c:leaderLines>` (§21.2.2.92) `<c:spPr><a:ln>`.
+fn parse_leader_lines(
+    d_lbls: Node,
+    resolver: &dyn ColorResolver,
+) -> (bool, Option<String>, Option<u32>) {
+    let show = child(d_lbls, "showLeaderLines")
+        .and_then(|c| c.attribute("val"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let (color, width) = match child(d_lbls, "leaderLines")
+        .and_then(|ll| child(ll, "spPr"))
+        .and_then(|sp| child(sp, "ln"))
+    {
+        None => (None, None),
+        Some(ln) => (
+            resolver.resolve_shape_fill(ln),
+            ln.attribute("w").and_then(|v| v.parse::<u32>().ok()),
+        ),
+    };
+    (show, color, width)
+}
+
 /// Parse a series-level `<c:dLbls>` into `(series_defaults, per_idx_overrides)`.
 /// ECMA-376 §21.2.2.47. Colors resolve through [`ColorResolver::resolve_shape_fill`]
 /// so a scheme-color label text picks up its lumMod/lumOff transforms.
@@ -2136,6 +2240,19 @@ pub fn parse_series_data_labels(
             .and_then(|v| v.parse::<i32>().ok())
     });
 
+    // §21.2.2.197 series-level callout-box shape (`<c:dLbls><c:spPr>`) and
+    // §21.2.2.183/§21.2.2.92 leader-line style. `<c:spPr>` may appear both as a
+    // direct child of `<c:dLbls>` (the series default) and inside each
+    // `<c:dLbl>` (per-point) — pick the direct child here.
+    let label_box = parse_label_box(
+        d_lbls
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "spPr"),
+        resolver,
+    );
+    let (show_leader_lines, leader_line_color, leader_line_width_emu) =
+        parse_leader_lines(d_lbls, resolver);
+
     let series_defaults = ChartSeriesDataLabels {
         show_val: bool_attr(d_lbls, "showVal"),
         show_cat_name: bool_attr(d_lbls, "showCatName"),
@@ -2146,6 +2263,10 @@ pub fn parse_series_data_labels(
         format_code,
         font_bold: font_bold_default,
         font_size_hpt: font_size_default,
+        label_box,
+        show_leader_lines,
+        leader_line_color,
+        leader_line_width_emu,
     };
 
     let mut overrides = Vec::new();
@@ -2190,6 +2311,13 @@ pub fn parse_series_data_labels(
             })
             .and_then(|def| def.attribute("b"))
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        // Per-point callout box (`<c:dLbl>` §21.2.2.47 `<c:spPr>` §21.2.2.197):
+        // direct child spPr overrides the series-default box for this one point.
+        let label_box = parse_label_box(
+            dl.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr"),
+            resolver,
+        );
         overrides.push(ChartDataLabelOverride {
             idx,
             text,
@@ -2197,6 +2325,7 @@ pub fn parse_series_data_labels(
             font_color,
             font_size_hpt,
             font_bold,
+            label_box,
         });
     }
 
@@ -2208,7 +2337,11 @@ pub fn parse_series_data_labels(
         || series_defaults.font_color.is_some()
         || series_defaults.format_code.is_some()
         || series_defaults.font_bold.is_some()
-        || series_defaults.font_size_hpt.is_some();
+        || series_defaults.font_size_hpt.is_some()
+        || series_defaults.label_box.is_some()
+        || series_defaults.show_leader_lines
+        || series_defaults.leader_line_color.is_some()
+        || series_defaults.leader_line_width_emu.is_some();
     let series_out = if any_default {
         Some(series_defaults)
     } else {
@@ -5285,6 +5418,78 @@ mod tests {
         assert_eq!(o.idx, 1);
         assert_eq!(o.text, "Custom");
         assert_eq!(o.position.as_deref(), Some("outEnd"));
+    }
+
+    #[test]
+    fn parse_series_data_labels_callout_box_and_leader_lines() {
+        // Mirror of sample-25 (Word pie callout labels): the series `<c:dLbls>`
+        // carries a `<c:spPr>` box (white fill + coloured border), a per-point
+        // `<c:dLbl>` with its own box, and `<c:showLeaderLines>` +
+        // `<c:leaderLines>` style. All must round-trip into the model.
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:dLbls>
+                <c:dLbl>
+                  <c:idx val="0"/>
+                  <c:spPr>
+                    <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+                    <a:ln w="12700"><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill></a:ln>
+                  </c:spPr>
+                  <c:showCatName val="1"/>
+                  <c:showPercent val="1"/>
+                </c:dLbl>
+                <c:spPr>
+                  <a:solidFill><a:srgbClr val="FEFEFE"/></a:solidFill>
+                  <a:ln w="12700"><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill></a:ln>
+                </c:spPr>
+                <c:showVal val="0"/>
+                <c:showCatName val="1"/>
+                <c:showPercent val="1"/>
+                <c:showLeaderLines val="1"/>
+                <c:leaderLines>
+                  <c:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="A6A6A6"/></a:solidFill></a:ln></c:spPr>
+                </c:leaderLines>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (defaults, overrides) =
+            parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let defaults = defaults.expect("series-level dLbls present");
+        let box_ = defaults.label_box.expect("series callout box");
+        assert_eq!(box_.fill.as_deref(), Some("FEFEFE"));
+        assert_eq!(box_.border_color.as_deref(), Some("4472C4"));
+        assert_eq!(box_.border_width_emu, Some(12700));
+        assert!(defaults.show_leader_lines);
+        assert_eq!(defaults.leader_line_color.as_deref(), Some("A6A6A6"));
+        assert_eq!(defaults.leader_line_width_emu, Some(9525));
+
+        assert_eq!(overrides.len(), 1);
+        let o = &overrides[0];
+        assert_eq!(o.idx, 0);
+        let obox = o.label_box.as_ref().expect("per-point callout box");
+        assert_eq!(obox.fill.as_deref(), Some("FFFFFF"));
+        assert_eq!(obox.border_color.as_deref(), Some("4472C4"));
+        assert_eq!(obox.border_width_emu, Some(12700));
+    }
+
+    #[test]
+    fn parse_series_data_labels_no_box_leaves_callout_fields_unset() {
+        // A plain `<c:dLbls>` with no `<c:spPr>` / leader lines must NOT
+        // synthesize a callout box (keeps the historical plain-label path).
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}">
+              <c:dLbls><c:showPercent val="1"/></c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (defaults, _) = parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let defaults = defaults.expect("series-level dLbls present");
+        assert!(defaults.label_box.is_none());
+        assert!(!defaults.show_leader_lines);
+        assert!(defaults.leader_line_color.is_none());
     }
 
     #[test]

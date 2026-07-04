@@ -3,7 +3,7 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
+import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
 import {
   computeChartFrame,
   cartesianTitleBand,
@@ -2597,7 +2597,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // slices. Only runs when a rich definition is present; the plain percent
   // labels above are byte-identical to the pre-CH8 pie.
   if (hasRichLabels) {
-    drawPieRichLabels(ctx, chart, richDef, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle, dLblFont);
+    drawPieRichLabels(ctx, chart, richDef, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle, dLblFont, ptToPx, x, w, y, h);
   }
 
   if (pieLeg) {
@@ -2619,7 +2619,14 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
  *  `<c:dLbls>` (§21.2.2.35: showVal / showCatName / showSerName / showPercent +
  *  dLblPos). Only called when such a definition exists; the plain percent-label
  *  path stays inline in the slice loop (byte-stable). `font` is the pre-resolved
- *  data-label CSS font-family. */
+ *  data-label CSS font-family.
+ *
+ *  When the `<c:dLbls>` carries a callout-box shape (`<c:spPr>` → `def.labelBox`,
+ *  §21.2.2.197) the labels are drawn Word-style: each is a boxed callout placed
+ *  OUTSIDE its slice at the slice mid-angle, with adjacent boxes pushed apart to
+ *  avoid overlap (`bestFit`), and a leader line back to the rim for any box that
+ *  ends up far from its slice. Without a box shape the historical plain-text
+ *  layout is preserved byte-for-byte. */
 function drawPieRichLabels(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -2632,7 +2639,15 @@ function drawPieRichLabels(
   outerR: number, innerR: number,
   startAngle: number,
   font: string,
+  ptToPx: number,
+  boundsX: number, boundsW: number, boundsY: number, boundsH: number,
 ): void {
+  // Callout mode: a `<c:spPr>` box shape on the dLbls (Word's boxed pie labels).
+  if (def.labelBox) {
+    drawPieCalloutLabels(ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, startAngle, font, ptToPx, boundsX, boundsW, boundsY, boundsH);
+    return;
+  }
+
   let angle = startAngle;
   for (let i = 0; i < vals.length; i++) {
     const slice = (vals[i] / total) * Math.PI * 2;
@@ -2660,6 +2675,219 @@ function drawPieRichLabels(
     ctx.fillStyle = def.fontColor ? `#${def.fontColor}` : (outside ? '#333' : '#fff');
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(text, lx2, ly2);
+  }
+}
+
+/** One laid-out pie callout label: its wrapped text lines, box rectangle, the
+ *  rim anchor point on its slice, and the resolved per-point style. */
+interface PieCalloutLabel {
+  lines: string[];
+  /** Slice mid-angle (canvas radians) — the leader-line target direction. */
+  midAngle: number;
+  /** Rim anchor point (on the outer arc at `midAngle`). */
+  rimX: number;
+  rimY: number;
+  /** Half-height of the text block (px) — box grows symmetrically around cy. */
+  boxW: number;
+  boxH: number;
+  /** Box centre (mutated by the collision pass). */
+  cxBox: number;
+  cyBox: number;
+  /** true when the label sits on the left half (box hangs to the left). */
+  leftSide: boolean;
+  fontColor: string;
+  boxFill: string | null;
+  boxBorder: string | null;
+  boxBorderPx: number;
+  fontPx: number;
+  bold: boolean;
+}
+
+/** Word-style boxed pie/doughnut callout labels (`bestFit`). Each label is a
+ *  filled+bordered rectangle placed just outside its slice at the slice
+ *  mid-angle; adjacent boxes on the same side are pushed vertically apart so
+ *  they do not overlap, and a leader line is drawn back to the rim for any box
+ *  whose gap from the rim exceeds a small threshold. Style (box fill/border,
+ *  leader colour/width, per-point font colour and box overrides) all comes from
+ *  the parsed model — no empirical constants beyond the layout paddings, which
+ *  are geometry (not spec values). */
+function drawPieCalloutLabels(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  def: ChartSeriesDataLabels,
+  s: ChartSeries,
+  cats: string[],
+  vals: number[],
+  total: number,
+  cx2: number, cy2: number,
+  outerR: number,
+  startAngle: number,
+  font: string,
+  ptToPx: number,
+  boundsX: number, boundsW: number, boundsY: number, boundsH: number,
+): void {
+  const overrides = s.dataLabelOverrides ?? [];
+  const findOverride = (i: number): ChartDataLabelOverride | undefined =>
+    overrides.find(o => o.idx === i);
+
+  // Base font size: series default (hpt → px) or a radius-relative fallback.
+  const baseFontPx = def.fontSizeHpt ? def.fontSizeHpt / 100 : Math.max(9, outerR * 0.09);
+  // Box padding around the text block (px). Geometry, not a spec constant.
+  const padX = Math.max(4, baseFontPx * 0.45);
+  const padY = Math.max(2, baseFontPx * 0.28);
+  const lineGap = baseFontPx * 0.22;
+
+  const seriesBox = def.labelBox;
+
+  // ── Build each label: wrapped lines + measured box + rim anchor ──────────
+  const labels: PieCalloutLabel[] = [];
+  let angle = startAngle;
+  for (let i = 0; i < vals.length; i++) {
+    const slice = (vals[i] / total) * Math.PI * 2;
+    const midAngle = angle + slice / 2;
+    angle += slice;
+    if (slice <= 0) continue;
+
+    const ov = findOverride(i);
+    // A `<c:delete val="1"/>` label carries an empty override text and NO
+    // styling — skip it entirely. A per-point *styling* override (sample-25's
+    // idx 0) also has text==="" but carries position/fontColor/box, in which
+    // case the label is still drawn using the composed cat/percent text.
+    const isDeleted = ov != null && ov.text === '' && ov.position === undefined
+      && ov.fontColor === undefined && ov.fontSizeHpt === undefined
+      && ov.fontBold === undefined && ov.labelBox === undefined;
+    if (isDeleted) continue;
+
+    // §21.2.2.35 composition. Word stacks category name and percent on
+    // SEPARATE lines (see sample-25.pdf), so each `show*` part is its own line
+    // rather than space-joined.
+    const lines: string[] = [];
+    if (def.showCatName) { const c = (cats[i] ?? '').toString(); if (c) lines.push(c); }
+    if (def.showSerName && s.name) lines.push(s.name);
+    if (def.showVal) lines.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
+    if (def.showPercent) lines.push(`${Math.round((vals[i] / total) * 100)}%`);
+    if (lines.length === 0) continue;
+
+    // Per-point overrides (font colour/size/bold + box), else series defaults.
+    const fontPx = ov?.fontSizeHpt ? ov.fontSizeHpt / 100 : baseFontPx;
+    const bold = ov?.fontBold ?? def.fontBold ?? false;
+    const fontColor = ov?.fontColor ? `#${ov.fontColor}` : (def.fontColor ? `#${def.fontColor}` : '#000');
+    const box = ov?.labelBox ?? seriesBox;
+    const boxFill = box?.fill ? `#${box.fill}` : null;
+    const boxBorder = box?.borderColor ? `#${box.borderColor}` : null;
+    const boxBorderPx = box?.borderWidthEmu
+      ? Math.max(0.75, (box.borderWidthEmu / EMU_PER_PT) * ptToPx)
+      : 1;
+
+    // Measure the widest line to size the box.
+    ctx.font = `${bold ? 'bold ' : ''}${fontPx}px ${font}`;
+    let textW = 0;
+    for (const ln of lines) textW = Math.max(textW, ctx.measureText(ln).width);
+    const lineH = fontPx + lineGap;
+    const boxW = textW + padX * 2;
+    const boxH = lines.length * lineH - lineGap + padY * 2;
+
+    const rimX = cx2 + Math.cos(midAngle) * outerR;
+    const rimY = cy2 + Math.sin(midAngle) * outerR;
+    const leftSide = Math.cos(midAngle) < 0;
+
+    // Initial box centre: outside the rim along the mid-angle. The gap scales
+    // with the box so small slices get pulled further out (Word `bestFit`).
+    const outGap = Math.max(boxW, boxH) * 0.55 + outerR * 0.06;
+    const cxBox = rimX + Math.cos(midAngle) * outGap;
+    const cyBox = rimY + Math.sin(midAngle) * outGap;
+
+    labels.push({
+      lines, midAngle, rimX, rimY, boxW, boxH, cxBox, cyBox,
+      leftSide, fontColor, boxFill, boxBorder, boxBorderPx, fontPx, bold,
+    });
+  }
+
+  // ── Collision pass (bestFit): split into left/right columns and push boxes
+  //    apart vertically so their rectangles do not overlap. Word lays labels
+  //    out radially then de-overlaps; this greedy top-down separation +
+  //    within-bounds fit-back is a faithful, deterministic approximation (no
+  //    sample-specific tuning). ──
+  const topLimit = boundsY + 2;
+  const bottomLimit = boundsY + boundsH - 2;
+  const separate = (col: PieCalloutLabel[]): void => {
+    if (col.length === 0) return;
+    col.sort((a, b) => a.cyBox - b.cyBox);
+    // Push each box below the previous one by at least their combined half
+    // heights (+ a small gap) so rectangles never overlap.
+    for (let k = 1; k < col.length; k++) {
+      const prev = col[k - 1];
+      const cur = col[k];
+      const minGap = (prev.boxH + cur.boxH) / 2 + 3;
+      if (cur.cyBox - prev.cyBox < minGap) cur.cyBox = prev.cyBox + minGap;
+    }
+    // If the stack now runs past the bottom bound, slide the whole column up
+    // (but not above the top bound) so it stays inside the chart area.
+    const last = col[col.length - 1];
+    const overflow = (last.cyBox + last.boxH / 2) - bottomLimit;
+    if (overflow > 0) for (const l of col) l.cyBox -= overflow;
+    const first = col[0];
+    const underflow = topLimit - (first.cyBox - first.boxH / 2);
+    if (underflow > 0) for (const l of col) l.cyBox += underflow;
+  };
+  separate(labels.filter(l => !l.leftSide));
+  separate(labels.filter(l => l.leftSide));
+
+  // Horizontal clamp: keep each box fully inside the chart rect.
+  const leftLimit = boundsX + 2;
+  const rightLimit = boundsX + boundsW - 2;
+  for (const l of labels) {
+    const half = l.boxW / 2;
+    if (l.cxBox - half < leftLimit) l.cxBox = leftLimit + half;
+    if (l.cxBox + half > rightLimit) l.cxBox = rightLimit - half;
+  }
+
+  // ── Draw leader lines first (under the boxes), then boxes + text ─────────
+  const leaderColor = def.leaderLineColor ? `#${def.leaderLineColor}` : '#a6a6a6';
+  const leaderPx = def.leaderLineWidthEmu
+    ? Math.max(0.5, (def.leaderLineWidthEmu / EMU_PER_PT) * ptToPx)
+    : 1;
+
+  for (const l of labels) {
+    // The box edge nearest the pie centre — where a leader line should meet.
+    const edgeX = l.cxBox + (l.leftSide ? l.boxW / 2 : -l.boxW / 2);
+    const edgeY = l.cyBox;
+    // Distance from the box's inner edge to its slice rim. When the box abuts
+    // the slice the leader is redundant; draw one only past a small threshold.
+    const dx = edgeX - l.rimX;
+    const dy = edgeY - l.rimY;
+    const dist = Math.hypot(dx, dy);
+    if (def.showLeaderLines && dist > l.fontPx * 0.9) {
+      ctx.beginPath();
+      ctx.moveTo(l.rimX, l.rimY);
+      ctx.lineTo(edgeX, edgeY);
+      ctx.strokeStyle = leaderColor;
+      ctx.lineWidth = leaderPx;
+      ctx.stroke();
+    }
+  }
+
+  for (const l of labels) {
+    const bx = l.cxBox - l.boxW / 2;
+    const by = l.cyBox - l.boxH / 2;
+    // Box fill + border (§21.2.2.197 spPr). Fill may carry an 8-digit RGBA hex
+    // (e.g. a 90%-opacity white) — valid canvas fillStyle.
+    if (l.boxFill) { ctx.fillStyle = l.boxFill; ctx.fillRect(bx, by, l.boxW, l.boxH); }
+    if (l.boxBorder) {
+      ctx.strokeStyle = l.boxBorder;
+      ctx.lineWidth = l.boxBorderPx;
+      ctx.strokeRect(bx, by, l.boxW, l.boxH);
+    }
+    // Text: centred, stacked lines.
+    ctx.font = `${l.bold ? 'bold ' : ''}${l.fontPx}px ${font}`;
+    ctx.fillStyle = l.fontColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const lineH = l.fontPx + lineGap;
+    const blockTop = l.cyBox - (l.lines.length * lineH - lineGap) / 2 + l.fontPx / 2;
+    for (let li = 0; li < l.lines.length; li++) {
+      ctx.fillText(l.lines[li], l.cxBox, blockTop + li * lineH);
+    }
   }
 }
 

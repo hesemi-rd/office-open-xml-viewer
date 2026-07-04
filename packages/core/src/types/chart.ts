@@ -195,6 +195,23 @@ export interface ChartDataLabelOverride {
   fontSizeHpt?: number;
   /** `<a:defRPr b="1">` inside the per-idx rich text. */
   fontBold?: boolean;
+  /** Per-point callout box (`<c:dLbl><c:spPr>`, ECMA-376 §21.2.2.47/§21.2.2.197):
+   *  overrides the series-default box for this one slice. */
+  labelBox?: ChartLabelBox;
+}
+
+/** Callout-box style for a pie/doughnut data label — the white (or themed)
+ *  rounded rectangle with a thin border Word draws around a `bestFit` label
+ *  placed outside its slice. From the label's `<c:spPr>` (§21.2.2.197). All
+ *  fields optional: absent → transparent / unbordered. Mirror of Rust
+ *  `ChartLabelBox`. */
+export interface ChartLabelBox {
+  /** `<a:solidFill>` resolved hex (no `#`). Box background. */
+  fill?: string;
+  /** `<a:ln><a:solidFill>` resolved hex (no `#`). Border stroke. */
+  borderColor?: string;
+  /** `<a:ln w>` border width in EMU (12700 EMU = 1 pt). */
+  borderWidthEmu?: number;
 }
 
 export interface ChartSeriesDataLabels {
@@ -209,6 +226,18 @@ export interface ChartSeriesDataLabels {
   fontBold?: boolean;
   /** Series-level font size for data labels (OOXML hundredths of a point). */
   fontSizeHpt?: number;
+  /** Series-default callout box (`<c:dLbls><c:spPr>`, ECMA-376 §21.2.2.49/
+   *  §21.2.2.197). When present the pie/doughnut renderer draws Word's boxed
+   *  callout layout (box + optional leader line) instead of plain text. */
+  labelBox?: ChartLabelBox;
+  /** `<c:dLbls><c:showLeaderLines val>` (§21.2.2.183) — draw leader lines from
+   *  a pulled-away label back to its slice. Default false. */
+  showLeaderLines?: boolean;
+  /** `<c:leaderLines><c:spPr><a:ln><a:solidFill>` (§21.2.2.92) resolved hex
+   *  (no `#`). undefined → renderer uses a neutral grey. */
+  leaderLineColor?: string;
+  /** `<c:leaderLines><c:spPr><a:ln w>` leader-line width in EMU. */
+  leaderLineWidthEmu?: number;
 }
 
 export interface ChartErrBars {

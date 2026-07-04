@@ -2233,3 +2233,108 @@ describe('CH13 — stock chart (high/low/close)', () => {
     expect(hiLoLines(rec.segs).length).toBe(3);
   });
 });
+
+// ─── CH14 — pie callout data labels (Word boxed labels, §21.2.2.197) ─────────
+//
+// When a pie/doughnut series `<c:dLbls>` carries a `<c:spPr>` box shape the
+// labels are drawn as boxed callouts OUTSIDE each slice: a filled+bordered
+// rectangle with the category name and percent on separate lines, plus a
+// leader line back to the rim for a box pulled far from its slice. Without a
+// box shape the historical plain-text label path is preserved.
+
+/** A pie model whose series data labels request Word's boxed callout layout. */
+function pieCalloutModel(over: Partial<ChartModel> = {}): ChartModel {
+  return baseModel({
+    chartType: 'pie',
+    categories: ['Brazil', 'Vietnam', 'Colombia', 'Indonesia', 'Honduras', 'Other'],
+    series: [series({
+      name: 'Prod',
+      values: [51500, 28500, 14000, 10800, 8349, 61000],
+      seriesDataLabels: {
+        showVal: false, showCatName: true, showSerName: false, showPercent: true,
+        position: 'bestFit',
+        labelBox: { fill: 'FFFFFF', borderColor: '4472C4', borderWidthEmu: 12700 },
+        showLeaderLines: true,
+        leaderLineColor: 'A6A6A6',
+        leaderLineWidthEmu: 9525,
+      },
+      dataLabelOverrides: [
+        // idx 0 (Brazil) is a per-point styling override: empty text (reuses the
+        // composed cat/percent), blue font, its own box.
+        { idx: 0, text: '', position: 'bestFit', fontColor: '4472C4', fontSizeHpt: 1000, fontBold: false,
+          labelBox: { fill: 'FFFFFF', borderColor: '4472C4', borderWidthEmu: 12700 } },
+      ],
+    })],
+    ...over,
+  });
+}
+
+describe('CH14 — pie callout data labels', () => {
+  it('draws a filled callout box per slice (category name + percent on separate lines)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, pieCalloutModel(), RECT, 1);
+    // White box fills — one per drawn label. The box fill is the parsed white
+    // (`#FFFFFF`); the slice wedges fill with palette colors, so filter on the
+    // box color to isolate the callout rectangles.
+    const boxes = rec.rects.filter(r => r.fs === '#FFFFFF');
+    expect(boxes.length).toBe(6);
+    // Category names and percents are drawn as SEPARATE fillText lines.
+    const texts = rec.texts.map(t => t.text);
+    expect(texts).toContain('Brazil');
+    expect(texts).toContain('Other');
+    expect(texts).toContain('30%'); // 51500 / 174149 ≈ 29.6% → 30
+    expect(texts).toContain('16%'); // 28500 / 174149 ≈ 16.4% → 16
+    // No space-joined "Brazil 30%" composite — category and percent are split.
+    expect(texts.some(t => /Brazil\s+\d/.test(t))).toBe(false);
+  });
+
+  it('colors the per-point (Brazil) label with its override font color', () => {
+    // Purpose-built context that snapshots fillStyle with each fillText so the
+    // per-point font-color override (`#4472C4` for Brazil vs `#000` default)
+    // can be asserted directly.
+    const calls: { text: string; fs: string }[] = [];
+    const state: Record<string, unknown> = {
+      font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+      textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+    };
+    const handler: ProxyHandler<Record<string, unknown>> = {
+      get(_t, prop: string) {
+        if (prop in state && typeof state[prop] !== 'function') return state[prop];
+        if (prop === 'measureText') return (t: string) => ({ width: String(t).length * 6 });
+        if (prop === 'fillText') return (text: string) => calls.push({ text, fs: String(state.fillStyle) });
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => ({ addColorStop() {} });
+        return () => undefined;
+      },
+      set(_t, prop: string, value) { state[prop] = value; return true; },
+    };
+    const ctx = new Proxy(state, handler) as unknown as CanvasRenderingContext2D;
+    renderChart(ctx, pieCalloutModel(), RECT, 1);
+    const brazil = calls.find(c => c.text === 'Brazil');
+    expect(brazil?.fs).toBe('#4472C4');
+    // A non-overridden slice uses the default black font (no series fontColor).
+    const other = calls.find(c => c.text === 'Other');
+    expect(other?.fs).toBe('#000');
+  });
+
+  it('draws leader lines in the parsed leader color when a box is pulled off its slice', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, pieCalloutModel(), RECT, 1);
+    // Leader lines are stroked in the parsed leader color (#A6A6A6). The small
+    // slices (Colombia/Indonesia/Honduras) get pulled far enough out to draw a
+    // leader; assert at least one leader segment exists in that color.
+    const leaders = rec.segs.filter(s => s.ss === '#A6A6A6');
+    expect(leaders.length).toBeGreaterThan(0);
+  });
+
+  it('keeps plain-text labels (no boxes) when the dLbls carries no box shape', () => {
+    const rec = recordingCtx();
+    const model = pieCalloutModel();
+    // Strip the box → falls back to the historical plain outer-ring text path.
+    const sdl = model.series[0].seriesDataLabels;
+    if (sdl) { sdl.labelBox = undefined; sdl.showLeaderLines = false; }
+    model.series[0].dataLabelOverrides = null;
+    renderChart(rec.ctx, model, RECT, 1);
+    // No white callout boxes are drawn.
+    expect(rec.rects.filter(r => r.fs === '#FFFFFF').length).toBe(0);
+  });
+});
