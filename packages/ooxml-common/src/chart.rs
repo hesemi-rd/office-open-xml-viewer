@@ -2654,7 +2654,7 @@ pub fn parse_chart_part(
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "chart");
     let title_node_opt = chart_node.and_then(|c| child(c, "title"));
-    let title = title_node_opt.and_then(|title_node| {
+    let mut title = title_node_opt.and_then(|title_node| {
         let texts: Vec<String> = title_node
             .descendants()
             .filter(|n| n.is_element() && n.tag_name().name() == "t")
@@ -3193,6 +3193,41 @@ pub fn parse_chart_part(
             }
         })
         .collect();
+
+    // Auto-title (ECMA-376 §21.2.2.7 `<c:autoTitleDeleted>`). When the chart has
+    // no explicit title text but auto-titling is enabled, Word synthesizes a
+    // title and shows it in the chart frame. §21.2.2.7 says the element only
+    // governs WHETHER an auto title may be shown ("val=0/false ⇒ the chart title
+    // SHALL be shown" when otherwise absent; "val=1/true ⇒ it SHALL NOT be
+    // shown"); the spec leaves the auto title's TEXT implementation-defined.
+    // Word's observed rule — the ground truth here is sample-25.docx / .pdf,
+    // whose `<c:title>` carries a `<c:txPr>` (fonts, `cap="all"`) but NO `<c:tx>`
+    // text, `<c:autoTitleDeleted val="0"/>`, and exactly one series named
+    // "Production in 2017" — is:
+    //   * exactly ONE series  → the auto title is that single series' name
+    //   * two or more series   → NO auto title (a lone series name would be
+    //                            misleading, so Word shows none)
+    // We adopt only the single-series case; multi-series charts stay untitled,
+    // matching Word. The title's `<a:defRPr cap="all">` would uppercase the
+    // rendered glyphs ("PRODUCTION IN 2017"); chart-title `cap` is a display
+    // transform we do not yet apply, so the model carries the series name
+    // VERBATIM ("Production in 2017"). Making the title APPEAR is the goal; the
+    // caps transform is a separate, tracked rendering-layer limitation.
+    if title.is_none() {
+        let auto_title_deleted = chart_node
+            .and_then(|c| child(c, "autoTitleDeleted"))
+            .and_then(|n| attr(&n, "val"))
+            // CT_Boolean: default false (auto title may be shown) when the
+            // element or its `val` is absent.
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        if !auto_title_deleted && series.len() == 1 {
+            let ser_name = series[0].name.trim();
+            if !ser_name.is_empty() {
+                title = Some(ser_name.to_string());
+            }
+        }
+    }
 
     // Data labels are on when `<c:dLbls>` enables `<c:showVal>` OR
     // `<c:showPercent>` (ECMA-376 §21.2.2.189 / §21.2.2.187) — at chart level
@@ -5850,5 +5885,90 @@ mod tests {
         let d = chart_space_of(&xml);
         let m = parse_chart_part(d.root_element(), &AccentResolver).expect("bar parses");
         assert!(m.series[0].data_point_colors.is_none());
+    }
+
+    /// A named single series in `<c:tx>` — reused by the auto-title tests. `idx`
+    /// distinguishes the two series in the multi-series fixture.
+    fn named_ser(idx: u32, name: &str) -> String {
+        format!(
+            r#"<c:ser><c:idx val="{idx}"/>
+              <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>{name}</c:v></c:pt></c:strCache></c:strRef></c:tx>
+              <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt></c:strCache></c:cat>
+              <c:val><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:val>
+            </c:ser>"#
+        )
+    }
+
+    /// A `<c:chart>` with an optional `<c:autoTitleDeleted val=…>`, NO explicit
+    /// `<c:title>` text, and the given series in a bar plot area. Models the
+    /// sample-25 shape (auto-title chart: title frame present but empty, so the
+    /// synthesized title comes from the series name).
+    fn chart_space_auto_title(auto_title_deleted: Option<&str>, sers: &str) -> String {
+        let atd = auto_title_deleted
+            .map(|v| format!(r#"<c:autoTitleDeleted val="{v}"/>"#))
+            .unwrap_or_default();
+        format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                {atd}
+                <c:plotArea>
+                  <c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{sers}</c:barChart>
+                  <c:catAx><c:axId val="1"/><c:axPos val="b"/></c:catAx>
+                  <c:valAx><c:axId val="2"/><c:axPos val="l"/></c:valAx>
+                </c:plotArea>
+              </c:chart>
+            </c:chartSpace>"#
+        )
+    }
+
+    /// ECMA-376 §21.2.2.7 auto-title: a chart with NO explicit title text,
+    /// `autoTitleDeleted` absent (⇒ auto title may show), and EXACTLY ONE named
+    /// series adopts that series' name as the chart title. Ground truth:
+    /// sample-25.docx — pie3D with a lone "Production in 2017" series and an
+    /// empty title frame — where Word shows "Production in 2017" as the title.
+    #[test]
+    fn parse_chart_part_auto_title_single_series() {
+        let xml = chart_space_auto_title(None, &named_ser(0, "Production in 2017"));
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
+        // The series name is promoted VERBATIM (the `cap="all"` uppercase is a
+        // rendering-layer transform we do not apply at parse time).
+        assert_eq!(m.title.as_deref(), Some("Production in 2017"));
+
+        // An explicit `autoTitleDeleted val="0"` behaves identically (0 ⇒ auto
+        // title may be shown).
+        let xml0 = chart_space_auto_title(Some("0"), &named_ser(0, "Production in 2017"));
+        let d0 = chart_space_of(&xml0);
+        let m0 = parse_chart_part(d0.root_element(), &FixtureResolver).expect("parses");
+        assert_eq!(m0.title.as_deref(), Some("Production in 2017"));
+    }
+
+    /// §21.2.2.7 `autoTitleDeleted val="1"` (or `"true"`) suppresses the auto
+    /// title even for a single named series — Word shows no title.
+    #[test]
+    fn parse_chart_part_auto_title_deleted_shows_no_title() {
+        for v in ["1", "true"] {
+            let xml = chart_space_auto_title(Some(v), &named_ser(0, "Production in 2017"));
+            let d = chart_space_of(&xml);
+            let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
+            assert_eq!(m.title, None, "autoTitleDeleted={v} should suppress title");
+        }
+    }
+
+    /// §21.2.2.7 auto-title applies ONLY to single-series charts. With TWO
+    /// series, Word shows no synthesized title (a lone series name would be
+    /// misleading), so `title` stays `None`.
+    #[test]
+    fn parse_chart_part_auto_title_multi_series_none() {
+        let sers = format!(
+            "{}{}",
+            named_ser(0, "Series One"),
+            named_ser(1, "Series Two")
+        );
+        let xml = chart_space_auto_title(None, &sers);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
+        assert_eq!(m.series.len(), 2);
+        assert_eq!(m.title, None);
     }
 }
