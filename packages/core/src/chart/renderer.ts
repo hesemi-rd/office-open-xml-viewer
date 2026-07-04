@@ -453,6 +453,69 @@ function computeSecondaryAxis(
   };
 }
 
+/** Draw a secondary value axis on the RIGHT edge of the plot: its rule, mirrored
+ *  tick marks + labels, and rotated title. Its scale is INDEPENDENT of the
+ *  primary axis (its own "nice" major unit; NOT aligned to the primary
+ *  gridlines) — PowerPoint places these marks independently. Shared by the
+ *  line and area families; the bar renderer keeps its own inline copy for now
+ *  (its call sequence is byte-identical to this helper). Callers pass:
+ *  - `secScale`   the resolved scale (from {@link computeSecondaryAxis}),
+ *  - `toYSecondary` the value→pixel map (`secScale.makeToY(py0, ph)`),
+ *  - `secFontPx` / `secLabelBandW` the tick-label font size + reserved gutter
+ *    width (measured up front so the title clears the labels),
+ *  - `primaryLabelColor` the fallback tick-label color when the axis specifies
+ *    none (the primary value-axis label color). */
+function drawSecondaryValueAxis(
+  ctx: CanvasRenderingContext2D,
+  sec: SecondaryValueAxis,
+  secScale: SecondaryAxisScale,
+  toYSecondary: (v: number) => number,
+  px0: number, py0: number, pw: number, ph: number,
+  h: number,
+  ptToPx: number,
+  secFontPx: number,
+  secLabelBandW: number,
+  primaryLabelColor: string,
+  date1904: boolean | undefined,
+): void {
+  const axX = px0 + pw;
+  const { color: secLineColor, width: secLineW } = resolveAxisLine(sec.lineColor, sec.lineWidthEmu, ptToPx);
+  if (!sec.lineHidden) {
+    ctx.strokeStyle = secLineColor; ctx.lineWidth = secLineW;
+    ctx.beginPath(); ctx.moveTo(axX, py0); ctx.lineTo(axX, py0 + ph); ctx.stroke();
+  }
+  if (!sec.hidden) {
+    ctx.font = `${secFontPx}px sans-serif`;
+    ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : primaryLabelColor;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const sRange = (secScale.max - secScale.min) || 1;
+    const secSteps = Math.max(1, Math.round(sRange / secScale.step));
+    for (let si = 0; si <= secSteps; si++) {
+      const sval = secScale.min + si * secScale.step;
+      const gy = toYSecondary(sval);
+      // Same tick geometry as the left axis, mirrored to the right edge.
+      drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true);
+      ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, date1904), axX + 14, gy);
+    }
+  }
+  if (sec.title) {
+    const tFontPx = sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05);
+    ctx.save();
+    ctx.fillStyle = sec.titleFontColor
+      ? `#${sec.titleFontColor}`
+      : (sec.fontColor ? `#${sec.fontColor}` : '#555');
+    ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // Right-axis title reads top-to-bottom (rotate +90), placed past the labels.
+    ctx.translate(px0 + pw + secLabelBandW + tFontPx * 0.6, py0 + ph / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.fillText(sec.title, 0, 0);
+    ctx.restore();
+  }
+}
+
 function drawChartTitle(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -1150,6 +1213,19 @@ function renderLineChart(
     return pct && pctTotals ? (sum / pctTotals[ci]) * 100 : sum;
   };
 
+  // Combo line charts may bind some series to a SECONDARY value axis drawn on
+  // the right (ECMA-376 §21.2.2.* — a second `<c:valAx>` with axPos="r"). `sec`
+  // is non-null only when the axis is declared AND at least one series opts in;
+  // secondary series are then excluded from the PRIMARY scale and mapped through
+  // the secondary one. Stacked line charts stack ALL series onto the primary
+  // axis (a percentStacked/stacked secondary combo is not an Office construct),
+  // so the split only applies to plain (unstacked) line charts. When `sec` is
+  // null every series stays on the primary axis, identical to the pre-CH7 path.
+  const sec = !stacked && chart.secondaryValAxis && chart.series.some(s => s.useSecondaryAxis === true)
+    ? chart.secondaryValAxis
+    : null;
+  const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
+
   // Shared frame bands. The line family uses title pads 0.045 / 0.035 and the
   // default 0.22 side-legend reserve — passed as params so pixels are unchanged.
   // PowerPoint's auto-layout reserves a title band with air above and below
@@ -1169,12 +1245,45 @@ function renderLineChart(
   const valTitlePx = axBands.valFontPx;
   const catTitleH = axBands.catBandH;
   const valTitleW = axBands.valBandW;
+
+  // Vertical pads (independent of the right gutter) so an estimated plot height
+  // is known before the secondary-axis scale + right-gutter measurement — the
+  // same up-front ordering the bar renderer uses.
+  const padT = titleH + legTopH + valAxFontPx / 2 + 2;
+  const padB = catAxFontPx + 12 + catTitleH + legBottomH;
+  const phEst = h - padT - padB;
+
+  // Secondary value-axis scale (shared helper). Its axis is the vertical right
+  // edge, so its length is the plot height. Null when there is no secondary axis.
+  const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
+  // Right-edge gutter for the secondary tick labels + rotated title. Measured
+  // with the SAME font/format the axis is drawn with so the reserve matches the
+  // painted labels (mirrors the bar renderer). Zero when there is no secondary
+  // axis, so `pad.r` is unchanged on the common single-axis path.
+  const secTickFontPx = Math.max(8, Math.min(11, h / 20));
+  const secFontPx = sec?.fontSizeHpt ? (sec.fontSizeHpt / 100) * ptToPx : secTickFontPx;
+  let secLabelBandW = 0;
+  if (sec && secScale && !sec.hidden) {
+    const prevFont = ctx.font;
+    ctx.font = `${secFontPx}px sans-serif`;
+    let wmax = 0;
+    const sSteps = Math.round((secScale.max - secScale.min) / secScale.step);
+    for (let si = 0; si <= sSteps; si++) {
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(secScale.min + si * secScale.step, sec.formatCode ?? null, chart.date1904)).width);
+    }
+    secLabelBandW = wmax + 18;
+    ctx.font = prevFont;
+  }
+  const secTitleBandW = sec && sec.title
+    ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
+    : 0;
+
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
-    t: titleH + legTopH + valAxFontPx / 2 + 2,
-    r: legRightW + w * 0.05,
-    b: catAxFontPx + 12 + catTitleH + legBottomH,
+    t: padT,
+    r: legRightW + w * 0.05 + secLabelBandW + secTitleBandW,
+    b: padB,
     l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
   };
 
@@ -1193,12 +1302,15 @@ function renderLineChart(
     ctx.fillRect(px0, py0, pw, ph);
   }
 
-  // Axis extent is taken from the PLOTTED values, so a stacked chart's top line
-  // (the cumulative sum) drives the maximum rather than the tallest single
-  // series. Every category still contributes each series' cumulative value.
+  // Primary axis extent is taken from the PLOTTED values of the PRIMARY series
+  // only (secondary series live on their own axis), so a stacked chart's top
+  // line (the cumulative sum) drives the maximum rather than the tallest single
+  // series. Every category still contributes each primary series' cumulative
+  // value. When `sec` is null every series is primary, identical to pre-CH7.
   let dataMin = Infinity; let dataMax = -Infinity;
   for (let ci = 0; ci < n; ci++) {
     for (let si = 0; si < chart.series.length; si++) {
+      if (isSecondarySeries(chart.series[si])) continue;
       if (!stacked && chart.series[si].values[ci] == null) continue;
       const v = plotted(si, ci);
       dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
@@ -1217,6 +1329,11 @@ function renderLineChart(
   const range = axMax - axMin; if (range === 0) return;
 
   const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
+  // Secondary series map through their own scale; `secScale` is null on the
+  // common single-axis path so `yMapFor` always returns the primary `toY`.
+  const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
+  const yMapFor = (s: ChartSeries): ((v: number) => number) =>
+    isSecondarySeries(s) ? toYSecondary : toY;
   // crossBetween="between" (default) insets the first/last category by half a
   // step so points aren't flush against the axes. "midCat" anchors them.
   const between = isCrossBetween(chart);
@@ -1261,6 +1378,9 @@ function renderLineChart(
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const color = chartColor(si, s);
+    // Secondary series ride their own vertical scale; primary series (and every
+    // series when there is no secondary axis) map through the primary `toY`.
+    const yOf = yMapFor(s);
     ctx.strokeStyle = color; ctx.lineWidth = lineWidthPx; ctx.setLineDash([]);
     ctx.beginPath();
     let started = false;
@@ -1268,7 +1388,7 @@ function renderLineChart(
       // Unstacked: a null cell breaks the line. Stacked: a null contributes 0
       // to the running sum (no gap), matching the area renderer.
       if (!stacked && s.values[ci] == null) { started = false; continue; }
-      const py = toY(plotted(si, ci)); const px = toX(ci);
+      const py = yOf(plotted(si, ci)); const px = toX(ci);
       if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
     }
     ctx.stroke();
@@ -1281,13 +1401,13 @@ function renderLineChart(
       if (!stacked && s.values[ci] == null) continue;
       const pv = plotted(si, ci);
       if (drawMarkers) {
-        ctx.beginPath(); ctx.arc(toX(ci), toY(pv), markerR, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(toX(ci), yOf(pv), markerR, 0, Math.PI * 2); ctx.fill();
       }
       if (chart.showDataLabels) {
         ctx.font = `${dataLabelPx}px sans-serif`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         const labelOffset = drawMarkers ? markerR + 1 : 2;
-        ctx.fillText(formatChartVal(pv), toX(ci), toY(pv) - labelOffset);
+        ctx.fillText(formatChartVal(pv), toX(ci), yOf(pv) - labelOffset);
         ctx.fillStyle = color;
       }
     }
@@ -1310,6 +1430,16 @@ function renderLineChart(
       const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
       ctx.fillText(elideToWidth(ctx, label, catSlotMaxPx), tx, py0 + ph + 5);
     }
+  }
+
+  // Secondary value axis (right edge) — drawn after the series + category labels
+  // so it sits atop the plot, mirroring the bar renderer's ordering.
+  if (sec && secScale) {
+    const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+    drawSecondaryValueAxis(
+      ctx, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
+      secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
+    );
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
@@ -1347,6 +1477,17 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     return pct && pctTotals ? (raw / pctTotals[ci]) * 100 : raw;
   };
 
+  // Combo area charts may bind some series to a SECONDARY value axis on the
+  // right (ECMA-376 §21.2.2.*). As with line, this applies only to plain
+  // (unstacked) area — a stacked/percentStacked secondary combo is not an Office
+  // construct. `sec` is null (single-axis, byte-identical to pre-CH7) unless the
+  // axis is declared AND a series opts in; secondary series are then excluded
+  // from the primary extent and mapped through the secondary scale.
+  const sec = !stacked && chart.secondaryValAxis && chart.series.some(s => s.useSecondaryAxis === true)
+    ? chart.secondaryValAxis
+    : null;
+  const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
+
   // Shared frame bands. Area uses title pads 0.035 / 0.035 and default 0.22
   // side-legend reserve — params keep pixels unchanged.
   const titleBand = chartTitleBand(chart, h, ptToPx, 0.035, 0.035);
@@ -1360,10 +1501,36 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const valTitlePx = axBands.valFontPx;
   const catTitleH = axBands.catBandH;
   const valTitleW = axBands.valBandW;
+
+  // Vertical pads first so the estimated plot height is known before the
+  // secondary-axis scale + right-gutter measurement (same ordering as bar/line).
+  const padT = titleH + legTopH + h * 0.02;
+  const padB = h * 0.14 + catTitleH + legBottomH;
+  const phEst = h - padT - padB;
+
+  const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
+  const secTickFontPx = Math.max(8, Math.min(11, h / 20));
+  const secFontPx = sec?.fontSizeHpt ? (sec.fontSizeHpt / 100) * ptToPx : secTickFontPx;
+  let secLabelBandW = 0;
+  if (sec && secScale && !sec.hidden) {
+    const prevFont = ctx.font;
+    ctx.font = `${secFontPx}px sans-serif`;
+    let wmax = 0;
+    const sSteps = Math.round((secScale.max - secScale.min) / secScale.step);
+    for (let si = 0; si <= sSteps; si++) {
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(secScale.min + si * secScale.step, sec.formatCode ?? null, chart.date1904)).width);
+    }
+    secLabelBandW = wmax + 18;
+    ctx.font = prevFont;
+  }
+  const secTitleBandW = sec && sec.title
+    ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
+    : 0;
+
   const pad = {
-    t: titleH + legTopH + h * 0.02,
-    r: legRightW + w * 0.05,
-    b: h * 0.14 + catTitleH + legBottomH,
+    t: padT,
+    r: legRightW + w * 0.05 + secLabelBandW + secTitleBandW,
+    b: padB,
     l: w * 0.12 + valTitleW + legLeftW,
   };
 
@@ -1382,6 +1549,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.fillRect(px0, py0, pw, ph);
   }
 
+  // Primary extent from the PRIMARY series only (secondary series live on their
+  // own axis). When `sec` is null every series is primary, byte-identical to
+  // the pre-CH7 path.
   let dataMax = 0;
   for (let ci = 0; ci < n; ci++) {
     if (stacked) {
@@ -1389,7 +1559,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       for (let si = 0; si < chart.series.length; si++) sum += stackedValue(si, ci);
       dataMax = Math.max(dataMax, sum);
     } else {
-      for (const s of chart.series) dataMax = Math.max(dataMax, s.values[ci] ?? 0);
+      for (const s of chart.series) {
+        if (isSecondarySeries(s)) continue;
+        dataMax = Math.max(dataMax, s.values[ci] ?? 0);
+      }
     }
   }
   // percentStacked always tops out at exactly 100% (each category's Σ|v|
@@ -1411,6 +1584,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ? (i: number) => px0 + ((i + 0.5) / n) * pw
     : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
   const toY = (v: number) => py0 + ph - (v / axMax) * ph;
+  // Secondary series map through their own scale; `secScale` is null on the
+  // common single-axis path so `yMapFor` always returns the primary `toY`.
+  const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
+  const yMapFor = (s: ChartSeries): ((v: number) => number) =>
+    isSecondarySeries(s) ? toYSecondary : toY;
 
   // Axis line colour/weight from `<c:*Ax><c:spPr><a:ln>` (EMU → px at scale),
   // mirroring the bar/line renderers. Office leaves the value-axis rule off by
@@ -1426,6 +1604,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const s = chart.series[si];
     const color = chartColor(si, s);
     const baseY = py0 + ph;
+    // Unstacked secondary series ride their own vertical scale; the stacked
+    // branch is never reached with a secondary axis (`sec` is null when
+    // stacked), so its `toY` mapping stays the primary one.
+    const yOf = yMapFor(s);
 
     ctx.beginPath();
     if (stacked && stackBase) {
@@ -1440,7 +1622,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(si, ci);
     } else {
       ctx.moveTo(toX(0), baseY);
-      for (let ci = 0; ci < n; ci++) ctx.lineTo(toX(ci), toY(s.values[ci] ?? 0));
+      for (let ci = 0; ci < n; ci++) ctx.lineTo(toX(ci), yOf(s.values[ci] ?? 0));
       ctx.lineTo(toX(n - 1), baseY);
     }
     ctx.closePath();
@@ -1513,6 +1695,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     for (let ci = 0; ci < n; ci += labelInterval) {
       ctx.fillText(elideToWidth(ctx, labels[ci] ?? '', catSlotMaxPx), toX(ci), py0 + ph + 3);
     }
+  }
+
+  // Secondary value axis (right edge) — drawn after the fills + category labels
+  // so it sits atop the plot, mirroring the bar/line ordering.
+  if (sec && secScale) {
+    const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+    drawSecondaryValueAxis(
+      ctx, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
+      secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
+    );
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
@@ -1765,6 +1957,12 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 // Scatter chart — X values from series.categories, Y from series.values.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// NB: scatter deliberately has NO secondary value axis. Unlike bar/line/area,
+// an XY scatter's X axis is already a numeric VALUE axis (not a category axis),
+// and Excel/PowerPoint do not define a second Y value axis for a scatter combo
+// (`useSecondaryAxis` / a right-hand `<c:valAx>` pairs with a category-based
+// family). So `computeSecondaryAxis` is never called here — the CH7 helper is
+// wired only into the category-axis families (bar already; line + area now).
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
   // Shared frame bands. Scatter uses title pads 0.035 / 0.035 and default 0.22

@@ -718,3 +718,171 @@ describe('scatter series data labels honor c:date1904 (§21.2.2.38)', () => {
     expect(scatterWithDateLabel(true).some(t => t.text === expected1900)).toBe(false);
   });
 });
+
+// ─── CH7 — secondary value axis for line / area (§21.2.2.*) ──────────────────
+//
+// A combo can bind a series to a SECONDARY value axis (a second `<c:valAx>`
+// with axPos="r" / `<c:crosses val="max">`). Bar already supports this; CH7
+// extends it to the line and area families. The secondary series is plotted
+// against the axis's OWN independent scale, and the axis is drawn on the right
+// edge. Scatter is intentionally NOT wired (Excel/PowerPoint do not define a
+// Y secondary axis for XY scatter).
+
+/** Recording context that captures path vertices (moveTo/lineTo/arc) grouped
+ *  into SEGMENTS delimited by `beginPath`, plus fillText. Line/area build each
+ *  series as its own `beginPath`…path…`fill`/`stroke` sequence, so a segment
+ *  isolates one series' plotted vertices — independent of when the renderer
+ *  sets strokeStyle/fillStyle relative to the path ops (area sets them AFTER
+ *  building the path, so strokeStyle-based grouping would misattribute). A test
+ *  picks the segment for a series by its known draw order. `fillRect` is dropped
+ *  (line/area draw no bars). */
+function pathRecordingCtx(): {
+  ctx: CanvasRenderingContext2D;
+  segments: Array<Array<{ x: number; y: number }>>;
+  texts: TextCall[];
+} {
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  let current: Array<{ x: number; y: number }> | null = null;
+  const texts: TextCall[] = [];
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif',
+    fillStyle: '#000',
+    strokeStyle: '#000',
+    lineWidth: 1,
+    textAlign: 'start',
+    textBaseline: 'alphabetic',
+    lineCap: 'butt',
+    lineJoin: 'miter',
+    globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const push = (x: number, y: number): void => {
+    if (!current) { current = []; segments.push(current); }
+    current.push({ x, y });
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'beginPath':
+          return () => { current = null; };
+        case 'moveTo':
+        case 'lineTo':
+        case 'arc':
+          return (x: number, y: number) => push(x, y);
+        case 'fillText':
+          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        case 'createLinearGradient':
+        case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        default:
+          return () => undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, segments, texts };
+}
+
+const SECONDARY_AXIS = {
+  min: null,
+  max: null,
+  title: 'Rate',
+  hidden: false,
+  majorTickMark: 'out',
+  lineHidden: false,
+};
+
+describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', () => {
+  // The primary series ASCENDS [10,20,30]; the secondary series DESCENDS
+  // [3,2,1]. Opposite slopes make the secondary series identifiable by geometry
+  // alone (no color/draw-order coupling): its plotted profile falls left→right,
+  // the primary's rises. Crucially the secondary series peaks at the FIRST
+  // category (value 3). Mapped to its OWN axis (0..~3.5) that peak rides near
+  // the plot top; mapped to the PRIMARY axis (0..~35) value 3 barely leaves the
+  // bottom. The primary series peaks at the LAST category, so the LEFT third of
+  // the plot contains a high point ONLY when the secondary axis is wired.
+  const primaryVals = [10, 20, 30];
+  const secondaryVals = [3, 2, 1];
+
+  function comboModel(chartType: 'line' | 'area', withSecondaryAxis: boolean): ChartModel {
+    return baseModel({
+      chartType,
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ name: 'Big', values: primaryVals }),
+        series({ name: 'Small', values: secondaryVals, useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: withSecondaryAxis ? { ...SECONDARY_AXIS } : null,
+    });
+  }
+
+  /** A "data" segment is a polyline/fill that slopes — its vertices vary in BOTH
+   *  x and y. Gridlines (constant y) and axis rules (constant x) are flat in one
+   *  axis, so this filter isolates the plotted series geometry from the chrome. */
+  function isDataSegment(seg: Array<{ x: number; y: number }>): boolean {
+    if (seg.length < 3) return false;
+    const xs = new Set(seg.map(p => Math.round(p.x)));
+    const ys = new Set(seg.map(p => Math.round(p.y)));
+    return xs.size > 1 && ys.size > 1;
+  }
+
+  /** Highest (min-Y) DATA vertex in the LEFT third of the plot. The primary
+   *  series' high point is on the RIGHT, so a high point here can only be the
+   *  DESCENDING secondary series' value-3 peak — present only when that series
+   *  rides its own (short) axis. Chrome (gridlines / axis rules) is excluded, so
+   *  the measure reflects series geometry alone; independent of color/draw order. */
+  function leftPeakY(segments: Array<Array<{ x: number; y: number }>>): number {
+    const leftThird = RECT.x + RECT.w / 3;
+    const ys = segments
+      .filter(isDataSegment)
+      .flat()
+      .filter(p => p.x < leftThird)
+      .map(p => p.y);
+    expect(ys.length).toBeGreaterThan(0);
+    return Math.min(...ys);
+  }
+
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: the secondary series maps to its OWN scale, not the primary`, () => {
+      const wired = pathRecordingCtx();
+      renderChart(wired.ctx, comboModel(chartType, true), RECT, 1);
+      const unwired = pathRecordingCtx();
+      renderChart(unwired.ctx, comboModel(chartType, false), RECT, 1);
+      // Wired: the descending series' value-3 peak sits top-left (small Y).
+      // Unwired: value 3 on the tall primary axis stays low, so the left third
+      // has no high point — its min-Y is far larger. A ≥100px gap can't be noise.
+      const wiredPeak = leftPeakY(wired.segments);
+      const unwiredPeak = leftPeakY(unwired.segments);
+      expect(wiredPeak).toBeLessThan(unwiredPeak - 100);
+    });
+
+    it(`${chartType}: draws right-edge secondary axis tick labels + title`, () => {
+      const rec = pathRecordingCtx();
+      renderChart(rec.ctx, comboModel(chartType, true), RECT, 1);
+      // Primary value labels sit LEFT of the plot; secondary tick labels + title
+      // sit to the RIGHT. A text mark past 75% of the width can only be secondary.
+      const rightLabels = rec.texts.filter(t => t.x > RECT.x + RECT.w * 0.75);
+      expect(rightLabels.length).toBeGreaterThan(0);
+      expect(rec.texts.some(t => t.text === 'Rate')).toBe(true);
+    });
+
+    it(`${chartType}: NO secondary axis (secondaryValAxis null) → no right-edge labels/title`, () => {
+      // Byte-stability guard: without a secondary axis the renderer must draw NO
+      // right-edge axis marks — it degrades to the exact single-axis path.
+      const rec = pathRecordingCtx();
+      renderChart(rec.ctx, comboModel(chartType, false), RECT, 1);
+      expect(rec.texts.some(t => t.text === 'Rate')).toBe(false);
+    });
+  }
+});
