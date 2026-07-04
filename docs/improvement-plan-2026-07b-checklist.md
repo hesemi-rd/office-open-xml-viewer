@@ -86,12 +86,14 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 
 ## Phase 2 — チャートエンジンの制覇
 
-- [ ] CH5: チャート XML パース ooxml-common 一本化(enabling step、byte-stable oracle)
-- [ ] CH6: 軸モデル完成(gridlines / units / log / orientation / rot / trendline)
-- [ ] CH7: 第2軸の全ファミリー化
-- [ ] CH8: pie / doughnut 完成
-- [ ] CH9: line ファミリーのマーカー / エラーバー / ラベル / smooth
-- [ ] CH10: チャートフォント(テーマ + c:txPr)
+- [ ] CH5: チャート XML パース ooxml-common 一本化(enabling step、byte-stable oracle) — **ユーザー判断で後回し**(2026-07-04): CH5 パーサー統一はレンダラー系 CH6-10 の前提ではない(CH6-10 は renderer 消費、CH5 は parse 構造)。真に必要なのは CH12 docx チャート/CH14-15 chartEx の enabling → CH12 着手時に実施。
+- [x] CH6: 軸モデル完成(gridlines / units / log / orientation / rot / trendline) — **完了**(PR feat/chart-axes-pie-fonts、commit 4264413/4001d02/d386928)。majorGridlines 有無(§21.2.2.102、既定=描画継続で byte-stable)/majorUnit・minorUnit(§21.2.2.116/.126、auto 上書き)/logBase(§21.2.2.104、log スケール値→px + decade gridline)/orientation maxMin(§21.2.2.130、値軸・カテゴリ軸反転)/ラベル rot(§ST_Angle ÷60000 = XSD 確認)/tickLblPos none/trendline(§21.2.2.212、linear 最小二乗+movingAvg 描画、exp/log/power/poly はパースのみ非描画=注記)。bar+line に配線(area/radar/scatter は byte-stable 据置)。ooxml-common に extractor + ChartTrendline 集約。
+- [x] CH7: 第2軸の全ファミリー化 — **完了**(PR #732)。bar の第2軸を純ヘルパー computeSecondaryAxis に抽出(bar byte-identical を snapshot で証明)、line/area に配線。scatter は spec 上 Y 第2軸なしで対象外。
+- [x] CH8: pie / doughnut 完成 — **完了**(PR feat/chart-axes-pie-fonts、commit fdb8237/b3efbd5)。holeSize(§21.2.2.60、% 除去 1-90 clamp、absent→50% で byte-stable)/firstSliceAngle(§21.2.2.52、既定 0=12時=旧-90°)/explosion(dPt §21.2.2.61、mid-angle 方向オフセット、doc は de-facto Office %)/多重リング(doughnut 複数 series を同心リング)/dLbls(per-slice showVal/CatName/SerName/Percent)/穴透明化。pie(非 doughnut)byte-stable、snapshot は doughnut のみ変化。
+- [x] CH9: line ファミリーのマーカー / エラーバー / ラベル / smooth — **完了**(PR #734)。scatter 実装を line/area に流用(marker 詳細/errBar/per-point ラベル)+ smooth(§21.2.2.194 Catmull-Rom、c:smooth を ooxml-common で新規パース)+ dispBlanksAs(§21.2.2.42/§21.2.3.10、gap/zero/span、@val 既定 zero・要素不在 gap)。詳細を持たない既存 line/area は byte-stable。レビュー検出=stacked-area の marker/label が積み上げ逆順とズレ(reverse-cumulative 修正)+ zero モードのラベル整合。
+- [x] CH10: チャートフォント(テーマ + c:txPr) — **完了**(PR feat/chart-axes-pie-fonts、commit fdb8237/b3efbd5)。28 の sans-serif ハードコードを txPr の a:latin typeface ?? theme majorFont/minorFont(fontScheme §20.1.4.2、+mj-lt/+mn-lt 解決)?? sans-serif に。軸ラベル/データラベル/凡例/目盛りに配線。xlsx は theme font threading を新規(parse_theme_fonts → WorkbookShared → chart)。**VRT は fontless で no-op**(E9 フォント可搬性 — Office フォント環境で正しく効くが CI/VRT マシンでは同フォールバックで参照差分ゼロ。ringRecordingCtx テストで ctx.font 解決の正しさを裏取り)。
+
+> CH6-CH10 は PR feat/chart-axes-pie-fonts(6 commits)+ CH7 #732 + CH9 #734。検証 = cargo 各パーサー / core 860 / typecheck / VRT 163 全 green・**参照画像差分ゼロ**(byte-stability: CH6/8 既定不変・snapshot は doughnut のみ・CH10 は fontless no-op)。独立2観点レビュー(spec 忠実性+byte-stability / テスト+wire+横断)ともに APPROVE、XSD で spec 値全照合。別トラック: CH6 は bar+line のみ(area/radar/scatter 第2軸/軸モデルの全ファミリー化)、trendline の exp/log/power/poly 描画 + dispEq/dispRSqr テキスト。
 - [ ] CH12: docx チャート(参照画像承認とセット)
 - [ ] CH13: 3D 平坦化 + stock + ofPie
 - [ ] CH14: xlsx chartEx 認識

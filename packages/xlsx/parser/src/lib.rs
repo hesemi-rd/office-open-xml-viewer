@@ -85,6 +85,9 @@ struct WorkbookShared {
     rels_xml: String,
     sheets: Vec<SheetMeta>,
     theme_colors: Vec<String>,
+    /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
+    /// (§20.1.4.2). Chart-text fallback font (CH10).
+    theme_fonts: (Option<String>, Option<String>),
     shared_strings: Vec<SharedString>,
     /// Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28).
     /// `true` = 1904 date system. Parsed once here and denormalized onto every
@@ -113,12 +116,14 @@ impl WorkbookShared {
         };
         let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
         let theme_colors = parse_theme_colors(archive);
+        let theme_fonts = parse_theme_fonts(archive);
         let shared_strings = read_shared_strings(archive, &theme_colors);
         Ok(WorkbookShared {
             workbook_xml,
             rels_xml,
             sheets,
             theme_colors,
+            theme_fonts,
             shared_strings,
             date1904,
         })
@@ -171,7 +176,15 @@ fn parse_sheet_with(
     // list; their preview parts are referenced from the worksheet XML + rels.
     ws.images
         .extend(load_sheet_ole_images(archive, &sheet_path, &sheet_xml));
-    ws.charts = load_sheet_charts(archive, &sheet_path, theme_colors);
+    ws.charts = load_sheet_charts(
+        archive,
+        &sheet_path,
+        theme_colors,
+        (
+            shared.theme_fonts.0.as_deref(),
+            shared.theme_fonts.1.as_deref(),
+        ),
+    );
     ws.shape_groups = load_sheet_shape_groups(archive, &sheet_path, theme_colors);
     ws.hyperlinks = load_hyperlinks(archive, &sheet_path, hyperlink_rids);
     ws.comments = load_sheet_comments(archive, &sheet_path);
@@ -333,6 +346,18 @@ fn parse_theme_colors(archive: &mut XlsxZip) -> Vec<String> {
         .flatten()
         .map(|hex| format!("#{}", hex.to_uppercase()))
         .collect()
+}
+
+/// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
+/// (`<a:fontScheme>`, ECMA-376 §20.1.4.2). Used as the chart-text fallback font
+/// (CH10) when a chart element's `<c:txPr>` carries no explicit `<a:latin>`.
+/// `(None, None)` when the theme is absent or declares no font scheme.
+fn parse_theme_fonts(archive: &mut XlsxZip) -> (Option<String>, Option<String>) {
+    let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
+        return (None, None);
+    };
+    let fonts = ooxml_common::theme::ThemeFonts::parse(&xml);
+    (fonts.major.latin, fonts.minor.latin)
 }
 
 /// Convert hex color + tint to resulting hex color using HLS model.

@@ -962,8 +962,8 @@ fillText "Margin" 529.2,207.8 fs=#333 font=12px sans-serif al=left bl=middle"
 
 exports[`renderChart draw-call signature (characterization) > is stable for: doughnut+legendBottom 1`] = `
 "beginPath
-moveTo 332,189.2
 arc 332,189.2,136.08,-1.5708,0.3142
+arc 332,189.2,68.04,0.3142,-1.5708
 closePath
 set fillStyle=#AA0000
 fill fs=#AA0000 ga=1
@@ -975,8 +975,8 @@ set textAlign=center
 set textBaseline=middle
 fillText "30%" 414.5683,129.2106 fs=#fff font=bold 13.607999999999999px sans-serif al=center bl=middle
 beginPath
-moveTo 332,189.2
 arc 332,189.2,136.08,0.3142,3.1416
+arc 332,189.2,68.04,3.1416,0.3142
 closePath
 set fillStyle=#ED7D31
 fill fs=#ED7D31 ga=1
@@ -984,17 +984,14 @@ stroke ss=#fff lw=1 dash=
 set fillStyle=#fff
 fillText "45%" 316.0343,290.0035 fs=#fff font=bold 13.607999999999999px sans-serif al=center bl=middle
 beginPath
-moveTo 332,189.2
 arc 332,189.2,136.08,3.1416,4.7124
+arc 332,189.2,68.04,4.7124,3.1416
 closePath
 set fillStyle=#CC0000
 fill fs=#CC0000 ga=1
 stroke ss=#fff lw=1 dash=
 set fillStyle=#fff
 fillText "25%" 259.8327,117.0327 fs=#fff font=bold 13.607999999999999px sans-serif al=center bl=middle
-beginPath
-arc 332,189.2,68.04,0,6.2832
-fill fs=#fff ga=1
 set font=12px sans-serif
 set fillStyle=#AA0000
 fillRect 277.4,359.6,10,12 fs=#AA0000

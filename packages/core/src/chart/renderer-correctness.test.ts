@@ -1331,3 +1331,660 @@ describe('CH9 — dispBlanksAs="zero" applies to per-point data labels too (§21
     expect(labelTexts).toContain('0');
   });
 });
+
+// ─── CH8 — pie / doughnut geometry ───────────────────────────────────────────
+
+interface RingArc { x: number; y: number; r: number; a0: number; a1: number; ccw: boolean }
+interface FontText { text: string; font: string; fill: string }
+
+interface RingRecorded {
+  ctx: CanvasRenderingContext2D;
+  arcs: RingArc[];
+  fills: string[];
+  fontTexts: FontText[];
+}
+
+/** Recording context that also captures arc() (radius + angles) and, for each
+ *  fillText, the active font + fillStyle. Used by the pie/doughnut + font tests
+ *  which assert on ring radii, slice start angle, explosion offsets, and the
+ *  resolved `ctx.font` family. */
+function ringRecordingCtx(): RingRecorded {
+  const arcs: RingArc[] = [];
+  const fills: string[] = [];
+  const fontTexts: FontText[] = [];
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'arc':
+          return (x: number, y: number, r: number, a0: number, a1: number, ccw = false) =>
+            arcs.push({ x, y, r, a0, a1, ccw });
+        case 'fill':
+          return () => fills.push(String(state.fillStyle));
+        case 'fillText':
+          return (text: string) =>
+            fontTexts.push({ text, font: String(state.font), fill: String(state.fillStyle) });
+        case 'createLinearGradient':
+        case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'save': case 'restore': case 'beginPath': case 'closePath':
+        case 'stroke': case 'moveTo': case 'lineTo': case 'bezierCurveTo':
+        case 'quadraticCurveTo': case 'rect': case 'fillRect': case 'strokeRect':
+        case 'clearRect': case 'strokeText': case 'setLineDash': case 'translate':
+        case 'rotate': case 'scale': case 'clip': case 'setTransform':
+        case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default:
+          return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, arcs, fills, fontTexts };
+}
+
+/** Outer/inner ring radii for a pie/doughnut: the outer radius is the largest
+ *  arc radius; the inner radius is the smallest DISTINCT smaller radius (0 for a
+ *  solid pie whose wedges are a single radius). */
+function ringRadii(arcs: RingArc[]): { outer: number; inner: number } {
+  const rs = [...new Set(arcs.map(a => Math.round(a.r * 100) / 100))].sort((a, b) => b - a);
+  return { outer: rs[0] ?? 0, inner: rs.length > 1 ? rs[rs.length - 1] : 0 };
+}
+
+describe('CH8 — pie / doughnut geometry', () => {
+  const pieModel = (over: Partial<ChartModel>): ChartModel =>
+    baseModel({
+      chartType: 'pie',
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [30, 45, 25] })],
+      ...over,
+    });
+
+  it('a plain pie draws solid wedges (inner radius 0)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({}), RECT, 1);
+    const { outer, inner } = ringRadii(rec.arcs);
+    expect(outer).toBeGreaterThan(0);
+    expect(inner).toBe(0);
+  });
+
+  it('doughnut holeSize sets the inner radius fraction of the outer radius', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({ chartType: 'doughnut', holeSize: 60 }), RECT, 1);
+    const { outer, inner } = ringRadii(rec.arcs);
+    expect(inner).toBeGreaterThan(0);
+    // holeSize 60 → inner ≈ 0.60 × outer.
+    expect(inner / outer).toBeCloseTo(0.6, 2);
+  });
+
+  it('a smaller holeSize yields a smaller hole', () => {
+    const big = ringRecordingCtx();
+    const small = ringRecordingCtx();
+    renderChart(big.ctx, pieModel({ chartType: 'doughnut', holeSize: 80 }), RECT, 1);
+    renderChart(small.ctx, pieModel({ chartType: 'doughnut', holeSize: 20 }), RECT, 1);
+    expect(ringRadii(big.arcs).inner).toBeGreaterThan(ringRadii(small.arcs).inner);
+  });
+
+  it('firstSliceAngle rotates the first slice start clockwise from 12 o\'clock', () => {
+    const base = ringRecordingCtx();
+    const rot = ringRecordingCtx();
+    renderChart(base.ctx, pieModel({}), RECT, 1);
+    renderChart(rot.ctx, pieModel({ firstSliceAngle: 90 }), RECT, 1);
+    // The first wedge's start angle. Default 0 → -90° (canvas up = -π/2).
+    const startBase = base.arcs[0].a0;
+    const startRot = rot.arcs[0].a0;
+    expect(startBase).toBeCloseTo(-Math.PI / 2, 4);
+    // +90° → -π/2 + π/2 = 0 (3 o'clock).
+    expect(startRot).toBeCloseTo(0, 4);
+  });
+
+  it('a transparent hole is NOT overpainted with an opaque fill (doughnut)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({ chartType: 'doughnut', holeSize: 50 }), RECT, 1);
+    // Pre-CH8 drew a full 0..2π white circle to mask the wedge centers. The
+    // annular geometry removes it: no arc should be a full circle at the inner
+    // radius drawn with a white fill immediately after.
+    const fullCircles = rec.arcs.filter(a => Math.abs((a.a1 - a.a0) - Math.PI * 2) < 1e-6);
+    expect(fullCircles.length).toBe(0);
+  });
+
+  it('explosion offsets the slice center outward (arc center moves)', () => {
+    const base = ringRecordingCtx();
+    renderChart(base.ctx, pieModel({
+      series: [series({ name: 'S', values: [30, 45, 25] })],
+    }), RECT, 1);
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S',
+        values: [30, 45, 25],
+        dataPointOverrides: [{ idx: 1, explosion: 40 }],
+      })],
+    }), RECT, 1);
+    // Every wedge shares the pie center EXCEPT the exploded one, whose arc
+    // center is displaced. Collect the distinct arc centers.
+    const centers = new Set(rec.arcs.map(a => `${Math.round(a.x)},${Math.round(a.y)}`));
+    expect(centers.size).toBeGreaterThan(1);
+    // The non-exploded pie's shared center — every arc (all 3 slices) is drawn
+    // around this single point.
+    const trueCenter = base.arcs[0];
+    expect(base.arcs.every(a => a.x === trueCenter.x && a.y === trueCenter.y)).toBe(true);
+    // Slice 0 and slice 2 (not exploded) still share the true center in the
+    // exploded render — only slice 1 moves.
+    const outerR = Math.max(...rec.arcs.map(a => a.r));
+    const slice0Arcs = rec.arcs.filter(a => a.a0 === base.arcs[0].a0 && a.a1 === base.arcs[0].a1);
+    expect(slice0Arcs.length).toBeGreaterThan(0);
+    for (const a of slice0Arcs) {
+      expect(a.x).toBeCloseTo(trueCenter.x, 6);
+      expect(a.y).toBeCloseTo(trueCenter.y, 6);
+    }
+    // Slice 1 (idx 1, explosion 40): §21.2.2.61 explosion, interpreted (de facto,
+    // see ChartDataPointOverride.explosion) as a percentage of the outer radius
+    // the slice is displaced outward along its own mid-angle.
+    // Values [30, 45, 25] over 2π starting at -π/2 (12 o'clock, clockwise) put
+    // slice 1's span at [-π/2 + 0.6π, -π/2 + 1.5π]; its mid-angle is -π/2 + 1.05π.
+    const total = 100;
+    const startAngle = -Math.PI / 2;
+    const slice0Frac = 30 / total;
+    const slice1Frac = 45 / total;
+    const midAngle = startAngle + slice0Frac * 2 * Math.PI + (slice1Frac * 2 * Math.PI) / 2;
+    const expectedOffset = 0.4 * outerR;
+    const expectedX = trueCenter.x + Math.cos(midAngle) * expectedOffset;
+    const expectedY = trueCenter.y + Math.sin(midAngle) * expectedOffset;
+    const slice1Arc = rec.arcs.find(a => Math.abs(a.x - trueCenter.x) > 1 || Math.abs(a.y - trueCenter.y) > 1);
+    expect(slice1Arc).toBeDefined();
+    expect(slice1Arc?.x).toBeCloseTo(expectedX, 4);
+    expect(slice1Arc?.y).toBeCloseTo(expectedY, 4);
+    // Displacement magnitude is exactly 40% of the outer radius.
+    const dist = Math.hypot((slice1Arc?.x ?? 0) - trueCenter.x, (slice1Arc?.y ?? 0) - trueCenter.y);
+    expect(dist).toBeCloseTo(expectedOffset, 4);
+  });
+
+  it('a multi-series doughnut draws concentric rings (multiple distinct radii)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'doughnut',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'Outer', values: [1, 1] }),
+        series({ name: 'Inner', values: [1, 1] }),
+      ],
+      holeSize: 40,
+    }), RECT, 1);
+    // Two rings → at least three distinct radii (outer ring outer/inner + inner
+    // ring outer/inner, some shared) — assert more than the two a single ring
+    // would produce.
+    const distinctRadii = new Set(rec.arcs.map(a => Math.round(a.r * 10) / 10));
+    expect(distinctRadii.size).toBeGreaterThanOrEqual(3);
+    // The single-series doughnut geometry (asserted in the tests above) gives
+    // us an independently-derived outer radius for this RECT — reuse it so the
+    // band boundaries below aren't just copied from the renderer's own formula.
+    const single = ringRecordingCtx();
+    renderChart(single.ctx, baseModel({
+      chartType: 'doughnut', categories: ['A'], series: [series({ name: 'S', values: [1] })], holeSize: 40,
+    }), RECT, 1);
+    // Use the RAW (unrounded) outer radius so the derived band boundaries below
+    // don't compound `ringRadii`'s rounding into a spurious mismatch.
+    const outerR = Math.max(...single.arcs.map(a => a.r));
+    const innerR = outerR * 0.4; // holeSize 40 → hole is 40% of the outer radius
+    const ringBand = (outerR - innerR) / 2; // band from hole to outer edge, split evenly across 2 rings
+    const expectRadiiCloseTo = (arcs: RingArc[], expected: number[]): void => {
+      const actual = [...new Set(arcs.map(a => Math.round(a.r * 1000) / 1000))].sort((a, b) => b - a);
+      const wanted = [...expected].sort((a, b) => b - a);
+      expect(actual.length).toBe(wanted.length);
+      actual.forEach((r, i) => expect(r).toBeCloseTo(wanted[i], 2));
+    };
+    // Each ring draws 2 arcs (outer + inner annulus edge) per category (A, B) →
+    // 4 arcs per ring, 8 total. Ring 0 ("Outer" series) is drawn FIRST and
+    // occupies the OUTERMOST band.
+    expectRadiiCloseTo(rec.arcs.slice(0, 4), [outerR, outerR - ringBand]);
+    // Ring 1 ("Inner" series) is drawn SECOND and occupies the band adjacent to
+    // the hole; its outer edge meets ring 0's inner edge, its inner edge is the
+    // hole radius.
+    expectRadiiCloseTo(rec.arcs.slice(4), [outerR - ringBand, innerR]);
+  });
+
+  it('rich pie dLbls compose showCatName + showPercent', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S',
+        categories: ['Alpha', 'Beta', 'Gamma'],
+        values: [30, 45, 25],
+        seriesDataLabels: {
+          showVal: false, showCatName: true, showSerName: false, showPercent: true,
+        },
+      })],
+    }), RECT, 1);
+    const texts = rec.fontTexts.map(t => t.text);
+    // "Alpha 30%" etc. — category name and percent joined.
+    expect(texts.some(t => t.includes('Alpha') && t.includes('30%'))).toBe(true);
+  });
+});
+
+// ─── CH10 — chart text font faces ────────────────────────────────────────────
+
+describe('CH10 — chart text font faces', () => {
+  // No data labels: the only numeric text is then the value-axis ticks, so the
+  // `/^[\d.]+$/` filter isolates the value-axis font cleanly (data-label values
+  // legitimately use the SEPARATE dataLabelFontFace and would otherwise blur the
+  // assertion).
+  const barWithLabels = (over: Partial<ChartModel>): ChartModel =>
+    baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ name: 'S', values: [10, 20] })],
+      valAxisTitle: 'Units',
+      ...over,
+    });
+
+  it('an explicit value-axis face is used for value-axis tick labels', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({ valAxisFontFace: 'Georgia' }), RECT, 1);
+    // The value-axis ticks ("0", "5", …) are drawn with the Georgia family.
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.some(f => f.includes('Georgia'))).toBe(true);
+  });
+
+  it('falls back to the theme body (minor) font when no element face is set', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({ themeMinorFontLatin: 'Aptos Narrow' }), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.some(f => f.includes('Aptos Narrow'))).toBe(true);
+  });
+
+  it('an element face wins over the theme font', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({
+      valAxisFontFace: 'Georgia',
+      themeMinorFontLatin: 'Aptos Narrow',
+    }), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.some(f => f.includes('Georgia'))).toBe(true);
+    expect(tickFonts.some(f => f.includes('Aptos Narrow'))).toBe(false);
+  });
+
+  it('with no face and no theme, the built-in sans-serif is used (byte-stable)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({}), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.length).toBeGreaterThan(0);
+    expect(tickFonts.every(f => f.endsWith('sans-serif') && !f.includes('"'))).toBe(true);
+  });
+
+  it('a `+mn-lt` theme reference face resolves to the theme minor font', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({
+      valAxisFontFace: '+mn-lt',
+      themeMinorFontLatin: 'Aptos Narrow',
+      themeMajorFontLatin: 'Aptos Display',
+    }), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    // "+mn-lt" must NOT appear literally; it resolves to the minor face.
+    expect(tickFonts.some(f => f.includes('Aptos Narrow'))).toBe(true);
+    expect(tickFonts.some(f => f.includes('+mn-lt'))).toBe(false);
+  });
+
+  it('axis titles use the theme heading (major) font as fallback', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({ themeMajorFontLatin: 'Aptos Display' }), RECT, 1);
+    const titleFont = rec.fontTexts.find(t => t.text === 'Units')?.font;
+    expect(titleFont).toBeDefined();
+    expect(titleFont).toContain('Aptos Display');
+  });
+});
+
+// ── CH6 — axis scale model (gridlines / units / logBase / orientation) ───────
+
+interface Seg { x0: number; y0: number; x1: number; y1: number; ss: string; lw: number }
+interface SegRecorded { ctx: CanvasRenderingContext2D; segs: Seg[]; texts: TextCall[] }
+
+/** Recording context that captures stroked line SEGMENTS (moveTo→lineTo→stroke)
+ *  plus fillText, so gridline presence/orientation can be asserted. */
+function segRecordingCtx(): SegRecorded {
+  const segs: Seg[] = [];
+  const texts: TextCall[] = [];
+  let cx = 0, cy = 0, mx = 0, my = 0;
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'moveTo': return (x: number, y: number) => { cx = x; cy = y; mx = x; my = y; };
+        case 'lineTo': return (x: number, y: number) => {
+          segs.push({ x0: cx, y0: cy, x1: x, y1: y, ss: String(state.strokeStyle), lw: Number(state.lineWidth) });
+          cx = x; cy = y;
+        };
+        case 'fillText': return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'closePath': return () => { cx = mx; cy = my; };
+        case 'save': case 'restore': case 'beginPath': case 'fill': case 'stroke':
+        case 'arc': case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect':
+        case 'fillRect': case 'strokeRect': case 'clearRect': case 'strokeText':
+        case 'setLineDash': case 'translate': case 'rotate': case 'scale': case 'clip':
+        case 'setTransform': case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default: return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, segs, texts };
+}
+
+/** Value-axis MAJOR/MINOR gridlines: near-flat segments spanning the plot width
+ *  drawn in the gridline colors (`#e0e0e0` faint or `#aaa` zero line). The
+ *  category axis bottom rule is also `#aaa` horizontal, so it's excluded by
+ *  dropping the single bottom-most horizontal `#aaa` segment (the axis line). */
+function horizGridlines(segs: Seg[]): Seg[] {
+  const flat = segs.filter(s => Math.abs(s.y0 - s.y1) < 0.5 && Math.abs(s.x1 - s.x0) > 50);
+  const grids = flat.filter(s => s.ss === '#e0e0e0' || s.ss === '#aaa');
+  // Drop the bottom-most `#aaa` line (the category axis rule) if present.
+  const aaa = grids.filter(s => s.ss === '#aaa');
+  if (aaa.length === 0) return grids;
+  const maxY = Math.max(...aaa.map(s => s.y0));
+  let dropped = false;
+  return grids.filter(s => {
+    if (!dropped && s.ss === '#aaa' && Math.abs(s.y0 - maxY) < 0.5) { dropped = true; return false; }
+    return true;
+  });
+}
+
+describe('CH6 — axis scale model', () => {
+  const lineModel = (over: Partial<ChartModel>): ChartModel => baseModel({
+    chartType: 'line',
+    categories: ['A', 'B', 'C'],
+    series: [series({ name: 'S', values: [10, 20, 30] })],
+    ...over,
+  });
+
+  it('valAxisMajorGridlines=false suppresses the value gridlines (labels stay)', () => {
+    const on = segRecordingCtx();
+    renderChart(on.ctx, lineModel({}), RECT, 1);
+    const gridsOn = horizGridlines(on.segs).length;
+    expect(gridsOn).toBeGreaterThan(0);
+
+    const off = segRecordingCtx();
+    renderChart(off.ctx, lineModel({ valAxisMajorGridlines: false }), RECT, 1);
+    // No horizontal gridlines spanning the plot when suppressed.
+    expect(horizGridlines(off.segs).length).toBe(0);
+    // Tick labels still drawn.
+    expect(off.texts.some(t => t.text === '10')).toBe(true);
+  });
+
+  it('valAxisTickLabelPos="none" hides value tick labels (gridlines stay)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, lineModel({ valAxisTickLabelPos: 'none' }), RECT, 1);
+    // Value labels (numeric) gone; gridlines still present.
+    expect(rec.texts.some(t => /^\d+$/.test(t.text))).toBe(false);
+    expect(horizGridlines(rec.segs).length).toBeGreaterThan(0);
+  });
+
+  it('an explicit valAxisMajorUnit changes the gridline count', () => {
+    // Data 10..30 → auto step 5 (0,5,…,35 ≈ 8 lines). majorUnit 10 → coarser.
+    const auto = segRecordingCtx();
+    renderChart(auto.ctx, lineModel({}), RECT, 1);
+    const coarse = segRecordingCtx();
+    renderChart(coarse.ctx, lineModel({ valAxisMajorUnit: 10 }), RECT, 1);
+    expect(horizGridlines(coarse.segs).length).toBeLessThan(horizGridlines(auto.segs).length);
+    // Labels land on 0,10,20,30,… (multiples of 10) only.
+    const coarseLabels = coarse.texts.map(t => t.text).filter(t => /^\d+$/.test(t));
+    expect(coarseLabels).toContain('10');
+    expect(coarseLabels).toContain('20');
+    expect(coarseLabels).not.toContain('5');
+  });
+
+  it('valAxisOrientation="maxMin" reverses the value axis (bar heights flip)', () => {
+    const normal = recordingCtx();
+    renderChart(normal.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ name: 'S', values: [10, 30] })],
+    }), RECT, 1);
+    const reversed = recordingCtx();
+    renderChart(reversed.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ name: 'S', values: [10, 30] })],
+      valAxisOrientation: 'maxMin',
+    }), RECT, 1);
+    // Normal: taller value (30) → shorter y (higher up) and greater height.
+    // Reversed: the axis flips, so the bar for 30 grows DOWNWARD from the top.
+    const [nSmall, nBig] = normal.rects;
+    const [rSmall, rBig] = reversed.rects;
+    // In the reversed axis the "30" bar's top edge sits at the plot top area
+    // and it extends toward the (now-inverted) zero at the bottom-flipped end;
+    // its y origin differs from the normal orientation.
+    expect(rBig.y).not.toBeCloseTo(nBig.y, 1);
+    // §21.2.2.130 orientation="maxMin" is a true mirror of the value axis, not
+    // just "a different y": every value's pixel position reflects across the
+    // plot's vertical midline. Both bars are zero-anchored (clustered, single
+    // series), so — independent of any internal renderer constant — the
+    // reversed zero line is the SHARED top edge of both reversed bars, and the
+    // normal zero line is the SHARED bottom edge of both normal bars.
+    const reversedZeroY = rSmall.y; // = rBig.y — both bars start at the (flipped) zero line
+    expect(rBig.y).toBeCloseTo(reversedZeroY, 6);
+    const normalZeroY = nSmall.y + nSmall.h; // = nBig.y + nBig.h — both bars end at zero
+    expect(nBig.y + nBig.h).toBeCloseTo(normalZeroY, 6);
+    // The mirror axis: for any value v, reversedBottom(v) = 2*reversedZeroY +
+    // (normalZeroY - reversedZeroY) - normalTop(v). A reversed bar's BOTTOM
+    // edge is the mirror image of the corresponding normal bar's TOP edge
+    // around the (reversedZeroY, normalZeroY) span.
+    const mirror = (yNormalTop: number): number => 2 * reversedZeroY + (normalZeroY - reversedZeroY) - yNormalTop;
+    expect(rSmall.y + rSmall.h).toBeCloseTo(mirror(nSmall.y), 4);
+    expect(rBig.y + rBig.h).toBeCloseTo(mirror(nBig.y), 4);
+    // The smaller value (10) still produces the smaller bar on the reversed
+    // axis too — reversal flips direction, not relative magnitude.
+    expect(rSmall.h).toBeLessThan(rBig.h);
+  });
+
+  it('valAxisLogBase=10 places gridlines on powers of ten', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, lineModel({
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [1, 10, 100] })],
+      valAxisLogBase: 10,
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    // Decade tick labels 1 / 10 / 100 present (1000 not required for this range).
+    expect(labels).toContain('1');
+    expect(labels).toContain('10');
+    expect(labels).toContain('100');
+  });
+
+  it('a chart with no CH6 fields renders identical gridlines to before (byte-stable)', () => {
+    // Guard: the default (no CH6 fields) must keep the historical value gridlines.
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, lineModel({}), RECT, 1);
+    expect(horizGridlines(rec.segs).length).toBeGreaterThan(2);
+  });
+});
+
+/** Recording context that counts rotate() calls and captures fillText, for the
+ *  category-label rotation / tickLblPos tests. */
+function rotateRecordingCtx(): { ctx: CanvasRenderingContext2D; rotates: number[]; texts: string[] } {
+  const rotates: number[] = [];
+  const texts: string[] = [];
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'rotate': return (r: number) => { rotates.push(r); };
+        case 'fillText': return (text: string) => texts.push(String(text));
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'save': case 'restore': case 'beginPath': case 'closePath':
+        case 'fill': case 'stroke': case 'moveTo': case 'lineTo': case 'arc':
+        case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect': case 'fillRect':
+        case 'strokeRect': case 'clearRect': case 'strokeText': case 'setLineDash':
+        case 'translate': case 'scale': case 'clip': case 'setTransform':
+        case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default: return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, rotates, texts };
+}
+
+describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
+  const colModel = (over: Partial<ChartModel>): ChartModel => baseModel({
+    chartType: 'clusteredBar',
+    categories: ['Alpha', 'Beta', 'Gamma'],
+    series: [series({ name: 'S', values: [10, 20, 30] })],
+    ...over,
+  });
+
+  it('catAxisTickLabelPos="none" hides the category labels', () => {
+    const shown = rotateRecordingCtx();
+    renderChart(shown.ctx, colModel({}), RECT, 1);
+    expect(shown.texts.some(t => t.startsWith('Alpha'))).toBe(true);
+
+    const hidden = rotateRecordingCtx();
+    renderChart(hidden.ctx, colModel({ catAxisTickLabelPos: 'none' }), RECT, 1);
+    expect(hidden.texts.some(t => t.startsWith('Alpha'))).toBe(false);
+    // Value tick labels still present.
+    expect(hidden.texts.some(t => /^\d+$/.test(t))).toBe(true);
+  });
+
+  it('catAxisLabelRotation rotates the column category labels', () => {
+    const flat = rotateRecordingCtx();
+    renderChart(flat.ctx, colModel({}), RECT, 1);
+    expect(flat.rotates.length).toBe(0);
+
+    const rot = rotateRecordingCtx();
+    // -2700000 60000ths = -45°.
+    renderChart(rot.ctx, colModel({ catAxisLabelRotation: -2_700_000 }), RECT, 1);
+    expect(rot.rotates.length).toBeGreaterThan(0);
+    const rad = rot.rotates[0];
+    expect(rad).toBeCloseTo((-45 * Math.PI) / 180, 6);
+    // Labels still drawn (just rotated).
+    expect(rot.texts.some(t => t.startsWith('Alpha'))).toBe(true);
+  });
+
+  it('rotation 0 keeps the un-rotated fast path (byte-stable, no rotate calls)', () => {
+    const rec = rotateRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisLabelRotation: 0 }), RECT, 1);
+    expect(rec.rotates.length).toBe(0);
+  });
+});
+
+/** Recording context that captures line-dash state alongside stroked segments,
+ *  so a dashed trendline can be distinguished from the solid data line. */
+function dashSegRecordingCtx(): { ctx: CanvasRenderingContext2D; segs: Array<{ dashed: boolean }> } {
+  const segs: Array<{ dashed: boolean }> = [];
+  let dash: number[] = [];
+  let pending = false;
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText': return (t: string) => ({ width: String(t).length * 6 });
+        case 'setLineDash': return (d: number[]) => { dash = d ?? []; };
+        case 'getLineDash': return () => dash;
+        case 'lineTo': return () => { pending = true; };
+        case 'stroke': return () => { if (pending) { segs.push({ dashed: dash.length > 0 }); pending = false; } };
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'save': case 'restore': case 'beginPath': case 'closePath':
+        case 'fill': case 'moveTo': case 'arc': case 'bezierCurveTo':
+        case 'quadraticCurveTo': case 'rect': case 'fillRect': case 'strokeRect':
+        case 'clearRect': case 'fillText': case 'strokeText': case 'translate':
+        case 'rotate': case 'scale': case 'clip': case 'setTransform':
+        case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default: return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, segs };
+}
+
+describe('CH6-follow — series trendlines (commit 3)', () => {
+  const lineWithTrend = (over: Partial<ChartSeries>): ChartModel => baseModel({
+    chartType: 'line',
+    categories: ['A', 'B', 'C', 'D'],
+    series: [series({ name: 'S', values: [1, 3, 5, 7], ...over })],
+  });
+
+  it('a linear trendline draws a dashed line', () => {
+    const noTrend = dashSegRecordingCtx();
+    renderChart(noTrend.ctx, lineWithTrend({}), RECT, 1);
+    expect(noTrend.segs.some(s => s.dashed)).toBe(false);
+
+    const withTrend = dashSegRecordingCtx();
+    renderChart(withTrend.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'linear' }] }), RECT, 1);
+    expect(withTrend.segs.some(s => s.dashed)).toBe(true);
+    // The solid data line is still drawn too.
+    expect(withTrend.segs.some(s => !s.dashed)).toBe(true);
+  });
+
+  it('a movingAvg trendline draws a dashed line', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'movingAvg', period: 2 }] }), RECT, 1);
+    expect(rec.segs.some(s => s.dashed)).toBe(true);
+  });
+
+  it('an unsupported trendline type draws nothing extra (dashed absent)', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'poly', order: 2 }] }), RECT, 1);
+    expect(rec.segs.some(s => s.dashed)).toBe(false);
+  });
+
+  it('no trendLines field is byte-stable (no dashed segments)', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({}), RECT, 1);
+    expect(rec.segs.every(s => !s.dashed)).toBe(true);
+  });
+});

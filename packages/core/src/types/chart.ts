@@ -121,6 +121,46 @@ export interface ChartSeries {
    * polyline (the default; byte-stable for series that never set it).
    */
   smooth?: boolean | null;
+  /**
+   * `<c:ser><c:trendline>` per-series trendlines (ECMA-376 §21.2.2.211,
+   * `CT_Trendline`). A series can carry several (e.g. a linear fit + a moving
+   * average). null/undefined/empty = no trendline (the default; byte-stable for
+   * series that never declare one).
+   */
+  trendLines?: ChartTrendline[] | null;
+}
+
+/**
+ * `<c:ser><c:trendline>` (ECMA-376 §21.2.2.211). A regression/smoothing curve
+ * fitted to the series' data points.
+ */
+export interface ChartTrendline {
+  /**
+   * `<c:trendlineType val>` (§21.2.2.213, `ST_TrendlineType` §21.2.3.50):
+   * "linear" | "exp" | "log" | "power" | "poly" | "movingAvg". The renderer
+   * currently draws "linear" (least squares) and "movingAvg"; other types parse
+   * but are not yet plotted (tracked as a follow-up).
+   */
+  trendlineType: string;
+  /** `<c:order val>` — polynomial order (`poly`, default 2). */
+  order?: number | null;
+  /** `<c:period val>` — moving-average window (`movingAvg`, default 2). */
+  period?: number | null;
+  /** `<c:forward val>` — units to extend the line past the last point. */
+  forward?: number | null;
+  /** `<c:backward val>` — units to extend the line before the first point. */
+  backward?: number | null;
+  /** `<c:intercept val>` — forced y-intercept (linear/exp). null = free fit. */
+  intercept?: number | null;
+  /** `<c:dispRSqr val="1">` — show the R² value (label; not yet rendered). */
+  dispRSqr?: boolean | null;
+  /** `<c:dispEq val="1">` — show the fit equation (label; not yet rendered). */
+  dispEq?: boolean | null;
+  /** `<c:spPr><a:ln><a:solidFill>` trendline color (hex without '#'). null =
+   *  inherit the series color. */
+  lineColor?: string | null;
+  /** `<c:spPr><a:ln w>` trendline width in EMU. */
+  lineWidthEmu?: number | null;
 }
 
 export interface ChartDataPointOverride {
@@ -131,6 +171,18 @@ export interface ChartDataPointOverride {
   markerSize?: number;
   markerFill?: string;
   markerLine?: string;
+  /**
+   * `<c:dPt><c:explosion val>` (ECMA-376 §21.2.2.61) — the amount this
+   * pie/doughnut slice is moved out from the center. The schema type is
+   * `CT_UnsignedInt` (unbounded `xsd:unsignedInt`); the spec text only says
+   * "the amount the data point shall be moved from the center of the pie"
+   * and does not itself define units or a 0–100 range. We treat it as a
+   * de-facto percentage of the outer radius (0–100 typical), matching
+   * Office's UI (the Point Explosion slider caps at 100%) rather than a
+   * spec-mandated bound. undefined/absent = 0 (no explosion, flush with the
+   * ring). Only consulted by the pie/doughnut renderer.
+   */
+  explosion?: number;
 }
 
 export interface ChartDataLabelOverride {
@@ -304,6 +356,41 @@ export interface ChartModel {
   valAxisTitleFontBold?: boolean | null;
   /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
   valAxisTitleFontColor?: string | null;
+  // ── Chart text font faces (CH10) ─────────────────────────────────────────
+  // Each is the `<a:latin typeface>` (ECMA-376 §20.1.4.2.24) resolved from the
+  // element's `<c:txPr>`. When absent the renderer falls back to the theme
+  // body/heading font (`themeMinorFontLatin` / `themeMajorFontLatin`) and
+  // finally to the built-in sans-serif, so a chart that specifies no faces is
+  // byte-stable. Faces mirror the existing color/size/bold groups.
+  /** `<c:catAx><c:txPr>…<a:latin typeface>` tick-label font. */
+  catAxisFontFace?: string | null;
+  /** `<c:valAx><c:txPr>…<a:latin typeface>` tick-label font. */
+  valAxisFontFace?: string | null;
+  /** `<c:catAx><c:title>…<a:latin typeface>` axis-title font. */
+  catAxisTitleFontFace?: string | null;
+  /** `<c:valAx><c:title>…<a:latin typeface>` axis-title font. */
+  valAxisTitleFontFace?: string | null;
+  /** `<c:dLbls><c:txPr>…<a:latin typeface>` data-label font. */
+  dataLabelFontFace?: string | null;
+  /** `<c:legend><c:txPr>…<a:latin typeface>` legend font. */
+  legendFontFace?: string | null;
+  /** `<c:legend><c:txPr>…<a:solidFill>` legend text color (hex without '#'). */
+  legendFontColor?: string | null;
+  /** `<c:legend><c:txPr>` legend font size (OOXML hundredths of a point). */
+  legendFontSizeHpt?: number | null;
+  /** `<c:legend><c:txPr>…defRPr@b` legend bold flag. */
+  legendFontBold?: boolean | null;
+  /**
+   * Theme font-scheme faces (`<a:fontScheme>`, ECMA-376 §20.1.4.2). Latin
+   * heading (majorFont) and body (minorFont) typefaces, used as the fallback
+   * for any chart text element whose own `<c:txPr>` supplies no `<a:latin>`.
+   * null when the theme is not threaded to the chart (then the renderer's
+   * built-in sans-serif remains, byte-stable). Axis titles / chart title use
+   * the major (heading) face; tick labels / data labels / legend use the
+   * minor (body) face — matching Office's default chart text styling.
+   */
+  themeMajorFontLatin?: string | null;
+  themeMinorFontLatin?: string | null;
   /** Explicit chart border color (hex without '#') from
    *  `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
    *  XML explicitly declares a paintable line; null otherwise (no default
@@ -388,6 +475,25 @@ export interface ChartModel {
    */
   date1904?: boolean;
   /**
+   * `<c:doughnutChart><c:holeSize val>` (ECMA-376 §21.2.2.60,
+   * `ST_HoleSizePercent` §21.2.3.55) — the doughnut hole diameter as a
+   * percentage 1–90 of the outer diameter. Ignored for pie (which has no
+   * hole). null/undefined = use the renderer's doughnut default when the
+   * element is absent. Note the ECMA `CT_HoleSize` schema default is 10%, but
+   * a real doughnut file always writes an explicit `<c:holeSize>` (Excel /
+   * PowerPoint emit 50–75%); the renderer falls back to 50% only for the
+   * pathological absent case.
+   */
+  holeSize?: number | null;
+  /**
+   * `<c:pieChart | doughnutChart><c:firstSliceAng val>` (ECMA-376 §21.2.2.52,
+   * `ST_FirstSliceAng` §21.2.3.15) — the angle in degrees (0–360, clockwise
+   * from the 12 o'clock position) at which the first slice begins.
+   * null/undefined = 0 (start at 12 o'clock), which matches the renderer's
+   * historical fixed −90° (canvas up) start.
+   */
+  firstSliceAngle?: number | null;
+  /**
    * `<c:chartSpace><c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42,
    * `ST_DispBlanksAs` §21.2.3.10) — how blank (null) cells are plotted on
    * line/area charts:
@@ -402,6 +508,66 @@ export interface ChartModel {
    * consulted for the line and area families. null/undefined = "gap".
    */
   dispBlanksAs?: string | null;
+  // ── Axis scale model (CH6) ───────────────────────────────────────────────
+  // Gridline presence, manual major/minor units, log scale and orientation.
+  // Every field is byte-stable when absent: the renderer keeps its historical
+  // "value gridlines always on, category gridlines off, linear minMax axis"
+  // behavior unless one of these is explicitly set.
+  /**
+   * `<c:valAx><c:majorGridlines>` presence (ECMA-376 §21.2.2.100). `false` when
+   * the value axis exists but omits the element (Office suppresses value
+   * gridlines). null/undefined ⇒ the renderer's historical always-on value
+   * gridlines (byte-stable). `true` is redundant with the default but honored.
+   */
+  valAxisMajorGridlines?: boolean | null;
+  /**
+   * `<c:catAx><c:majorGridlines>` presence (§21.2.2.100). `true` turns on
+   * category-axis gridlines (Office omits them by default). null/undefined/false
+   * ⇒ no category gridlines (the historical default, byte-stable).
+   */
+  catAxisMajorGridlines?: boolean | null;
+  /** `<c:valAx><c:minorGridlines>` presence (§21.2.2.109). Only drawn when a
+   *  minor step is resolvable (see {@link valAxisMinorUnit}). */
+  valAxisMinorGridlines?: boolean | null;
+  /**
+   * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between major
+   * gridlines/ticks, overriding the Excel-style auto "nice" step. null/undefined
+   * ⇒ auto step (byte-stable).
+   */
+  valAxisMajorUnit?: number | null;
+  /** `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step. Drives
+   *  minor gridlines/ticks when present. null ⇒ no minor divisions. */
+  valAxisMinorUnit?: number | null;
+  /**
+   * `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98, `ST_LogBase` §21.2.3.25)
+   * — logarithmic value-axis base (>= 2). When set, values map to pixels in log
+   * space and gridlines fall on powers of the base. null/undefined ⇒ linear
+   * (byte-stable).
+   */
+  valAxisLogBase?: number | null;
+  /**
+   * `<c:valAx><c:scaling><c:orientation val>` (§21.2.2.130, `ST_Orientation`
+   * §21.2.3.30) — "minMax" (normal) | "maxMin" (reversed, so the value axis runs
+   * top→bottom max→min). null/undefined/"minMax" ⇒ normal (byte-stable).
+   */
+  valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
+  /** `<c:catAx><c:scaling><c:orientation val>` — "maxMin" reverses the category
+   *  axis left↔right. null/"minMax" ⇒ normal. */
+  catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
+  /**
+   * `<c:catAx><c:tickLblPos val>` (§21.2.2.207, `ST_TickLblPos` §21.2.3.47) —
+   * "nextTo" (default) | "low" | "high" | "none". "none" hides the category tick
+   * labels. null/undefined ⇒ nextTo (byte-stable).
+   */
+  catAxisTickLabelPos?: string | null;
+  /** `<c:valAx><c:tickLblPos val>` (§21.2.2.207). "none" hides value tick labels. */
+  valAxisTickLabelPos?: string | null;
+  /**
+   * `<c:catAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
+   * degree) — category tick-label rotation. e.g. -2700000 = -45°. null/undefined
+   * /0 ⇒ horizontal labels (byte-stable).
+   */
+  catAxisLabelRotation?: number | null;
 }
 
 /**

@@ -165,6 +165,54 @@ pub struct ChartModel {
     pub radar_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
+    // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
+    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60, `ST_HoleSizePercent`
+    /// §21.2.3.55) — hole diameter as 1–90% of the outer diameter. `None` when
+    /// absent; the renderer defaults an absent doughnut hole to 50%.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hole_size: Option<u32>,
+    /// `<c:pieChart | doughnutChart><c:firstSliceAng val>` (§21.2.2.52,
+    /// `ST_FirstSliceAng` §21.2.3.15) — start angle 0–360° clockwise from 12
+    /// o'clock. `None` = 0 (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_slice_angle: Option<u32>,
+    // ── Chart text font faces (CH10) ────────────────────────────────────────
+    /// `<c:catAx><c:txPr>…<a:latin typeface>` tick-label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_face: Option<String>,
+    /// `<c:valAx><c:txPr>…<a:latin typeface>` tick-label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_face: Option<String>,
+    /// `<c:catAx><c:title>…<a:latin typeface>` axis-title font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_font_face: Option<String>,
+    /// `<c:valAx><c:title>…<a:latin typeface>` axis-title font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_font_face: Option<String>,
+    /// `<c:dLbls><c:txPr>…<a:latin typeface>` data-label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_font_face: Option<String>,
+    /// `<c:legend><c:txPr>…<a:latin typeface>` legend font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_face: Option<String>,
+    /// `<c:legend><c:txPr>…<a:solidFill>` legend text color (hex, no `#`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_color: Option<String>,
+    /// `<c:legend><c:txPr>` legend font size (OOXML hundredths of a point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_size_hpt: Option<i32>,
+    /// `<c:legend><c:txPr>…defRPr@b` legend bold flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_bold: Option<bool>,
+    /// Theme heading (majorFont) Latin face — fallback for chart title / axis
+    /// titles when their `<c:txPr>` supplies no `<a:latin>`. `None` when the
+    /// theme is not threaded (renderer keeps sans-serif; byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_major_font_latin: Option<String>,
+    /// Theme body (minorFont) Latin face — fallback for tick labels / data
+    /// labels / legend. `None` when the theme is not threaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_minor_font_latin: Option<String>,
     /// `<c:date1904>` (ECMA-376 §21.2.2.38). `true` = the chart's serial dates
     /// resolve against the 1904 date system. Omitted from JSON when false (the
     /// default 1900 system) for wire parity.
@@ -176,6 +224,52 @@ pub struct ChartModel {
     /// when the file sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disp_blanks_as: Option<String>,
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+    /// `<c:valAx><c:majorGridlines>` presence (§21.2.2.100). `Some(false)` when
+    /// the value axis exists but omits the element — Office suppresses the value
+    /// gridlines then. `None` when there is no value axis (or the parser path
+    /// doesn't model it); the renderer keeps its historical always-on value
+    /// gridlines, so a `None`/absent field is byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_gridlines: Option<bool>,
+    /// `<c:catAx><c:majorGridlines>` presence (§21.2.2.100). `Some(true)` turns
+    /// on category-axis gridlines (Office omits them by default). `None`/absent
+    /// keeps the renderer's historical no-category-gridlines behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_major_gridlines: Option<bool>,
+    /// `<c:valAx><c:minorGridlines>` presence (§21.2.2.109).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_gridlines: Option<bool>,
+    /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major gridline
+    /// step, overriding the auto "nice" step. `None` = auto (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_unit: Option<f64>,
+    /// `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor gridline step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_unit: Option<f64>,
+    /// `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98) — logarithmic value
+    /// axis base (>= 2). `None` = linear (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_log_base: Option<f64>,
+    /// `<c:valAx><c:scaling><c:orientation val>` (§21.2.2.130) — `"minMax"`
+    /// (normal) | `"maxMin"` (reversed). `None`/`"minMax"` = normal (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_orientation: Option<String>,
+    /// `<c:catAx><c:scaling><c:orientation val>` — reverses the category axis
+    /// left↔right when `"maxMin"`. `None`/`"minMax"` = normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_orientation: Option<String>,
+    /// `<c:catAx><c:tickLblPos val>` (§21.2.2.207) — `"nextTo"` (default) |
+    /// `"low"` | `"high"` | `"none"` (labels hidden). `None` = nextTo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_label_pos: Option<String>,
+    /// `<c:valAx><c:tickLblPos val>` (§21.2.2.207).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_tick_label_pos: Option<String>,
+    /// `<c:catAx><c:txPr><a:bodyPr rot>` (60000ths of a degree) — category
+    /// tick-label rotation. `None`/0 = horizontal (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_label_rotation: Option<i32>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -224,6 +318,36 @@ pub struct ChartSeries {
     /// polyline (the default); only serialized when the file sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
+    /// `<c:ser><c:trendline>` per-series trendlines (§21.2.2.211). `None`/empty
+    /// when the series declares none (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend_lines: Option<Vec<ChartTrendline>>,
+}
+
+/// Mirror of TS `ChartTrendline` — `<c:ser><c:trendline>` (§21.2.2.211).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartTrendline {
+    /// `<c:trendlineType val>` (§21.2.2.213) — linear|exp|log|power|poly|movingAvg.
+    pub trendline_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backward: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disp_r_sqr: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disp_eq: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
 }
 
 /// Mirror of TS `ChartDataPointOverride`.
@@ -241,6 +365,15 @@ pub struct ChartDataPointOverride {
     pub marker_fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_line: Option<String>,
+    /// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out
+    /// amount. The schema type is `CT_UnsignedInt` (unbounded `xsd:unsignedInt`);
+    /// the spec text itself doesn't define a 0–100 range or "percentage" unit,
+    /// only "the amount the data point shall be moved from the center of the
+    /// pie". Renderers interpret it as a de-facto percentage of the outer
+    /// radius (0–100 typical), matching Office's Point Explosion UI slider
+    /// rather than a spec-mandated bound. `None`/absent = 0 (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explosion: Option<u32>,
 }
 
 /// Mirror of TS `ChartDataLabelOverride`.
@@ -666,6 +799,144 @@ pub fn extract_axis_title_with_props(
     }
 }
 
+// ============================================================================
+// Chart text font faces (CH10) — `<c:txPr>` / `<c:title>` → `<a:latin@typeface>`
+// ============================================================================
+
+/// First `<a:latin typeface>` (DrawingML §20.1.4.2.24) descendant of `container`.
+/// Empty typefaces are dropped; a theme reference like `+mn-lt` / `+mj-lt` is
+/// returned verbatim so the caller can resolve it against the font scheme.
+fn first_latin_typeface(container: Node) -> Option<String> {
+    container.descendants().find_map(|n| {
+        if !n.is_element() || n.tag_name().name() != "latin" {
+            return None;
+        }
+        n.attribute("typeface")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    })
+}
+
+/// `<c:catAx|valAx><c:txPr>…<a:latin typeface>` — the axis tick-label font face.
+/// Scoped to the axis's `<c:txPr>` so an axis *title* face (under `<c:title>`)
+/// is not misread as the tick face. `None` when absent (renderer falls back to
+/// the theme body font, then sans-serif).
+pub fn extract_axis_tick_label_face(axis_node: Node) -> Option<String> {
+    first_latin_typeface(child(axis_node, "txPr")?)
+}
+
+/// `<c:catAx|valAx><c:title>…<a:latin typeface>` — the axis-title font face.
+/// Scoped to the axis's direct-child `<c:title>`. `None` when absent.
+pub fn extract_axis_title_face(axis_node: Node) -> Option<String> {
+    first_latin_typeface(child(axis_node, "title")?)
+}
+
+/// First `<c:dLbls><c:txPr>…<a:latin typeface>` in the chart — the data-label
+/// font face. Scoped to a `<c:txPr>` inside a `<c:dLbls>` so a series-value
+/// run's face isn't picked up. `None` when absent.
+pub fn extract_data_label_face(root: Node) -> Option<String> {
+    root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .find_map(|dlbls| first_latin_typeface(child(dlbls, "txPr")?))
+}
+
+/// `<c:legend><c:txPr>` text properties (CH10). Returns
+/// `(face, size_hpt, bold)` — the legend `<a:latin typeface>`, first
+/// `<a:defRPr|rPr@sz>` (hundredths of a point) and `@b` bold flag. Color is
+/// resolved separately via [`extract_legend_font_color`] (needs the theme
+/// resolver). All `None` when the legend has no `<c:txPr>`.
+pub fn extract_legend_text_props(root: Node) -> (Option<String>, Option<i32>, Option<bool>) {
+    let Some(legend) = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend")
+    else {
+        return (None, None, None);
+    };
+    let Some(txpr) = child(legend, "txPr") else {
+        return (None, None, None);
+    };
+    let face = first_latin_typeface(txpr);
+    let size = txpr.descendants().find_map(|n| {
+        let tag = n.tag_name().name();
+        if n.is_element() && (tag == "defRPr" || tag == "rPr") {
+            n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+        } else {
+            None
+        }
+    });
+    let bold = txpr.descendants().find_map(|n| {
+        let tag = n.tag_name().name();
+        if n.is_element() && (tag == "defRPr" || tag == "rPr") {
+            n.attribute("b")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        } else {
+            None
+        }
+    });
+    (face, size, bold)
+}
+
+/// `<c:legend><c:txPr>…<a:solidFill>` legend text color, resolved to a hex
+/// string (no `#`) via the caller's `ColorResolver`. Scoped to the legend's
+/// `<c:txPr>` so a legend-frame `<c:spPr>` fill doesn't leak. `None` when absent.
+pub fn extract_legend_font_color(root: Node, resolver: &dyn ColorResolver) -> Option<String> {
+    let legend = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend")?;
+    let txpr = child(legend, "txPr")?;
+    txpr.descendants().find_map(|n| {
+        if n.is_element() && n.tag_name().name() == "solidFill" {
+            resolver.resolve_solid_fill(n)
+        } else {
+            None
+        }
+    })
+}
+
+// ============================================================================
+// Pie / doughnut geometry (CH8)
+// ============================================================================
+
+/// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60) — hole diameter percentage
+/// (1–90). Clamped to the ECMA range. `None` when absent. `root` is the chart
+/// space (or `<c:chart>`); the search is scoped to a `<c:doughnutChart>` so a
+/// hole size only ever comes from a doughnut plot.
+pub fn extract_hole_size(root: Node) -> Option<u32> {
+    let doughnut = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "doughnutChart")?;
+    child(doughnut, "holeSize")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.trim_end_matches('%').parse::<u32>().ok())
+        .map(|v| v.clamp(1, 90))
+}
+
+/// `<c:pieChart|doughnutChart><c:firstSliceAng val>` (§21.2.2.52) — start angle
+/// in degrees (0–360, clockwise from 12 o'clock). Clamped to the ECMA range.
+/// `None` when absent (renderer defaults to 0).
+pub fn extract_first_slice_angle(root: Node) -> Option<u32> {
+    root.descendants()
+        .find(|n| {
+            n.is_element()
+                && (n.tag_name().name() == "pieChart" || n.tag_name().name() == "doughnutChart")
+        })
+        .and_then(|pie| child(pie, "firstSliceAng"))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.min(360))
+}
+
+/// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out
+/// amount, parsed as the unbounded `xsd:unsignedInt` the schema (`CT_UnsignedInt`)
+/// actually specifies (no 0–100 clamp here; see `ChartDataPointOverride::explosion`
+/// for how renderers interpret the value). Caller passes a `<c:dPt>` node.
+/// `None` when absent.
+pub fn extract_dpt_explosion(dpt_node: Node) -> Option<u32> {
+    child(dpt_node, "explosion")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<u32>().ok())
+}
+
 /// Explicit chart-frame border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
 /// §21.2.2.5 / DrawingML §20.1.2.2.24). `chart_space_root` is the
 /// `<c:chartSpace>` element. Returns `(srgb_color, width_emu)` under the locked
@@ -705,6 +976,76 @@ pub fn extract_series_smooth(ser_node: Node) -> Option<bool> {
         None => true, // element present, val implied true
         Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
     })
+}
+
+/// Parse `bool_val`: a `CT_Boolean` child's `val` where an absent attribute
+/// implies true (the OOXML default when the element is present).
+fn bool_child(parent: Node, name: &str) -> Option<bool> {
+    child(parent, name).map(|n| match n.attribute("val") {
+        None => true,
+        Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+    })
+}
+
+/// `<c:ser><c:trendline>` (ECMA-376 §21.2.2.211, `CT_Trendline`) — every
+/// trendline declared on `ser_node` (0..N). Each carries a required
+/// `<c:trendlineType>` plus optional order/period/forward/backward/intercept,
+/// the `<c:dispRSqr>` / `<c:dispEq>` label flags, and an `<c:spPr><a:ln>` line
+/// style (color resolved via `resolver`, width in EMU). Returns `None` when the
+/// series declares no trendline (byte-stable); otherwise the parsed vec. Shared
+/// so pptx and xlsx honor trendlines identically.
+pub fn extract_series_trendlines(
+    ser_node: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<Vec<ChartTrendline>> {
+    let mut out = Vec::new();
+    for tl in ser_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "trendline")
+    {
+        // trendlineType is required per the schema; skip a malformed trendline
+        // that somehow lacks it rather than emitting an empty type.
+        let Some(trendline_type) = child(tl, "trendlineType").and_then(|n| n.attribute("val"))
+        else {
+            continue;
+        };
+        let u32_val = |name: &str| -> Option<u32> {
+            child(tl, name)
+                .and_then(|n| n.attribute("val"))
+                .and_then(|v| v.parse::<u32>().ok())
+        };
+        let f64_val = |name: &str| -> Option<f64> {
+            child(tl, name)
+                .and_then(|n| n.attribute("val"))
+                .and_then(|v| v.parse::<f64>().ok())
+        };
+        // `<c:spPr><a:ln>` line style: solidFill color + width.
+        let (line_color, line_width_emu) = match child(tl, "spPr").and_then(|sp| child(sp, "ln")) {
+            None => (None, None),
+            Some(ln) => {
+                let color = child(ln, "solidFill").and_then(|sf| resolver.resolve_solid_fill(sf));
+                let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
+                (color, width)
+            }
+        };
+        out.push(ChartTrendline {
+            trendline_type: trendline_type.to_string(),
+            order: u32_val("order"),
+            period: u32_val("period"),
+            forward: f64_val("forward"),
+            backward: f64_val("backward"),
+            intercept: f64_val("intercept"),
+            disp_r_sqr: bool_child(tl, "dispRSqr"),
+            disp_eq: bool_child(tl, "dispEq"),
+            line_color,
+            line_width_emu,
+        });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// `<c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42, `ST_DispBlanksAs`
@@ -840,6 +1181,99 @@ pub fn extract_axis_line_style(
     (color, width, no_fill)
 }
 
+// ============================================================================
+// Axis scale model (CH6) — gridlines / units / logBase / orientation / labels
+// ============================================================================
+//
+// All helpers take the already-located `<c:catAx>` / `<c:valAx>` node (per
+// EG_AxShared, ECMA-376 §21.2.2). `<c:majorGridlines>` / `<c:minorGridlines>`
+// are direct children of the axis; `<c:logBase>` / `<c:orientation>` live under
+// `<c:scaling>`; `<c:majorUnit>` / `<c:minorUnit>` are direct children of a
+// `<c:valAx>` (after `<c:crossBetween>`).
+
+/// `<c:catAx|valAx><c:majorGridlines>` presence (ECMA-376 §21.2.2.100,
+/// `CT_ChartLines`). The element carries only an optional `<c:spPr>` line
+/// style; its mere PRESENCE requests gridlines. Returns `true` when the axis
+/// declares `<c:majorGridlines>`. Office writes it on the value axis by default
+/// and omits it on the category axis, so this maps directly to "draw them".
+pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
+    child(axis_node, "majorGridlines").is_some()
+}
+
+/// `<c:catAx|valAx><c:minorGridlines>` presence (ECMA-376 §21.2.2.109). Same
+/// presence-only semantics as [`axis_has_major_gridlines`]. Minor gridlines
+/// require a minor unit to place them; the renderer only draws them when both a
+/// `<c:minorGridlines>` element and a resolvable minor step exist.
+pub fn axis_has_minor_gridlines(axis_node: Node) -> bool {
+    child(axis_node, "minorGridlines").is_some()
+}
+
+/// `<c:valAx><c:majorUnit val>` (ECMA-376 §21.2.2.103, `ST_AxisUnit`
+/// §21.2.3.1) — an explicit distance between major ticks/gridlines. Must be a
+/// positive floating-point number; non-positive values are rejected so they
+/// can't wedge the renderer into an infinite gridline loop. `None` when absent
+/// (the renderer keeps its Excel-style auto "nice" step).
+pub fn extract_axis_major_unit(axis_node: Node) -> Option<f64> {
+    child(axis_node, "majorUnit")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// `<c:valAx><c:minorUnit val>` (ECMA-376 §21.2.2.112) — explicit distance
+/// between minor ticks/gridlines. Positive floating-point; `None` when absent.
+pub fn extract_axis_minor_unit(axis_node: Node) -> Option<f64> {
+    child(axis_node, "minorUnit")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// `<c:catAx|valAx><c:scaling><c:logBase val>` (ECMA-376 §21.2.2.98,
+/// `ST_LogBase` §21.2.3.25) — the base of a logarithmic value axis. Per the
+/// spec the base shall be `>= 2`; smaller/invalid values are rejected. `None`
+/// when the axis is linear (the common case).
+pub fn extract_axis_log_base(axis_node: Node) -> Option<f64> {
+    let scaling = child(axis_node, "scaling")?;
+    child(scaling, "logBase")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 2.0)
+}
+
+/// `<c:catAx|valAx><c:scaling><c:orientation val>` (ECMA-376 §21.2.2.130,
+/// `ST_Orientation` §21.2.3.30) — axis direction. Returns the raw enum string
+/// `"minMax"` (normal, the default) or `"maxMin"` (reversed). `None` when the
+/// element is absent (the renderer treats absent and `"minMax"` identically, so
+/// omitting it is byte-stable).
+pub fn extract_axis_orientation(axis_node: Node) -> Option<String> {
+    let scaling = child(axis_node, "scaling")?;
+    child(scaling, "orientation")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
+}
+
+/// `<c:catAx|valAx><c:tickLblPos val>` (ECMA-376 §21.2.2.207, `ST_TickLblPos`
+/// §21.2.3.47) — where the tick labels sit: `"high"` | `"low"` | `"nextTo"`
+/// (default) | `"none"` (labels not drawn). Returns the raw enum string; `None`
+/// when absent (renderer treats absent as `"nextTo"`, byte-stable).
+pub fn extract_axis_tick_label_pos(axis_node: Node) -> Option<String> {
+    child(axis_node, "tickLblPos")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
+}
+
+/// `<c:catAx|valAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
+/// degree — §20.1.10.3) — tick-label rotation. Scoped to the axis's `<c:txPr>`
+/// body properties so a title's rotation isn't misread. Returns the raw
+/// 60000ths-degree integer; `None` when absent or 0 is not written (renderer
+/// treats absent as 0, byte-stable). A value like `-2700000` = -45°.
+pub fn extract_axis_tick_label_rotation(axis_node: Node) -> Option<i32> {
+    let txpr = child(axis_node, "txPr")?;
+    let body_pr = child(txpr, "bodyPr")?;
+    body_pr.attribute("rot").and_then(|v| v.parse::<i32>().ok())
+}
+
 /// chartEx (`<cx:chartSpace>`) axis visibility. ChartEx encodes the
 /// scale type via a `<cx:catScaling>` / `<cx:valScaling>` child rather
 /// than separate `<c:catAx>` / `<c:valAx>` elements, so callers can't just
@@ -972,6 +1406,7 @@ mod tests {
                 err_bars: None,
                 bubble_sizes: None,
                 smooth: None,
+                trend_lines: None,
             }],
             show_data_labels: false,
             val_min: None,
@@ -1034,8 +1469,32 @@ mod tests {
             scatter_style: None,
             radar_style: None,
             secondary_val_axis: None,
+            hole_size: None,
+            first_slice_angle: None,
+            cat_axis_font_face: None,
+            val_axis_font_face: None,
+            cat_axis_title_font_face: None,
+            val_axis_title_font_face: None,
+            data_label_font_face: None,
+            legend_font_face: None,
+            legend_font_color: None,
+            legend_font_size_hpt: None,
+            legend_font_bold: None,
+            theme_major_font_latin: None,
+            theme_minor_font_latin: None,
             date1904: false,
             disp_blanks_as: None,
+            val_axis_major_gridlines: None,
+            cat_axis_major_gridlines: None,
+            val_axis_minor_gridlines: None,
+            val_axis_major_unit: None,
+            val_axis_minor_unit: None,
+            val_axis_log_base: None,
+            val_axis_orientation: None,
+            cat_axis_orientation: None,
+            cat_axis_tick_label_pos: None,
+            val_axis_tick_label_pos: None,
+            cat_axis_label_rotation: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -1531,5 +1990,271 @@ mod tests {
         // Absent element ⇒ false (default 1900 system).
         let absent = format!(r#"<c:chartSpace xmlns:c="{ns}"/>"#);
         assert!(!extract_chart_date1904(root_of(&absent).root_element()));
+    }
+
+    // ── CH8 — pie / doughnut geometry ───────────────────────────────────────
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    #[test]
+    fn hole_size_from_doughnut() {
+        let xml = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:plotArea><c:doughnutChart><c:holeSize val="60"/></c:doughnutChart></c:plotArea></c:chart>"#
+        );
+        assert_eq!(extract_hole_size(root_of(&xml).root_element()), Some(60));
+        // Clamped to the ECMA 1–90 range.
+        let hi = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:doughnutChart><c:holeSize val="200"/></c:doughnutChart></c:chart>"#
+        );
+        assert_eq!(extract_hole_size(root_of(&hi).root_element()), Some(90));
+        // A pie chart has no hole → None even if a stray holeSize appears elsewhere.
+        let pie = format!(r#"<c:chart xmlns:c="{C_NS}"><c:pieChart/></c:chart>"#);
+        assert_eq!(extract_hole_size(root_of(&pie).root_element()), None);
+    }
+
+    #[test]
+    fn first_slice_angle_from_pie_or_doughnut() {
+        let pie = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:pieChart><c:firstSliceAng val="90"/></c:pieChart></c:chart>"#
+        );
+        assert_eq!(
+            extract_first_slice_angle(root_of(&pie).root_element()),
+            Some(90)
+        );
+        let dn = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:doughnutChart><c:firstSliceAng val="270"/></c:doughnutChart></c:chart>"#
+        );
+        assert_eq!(
+            extract_first_slice_angle(root_of(&dn).root_element()),
+            Some(270)
+        );
+        // Absent ⇒ None (renderer defaults to 0).
+        let none = format!(r#"<c:chart xmlns:c="{C_NS}"><c:pieChart/></c:chart>"#);
+        assert_eq!(
+            extract_first_slice_angle(root_of(&none).root_element()),
+            None
+        );
+    }
+
+    #[test]
+    fn dpt_explosion() {
+        let with =
+            format!(r#"<c:dPt xmlns:c="{C_NS}"><c:idx val="1"/><c:explosion val="25"/></c:dPt>"#);
+        assert_eq!(
+            extract_dpt_explosion(root_of(&with).root_element()),
+            Some(25)
+        );
+        let without = format!(r#"<c:dPt xmlns:c="{C_NS}"><c:idx val="1"/></c:dPt>"#);
+        assert_eq!(
+            extract_dpt_explosion(root_of(&without).root_element()),
+            None
+        );
+    }
+
+    // ── CH10 — chart text font faces ────────────────────────────────────────
+
+    #[test]
+    fn axis_tick_and_title_faces() {
+        // Tick face lives in the axis `<c:txPr>`; the title face in `<c:title>`.
+        // Extractors must NOT cross-contaminate.
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:title><a:p><a:r><a:rPr><a:latin typeface="Georgia"/></a:rPr><a:t>Y</a:t></a:r></a:p></c:title>
+                 <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Verdana"/></a:defRPr></a:pPr></a:p></c:txPr>
+               </c:valAx>"#
+        );
+        let root = root_of(&xml);
+        let ax = root.root_element();
+        assert_eq!(extract_axis_tick_label_face(ax).as_deref(), Some("Verdana"));
+        assert_eq!(extract_axis_title_face(ax).as_deref(), Some("Georgia"));
+    }
+
+    #[test]
+    fn data_label_face_scoped_to_dlbls() {
+        let xml = format!(
+            r#"<c:chart xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:plotArea><c:barChart>
+                   <c:dLbls><c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Consolas"/></a:defRPr></a:pPr></a:p></c:txPr></c:dLbls>
+                 </c:barChart></c:plotArea>
+               </c:chart>"#
+        );
+        assert_eq!(
+            extract_data_label_face(root_of(&xml).root_element()).as_deref(),
+            Some("Consolas")
+        );
+    }
+
+    #[test]
+    fn legend_text_props_face_size_bold() {
+        let xml = format!(
+            r#"<c:chart xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:legend><c:legendPos val="b"/>
+                   <c:txPr><a:p><a:pPr><a:defRPr sz="1100" b="1"><a:latin typeface="Calibri"/></a:defRPr></a:pPr></a:p></c:txPr>
+                 </c:legend>
+               </c:chart>"#
+        );
+        let (face, size, bold) = extract_legend_text_props(root_of(&xml).root_element());
+        assert_eq!(face.as_deref(), Some("Calibri"));
+        assert_eq!(size, Some(1100));
+        assert_eq!(bold, Some(true));
+    }
+
+    #[test]
+    fn theme_reference_typeface_passes_through() {
+        // A `+mn-lt` theme reference is returned verbatim (the renderer resolves
+        // it against the theme font scheme).
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="+mn-lt"/></a:defRPr></a:pPr></a:p></c:txPr>
+               </c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_tick_label_face(root_of(&xml).root_element()).as_deref(),
+            Some("+mn-lt")
+        );
+    }
+
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+
+    #[test]
+    fn axis_gridlines_presence() {
+        // Value axis with `<c:majorGridlines>` → true; category axis without → false.
+        let val = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:majorGridlines/></c:valAx>"#);
+        assert!(axis_has_major_gridlines(root_of(&val).root_element()));
+        assert!(!axis_has_minor_gridlines(root_of(&val).root_element()));
+
+        let cat = format!(r#"<c:catAx xmlns:c="{C_NS}"/>"#);
+        assert!(!axis_has_major_gridlines(root_of(&cat).root_element()));
+
+        let both = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:majorGridlines/><c:minorGridlines/></c:valAx>"#
+        );
+        assert!(axis_has_major_gridlines(root_of(&both).root_element()));
+        assert!(axis_has_minor_gridlines(root_of(&both).root_element()));
+    }
+
+    #[test]
+    fn axis_major_minor_unit() {
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:crossBetween val="between"/><c:majorUnit val="500"/><c:minorUnit val="100"/></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_major_unit(root_of(&xml).root_element()),
+            Some(500.0)
+        );
+        assert_eq!(
+            extract_axis_minor_unit(root_of(&xml).root_element()),
+            Some(100.0)
+        );
+        // Absent → None (auto step).
+        let bare = format!(r#"<c:valAx xmlns:c="{C_NS}"/>"#);
+        assert_eq!(extract_axis_major_unit(root_of(&bare).root_element()), None);
+        // Non-positive rejected (would wedge the gridline loop).
+        let zero = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:majorUnit val="0"/></c:valAx>"#);
+        assert_eq!(extract_axis_major_unit(root_of(&zero).root_element()), None);
+    }
+
+    #[test]
+    fn axis_log_base() {
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:logBase val="10"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_log_base(root_of(&xml).root_element()),
+            Some(10.0)
+        );
+        // Base < 2 is invalid per ST_LogBase → rejected.
+        let bad = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:logBase val="1"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(extract_axis_log_base(root_of(&bad).root_element()), None);
+        // Absent scaling / logBase → None (linear).
+        let bare = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:scaling/></c:valAx>"#);
+        assert_eq!(extract_axis_log_base(root_of(&bare).root_element()), None);
+    }
+
+    #[test]
+    fn axis_orientation() {
+        let rev = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:orientation val="maxMin"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_orientation(root_of(&rev).root_element()).as_deref(),
+            Some("maxMin")
+        );
+        let norm = format!(
+            r#"<c:valAx xmlns:c="{C_NS}"><c:scaling><c:orientation val="minMax"/></c:scaling></c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_orientation(root_of(&norm).root_element()).as_deref(),
+            Some("minMax")
+        );
+        // Absent → None (renderer treats as minMax).
+        let bare = format!(r#"<c:valAx xmlns:c="{C_NS}"><c:scaling/></c:valAx>"#);
+        assert_eq!(
+            extract_axis_orientation(root_of(&bare).root_element()),
+            None
+        );
+    }
+
+    #[test]
+    fn axis_tick_label_pos_and_rotation() {
+        let xml = format!(
+            r#"<c:catAx xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:tickLblPos val="low"/><c:txPr><a:bodyPr rot="-2700000"/></c:txPr></c:catAx>"#
+        );
+        assert_eq!(
+            extract_axis_tick_label_pos(root_of(&xml).root_element()).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            extract_axis_tick_label_rotation(root_of(&xml).root_element()),
+            Some(-2_700_000)
+        );
+        // Absent → None (renderer treats as nextTo / 0°).
+        let bare = format!(r#"<c:catAx xmlns:c="{C_NS}"/>"#);
+        assert_eq!(
+            extract_axis_tick_label_pos(root_of(&bare).root_element()),
+            None
+        );
+        assert_eq!(
+            extract_axis_tick_label_rotation(root_of(&bare).root_element()),
+            None
+        );
+    }
+
+    #[test]
+    fn series_trendlines_parse() {
+        // No trendline → None (byte-stable).
+        let none = format!(r#"<c:ser xmlns:c="{C_NS}"/>"#);
+        assert_eq!(
+            extract_series_trendlines(root_of(&none).root_element(), &StubResolver),
+            None
+        );
+        // A linear fit + a period-3 moving average, the linear one with a red line.
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:trendline>
+                   <c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="ff0000"/></a:solidFill></a:ln></c:spPr>
+                   <c:trendlineType val="linear"/>
+                   <c:dispEq val="1"/>
+                   <c:dispRSqr val="1"/>
+                 </c:trendline>
+                 <c:trendline>
+                   <c:trendlineType val="movingAvg"/>
+                   <c:period val="3"/>
+                 </c:trendline>
+               </c:ser>"#
+        );
+        let got = extract_series_trendlines(root_of(&xml).root_element(), &StubResolver).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].trendline_type, "linear");
+        assert_eq!(got[0].line_color.as_deref(), Some("FF0000"));
+        assert_eq!(got[0].line_width_emu, Some(19050));
+        assert_eq!(got[0].disp_eq, Some(true));
+        assert_eq!(got[0].disp_r_sqr, Some(true));
+        assert_eq!(got[1].trendline_type, "movingAvg");
+        assert_eq!(got[1].period, Some(3));
+        assert_eq!(got[1].line_color, None);
     }
 }

@@ -55,6 +55,7 @@ impl From<DataPointOverride> for CmDataPointOverride {
             marker_size: o.marker_size.map(|v| v as f64),
             marker_fill: o.marker_fill,
             marker_line: o.marker_line,
+            explosion: o.explosion,
         }
     }
 }
@@ -145,6 +146,8 @@ impl From<ChartSeries> for CmSeries {
             err_bars: some_if_nonempty(s.err_bars),
             bubble_sizes: None,
             smooth: s.smooth,
+            // Shared `ChartTrendline` type flows straight through (no adapter).
+            trend_lines: s.trend_lines,
             // `order` is xlsx parse-time only (used for stacking/legend sort
             // before emit); core `ChartSeries` has no such field.
         }
@@ -242,8 +245,34 @@ impl From<ChartData> for ChartModel {
             scatter_style: None,
             radar_style: c.radar_style,
             secondary_val_axis: None,
+            // Pie/doughnut geometry (CH8) + chart text font faces (CH10).
+            hole_size: c.hole_size,
+            first_slice_angle: c.first_slice_angle,
+            cat_axis_font_face: c.cat_axis_font_face,
+            val_axis_font_face: c.val_axis_font_face,
+            cat_axis_title_font_face: c.cat_axis_title_font_face,
+            val_axis_title_font_face: c.val_axis_title_font_face,
+            data_label_font_face: c.data_label_font_face,
+            legend_font_face: c.legend_font_face,
+            legend_font_color: c.legend_font_color,
+            legend_font_size_hpt: c.legend_font_size_hpt,
+            legend_font_bold: c.legend_font_bold,
+            theme_major_font_latin: c.theme_major_font_latin,
+            theme_minor_font_latin: c.theme_minor_font_latin,
             date1904: c.date1904,
             disp_blanks_as: c.disp_blanks_as,
+            // ── Axis scale model (CH6) ──────────────────────────────────────
+            val_axis_major_gridlines: c.val_axis_major_gridlines,
+            cat_axis_major_gridlines: c.cat_axis_major_gridlines,
+            val_axis_minor_gridlines: c.val_axis_minor_gridlines,
+            val_axis_major_unit: c.val_axis_major_unit,
+            val_axis_minor_unit: c.val_axis_minor_unit,
+            val_axis_log_base: c.val_axis_log_base,
+            val_axis_orientation: c.val_axis_orientation,
+            cat_axis_orientation: c.cat_axis_orientation,
+            cat_axis_tick_label_pos: c.cat_axis_tick_label_pos,
+            val_axis_tick_label_pos: c.val_axis_tick_label_pos,
+            cat_axis_label_rotation: c.cat_axis_label_rotation,
         }
     }
 }
@@ -254,6 +283,7 @@ pub(crate) fn load_sheet_charts(
     archive: &mut crate::XlsxZip,
     sheet_path: &str,
     theme_colors: &[String],
+    theme_fonts: (Option<&str>, Option<&str>),
 ) -> Vec<ChartAnchor> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
@@ -423,7 +453,7 @@ pub(crate) fn load_sheet_charts(
             let Ok(chart_xml) = read_zip_string(archive, &chart_path) else {
                 continue;
             };
-            let Some(chart_data) = parse_chart_xml(&chart_xml, theme_colors) else {
+            let Some(chart_data) = parse_chart_xml(&chart_xml, theme_colors, theme_fonts) else {
                 continue;
             };
 
@@ -447,8 +477,15 @@ pub(crate) fn load_sheet_charts(
 
 // ─── Chart XML parser ────────────────────────────────────────────────────────
 
-/// Parse a `xl/charts/chartN.xml` file into a `ChartData`.
-pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<ChartData> {
+/// Parse a `xl/charts/chartN.xml` file into a `ChartData`. `theme_fonts` is the
+/// workbook theme's `(majorFont.latin, minorFont.latin)` Latin faces (ECMA-376
+/// §20.1.4.2), used as the fallback for chart text elements whose `<c:txPr>`
+/// carries no `<a:latin>` (CH10).
+pub(crate) fn parse_chart_xml(
+    xml: &str,
+    theme_colors: &[String],
+    theme_fonts: (Option<&str>, Option<&str>),
+) -> Option<ChartData> {
     let doc = roxmltree::Document::parse(xml).ok()?;
 
     // Find c:chart root element
@@ -462,6 +499,7 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
     let title_font_color = extract_chart_title_color(&chart_root);
     let title_font_face = extract_chart_title_face(&chart_root);
     let title_font_bold = extract_chart_title_bold(&chart_root);
+    let (theme_major_font_latin, theme_minor_font_latin) = theme_fonts;
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
@@ -602,6 +640,12 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
     let mut val_axis_title_color: Option<String> = None;
     let mut cat_axis_font_size_hpt: Option<i32> = None;
     let mut val_axis_font_size_hpt: Option<i32> = None;
+    // Axis tick-label + title font faces (CH10, `<c:txPr>`/`<c:title>` →
+    // `<a:latin typeface>`), populated in the axis loop via ooxml-common helpers.
+    let mut cat_axis_font_face: Option<String> = None;
+    let mut val_axis_font_face: Option<String> = None;
+    let mut cat_axis_title_font_face: Option<String> = None;
+    let mut val_axis_title_font_face: Option<String> = None;
     let mut val_axis_format_code: Option<String> = None;
     // ECMA-376 §21.2.2.40 — `<c:delete val="1"/>` on a `<c:catAx>`/`<c:valAx>`
     // hides the axis (labels, ticks, and lines). Default is "0" (visible).
@@ -629,6 +673,21 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
     let mut cat_axis_crosses_at: Option<f64> = None;
     let mut val_axis_crosses: Option<String> = None;
     let mut val_axis_crosses_at: Option<f64> = None;
+    // ── Axis scale model (CH6) — gridlines / units / logBase / orientation ──
+    // Populated in the catAx/valAx branches via the shared ooxml-common
+    // extractors. Gridline flags stay None unless the corresponding axis is
+    // seen, so a chart with no value axis keeps the renderer's default gridlines.
+    let mut val_axis_major_gridlines: Option<bool> = None;
+    let mut cat_axis_major_gridlines: Option<bool> = None;
+    let mut val_axis_minor_gridlines: Option<bool> = None;
+    let mut val_axis_major_unit: Option<f64> = None;
+    let mut val_axis_minor_unit: Option<f64> = None;
+    let mut val_axis_log_base: Option<f64> = None;
+    let mut val_axis_orientation: Option<String> = None;
+    let mut cat_axis_orientation: Option<String> = None;
+    let mut cat_axis_tick_label_pos: Option<String> = None;
+    let mut val_axis_tick_label_pos: Option<String> = None;
+    let mut cat_axis_label_rotation: Option<i32> = None;
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
     let mut radar_style: Option<String> = None;
@@ -680,10 +739,15 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                         cat_axis_title_size = sz;
                         cat_axis_title_bold = b;
                         cat_axis_title_color = c;
+                        cat_axis_title_font_face =
+                            ooxml_common::chart::extract_axis_title_face(child);
                     }
                 }
                 if cat_axis_font_size_hpt.is_none() {
                     cat_axis_font_size_hpt = extract_axis_tick_label_size(&child);
+                }
+                if cat_axis_font_face.is_none() {
+                    cat_axis_font_face = ooxml_common::chart::extract_axis_tick_label_face(child);
                 }
                 if cat_axis_format_code.is_none() {
                     cat_axis_format_code = extract_axis_format_code(&child);
@@ -705,6 +769,22 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                 }
                 if cat_axis_minor_tick_mark.is_none() {
                     cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
+                }
+                // ── Axis scale model (CH6) — category axis ──────────────────
+                if cat_axis_major_gridlines.is_none() {
+                    cat_axis_major_gridlines =
+                        Some(ooxml_common::chart::axis_has_major_gridlines(child));
+                }
+                if cat_axis_orientation.is_none() {
+                    cat_axis_orientation = ooxml_common::chart::extract_axis_orientation(child);
+                }
+                if cat_axis_tick_label_pos.is_none() {
+                    cat_axis_tick_label_pos =
+                        ooxml_common::chart::extract_axis_tick_label_pos(child);
+                }
+                if cat_axis_label_rotation.is_none() {
+                    cat_axis_label_rotation =
+                        ooxml_common::chart::extract_axis_tick_label_rotation(child);
                 }
                 if let Some((mn, mx)) = extract_axis_scaling(&child) {
                     if cat_axis_min.is_none() {
@@ -752,6 +832,8 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                             cat_axis_title_size = sz;
                             cat_axis_title_bold = b;
                             cat_axis_title_color = c;
+                            cat_axis_title_font_face =
+                                ooxml_common::chart::extract_axis_title_face(child);
                         }
                     }
                     if cat_axis_format_code.is_none() {
@@ -767,6 +849,10 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                     }
                     if cat_axis_font_size_hpt.is_none() {
                         cat_axis_font_size_hpt = extract_axis_tick_label_size(&child);
+                    }
+                    if cat_axis_font_face.is_none() {
+                        cat_axis_font_face =
+                            ooxml_common::chart::extract_axis_tick_label_face(child);
                     }
                     if cat_axis_font_bold.is_none() {
                         cat_axis_font_bold = extract_axis_tick_label_bold(&child);
@@ -785,6 +871,22 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                     }
                     if cat_axis_minor_tick_mark.is_none() {
                         cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
+                    }
+                    // ── Axis scale model (CH6) — scatter X (category) axis ──
+                    if cat_axis_major_gridlines.is_none() {
+                        cat_axis_major_gridlines =
+                            Some(ooxml_common::chart::axis_has_major_gridlines(child));
+                    }
+                    if cat_axis_orientation.is_none() {
+                        cat_axis_orientation = ooxml_common::chart::extract_axis_orientation(child);
+                    }
+                    if cat_axis_tick_label_pos.is_none() {
+                        cat_axis_tick_label_pos =
+                            ooxml_common::chart::extract_axis_tick_label_pos(child);
+                    }
+                    if cat_axis_label_rotation.is_none() {
+                        cat_axis_label_rotation =
+                            ooxml_common::chart::extract_axis_tick_label_rotation(child);
                     }
                     let (cr, cra) = extract_axis_crosses(&child);
                     if cat_axis_crosses.is_none() {
@@ -807,10 +909,16 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                             val_axis_title_size = sz;
                             val_axis_title_bold = b;
                             val_axis_title_color = c;
+                            val_axis_title_font_face =
+                                ooxml_common::chart::extract_axis_title_face(child);
                         }
                     }
                     if val_axis_font_size_hpt.is_none() {
                         val_axis_font_size_hpt = extract_axis_tick_label_size(&child);
+                    }
+                    if val_axis_font_face.is_none() {
+                        val_axis_font_face =
+                            ooxml_common::chart::extract_axis_tick_label_face(child);
                     }
                     if val_axis_format_code.is_none() {
                         val_axis_format_code = extract_axis_format_code(&child);
@@ -847,6 +955,31 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
                     }
                     if val_axis_minor_tick_mark.is_none() {
                         val_axis_minor_tick_mark = extract_axis_tick_mark(&child, "minorTickMark");
+                    }
+                    // ── Axis scale model (CH6) — value axis ─────────────────
+                    if val_axis_major_gridlines.is_none() {
+                        val_axis_major_gridlines =
+                            Some(ooxml_common::chart::axis_has_major_gridlines(child));
+                    }
+                    if val_axis_minor_gridlines.is_none() {
+                        val_axis_minor_gridlines =
+                            Some(ooxml_common::chart::axis_has_minor_gridlines(child));
+                    }
+                    if val_axis_major_unit.is_none() {
+                        val_axis_major_unit = ooxml_common::chart::extract_axis_major_unit(child);
+                    }
+                    if val_axis_minor_unit.is_none() {
+                        val_axis_minor_unit = ooxml_common::chart::extract_axis_minor_unit(child);
+                    }
+                    if val_axis_log_base.is_none() {
+                        val_axis_log_base = ooxml_common::chart::extract_axis_log_base(child);
+                    }
+                    if val_axis_orientation.is_none() {
+                        val_axis_orientation = ooxml_common::chart::extract_axis_orientation(child);
+                    }
+                    if val_axis_tick_label_pos.is_none() {
+                        val_axis_tick_label_pos =
+                            ooxml_common::chart::extract_axis_tick_label_pos(child);
                     }
                     if axis_is_deleted(&child) {
                         val_axis_hidden = true;
@@ -1010,6 +1143,19 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
     // legend order, independent of document order.
     all_series.sort_by_key(|s| s.order);
 
+    // ── Chart text font faces (CH10) ────────────────────────────────────────
+    // Data-label face + legend text props via the shared ooxml-common helpers
+    // so xlsx/pptx stay in lockstep. Legend color needs the theme resolver.
+    let data_label_font_face = ooxml_common::chart::extract_data_label_face(chart_root);
+    let (legend_font_face, legend_font_size_hpt, legend_font_bold) =
+        ooxml_common::chart::extract_legend_text_props(chart_root);
+    let legend_font_color =
+        ooxml_common::chart::extract_legend_font_color(chart_root, &xlsx_resolver);
+
+    // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
+    let hole_size = ooxml_common::chart::extract_hole_size(chart_root);
+    let first_slice_angle = ooxml_common::chart::extract_first_slice_angle(chart_root);
+
     Some(ChartData {
         chart_type: primary_type,
         bar_dir,
@@ -1073,6 +1219,31 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
         chart_border_width_emu,
         date1904,
         disp_blanks_as,
+        hole_size,
+        first_slice_angle,
+        cat_axis_font_face,
+        val_axis_font_face,
+        cat_axis_title_font_face,
+        val_axis_title_font_face,
+        data_label_font_face,
+        legend_font_face,
+        legend_font_color,
+        legend_font_size_hpt,
+        legend_font_bold,
+        theme_major_font_latin: theme_major_font_latin.map(|s| s.to_string()),
+        theme_minor_font_latin: theme_minor_font_latin.map(|s| s.to_string()),
+        // ── Axis scale model (CH6) ──────────────────────────────────────────
+        val_axis_major_gridlines,
+        cat_axis_major_gridlines,
+        val_axis_minor_gridlines,
+        val_axis_major_unit,
+        val_axis_minor_unit,
+        val_axis_log_base,
+        val_axis_orientation,
+        cat_axis_orientation,
+        cat_axis_tick_label_pos,
+        val_axis_tick_label_pos,
+        cat_axis_label_rotation,
     })
 }
 
@@ -1460,6 +1631,10 @@ pub(crate) fn parse_chart_series(
     // `<c:ser><c:smooth>` (§21.2.2.194) — line/area spline flag. Shared with the
     // pptx parser so both honor the CT_Boolean implied-true semantics.
     let smooth = ooxml_common::chart::extract_series_smooth(*node);
+    // `<c:ser><c:trendline>` (§21.2.2.211) — regression lines. Shared extractor;
+    // the line color resolves through the workbook theme.
+    let trend_lines =
+        ooxml_common::chart::extract_series_trendlines(*node, &XlsxColorResolver { theme_colors });
 
     ChartSeries {
         name,
@@ -1480,6 +1655,7 @@ pub(crate) fn parse_chart_series(
         series_data_labels,
         err_bars,
         smooth,
+        trend_lines,
     }
 }
 
@@ -1569,6 +1745,7 @@ pub(crate) fn parse_data_point_overrides(
             .find(|n| n.tag_name().name() == "marker" && is_c_ns(n.tag_name().namespace()));
         let (marker_symbol, marker_size, marker_fill, marker_line) =
             parse_marker_block(mk, theme_colors);
+        let explosion = ooxml_common::chart::extract_dpt_explosion(dpt);
         result.push(DataPointOverride {
             idx,
             color,
@@ -1576,6 +1753,7 @@ pub(crate) fn parse_data_point_overrides(
             marker_size,
             marker_fill,
             marker_line,
+            explosion,
         });
     }
     result
@@ -2237,7 +2415,7 @@ mod pie_doughnut_tests {
     #[test]
     fn pie_chart_series_and_categories() {
         let xml = pie_chart_xml("pieChart");
-        let chart = parse_chart_xml(&xml, &theme()).expect("pie chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("pie chart parses");
         assert_eq!(chart.chart_type, "pie");
         assert_eq!(chart.title.as_deref(), Some("Share"));
         assert_eq!(chart.categories, vec!["North", "South", "East"]);
@@ -2252,7 +2430,7 @@ mod pie_doughnut_tests {
     #[test]
     fn doughnut_chart_type() {
         let xml = pie_chart_xml("doughnutChart");
-        let chart = parse_chart_xml(&xml, &theme()).expect("doughnut chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("doughnut chart parses");
         assert_eq!(chart.chart_type, "doughnut");
         assert_eq!(chart.categories.len(), 3);
         assert_eq!(chart.series.len(), 1);
@@ -2306,7 +2484,7 @@ mod pie_doughnut_tests {
 
     #[test]
     fn adapter_bar_defaults_and_series_mapping() {
-        let data = parse_chart_xml(&bar_chart_xml(), &theme()).expect("bar parses");
+        let data = parse_chart_xml(&bar_chart_xml(), &theme(), (None, None)).expect("bar parses");
         // `order` exists on the parse-time series but not on the emitted model.
         assert_eq!(data.series[0].order, 0);
         let m = ChartModel::from(data);
@@ -2370,7 +2548,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&xml, &theme(), (None, None)).expect("parses"));
         assert_eq!(m.chart_type, "stackedBarH");
         // spPr present but noFill → transparent, so NOT the white default.
         assert!(
@@ -2395,7 +2573,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&xml, &theme(), (None, None)).expect("parses"));
         assert_eq!(m.chart_type, "line");
         assert!(m.series[0].categories.is_none());
     }
@@ -2420,7 +2598,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&xml, &theme(), (None, None)).expect("parses"));
         assert_eq!(m.series[0].smooth, Some(true));
         assert_eq!(m.series[1].smooth, None);
     }
@@ -2444,7 +2622,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&with, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&with, &theme(), (None, None)).expect("parses"));
         assert_eq!(m.disp_blanks_as.as_deref(), Some("span"));
 
         let without = format!(
@@ -2458,7 +2636,8 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m0 = ChartModel::from(parse_chart_xml(&without, &theme()).expect("parses"));
+        let m0 =
+            ChartModel::from(parse_chart_xml(&without, &theme(), (None, None)).expect("parses"));
         assert_eq!(m0.disp_blanks_as, None);
     }
 
@@ -2480,7 +2659,7 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m = ChartModel::from(parse_chart_xml(&with, &theme()).expect("parses"));
+        let m = ChartModel::from(parse_chart_xml(&with, &theme(), (None, None)).expect("parses"));
         assert!(
             m.date1904,
             "<c:date1904/> must set ChartModel.date1904 = true"
@@ -2497,7 +2676,8 @@ mod pie_doughnut_tests {
             c = C_NS,
             a = A_NS,
         );
-        let m0 = ChartModel::from(parse_chart_xml(&without, &theme()).expect("parses"));
+        let m0 =
+            ChartModel::from(parse_chart_xml(&without, &theme(), (None, None)).expect("parses"));
         assert!(
             !m0.date1904,
             "absent <c:date1904> must leave the 1900 default"
@@ -2642,7 +2822,7 @@ mod axis_title_and_border_tests {
             <a:defRPr sz="1800" b="1"/>
           </a:pPr><a:r><a:rPr sz="1800" b="1"/><a:t>Revenue</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = bar_chart_xml("", val_title, "");
-        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("chart parses");
         assert_eq!(chart.val_axis_title.as_deref(), Some("Revenue"));
         assert_eq!(chart.val_axis_title_size, Some(1800));
         assert_eq!(chart.val_axis_title_bold, Some(true));
@@ -2654,7 +2834,7 @@ mod axis_title_and_border_tests {
         let val_title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1800"/><a:t>Units</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = bar_chart_xml("", val_title, "");
-        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("chart parses");
         assert_eq!(chart.val_axis_title_size, Some(1800));
         assert_eq!(chart.val_axis_title_bold, None);
     }
@@ -2666,7 +2846,7 @@ mod axis_title_and_border_tests {
         let cat_title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1800"><a:solidFill><a:srgbClr val="ff0000"/></a:solidFill></a:rPr><a:t>Month</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = bar_chart_xml(cat_title, "", "");
-        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("chart parses");
         assert_eq!(chart.cat_axis_title.as_deref(), Some("Month"));
         assert_eq!(chart.cat_axis_title_size, Some(1800));
         assert_eq!(chart.cat_axis_title_color.as_deref(), Some("ff0000"));
@@ -2676,7 +2856,7 @@ mod axis_title_and_border_tests {
     #[test]
     fn fixture_c_no_sp_pr_no_border() {
         let xml = bar_chart_xml("", "", "");
-        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("chart parses");
         assert!(!chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color, None);
         assert_eq!(chart.chart_border_width_emu, None);
@@ -2688,7 +2868,7 @@ mod axis_title_and_border_tests {
     fn fixture_d_explicit_ln_solid_fill_border() {
         let sp_pr = r#"<c:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr>"#;
         let xml = bar_chart_xml("", "", sp_pr);
-        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("chart parses");
         assert!(chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color.as_deref(), Some("808080"));
         assert_eq!(chart.chart_border_width_emu, Some(9525));
@@ -2699,7 +2879,7 @@ mod axis_title_and_border_tests {
     fn fixture_e_ln_nofill_no_border() {
         let sp_pr = r#"<c:spPr><a:ln w="12700"><a:noFill/></a:ln></c:spPr>"#;
         let xml = bar_chart_xml("", "", sp_pr);
-        let chart = parse_chart_xml(&xml, &theme()).expect("chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("chart parses");
         assert!(chart.has_chart_sp_pr);
         assert_eq!(chart.chart_border_color, None);
     }
@@ -2760,7 +2940,7 @@ mod axis_title_and_border_tests {
         let y_title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1800"/><a:t>Period</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = scatter_chart_xml(x_title, y_title);
-        let chart = parse_chart_xml(&xml, &theme()).expect("scatter parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("scatter parses");
         // Bottom (X) valAx → cat-axis title, bold 18pt.
         assert_eq!(chart.cat_axis_title.as_deref(), Some("Acid/Bromate"));
         assert_eq!(chart.cat_axis_title_size, Some(1800));
@@ -2914,7 +3094,7 @@ mod date_axis_tests {
     #[test]
     fn date_axis_format_code_populates_cat_axis_format_code() {
         let xml = date_axis_chart_xml(r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="0"/>"#);
-        let chart = parse_chart_xml(&xml, &theme()).expect("dateAx chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("dateAx chart parses");
         assert_eq!(chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
     }
 
@@ -2923,7 +3103,7 @@ mod date_axis_tests {
     #[test]
     fn date_axis_delete_hides_cat_axis() {
         let xml = date_axis_chart_xml(r#"<c:delete val="1"/>"#);
-        let chart = parse_chart_xml(&xml, &theme()).expect("dateAx chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("dateAx chart parses");
         assert!(chart.cat_axis_hidden);
     }
 
@@ -2933,7 +3113,7 @@ mod date_axis_tests {
         let title = r#"<c:title><c:tx><c:rich><a:p>
             <a:r><a:rPr sz="1200"/><a:t>Date</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
         let xml = date_axis_chart_xml(title);
-        let chart = parse_chart_xml(&xml, &theme()).expect("dateAx chart parses");
+        let chart = parse_chart_xml(&xml, &theme(), (None, None)).expect("dateAx chart parses");
         assert_eq!(chart.cat_axis_title.as_deref(), Some("Date"));
         assert_eq!(chart.cat_axis_title_size, Some(1200));
     }
@@ -2997,7 +3177,8 @@ mod strict_namespace_tests {
             a = A_NS_STRICT,
         );
 
-        let chart = parse_chart_xml(&xml, &theme()).expect("Strict chartSpace must parse");
+        let chart =
+            parse_chart_xml(&xml, &theme(), (None, None)).expect("Strict chartSpace must parse");
         assert_eq!(chart.chart_type, "bar");
         assert_eq!(chart.title.as_deref(), Some("Strict Share"));
         assert_eq!(chart.categories, vec!["Q1", "Q2"]);
@@ -3102,7 +3283,12 @@ mod hidden_tests {
     fn hidden_chart_graphicframe_is_not_emitted() {
         for attr in [r#" hidden="1""#, r#" hidden="true""#] {
             let mut archive = archive_with_chart(attr);
-            let charts = load_sheet_charts(&mut archive, "worksheets/sheet1.xml", &theme());
+            let charts = load_sheet_charts(
+                &mut archive,
+                "worksheets/sheet1.xml",
+                &theme(),
+                (None, None),
+            );
             assert!(charts.is_empty(), "hidden chart emitted (attr={attr})");
         }
     }
@@ -3111,7 +3297,12 @@ mod hidden_tests {
     fn visible_chart_graphicframe_is_emitted_unchanged() {
         for attr in ["", r#" hidden="0""#, r#" hidden="false""#] {
             let mut archive = archive_with_chart(attr);
-            let charts = load_sheet_charts(&mut archive, "worksheets/sheet1.xml", &theme());
+            let charts = load_sheet_charts(
+                &mut archive,
+                "worksheets/sheet1.xml",
+                &theme(),
+                (None, None),
+            );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
     }

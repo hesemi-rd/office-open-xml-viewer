@@ -463,6 +463,11 @@ pub struct ChartSeries {
     /// element is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
+    /// `<c:ser><c:trendline>` per-series trendlines (ECMA-376 §21.2.2.211).
+    /// Reuses the shared `ooxml_common` type so it flows straight to the
+    /// ChartModel. None = no trendline (byte-stable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend_lines: Option<Vec<ooxml_common::chart::ChartTrendline>>,
 }
 
 /// Per-point override pulled from `<c:dPt idx="N">` siblings of a series
@@ -482,6 +487,9 @@ pub struct DataPointOverride {
     pub marker_fill: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_line: Option<String>,
+    /// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out %.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explosion: Option<u32>,
 }
 
 /// Custom data label for one point (`<c:dLbl idx="N">`).
@@ -804,6 +812,83 @@ pub struct ChartData {
     /// (renderer defaults to "gap").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disp_blanks_as: Option<String>,
+    // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
+    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60) — hole % (1–90).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hole_size: Option<u32>,
+    /// `<c:pieChart|doughnutChart><c:firstSliceAng val>` (§21.2.2.52) — start
+    /// angle (0–360°, clockwise from 12 o'clock).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_slice_angle: Option<u32>,
+    // ── Chart text font faces (CH10) ────────────────────────────────────────
+    /// `<c:catAx><c:txPr>…<a:latin typeface>` tick-label font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_face: Option<String>,
+    /// `<c:valAx><c:txPr>…<a:latin typeface>` tick-label font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_face: Option<String>,
+    /// `<c:catAx><c:title>…<a:latin typeface>` axis-title font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_font_face: Option<String>,
+    /// `<c:valAx><c:title>…<a:latin typeface>` axis-title font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_font_face: Option<String>,
+    /// `<c:dLbls><c:txPr>…<a:latin typeface>` data-label font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_label_font_face: Option<String>,
+    /// `<c:legend><c:txPr>…<a:latin typeface>` legend font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend_font_face: Option<String>,
+    /// `<c:legend><c:txPr>…<a:solidFill>` legend text color (hex, no `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend_font_color: Option<String>,
+    /// `<c:legend><c:txPr>` legend font size (hundredths of a point).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend_font_size_hpt: Option<i32>,
+    /// `<c:legend><c:txPr>…defRPr@b` legend bold flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend_font_bold: Option<bool>,
+    /// Theme heading (majorFont) Latin face — fallback for title/axis titles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme_major_font_latin: Option<String>,
+    /// Theme body (minorFont) Latin face — fallback for ticks/data labels/legend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme_minor_font_latin: Option<String>,
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+    /// `<c:valAx><c:majorGridlines>` presence (§21.2.2.100). `Some(false)` when
+    /// the value axis exists without the element. `None` = no value axis parsed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_gridlines: Option<bool>,
+    /// `<c:catAx><c:majorGridlines>` presence (§21.2.2.100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_major_gridlines: Option<bool>,
+    /// `<c:valAx><c:minorGridlines>` presence (§21.2.2.109).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_gridlines: Option<bool>,
+    /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_unit: Option<f64>,
+    /// `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_unit: Option<f64>,
+    /// `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98) — log base (>= 2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_log_base: Option<f64>,
+    /// `<c:valAx><c:scaling><c:orientation val>` (§21.2.2.130) — minMax|maxMin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_orientation: Option<String>,
+    /// `<c:catAx><c:scaling><c:orientation val>` — minMax|maxMin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_orientation: Option<String>,
+    /// `<c:catAx><c:tickLblPos val>` (§21.2.2.207).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_label_pos: Option<String>,
+    /// `<c:valAx><c:tickLblPos val>` (§21.2.2.207).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_tick_label_pos: Option<String>,
+    /// `<c:catAx><c:txPr><a:bodyPr rot>` (60000ths of a degree) — label rotation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_label_rotation: Option<i32>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).

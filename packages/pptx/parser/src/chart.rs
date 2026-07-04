@@ -465,6 +465,32 @@ pub(crate) fn parse_legacy_chart(
 
             let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
 
+            // Per-point `<c:dPt><c:explosion>` (§21.2.2.61) — pie/doughnut slice
+            // pull-out. Only the explosion is captured here (fills already flow
+            // through `data_point_colors`); a dPt with no explosion yields no
+            // override so the wire stays clean for the common non-exploded pie.
+            let data_point_overrides: Vec<ooxml_common::chart::ChartDataPointOverride> = ser
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
+                .filter_map(|dpt| {
+                    let idx = dpt
+                        .children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "idx")
+                        .and_then(|n| attr(&n, "val"))
+                        .and_then(|v| v.parse::<u32>().ok())?;
+                    let explosion = ooxml_common::chart::extract_dpt_explosion(dpt)?;
+                    Some(ooxml_common::chart::ChartDataPointOverride {
+                        idx,
+                        color: None,
+                        marker_symbol: None,
+                        marker_size: None,
+                        marker_fill: None,
+                        marker_line: None,
+                        explosion: Some(explosion),
+                    })
+                })
+                .collect();
+
             // Series value number format from `<c:val>…<c:numCache><c:formatCode>`.
             // Used for data labels when `<c:dLbls>` carries no explicit `<c:numFmt>`
             // (ECMA-376 §21.2.2.121). "General" means "no format" → drop it so the
@@ -526,7 +552,11 @@ pub(crate) fn parse_legacy_chart(
                 marker_size: None,
                 marker_fill: None,
                 marker_line: None,
-                data_point_overrides: None,
+                data_point_overrides: if data_point_overrides.is_empty() {
+                    None
+                } else {
+                    Some(data_point_overrides)
+                },
                 data_label_overrides: None,
                 series_data_labels: None,
                 err_bars: None,
@@ -534,6 +564,12 @@ pub(crate) fn parse_legacy_chart(
                 // Shared with the xlsx parser via ooxml-common so both honor the
                 // CT_Boolean implied-true semantics.
                 smooth: ooxml_common::chart::extract_series_smooth(*ser),
+                // `<c:ser><c:trendline>` (§21.2.2.211) — regression lines. Shared
+                // extractor; the line color resolves through the pptx theme.
+                trend_lines: ooxml_common::chart::extract_series_trendlines(
+                    *ser,
+                    &PptxColorResolver { theme },
+                ),
             }
         })
         .collect();
@@ -752,10 +788,12 @@ pub(crate) fn parse_legacy_chart(
     let mut cat_axis_title_size: Option<i32> = None;
     let mut cat_axis_title_bold: Option<bool> = None;
     let mut cat_axis_title_color: Option<String> = None;
+    let mut cat_axis_title_face: Option<String> = None;
     let mut val_axis_title: Option<String> = None;
     let mut val_axis_title_size: Option<i32> = None;
     let mut val_axis_title_bold: Option<bool> = None;
     let mut val_axis_title_color: Option<String> = None;
+    let mut val_axis_title_face: Option<String> = None;
     for ax in plot_area
         .children()
         .filter(|n| n.is_element() && matches!(n.tag_name().name(), "catAx" | "dateAx" | "valAx"))
@@ -779,6 +817,7 @@ pub(crate) fn parse_legacy_chart(
                     cat_axis_title_size = sz;
                     cat_axis_title_bold = b;
                     cat_axis_title_color = col;
+                    cat_axis_title_face = ooxml_common::chart::extract_axis_title_face(ax);
                 }
             }
         } else if val_axis_title.is_none() {
@@ -788,6 +827,7 @@ pub(crate) fn parse_legacy_chart(
                 val_axis_title_size = sz;
                 val_axis_title_bold = b;
                 val_axis_title_color = col;
+                val_axis_title_face = ooxml_common::chart::extract_axis_title_face(ax);
             }
         }
     }
@@ -823,6 +863,60 @@ pub(crate) fn parse_legacy_chart(
     // line/area. Shared with the xlsx parser via ooxml-common.
     let disp_blanks_as = ooxml_common::chart::extract_disp_blanks_as(root);
 
+    // ── Chart text font faces (CH10) ────────────────────────────────────────
+    // Tick-label faces (`<c:catAx|valAx><c:txPr>…<a:latin>`), data-label face
+    // (`<c:dLbls><c:txPr>…<a:latin>`) and legend text props, all via the shared
+    // ooxml-common extractors so pptx/xlsx stay in lockstep. Absent faces stay
+    // None; the renderer falls back to the theme body/heading font.
+    let cat_axis_font_face = cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_face);
+    let val_axis_font_face = val_ax.and_then(ooxml_common::chart::extract_axis_tick_label_face);
+    let data_label_font_face = ooxml_common::chart::extract_data_label_face(root);
+    let (legend_font_face, legend_font_size_hpt, legend_font_bold) =
+        ooxml_common::chart::extract_legend_text_props(root);
+    let legend_font_color = {
+        let resolver = PptxColorResolver { theme };
+        ooxml_common::chart::extract_legend_font_color(root, &resolver)
+    };
+    // Theme fallback fonts: pptx stores the theme's major/minor Latin faces in
+    // the `+mj-lt` / `+mn-lt` keys of the color+font map (see lib.rs
+    // parse_theme_colors). None when the theme lacks a fontScheme.
+    let theme_major_font_latin = theme.get("+mj-lt").cloned();
+    let theme_minor_font_latin = theme.get("+mn-lt").cloned();
+
+    // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
+    // holeSize (doughnut) / firstSliceAng (pie + doughnut), shared extractors.
+    let hole_size = ooxml_common::chart::extract_hole_size(root);
+    let first_slice_angle = ooxml_common::chart::extract_first_slice_angle(root);
+
+    // ── Axis scale model (CH6) ──────────────────────────────────────────────
+    // Gridline presence, manual major/minor units, log scale and orientation —
+    // all via the shared ooxml-common extractors on the primary val/cat axes.
+    // `<c:majorGridlines>` presence: Office writes it on the value axis by
+    // default (renderer keeps its historical always-on when the field is None),
+    // so we only emit `Some(false)` when a value axis EXISTS without the element.
+    let val_axis_major_gridlines =
+        val_ax.map(|ax| ooxml_common::chart::axis_has_major_gridlines(ax));
+    let cat_axis_major_gridlines =
+        cat_ax.map(|ax| ooxml_common::chart::axis_has_major_gridlines(ax));
+    let val_axis_minor_gridlines =
+        val_ax.map(|ax| ooxml_common::chart::axis_has_minor_gridlines(ax));
+    let val_axis_major_unit = val_ax.and_then(ooxml_common::chart::extract_axis_major_unit);
+    let val_axis_minor_unit = val_ax.and_then(ooxml_common::chart::extract_axis_minor_unit);
+    let val_axis_log_base = val_ax.and_then(ooxml_common::chart::extract_axis_log_base);
+    let val_axis_orientation = val_ax.and_then(ooxml_common::chart::extract_axis_orientation);
+    let cat_axis_orientation = cat_ax.and_then(ooxml_common::chart::extract_axis_orientation);
+    let cat_axis_tick_label_pos = cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_pos);
+    let val_axis_tick_label_pos = val_ax.and_then(ooxml_common::chart::extract_axis_tick_label_pos);
+    let cat_axis_label_rotation =
+        cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_rotation);
+
+    // Chart title font face (`<c:title>…<a:latin>`) — parity with xlsx, which
+    // already extracts it. `extract_axis_title_face` scopes to a node's
+    // direct-child `<c:title>`, so pass the title's parent (`<c:chart>`).
+    let title_font_face = title_node_opt
+        .and_then(|t| t.parent())
+        .and_then(ooxml_common::chart::extract_axis_title_face);
+
     Some(ChartElement {
         x: 0,
         y: 0,
@@ -847,7 +941,7 @@ pub(crate) fn parse_legacy_chart(
             cat_axis_major_tick_mark,
             title_font_size_hpt,
             title_font_color: None,
-            title_font_face: None,
+            title_font_face,
             cat_axis_font_size_hpt,
             val_axis_font_size_hpt,
             cat_axis_font_color,
@@ -885,6 +979,20 @@ pub(crate) fn parse_legacy_chart(
             chart_border_color,
             chart_border_width_emu,
             secondary_val_axis,
+            // Pie/doughnut geometry (CH8) + chart text font faces (CH10).
+            hole_size,
+            first_slice_angle,
+            cat_axis_font_face,
+            val_axis_font_face,
+            cat_axis_title_font_face: cat_axis_title_face,
+            val_axis_title_font_face: val_axis_title_face,
+            data_label_font_face,
+            legend_font_face,
+            legend_font_color,
+            legend_font_size_hpt,
+            legend_font_bold,
+            theme_major_font_latin,
+            theme_minor_font_latin,
             // ChartModel fields the legacy pptx `<c:chart>` path leaves unset
             // (they were never in the pptx `ChartElement` copy, so they defaulted
             // to `undefined` on the TS side and stay absent on the wire).
@@ -902,6 +1010,18 @@ pub(crate) fn parse_legacy_chart(
             radar_style: None,
             date1904,
             disp_blanks_as,
+            // ── Axis scale model (CH6) ──────────────────────────────────────
+            val_axis_major_gridlines,
+            cat_axis_major_gridlines,
+            val_axis_minor_gridlines,
+            val_axis_major_unit,
+            val_axis_minor_unit,
+            val_axis_log_base,
+            val_axis_orientation,
+            cat_axis_orientation,
+            cat_axis_tick_label_pos,
+            val_axis_tick_label_pos,
+            cat_axis_label_rotation,
         },
     })
 }
@@ -1059,6 +1179,8 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
         err_bars: None,
         // chartEx (waterfall) has no `<c:smooth>` concept.
         smooth: None,
+        // chartEx series carry no classic `<c:trendline>`.
+        trend_lines: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
@@ -1140,6 +1262,22 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
             chart_border_color: None,
             chart_border_width_emu: None,
             secondary_val_axis: None,
+            // chartEx charts (waterfall/treemap/etc.) are not pie/doughnut and
+            // don't carry `<c:txPr>` axis/legend faces; only the theme fallback
+            // fonts are threaded so their data labels can pick up the body font.
+            hole_size: None,
+            first_slice_angle: None,
+            cat_axis_font_face: None,
+            val_axis_font_face: None,
+            cat_axis_title_font_face: None,
+            val_axis_title_font_face: None,
+            data_label_font_face: None,
+            legend_font_face: None,
+            legend_font_color: None,
+            legend_font_size_hpt: None,
+            legend_font_bold: None,
+            theme_major_font_latin: theme.get("+mj-lt").cloned(),
+            theme_minor_font_latin: theme.get("+mn-lt").cloned(),
             val_axis_minor_tick_mark: None,
             cat_axis_minor_tick_mark: None,
             legend_manual_layout: None,
@@ -1158,6 +1296,20 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
             date1904: false,
             // chartEx waterfall has no line/area blanks to display.
             disp_blanks_as: None,
+            // chartEx (cx:) has its own axis model (`<cx:axis>`); the classic
+            // `<c:catAx>`/`<c:valAx>` scale properties don't apply, so leave the
+            // CH6 fields unset — the renderer keeps its defaults (byte-stable).
+            val_axis_major_gridlines: None,
+            cat_axis_major_gridlines: None,
+            val_axis_minor_gridlines: None,
+            val_axis_major_unit: None,
+            val_axis_minor_unit: None,
+            val_axis_log_base: None,
+            val_axis_orientation: None,
+            cat_axis_orientation: None,
+            cat_axis_tick_label_pos: None,
+            val_axis_tick_label_pos: None,
+            cat_axis_label_rotation: None,
         },
     })
 }

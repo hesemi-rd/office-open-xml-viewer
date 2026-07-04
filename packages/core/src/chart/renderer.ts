@@ -3,7 +3,7 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../types/chart';
+import type { ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
 import {
   computeChartFrame,
   chartTitleBand,
@@ -13,7 +13,7 @@ import {
   axisTitleMargin,
   type ChartLegendReserve,
 } from './layout.js';
-import { niceStep, valueAxisScale } from './axis-scale.js';
+import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
@@ -36,6 +36,40 @@ function pieSliceColor(idx: number, series: ChartSeries): string {
   const override = series.dataPointColors?.[idx];
   if (override) return `#${override}`;
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
+}
+
+// ─── Font-face resolution (CH10) ─────────────────────────────────────────────
+// Chart text elements draw with, in priority order: the element's own
+// `<a:latin typeface>` (from its `<c:txPr>`), else the theme font-scheme face
+// (heading `majorFont` for titles, body `minorFont` for tick labels / data
+// labels / legend, ECMA-376 §20.1.4.2), else the built-in `sans-serif`. When
+// neither a per-element face nor a theme face is present the result is exactly
+// `sans-serif`, so charts that specify no faces render byte-identically to
+// before. A resolved face is quoted and given the same Calibri/Arial fallback
+// chain as the chart title, so a font the platform lacks still degrades to a
+// sans-serif rather than a serif default.
+type ChartFontRole = 'major' | 'minor';
+
+/** Resolve a DrawingML theme font-scheme reference (`+mj-lt` / `+mn-lt` etc.,
+ *  ECMA-376 §20.1.4.1.16) to the concrete theme face. `+mj-*` = heading
+ *  (majorFont), `+mn-*` = body (minorFont); the axis suffix (`-lt`/`-ea`/`-cs`)
+ *  is ignored here — chart text is Latin. A non-reference face passes through.
+ *  Returns null when a reference can't be resolved (theme not threaded). */
+function resolveThemeFontRef(chart: ChartModel, face: string | null | undefined): string | null | undefined {
+  if (!face) return face;
+  if (face.startsWith('+mj')) return chart.themeMajorFontLatin ?? null;
+  if (face.startsWith('+mn')) return chart.themeMinorFontLatin ?? null;
+  return face;
+}
+
+function chartFontFamily(
+  chart: ChartModel,
+  elementFace: string | null | undefined,
+  role: ChartFontRole,
+): string {
+  const themeFace = role === 'major' ? chart.themeMajorFontLatin : chart.themeMinorFontLatin;
+  const face = resolveThemeFontRef(chart, elementFace) ?? themeFace;
+  return face ? `"${face}", Calibri, Arial, sans-serif` : 'sans-serif';
 }
 
 /** Chart types whose legend lists one entry per category (data point of the
@@ -89,9 +123,11 @@ function drawAxisTitle(
   // plot height for the rotated val title). Titles longer than the axis are
   // elided with an ellipsis rather than hard-cut at a fixed char count.
   maxPx: number,
+  // Resolved CSS font-family (element face ?? theme heading ?? sans-serif).
+  fontFamily = 'sans-serif',
 ): void {
   ctx.save();
-  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px sans-serif`;
+  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
   ctx.fillStyle = color;
   const label = elideToWidth(ctx, text, maxPx);
   if (axis === 'cat') {
@@ -138,7 +174,7 @@ function drawAxisTitles(
     drawAxisTitle(
       ctx, chart.valAxisTitle, anchorX, anchorY, 'val',
       valTitlePx, chart.valAxisTitleFontBold ?? true, axisTitleColor(chart.valAxisTitleFontColor),
-      ph,
+      ph, chartFontFamily(chart, chart.valAxisTitleFontFace, 'major'),
     );
   }
   if (chart.catAxisTitle) {
@@ -148,7 +184,7 @@ function drawAxisTitles(
     drawAxisTitle(
       ctx, chart.catAxisTitle, anchorX, anchorY, 'cat',
       catTitlePx, chart.catAxisTitleFontBold ?? true, axisTitleColor(chart.catAxisTitleFontColor),
-      pw,
+      pw, chartFontFamily(chart, chart.catAxisTitleFontFace, 'major'),
     );
   }
 }
@@ -220,20 +256,40 @@ function buildLegendEntries(series: ChartSeries[], chartType: string | undefined
   }));
 }
 
+/** Resolved legend text styling (CH10). All optional so the default (no
+ *  `<c:legend><c:txPr>`) reproduces the historical `sans-serif` / `#333`
+ *  legend byte-for-byte. `fontFamily` already carries the theme-body fallback;
+ *  `sizePx` overrides the proportional size only when the file set one. */
+interface LegendTextStyle {
+  fontFamily: string;
+  color: string;
+  bold: boolean;
+  sizePx: number | null;
+}
+
+const DEFAULT_LEGEND_STYLE: LegendTextStyle = {
+  fontFamily: 'sans-serif',
+  color: '#333',
+  bold: false,
+  sizePx: null,
+};
+
 function drawLegend(
   ctx: CanvasRenderingContext2D,
   series: ChartSeries[],
   lx: number, ly: number, lw: number, lh: number,
   orient: 'vertical' | 'horizontal' = 'vertical',
   chartType?: string,
+  style: LegendTextStyle = DEFAULT_LEGEND_STYLE,
 ): void {
   const sw = 10; const gap = 4;
   const swatchStyle = legendSwatchStyle(chartType);
   const entries = buildLegendEntries(series, chartType);
+  const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
-    const fontSize = Math.max(9, Math.min(12, lh * 0.7));
-    ctx.font = `${fontSize}px sans-serif`;
+    const fontSize = style.sizePx ?? Math.max(9, Math.min(12, lh * 0.7));
+    ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
     ctx.textBaseline = 'middle';
     const itemGap = 12;
     // Cap each entry's text at the full legend strip (minus its own swatch+gap)
@@ -252,14 +308,14 @@ function drawLegend(
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
       drawLegendSwatch(ctx, swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize);
-      ctx.fillStyle = '#333'; ctx.textAlign = 'left';
+      ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
     }
     return;
   }
-  const fontSize = Math.max(9, Math.min(12, lh / (entries.length + 1)));
-  ctx.font = `${fontSize}px sans-serif`;
+  const fontSize = style.sizePx ?? Math.max(9, Math.min(12, lh / (entries.length + 1)));
+  ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
   ctx.textBaseline = 'middle';
   const rowH = fontSize + 4;
   // Vertical legend: each label runs from just after the swatch to the right
@@ -268,10 +324,23 @@ function drawLegend(
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
     drawLegendSwatch(ctx, swatchStyle, entries[i].color, lx, ry, sw, fontSize);
-    ctx.fillStyle = '#333'; ctx.textAlign = 'left';
+    ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
   }
+}
+
+/** Build the resolved legend text style for a chart (CH10). Absent legend
+ *  `<c:txPr>` fields fall back to the historical defaults, keeping legends
+ *  byte-stable for files that style nothing. */
+function legendTextStyle(chart: ChartModel): LegendTextStyle {
+  const face = resolveThemeFontRef(chart, chart.legendFontFace) ?? chart.themeMinorFontLatin;
+  return {
+    fontFamily: face ? `"${face}", Calibri, Arial, sans-serif` : 'sans-serif',
+    color: chart.legendFontColor ? `#${chart.legendFontColor}` : '#333',
+    bold: chart.legendFontBold ?? false,
+    sizePx: chart.legendFontSizeHpt != null ? chart.legendFontSizeHpt / 100 : null,
+  };
 }
 
 // Legend placement is resolved by `chartLegendReserve` (layout.ts). This alias
@@ -289,6 +358,7 @@ function drawLegendForLayout(
   topBand: number,
 ): void {
   if (!leg) return;
+  const legStyle = legendTextStyle(chart);
   // `<c:legend><c:manualLayout>` (§21.2.2.31) wins over the default side-based
   // rectangle. We honor the `edge` placement mode — fractions are measured
   // from the top-left of the chart space — which matches what Excel's built-in
@@ -304,21 +374,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType);
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType);
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle);
       break;
   }
 }
@@ -395,11 +465,187 @@ function strokeValueGridlineH(
   ctx.stroke();
 }
 
+/** True when the value axis is reversed (`<c:valAx><c:scaling><c:orientation
+ *  val="maxMin">`, ECMA-376 §21.2.2.130). Absent/"minMax" ⇒ false (byte-stable). */
+function valAxisReversed(chart: ChartModel): boolean {
+  return chart.valAxisOrientation === 'maxMin';
+}
+
+/** True when the category axis is reversed (`<c:catAx>…orientation="maxMin">`). */
+function catAxisReversed(chart: ChartModel): boolean {
+  return chart.catAxisOrientation === 'maxMin';
+}
+
+/** Whether to draw value-axis MAJOR gridlines. Office writes `<c:majorGridlines>`
+ *  on the value axis by default, so the historical always-on behavior maps to
+ *  "draw unless the model explicitly says the element is absent". `undefined`
+ *  (parser didn't model it) ⇒ true (byte-stable); `false` (axis present without
+ *  the element) ⇒ off. */
+function drawValMajorGridlines(chart: ChartModel): boolean {
+  return chart.valAxisMajorGridlines !== false;
+}
+
+/** A resolved value-axis plan: rounded bounds, the major gridline VALUES to
+ *  stroke, an optional minor gridline VALUES list, and the value→fraction map
+ *  (0 at the axis min end, 1 at the max end — before any pixel flip). Centralizes
+ *  the CH6 major unit / logBase / orientation handling so every value-axis
+ *  family shares one spec-faithful code path. With no CH6 fields set the plan is
+ *  byte-identical to the old inline math: `step`/bounds from `valueAxisScale`,
+ *  `majorLines = [min, min+step, … max]`, `frac(v) = (v-min)/(max-min)`. */
+interface ValueAxisPlan {
+  min: number;
+  max: number;
+  step: number;
+  majorLines: number[];
+  minorLines: number[];
+  /** 0..1 position of `v` from the axis minimum toward the maximum (log-aware,
+   *  orientation-aware). Renderers turn this into a pixel with
+   *  `plotBottom - frac(v) * plotHeight` (vertical) — the reversal is already
+   *  baked in, so callers keep their existing `- frac*len` form. */
+  frac: (v: number) => number;
+}
+
+/** Build a {@link ValueAxisPlan} for the primary value axis. `dataMin`/`dataMax`
+ *  are the raw data extents already massaged by the caller (0-anchoring, pct
+ *  normalization, explicit valMin/valMax). `axisLenPt` drives the auto major
+ *  unit. Reversal is read from the chart's value-axis orientation. */
+function planValueAxis(
+  chart: ChartModel, dataMin: number, dataMax: number, axisLenPt?: number,
+): ValueAxisPlan {
+  const reversed = valAxisReversed(chart);
+  const logBase = chart.valAxisLogBase;
+  if (logBase != null && isFinite(logBase) && logBase >= 2) {
+    // Logarithmic axis (ECMA-376 §21.2.2.98): bounds snap to powers of the base,
+    // gridlines fall on those decades, values map in log space.
+    const { min, max, lines } = logAxisScale(dataMin, dataMax, logBase, chart.valMin, chart.valMax);
+    return {
+      min, max,
+      step: lines.length > 1 ? lines[1] - lines[0] : max - min,
+      majorLines: lines,
+      minorLines: [],
+      frac: (v: number) => axisFraction(v, min, max, { logBase, reversed }),
+    };
+  }
+  const { min, max, step } = valueAxisScale(
+    dataMin, dataMax, chart.valMin, chart.valMax, axisLenPt, chart.valAxisMajorUnit,
+  );
+  const range = (max - min) || 1;
+  const majorLines: number[] = [];
+  const steps = Math.round((max - min) / step);
+  for (let si = 0; si <= steps; si++) majorLines.push(min + si * step);
+  // Minor gridlines (ECMA-376 §21.2.2.109/§21.2.2.112): only when the file both
+  // declares `<c:minorGridlines>` AND a positive `<c:minorUnit>`; the minor lines
+  // between the majors are the interior multiples of the minor unit.
+  const minorLines: number[] = [];
+  const mu = chart.valAxisMinorUnit;
+  if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
+    for (let v = min + mu; v < max - 1e-9; v += mu) {
+      // Skip values that coincide with a major line.
+      if (Math.abs((v - min) / step - Math.round((v - min) / step)) > 1e-6) minorLines.push(v);
+    }
+  }
+  return {
+    min, max, step, majorLines, minorLines,
+    frac: (v: number) => (reversed ? 1 - (v - min) / range : (v - min) / range),
+  };
+}
+
+/** Draw a series' `<c:trendline>` regression lines (ECMA-376 §21.2.2.211).
+ *  Each trendline is fitted over the series' non-null `(categoryIndex, value)`
+ *  points via {@link fitTrendline} and stroked (dashed) through the chart's
+ *  `toX` (category-index → pixel) and `toY` (value → pixel) maps. `forward` /
+ *  `backward` extend the linear fit past the data ends by that many category
+ *  units. Unsupported types (exp/log/power/poly) fit to nothing and draw
+ *  nothing. `seriesColor` is the fallback stroke when the trendline declares no
+ *  `<a:ln>` color. Byte-stable no-op for series with no trendline. */
+function drawSeriesTrendlines(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  seriesColor: string,
+  toX: (i: number) => number,
+  toY: (v: number) => number,
+  ptToPx: number,
+): void {
+  const tls = s.trendLines;
+  if (!tls || tls.length === 0) return;
+  // Collect the fittable (index, value) points once.
+  const xs: number[] = []; const ys: number[] = [];
+  for (let i = 0; i < s.values.length; i++) {
+    const v = s.values[i];
+    if (v != null) { xs.push(i); ys.push(v); }
+  }
+  if (xs.length < 2) return;
+  const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
+  for (const tl of tls) {
+    const fit = fitTrendline(xs, ys, tl.trendlineType, {
+      period: tl.period, intercept: tl.intercept,
+    });
+    if (fit.xs.length < 2) continue;
+    // For a linear fit, forward/backward extend the two endpoints along the
+    // fitted slope (in category-index units).
+    let fxs = fit.xs; let fys = fit.ys;
+    if (tl.trendlineType === 'linear') {
+      const m = (fit.ys[1] - fit.ys[0]) / ((fit.xs[1] - fit.xs[0]) || 1);
+      const bwd = tl.backward ?? 0; const fwd = tl.forward ?? 0;
+      const x0 = fit.xs[0] - bwd; const x1 = fit.xs[1] + fwd;
+      fxs = [x0, x1];
+      fys = [fit.ys[0] - m * bwd, fit.ys[1] + m * fwd];
+    }
+    ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
+    ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    for (let i = 0; i < fxs.length; i++) {
+      const px = toX(fxs[i]); const py = toY(fys[i]);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash(prevDash);
+}
+
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
  *  fallback. ptToPx comes from the host renderer (EMU/px scale at display). */
 function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
   if (sizeHpt) return (sizeHpt / 100) * ptToPx;
   return Math.max(8, h * 0.045);
+}
+
+/** Whether the CATEGORY tick labels should be drawn. `<c:catAx><c:tickLblPos
+ *  val="none">` (ECMA-376 §21.2.2.207) hides them; anything else (incl. absent)
+ *  shows them, so the default is byte-stable. */
+function catLabelsVisible(chart: ChartModel): boolean {
+  return chart.catAxisTickLabelPos !== 'none';
+}
+
+/** Category-axis label rotation in RADIANS (canvas convention), from
+ *  `<c:catAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
+ *  degree). Returns 0 when unset — the un-rotated fast path callers keep. */
+function catLabelRotationRad(chart: ChartModel): number {
+  const rot = chart.catAxisLabelRotation;
+  if (rot == null || rot === 0) return 0;
+  return (rot / 60000) * (Math.PI / 180);
+}
+
+/** Draw a category label at `(x, y)` with optional rotation. `rotRad === 0`
+ *  keeps the exact non-rotated draw the callers used before (byte-stable):
+ *  `ctx.fillText(text, x, y)` with the caller's current align/baseline. When
+ *  rotated, the label pivots around `(x, y)` and is right-aligned+middle so the
+ *  text trails up-left from the tick, matching PowerPoint's angled axis labels. */
+function drawRotatedCatLabel(
+  ctx: CanvasRenderingContext2D, text: string, x: number, y: number, rotRad: number,
+): void {
+  if (rotRad === 0) {
+    ctx.fillText(text, x, y);
+    return;
+  }
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rotRad);
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
 }
 
 /** Resolved secondary value-axis scale (combo charts). `min`/`max`/`step` are
@@ -522,7 +768,11 @@ function drawChartTitle(
   x: number, y: number, w: number, fontSize: number,
 ): void {
   if (!chart.title) return;
-  const face = chart.titleFontFace ? `"${chart.titleFontFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
+  // Resolve a theme-scheme reference (`+mj-lt` / `+mn-lt`) title face; a
+  // concrete face passes through. When no face is set, keep the historical
+  // Calibri/Arial default chain (byte-stable for charts without a title face).
+  const titleFace = resolveThemeFontRef(chart, chart.titleFontFace);
+  const face = titleFace ? `"${titleFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
   ctx.font = `${(chart.titleFontBold ?? true) ? 'bold ' : ''}${fontSize}px ${face}`;
   ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333';
   ctx.textAlign = 'center';
@@ -718,7 +968,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (chart.valMax != null) dataMax = chart.valMax;
   if (chart.valMin != null) dataMin = chart.valMin;
   if (dataMax === 0 && dataMin === 0) dataMax = 1;
-  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax, valAxisLenPt);
+  // `planValueAxis` folds in the CH6 major unit / logBase / orientation; with
+  // none set it is byte-identical to `valueAxisScale` + a linear map.
+  const plan = planValueAxis(chart, dataMin, dataMax, valAxisLenPt);
+  const { min: axMin, max: axMax, step } = plan;
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
   // own "nice" major unit / gridline count. Its axis is the vertical right edge,
@@ -737,7 +990,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // wider left band for the category labels).
   let valLabelBandW = 0;
   if (!isH && !chart.valAxisHidden) {
-    ctx.font = `${tickFontPx}px sans-serif`;
+    // Measure with the same face the value-axis ticks draw with (below), so the
+    // reserved gutter width matches the painted labels when a real face is set.
+    ctx.font = `${tickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     let wmax = 0;
     const vSteps = Math.round((axMax - axMin) / step);
     for (let si = 0; si <= vSteps; si++) {
@@ -818,8 +1073,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // mapping is unchanged. `valX`/`valY` give the on-axis pixel for a value on
   // the value axis (X for horizontal bars, Y for columns).
   const axRange = (axMax - axMin) || 1;
-  const valY = (v: number): number => py0 + ph - ((v - axMin) / axRange) * ph;
-  const valX = (v: number): number => px0 + ((v - axMin) / axRange) * pw;
+  const valY = (v: number): number => py0 + ph - plan.frac(v) * ph;
+  const valX = (v: number): number => px0 + plan.frac(v) * pw;
   const zeroY = valY(0); // column zero line
   const zeroX = valX(0); // horizontal-bar zero line
   const toYPrimaryLine = valY;
@@ -832,15 +1087,26 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const gridColor = '#e0e0e0';
   const steps = Math.round(axRange / step);
   ctx.textBaseline = 'middle';
-  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
   // Honor `<c:valAx><c:txPr>…<a:solidFill>` when present (ECMA-376 §21.2.2.*);
   // otherwise keep the neutral gray default.
   const valLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
   ctx.fillStyle = valLabelColor;
 
   if (!chart.valAxisHidden) {
-    for (let si = 0; si <= steps; si++) {
-      const val = axMin + si * step;
+    // Minor gridlines (under the majors) when the file declares them.
+    for (const val of plan.minorLines) {
+      if (!isH) {
+        strokeValueGridlineH(ctx, px0, pw, valY(val), false);
+      } else {
+        const gx = valX(val);
+        ctx.strokeStyle = gridColor; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+      }
+    }
+    const drawMajorGrid = drawValMajorGridlines(chart);
+    const drawLabels = chart.valAxisTickLabelPos !== 'none';
+    for (const val of plan.majorLines) {
       // The zero line is the emphasized gridline (`si === 0` was that line only
       // while the axis was anchored at 0; with a negative minimum it moves up).
       const isZero = Math.abs(val) < step * 1e-9;
@@ -849,16 +1115,22 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
       if (!isH) {
         const gy = valY(val);
-        strokeValueGridlineH(ctx, px0, pw, gy, isZero);
-        ctx.textAlign = 'right';
-        ctx.fillText(label, px0 - 12, gy);
+        if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, isZero);
+        if (drawLabels) {
+          ctx.textAlign = 'right';
+          ctx.fillText(label, px0 - 12, gy);
+        }
       } else {
         const gx = valX(val);
-        ctx.strokeStyle = isZero ? '#aaa' : gridColor;
-        ctx.lineWidth = isZero ? 1 : 0.5;
-        ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
-        ctx.textAlign = 'center';
-        ctx.fillText(label, gx, py0 + ph + 10);
+        if (drawMajorGrid) {
+          ctx.strokeStyle = isZero ? '#aaa' : gridColor;
+          ctx.lineWidth = isZero ? 1 : 0.5;
+          ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+        }
+        if (drawLabels) {
+          ctx.textAlign = 'center';
+          ctx.fillText(label, gx, py0 + ph + 10);
+        }
       }
     }
   }
@@ -993,7 +1265,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           const lsz = chart.dataLabelFontSizeHpt
             ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
-          ctx.font = `bold ${lsz}px sans-serif`;
+          ctx.font = `bold ${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
           const text = pct
             ? `${Math.round(sv)}%`
             : formatChartValWithCode(
@@ -1036,7 +1308,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           const lsz = chart.dataLabelFontSizeHpt
             ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
-          ctx.font = `bold ${lsz}px sans-serif`;
+          ctx.font = `bold ${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
           const text = pct
             ? `${Math.round(sv)}%`
             : formatChartValWithCode(
@@ -1060,17 +1332,19 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
-  if (!chart.catAxisHidden) {
+  if (!chart.catAxisHidden && catLabelsVisible(chart)) {
     // `<c:catAx><c:txPr>…<a:solidFill>` colors the category tick labels (e.g.
     // sample-2 slide-16's "2025年3月期" labels are `bg1 lumMod 75%` gray).
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
-    ctx.font = `${Math.max(8, Math.min(11, catGap * 0.5))}px sans-serif`;
+    ctx.font = `${Math.max(8, Math.min(11, catGap * 0.5))}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
     // Column: each label is centered in a category slot of width `catGap`, so
     // cap it just under that so neighbours don't collide. Horizontal bars: the
     // label sits right-aligned in the left gutter between the val-title/legend
     // band and the plot edge, so cap it at that band width.
     const catSlotMaxPx = catGap - 4;
     const horizLabelMaxPx = (px0 - 4) - (x + legLeftW + valTitleW);
+    // `<c:catAx><c:txPr><a:bodyPr rot>` rotates the column labels (0 = flat).
+    const rotRad = catLabelRotationRad(chart);
     for (let ci = 0; ci < n; ci++) {
       // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
       // (e.g. dateAx serials → real dates). No-op for string categories.
@@ -1078,7 +1352,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       if (!isH) {
         const lx = px0 + ci * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        ctx.fillText(elideToWidth(ctx, raw, catSlotMaxPx), lx, py0 + ph + 3);
+        // Rotation elides against a longer diagonal budget; unrotated keeps the
+        // slot width and the byte-stable `fillText(text, x, y)` path.
+        const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
+        drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, py0 + ph + 3, rotRad);
       } else {
         const ly = py0 + (n - 1 - ci) * catGap + catGap / 2;
         ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
@@ -1115,6 +1392,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
         }
       }
+      // Trendlines (`<c:trendline>`, §21.2.2.211) for the combo line series.
+      drawSeriesTrendlines(ctx, s, color, (i) => px0 + i * catGap + catGap / 2, yOf, ptToPx);
     }
   }
 
@@ -1329,18 +1608,24 @@ function renderLineChart(
     }
   }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
+  // A log axis can't anchor at 0 (log undefined) — keep the positive data
+  // minimum so `logAxisScale` can floor it to a decade. Linear axes keep the
+  // historical 0-anchor for positive data (byte-stable).
+  const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
   if (chart.valMin != null) dataMin = chart.valMin;
-  else if (dataMin > 0) dataMin = 0;
+  else if (dataMin > 0 && !isLogAxis) dataMin = 0;
   if (chart.valMax != null) dataMax = chart.valMax;
   else if (dataMax < 0) dataMax = 0;
   if (dataMax === dataMin) dataMax = dataMin + 1;
 
   // Value axis is vertical → its length is the plot height (axis-length-aware
-  // auto major unit, same model as the bar/column renderer).
-  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx);
-  const range = axMax - axMin; if (range === 0) return;
+  // auto major unit, same model as the bar/column renderer). `planValueAxis`
+  // folds in the CH6 major unit / logBase / orientation; with none set it is
+  // byte-identical to the old `valueAxisScale` + linear `toY`.
+  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
+  if (plan.max - plan.min === 0) return;
 
-  const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
+  const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
   // Secondary series map through their own scale; `secScale` is null on the
   // common single-axis path so `yMapFor` always returns the primary `toY`.
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
@@ -1348,23 +1633,30 @@ function renderLineChart(
     isSecondarySeries(s) ? toYSecondary : toY;
   // crossBetween="between" (default) insets the first/last category by half a
   // step so points aren't flush against the axes. "midCat" anchors them.
+  // A `maxMin` category orientation (§21.2.2.130) mirrors the index left↔right.
   const between = isCrossBetween(chart);
+  const catRev = catAxisReversed(chart);
   const toX = between
-    ? (i: number) => px0 + ((i + 0.5) / n) * pw
-    : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+    ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
+    : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
 
   if (!chart.valAxisHidden) {
-    const steps = Math.round((axMax - axMin) / step);
-    ctx.font = `${valAxFontPx}px sans-serif`;
+    ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
-    for (let si = 0; si <= steps; si++) {
-      const v = axMin + si * step;
+    // Minor gridlines first (under the majors), then major gridlines + ticks +
+    // labels. Minor lines are only populated when the file declares them.
+    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false);
+    const drawMajorGrid = drawValMajorGridlines(chart);
+    const drawLabels = chart.valAxisTickLabelPos !== 'none';
+    for (const v of plan.majorLines) {
       const gy = toY(v);
-      strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
+      if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
-      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
-      ctx.textAlign = 'right';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+      if (drawLabels) {
+        ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+        ctx.textAlign = 'right';
+        ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+      }
     }
   }
 
@@ -1448,6 +1740,7 @@ function renderLineChart(
       // plotted null (a stacked sum already reads null as 0), and unstacked
       // "zero" mode plots the null at 0 — both cases get a label too.
       stacked || dispBlanks === 'zero',
+      chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
     );
     if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
@@ -1470,31 +1763,41 @@ function renderLineChart(
         }
       }
       if (chart.showDataLabels && !perPointLabels) {
-        ctx.font = `${dataLabelPx}px sans-serif`;
+        ctx.font = `${dataLabelPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         const labelOffset = drawMarkers ? markerR + 1 : 2;
         ctx.fillText(formatChartVal(pv), toX(ci), yOf(pv) - labelOffset);
         ctx.fillStyle = color;
       }
     }
+
+    // Trendlines (`<c:trendline>`, §21.2.2.211) over this series' points —
+    // drawn on top of the line/markers, dashed, in the series color unless the
+    // trendline declares its own `<a:ln>`.
+    drawSeriesTrendlines(ctx, s, color, toX, yOf, ptToPx);
   }
 
   if (!chart.catAxisHidden) {
     const labelInterval = Math.max(1, Math.ceil(n / 8));
     const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = `${catAxFontPx}px sans-serif`;
+    ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
     // Only every `labelInterval`-th category is drawn, so the horizontal room a
     // centered label owns is the spacing between two drawn labels: (pw/n)·interval.
     const catSlotMaxPx = (pw / n) * labelInterval - 4;
+    // Ticks are still drawn under `tickLblPos="none"`; only the labels drop.
+    const showLabels = catLabelsVisible(chart);
+    const rotRad = catLabelRotationRad(chart);
     for (let ci = 0; ci < n; ci += labelInterval) {
       const tx = toX(ci);
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
+      if (!showLabels) continue;
       ctx.fillStyle = catLabelColor;
       // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
       // category-axis numFmt; string categories pass through unchanged.
       const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
-      ctx.fillText(elideToWidth(ctx, label, catSlotMaxPx), tx, py0 + ph + 5);
+      const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
+      drawRotatedCatLabel(ctx, elideToWidth(ctx, label, budget), tx, py0 + ph + 5, rotRad);
     }
   }
 
@@ -1778,12 +2081,13 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       // from before this parameter existed).
       drawCategoryDataLabels(
         ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, true,
+        chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
       );
     }
   }
 
   if (!chart.valAxisHidden) {
-    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
     const steps = Math.round(axMax / step);
     for (let si = 0; si <= steps; si++) {
@@ -1824,7 +2128,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (!chart.catAxisHidden) {
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
+    ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
     // Show every category label that fits; thin out only when adjacent labels
     // would collide (so 12 months all render, unlike a fixed n/8 cap). Measure
     // each label's real full width (the previous slice(0,10) under-measured wide
@@ -1892,37 +2196,104 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const cx2 = frame.center.cx;
   const cy2 = frame.center.cy;
   const outerR = Math.min(pw, ph) * 0.42;
-  const innerR = isDoughnut ? outerR * 0.5 : 0;
 
-  let angle = -Math.PI / 2;
-  for (let i = 0; i < vals.length; i++) {
-    const slice = (vals[i] / total) * Math.PI * 2;
-    const color = pieSliceColor(i, s);
-    ctx.beginPath();
-    ctx.moveTo(cx2, cy2);
-    ctx.arc(cx2, cy2, outerR, angle, angle + slice);
-    ctx.closePath();
-    ctx.fillStyle = color; ctx.fill();
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+  // §21.2.2.52 firstSliceAng: the first slice begins `firstSliceAngle` degrees
+  // clockwise from 12 o'clock. Canvas 0 rad points right (+x) and its angles
+  // grow clockwise (y-down), so 12 o'clock is −90°. Default 0 keeps the
+  // historical −90° start (byte-stable for files without the element).
+  const startAngle = -Math.PI / 2 + ((chart.firstSliceAngle ?? 0) * Math.PI) / 180;
 
-    if (chart.showDataLabels && slice > 0.15) {
+  // §21.2.2.60 holeSize (doughnut only): hole diameter as 1–90% of the outer
+  // diameter. The ECMA schema default is 10%, but a real doughnut always writes
+  // an explicit holeSize (Office emits 50–75%); 50% is the historical inner
+  // radius, so an absent holeSize keeps the prior look (byte-stable). Pie has
+  // no hole (innerR = 0).
+  const holePct = isDoughnut ? Math.max(1, Math.min(90, chart.holeSize ?? 50)) : 0;
+
+  // Concentric rings. Doughnut plots EVERY series as a ring (outermost =
+  // series[0]); pie plots only series[0]. The band from the hole radius to the
+  // outer radius is split evenly across the rings. A single-series doughnut is
+  // byte-identical to the prior single-ring geometry.
+  const rings = isDoughnut ? chart.series : [s];
+  const innerR = outerR * (holePct / 100);
+  const ringBand = (outerR - innerR) / rings.length;
+
+  // Explosion offset for slice `i` of series `ser`: move the slice out from the
+  // center along its mid-angle by `explosion`% of the outer radius. §21.2.2.61
+  // only defines `explosion` as an unbounded `xsd:unsignedInt` "amount the data
+  // point shall be moved from the center of the pie" — the 0-100-as-percent
+  // interpretation is a de-facto Office convention (the Point Explosion UI
+  // slider), not a spec-mandated range (see `ChartDataPointOverride.explosion`
+  // in types/chart.ts). Absent / zero explosion → no offset (byte-stable).
+  const explodeOffset = (ser: ChartSeries, i: number): number => {
+    const e = (ser.dataPointOverrides ?? []).find(d => d.idx === i)?.explosion ?? 0;
+    return e > 0 ? (e / 100) * outerR : 0;
+  };
+
+  // The legacy `showDataLabels` percent label (drawn INLINE per slice on the
+  // outer ring, exactly as before) is used only when the series has no rich
+  // `<c:dLbls>` definition; the rich labels are drawn in a separate pass after
+  // all slices. Keeping the legacy path inline preserves the historical
+  // draw-call order for a plain pie/doughnut (byte-stable).
+  const richDef = s.seriesDataLabels;
+  const hasRichLabels = richDef != null &&
+    (richDef.showVal || richDef.showCatName || richDef.showSerName || richDef.showPercent);
+  const legacyLabels = chart.showDataLabels && !hasRichLabels;
+  const dLblFont = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
+
+  for (let ring = 0; ring < rings.length; ring++) {
+    const rs = rings[ring];
+    const rVals = rs.values.map(v => Math.abs(v ?? 0));
+    const rTotal = rVals.reduce((a, b) => a + b, 0);
+    if (rTotal === 0) continue;
+    // Ring 0 is the OUTERMOST band; deeper rings step inward toward the hole.
+    const rOuter = outerR - ring * ringBand;
+    const rInner = rOuter - ringBand;
+
+    let angle = startAngle;
+    for (let i = 0; i < rVals.length; i++) {
+      const slice = (rVals[i] / rTotal) * Math.PI * 2;
+      const color = pieSliceColor(i, rs);
       const midAngle = angle + slice / 2;
-      const labelR = outerR * (isDoughnut ? 0.75 : 0.6);
-      const lx2 = cx2 + Math.cos(midAngle) * labelR;
-      const ly2 = cy2 + Math.sin(midAngle) * labelR;
-      const pct2 = Math.round((vals[i] / total) * 100);
-      const lsz = Math.max(8, outerR * 0.1);
-      ctx.font = `bold ${lsz}px sans-serif`;
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`${pct2}%`, lx2, ly2);
-    }
+      const off = explodeOffset(rs, i);
+      const ox = off > 0 ? Math.cos(midAngle) * off : 0;
+      const oy = off > 0 ? Math.sin(midAngle) * off : 0;
+      ctx.beginPath();
+      if (rInner > 0.01) {
+        // Annular slice (doughnut ring): outer arc CW, inner arc CCW.
+        ctx.arc(cx2 + ox, cy2 + oy, rOuter, angle, angle + slice);
+        ctx.arc(cx2 + ox, cy2 + oy, rInner, angle + slice, angle, true);
+      } else {
+        // Solid wedge (pie, or the innermost pie-like ring).
+        ctx.moveTo(cx2 + ox, cy2 + oy);
+        ctx.arc(cx2 + ox, cy2 + oy, rOuter, angle, angle + slice);
+      }
+      ctx.closePath();
+      ctx.fillStyle = color; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
 
-    angle += slice;
+      // Legacy percent label — outer ring only, drawn inline (byte-stable).
+      if (legacyLabels && ring === 0 && slice > 0.15) {
+        const labelR = outerR * (isDoughnut ? 0.75 : 0.6);
+        const lx2 = cx2 + ox + Math.cos(midAngle) * labelR;
+        const ly2 = cy2 + oy + Math.sin(midAngle) * labelR;
+        const pct2 = Math.round((rVals[i] / rTotal) * 100);
+        const lsz = Math.max(8, outerR * 0.1);
+        ctx.font = `bold ${lsz}px ${dLblFont}`;
+        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(`${pct2}%`, lx2, ly2);
+      }
+
+      angle += slice;
+    }
   }
 
-  if (isDoughnut) {
-    ctx.beginPath(); ctx.arc(cx2, cy2, innerR, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff'; ctx.fill();
+  // Rich data labels (`<c:dLbls>`: showVal / showCatName / showSerName /
+  // showPercent + dLblPos, §21.2.2.35), drawn on the OUTER ring after all
+  // slices. Only runs when a rich definition is present; the plain percent
+  // labels above are byte-identical to the pre-CH8 pie.
+  if (hasRichLabels) {
+    drawPieRichLabels(ctx, chart, richDef, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle, dLblFont);
   }
 
   if (pieLeg) {
@@ -1937,6 +2308,54 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
       x, y, w, h, plotLeft, plotTop, pw, ph, titleH + 2,
     );
+  }
+}
+
+/** Draw the rich outer-ring data labels for a pie / doughnut from a series-level
+ *  `<c:dLbls>` (§21.2.2.35: showVal / showCatName / showSerName / showPercent +
+ *  dLblPos). Only called when such a definition exists; the plain percent-label
+ *  path stays inline in the slice loop (byte-stable). `font` is the pre-resolved
+ *  data-label CSS font-family. */
+function drawPieRichLabels(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  def: ChartSeriesDataLabels,
+  s: ChartSeries,
+  cats: string[],
+  vals: number[],
+  total: number,
+  cx2: number, cy2: number,
+  outerR: number, innerR: number,
+  startAngle: number,
+  font: string,
+): void {
+  let angle = startAngle;
+  for (let i = 0; i < vals.length; i++) {
+    const slice = (vals[i] / total) * Math.PI * 2;
+    const midAngle = angle + slice / 2;
+    angle += slice;
+    // §21.2.2.35 label composition. dLblPos: "outEnd" places the label just
+    // beyond the rim; "inEnd"/"ctr" (and default) sit inside the slice at the
+    // radial midpoint. Percent is derived from the slice's share of the total.
+    const parts: string[] = [];
+    if (def.showCatName) parts.push((cats[i] ?? '').toString());
+    if (def.showSerName) parts.push(s.name);
+    if (def.showVal) parts.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
+    if (def.showPercent) parts.push(`${Math.round((vals[i] / total) * 100)}%`);
+    const text = parts.filter(Boolean).join(' ');
+    if (!text) continue;
+    const pos = def.position ?? 'bestFit';
+    const outside = pos === 'outEnd';
+    const labelR = outside
+      ? outerR + Math.max(10, outerR * 0.12)
+      : (innerR + outerR) / 2;
+    const lx2 = cx2 + Math.cos(midAngle) * labelR;
+    const ly2 = cy2 + Math.sin(midAngle) * labelR;
+    const sizePx = def.fontSizeHpt ? def.fontSizeHpt / 100 : Math.max(8, outerR * 0.1);
+    ctx.font = `${def.fontBold ? 'bold ' : ''}${sizePx}px ${font}`;
+    ctx.fillStyle = def.fontColor ? `#${def.fontColor}` : (outside ? '#333' : '#fff');
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, lx2, ly2);
   }
 }
 
@@ -2003,7 +2422,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   // overlapping the origin point.
   if (!chart.valAxisHidden) {
     const valAxPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-    ctx.font = `${valAxPx}px sans-serif`;
+    ctx.font = `${valAxPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.fillStyle = '#555';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
@@ -2014,7 +2433,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     }
   }
 
-  ctx.font = `${Math.max(8, Math.min(11, rd * 0.2))}px sans-serif`;
+  ctx.font = `${Math.max(8, Math.min(11, rd * 0.2))}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
   ctx.fillStyle = '#444'; ctx.textBaseline = 'middle';
   // Spoke labels radiate from just outside the ring. Cap each at the room
   // between its anchor and the nearest horizontal plot edge so long category
@@ -2222,7 +2641,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // Y-axis gridlines + labels + major tick marks.
   if (!chart.valAxisHidden) {
     const yTickFontPx = Math.max(8, Math.min(11, ph / 20));
-    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px sans-serif`;
+    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     const ySteps = Math.round((yMax - yMin) / yAxisStep) + 1;
     for (let si = 0; si < ySteps; si++) {
       const v = yMin + si * yAxisStep; if (v > yMax + yAxisStep * 0.01) break;
@@ -2291,7 +2710,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // depend on.
   if (!chart.catAxisHidden) {
     const tickFontPx = Math.max(8, Math.min(11, ph / 20));
-    ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px sans-serif`;
+    ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
     const xStep = niceStep(xMax - xMin);
     const xSteps = Math.round((xMax - xMin) / xStep) + 1;
     ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -2409,7 +2828,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
 
     // Per-point data labels (`<c:dLbl idx>`) and series-level defaults.
-    drawSeriesDataLabels(ctx, s, cats, useIndexX, toX, toY, ph, ptToPx, chart.date1904);
+    drawSeriesDataLabels(
+      ctx, s, cats, useIndexX, toX, toY, ph, ptToPx, chart.date1904,
+      chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+    );
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2);
@@ -2605,6 +3027,8 @@ function drawSeriesDataLabels(
    *  value labels resolve against the correct epoch. Defaults to false, which
    *  also accepts the optional `ChartModel.date1904` when it is undefined. */
   date1904 = false,
+  /** Resolved data-label CSS font-family; defaults to sans-serif (byte-stable). */
+  fontFamily = 'sans-serif',
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   if (overrides.length === 0 && !s.seriesDataLabels) return;
@@ -2638,7 +3062,7 @@ function drawSeriesDataLabels(
       : Math.max(9, Math.min(11, ph / 25));
     const color = ovr?.fontColor ?? seriesDef?.fontColor;
     const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
-    drawDataLabelText(ctx, toX(xv), toY(yv), text, pos, fontSizePx, color, bold);
+    drawDataLabelText(ctx, toX(xv), toY(yv), text, pos, fontSizePx, color, bold, fontFamily);
   }
 }
 
@@ -2650,9 +3074,10 @@ function drawDataLabelText(
   fontSizePx: number,
   color: string | undefined,
   bold: boolean,
+  fontFamily = 'sans-serif',
 ): void {
   ctx.save();
-  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px sans-serif`;
+  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
   ctx.fillStyle = color ? `#${color}` : '#333';
   const offset = fontSizePx * 0.6;
   let tx = cx, ty = cy;
@@ -2828,6 +3253,10 @@ function drawCategoryDataLabels(
   ptToPx: number,
   date1904: boolean,
   plotNullAsZero: boolean,
+  // Resolved data-label CSS font-family (element face ?? theme body ??
+  // sans-serif). Defaults to sans-serif so callers that don't pass it stay
+  // byte-stable.
+  fontFamily = 'sans-serif',
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const seriesDef = s.seriesDataLabels;
@@ -2855,7 +3284,7 @@ function drawCategoryDataLabels(
     const fontSizePx = sizeHpt ? (sizeHpt / 100) * ptToPx : Math.max(9, Math.min(11, ph / 25));
     const color = ovr?.fontColor ?? seriesDef?.fontColor;
     const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
-    drawDataLabelText(ctx, xAt(ci), yAt(pv), text, pos, fontSizePx, color, bold);
+    drawDataLabelText(ctx, xAt(ci), yAt(pv), text, pos, fontSizePx, color, bold, fontFamily);
   }
   return true;
 }
@@ -2935,7 +3364,7 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   const step = niceStep(padded);
   ctx.save();
   const fontSize = Math.round(h * 0.042);
-  ctx.font = `${fontSize}px sans-serif`;
+  ctx.font = `${fontSize}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
 
   // ECMA-376 / chartEx §axis@hidden: when the value axis is hidden, skip the
   // value-axis gridlines, tick labels and the left segment of the L-frame.
@@ -3039,7 +3468,7 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
         ? `#${chart.dataLabelFontColor}`
         : '#595959';
     ctx.fillStyle = labelColor;
-    ctx.font = `bold ${Math.round(h * 0.044)}px sans-serif`;
+    ctx.font = `bold ${Math.round(h * 0.044)}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
     ctx.textAlign = 'center';
     // Negative bars: label sits BELOW the bar (`outEnd` for a negative value
     // points downward in chartEx). Positive bars and subtotals: label ABOVE.
@@ -3055,7 +3484,8 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#666';
-  ctx.font = `${Math.round(h * 0.038)}px sans-serif`;
+  // Category (transaction) labels below the bars → category-axis face.
+  ctx.font = `${Math.round(h * 0.038)}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
   const labelY = py0 + ph + 4;
   for (let i = 0; i < n; i++) {
     const ccx = px0 + gapW * i + gapW / 2;
