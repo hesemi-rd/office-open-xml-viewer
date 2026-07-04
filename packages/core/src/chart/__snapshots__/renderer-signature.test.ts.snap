@@ -5,7 +5,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: are
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Area" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Area" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 beginPath
 moveTo 105.0667,307.6
 lineTo 105.0667,251.45
@@ -361,7 +361,7 @@ set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Quarterly" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Quarterly" 332,36.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set textBaseline=middle
 set font=11px sans-serif
 set fillStyle=#555
@@ -516,7 +516,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: clu
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Horizontal" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Horizontal" 332,36.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set textBaseline=middle
 set font=11px sans-serif
 set fillStyle=#555
@@ -740,7 +740,7 @@ set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Combo" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Combo" 332,36.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set textBaseline=middle
 set font=11px sans-serif
 set fillStyle=#555
@@ -1013,7 +1013,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: lin
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Trend" 332,36.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Trend" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set font=16.2px sans-serif
 set textBaseline=middle
 set strokeStyle=#aaa
@@ -1406,7 +1406,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: pie
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Share" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Share" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 beginPath
 moveTo 242.4,231.5
 arc 242.4,231.5,124.74,-1.5708,0.3142
@@ -1458,7 +1458,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: rad
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Profile" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Profile" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set strokeStyle=#ddd
 set lineWidth=0.5
 beginPath
@@ -1602,7 +1602,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: sca
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "XY" 332,32.6 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "XY" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set font=11px sans-serif
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
@@ -2044,7 +2044,7 @@ set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=top
-fillText "Stacked" 332,27.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+fillText "Stacked" 332,36.2 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set textBaseline=middle
 set font=11px sans-serif
 set fillStyle=#555

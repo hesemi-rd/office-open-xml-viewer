@@ -496,7 +496,7 @@ pub(crate) fn parse_chart_xml(
     // Parse optional title
     let title = extract_chart_title(&chart_root);
     let title_font_size_hpt = extract_chart_title_size(&chart_root);
-    let title_font_color = extract_chart_title_color(&chart_root);
+    let title_font_color = extract_chart_title_color(&chart_root, theme_colors);
     let title_font_face = extract_chart_title_face(&chart_root);
     let title_font_bold = extract_chart_title_bold(&chart_root);
     let (theme_major_font_latin, theme_minor_font_latin) = theme_fonts;
@@ -733,7 +733,7 @@ pub(crate) fn parse_chart_xml(
             // is out of scope here — treated identically to catAx.
             "catAx" | "dateAx" => {
                 if cat_axis_title.is_none() {
-                    let (t, sz, b, c) = extract_axis_title_with_props(&child);
+                    let (t, sz, b, c) = extract_axis_title_with_props(&child, theme_colors);
                     if t.is_some() {
                         cat_axis_title = t;
                         cat_axis_title_size = sz;
@@ -826,7 +826,7 @@ pub(crate) fn parse_chart_xml(
                     // X-axis title of every scatter chart was dropped (the catAx
                     // branch above never runs for scatter — there is no catAx).
                     if cat_axis_title.is_none() {
-                        let (t, sz, b, c) = extract_axis_title_with_props(&child);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child, theme_colors);
                         if t.is_some() {
                             cat_axis_title = t;
                             cat_axis_title_size = sz;
@@ -903,7 +903,7 @@ pub(crate) fn parse_chart_xml(
                     }
                 } else {
                     if val_axis_title.is_none() {
-                        let (t, sz, b, c) = extract_axis_title_with_props(&child);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child, theme_colors);
                         if t.is_some() {
                             val_axis_title = t;
                             val_axis_title_size = sz;
@@ -1430,12 +1430,16 @@ pub(crate) fn extract_chart_title_bold(chart_root: &roxmltree::Node) -> Option<b
 }
 
 /// Extract the chart title's font color (hex without '#') from the first
-/// `a:solidFill/a:srgbClr@val` inside `c:title`. Only srgb is resolved here —
-/// scheme colors would require the workbook theme, which isn't wired through
-/// to chart parsing yet. Thin wrapper around
-/// `ooxml_common::chart::extract_chart_title_srgb`.
-pub(crate) fn extract_chart_title_color(chart_root: &roxmltree::Node) -> Option<String> {
-    ooxml_common::chart::extract_chart_title_srgb(*chart_root)
+/// run-property `<a:solidFill>` inside `c:title`, resolved via an
+/// `XlsxColorResolver` so a `<a:schemeClr>` (e.g. `tx2` → the workbook theme's
+/// dark-2 slot) resolves in addition to a literal `<a:srgbClr>`. Thin wrapper
+/// around `ooxml_common::chart::extract_chart_title_color`.
+pub(crate) fn extract_chart_title_color(
+    chart_root: &roxmltree::Node,
+    theme_colors: &[String],
+) -> Option<String> {
+    let resolver = XlsxColorResolver { theme_colors };
+    ooxml_common::chart::extract_chart_title_color(*chart_root, &resolver)
 }
 
 /// Extract the chart title's font family from the first `a:latin@typeface`
@@ -1467,12 +1471,16 @@ pub(crate) fn extract_chart_title(chart_root: &roxmltree::Node) -> Option<String
 /// Extract an axis title's text + run props from a `<c:catAx>`/`<c:valAx>` node.
 /// Reuses the chart-title helpers (which scope to the node's direct-child
 /// `<c:title>`); run props are resolved only when title text is present.
+/// The color is resolved via an `XlsxColorResolver`, so a `<a:schemeClr>`
+/// axis-title color resolves in addition to a literal `<a:srgbClr>`.
 /// Returns (text, size_hpt, bold, color_hex). Thin wrapper around
-/// `ooxml_common::chart::extract_axis_title_with_props`.
+/// `ooxml_common::chart::extract_axis_title_with_props_resolved`.
 fn extract_axis_title_with_props(
     axis_node: &roxmltree::Node,
+    theme_colors: &[String],
 ) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
-    ooxml_common::chart::extract_axis_title_with_props(*axis_node)
+    let resolver = XlsxColorResolver { theme_colors };
+    ooxml_common::chart::extract_axis_title_with_props_resolved(*axis_node, &resolver)
 }
 
 /// Parse one `<c:ser>` element.

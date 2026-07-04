@@ -807,10 +807,50 @@ pub fn extract_chart_title_srgb(node: Node) -> Option<String> {
     })
 }
 
+/// Theme-aware chart-title text color from `node`'s direct-child `<c:title>`,
+/// resolved to a hex string (no leading `#`) via the caller's `ColorResolver`.
+///
+/// Unlike [`extract_chart_title_srgb`] (srgb-only, a historical limitation),
+/// this resolves BOTH `<a:srgbClr>` and `<a:schemeClr>` (e.g. `tx2` → the
+/// theme's dark-2 slot) plus the surrounding lumMod/lumOff/tint/shade
+/// transforms, because chart parts now thread a `&dyn ColorResolver` through
+/// `parse_chart_part`. Works for the `<c:chart>` element (chart title) or a
+/// `<c:catAx>` / `<c:valAx>` (axis title) since both scope to the node's
+/// direct-child `<c:title>`.
+///
+/// The search is restricted to a `<a:solidFill>` that is a run-property fill
+/// (its ancestor chain includes `<a:defRPr>` or `<a:rPr>`), so a title-frame
+/// `<c:spPr><a:solidFill>` background fill can never shadow the text color.
+/// `None` when there is no `<c:title>`, no run-property solid fill, or the
+/// resolver cannot map the contained color (renderer default applies).
+pub fn extract_chart_title_color(node: Node, resolver: &dyn ColorResolver) -> Option<String> {
+    let title = child(node, "title")?;
+    title.descendants().find_map(|n| {
+        if !n.is_element() || n.tag_name().name() != "solidFill" {
+            return None;
+        }
+        // Only honor a solidFill that is a text run-property fill — its ancestor
+        // chain must pass through a `<a:defRPr>` / `<a:rPr>`. This excludes a
+        // `<c:title><c:spPr><a:solidFill>` frame fill.
+        let is_run_prop = n
+            .ancestors()
+            .any(|a| matches!(a.tag_name().name(), "defRPr" | "rPr"));
+        if !is_run_prop {
+            return None;
+        }
+        resolver.resolve_solid_fill(n)
+    })
+}
+
 /// Axis title text + run props from a `<c:catAx>` / `<c:valAx>` node. Reuses
 /// the chart-title helpers (which scope to the node's direct-child `<c:title>`);
 /// run props are resolved only when title text is present, so an axis with no
 /// title yields all `None`. Returns `(text, size_hpt, bold, srgb_color)`.
+///
+/// NOTE: the color here is srgb-only (via [`extract_chart_title_srgb`]). Prefer
+/// [`extract_axis_title_with_props_resolved`] when a `ColorResolver` is in hand
+/// so a `<a:schemeClr>` axis-title color resolves too; this srgb-only variant is
+/// kept for callers without a resolver.
 pub fn extract_axis_title_with_props(
     axis_node: Node,
 ) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
@@ -821,6 +861,25 @@ pub fn extract_axis_title_with_props(
             extract_chart_title_size(axis_node),
             extract_chart_title_bold(axis_node),
             extract_chart_title_srgb(axis_node),
+        ),
+    }
+}
+
+/// Like [`extract_axis_title_with_props`] but resolves the axis-title color via
+/// the caller's `ColorResolver`, so a `<a:schemeClr>` (theme) axis-title color
+/// resolves in addition to a literal `<a:srgbClr>`. All other fields
+/// (text/size/bold) are identical. Returns `(text, size_hpt, bold, color_hex)`.
+pub fn extract_axis_title_with_props_resolved(
+    axis_node: Node,
+    resolver: &dyn ColorResolver,
+) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
+    match extract_chart_title_text(axis_node) {
+        None => (None, None, None, None),
+        Some(text) => (
+            Some(text),
+            extract_chart_title_size(axis_node),
+            extract_chart_title_bold(axis_node),
+            extract_chart_title_color(axis_node, resolver),
         ),
     }
 }
@@ -1445,6 +1504,16 @@ pub fn parse_chart_part(
             attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
         })
     });
+    // Title font color — resolved via the `ColorResolver` so a `<a:schemeClr>`
+    // (e.g. `tx2` → the theme dark-2 slot) resolves in addition to a literal
+    // `<a:srgbClr>`. `extract_chart_title_color` scopes to the direct-child
+    // `<c:title>` of the node it's given, so pass `title_node_opt`'s parent (the
+    // element that holds `<c:title>`). Previously hardcoded `None` (the srgb was
+    // never threaded into the wire model); resolving it fixes titles that use a
+    // theme scheme color, which Office decks commonly do.
+    let title_font_color = title_node_opt
+        .and_then(|t| t.parent())
+        .and_then(|parent| extract_chart_title_color(parent, color_resolver));
 
     // val axis max / min and visibility — shared helpers in ooxml-common
     // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` §21.2.2.160
@@ -1988,7 +2057,8 @@ pub fn parse_chart_part(
     // axis. None for the common single value-axis case.
     let secondary_val_axis = secondary_val_ax.map(|ax| {
         let (min, max) = extract_axis_min_max(ax);
-        let (t, title_size, title_bold, title_color) = extract_axis_title_with_props(ax);
+        let (t, title_size, title_bold, title_color) =
+            extract_axis_title_with_props_resolved(ax, color_resolver);
         let (line_color, line_width_emu, line_hidden) = extract_axis_line_style(ax, color_resolver);
         SecondaryValueAxis {
             min,
@@ -2119,7 +2189,7 @@ pub fn parse_chart_part(
         };
         if is_cat {
             if cat_axis_title.is_none() {
-                let (t, sz, b, col) = extract_axis_title_with_props(ax);
+                let (t, sz, b, col) = extract_axis_title_with_props_resolved(ax, color_resolver);
                 if t.is_some() {
                     cat_axis_title = t;
                     cat_axis_title_size = sz;
@@ -2129,7 +2199,7 @@ pub fn parse_chart_part(
                 }
             }
         } else if val_axis_title.is_none() {
-            let (t, sz, b, col) = extract_axis_title_with_props(ax);
+            let (t, sz, b, col) = extract_axis_title_with_props_resolved(ax, color_resolver);
             if t.is_some() {
                 val_axis_title = t;
                 val_axis_title_size = sz;
@@ -2236,7 +2306,7 @@ pub fn parse_chart_part(
         val_axis_major_tick_mark,
         cat_axis_major_tick_mark,
         title_font_size_hpt,
-        title_font_color: None,
+        title_font_color,
         title_font_face,
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
@@ -2889,6 +2959,61 @@ mod tests {
     }
 
     #[test]
+    fn chart_title_color_resolves_scheme_and_srgb() {
+        // schemeClr (`tx2`) — resolved via the resolver, unlike the srgb-only
+        // `extract_chart_title_srgb` which returns None for a scheme color.
+        let scheme = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title><c:tx><c:rich><a:p><a:pPr>
+                <a:defRPr><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:defRPr>
+            </a:pPr><a:r><a:rPr><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:rPr><a:t>T</a:t></a:r></a:p></c:rich></c:tx></c:title>
+        </c:chart>"#;
+        let d = root_of(scheme);
+        assert_eq!(
+            extract_chart_title_color(d.root_element(), &StubResolver).as_deref(),
+            Some("tx2")
+        );
+        assert!(extract_chart_title_srgb(d.root_element()).is_none());
+
+        // srgbClr — resolved (uppercased by StubResolver) too.
+        let srgb = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title><c:tx><c:rich><a:p><a:r><a:rPr><a:solidFill><a:srgbClr val="1b4332"/></a:solidFill></a:rPr><a:t>T</a:t></a:r></a:p></c:rich></c:tx></c:title>
+        </c:chart>"#;
+        let d2 = root_of(srgb);
+        assert_eq!(
+            extract_chart_title_color(d2.root_element(), &StubResolver).as_deref(),
+            Some("1B4332")
+        );
+    }
+
+    #[test]
+    fn chart_title_color_skips_title_frame_sppr_fill() {
+        // A `<c:title><c:spPr><a:solidFill>` is the title FRAME fill, not the
+        // text color; it must be ignored (only run-property fills count).
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title>
+                <c:tx><c:rich><a:p><a:r><a:t>T</a:t></a:r></a:p></c:rich></c:tx>
+                <c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr>
+            </c:title>
+        </c:chart>"#;
+        let d = root_of(xml);
+        assert!(extract_chart_title_color(d.root_element(), &StubResolver).is_none());
+    }
+
+    #[test]
+    fn axis_title_with_props_resolved_scheme_color() {
+        // The resolver-based axis-title variant resolves a schemeClr color.
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:axPos val="l"/>
+            <c:title><c:tx><c:rich><a:p><a:r><a:rPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:rPr><a:t>Value</a:t></a:r></a:p></c:rich></c:tx></c:title>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        let (text, _sz, _b, color) =
+            extract_axis_title_with_props_resolved(d.root_element(), &StubResolver);
+        assert_eq!(text.as_deref(), Some("Value"));
+        assert_eq!(color.as_deref(), Some("accent1"));
+    }
+
+    #[test]
     fn axis_title_with_props_full() {
         let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
             <c:axPos val="b"/>
@@ -3374,11 +3499,14 @@ mod tests {
         assert_eq!(m.title.as_deref(), Some("Quarterly Revenue"));
         assert_eq!(m.title_font_size_hpt, Some(1800));
         assert_eq!(m.title_font_bold, Some(true));
-        // `parse_chart_part` hardcodes `title_font_color: None` (the srgb is
-        // never resolved into the wire `ChartModel` even though the raw XML
-        // carries one) — pin the known limitation so a future "fix" that
-        // starts populating it is a deliberate, visible contract change.
-        assert_eq!(m.title_font_color, None);
+        // `parse_chart_part` now resolves the title's `<a:solidFill>` via the
+        // `ColorResolver` (schemeClr resolution was added — see
+        // `extract_chart_title_color`). The fixture's title carries
+        // `<a:srgbClr val="1b4332">`, which the resolver returns uppercased.
+        // (This assertion previously pinned `None` as a known limitation; the
+        // limitation is now fixed, so the expected value flips to the resolved
+        // hex — a deliberate, visible contract change.)
+        assert_eq!(m.title_font_color.as_deref(), Some("1B4332"));
         assert_eq!(m.categories, vec!["Q1".to_string(), "Q2".to_string()]);
         assert_eq!(m.series.len(), 1);
         assert_eq!(m.series[0].name, "Revenue");

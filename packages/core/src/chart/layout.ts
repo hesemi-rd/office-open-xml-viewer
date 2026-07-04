@@ -99,10 +99,38 @@ export function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): 
   return Math.max(10, h * 0.085);
 }
 
+/** Fraction of the title font size used as the band's TOP pad — the gap from
+ *  the band top down to the title's draw origin (`textBaseline='top'` box top).
+ *
+ *  This is FONT-proportional, not chart-height-proportional, on purpose. The
+ *  title's inset above its glyphs is a property of the type (PowerPoint centers
+ *  the title text in a slot sized to the font), so tying it to `h` made the
+ *  title ride higher in tall frames and lower in short ones — the same title at
+ *  the same point size landed at a different fraction of its own height. With
+ *  `textBaseline='top'` the glyph cap-top sits ~0.19×font below the draw origin
+ *  (the box-top → cap-top gap intrinsic to the face), so a top pad of ~0.62×font
+ *  places the cap-top at ~0.81×font from the band top, matching PowerPoint's
+ *  rendered chart titles (measured against the demo sample-1 line chart PDF).
+ *
+ *  The band's TOTAL height (`bandH`) is unchanged — see {@link chartTitleBand};
+ *  only the split between top and bottom pad moves, so the plot rectangle below
+ *  the title does not shift by a single pixel. */
+export const TITLE_TOP_PAD_FONT_FRAC = 0.62;
+
 /** Resolve the title band from the family's top/bottom pad FRACTIONS (of `h`).
- *  These fractions differ per family (the historical drift); passing them in
- *  keeps each family's pixels unchanged. When the chart has no title the band
- *  collapses to zero (matching the `chart.title ? … : 0` guards inline). */
+ *  These fractions still set the band's TOTAL height (`bandH = fontPx +
+ *  h*topPadFrac + h*bottomPadFrac`), which every family's plot layout depends on
+ *  — that value is byte-identical to before, so the plot area never moves.
+ *
+ *  What changed: the title's vertical placement WITHIN the band. `topPad` (the
+ *  draw offset) is now a FONT-proportional inset ({@link TITLE_TOP_PAD_FONT_FRAC}
+ *  × fontPx) rather than the old `h * topPadFrac`, fixing the title riding at a
+ *  different fraction of its height in tall vs short frames. `bottomPad` becomes
+ *  the remainder so `bandH` is preserved exactly. The font inset is clamped to
+ *  `[0, bandH - fontPx]` so a shallow band never pushes the title past the plot.
+ *
+ *  When the chart has no title the band collapses to zero (matching the
+ *  `chart.title ? … : 0` guards inline). */
 export function chartTitleBand(
   chart: ChartModel,
   h: number,
@@ -112,9 +140,13 @@ export function chartTitleBand(
 ): ChartTitleBand {
   if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
-  const topPad = h * topPadFrac;
-  const bottomPad = h * bottomPadFrac;
-  return { fontPx, topPad, bottomPad, bandH: fontPx + topPad + bottomPad };
+  // Total band height is preserved verbatim from the family fractions so the
+  // plot rectangle below stays put.
+  const bandH = fontPx + h * topPadFrac + h * bottomPadFrac;
+  // Font-proportional top inset, clamped so the title never overflows the band.
+  const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);
+  const bottomPad = bandH - fontPx - topPad;
+  return { fontPx, topPad, bottomPad, bandH };
 }
 
 // ─── Legend reserve ──────────────────────────────────────────────────────────

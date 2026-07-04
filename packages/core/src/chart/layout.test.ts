@@ -13,6 +13,7 @@ import {
   chartLegendBands,
   chartAxisTitleBands,
   chartTitleFontPx,
+  TITLE_TOP_PAD_FONT_FRAC,
   type FrameParams,
 } from './layout.js';
 
@@ -74,18 +75,31 @@ describe('chartTitleBand', () => {
       bandH: 0,
     });
   });
-  it('matches the bar family fractions (0.02 / 0.025)', () => {
+  it('keeps the bar family bandH but uses a font-proportional top pad', () => {
     const f = chartTitleFontPx(model({ title: 'T' }), H, PTPX);
+    // bandH is unchanged from the family fractions (plot must not move).
+    const bandH = f + H * 0.02 + H * 0.025;
+    // topPad is now font-proportional (clamped to the band); bottomPad is the
+    // remainder so bandH is preserved exactly.
+    const topPad = Math.min(Math.max(0, bandH - f), f * TITLE_TOP_PAD_FONT_FRAC);
     expect(chartTitleBand(model({ title: 'T' }), H, PTPX, 0.02, 0.025)).toEqual({
       fontPx: f,
-      topPad: H * 0.02,
-      bottomPad: H * 0.025,
-      bandH: f + H * 0.02 + H * 0.025,
+      topPad,
+      bottomPad: bandH - f - topPad,
+      bandH,
     });
   });
-  it('matches the line family fractions (0.045 / 0.035)', () => {
+  it('matches the line family bandH (0.045 / 0.035) exactly (plot invariant)', () => {
     const f = chartTitleFontPx(model({ title: 'T' }), H, PTPX);
     expect(chartTitleBand(model({ title: 'T' }), H, PTPX, 0.045, 0.035).bandH).toBe(f + H * 0.045 + H * 0.035);
+  });
+  it('clamps the font-proportional top pad so the title never overflows a shallow band', () => {
+    // Force a shallow band: tiny pad fractions so bandH ≈ fontPx. topPad must
+    // clamp to bandH - fontPx (never negative bottomPad, never past the plot).
+    const b = chartTitleBand(model({ title: 'T' }), H, PTPX, 0, 0);
+    expect(b.bandH).toBe(b.fontPx); // fontPx + 0 + 0
+    expect(b.topPad).toBe(0);
+    expect(b.bottomPad).toBe(0);
   });
 });
 
