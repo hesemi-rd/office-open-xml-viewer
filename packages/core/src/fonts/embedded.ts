@@ -25,6 +25,13 @@
  * contract (fonts must be ready before the caller measures/paints text).
  */
 import { activeFontSet, withFontCeiling } from './preload.js';
+import { retainFace, releaseFaces, _resetFontRegistryForTests } from './font-registry.js';
+
+/** Test hook — clears the shared FontFace refcount registry (does NOT touch any
+ *  FontFaceSet; tests install a fresh fake set per case). Re-exported here under
+ *  the embedded name so existing embedded-font tests keep their reset call; the
+ *  registry itself is now shared with the Google-Fonts preloader. */
+export const _resetEmbeddedRegistryForTests = _resetFontRegistryForTests;
 
 /**
  * ECMA-376 §17.8.1 — de-obfuscate a WordprocessingML embedded font (`.odttf`).
@@ -93,32 +100,16 @@ export interface EmbeddedFontFace {
 }
 
 /**
- * A refcounted embedded-font registration shared across documents.
- *
+ * Embedded fonts dedup + refcount through the shared {@link ./font-registry.ts}:
  * `document.fonts` (the FontFaceSet) is a process-global singleton, so opening
  * the same embedded font in two documents — or the same document twice in an SPA
  * — would otherwise add a second, byte-identical `FontFace` every time and leak
  * them all (nothing ever removed them). We dedup by a stable content signature
- * and refcount: the first registration adds the `FontFace`; later ones reuse it
- * and bump `refs`; {@link unregisterEmbeddedFonts} decrements and only
- * `document.fonts.delete()`s the face when the last holder releases it.
+ * ({@link contentSignature}) and refcount: the first registration adds the
+ * `FontFace`; later ones reuse it and bump refs; {@link unregisterEmbeddedFonts}
+ * decrements and only `document.fonts.delete()`s the face when the last holder
+ * releases it. The refcount machinery is shared with the Google-Fonts preloader.
  */
-interface FontRegistration {
-  face: FontFace;
-  set: FontFaceSet;
-  refs: number;
-}
-
-/** signature → the single shared registration. Module-global to mirror the
- *  process-global FontFaceSet (the same dedup contract as `cssRegistrations`
- *  in {@link ./preload.ts}). */
-const embeddedRegistry = new Map<string, FontRegistration>();
-
-/** Test hook — clears the embedded-font dedup registry (does NOT touch the
- *  FontFaceSet; tests install a fresh fake set per case). */
-export function _resetEmbeddedRegistryForTests(): void {
-  embeddedRegistry.clear();
-}
 
 /** Cheap 32-bit FNV-1a over the (de-obfuscated) font bytes — the content key for
  *  dedup. Combined with family/weight/style so two distinct faces that happen to
@@ -176,30 +167,28 @@ export async function registerEmbeddedFonts(
       const data = face.odttf
         ? deobfuscateOdttf(face.bytes, face.fontKey ?? '')
         : face.bytes;
-      const sig = contentSignature(face.family, face.weight, face.style, data);
+      // `embedded:` namespaces the signature so an embedded face can never share
+      // a registry entry with a Google-Fonts face (a different keyspace).
+      const sig = `embedded:${contentSignature(face.family, face.weight, face.style, data)}`;
 
-      // Dedup: a byte-identical face already in THIS set → reuse + bump refs.
-      const existing = embeddedRegistry.get(sig);
-      if (existing && existing.set === set) {
-        existing.refs++;
-        held.push(existing.face);
-        continue;
-      }
-
-      // Copy into a standalone ArrayBuffer: FontFace(source) reads the buffer,
-      // and `data` may be a subarray view into a larger WASM/transfer buffer.
-      const buf = data.buffer.slice(
-        data.byteOffset,
-        data.byteOffset + data.byteLength,
-      ) as ArrayBuffer;
-      const ff = new FontFace(face.family, buf, {
-        weight: face.weight,
-        style: face.style,
+      // Dedup + refcount via the shared registry: a byte-identical face already
+      // in THIS set → reuse + bump refs; otherwise build + add it once.
+      const { face: ff, isNew } = retainFace(sig, set, () => {
+        // Copy into a standalone ArrayBuffer: FontFace(source) reads the buffer,
+        // and `data` may be a subarray view into a larger WASM/transfer buffer.
+        const buf = data.buffer.slice(
+          data.byteOffset,
+          data.byteOffset + data.byteLength,
+        ) as ArrayBuffer;
+        const created = new FontFace(face.family, buf, {
+          weight: face.weight,
+          style: face.style,
+        });
+        set.add(created);
+        return created;
       });
-      set.add(ff);
-      embeddedRegistry.set(sig, { face: ff, set, refs: 1 });
       held.push(ff);
-      toLoad.push(ff);
+      if (isNew) toLoad.push(ff); // only a freshly-added face needs a load()
     } catch {
       // Malformed fontKey / unreadable part: skip this face, keep the document.
       failed.push(face.family);
@@ -255,28 +244,5 @@ export async function registerEmbeddedFonts(
  * the shared refcount.
  */
 export function unregisterEmbeddedFonts(faces: Iterable<FontFace>): void {
-  // Guard against the same face appearing more than once in THIS call so a
-  // duplicate cannot decrement a shared registration's refcount twice.
-  const seen = new Set<FontFace>();
-  for (const face of faces) {
-    if (seen.has(face)) continue;
-    seen.add(face);
-    // Find the registration for this face (identity match). The registry is
-    // small (one entry per distinct embedded face), so a linear scan is fine.
-    // A face that was already fully released has no entry → this loop finds
-    // nothing and the release is a no-op (cross-call idempotency).
-    for (const [sig, reg] of embeddedRegistry) {
-      if (reg.face !== face) continue;
-      reg.refs--;
-      if (reg.refs <= 0) {
-        try {
-          reg.set.delete(face);
-        } catch {
-          /* a set without delete() (older shim / mock): drop the entry anyway */
-        }
-        embeddedRegistry.delete(sig);
-      }
-      break;
-    }
-  }
+  releaseFaces(faces);
 }

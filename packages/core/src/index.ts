@@ -67,7 +67,7 @@ export {
   type AgileEncryptionDescriptor,
 } from './crypto';
 export { readCfbStream } from './errors/cfb-read';
-export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
+export { preloadGoogleFonts, unloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 // Embedded-font registration: docx `.odttf` (§17.8.1 obfuscated) + pptx
 // `.fntdata` (raw sfnt) faces turned into FontFace objects in the active set.
 export {

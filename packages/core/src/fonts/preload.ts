@@ -22,6 +22,8 @@
  * use a system fallback and shift once a later interaction re-rasterized
  * the canvas after the font landed.
  */
+import { retainFace, releaseFaces } from './font-registry.js';
+
 export interface FontPreloadEntry {
   /** Google Fonts CSS URL — `display=swap` recommended. */
   url: string;
@@ -55,22 +57,22 @@ export function withFontCeiling<T>(p: Promise<T>): Promise<T | void> {
   ]);
 }
 
-/** In-flight (or completed) fetch-and-register promise per CSS url, keyed by url.
- *  Resolves with the `FontFace` objects this loader added for that stylesheet
- *  (empty on fetch failure). Storing the PROMISE (not just a flag) lets a
- *  concurrent caller with the same url JOIN the first registration instead of
- *  seeing a cache hit, skipping registration, and resolving while the first
- *  fetch is still in flight (which would defeat the first-paint determinism this
- *  function exists to provide). It also hands step 2 the exact FontFace
- *  references to load — see why that matters there. The stored promise ALWAYS
- *  resolves: failure handling (recording the failed families + deleting the
- *  entry so a later call can retry) happens inside the producing call's own
- *  logic, so a cache-hit awaiter never throws. */
-const cssRegistrations = new Map<string, Promise<FontFace[]>>();
+/** In-flight (or completed) stylesheet FETCH promise per CSS url, keyed by url.
+ *  Resolves with the PARSED `@font-face` rules of that stylesheet (empty on a
+ *  failed fetch). This dedups only the NETWORK fetch: a concurrent caller with
+ *  the same url JOINs the first fetch instead of re-downloading, and the join
+ *  cannot resolve before the fetch settles (first-paint determinism). The actual
+ *  `FontFace` objects are dedup + refcounted separately per call in the shared
+ *  {@link ./font-registry.ts} (so two documents using the same web font share
+ *  one FontFace, and it leaves the set only when both release it). The stored
+ *  promise ALWAYS resolves: a failed fetch records the failed families + deletes
+ *  the entry (so a later call retries) inside the producing call, so a cache-hit
+ *  awaiter never throws. */
+const cssFetches = new Map<string, Promise<ParsedFontFace[]>>();
 
-/** Test hook — clears the per-context CSS registration cache. */
+/** Test hook — clears the per-context CSS fetch cache. */
 export function _resetCssCacheForTests(): void {
-  cssRegistrations.clear();
+  cssFetches.clear();
 }
 
 export interface ParsedFontFace {
@@ -119,12 +121,34 @@ export function activeFontSet(): FontFaceSet | null {
   return null;
 }
 
+/** Stable signature for one Google-Fonts `@font-face`, keyed to the CSS url it
+ *  came from + its identity (family + all CSS descriptors). `gfonts:` namespaces
+ *  it away from embedded-font signatures in the shared registry. Two documents
+ *  requesting the same web font compute the SAME signature and so share one
+ *  refcounted FontFace; distinct subsets (latin vs latin-ext, different weights)
+ *  key distinctly. */
+function googleFaceSignature(url: string, f: ParsedFontFace): string {
+  const d = f.descriptors;
+  return [
+    'gfonts',
+    url,
+    f.family.toLowerCase(),
+    d.style ?? '',
+    d.weight ?? '',
+    d.stretch ?? '',
+    d.unicodeRange ?? '',
+    // `src` last: two rules identical in every descriptor but pointing at
+    // different files (theoretically) still key apart.
+    f.src,
+  ].join('|');
+}
+
 export async function preloadGoogleFonts(
   fontNames: Iterable<string | null | undefined>,
   map: Record<string, FontPreloadEntry>,
-): Promise<void> {
+): Promise<FontFace[]> {
   const fonts = activeFontSet();
-  if (!fonts || typeof FontFace === 'undefined' || typeof fetch === 'undefined') return;
+  if (!fonts || typeof FontFace === 'undefined' || typeof fetch === 'undefined') return [];
 
   const seen = new Set<string>();
   const targetFamilies = new Set<string>();
@@ -138,7 +162,7 @@ export async function preloadGoogleFonts(
   // matching FontFace.load() rejected). Surfaced once at the end via a single
   // console.warn so a failed web font no longer falls back to a system face
   // completely silently. The renderer still degrades gracefully — this is
-  // diagnostics only, the return contract stays `Promise<void>`.
+  // diagnostics only.
   const failedFamilies = new Set<string>();
 
   for (const name of fontNames) {
@@ -158,66 +182,82 @@ export async function preloadGoogleFonts(
     }
     targets.add(family);
   }
-  if (targetFamilies.size === 0) return;
+  if (targetFamilies.size === 0) return [];
 
-  // 1) Fetch each stylesheet once per JS context and register its FontFace
-  //    entries into the active FontFaceSet, keeping references to the faces we
-  //    add. Canvas rendering never puts glyphs into the DOM, so registration
-  //    alone is not enough — see (2).
-  const faceGroups = await withFontCeiling(
+  // 1) Fetch each stylesheet once per JS context (network dedup via cssFetches)
+  //    and PARSE its `@font-face` rules. The rules are shared data; the FontFace
+  //    objects are created + refcounted per call in step 2 so two open documents
+  //    share one face and it leaves the set only when both release it.
+  const parsedGroups = await withFontCeiling(
     Promise.all(
-      [...cssUrls].map((url) => {
-        // Cache hit: AWAIT the in-flight registration so concurrent callers join
-        // the first fetch rather than racing past it. The stored promise never
-        // rejects (see cssRegistrations), so a joined-then-failed registration
-        // just yields no faces in step 2.
-        const inFlight = cssRegistrations.get(url);
-        if (inFlight) return inFlight;
-        const registration = (async (): Promise<FontFace[]> => {
+      [...cssUrls].map(async (url): Promise<{ url: string; rules: ParsedFontFace[] }> => {
+        // Cache hit: AWAIT the in-flight fetch so concurrent callers join the
+        // first download rather than racing past it. The stored promise never
+        // rejects (see cssFetches), so a joined-then-failed fetch yields [].
+        const inFlight = cssFetches.get(url);
+        if (inFlight) return { url, rules: await inFlight };
+        const fetchAndParse = (async (): Promise<ParsedFontFace[]> => {
           try {
             const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const added: FontFace[] = [];
-            for (const f of parseFontFaceRules(await res.text())) {
-              const face = new FontFace(f.family, f.src, f.descriptors);
-              fonts.add(face);
-              added.push(face);
-            }
-            return added;
+            return parseFontFaceRules(await res.text());
           } catch {
-            cssRegistrations.delete(url); // free the slot so a later call retries
+            cssFetches.delete(url); // free the slot so a later call retries
             for (const family of urlTargets.get(url) ?? []) {
               failedFamilies.add(family);
             }
             return [];
           }
         })();
-        cssRegistrations.set(url, registration);
-        return registration;
+        cssFetches.set(url, fetchAndParse);
+        return { url, rules: await fetchAndParse };
       }),
     ),
   );
 
-  // 2) Force-load the FontFaces we added and AWAIT them all — no timeout race
-  //    that could resolve mid-download. `face.load()` is required because
-  //    unicode-range gating would otherwise leave the faces `unloaded` and the
-  //    first canvas paint would use a system fallback, shifting once a later
-  //    interaction re-rasterized. We load the FontFace objects WE created (held
-  //    via cssRegistrations) rather than re-selecting them from the set by
-  //    family name: `FontFace.family` serializes a multi-word name back WITH
-  //    quotes (e.g. `"Nunito Sans"`), so a `family`-string filter silently
-  //    matches nothing and the fonts never load — the bug this avoids.
-  const addedFaces = (Array.isArray(faceGroups) ? faceGroups : []).flat();
-  await withFontCeiling(
-    Promise.allSettled(addedFaces.map((f) => f.load())).then((results) => {
-      results.forEach((res, i) => {
-        if (res.status === 'rejected') {
-          failedFamilies.add(addedFaces[i].family.replace(/['"]/g, '').toLowerCase());
-        }
+  // 2) Retain a shared, refcounted FontFace per parsed rule. The FIRST holder of
+  //    a rule (across all open documents) creates the FontFace, adds it to the
+  //    set, and must force-`load()` it; a later holder reuses the shared face
+  //    (already loaded) and only bumps its refcount. `held` is what THIS call
+  //    references — returned so the caller can release it in `destroy()`, the
+  //    fix for the SPA leak where every opened document left its Google FontFace
+  //    objects in `document.fonts` forever.
+  const held: FontFace[] = [];
+  const toLoad: FontFace[] = [];
+  for (const group of Array.isArray(parsedGroups) ? parsedGroups : []) {
+    for (const rule of group.rules) {
+      const sig = googleFaceSignature(group.url, rule);
+      const { face, isNew } = retainFace(sig, fonts, () => {
+        const created = new FontFace(rule.family, rule.src, rule.descriptors);
+        fonts.add(created);
+        return created;
       });
-      return fonts.ready;
-    }),
-  );
+      held.push(face);
+      if (isNew) toLoad.push(face);
+    }
+  }
+
+  // 3) Force-load only the FontFaces this call newly created and AWAIT them —
+  //    no timeout race that could resolve mid-download. `face.load()` is required
+  //    because unicode-range gating would otherwise leave the faces `unloaded`
+  //    and the first canvas paint would use a system fallback, shifting once a
+  //    later interaction re-rasterized. We load the FontFace objects WE created
+  //    rather than re-selecting them from the set by family name: `FontFace.family`
+  //    serializes a multi-word name back WITH quotes (e.g. `"Nunito Sans"`), so a
+  //    `family`-string filter silently matches nothing and the fonts never load —
+  //    the bug this avoids. (Reused faces were already loaded by their first holder.)
+  if (toLoad.length > 0) {
+    await withFontCeiling(
+      Promise.allSettled(toLoad.map((f) => f.load())).then((results) => {
+        results.forEach((res, i) => {
+          if (res.status === 'rejected') {
+            failedFamilies.add(toLoad[i].family.replace(/['"]/g, '').toLowerCase());
+          }
+        });
+        return fonts.ready;
+      }),
+    );
+  }
 
   if (failedFamilies.size > 0) {
     console.warn(
@@ -225,4 +265,21 @@ export async function preloadGoogleFonts(
         `falling back to system fonts (text may shift or differ).`,
     );
   }
+
+  return held;
+}
+
+/**
+ * Release the Google-Fonts `FontFace` objects a document/presentation/workbook
+ * preloaded (the array returned by {@link preloadGoogleFonts}). Refcounted +
+ * dedup-safe via the shared {@link ./font-registry.ts}: each face is removed
+ * from its FontFaceSet only when the LAST holder releases it, so a web font used
+ * by two open documents survives until both are destroyed. Double-release safe
+ * (a face passed twice, or a re-release after full release, is a no-op) and safe
+ * in a context without a FontFaceSet. Twin of `unregisterEmbeddedFonts`; called
+ * from each viewer's `destroy()` to fix the SPA leak where every opened document
+ * left its Google FontFace objects in `document.fonts` forever.
+ */
+export function unloadGoogleFonts(faces: Iterable<FontFace>): void {
+  releaseFaces(faces);
 }
