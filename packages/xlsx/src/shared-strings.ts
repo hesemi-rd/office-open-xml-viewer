@@ -1,4 +1,4 @@
-import type { SharedString, Worksheet } from './types.js';
+import type { CellValue, SharedString, Worksheet } from './types.js';
 
 /**
  * Resolve every `{ type: 'shared', si }` cell in `ws` to a concrete
@@ -18,11 +18,20 @@ export function resolveSharedStrings(ws: Worksheet, sharedStrings: SharedString[
       const v = cell.value;
       if (v.type === 'shared') {
         const ss = sharedStrings[v.si];
-        cell.value = ss
-          ? ss.runs !== undefined
-            ? { type: 'text', text: ss.text, runs: ss.runs }
-            : { type: 'text', text: ss.text }
-          : { type: 'text', text: '' };
+        if (ss) {
+          // Carry the String Item's furigana (§18.4.6 rPh / §18.4.3
+          // phoneticPr) onto the resolved text cell so the renderer can draw
+          // the phonetic band. Only meaningful when the CELL opted in with
+          // `ph="1"` (checked at draw time), but the reading always rides with
+          // the resolved value.
+          const resolved: CellValue = { type: 'text', text: ss.text };
+          if (ss.runs !== undefined) resolved.runs = ss.runs;
+          if (ss.phoneticRuns !== undefined) resolved.phoneticRuns = ss.phoneticRuns;
+          if (ss.phoneticPr !== undefined) resolved.phoneticPr = ss.phoneticPr;
+          cell.value = resolved;
+        } else {
+          cell.value = { type: 'text', text: '' };
+        }
       }
     }
   }

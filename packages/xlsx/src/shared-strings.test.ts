@@ -93,6 +93,37 @@ describe('resolveSharedStrings', () => {
     expect(sheet.rows[0].cells[3].value).toEqual({ type: 'empty' });
   });
 
+  it('carries §18.4.6/§18.4.3 phonetic data onto the resolved text cell', () => {
+    const table: SharedString[] = [
+      {
+        text: '課長',
+        phoneticRuns: [
+          { sb: 0, eb: 1, text: 'カ' },
+          { sb: 1, eb: 2, text: 'チョウ' },
+        ],
+        phoneticPr: { fontId: 2, type: 'Hiragana', alignment: 'center' },
+      },
+    ];
+    const sheet = resolveSharedStrings(ws([sharedCell(1, 0)]), table);
+    expect(sheet.rows[0].cells[0].value).toEqual({
+      type: 'text',
+      text: '課長',
+      phoneticRuns: [
+        { sb: 0, eb: 1, text: 'カ' },
+        { sb: 1, eb: 2, text: 'チョウ' },
+      ],
+      phoneticPr: { fontId: 2, type: 'Hiragana', alignment: 'center' },
+    });
+  });
+
+  it('does not add phonetic keys when the shared string carries none', () => {
+    const table: SharedString[] = [{ text: 'plain' }];
+    const sheet = resolveSharedStrings(ws([sharedCell(1, 0)]), table);
+    const v = sheet.rows[0].cells[0].value as { phoneticRuns?: unknown; phoneticPr?: unknown };
+    expect('phoneticRuns' in v).toBe(false);
+    expect('phoneticPr' in v).toBe(false);
+  });
+
   it('is idempotent: a worksheet with no shared cells is returned unchanged', () => {
     const num: Cell = { col: 1, row: 1, value: { type: 'number', number: 7 } };
     const sheet = ws([num]);

@@ -44,6 +44,12 @@ export type {
   Run,
   RunFont,
   SharedString,
+  // Phonetic hints / furigana (ECMA-376 §18.4.6 / §18.4.3), reachable via
+  // Cell text values and SharedString.
+  PhoneticRun,
+  PhoneticProperties,
+  PhoneticType,
+  PhoneticAlignment,
   // Differential / gradient style sub-types (reachable via Styles).
   Dxf,
   GradientFillSpec,
