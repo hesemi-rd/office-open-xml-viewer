@@ -912,6 +912,14 @@ fn parse_worksheet(
     let mut rows = Vec::new();
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
     let mut row_heights: BTreeMap<u32, f64> = BTreeMap::new();
+    // Outline (grouping) metadata — ECMA-376 §18.3.1.13 (col) / §18.3.1.73
+    // (row) / §18.3.1.61 (outlinePr). Only non-default entries are recorded so
+    // an outline-free sheet keeps empty maps / a `None` outlinePr (byte-stable
+    // JSON, §CLAUDE "1px identical").
+    let mut col_outline_levels: BTreeMap<u32, u8> = BTreeMap::new();
+    let mut col_collapsed: BTreeMap<u32, bool> = BTreeMap::new();
+    let mut col_hidden: BTreeMap<u32, bool> = BTreeMap::new();
+    let mut outline_pr: Option<crate::types::OutlinePr> = None;
     let mut merge_cells: Vec<MergeCell> = Vec::new();
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
@@ -929,6 +937,14 @@ fn parse_worksheet(
     let mut tab_color: Option<String> = None;
     let mut auto_filter: Option<CellRange> = None;
     let mut hyperlink_rids: HyperlinkRids = Vec::new();
+    // ECMA-376 §18.3.1.73 (CT_Row, sml.xsd) makes `@r` on `<row>` optional with
+    // no default; the spec does not spell out how an omitted value is resolved.
+    // We follow the de-facto consumer convention (Excel, LibreOffice, SheetJS
+    // agree; no competing interpretation exists): an r-less row is the previous
+    // row's number + 1 (the first row is 1), and an explicit `@r` re-anchors
+    // this counter. `prev_row_idx == 0` means "no row yet", so the first
+    // implicit row lands at index 1.
+    let mut prev_row_idx: u32 = 0;
 
     // Pre-scan worksheet-level extLst for x14:dataBar extension attributes.
     // Excel 2010+ stores the `gradient` flag on `<x14:dataBar>` inside
@@ -1071,8 +1087,21 @@ fn parse_worksheet(
             "col" if is_x_ns(node.tag_name().namespace()) => {
                 let custom = attr_bool(&node, "customWidth").unwrap_or(false);
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
-                // Only record widths for custom-widthed columns OR hidden columns
-                if !custom && !hidden {
+                // §18.3.1.13 outline metadata: `outlineLevel` (0-7) and the
+                // summary-column `collapsed` flag. Recorded independently of the
+                // width so a grouped column at the default width is still
+                // surfaced to the gutter.
+                let outline_level = node
+                    .attribute("outlineLevel")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0)
+                    .min(7);
+                let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
+                // Record widths for custom-widthed OR hidden columns, and also
+                // for columns that carry outline info (level > 0 or collapsed) —
+                // those must reach the viewer even at the default width.
+                let has_outline = outline_level > 0 || collapsed;
+                if !custom && !hidden && !has_outline {
                     continue;
                 }
                 let min: u32 = node
@@ -1093,7 +1122,22 @@ fn parse_worksheet(
                         .unwrap_or(default_col_width)
                 };
                 for c in min..=max {
-                    col_widths.insert(c, width);
+                    // Only store a width entry when the column actually has a
+                    // custom / hidden width; a default-width grouped column keeps
+                    // the workbook default (no colWidths entry) so its rendered
+                    // width is byte-identical to an ungrouped default column.
+                    if custom || hidden {
+                        col_widths.insert(c, width);
+                    }
+                    if outline_level > 0 {
+                        col_outline_levels.insert(c, outline_level);
+                    }
+                    if collapsed {
+                        col_collapsed.insert(c, true);
+                    }
+                    if hidden {
+                        col_hidden.insert(c, true);
+                    }
                 }
             }
             "sheetView" if is_x_ns(node.tag_name().namespace()) => {
@@ -1102,6 +1146,14 @@ fn parse_worksheet(
                 // ECMA-376 §18.3.1.87 `rightToLeft` — mirrors the whole grid so
                 // column A is on the right. Default false (left-to-right).
                 right_to_left = attr_bool(&node, "rightToLeft").unwrap_or(false);
+            }
+            "outlinePr" if is_x_ns(node.tag_name().namespace()) => {
+                // §18.3.1.61 `<sheetPr><outlinePr>`. Both flags default to true
+                // (summary below/right of detail). `applyStyles` is out of scope.
+                outline_pr = Some(crate::types::OutlinePr {
+                    summary_below: attr_bool(&node, "summaryBelow").unwrap_or(true),
+                    summary_right: attr_bool(&node, "summaryRight").unwrap_or(true),
+                });
             }
             "tabColor" if is_x_ns(node.tag_name().namespace()) => {
                 tab_color = parse_color(&node, theme_colors);
@@ -1187,10 +1239,16 @@ fn parse_worksheet(
                 }
             }
             "row" if is_x_ns(node.tag_name().namespace()) => {
-                let row_idx: u32 = node
-                    .attribute("r")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                // §18.3.1.73 makes `@r` optional; honor an explicit value when
+                // present. When omitted, take the running previous row + 1
+                // (implicit sequential numbering — the de-facto consumer
+                // convention; the spec only grants the optionality). An explicit
+                // value also re-anchors the counter for following implicit rows.
+                let row_idx: u32 = match node.attribute("r").and_then(|s| s.parse::<u32>().ok()) {
+                    Some(r) => r,
+                    None => prev_row_idx + 1,
+                };
+                prev_row_idx = row_idx;
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
                 // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
                 // Gating the value on `@customHeight="1"` (0.37.0) was too
@@ -1208,11 +1266,24 @@ fn parse_worksheet(
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
                 }
-                let cells = parse_row_cells(&node, shared_strings, theme_colors);
+                // §18.3.1.73 outline metadata: `outlineLevel` (0-7) and the
+                // summary-row `collapsed` flag. `hidden` is surfaced explicitly
+                // (not just as `height == 0`) so the gutter can distinguish a
+                // collapsed-detail row from a deliberately zero-height row.
+                let outline_level = node
+                    .attribute("outlineLevel")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0)
+                    .min(7);
+                let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
+                let cells = parse_row_cells(&node, row_idx, shared_strings, theme_colors);
                 rows.push(Row {
                     index: row_idx,
                     height,
                     cells,
+                    outline_level,
+                    collapsed,
+                    hidden,
                 });
             }
             "conditionalFormatting" if is_x_ns(node.tag_name().namespace()) => {
@@ -1498,6 +1569,9 @@ fn parse_worksheet(
             rows,
             col_widths,
             row_heights,
+            col_outline_levels,
+            col_collapsed,
+            col_hidden,
             default_col_width,
             default_row_height,
             merge_cells,
@@ -1510,6 +1584,7 @@ fn parse_worksheet(
             show_zeros,
             show_gridlines,
             right_to_left,
+            outline_pr,
             tab_color,
             auto_filter,
             hyperlinks: Vec::new(),
@@ -2232,6 +2307,10 @@ fn load_sheet_sparklines(
 
 fn parse_row_cells(
     row_node: &roxmltree::Node,
+    // The resolved 1-based row number of the containing `<row>`. Used as the row
+    // coordinate for any `<c>` that omits its own `@r` (optional per ECMA-376
+    // §18.3.1.4 / CT_Cell in sml.xsd).
+    row_index: u32,
     // Shared-string cells now ship an `si` reference (resolved consumer-side),
     // so this table is no longer read here. Kept in the signature for symmetry
     // with `parse_worksheet`'s threading; prefixed `_` to silence the warning.
@@ -2239,12 +2318,24 @@ fn parse_row_cells(
     theme_colors: &[String],
 ) -> Vec<Cell> {
     let mut cells = Vec::new();
+    // ECMA-376 §18.3.1.4 (CT_Cell, sml.xsd) makes `@r` on `<c>` optional with no
+    // default; the spec does not spell out how an omitted value is resolved. We
+    // follow the de-facto consumer convention (Excel, LibreOffice, SheetJS
+    // agree; no competing interpretation exists): an r-less cell takes the
+    // column after the previous cell in this row (the first cell starts at
+    // column A / 1), and an explicit `@r` re-anchors this running column so
+    // subsequent omitted cells continue from it. `prev_col == 0` means "no cell
+    // yet", so the first implicit cell lands at column 1.
+    let mut prev_col: u32 = 0;
     for c_node in row_node.children() {
         if c_node.tag_name().name() != "c" || !is_x_ns(c_node.tag_name().namespace()) {
             continue;
         }
-        let cell_ref = c_node.attribute("r").unwrap_or("A1").to_string();
-        let (col, row) = parse_cell_ref(&cell_ref);
+        let (col, row) = match c_node.attribute("r") {
+            Some(cell_ref) => parse_cell_ref(cell_ref),
+            None => (prev_col + 1, row_index),
+        };
+        prev_col = col;
         let cell_type = c_node.attribute("t").unwrap_or("");
         let style_index: u32 = c_node
             .attribute("s")
@@ -2739,6 +2830,129 @@ mod sheet_view_tests {
             p1 < p2 && p2 < p3,
             "colWidths keys must serialize in ascending order (1,2,3), got positions {p1},{p2},{p3} in {widths}"
         );
+    }
+
+    // ── Outline grouping (ECMA-376 §18.3.1.13 / §18.3.1.61 / §18.3.1.73) ──
+
+    /// The row-outline example from §18.3.1.73 (middle + lowest level collapsed):
+    /// rows 6-8 are collapsed-hidden detail at levels 3/3/2, and row 9 is the
+    /// level-1 summary carrying `collapsed="1"`. The parser must surface each
+    /// row's `outlineLevel`, `collapsed`, and `hidden` flags verbatim.
+    #[test]
+    fn row_outline_levels_collapsed_and_hidden() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+                 <row r="6" hidden="1" outlineLevel="3"/>
+                 <row r="7" hidden="1" outlineLevel="3"/>
+                 <row r="8" hidden="1" outlineLevel="2"/>
+                 <row r="9" hidden="1" outlineLevel="1" collapsed="1"/>
+                 <row r="10" collapsed="1"/>
+               </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        let by_idx = |i: u32| ws.rows.iter().find(|r| r.index == i).expect("row present");
+        assert_eq!(by_idx(6).outline_level, 3);
+        assert!(by_idx(6).hidden);
+        assert!(!by_idx(6).collapsed);
+        assert_eq!(by_idx(8).outline_level, 2);
+        assert!(by_idx(8).hidden);
+        assert_eq!(by_idx(9).outline_level, 1);
+        assert!(by_idx(9).hidden);
+        assert!(by_idx(9).collapsed);
+        // Row 10 is the top-level summary: collapsed but visible, level 0.
+        assert_eq!(by_idx(10).outline_level, 0);
+        assert!(!by_idx(10).hidden);
+        assert!(by_idx(10).collapsed);
+    }
+
+    /// `outlineLevel` is clamped to the §18.3.1.73 range max of 7.
+    #[test]
+    fn row_outline_level_clamped_to_seven() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData><row r="1" outlineLevel="9"/></sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.rows[0].outline_level, 7);
+    }
+
+    /// A grouped column at the *default* width (no `customWidth`, not hidden) must
+    /// still be surfaced: its outline level reaches `col_outline_levels` even
+    /// though no `colWidths` entry is recorded (so its rendered width stays the
+    /// workbook default). `collapsed` and `hidden` map likewise.
+    #[test]
+    fn col_outline_level_recorded_without_custom_width() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols>
+                 <col min="2" max="3" outlineLevel="1"/>
+                 <col min="4" max="4" outlineLevel="1" collapsed="1"/>
+                 <col min="2" max="2" hidden="1" outlineLevel="1"/>
+               </cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.col_outline_levels.get(&2).copied(), Some(1));
+        assert_eq!(ws.col_outline_levels.get(&3).copied(), Some(1));
+        assert_eq!(ws.col_outline_levels.get(&4).copied(), Some(1));
+        assert_eq!(ws.col_collapsed.get(&4).copied(), Some(true));
+        // The last <col> hides column 2.
+        assert_eq!(ws.col_hidden.get(&2).copied(), Some(true));
+        // A default-width grouped column gets NO colWidths entry (col 3 was never
+        // custom-width nor hidden), so its width stays the workbook default.
+        assert_eq!(ws.col_widths.get(&3).copied(), None);
+    }
+
+    /// `<sheetPr><outlinePr>` flags parse with the §18.3.1.61 defaults (both
+    /// `true`) and honor explicit `false`.
+    #[test]
+    fn outline_pr_summary_flags() {
+        let default_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetPr><outlinePr/></sheetPr><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&default_xml, &[], &[], "Sheet1").expect("parses");
+        let pr = ws.outline_pr.expect("outlinePr present");
+        assert!(pr.summary_below);
+        assert!(pr.summary_right);
+
+        let above_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetPr><outlinePr summaryBelow="0" summaryRight="0"/></sheetPr><sheetData/></worksheet>"#
+        );
+        let (ws2, _) = parse_worksheet(&above_xml, &[], &[], "Sheet1").expect("parses");
+        let pr2 = ws2.outline_pr.expect("outlinePr present");
+        assert!(!pr2.summary_below);
+        assert!(!pr2.summary_right);
+    }
+
+    /// A sheet with no outlining (no `<outlinePr>`, all `outlineLevel="0"`, as
+    /// LibreOffice emits) serializes byte-for-byte as before: no `outlinePr`,
+    /// `colOutlineLevels`, `colCollapsed`, `colHidden`, and no per-row
+    /// `outlineLevel` / `collapsed` / `hidden` keys.
+    #[test]
+    fn outline_free_sheet_is_wire_stable() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}">
+                 <cols><col customWidth="1" min="1" max="1" width="22" outlineLevel="0" collapsed="0"/></cols>
+                 <sheetData>
+                   <row r="1" hidden="0" outlineLevel="0" collapsed="0"><c r="A1"/></row>
+                 </sheetData>
+               </worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parses");
+        let v = serde_json::to_value(&ws).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("outlinePr"), "no outlinePr key");
+        assert!(
+            !obj.contains_key("colOutlineLevels"),
+            "no colOutlineLevels key"
+        );
+        assert!(!obj.contains_key("colCollapsed"), "no colCollapsed key");
+        assert!(!obj.contains_key("colHidden"), "no colHidden key");
+        let row0 = &v["rows"][0];
+        let row_obj = row0.as_object().unwrap();
+        assert!(
+            !row_obj.contains_key("outlineLevel"),
+            "no row outlineLevel key"
+        );
+        assert!(!row_obj.contains_key("collapsed"), "no row collapsed key");
+        assert!(!row_obj.contains_key("hidden"), "no row hidden key");
     }
 }
 
@@ -3781,6 +3995,99 @@ mod rb7_partial_degradation_tests {
         );
     }
 
+    // ── #832 / #833-1: implicit references through the whole-archive path ─────
+
+    /// Build a 1-sheet workbook that OMITS `@r` on both `<row>` and every `<c>`
+    /// (the minimal enterprise-exporter shape from #832 / #833-1), backed by a
+    /// real `sharedStrings.xml`. Exercised end-to-end through `parse_sheet_native`
+    /// — the same code the WASM `parse_sheet` entry runs — so this proves the fix
+    /// survives ZIP extraction + shared-string resolution, not just the isolated
+    /// `parse_worksheet` unit path.
+    fn build_implicit_ref_workbook() -> Vec<u8> {
+        let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        // Two rows, no @r anywhere; row 1 = three shared strings, row 2 = a
+        // shared string then two numbers. Positions must fill A1:C2.
+        let sheet = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData>
+              <row><c t="s"><v>0</v></c><c t="s"><v>1</v></c><c t="s"><v>2</v></c></row>
+              <row><c t="s"><v>3</v></c><c t="n"><v>42.5</v></c><c t="n"><v>100</v></c></row>
+            </sheetData></worksheet>"#
+        );
+        let shared = format!(
+            r#"<sst xmlns="{ns}" count="4" uniqueCount="4"><si><t>Alpha</t></si><si><t>Beta</t></si><si><t>Gamma</t></si><si><t>Delta</t></si></sst>"#
+        );
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let wb_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>"#;
+        let entries: Vec<(String, String)> = vec![
+            ("xl/workbook.xml".into(), workbook.into()),
+            ("xl/_rels/workbook.xml.rels".into(), wb_rels.into()),
+            ("xl/worksheets/sheet1.xml".into(), sheet),
+            ("xl/sharedStrings.xml".into(), shared),
+            ("xl/styles.xml".into(), styles.into()),
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in &entries {
+                w.start_file(name.as_str(), o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    /// End-to-end: an implicit-reference workbook parses to a full 2×3 grid —
+    /// not a single A1 cell. Cell coordinates (col/row) and the shared-string
+    /// `si` indices survive ZIP extraction + the shared-string load. (The `si`
+    /// index → text mapping is resolved consumer-side and covered elsewhere;
+    /// here `<v>0..3</v>` map to si 0..3 by insertion order.) This is the #832
+    /// reproduction driven through the real archive path (== the WASM entry).
+    #[test]
+    fn implicit_refs_resolve_full_grid_through_archive() {
+        let data = build_implicit_ref_workbook();
+        let ws = parse_sheet_json(&data, 0, "Sheet1");
+        assert!(
+            ws["parseError"].is_null(),
+            "healthy implicit-ref sheet must carry no parseError; got {ws}"
+        );
+        let rows = ws["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 2, "two rows must materialize");
+        assert_eq!(rows[0]["index"].as_u64(), Some(1), "first <row> → 1");
+        assert_eq!(rows[1]["index"].as_u64(), Some(2), "second <row> → 2");
+
+        let cell_at = |r: usize, c: usize| -> &serde_json::Value { &ws["rows"][r]["cells"][c] };
+
+        // CellValue is internally tagged (`tag = "type"`): a shared reference
+        // serializes as { "type": "shared", "si": N }, a number as
+        // { "type": "number", "number": X }.
+        // Row 1: three shared strings at columns A, B, C (si 0, 1, 2).
+        for (i, col) in [1u64, 2, 3].iter().enumerate() {
+            let cell = cell_at(0, i);
+            assert_eq!(cell["col"].as_u64(), Some(*col), "row1 cell {i} col");
+            assert_eq!(cell["row"].as_u64(), Some(1), "row1 cell {i} row");
+            assert_eq!(cell["value"]["type"].as_str(), Some("shared"));
+            assert_eq!(
+                cell["value"]["si"].as_u64(),
+                Some(i as u64),
+                "row1 cell {i} shared si"
+            );
+        }
+
+        // Row 2: A2 = shared si 3, B2 = 42.5, C2 = 100.
+        let a2 = cell_at(1, 0);
+        assert_eq!((a2["col"].as_u64(), a2["row"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(a2["value"]["si"].as_u64(), Some(3));
+        let b2 = cell_at(1, 1);
+        assert_eq!((b2["col"].as_u64(), b2["row"].as_u64()), (Some(2), Some(2)));
+        assert_eq!(b2["value"]["number"].as_f64(), Some(42.5));
+        let c2 = cell_at(1, 2);
+        assert_eq!((c2["col"].as_u64(), c2["row"].as_u64()), (Some(3), Some(2)));
+        assert_eq!(c2["value"]["number"].as_f64(), Some(100.0));
+    }
+
     // ── #773: corrupt sharedStrings surfaces (not silent) ────────────────────
 
     /// Build a 1-sheet workbook whose one string cell (`A1`, `t="s"`) references
@@ -3950,5 +4257,165 @@ mod rb7_partial_degradation_tests {
             wb["parseError"].is_null(),
             "an absent sharedStrings is normal, not a degradation; got {wb}"
         );
+    }
+}
+
+/// Implicit (omitted) cell/row references — ECMA-376 §18.3.1.4 (`c`) and
+/// §18.3.1.73 (`row`). Both `@r` attributes are `use="optional"` in the schema
+/// (CT_Cell / CT_Row, sml.xsd) with no default; that optionality is all the
+/// spec mandates — it does not spell out how an omitted reference is resolved.
+/// The resolution below is the de-facto consumer convention, on which Excel,
+/// LibreOffice, and SheetJS agree (no competing interpretation exists):
+///
+///   * `<c>` without `@r` → the next column after the previous cell in the same
+///     row (the first cell in a row starts at column A / 1); an explicit `@r`
+///     resets the running column so subsequent omitted cells continue from it.
+///   * `<row>` without `@r` → the previous row's number + 1 (the first row is 1).
+///
+/// Enterprise exporters (Dynamics, SAP, Oracle, SSRS) emit this minimal form to
+/// shrink files; Excel/Sheets/LibreOffice/SheetJS all accept it (#832, #833-1).
+#[cfg(test)]
+mod implicit_reference_tests {
+    use super::*;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    /// #832: every `<c>` omits `@r`. Columns must run A, B, C per ordinal
+    /// position within each row (reset at each `<row>`), not all collapse to A1.
+    #[test]
+    fn cells_without_r_get_sequential_columns() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+              <row r="1"><c t="s"><v>0</v></c><c t="s"><v>1</v></c><c t="s"><v>2</v></c></row>
+              <row r="2"><c t="s"><v>3</v></c><c t="n"><v>42.5</v></c><c t="n"><v>100</v></c></row>
+            </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        assert_eq!(ws.rows.len(), 2);
+
+        let r1 = &ws.rows[0].cells;
+        assert_eq!((r1[0].col, r1[0].row), (1, 1), "first cell of row 1 → A1");
+        assert_eq!((r1[1].col, r1[1].row), (2, 1), "second cell → B1");
+        assert_eq!((r1[2].col, r1[2].row), (3, 1), "third cell → C1");
+
+        let r2 = &ws.rows[1].cells;
+        assert_eq!((r2[0].col, r2[0].row), (1, 2), "first cell of row 2 → A2");
+        assert_eq!((r2[1].col, r2[1].row), (2, 2), "second cell → B2");
+        assert_eq!((r2[2].col, r2[2].row), (3, 2), "third cell → C2");
+        match &r2[1].value {
+            CellValue::Number { number } => assert_eq!(*number, 42.5),
+            other => panic!("expected number 42.5 at B2, got {other:?}"),
+        }
+    }
+
+    /// #833-1: every `<row>` omits `@r`. Rows must number 1, 2, 3 by document
+    /// order, not all collapse to index 0.
+    #[test]
+    fn rows_without_r_get_sequential_indices() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+              <row><c r="A1" t="s"><v>0</v></c></row>
+              <row><c r="A2" t="s"><v>1</v></c></row>
+              <row><c r="A3" t="s"><v>2</v></c></row>
+            </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        assert_eq!(ws.rows.len(), 3);
+        assert_eq!(ws.rows[0].index, 1, "first <row> → 1");
+        assert_eq!(ws.rows[1].index, 2, "second <row> → 2");
+        assert_eq!(ws.rows[2].index, 3, "third <row> → 3");
+    }
+
+    /// Both `<row>` and `<c>` omit `@r` simultaneously (the common enterprise
+    /// export shape). Positions must fill A1:C2 exactly.
+    #[test]
+    fn both_row_and_cell_omit_r() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+              <row><c t="s"><v>0</v></c><c t="s"><v>1</v></c><c t="s"><v>2</v></c></row>
+              <row><c t="s"><v>3</v></c><c t="n"><v>42.5</v></c><c t="n"><v>100</v></c></row>
+            </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        assert_eq!(ws.rows[0].index, 1);
+        assert_eq!(ws.rows[1].index, 2);
+        let coords: Vec<(u32, u32)> = ws
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter().map(|c| (c.col, c.row)))
+            .collect();
+        assert_eq!(
+            coords,
+            vec![(1, 1), (2, 1), (3, 1), (1, 2), (2, 2), (3, 2)],
+            "row+cell implicit refs must fill A1:C2"
+        );
+    }
+
+    /// Mixed: some cells carry an explicit `@r`, some don't. Under the de-facto
+    /// convention (the spec grants only the optionality), an explicit reference
+    /// re-anchors the running column, so omitted cells after it continue from
+    /// that column, not from the ordinal count.
+    #[test]
+    fn explicit_r_reanchors_running_column() {
+        // A1 (implicit) → col 1; then jump to D1 (explicit) → col 4; the next
+        // implicit cell must be E1 (col 5), and the last implicit → F1 (col 6).
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+              <row r="1"><c t="s"><v>0</v></c><c r="D1" t="s"><v>1</v></c><c t="s"><v>2</v></c><c t="s"><v>3</v></c></row>
+            </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        let cols: Vec<u32> = ws.rows[0].cells.iter().map(|c| c.col).collect();
+        assert_eq!(
+            cols,
+            vec![1, 4, 5, 6],
+            "implicit → A(1); explicit D(4) re-anchors; then E(5), F(6)"
+        );
+    }
+
+    /// A `<row>` with an explicit `@r` re-anchors the running row index, so a
+    /// following `<row>` without `@r` is that number + 1 (not a blind counter).
+    #[test]
+    fn explicit_row_r_reanchors_running_index() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+              <row><c r="A1"><v>1</v></c></row>
+              <row r="5"><c r="A5"><v>2</v></c></row>
+              <row><c r="A6"><v>3</v></c></row>
+            </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        assert_eq!(ws.rows[0].index, 1, "first implicit row → 1");
+        assert_eq!(ws.rows[1].index, 5, "explicit r=5 honored");
+        assert_eq!(ws.rows[2].index, 6, "implicit after r=5 → 6");
+    }
+
+    /// Implicit references must not disturb the other minimal-exporter
+    /// constructs from #833: an inline string (`t="inlineStr"`) with rich
+    /// runs and a shared-string reference resolve correctly even when `@r` is
+    /// omitted on both the row and the cells.
+    #[test]
+    fn implicit_refs_coexist_with_inline_and_shared_strings() {
+        let shared = vec![SharedString {
+            text: "Shared".to_string(),
+            ..Default::default()
+        }];
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+              <row><c t="s"><v>0</v></c><c t="inlineStr"><is><r><rPr><b/></rPr><t>Bold</t></r><r><t> tail</t></r></is></c></row>
+            </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &shared, &[], "Sheet1").expect("parse");
+        let cells = &ws.rows[0].cells;
+        assert_eq!((cells[0].col, cells[0].row), (1, 1));
+        assert_eq!((cells[1].col, cells[1].row), (2, 1));
+        match &cells[0].value {
+            CellValue::Shared { si } => assert_eq!(*si, 0),
+            other => panic!("expected shared ref, got {other:?}"),
+        }
+        match &cells[1].value {
+            CellValue::Text { text, .. } => assert_eq!(text, "Bold tail"),
+            other => panic!("expected concatenated inline rich text, got {other:?}"),
+        }
     }
 }

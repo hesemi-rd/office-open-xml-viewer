@@ -5,8 +5,8 @@ import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
-import { openExternalHyperlink } from '@silurus/ooxml-core';
-import type { HyperlinkTarget, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -17,6 +17,17 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   enableTextSelection?: boolean;
   /** Called when a page finishes rendering. */
   onPageChange?: (index: number, total: number) => void;
+  /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
+   *  {@link DocxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
+   *  as user-facing zoom factors (`1` = 100% = the page at its natural pt→px
+   *  size). Defaults 0.1–4 (10%–400%), matching the other viewers. */
+  zoomMin?: number;
+  zoomMax?: number;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100%): from
+   *  {@link DocxViewer.setScale}, `zoomIn`/`zoomOut`, or `fitWidth`/`fitPage`.
+   *  Named `onScaleChange` to match the pptx/xlsx viewers so all five share one
+   *  notification shape. */
+  onScaleChange?: (scale: number) => void;
   /** IX1 (design decision — NOT user-confirmed, integrator may veto). Called when
    *  a hyperlink run is clicked. When omitted, the default is: external → open in a
    *  new tab via core `openExternalHyperlink` (sanitised, noopener,noreferrer);
@@ -26,9 +37,18 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   onError?: (err: Error) => void;
 }
 
-export class DocxViewer {
+export class DocxViewer implements ZoomableViewer {
   private _doc: DocxDocument | null = null;
   private _currentPage = 0;
+  /**
+   * IX9 explicit zoom factor (`1` = 100% = the page at its natural pt→px width),
+   * or `null` when the caller has never invoked a zoom method. `null` preserves
+   * the pre-IX9 render path EXACTLY: the page renders at `opts.width` (or its
+   * natural width when that is unset), so default rendering is byte-identical. The
+   * first `setScale`/`zoomIn`/`zoomOut`/`fitWidth`/`fitPage` call latches a number
+   * here, after which `_renderPage` derives the canvas width from it instead.
+   */
+  private _scale: number | null = null;
   private _canvas: HTMLCanvasElement;
   private _wrapper: HTMLDivElement;
   /** The canvas's DOM position BEFORE the constructor reparented it into
@@ -58,9 +78,6 @@ export class DocxViewer {
    *  holds one context type for its lifetime; the main-mode 2d render path is
    *  never used on the same canvas). */
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
-  private _warnedNoTextSelection = false;
-  /** One-shot guard so the worker-mode findText warning prints once. */
-  private _warnedNoFind = false;
   /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
    *  render rejection that lands AFTER teardown is swallowed rather than surfaced
    *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
@@ -125,8 +142,8 @@ export class DocxViewer {
 
     // IX2 — the find-highlight overlay layer. Appended last so it stacks above
     // the text/selection layer; `pointer-events:none` keeps selection + link
-    // clicks working through it. In worker mode `onTextRun` can't fire, so it
-    // stays empty (find is main-mode only, warned at find() time).
+    // clicks working through it. IX6 — populated in BOTH render modes (worker
+    // mode ships the run geometry back beside the bitmap).
     this._highlightLayer = document.createElement('div');
     this._highlightLayer.style.cssText =
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
@@ -221,6 +238,110 @@ export class DocxViewer {
   async nextPage(): Promise<void> { await this.goToPage(this._currentPage + 1); }
   async prevPage(): Promise<void> { await this.goToPage(this._currentPage - 1); }
 
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** Natural (100%) CSS-px width of the current page — `widthPt × PT_TO_PX`.
+   *  This is the scale-1 reference every zoom factor multiplies. 0 when nothing
+   *  is loaded. */
+  private _naturalWidthPx(): number {
+    if (!this._doc || this._doc.pageCount === 0) return 0;
+    return this._doc.pageSize(this._currentPage).widthPt * PT_TO_PX;
+  }
+
+  /**
+   * The width (CSS px) `_renderPage` renders the current page at, honouring the
+   * zoom state. `_scale === null` (no zoom method ever called) ⇒ the pre-IX9
+   * value `opts.width` verbatim (byte-identical default: `undefined` lets the
+   * renderer use the page's natural width). Once a factor latched ⇒
+   * `naturalWidth × scale` (rounded), so the on-screen page is exactly `scale ×`
+   * its natural size regardless of the original `opts.width`.
+   */
+  private _renderWidth(): number | undefined {
+    if (this._scale === null) return this._opts.width;
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return this._opts.width; // unloaded — fall back, defer
+    return Math.round(natural * this._scale);
+  }
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor (`1` = 100%). Before
+   *  any zoom method is called this is the EFFECTIVE scale implied by the current
+   *  render width: `opts.width / naturalWidth`, or `1` when `opts.width` is unset
+   *  (the page renders at its natural size) or nothing is loaded. */
+  getScale(): number {
+    if (this._scale !== null) return this._scale;
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return 1;
+    return this._opts.width && this._opts.width > 0 ? this._opts.width / natural : 1;
+  }
+
+  private _zoomMin(): number { return this._opts.zoomMin ?? 0.1; }
+  private _zoomMax(): number { return this._opts.zoomMax ?? 4; }
+
+  /**
+   * IX9 {@link ZoomableViewer} — set the absolute zoom factor (`1` = 100% = the
+   * page at its natural pt→px width), clamped to `[zoomMin, zoomMax]`, and
+   * re-render the current page at the new size. Fires `onScaleChange` when the
+   * clamped factor actually changes. Resolves once the re-render settles. A no-op
+   * (but still latches the scale) when nothing is loaded.
+   */
+  async setScale(scale: number): Promise<void> {
+    const next = clampScale(scale, this._zoomMin(), this._zoomMax());
+    const changed = next !== this.getScale();
+    this._scale = next;
+    await this._render();
+    if (changed) this._opts.onScaleChange?.(next);
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder (clamped to `zoomMax`). */
+  async zoomIn(): Promise<void> { await this.setScale(nextZoomStep(this.getScale())); }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  async zoomOut(): Promise<void> { await this.setScale(prevZoomStep(this.getScale())); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the current page's WIDTH to the host
+   * container (the element the canvas lives in, or `opts.container` if supplied),
+   * then re-render. Defers (no-op) when nothing is loaded or the container is
+   * unlaid-out. Routes through {@link setScale}, so the factor is clamped and
+   * `onScaleChange` fires.
+   */
+  async fitWidth(): Promise<void> { await this._fit('width'); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the WHOLE current page (width and height)
+   * inside the container so it is visible without scrolling; takes the tighter of
+   * the width/height fit. Defers when unloaded / unlaid-out.
+   */
+  async fitPage(): Promise<void> { await this._fit('page'); }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: measure the natural page
+   *  size + the container box, ask core's pure `fitScale`, apply via setScale. */
+  private async _fit(mode: 'width' | 'page'): Promise<void> {
+    if (!this._doc || this._doc.pageCount === 0) return;
+    const size = this._doc.pageSize(this._currentPage);
+    const container = this._fitContainer();
+    if (!container) return;
+    const scale = fitScale(
+      {
+        contentWidth: size.widthPt * PT_TO_PX,
+        contentHeight: size.heightPt * PT_TO_PX,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out / empty — defer
+    await this.setScale(scale);
+  }
+
+  /** The element a fit measures against: the explicit `opts.container`, else the
+   *  host the wrapper was inserted into (`_wrapper.parentElement`). `null` when
+   *  the canvas was mounted detached (no host to fit to). */
+  private _fitContainer(): { clientWidth: number; clientHeight: number } | null {
+    return this._opts.container ?? this._wrapper.parentElement ?? null;
+  }
+
   /**
    * IX2 — find every occurrence of `query` in the document and highlight them
    * all (a soft box per match, drawn on the highlight overlay over the drawn
@@ -228,26 +349,17 @@ export class DocxViewer {
    * `{ page }` (0-based). Case-insensitive by default (browser find-in-page);
    * pass `{ caseSensitive: true }` to match case exactly.
    *
-   * Scans all pages, so a large document renders each page once offscreen to
-   * read its text (the visible page reuses its on-screen render). Not available
-   * in `mode: 'worker'` (the `onTextRun` stream can't cross the worker boundary)
-   * — returns `[]` there after a one-time warning. An empty query clears the
-   * find and returns `[]`.
+   * Scans all pages, so a large document renders each page once (offscreen) to
+   * read its text (the visible page reuses its on-screen render). IX6 — works in
+   * BOTH `mode: 'main'` and `mode: 'worker'`: in worker mode each page's run
+   * geometry is collected off-thread and shipped back, so find returns the same
+   * matches on the same code path. An empty query clears the find and returns `[]`.
    */
   async findText(
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<DocxMatchLocation>[]> {
     if (!this._doc) return [];
-    if (this._mode === 'worker') {
-      if (!this._warnedNoFind) {
-        this._warnedNoFind = true;
-        console.warn(
-          "[ooxml] findText is unavailable in mode: 'worker' (text runs can't cross the worker boundary). Use mode: 'main'.",
-        );
-      }
-      return [];
-    }
     const matches = await this._find.find(query, opts);
     // Redraw the current page's highlights (matches on it become visible without
     // navigating). Cheap DOM geometry — no page re-render.
@@ -369,24 +481,33 @@ export class DocxViewer {
   private async _renderPage(): Promise<void> {
     if (!this._doc) return;
     const isWorker = this._mode === 'worker';
-    // In worker mode rendering happens off the main thread, so the onTextRun
-    // callback can't fire — the text-selection overlay is unavailable.
-    if (isWorker && this._textLayer && !this._warnedNoTextSelection) {
-      this._warnedNoTextSelection = true;
-      console.warn(
-        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
-      );
-    }
+    // IX9: the width to render at. When no zoom method was ever called
+    // (`_scale === null`) this is exactly `opts.width` (pre-IX9 path, byte-
+    // identical default); once a zoom latched a factor it is `naturalWidth ×
+    // scale`.
+    const renderWidth = this._renderWidth();
+    // Collect runs unconditionally (not just when a text layer exists): the
+    // find-highlight overlay needs the current page's run geometry too, and
+    // caching them here means find() reuses the visible render for this page
+    // instead of re-rendering it offscreen. IX6 — in worker mode the runs ride
+    // back beside the bitmap, so both modes populate the same `runs` array,
+    // at the zoom-aware `renderWidth` (the geometry follows setScale).
+    const runs: DocxTextRunInfo[] = [];
+    const onTextRun = (r: DocxTextRunInfo) => runs.push(r);
     if (isWorker) {
       const dpr = this._opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
       // Only serializable render options may cross to the worker — spreading the
       // full viewer opts would postMessage non-cloneable values (the math
-      // engine, callbacks, container element) and throw a DataCloneError.
+      // engine, callbacks, container element) and throw a DataCloneError. The
+      // `onTextRun` callback stays main-thread; the proxy invokes it with the
+      // worker's returned runs (IX6).
       const bmp = await this._doc.renderPageToBitmap(this._currentPage, {
-        width: this._opts.width,
+        width: renderWidth,
         dpr: this._opts.dpr,
         defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
+        onTextRun,
       });
       this._canvas.width = bmp.width;
       this._canvas.height = bmp.height;
@@ -396,21 +517,17 @@ export class DocxViewer {
       this._canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
       this._bitmapCtx?.transferFromImageBitmap(bmp);
     } else {
-      // Collect runs unconditionally (not just when a text layer exists): the
-      // find-highlight overlay needs the current page's run geometry too, and
-      // caching them here means find() reuses the visible render for this page
-      // instead of re-rendering it offscreen.
-      const runs: DocxTextRunInfo[] = [];
-      const onTextRun = (r: DocxTextRunInfo) => runs.push(r);
-      await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, onTextRun });
-      if (this._textLayer) {
-        this._buildTextLayer(this._textLayer, runs);
-      }
-      // Feed the just-rendered page's runs to the find controller so highlight
-      // geometry matches exactly what was drawn, then (re)draw the highlights.
-      this._find.setPageRuns(this._currentPage, runs);
-      this._buildHighlightLayer(runs);
+      await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, width: renderWidth, onTextRun });
     }
+    // IX6 — identical overlay build for both modes: the run geometry the worker
+    // shipped is the same shape `onTextRun` emits in main mode.
+    if (this._textLayer) {
+      this._buildTextLayer(this._textLayer, runs);
+    }
+    // Feed the just-rendered page's runs to the find controller so highlight
+    // geometry matches exactly what was drawn, then (re)draw the highlights.
+    this._find.setPageRuns(this._currentPage, runs);
+    this._buildHighlightLayer(runs);
     this._opts.onPageChange?.(this._currentPage, this.pageCount);
   }
 
@@ -449,19 +566,22 @@ export class DocxViewer {
    *  (text + geometry) for search, without touching the visible canvas. Used by
    *  the find controller for pages other than the one on screen. */
   private async _collectPageRuns(page: number): Promise<DocxTextRunInfo[]> {
-    if (!this._doc || this._mode === 'worker') return [];
-    // The currently displayed page's runs are already cached by _renderPage; the
-    // controller only calls this for other pages.
-    const runs: DocxTextRunInfo[] = [];
-    const off =
-      typeof OffscreenCanvas !== 'undefined'
-        ? new OffscreenCanvas(1, 1)
-        : (document.createElement('canvas') as HTMLCanvasElement);
-    await this._doc.renderPage(off, page, {
-      ...this._opts,
-      onTextRun: (r: DocxTextRunInfo) => runs.push(r),
+    if (!this._doc) return [];
+    // IX6 — `collectPageRuns` renders the page (off-thread in worker mode, to a
+    // throwaway offscreen canvas in main mode) and returns just its run
+    // geometry. The find controller only calls this for pages OTHER than the one
+    // on screen (the visible page's runs are cached by _renderPage). Pass the
+    // same serializable options as the visible render — including the IX9
+    // zoom-aware `_renderWidth()`, so the harvested geometry matches what a
+    // navigation to that page would draw at the current scale (worker mode
+    // postMessages these — no callbacks/engine).
+    return this._doc.collectPageRuns(page, {
+      width: this._renderWidth(),
+      dpr: this._opts.dpr,
+      defaultTextColor: this._opts.defaultTextColor,
+      showTrackChanges: this._opts.showTrackChanges,
+      currentDate: this._opts.currentDate,
     });
-    return runs;
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {

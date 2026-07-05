@@ -1,5 +1,5 @@
 import type { DimOptions, MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
-import { renderSlide, dropImageBitmapCache, type TextRunCallback } from './renderer';
+import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import { selectNotes } from './notes';
 import { selectHidden } from './hidden';
@@ -55,6 +55,14 @@ export interface RenderSlideToBitmapOptions {
   skipMediaControls?: boolean;
   /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
   dim?: DimOptions;
+  /**
+   * IX6 — receives the slide's text-run geometry (the same stream `renderSlide`
+   * emits in main mode). Stays main-thread (never crosses the wire); in worker
+   * mode the proxy invokes it with the runs the worker shipped back beside the
+   * bitmap, so a caller builds the selection / find overlay on the SAME code
+   * path in both modes.
+   */
+  onTextRun?: TextRunCallback;
 }
 
 /** Options for rendering a single slide onto a canvas. */
@@ -384,11 +392,46 @@ export class PptxPresentation {
       const res = await this._bridge.request(
         (id) => ({ kind: 'renderSlide', id, slideIndex, width, dpr, skipMediaControls: opts.skipMediaControls, dim: opts.dim }) satisfies RenderWorkerRequest,
       );
-      return (res as Extract<RenderWorkerResponse, { kind: 'slideRendered' }>).bitmap;
+      const rendered = res as Extract<RenderWorkerResponse, { kind: 'slideRendered' }>;
+      // IX6 — replay the worker's run geometry to the caller's collector so the
+      // selection / find overlay is built on the same path as main mode.
+      if (opts.onTextRun) for (const r of rendered.runs) opts.onTextRun(r);
+      return rendered.bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
-    await this.renderSlide(off, slideIndex, { width, dpr, skipMediaControls: opts.skipMediaControls, dim: opts.dim });
+    await this.renderSlide(off, slideIndex, {
+      width,
+      dpr,
+      skipMediaControls: opts.skipMediaControls,
+      dim: opts.dim,
+      onTextRun: opts.onTextRun,
+    });
     return off.transferToImageBitmap();
+  }
+
+  /**
+   * IX6 — collect a slide's text-run geometry (`PptxTextRunInfo[]`) without
+   * painting a visible canvas. Works in BOTH modes: worker mode renders the
+   * slide off-thread and ships only the runs (no bitmap transfer); main mode
+   * renders to a throwaway offscreen canvas. Used by the find controller to scan
+   * every slide for matches. Run geometry is in CSS px (independent of dpr) and
+   * dimming does not move glyphs, so only `width` is threaded — matching the
+   * historical main-mode `_collectSlideRuns`.
+   */
+  async collectSlideRuns(slideIndex: number, width = 960): Promise<PptxTextRunInfo[]> {
+    if (this._mode === 'worker') {
+      if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= this.slideCount) {
+        throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+      }
+      const res = await this._bridge.request(
+        (id) => ({ kind: 'collectRuns', id, slideIndex, width }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { kind: 'runsCollected' }>).runs;
+    }
+    const runs: PptxTextRunInfo[] = [];
+    const off = new OffscreenCanvas(1, 1);
+    await this.renderSlide(off, slideIndex, { width, onTextRun: (r) => runs.push(r) });
+    return runs;
   }
 
   /**
@@ -482,19 +525,14 @@ export class PptxPresentation {
     const dpr = opts.dpr ?? defaultDpr();
     const width = opts.width ?? (canvas.offsetWidth || 960);
 
-    if (this._mode === 'worker' && opts.onTextRun) {
-      // The callback can't cross the worker boundary.
-      console.warn(
-        "[ooxml] onTextRun is unavailable in mode: 'worker'; the text selection overlay will be empty for this slide.",
-      );
-    }
-
     const drawBase =
       this._mode === 'worker'
         ? async () => {
             // Whole slide rendered off-thread; the handle snapshots this paint
             // into its own base copy, so the bitmap can be closed right after.
-            const bmp = await this.renderSlideToBitmap(slideIndex, { width, dpr, skipMediaControls: true, dim: opts.dim });
+            // IX6 — the run geometry rides back beside the bitmap, so a media
+            // slide is as selectable/searchable in worker mode as in main mode.
+            const bmp = await this.renderSlideToBitmap(slideIndex, { width, dpr, skipMediaControls: true, dim: opts.dim, onTextRun: opts.onTextRun });
             canvas.width = bmp.width;
             canvas.height = bmp.height;
             // Set only the CSS width and let height follow the intrinsic aspect

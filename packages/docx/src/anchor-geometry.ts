@@ -26,7 +26,11 @@ import type { RenderState } from './renderer.js';
  *                        (we approximate as leftMargin)
  *    - "outsideMargin" → on odd pages = rightMargin, even = leftMargin
  *                        (we approximate as rightMargin)
- *    - "character"     → degrade to "margin" (no run-relative anchor data)
+ *    - "column"        → the current text column (state.contentX/contentW):
+ *                        the margin band at body level, a specific column in a
+ *                        multi-column section, or a table cell's inner text box
+ *    - "character"     → degrade to "column" (no run-relative offset data), i.e.
+ *                        the containing text column — the closest available base
  *    - "topMargin"     → strip from y=0 to y=marginTop
  *    - "bottomMargin"  → strip from y=pageH-marginBottom to y=pageH
  *    - "paragraph"/"line" → relative to paragraph top (V only) */
@@ -46,9 +50,20 @@ export function xContainer(
     case 'rightMargin':   return { start: pageW - mr, end: pageW };
     case 'insideMargin':  return { start: 0, end: ml };
     case 'outsideMargin': return { start: pageW - mr, end: pageW };
-    case 'margin':
+    // ECMA-376 §20.4.3.4 ST_RelFromH: `column` is "relative to the extents of the
+    // COLUMN which contains its anchor" — the current TEXT column, not the page
+    // margins. `character` is "relative to the position of the anchor within its
+    // run content"; with no run-relative offset data we degrade it to the same
+    // containing column (the closest available base). The renderer keeps the
+    // current column band in state.contentX/contentW (ALREADY scaled px): the
+    // section margin band at body level, a specific column band in a multi-column
+    // section, or a table CELL's inner text box while rendering cell content
+    // (renderCell). This lets a header-logo anchor authored `relativeFrom="column"`
+    // inside an RTL bidi cell land in that cell's column (sample-28) instead of
+    // being flattened onto the page margin band.
     case 'character':
-    case 'column':
+    case 'column':        return { start: state.contentX, end: state.contentX + state.contentW };
+    case 'margin':
     default:              return { start: ml, end: pageW - mr };
   }
 }

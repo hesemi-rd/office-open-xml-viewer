@@ -10,7 +10,13 @@ import {
   type HyperlinkTarget,
   type FindMatch,
   type FindMatchesOptions,
+  type ZoomableViewer,
+  EMU_PER_PX,
   openExternalHyperlink,
+  nextZoomStep,
+  prevZoomStep,
+  clampScale,
+  fitScale,
 } from '@silurus/ooxml-core';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
@@ -24,6 +30,17 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   onSlideChange?: (index: number, total: number) => void;
   /** Called on parse or render errors */
   onError?: (err: Error) => void;
+  /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
+   *  {@link PptxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
+   *  as user-facing zoom factors (`1` = 100% = the slide at its natural
+   *  EMU→px size). Defaults 0.1–4 (10%–400%), matching the other viewers. */
+  zoomMin?: number;
+  zoomMax?: number;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100%): from
+   *  {@link PptxViewer.setScale}, `zoomIn`/`zoomOut`, or `fitWidth`/`fitPage`.
+   *  Named `onScaleChange` to match the docx/xlsx viewers so all five share one
+   *  notification shape. */
+  onScaleChange?: (scale: number) => void;
   /**
    * Enable interactive audio/video playback. When true, slides are rendered
    * via {@link PptxPresentation.presentSlide} so media elements become
@@ -78,9 +95,18 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
  *
  * For custom layouts (multi-canvas, thumbnails, scroll view) use PptxPresentation directly.
  */
-export class PptxViewer {
+export class PptxViewer implements ZoomableViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly wrapper: HTMLDivElement;
+  /**
+   * IX9 explicit zoom factor (`1` = 100% = the slide at its natural EMU→px
+   * width), or `null` when the caller has never invoked a zoom method. `null`
+   * preserves the pre-IX9 render path EXACTLY: the slide renders at `opts.width`
+   * (or `canvas.offsetWidth || 960` when unset), so default rendering is
+   * byte-identical. The first zoom call latches a number here, after which
+   * {@link _targetWidth} derives the render width from it.
+   */
+  private _scale: number | null = null;
   /** The canvas's DOM position BEFORE the constructor reparented it into
    *  {@link wrapper}, captured so {@link destroy} can return the caller-owned
    *  canvas to exactly where it was. `null` parent = canvas was passed
@@ -98,8 +124,6 @@ export class PptxViewer {
   private _find: PptxFindController;
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
-  /** One-shot guard for the worker-mode findText warning. */
-  private _warnedNoFind = false;
   private engine: PptxPresentation | null = null;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
@@ -110,7 +134,6 @@ export class PptxViewer {
    *  render path. The media-playback path keeps a 2d context (via presentSlide),
    *  so this is obtained only when worker mode renders without media playback. */
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
-  private _warnedNoTextSelection = false;
   /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
    *  render rejection that lands AFTER teardown is swallowed rather than surfaced
    *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
@@ -175,7 +198,8 @@ export class PptxViewer {
 
     // IX2 — find-highlight overlay layer, appended last (stacks above the text
     // layer). `pointer-events:none` keeps selection + link clicks working
-    // through it. Empty in worker mode (onTextRun can't fire there).
+    // through it. IX6 — populated in BOTH render modes (worker mode ships the
+    // run geometry back beside the bitmap).
     this.highlightLayer = document.createElement('div');
     this.highlightLayer.style.cssText =
       'position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
@@ -331,13 +355,105 @@ export class PptxViewer {
   /** The underlying <canvas> element. */
   get canvasElement(): HTMLCanvasElement { return this.canvas; }
 
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** Natural (100%) CSS-px width of a slide — `slideWidth(EMU) / EMU_PER_PX`.
+   *  0 when nothing is loaded. The scale-1 reference every zoom factor
+   *  multiplies. */
+  private _naturalWidthPx(): number {
+    const emu = this.engine?.slideWidth ?? 0;
+    return emu > 0 ? emu / EMU_PER_PX : 0;
+  }
+
+  /**
+   * The width (CSS px) the render paths draw the slide at, honouring the zoom
+   * state. `_scale === null` (no zoom method ever called) ⇒ the pre-IX9 value
+   * `opts.width ?? (canvas.offsetWidth || 960)` verbatim (byte-identical
+   * default). Once a factor latched ⇒ `naturalWidth × scale` (rounded), so the
+   * slide is exactly `scale ×` its natural size regardless of `opts.width`.
+   */
+  private _targetWidth(): number {
+    if (this._scale === null) return this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return this.opts.width ?? (this.canvas.offsetWidth || 960);
+    return Math.round(natural * this._scale);
+  }
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor (`1` = 100%). Before
+   *  any zoom method is called this is the EFFECTIVE scale implied by the render
+   *  width: `targetWidth / naturalWidth`, or `1` when nothing is loaded. */
+  getScale(): number {
+    if (this._scale !== null) return this._scale;
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return 1;
+    return this._targetWidth() / natural;
+  }
+
+  private _zoomMin(): number { return this.opts.zoomMin ?? 0.1; }
+  private _zoomMax(): number { return this.opts.zoomMax ?? 4; }
+
+  /**
+   * IX9 {@link ZoomableViewer} — set the absolute zoom factor (`1` = 100% = the
+   * slide at its natural EMU→px width), clamped to `[zoomMin, zoomMax]`, and
+   * re-render the current slide at the new size. Fires `onScaleChange` when the
+   * clamped factor actually changes. Resolves once the re-render settles.
+   */
+  async setScale(scale: number): Promise<void> {
+    const next = clampScale(scale, this._zoomMin(), this._zoomMax());
+    const changed = next !== this.getScale();
+    this._scale = next;
+    await this.renderCurrentSlide();
+    if (changed) this.opts.onScaleChange?.(next);
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder (clamped to `zoomMax`). */
+  async zoomIn(): Promise<void> { await this.setScale(nextZoomStep(this.getScale())); }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  async zoomOut(): Promise<void> { await this.setScale(prevZoomStep(this.getScale())); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the current slide's WIDTH to the host
+   * container (the element the canvas lives in), then re-render. Defers (no-op)
+   * when nothing is loaded or the container is unlaid-out. Routes through
+   * {@link setScale}.
+   */
+  async fitWidth(): Promise<void> { await this._fit('width'); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the WHOLE current slide (width and height)
+   * inside the container so it is fully visible; takes the tighter of the
+   * width/height fit. Defers when unloaded / unlaid-out.
+   */
+  async fitPage(): Promise<void> { await this._fit('page'); }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: measure the natural slide
+   *  size + the container box, ask core's pure `fitScale`, apply via setScale. */
+  private async _fit(mode: 'width' | 'page'): Promise<void> {
+    if (!this.engine) return;
+    const container = this.wrapper.parentElement;
+    if (!container) return;
+    const scale = fitScale(
+      {
+        contentWidth: this.engine.slideWidth / EMU_PER_PX,
+        contentHeight: this.engine.slideHeight / EMU_PER_PX,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out / empty — defer
+    await this.setScale(scale);
+  }
+
   private async renderCurrentSlide(): Promise<void> {
     if (!this.engine) return;
     const dim =
       this._hiddenMode === 'dim' && this.engine.isHidden(this.currentSlide)
         ? this._dim()
         : undefined;
-    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const targetWidth = this._targetWidth();
     const dpr = this.opts.dpr ?? (window.devicePixelRatio || 1);
 
     const scale = targetWidth / this.engine.slideWidth;
@@ -349,19 +465,13 @@ export class PptxViewer {
     this.handle = null;
 
     const isWorker = this._mode === 'worker';
-    // In worker mode rendering happens off the main thread, so the onTextRun
-    // callback can't fire — the text-selection overlay is unavailable.
-    if (isWorker && this.textLayer && !this._warnedNoTextSelection) {
-      this._warnedNoTextSelection = true;
-      console.warn(
-        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
-      );
-    }
-    // Collect runs unconditionally in main mode (not just when a text layer
-    // exists): the find-highlight overlay needs the current slide's run geometry
-    // too, and caching them lets find() reuse the visible render for this slide.
+    // Collect runs unconditionally (not just when a text layer exists): the
+    // find-highlight overlay needs the current slide's run geometry too, and
+    // caching them lets find() reuse the visible render for this slide. IX6 —
+    // in worker mode the runs ride back beside the bitmap (via the proxy's
+    // `onTextRun`), so both modes populate the same `runs` array.
     const runs: PptxTextRunInfo[] = [];
-    const onTextRun = !isWorker ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const onTextRun = (r: PptxTextRunInfo) => runs.push(r);
 
     try {
       if (this.opts.enableMediaPlayback) {
@@ -371,9 +481,10 @@ export class PptxViewer {
           width: targetWidth,
           dpr,
           dim,
+          onTextRun,
         });
       } else if (isWorker) {
-        const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim });
+        const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim, onTextRun });
         this.canvas.width = bmp.width;
         this.canvas.height = bmp.height;
         this._bitmapCtx?.transferFromImageBitmap(bmp);
@@ -385,15 +496,15 @@ export class PptxViewer {
       this._reportRenderError(err);
     }
 
-    if (this.textLayer && !isWorker) {
+    // IX6 — identical overlay build for both modes: the run geometry the worker
+    // shipped is the same shape `onTextRun` emits in main mode.
+    if (this.textLayer) {
       this._buildTextLayer(this.textLayer, runs, targetWidth, cssHeight);
     }
-    if (!isWorker) {
-      // Feed the just-rendered slide's runs to the find controller (geometry
-      // matches what was drawn) and (re)draw its highlights.
-      this._find.setSlideRuns(this.currentSlide, runs);
-      this._buildHighlightLayer(runs, targetWidth, cssHeight);
-    }
+    // Feed the just-rendered slide's runs to the find controller (geometry
+    // matches what was drawn) and (re)draw its highlights.
+    this._find.setSlideRuns(this.currentSlide, runs);
+    this._buildHighlightLayer(runs, targetWidth, cssHeight);
   }
 
   /** Draw the find-highlight boxes for the current slide from its runs. */
@@ -418,22 +529,15 @@ export class PptxViewer {
     return (s) => ctx.measureText(s).width;
   }
 
-  /** Render a slide to a throwaway offscreen canvas to collect its runs for
-   *  search, without touching the visible canvas. Used for slides other than the
-   *  one on screen. */
+  /** IX6 — collect a slide's runs for search without touching the visible
+   *  canvas. Delegates to `collectSlideRuns`, which works in BOTH modes (worker:
+   *  off-thread, ships only the runs; main: throwaway offscreen canvas). Used for
+   *  slides other than the one on screen. */
   private async _collectSlideRuns(slide: number): Promise<PptxTextRunInfo[]> {
-    if (!this.engine || this._mode === 'worker') return [];
-    const runs: PptxTextRunInfo[] = [];
-    const off =
-      typeof OffscreenCanvas !== 'undefined'
-        ? new OffscreenCanvas(1, 1)
-        : (document.createElement('canvas') as HTMLCanvasElement);
-    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
-    await this.engine.renderSlide(off, slide, {
-      width: targetWidth,
-      onTextRun: (r: PptxTextRunInfo) => runs.push(r),
-    });
-    return runs;
+    if (!this.engine) return [];
+    // IX9 — collect at the zoom-aware width so the harvested geometry matches
+    // what a navigation to that slide would draw at the current scale.
+    return this.engine.collectSlideRuns(slide, this._targetWidth());
   }
 
   /**
@@ -443,23 +547,16 @@ export class PptxViewer {
    * by default; pass `{ caseSensitive: true }` for an exact match.
    *
    * Scans all slides (each rendered once offscreen to read its text; the visible
-   * slide reuses its on-screen render). Not available in `mode: 'worker'` —
-   * returns `[]` there after a one-time warning. An empty query clears the find.
+   * slide reuses its on-screen render). IX6 — works in BOTH `mode: 'main'` and
+   * `mode: 'worker'`: in worker mode each slide's run geometry is collected
+   * off-thread and shipped back, so find returns the same matches on the same
+   * code path. An empty query clears the find.
    */
   async findText(
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
     if (!this.engine) return [];
-    if (this._mode === 'worker') {
-      if (!this._warnedNoFind) {
-        this._warnedNoFind = true;
-        console.warn(
-          "[ooxml] findText is unavailable in mode: 'worker' (text runs can't cross the worker boundary). Use mode: 'main'.",
-        );
-      }
-      return [];
-    }
     const matches = await this._find.find(query, opts);
     this._redrawHighlights();
     return matches;
@@ -504,7 +601,7 @@ export class PptxViewer {
   /** Rebuild the highlight overlay for the current slide from cached runs. */
   private _redrawHighlights(): void {
     const runs = this._find.slideRuns(this.currentSlide) ?? [];
-    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const targetWidth = this._targetWidth();
     const cssHeight = this.engine
       ? Math.round(this.engine.slideHeight * (targetWidth / this.engine.slideWidth))
       : 0;
