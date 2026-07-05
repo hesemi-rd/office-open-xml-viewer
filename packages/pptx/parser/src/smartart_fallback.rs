@@ -19,8 +19,9 @@
 //! * Only `node`/`asst` points carry user content; `doc`, `pres`, `parTrans`
 //!   and `sibTrans` are structural (ST_PtType, §21.4.7.51) and are skipped.
 //! * `<dgm:cxnLst>` (§21.4.3.3) `parOf` connections (ST_CxnType, §21.4.7.23)
-//!   define the parent→child tree; `destOrd` orders siblings. A pre-order walk
-//!   of that tree yields the reading order and each node's indent depth.
+//!   define the parent→child tree; `srcOrd` orders siblings under a common
+//!   parent (§21.4.3.2 — see [`ParOfEdge`]). A pre-order walk of that tree
+//!   yields the reading order and each node's indent depth.
 //!
 //! Two fallback stages:
 //!
@@ -46,21 +47,29 @@ pub(crate) fn pt_type_is_content(pt_type: Option<&str>) -> bool {
     matches!(pt_type.unwrap_or("node"), "node" | "asst")
 }
 
-/// A `parOf` connection edge (ECMA-376 §21.4.3.3 / ST_CxnType §21.4.7.23):
-/// `src` is the parent point's modelId, `dst` the child's, `ord` the sibling
-/// ordering (`destOrd`). Only `parOf` edges build the display tree; `presOf`,
-/// `presParOf` and `unknownRelationship` are ignored.
+/// A `parOf` connection edge (ECMA-376 §21.4.3.2 cxn / ST_CxnType §21.4.7.23):
+/// `src` is the parent point's modelId, `dst` the child's. Sibling order under
+/// a common parent travels on `src_ord` (`@srcOrd`) — §21.4.3.2's worked
+/// example is decisive: six children of one parent (`srcId="0"`) carry
+/// `srcOrd="0..5"` while every edge has `destOrd="0"`, i.e. `srcOrd` is the
+/// ordinal of this connection among the source's outgoing connections.
+/// `dest_ord` (`@destOrd`, the ordinal among the destination's incoming
+/// connections, almost always 0) is kept as a secondary key only. Only `parOf`
+/// edges build the display tree; `presOf`, `presParOf` and
+/// `unknownRelationship` are ignored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParOfEdge {
     pub(crate) src: String,
     pub(crate) dst: String,
-    pub(crate) ord: u32,
+    pub(crate) src_ord: u32,
+    pub(crate) dest_ord: u32,
 }
 
 /// Pre-order traversal of the `parOf` tree starting from `root_id`, returning
 /// each reachable point's modelId paired with its depth (root's direct children
-/// are depth 0). Children are visited in ascending `destOrd`, then in the order
-/// the edges were declared (stable tie-break). A visited-set guards against
+/// are depth 0). Children are visited in ascending `srcOrd` (§21.4.3.2 — the
+/// sibling position under the source), with `destOrd` as a secondary key and
+/// declaration order as the stable tie-break. A visited-set guards against
 /// cyclic or duplicated connections so a malformed data model cannot loop.
 ///
 /// Pure over IDs — no XML — so the tree logic is unit-tested independently of
@@ -81,9 +90,10 @@ fn walk(
     out: &mut Vec<(String, u32)>,
 ) {
     // Collect this parent's outgoing edges, preserving declaration order as the
-    // stable tie-break, then sort by `destOrd` (stable sort keeps the tie-break).
+    // stable tie-break, then sort by (srcOrd, destOrd) — srcOrd is the sibling
+    // position under this parent (§21.4.3.2); a stable sort keeps the tie-break.
     let mut children: Vec<&ParOfEdge> = edges.iter().filter(|e| e.src == parent).collect();
-    children.sort_by_key(|e| e.ord);
+    children.sort_by_key(|e| (e.src_ord, e.dest_ord));
     for edge in children {
         if !visited.insert(edge.dst.clone()) {
             continue; // already placed — avoid cycles / duplicate parents
@@ -164,10 +174,21 @@ pub(crate) fn emit_smartart_fallback(
             let (Some(src), Some(dst)) = (attr(&cxn, "srcId"), attr(&cxn, "destId")) else {
                 continue;
             };
-            let ord = attr(&cxn, "destOrd")
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0);
-            edges.push(ParOfEdge { src, dst, ord });
+            // §21.4.3.2: srcOrd carries the sibling position under the source
+            // (parent); destOrd is the ordinal among the destination's incoming
+            // connections. Both are xsd:unsignedInt and required by CT_Cxn, but
+            // degrade to 0 if absent/unparsable rather than dropping the edge.
+            let parse_ord = |name: &str| -> u32 {
+                attr(&cxn, name)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0)
+            };
+            edges.push(ParOfEdge {
+                src,
+                dst,
+                src_ord: parse_ord("srcOrd"),
+                dest_ord: parse_ord("destOrd"),
+            });
         }
     }
 
@@ -456,23 +477,24 @@ mod tests {
         assert!(!pt_type_is_content(Some("sibTrans")));
     }
 
-    fn edge(src: &str, dst: &str, ord: u32) -> ParOfEdge {
+    fn edge(src: &str, dst: &str, src_ord: u32, dest_ord: u32) -> ParOfEdge {
         ParOfEdge {
             src: src.into(),
             dst: dst.into(),
-            ord,
+            src_ord,
+            dest_ord,
         }
     }
 
     #[test]
     fn tree_order_is_preorder_with_depth() {
-        // doc(root) -> A(ord0) -> A1(ord0); root -> B(ord1) -> B1, B2
+        // doc(root) -> A(srcOrd0) -> A1; root -> B(srcOrd1) -> B1, B2
         let edges = vec![
-            edge("root", "A", 0),
-            edge("A", "A1", 0),
-            edge("root", "B", 1),
-            edge("B", "B1", 0),
-            edge("B", "B2", 1),
+            edge("root", "A", 0, 0),
+            edge("A", "A1", 0, 0),
+            edge("root", "B", 1, 0),
+            edge("B", "B1", 0, 0),
+            edge("B", "B2", 1, 0),
         ];
         let ordered = order_nodes_by_tree("root", &edges);
         assert_eq!(
@@ -487,13 +509,17 @@ mod tests {
         );
     }
 
+    /// §21.4.3.2 — `srcOrd` is the sibling position under the source (parent);
+    /// the spec's worked example writes `srcOrd="0..5"` / `destOrd="0"` for six
+    /// children of one parent. Real files (sample-9) match: parents order their
+    /// children by srcOrd while destOrd stays 0. Here destOrd is set to the
+    /// exact opposite order to prove it does NOT govern.
     #[test]
-    fn siblings_sorted_by_dest_ord_not_declaration_order() {
-        // Declared out of order; destOrd governs.
+    fn siblings_sorted_by_src_ord_even_when_dest_ord_disagrees() {
         let edges = vec![
-            edge("root", "third", 2),
-            edge("root", "first", 0),
-            edge("root", "second", 1),
+            edge("root", "third", 2, 0),
+            edge("root", "first", 0, 2),
+            edge("root", "second", 1, 1),
         ];
         let ordered = order_nodes_by_tree("root", &edges);
         let ids: Vec<&str> = ordered.iter().map(|(id, _)| id.as_str()).collect();
@@ -503,14 +529,18 @@ mod tests {
     #[test]
     fn cyclic_connections_do_not_loop() {
         // A -> B -> A would loop without the visited guard.
-        let edges = vec![edge("root", "A", 0), edge("A", "B", 0), edge("B", "A", 0)];
+        let edges = vec![
+            edge("root", "A", 0, 0),
+            edge("A", "B", 0, 0),
+            edge("B", "A", 0, 0),
+        ];
         let ordered = order_nodes_by_tree("root", &edges);
         assert_eq!(ordered, vec![("A".into(), 0), ("B".into(), 1)]);
     }
 
     #[test]
     fn tree_order_ignores_unrelated_root() {
-        let edges = vec![edge("other", "X", 0)];
+        let edges = vec![edge("other", "X", 0, 0)];
         assert!(order_nodes_by_tree("root", &edges).is_empty());
     }
 
@@ -601,6 +631,56 @@ mod tests {
             lines,
             vec![("Parent", 0), ("Child", 1), ("Sibling", 0)],
             "pre-order traversal with depth-based list level"
+        );
+    }
+
+    /// Sibling order travels on `srcOrd`, NOT `destOrd`. ECMA-376 §21.4.3.2's
+    /// worked example is decisive: six children of one parent (`srcId="0"`)
+    /// carry `srcOrd="0..5"` while every edge has `destOrd="0"` — the ordinal
+    /// among the source's outgoing connections is the sibling position.
+    /// This probe sets the two attributes to opposite orders so a destOrd
+    /// (or declaration-order) implementation emits the exact reverse.
+    #[test]
+    fn sibling_order_follows_src_ord_in_data_model() {
+        let data = format!(
+            r#"<dgm:dataModel {DGM_NS}>
+              <dgm:ptLst>
+                <dgm:pt modelId="root" type="doc"/>
+                <dgm:pt modelId="a"><dgm:t><a:bodyPr/><a:p><a:r><a:t>First</a:t></a:r></a:p></dgm:t></dgm:pt>
+                <dgm:pt modelId="b"><dgm:t><a:bodyPr/><a:p><a:r><a:t>Second</a:t></a:r></a:p></dgm:t></dgm:pt>
+                <dgm:pt modelId="c"><dgm:t><a:bodyPr/><a:p><a:r><a:t>Third</a:t></a:r></a:p></dgm:t></dgm:pt>
+              </dgm:ptLst>
+              <dgm:cxnLst>
+                <dgm:cxn modelId="c1" type="parOf" srcId="root" destId="c" srcOrd="2" destOrd="0"/>
+                <dgm:cxn modelId="c2" type="parOf" srcId="root" destId="a" srcOrd="0" destOrd="2"/>
+                <dgm:cxn modelId="c3" type="parOf" srcId="root" destId="b" srcOrd="1" destOrd="1"/>
+              </dgm:cxnLst>
+            </dgm:dataModel>"#
+        );
+        let mut zip = zip_with(&[("ppt/diagrams/data1.xml", data.as_bytes())]);
+        let mut rels = HashMap::new();
+        rels.insert("rId3".to_string(), "../diagrams/data1.xml".to_string());
+        let theme = HashMap::new();
+        let mut out = Vec::new();
+        emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        let SlideElement::Shape(shape) = &out[0] else {
+            panic!("expected a shape");
+        };
+        let texts: Vec<&str> = shape
+            .text_body
+            .as_ref()
+            .unwrap()
+            .paragraphs
+            .iter()
+            .filter_map(|p| match p.runs.first() {
+                Some(TextRun::Text(t)) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["First", "Second", "Third"],
+            "srcOrd (0,1,2) must govern sibling order even when destOrd (2,1,0) disagrees"
         );
     }
 
