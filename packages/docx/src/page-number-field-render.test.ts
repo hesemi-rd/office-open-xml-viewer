@@ -123,6 +123,52 @@ function twoSectionDoc(
   } as unknown as DocxDocumentModel;
 }
 
+/** A 2-section doc joined by a CONTINUOUS section break (§17.18.77): the second
+ *  section begins MID-PAGE below the first (no page break) and its content SPILLS
+ *  onto the following physical pages. The second section is the FINAL (body-level)
+ *  section, so its `w:type="continuous"` lives on `section.sectionStart` and its
+ *  `<w:pgNumType>` on `section.pageNumType` — exactly how the parser models
+ *  sample-27 (§17.6.12). `firstLines` keeps section 1 short so section 2 shares its
+ *  page; `secondLines` controls how far section 2 spills. */
+function continuousSpilloverDoc(
+  secondPgNum: PageNumType | null,
+  firstLines: number,
+  secondLines: number,
+): DocxDocumentModel {
+  const front: BodyElement[] = [];
+  for (let i = 0; i < firstLines; i++) front.push(para(`S1-${i}`));
+  const body: BodyElement[] = [];
+  for (let i = 0; i < secondLines; i++) body.push(para(`S2-${i}`));
+  const footer = footerWithPageField('PAGE');
+  const bodySection: SectionProps = {
+    ...GEOM(), titlePage: false, evenAndOddHeaders: false,
+    // §17.18.77 — the body-level (final) section starts CONTINUOUS, so it shares the
+    // page where section 1 ends. §17.6.12 — and it carries the restart.
+    sectionStart: 'continuous',
+    pageNumType: secondPgNum,
+  } as unknown as SectionProps;
+  return {
+    section: bodySection,
+    body: [
+      ...front,
+      {
+        // The mid-body marker ENDS section 1 (which carries no restart). The break's
+        // effective kind is read from the UPCOMING section (the body section's
+        // `sectionStart: 'continuous'`), so this marker's own `kind` is irrelevant.
+        type: 'sectionBreak', kind: 'nextPage', geom: GEOM(),
+        headers: { default: null, first: null, even: null },
+        footers: { default: footer, first: null, even: null },
+        titlePage: false,
+        pageNumType: null,
+      } as BodyElement,
+      ...body,
+    ],
+    headers: { default: null, first: null, even: null },
+    footers: { default: footer, first: null, even: null },
+    fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+}
+
 describe('page-number restart + format — pagination stamp → computePageNumbering', () => {
   it('front matter lowerRoman(start=1) + body decimal(restart start=1)', () => {
     // 6 front lines / 6 body lines, 5 lines per page ⇒ 2 pages each ⇒ 4 physical.
@@ -147,6 +193,44 @@ describe('page-number restart + format — pagination stamp → computePageNumbe
     const pages = computePages(doc.body, doc.section, makeCtx());
     const nums = computePageNumbering(pages).map((n) => `${n.displayNumber}/${n.format}`);
     expect(nums).toEqual(['1/decimal', '2/decimal', '3/decimal', '4/decimal']);
+  });
+
+  // ECMA-376 §17.6.12 + §17.18.77 — CONTINUOUS restart semantics (issue #804).
+  // GROUND TRUTH: sample-27 (section 1 → continuous break + `w:pgNumType w:start="50"`
+  // → section 2 spilling to later pages, footer PAGE) rendered in real Word prints
+  // footers [Page 1, Page 51, Page 52]. The restart's series counts from the FIRST
+  // physical page the section's content appears on — the SHARED page (page 0), which
+  // it does not OWN (page 0's top displays section 1's number 1). So section 2's
+  // series is 50 on the shared page 0, 51 on page 1, 52 on page 2. The pre-#804
+  // implementation restarted at the SPILLOVER page (where section 2 first owns a top)
+  // and produced [1, 50, 51] — one short, because it did not count the shared page as
+  // the section's first page. This deterministic doc mirrors sample-27's shape:
+  //   5 lines/page; section 1 = 3 lines ⇒ 2 lines of section 2 share page 0;
+  //   section 2 = 9 lines ⇒ 2 on page 0, 5 on page 1, 2 on page 2 ⇒ 3 pages.
+  it('continuous restart counts the shared page as the section first page (§17.6.12, #804)', () => {
+    const doc = continuousSpilloverDoc({ start: 50 }, 3, 9);
+    const pages = computePages(doc.body, doc.section, makeCtx());
+    expect(pages.length).toBe(3);
+    // Section 2 shares page 0 (does not own its top) and owns pages 1–2.
+    const nums = computePageNumbering(pages).map((n) => n.displayNumber);
+    expect(nums).toEqual([1, 51, 52]);
+  });
+
+  // A continuous restart section that is a MID-PAGE ISLAND — its content fits within
+  // the page it starts on and NEVER owns a page top (the next section takes over the
+  // following page's top). Its `w:start` therefore never surfaces as a displayed
+  // number; numbering stays sequential. No real sample has this shape (probed in the
+  // browser, sample-13's `start=2` continuous section begins exactly at a page
+  // boundary and OWNS that page's top with anchor offset 0 — see the module header
+  // of page-numbering.ts), so this arm is pinned here deterministically.
+  it('a continuous restart island that owns no page top does not surface its start', () => {
+    // section 1 = 2 lines; section 2 (start=99) = 2 lines ⇒ both share page 0 (4 of 5
+    // lines). Section 2 owns no page top (it is the final section here, but its whole
+    // content sits on page 0). Single page ⇒ display 1, no restart visible.
+    const doc = continuousSpilloverDoc({ start: 99 }, 2, 2);
+    const pages = computePages(doc.body, doc.section, makeCtx());
+    expect(pages.length).toBe(1);
+    expect(computePageNumbering(pages).map((n) => n.displayNumber)).toEqual([1]);
   });
 });
 

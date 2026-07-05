@@ -1,29 +1,43 @@
 import { test, expect } from '@playwright/test';
 import { existsSync } from 'node:fs';
 
-// ECMA-376 §17.6.12 non-regression on REAL private samples. sample-12/13/14 all
-// carry `<w:pgNumType>` (sample-12: continuous start=1; sample-13: nextPage start=1
-// + a continuous start=2; sample-14: nextPage start=1) plus a footer PAGE field.
-// Word's PDF ground truth (measured with pdftotext) shows SEQUENTIAL footer numbers
-// — none of these restarts is VISIBLE because every start value coincides with the
-// natural continuation at the page where it fires: start=1 on the first section is
-// the identity, and sample-13's continuous start=2 section spills onto physical
-// page 2, where its restart fires but 2 equals the natural continuation (1+1)
-// anyway. (A continuous restart is thus observed at a spillover page top, not
-// suppressed — see page-numbering.ts; whether Word matches at a NON-coinciding
-// spillover start is unverified, tracked as a follow-up issue.) So the DISPLAYED
-// footer number must equal the physical page number, unchanged from before this
-// feature. Skips gracefully when the (gitignored) sample is absent.
-// sample-12 (continuous start=1, footer PAGE) and sample-13 (nextPage start=1 +
-// continuous start=2, footer PAGE) both isolate the footer number cleanly at the
-// page bottom, so their sequential numbering is a direct non-regression check.
-// (sample-14 also carries pgNumType but its footer shares the bottom band with
-// other numeric content, so the position heuristic can't isolate it; its structure
-// — nextPage start=1 on the first section — is identical to sample-13's break[0]
-// and is covered deterministically by page-numbering.test.ts.)
+// ECMA-376 §17.6.12 on REAL private samples, against Word PDF ground truth (measured
+// with pdftotext). Two shapes are covered:
+//
+// (1) NON-REGRESSION — sample-12/13 both carry `<w:pgNumType>` (sample-12: continuous
+//     start=1; sample-13: nextPage start=1 + a continuous start=2) plus a footer
+//     PAGE field, and Word prints SEQUENTIAL footers. No restart is VISIBLE:
+//     start=1 on the first section is the identity, and sample-13's continuous
+//     start=2 section begins exactly AT a page boundary (probed: its content first
+//     appears on physical page 2, the SAME page whose top it owns — see the module
+//     header of page-numbering.ts), so its restart fires with anchor offset 0 and
+//     shows start=2, which equals the natural continuation (1+1). The DISPLAYED
+//     footer number therefore equals the physical page number. (sample-14 also
+//     carries pgNumType but its footer shares the bottom band with other numeric
+//     content, so the position heuristic can't isolate it; its structure — nextPage
+//     start=1 on the first section — is covered deterministically by
+//     page-numbering.test.ts.)
+//
+// (2) RESTART — sample-27 (synthesized for issue #804): section 1 → continuous break
+//     + `w:pgNumType w:start="50"` → section 2 sharing p.1 and spilling to p.2/p.3,
+//     footer PAGE. Word prints [Page 1, Page 51, Page 52]: the continuous section's
+//     series counts the SHARED page (its first appearance) as page 50, so its owned
+//     pages show 51 and 52. This is the case the pre-#804 code got wrong ([1, 50, 51]).
+//
+// Skips gracefully when the (gitignored) sample is absent.
 const CASES: { file: string; pageCount: number; width: number; expected: string[] }[] = [
   { file: 'private/sample-12', pageCount: 4, width: 595, expected: ['1', '2', '3', '4'] },
   { file: 'private/sample-13', pageCount: 6, width: 595, expected: ['1', '2', '3', '4', '5'] },
+  // §17.6.12 continuous restart (#804): continuous start=50 shares p.1 and spills.
+  // The DISTINGUISHING signal is that the section's FIRST OWNED page shows 51 (not
+  // 50) — the shared page it does not own counts as the section's page 50. Word's
+  // PDF (public/private/sample-27.pdf) is 3 pages [Page 1, Page 51, Page 52]; this
+  // renderer packs ~50 body paragraphs per page vs Word's ~46, so it fits section 2
+  // in ONE fewer page and shows [1, 51] over 2 pages. That page-DENSITY gap is a
+  // separate pagination-fidelity concern, out of scope for #804 — the RESTART
+  // semantics (51, not 50) are what this asserts. The full [1, 51, 52] series is
+  // pinned deterministically in page-number-field-render.test.ts.
+  { file: 'private/sample-27', pageCount: 2, width: 595, expected: ['1', '51'] },
 ];
 
 test.describe('page-number restart non-regression (§17.6.12)', () => {
