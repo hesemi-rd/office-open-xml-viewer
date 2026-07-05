@@ -1329,6 +1329,27 @@ pub struct TextRun {
     /// = kerning off (the hierarchy default). `Some(0.0)` = kern at all sizes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kerning: Option<f64>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
+    /// (縦中横 / tate-chū-yoko). `Some(true)` means that in a VERTICAL (tbRl) page
+    /// this run's characters are laid out horizontally within one cell of the
+    /// vertical line. `None`/absent = normal vertical stacking. Inert in a
+    /// horizontal page (the property is only meaningful in vertical text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asian_vert: Option<bool>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vertCompress>` — compress the
+    /// horizontally-laid-out (縦中横) run to fit the existing line height. Ignored
+    /// unless `east_asian_vert` is set. `None`/absent = not compressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asian_vert_compress: Option<bool>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:combine>` — two-lines-in-one.
+    /// PARSED for completeness; not yet rendered (no fixture). `None`/absent = off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asian_combine: Option<bool>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:combineBrackets>` (§17.18.8) —
+    /// bracket style around two-lines-in-one text. PARSED for completeness; the
+    /// two-lines-in-one draw is a follow-up. `None` = no brackets / `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asian_combine_brackets: Option<String>,
     /// ECMA-376 §17.11.6 / §17.11.7 / §17.11.16 / §17.11.17 — set when this run
     /// is a footnote/endnote reference mark (`<w:footnoteReference>` in the body,
     /// `<w:footnoteRef>` inside the note content, and the endnote equivalents).

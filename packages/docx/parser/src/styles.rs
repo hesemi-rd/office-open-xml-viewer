@@ -127,6 +127,32 @@ pub struct RunFmt {
     /// (Word's default is OFF, unlike Canvas's default `fontKerning='auto'`).
     /// `Some(0.0)` = kern at every size.
     pub kerning: Option<f64>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — "Horizontal in Vertical
+    /// (Rotate Text)" (縦中横 / tate-chū-yoko). When `Some(true)`, in a VERTICAL
+    /// (tbRl) document the run's characters are laid out HORIZONTALLY within a
+    /// single cell of the vertical line ("keeping the text on the same line"),
+    /// i.e. rotated 90° relative to the surrounding vertical flow. `None` =
+    /// inherit; the property is inert in a horizontal document (§17.3.2.10 is only
+    /// meaningful in vertical text).
+    pub east_asian_vert: Option<bool>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vertCompress>` — "Compress
+    /// Rotated Text to Line Height". Ignored unless `east_asian_vert` is set. When
+    /// `Some(true)`, the horizontally-laid-out (rotated) run is compressed so it
+    /// fits into the existing line height without growing the line. `None` =
+    /// inherit (default: not compressed).
+    pub east_asian_vert_compress: Option<bool>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:combine>` — "Two Lines in One":
+    /// the run's characters are written on two sub-lines within one logical line.
+    /// PARSED for completeness (§17.3.2.10) but not yet rendered (no fixture);
+    /// carried so a future two-lines-in-one implementation has the flag. `None` =
+    /// inherit / off.
+    pub east_asian_combine: Option<bool>,
+    /// ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:combineBrackets>` — the bracket
+    /// style (§17.18.8 ST_CombineBrackets: `none` | `round` | `square` | `angle` |
+    /// `curly`) enclosing two-lines-in-one text. Ignored unless `combine` is set.
+    /// PARSED for completeness; the two-lines-in-one draw is a follow-up. `None` =
+    /// no brackets.
+    pub east_asian_combine_brackets: Option<String>,
 }
 
 /// Resolved paragraph formatting.
@@ -897,6 +923,21 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.kerning.is_some() {
         dst.kerning = src.kerning;
     }
+    // East Asian typography (§17.3.2.10 eastAsianLayout) — each attribute is a
+    // set-wins toggle/value like the run properties above: a level that names it
+    // overrides, absence inherits.
+    if src.east_asian_vert.is_some() {
+        dst.east_asian_vert = src.east_asian_vert;
+    }
+    if src.east_asian_vert_compress.is_some() {
+        dst.east_asian_vert_compress = src.east_asian_vert_compress;
+    }
+    if src.east_asian_combine.is_some() {
+        dst.east_asian_combine = src.east_asian_combine;
+    }
+    if src.east_asian_combine_brackets.is_some() {
+        dst.east_asian_combine_brackets = src.east_asian_combine_brackets.clone();
+    }
 
     // Complex-script font size resolution (ECMA-376 §17.3.2.18). Word treats a
     // directly-applied `w:sz` as also setting the complex-script size UNLESS the
@@ -1419,6 +1460,21 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         if let Some(v) = attr_w(kern, "val") {
             fmt.kerning = Some(half_pt_to_pt(&v));
         }
+    }
+
+    // East Asian typography settings (ECMA-376 §17.3.2.10 `<w:eastAsianLayout>`).
+    // `w:vert` (horizontal-in-vertical / 縦中横) and `w:vertCompress` are ST_OnOff
+    // toggles; `w:combine` (two-lines-in-one) + `w:combineBrackets` (§17.18.8) are
+    // parsed for completeness — the two-lines-in-one draw is a follow-up (no
+    // fixture). All four are Option so an unset attribute inherits through the
+    // style chain like the other run properties. `w:id` (§17.18.10) only links
+    // multiple runs into one eastAsianLayout region and does not affect a single
+    // run's layout, so it is not modeled.
+    if let Some(eal) = child_w(rpr, "eastAsianLayout") {
+        fmt.east_asian_vert = on_off_attr(eal, "vert");
+        fmt.east_asian_vert_compress = on_off_attr(eal, "vertCompress");
+        fmt.east_asian_combine = on_off_attr(eal, "combine");
+        fmt.east_asian_combine_brackets = attr_w(eal, "combineBrackets").filter(|v| v != "none");
     }
 
     fmt

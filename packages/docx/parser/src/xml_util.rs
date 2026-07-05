@@ -84,3 +84,14 @@ pub fn bool_prop(node: Node, tag: &str) -> Option<bool> {
         Some("0") | Some("false") | Some("off")
     ))
 }
+
+/// Parse a ST_OnOff-valued ATTRIBUTE (e.g. `<w:eastAsianLayout w:vert="1">`,
+/// §17.3.2.10) directly on `node`, using the same "true"/"false"/"1"/"0"/"on"/
+/// "off" vocabulary as {@link bool_prop} (§22.9.2.7 ST_OnOff). Unlike `bool_prop`
+/// (which reads a CHILD element's `w:val`), the value here is the attribute
+/// itself. Returns `None` when the attribute is absent so the caller can
+/// distinguish "explicitly off" from "inherited".
+pub fn on_off_attr(node: Node, name: &str) -> Option<bool> {
+    let val = attr_w(node, name)?;
+    Some(!matches!(val.as_str(), "0" | "false" | "off"))
+}
