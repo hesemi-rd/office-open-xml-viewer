@@ -125,7 +125,9 @@ export type FontGenericClass = 'serif' | 'sans' | 'mono';
  *
  * - mono : mono / courier / consolas / 等幅 …
  * - serif: Latin serifs (Times, Cambria/Caladea, Georgia, Garamond, Century,
- *          Palatino, Didot, Bodoni, Playfair, "… Serif", roman) AND CJK
+ *          Palatino, Antiqua (Book Antiqua & other Palatino clones — "Antiqua"
+ *          is the typographic term for a Roman/serif face), Didot, Bodoni,
+ *          Playfair, "… Serif", roman) AND CJK
  *          song/ming/kai/fangsong faces (SimSun 宋 / Batang / PMingLiU 細明 /
  *          KaiTi 楷 / FangSong 仿宋 / *Mincho 明朝) — so the per-language Noto CJK
  *          fallback picks its serif variant.
@@ -141,7 +143,7 @@ export function classifyFontGeneric(family: string | null | undefined): FontGene
   // authoritative split is the §17.8.3.10 <w:family> class the caller checks
   // first; this only refines the name-pattern fallback.)
   if (
-    /roman|times|cambria|caladea|georgia|garamond|century(?!\s*gothic)|palatino|didot|bodoni|playfair|source serif|noto serif|min\s*cho|明朝体|明朝|song|sung|simsun|nsimsun|batang|gungsuh|ming\s*liu|mingliu|pmingliu|fang\s*song|fangsong|kai\s*ti|kaiti|simkai|simfang|stsong|stkaiti|stfangsong|stzhongsong|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝|ms mincho|yu mincho|hiragino mincho|ヒラギノ明朝/.test(
+    /roman|times|cambria|caladea|georgia|garamond|century(?!\s*gothic)|palatino|antiqua|didot|bodoni|playfair|source serif|noto serif|min\s*cho|明朝体|明朝|song|sung|simsun|nsimsun|batang|gungsuh|ming\s*liu|mingliu|pmingliu|fang\s*song|fangsong|kai\s*ti|kaiti|simkai|simfang|stsong|stkaiti|stfangsong|stzhongsong|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝|ms mincho|yu mincho|hiragino mincho|ヒラギノ明朝/.test(
       l,
     ) ||
     /新細明體|細明體|宋体|明朝|楷体|楷體|仿宋|標楷體|游明朝|ＭＳ 明朝/.test(family)

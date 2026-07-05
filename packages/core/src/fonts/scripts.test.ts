@@ -91,6 +91,18 @@ describe('classifyFontGeneric — font name → CSS generic class', () => {
     expect(classifyFontGeneric('Noto Serif')).toBe('serif');
   });
 
+  it('classifies Antiqua serif faces (Book Antiqua / Palatino clones) as serif', () => {
+    // ECMA-376 documents authored in Central/Eastern Europe and Cyrillic locales
+    // frequently use "*Antiqua" serif families (Book Antiqua — a Palatino clone —
+    // plus locale variants like URW Antiqua, Antiqua). "Antiqua" is the German/
+    // typographic term for a Roman/serif face, so any "*antiqua" name is serif and
+    // must resolve to the serif Noto/Times fallback chain, not sans.
+    expect(classifyFontGeneric('Book Antiqua')).toBe('serif');
+    expect(classifyFontGeneric('Antiqua')).toBe('serif');
+    expect(classifyFontGeneric('URW Antiqua')).toBe('serif');
+    expect(classifyFontGeneric('BookAntiqua')).toBe('serif');
+  });
+
   it('classifies CJK serif (song/ming/kai/fangsong) faces as serif', () => {
     expect(classifyFontGeneric('SimSun')).toBe('serif');
     expect(classifyFontGeneric('PMingLiU')).toBe('serif');
