@@ -17,9 +17,10 @@ import {
 // Word's measured minimum line-start rule beside a float (issue #676).
 //
 // GROUND TRUTH (fixtures private/sample-19/20/22, Word-exported PDF, pdftotext
-// bbox): Word starts a line beside a float ONLY when the free horizontal gap is
-// ≥ 72pt (= 1 inch = 1440 twips), and always when it is. The threshold is:
-//   - content-independent (an empty paragraph mark and a text line switch at the
+// bbox): Word starts a CONTENT line beside a float ONLY when the free horizontal
+// gap is ≥ 72pt (= 1 inch = 1440 twips), and always when it is. For a content
+// line the threshold is:
+//   - text-independent (a short-token line and a long-word line switch at the
 //     same width),
 //   - font-size-independent (8/12/24pt switch at 72pt),
 //   - line-spacing-independent (single/1.5/double switch at 72pt),
@@ -27,6 +28,15 @@ import {
 // gap of 70pt the line flows below the band; at 72pt it sits beside. A first
 // word that overruns the ≥1-inch gap is force-broken there (Word's "AFTE"/"R-10"
 // wrap), not refused.
+//
+// SCOPE — this 1-inch rule is the CONTENT-line threshold. A literally-empty /
+// anchor-only paragraph's pilcrow uses the NARROWER pilcrow-em threshold
+// (paragraphMarkEmPx via resolveEmptyMarkTop / flowMarkLine): Word keeps such a
+// mark beside a float down to a sub-inch gap and drops it below only for a
+// full-width band (sample-9 p.4 + sample-12 p.2; the #676 change wrongly
+// applied 1 inch to empty marks). The (c) case below exercises the layoutLines
+// EMPTY-CONTENT-line path (a paragraph carrying an empty text segment), which is
+// a content line and keeps the 1-inch rule.
 //
 // The boundary is INCLUSIVE at 1 inch, but a frame authored so the gap is
 // exactly 1 inch computes as content-width − frame-width slightly under 72
@@ -37,10 +47,11 @@ import {
 // beside. See issue #676.
 //
 // This file pins the pure geometry gate (resolveLineFloatWindow) and the
-// layoutLines integration that consumes it. It replaces the prior 1-em-of-the-
-// mark-font heuristic (resolveEmptyMarkTop) and the first-atomic-token-width
-// probe (the former requiredLineWidth), both retired in favour of this single
-// grounded rule.
+// layoutLines integration that consumes it. It replaced the first-atomic-token-
+// width probe (the former requiredLineWidth) for content lines with this single
+// grounded 1-inch rule. The literally-empty-paragraph mark path
+// (resolveEmptyMarkTop / flowMarkLine) keeps its own pilcrow-em threshold — see
+// the SCOPE note above.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A LEFT-anchored square float band occupying [0, floatRightPx] horizontally on
@@ -188,8 +199,11 @@ describe('layoutLines — 1-inch line-start rule end to end (issue #676)', () =>
   // A gap just under 1 inch (70px) and just over (72px) at scale 1.
   const bandFor = (gapPx: number) => [leftBand(colW - gapPx, floatBottom)];
 
-  it('(c) an empty-content line flows below a sub-inch gap and beside a ≥1-inch gap', () => {
-    // No width-bearing content — the empty/paragraph-mark line path.
+  it('(c) an empty-content CONTENT line flows below a sub-inch gap and beside a ≥1-inch gap', () => {
+    // A content paragraph whose sole segment is empty text — the layoutLines
+    // content-line path, which keeps the 1-inch rule. (A literally-empty
+    // paragraph with NO runs is placed by resolveEmptyMarkTop against the
+    // narrower pilcrow-em threshold instead — see SCOPE note.)
     const emptyBelow = layoutLines(makeLinearCtx(), [textSeg('', 10)], colW, 0, scale, [], wrapCtx(bandFor(70)), {}, 0);
     const emptyBeside = layoutLines(makeLinearCtx(), [textSeg('', 10)], colW, 0, scale, [], wrapCtx(bandFor(72)), {}, 0);
     expect(firstLinePlacement(emptyBelow)).toBe('below');
