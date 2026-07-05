@@ -765,6 +765,7 @@ pub(crate) fn parse_paragraph(
                         None
                     },
                     hyperlink: None,
+                    hyperlink_action: None,
                     shadow: None,
                     outline: None,
                     highlight,
@@ -1007,12 +1008,20 @@ pub(crate) fn parse_run(
         .and_then(|v| v.parse::<i32>().ok())
         .filter(|&v| v != 0);
 
-    // a:hlinkClick — hyperlink. r:id refers to the slide rels (Target = URL or local target).
-    // Resolve immediately so the renderer doesn't need access to the rels table.
-    let hyperlink = r_pr
-        .and_then(|n| child(n, "hlinkClick"))
+    // a:hlinkClick — hyperlink. r:id refers to the slide rels (Target = URL or
+    // internal part name). Resolve immediately so the renderer doesn't need
+    // access to the rels table. ECMA-376 §21.1.2.3.5 (CT_Hyperlink): the
+    // optional @action holds a "ppaction://..." verb (e.g. hlinksldjump) that
+    // marks the link as an INTERNAL navigation; carry it through so the TS side
+    // can distinguish a slide jump from an external URL. For a slide jump the
+    // rel is TargetMode=Internal, so `hyperlink` is the internal slide part.
+    let hlink_click = r_pr.and_then(|n| child(n, "hlinkClick"));
+    let hyperlink = hlink_click
         .and_then(|h| attr_r(&h, "id"))
         .and_then(|rid| rels.get(&rid).cloned())
+        .filter(|s| !s.is_empty());
+    let hyperlink_action = hlink_click
+        .and_then(|h| attr(&h, "action"))
         .filter(|s| !s.is_empty());
 
     // ECMA-376 §20.1.8.45 — `<a:rPr><a:effectLst><a:outerShdw>` glyph drop
@@ -1069,6 +1078,7 @@ pub(crate) fn parse_run(
         letter_spacing,
         field_type: None,
         hyperlink,
+        hyperlink_action,
         shadow,
         outline,
         highlight,

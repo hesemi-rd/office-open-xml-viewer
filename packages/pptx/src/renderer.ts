@@ -78,6 +78,8 @@ import {
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
+import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { classifyPptxHyperlink } from './hyperlink';
 import { drawPlayBadge } from './media-chrome';
 import {
   segmentsHaveRtl,
@@ -136,6 +138,14 @@ export interface PptxTextRunInfo {
    * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
    */
   textBodyRotation?: number;
+  /**
+   * Resolved hyperlink target for this run (IX1), classified into the shared
+   * {@link HyperlinkTarget} shape. Present only for runs whose `<a:rPr>` carried
+   * an `<a:hlinkClick>`; the overlay makes such spans clickable. The glyph
+   * drawing (colour + underline) is unaffected — this is metadata for the
+   * transparent overlay only.
+   */
+  hyperlink?: HyperlinkTarget;
 }
 
 export type TextRunCallback = (run: PptxTextRunInfo) => void;
@@ -359,6 +369,12 @@ type LayoutSegment = {
    */
   highlight?: string;
   /**
+   * Resolved hyperlink target for this segment's run (IX1). Carried so the
+   * onTextRun callback can attach it to the overlay span. Does not affect glyph
+   * drawing (colour + underline already handled via `color`/`underline`).
+   */
+  hyperlink?: HyperlinkTarget;
+  /**
    * Present when this segment is an OMML equation drawn as an image instead of
    * text (`text` is then ""). Box metrics are in px at the current scale.
    */
@@ -505,6 +521,17 @@ export function cssFontStack(normalized: string): string {
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
   return `"${normalized}", ${subPart}${cjkPart}${nonCjkPart}${generic}`;
+}
+
+/**
+ * Stable string key for a {@link HyperlinkTarget} so adjacent same-format runs
+ * that carry the SAME link still merge into one segment (classification mints a
+ * fresh object per run, so identity comparison would over-split). `undefined`
+ * (no link) and any two links with the same kind + destination compare equal.
+ */
+function hyperlinkKey(t: HyperlinkTarget | undefined): string {
+  if (!t) return '';
+  return t.kind === 'external' ? `e:${t.url}` : `i:${t.ref}`;
 }
 
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
@@ -692,6 +719,8 @@ export function layoutParagraph(
       highlight?: string;
       /** Raw normalized family for the design-line-height floor (see LayoutSegment). */
       fontFamily?: string;
+      /** Resolved hyperlink target (IX1) — passed through to the overlay span. */
+      hyperlink?: HyperlinkTarget;
     },
   ) => {
     if (!text) return;
@@ -710,6 +739,7 @@ export function layoutParagraph(
     const outline = extras?.outline;
     const highlight = extras?.highlight;
     const fontFamily = extras?.fontFamily;
+    const hyperlink = extras?.hyperlink;
     // Shadow / outline use object identity for merging — adjacent runs share
     // the same object since the run is parsed once. Different objects (or
     // one set / one missing) force a new segment.
@@ -727,14 +757,15 @@ export function layoutParagraph(
       a.shadow === shadow &&
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
-      (a.fontFamily ?? '') === (fontFamily ?? '');
+      (a.fontFamily ?? '') === (fontFamily ?? '') &&
+      hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink);
     if (tabActive && currentLine.tabStop) {
       const segs = currentLine.tabStop.segments;
       const last = segs.at(-1);
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
+        segs.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
       }
     } else {
       lineW += w;
@@ -742,7 +773,7 @@ export function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
+        currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
       }
     }
   };
@@ -894,6 +925,12 @@ export function layoutParagraph(
       // RRGGBBAA); hexToRgba handles both, matching how text/underline colours
       // are converted for canvas.
       highlight: run.highlight ? hexToRgba(run.highlight) : undefined,
+      // IX1 — classify the resolved hyperlink target string into the shared
+      // HyperlinkTarget shape (external URL vs internal slide jump). The core
+      // TextRun type carries only `hyperlink` (no action field), so the string
+      // alone drives classification: a ppaction://… or a scheme-less internal
+      // part name is treated as internal. Overlay-only; does not affect glyphs.
+      hyperlink: classifyPptxHyperlink(run.hyperlink),
     };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
@@ -2707,6 +2744,7 @@ export function renderTextBody(
           shapeW: bw,
           shapeH: bh,
           rotation: shapeRotation,
+          hyperlink: seg.hyperlink,
         });
       }
 
@@ -2812,6 +2850,7 @@ export function renderTextBody(
             shapeW: bw,
             shapeH: bh,
             rotation: shapeRotation,
+            hyperlink: seg.hyperlink,
           });
         }
         tabPenX += tabSegW;

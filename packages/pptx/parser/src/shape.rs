@@ -109,16 +109,45 @@ pub(crate) fn is_placeholder(node: roxmltree::Node<'_, '_>) -> bool {
         .any(|n| n.is_element() && n.tag_name().name() == "ph")
 }
 
-/// Pull `(id, name)` from a sibling `<p:nvSpPr><p:cNvPr>` (or `<p:nvCxnSpPr>`).
-/// Returns `(None, None)` when the wrapper is missing — both fields are
-/// optional in the JSON output.
-pub(crate) fn read_cnv_pr(sp_node: roxmltree::Node<'_, '_>) -> (Option<String>, Option<String>) {
+/// Non-visual drawing props pulled from a shape's own `<p:cNvPr>`.
+#[derive(Default)]
+pub(crate) struct CNvPrInfo {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    /// Shape-level hyperlink target resolved via `rels` (URL for external,
+    /// internal part name for a slide jump). ECMA-376 §21.1.2.3.5.
+    pub(crate) hyperlink: Option<String>,
+    /// Raw `<a:hlinkClick @action>` (e.g. "ppaction://hlinksldjump").
+    pub(crate) hyperlink_action: Option<String>,
+}
+
+/// Pull `id` / `name` / shape-level `hlinkClick` from a node's own
+/// `<p:nvSpPr><p:cNvPr>` (or `nvCxnSpPr` etc.). Returns defaults when the
+/// wrapper is missing — every field is optional in the JSON output.
+///
+/// ECMA-376 §21.1.2.3.5: a `<p:cNvPr>` may carry an `<a:hlinkClick @r:id
+/// [@action]>`, making the whole shape a click target. `@r:id` resolves via the
+/// slide `rels`; `@action` (when a "ppaction://..." verb) marks an internal
+/// navigation, mirroring the text-run hyperlink parse in `parse_run`.
+pub(crate) fn read_cnv_pr(
+    sp_node: roxmltree::Node<'_, '_>,
+    rels: &HashMap<String, String>,
+) -> CNvPrInfo {
     if let Some(cnv) = own_cnv_pr(sp_node) {
-        let id = attr(&cnv, "id");
-        let name = attr(&cnv, "name").filter(|s| !s.is_empty());
-        return (id, name);
+        let hlink_click = child(cnv, "hlinkClick");
+        return CNvPrInfo {
+            id: attr(&cnv, "id"),
+            name: attr(&cnv, "name").filter(|s| !s.is_empty()),
+            hyperlink: hlink_click
+                .and_then(|h| attr_r(&h, "id"))
+                .and_then(|rid| rels.get(&rid).cloned())
+                .filter(|s| !s.is_empty()),
+            hyperlink_action: hlink_click
+                .and_then(|h| attr(&h, "action"))
+                .filter(|s| !s.is_empty()),
+        };
     }
-    (None, None)
+    CNvPrInfo::default()
 }
 
 /// Locate the shape/tree node's OWN `<p:cNvPr>` — the `cNvPr` inside this
@@ -183,7 +212,7 @@ pub(crate) fn parse_shape(
     let placeholder_type_out: Option<String> = ph_node
         .as_ref()
         .map(|n| attr(n, "type").unwrap_or_else(|| "body".into()));
-    let (cnv_id, cnv_name) = read_cnv_pr(sp_node);
+    let cnv = read_cnv_pr(sp_node, rels);
 
     // --- Transform: slide xfrm OR layout fallback ---
     let sp_pr = child(sp_node, "spPr");
@@ -525,8 +554,10 @@ pub(crate) fn parse_shape(
         glow,
         soft_edge,
         reflection,
-        id: cnv_id,
-        name: cnv_name,
+        id: cnv.id,
+        name: cnv.name,
+        hyperlink: cnv.hyperlink,
+        hyperlink_action: cnv.hyperlink_action,
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
         text_rect: None,
@@ -2017,7 +2048,7 @@ pub(crate) fn parse_sp_tree_node(
             if skip_placeholders && is_placeholder(node) {
                 return;
             }
-            if let Some(shape) = parse_connector(node, theme) {
+            if let Some(shape) = parse_connector(node, theme, rels) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -2094,7 +2125,7 @@ fn parse_smartart_drawing(
                 }
             }
             "cxnSp" => {
-                if let Some(shape) = parse_connector(node, theme) {
+                if let Some(shape) = parse_connector(node, theme, &empty_rels) {
                     out.push(SlideElement::Shape(shape));
                 }
             }
@@ -2145,7 +2176,7 @@ fn parse_smartart_drawing(
                             }
                         }
                         "cxnSp" => {
-                            if let Some(shape) = parse_connector(child_node, theme) {
+                            if let Some(shape) = parse_connector(child_node, theme, &empty_rels) {
                                 out.push(SlideElement::Shape(shape));
                             }
                         }
@@ -2201,6 +2232,7 @@ fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
 fn parse_connector(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
 ) -> Option<ShapeElement> {
     let sp_pr = child(node, "spPr")?;
     let xfrm = child(sp_pr, "xfrm")?;
@@ -2208,7 +2240,7 @@ fn parse_connector(
     if t.cx == 0 && t.cy == 0 {
         return None;
     }
-    let (cnv_id, cnv_name) = read_cnv_pr(node);
+    let cnv = read_cnv_pr(node, rels);
 
     // Style-based stroke fallback. `p:style > a:lnRef idx="N"` references the
     // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
@@ -2360,8 +2392,10 @@ fn parse_connector(
         glow: None,
         soft_edge: None,
         reflection: None,
-        id: cnv_id,
-        name: cnv_name,
+        id: cnv.id,
+        name: cnv.name,
+        hyperlink: cnv.hyperlink,
+        hyperlink_action: cnv.hyperlink_action,
         placeholder_type: None,
         placeholder_idx: None,
         text_rect: None,
@@ -2435,6 +2469,86 @@ mod ole_tests {
             DepthGuard::root(),
         );
         out
+    }
+
+    /// ECMA-376 §21.1.2.3.5 — a `<p:cNvPr><a:hlinkClick @r:id>` on a shape makes
+    /// the whole shape an EXTERNAL click target; r:id resolves via slide rels.
+    #[test]
+    fn shape_cnv_hlink_click_external_resolves_url() {
+        let mut rels = HashMap::new();
+        rels.insert("rId9".to_string(), "https://example.com/".to_string());
+        let mut zip = zip_with(&[]);
+        let xml = format!(
+            r#"<p:sp {ns}>
+                <p:nvSpPr>
+                  <p:cNvPr id="3" name="Rect"><a:hlinkClick r:id="rId9"/></p:cNvPr>
+                  <p:cNvSpPr/><p:nvPr/>
+                </p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+               </p:sp>"#,
+            ns = ns()
+        );
+        let out = run(&xml, &mut zip, &rels);
+        let shape = match &out[0] {
+            SlideElement::Shape(s) => s,
+            _ => panic!("expected a shape element"),
+        };
+        assert_eq!(shape.hyperlink.as_deref(), Some("https://example.com/"));
+        assert!(shape.hyperlink_action.is_none());
+    }
+
+    /// A `<a:hlinkClick action="ppaction://hlinksldjump" r:id>` on a shape is an
+    /// INTERNAL slide jump: `hyperlink` is the resolved internal slide part and
+    /// `hyperlink_action` carries the raw ppaction verb. ECMA-376 §21.1.2.3.5.
+    #[test]
+    fn shape_cnv_hlink_click_internal_slidejump() {
+        let mut rels = HashMap::new();
+        rels.insert("rId3".to_string(), "../slides/slide3.xml".to_string());
+        let mut zip = zip_with(&[]);
+        let xml = format!(
+            r#"<p:sp {ns}>
+                <p:nvSpPr>
+                  <p:cNvPr id="4" name="Btn"><a:hlinkClick action="ppaction://hlinksldjump" r:id="rId3"/></p:cNvPr>
+                  <p:cNvSpPr/><p:nvPr/>
+                </p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+               </p:sp>"#,
+            ns = ns()
+        );
+        let out = run(&xml, &mut zip, &rels);
+        let shape = match &out[0] {
+            SlideElement::Shape(s) => s,
+            _ => panic!("expected a shape element"),
+        };
+        assert_eq!(shape.hyperlink.as_deref(), Some("../slides/slide3.xml"));
+        assert_eq!(
+            shape.hyperlink_action.as_deref(),
+            Some("ppaction://hlinksldjump")
+        );
+    }
+
+    /// A shape with no cNvPr hlinkClick has both hyperlink fields None.
+    #[test]
+    fn shape_cnv_without_hlink_click_is_none() {
+        let rels = HashMap::new();
+        let mut zip = zip_with(&[]);
+        let xml = format!(
+            r#"<p:sp {ns}>
+                <p:nvSpPr><p:cNvPr id="5" name="Plain"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+               </p:sp>"#,
+            ns = ns()
+        );
+        let out = run(&xml, &mut zip, &rels);
+        let shape = match &out[0] {
+            SlideElement::Shape(s) => s,
+            _ => panic!("expected a shape element"),
+        };
+        assert!(shape.hyperlink.is_none());
+        assert!(shape.hyperlink_action.is_none());
     }
 
     /// PowerPoint's canonical OLE output: `mc:Choice Requires="v"` holds a

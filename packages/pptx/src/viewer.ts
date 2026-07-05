@@ -4,6 +4,7 @@ import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
 import type { DimOptions } from './types';
+import { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
 export type HiddenSlideMode = 'show' | 'skip' | 'dim';
@@ -47,6 +48,16 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * in sync if {@link DimOptions} gains a field.
    */
   hiddenSlideDim?: Partial<DimOptions>;
+  /**
+   * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires on a
+   * hyperlink click (a text run whose `<a:rPr>` carried an `<a:hlinkClick>`;
+   * requires {@link enableTextSelection} so the overlay spans exist). Default
+   * when omitted: external → {@link openExternalHyperlink} (new tab, sanitised,
+   * noopener); internal slide-jump → {@link goToSlide}(target) once the slide
+   * part resolves to an index (currently a documented no-op — see below). When
+   * provided, the viewer calls this instead and takes NO default action.
+   */
+  onHyperlinkClick?: (target: HyperlinkTarget) => void;
 }
 
 /**
@@ -345,7 +356,36 @@ export class PptxViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-    buildPptxTextLayer(layer, runs, cssWidth, cssHeight);
+    buildPptxTextLayer(layer, runs, cssWidth, cssHeight, (t) => this._onHyperlinkClick(t));
+  }
+
+  /**
+   * IX1 hyperlink click dispatch. When the integrator supplies
+   * `opts.onHyperlinkClick` it OWNS the click (no default action). Otherwise the
+   * viewer applies its default policy: an external link opens in a new tab via
+   * the shared, scheme-sanitised {@link openExternalHyperlink}; an internal
+   * slide jump navigates via {@link goToSlide} once the target part resolves to
+   * a slide index.
+   */
+  private _onHyperlinkClick(target: HyperlinkTarget): void {
+    if (this.opts.onHyperlinkClick) {
+      this.opts.onHyperlinkClick(target);
+      return;
+    }
+    if (target.kind === 'external') {
+      openExternalHyperlink(target.url);
+      return;
+    }
+    // Internal slide jump. `target.ref` is the resolved internal part name
+    // (e.g. "../slides/slide3.xml") or a raw "ppaction://…" verb. Mapping a
+    // slide part to its 0-based presentation index is NOT cheaply available:
+    // the parsed `Slide` model carries no part name, and matching by the file's
+    // numeric suffix (slide3.xml → index 2) is a heuristic that breaks whenever
+    // the slide file numbers don't match the presentation's <p:sldIdLst> order
+    // (CLAUDE.md forbids such heuristics). Left as a no-op until the parser
+    // surfaces each slide's part name.
+    // TODO IX1: resolve slide part -> index (needs Slide.partName from parser),
+    //   then `void this.goToSlide(idx);`.
   }
 
   /** PD14 render-error contract: route a render failure to `onError`, or

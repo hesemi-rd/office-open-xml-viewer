@@ -1,4 +1,4 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, type VisibleRange, type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
@@ -123,6 +123,16 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  crashing the loop. Without an `onError`, render failures are logged via
    *  `console.error` so they are never fully silent. */
   onError?: (err: Error) => void;
+  /**
+   * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires on a
+   * hyperlink click in any mounted slide's text overlay (requires
+   * {@link enableTextSelection}). Default when omitted: external →
+   * {@link openExternalHyperlink} (new tab, sanitised, noopener); internal
+   * slide-jump → {@link scrollToSlide}(target) once the slide part resolves to
+   * an index (currently a documented no-op). When provided, the viewer calls
+   * this instead and takes NO default action.
+   */
+  onHyperlinkClick?: (target: HyperlinkTarget) => void;
 }
 
 /** One mounted slide. `canvas` is the drawn slide; `textLayer` the optional
@@ -752,7 +762,7 @@ export class PptxScrollViewer {
           // overlay 2× too large (overflowing the wrapper + inflating the scroll
           // area). Pass the CSS px directly — the uniform slide width/height at the
           // current scale (rounded).
-          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()));
+          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), (t) => this._onHyperlinkClick(t));
         }
       })
       .catch((err: unknown) => {
@@ -1142,7 +1152,7 @@ export class PptxScrollViewer {
           if (wantOverlay) {
             // buildPptxTextLayer takes NUMBERS: pass the CSS box (uniform slide
             // width/height at the current scale), NOT the retina backing store.
-            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()));
+            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), (t) => this._onHyperlinkClick(t));
           }
         }
       })
@@ -1194,6 +1204,30 @@ export class PptxScrollViewer {
       this._scrollHost.scrollTop = top;
     }
     this._mountVisible();
+  }
+
+  /**
+   * IX1 hyperlink click dispatch (mirrors {@link PptxViewer._onHyperlinkClick}).
+   * When the integrator supplies `opts.onHyperlinkClick` it OWNS the click (no
+   * default). Otherwise: an external link opens in a new tab via the shared,
+   * scheme-sanitised {@link openExternalHyperlink}; an internal slide jump would
+   * scroll to the target slide via {@link scrollToSlide} once the target part
+   * resolves to a slide index.
+   */
+  private _onHyperlinkClick(target: HyperlinkTarget): void {
+    if (this._opts.onHyperlinkClick) {
+      this._opts.onHyperlinkClick(target);
+      return;
+    }
+    if (target.kind === 'external') {
+      openExternalHyperlink(target.url);
+      return;
+    }
+    // Internal slide jump. Mapping `target.ref` (e.g. "../slides/slide3.xml")
+    // to a 0-based index is NOT cheaply available: the parsed Slide model has no
+    // part name and file-number matching is a forbidden heuristic (see
+    // CLAUDE.md). No-op until the parser surfaces each slide's part name.
+    // TODO IX1: resolve slide part -> index, then `this.scrollToSlide(idx);`.
   }
 
   /**

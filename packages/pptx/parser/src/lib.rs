@@ -1930,6 +1930,41 @@ mod tests {
         assert_eq!(parsed.hyperlink.as_deref(), Some("https://example.com/"));
     }
 
+    /// ECMA-376 §21.1.2.3.5 — a:hlinkClick @action="ppaction://hlinksldjump"
+    /// marks an INTERNAL slide jump. The r:id resolves to the internal slide
+    /// part (TargetMode=Internal), and the raw action verb is carried through
+    /// on `hyperlink_action` so the TS side can classify it as internal.
+    #[test]
+    fn test_parse_run_hyperlink_internal_slidejump_action() {
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><rPr lang="en-US"><hlinkClick r:id="rId5" action="ppaction://hlinksldjump"/></rPr><t>Go to slide 3</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut rels = HashMap::new();
+        rels.insert("rId5".to_owned(), "../slides/slide3.xml".to_owned());
+
+        let parsed = parse_run(doc.root_element(), None, &theme, &rels).expect("run should parse");
+        assert_eq!(parsed.hyperlink.as_deref(), Some("../slides/slide3.xml"));
+        assert_eq!(
+            parsed.hyperlink_action.as_deref(),
+            Some("ppaction://hlinksldjump")
+        );
+    }
+
+    /// An external URL hlinkClick (no @action) leaves hyperlink_action = None.
+    #[test]
+    fn test_parse_run_hyperlink_external_has_no_action() {
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><rPr lang="en-US"><hlinkClick r:id="rId7"/></rPr><t>Open site</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r_node = doc.root_element();
+        let theme = HashMap::new();
+        let mut rels = HashMap::new();
+        rels.insert("rId7".to_owned(), "https://example.com/".to_owned());
+
+        let parsed = parse_run(r_node, None, &theme, &rels).expect("run should parse");
+        assert_eq!(parsed.hyperlink.as_deref(), Some("https://example.com/"));
+        assert!(parsed.hyperlink_action.is_none());
+    }
+
     /// A run without hlinkClick should have hyperlink = None.
     #[test]
     fn test_parse_run_without_hyperlink_is_none() {

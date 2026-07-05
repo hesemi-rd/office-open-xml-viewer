@@ -260,6 +260,15 @@ export interface ShapeElement {
   /** `<a:sp3d>` 3D shape properties (ECMA-376 §20.1.5.12). Parsed but not
    *  rendered in Phase A. */
   sp3d?: Sp3d;
+  /** Shape-level hyperlink target resolved from `<p:cNvPr><a:hlinkClick @r:id>`
+   *  via slide _rels (ECMA-376 §21.1.2.3.5). For an external link this is the
+   *  URL; for an internal slide jump it is the resolved internal part name.
+   *  Undefined when the shape carries no hlinkClick. */
+  hyperlink?: string;
+  /** Raw `<a:hlinkClick @action>` (e.g. `"ppaction://hlinksldjump"`) when the
+   *  shape link is an internal PowerPoint action rather than an external URL.
+   *  Undefined when absent. */
+  hyperlinkAction?: string;
 }
 
 /** Absolute text-frame rectangle in EMU (from SmartArt `<dsp:txXfrm>`). */

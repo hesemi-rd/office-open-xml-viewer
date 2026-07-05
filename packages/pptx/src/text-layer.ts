@@ -1,3 +1,4 @@
+import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 
 /**
@@ -12,16 +13,26 @@ import type { PptxTextRunInfo } from './renderer';
  * integrators (design §10). MAIN render mode only — `onTextRun` cannot cross the
  * worker boundary.
  *
+ * IX1 — when a run carries a resolved `hyperlink` (from `<a:hlinkClick>`) and an
+ * `onHyperlinkClick` callback is supplied, its span becomes a click target
+ * (`cursor:pointer`, a `title` tooltip, and a `click` handler). A plain span
+ * (no hyperlink) is byte-identical to before. A JS click handler is used rather
+ * than an `<a href>` so the URL never bypasses the viewer's sanitisation.
+ *
  * @param layer     the overlay div.
  * @param runs      per-run + per-shape geometry from `renderSlide({ onTextRun })`.
  * @param cssWidth  the rendered canvas's CSS width (px, number).
  * @param cssHeight the rendered canvas's CSS height (px, number).
+ * @param onHyperlinkClick called with the run's resolved {@link HyperlinkTarget}
+ *                         when a hyperlink span is clicked. Omit to leave links
+ *                         non-interactive (spans stay plain, selectable text).
  */
 export function buildPptxTextLayer(
   layer: HTMLDivElement,
   runs: PptxTextRunInfo[],
   cssWidth: number,
   cssHeight: number,
+  onHyperlinkClick?: (target: HyperlinkTarget) => void,
 ): void {
   layer.innerHTML = '';
   layer.style.width = `${cssWidth}px`;
@@ -58,11 +69,24 @@ export function buildPptxTextLayer(
     // ligatures are left at the browser default ('auto') because canvas
     // `measureText` / `fillText` also apply them by default — forcing them
     // off here would make the span wider than the drawn text.
+    // Hyperlink runs become clickable when a handler is wired: pointer cursor +
+    // a tooltip + a JS click handler. `color:transparent` is kept (the glyphs
+    // are painted on the canvas underneath, incl. the theme hyperlink colour and
+    // underline) — the span only supplies the hit region. `cursor:text` stays
+    // the default for plain runs so selection UX is unchanged.
+    const link = onHyperlinkClick ? run.hyperlink : undefined;
     span.style.cssText =
       `position:absolute;` +
       `left:${run.inShapeX}px;top:${run.inShapeY}px;` +
       `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
-      `white-space:pre;color:transparent;cursor:text;`;
+      `white-space:pre;color:transparent;cursor:${link ? 'pointer' : 'text'};`;
+    if (link && onHyperlinkClick) {
+      span.title = link.kind === 'external' ? link.url : link.ref;
+      span.addEventListener('click', (e) => {
+        e.preventDefault();
+        onHyperlinkClick(link);
+      });
+    }
     shape.div.appendChild(span);
   }
 }

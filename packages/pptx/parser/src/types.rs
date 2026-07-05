@@ -365,6 +365,18 @@ pub(crate) struct ShapeElement {
     /// "Rectangle 5"). Useful for tools that want a human-readable handle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
+    /// Shape-level hyperlink resolved from `<p:nvSpPr><p:cNvPr><a:hlinkClick @r:id>`
+    /// via slide _rels (ECMA-376 §21.1.2.3.5). For an EXTERNAL link this is the
+    /// URL; for an INTERNAL slide-jump it is the resolved internal part name.
+    /// None when the shape has no hlinkClick. Clicking anywhere on the shape
+    /// activates it (distinct from a text-run hyperlink).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hyperlink: Option<String>,
+    /// Raw `<a:hlinkClick @action>` on the shape's cNvPr (e.g.
+    /// "ppaction://hlinksldjump"), marking an internal action. See
+    /// `TextRunData::hyperlink_action`. None when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hyperlink_action: Option<String>,
     /// `<p:nvSpPr><p:nvPr><p:ph @type>` — placeholder semantic type
     /// ("title" / "ctrTitle" / "body" / "subTitle" / "ftr" / "sldNum" /
     /// "dt" / "obj" / "pic" / etc., ECMA-376 §19.7.10). `None` for
@@ -987,10 +999,19 @@ pub(crate) struct TextRunData {
     pub(crate) letter_spacing: Option<f64>,
     /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)
     pub(crate) field_type: Option<String>,
-    /// Hyperlink target URL resolved from rPr > hlinkClick @r:id via slide _rels.
-    /// None for runs without a:hlinkClick.
+    /// Hyperlink target resolved from rPr > hlinkClick @r:id via slide _rels.
+    /// For an EXTERNAL link this is the URL; for an INTERNAL slide-jump it is the
+    /// resolved internal part name (e.g. "../slides/slide3.xml", TargetMode=Internal).
+    /// None for runs without a:hlinkClick. ECMA-376 §21.1.2.3.5 (CT_Hyperlink).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) hyperlink: Option<String>,
+    /// Raw `<a:hlinkClick @action>` string (e.g. "ppaction://hlinksldjump")
+    /// when present. Its presence marks the link as an INTERNAL PowerPoint
+    /// action (slide jump / first / last / ...) rather than an external URL;
+    /// `hyperlink` then holds the resolved internal part name for a slide jump.
+    /// None when the hlinkClick has no @action. ECMA-376 §21.1.2.3.5.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hyperlink_action: Option<String>,
     /// ECMA-376 §20.1.8.45 (CT_OuterShadowEffect) — drop shadow on this run's
     /// glyphs from `<a:rPr><a:effectLst><a:outerShdw>`. Distinct from the
     /// shape-level shadow on `spPr`. None = no shadow on the run.

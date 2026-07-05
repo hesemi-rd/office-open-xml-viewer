@@ -10,6 +10,10 @@ export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCall
 export { buildPptxTextLayer } from './text-layer';
 export type { PresentationHandle } from './presentation-handle';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
+// IX1 — the shared hyperlink target shape surfaced by `PptxViewerOptions.
+// onHyperlinkClick`, `PptxTextRunInfo.hyperlink`, and the 5th arg of
+// `buildPptxTextLayer`, plus the default "open in a new tab, sanitised" helper.
+export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
 // Typed load-time error surfaced by PptxPresentation.load (e.g. a
 // password-protected or legacy-binary .ppt file). Re-exported so
 // `@silurus/ooxml/pptx` consumers can narrow on `err.code`.
