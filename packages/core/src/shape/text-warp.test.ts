@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildWarpEnvelope,
+  followPathUScale,
   hasTextWarp,
   isSingleEdgeWarp,
   samplePolyline,
   warpGlyphTransform,
+  warpArcLength,
   type Polyline,
 } from './text-warp';
 
@@ -129,6 +131,47 @@ describe('textInflate — per-glyph vertical scale', () => {
     const mid = warpGlyphTransform(env, 0.5, boxH, 0.8);
     const end = warpGlyphTransform(env, 0.02, boxH, 0.8);
     expect(mid.vScale).toBeGreaterThan(end.vScale);
+  });
+});
+
+describe('Follow Path — single-edge natural-width distribution (§20.1.9.19)', () => {
+  it('warpArcLength returns the baseline arc length for single-edge presets', () => {
+    const env = buildWarpEnvelope('textArchUp', [], W, H)!;
+    expect(env.singleEdge).toBe(true);
+    // The arc length equals the accumulated length of the flattened baseline.
+    expect(warpArcLength(env)).toBeCloseTo(env.topLen[env.topLen.length - 1], 3);
+    expect(warpArcLength(env)).toBeGreaterThan(0);
+  });
+
+  it('maps text narrower than the arc to only its natural fraction from the start', () => {
+    const env = buildWarpEnvelope('textArchUp', [], W, H)!;
+    const arc = warpArcLength(env);
+    // Text whose flat ink width is a quarter of the arc should occupy the first
+    // quarter of the arc parameter, not spread across the whole path.
+    const naturalW = arc / 4;
+    expect(followPathUScale(env, naturalW)).toBeCloseTo(0.25, 6);
+    // A glyph at u=1 (line end) then lands at arc parameter 0.25, i.e. the text
+    // follows the path for only its natural arc length from stAng.
+    expect(1 * followPathUScale(env, naturalW)).toBeCloseTo(0.25, 6);
+  });
+
+  it('never stretches: text wider than the arc is clamped to the full path', () => {
+    const env = buildWarpEnvelope('textArchUp', [], W, H)!;
+    const arc = warpArcLength(env);
+    // Follow Path only shrinks the span; it never widens text past the path.
+    expect(followPathUScale(env, arc * 2)).toBeCloseTo(1, 6);
+  });
+
+  it('is the identity (1) for paired-edge presets — they DO stretch', () => {
+    const env = buildWarpEnvelope('textInflate', [], W, H)!;
+    expect(env.singleEdge).toBe(false);
+    expect(followPathUScale(env, 10)).toBe(1);
+    expect(followPathUScale(env, 99999)).toBe(1);
+  });
+
+  it('is safe for a degenerate zero-length or zero-width input', () => {
+    const env = buildWarpEnvelope('textArchUp', [], W, H)!;
+    expect(followPathUScale(env, 0)).toBe(0);
   });
 });
 

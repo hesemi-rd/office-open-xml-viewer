@@ -190,6 +190,8 @@ export {
   buildWarpEnvelope,
   samplePolyline,
   warpGlyphTransform,
+  warpArcLength,
+  followPathUScale,
   type WarpEnvelope,
   type WarpGlyphTransform,
   type Polyline,
