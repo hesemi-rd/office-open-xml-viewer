@@ -1,5 +1,5 @@
-import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
-import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -112,6 +112,12 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  `computeVisibleRange` (the first page intersecting the viewport top,
    *  EXCLUDING overscan). */
   onVisiblePageChange?: (topIndex: number, total: number) => void;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100% = a page
+   *  at its natural pt→px size): from {@link DocxScrollViewer.setScale},
+   *  `zoomIn`/`zoomOut`, `fitWidth`/`fitPage`, a Ctrl/⌘+wheel gesture, or a
+   *  container-resize re-fit. Named `onScaleChange` to match the single-canvas
+   *  viewers so all five share one notification shape. */
+  onScaleChange?: (scale: number) => void;
   /** IX1 (design decision — NOT user-confirmed, integrator may veto). Called when
    *  a hyperlink run is clicked. When omitted, the default is: external → open in a
    *  new tab via core `openExternalHyperlink` (sanitised, noopener,noreferrer);
@@ -151,7 +157,7 @@ interface PageSlot {
   bitmapCtx: ImageBitmapRenderingContext | null;
 }
 
-export class DocxScrollViewer {
+export class DocxScrollViewer implements ZoomableViewer {
   private _doc: DocxDocument | null = null;
   private readonly _injected: boolean;
   private readonly _opts: DocxScrollViewerOptions;
@@ -1006,6 +1012,74 @@ export class DocxScrollViewer {
     //     after the LAST setScale so a wheel/pinch burst coalesces into one render.
     this._previewVisible();
     this._scheduleSettle();
+    // IX9 change notification. Only reached when `next` differs from the prior
+    // scale (early-returned above), so every source — the public setScale, the
+    // ladder steppers, fitWidth/fitPage, Ctrl-wheel, and the _onResize re-fit
+    // (which routes through here) — notifies through this one hook.
+    this._opts.onScaleChange?.(next);
+  }
+
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor, where `1` = 100% (a
+   *  page at its natural pt→px width). This is the viewer's absolute `_scale`
+   *  (`widthPt × PT_TO_PX × _scale` is the drawn width), so it reads `1` at true
+   *  100% and, after the initial fit-to-width, the base fit factor. `1` before a
+   *  scale is established. */
+  getScale(): number {
+    return this._scaleEstablished ? this._scale : 1;
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder above the current factor (clamped to `zoomMax` by {@link setScale}). */
+  zoomIn(): void {
+    this.setScale(nextZoomStep(this.getScale()));
+  }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  zoomOut(): void {
+    this.setScale(prevZoomStep(this.getScale()));
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit a page's WIDTH to the container (the classic
+   * continuous-scroll "fit width"). Sets the scale to the width-fit base for the
+   * current container, then re-anchors + re-renders via {@link setScale}. Defers
+   * (no-op) while the container is unlaid-out. Note the `zoomMin`/`zoomMax` clamp
+   * still applies, so a fit below `zoomMin` pins to `zoomMin`.
+   */
+  fitWidth(): void {
+    this._fit('width');
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit a WHOLE page (width and height) inside the
+   * container so one page is visible without scrolling; takes the tighter of the
+   * width/height fit. Uses the FIRST page's size (the continuous viewer's fit
+   * reference, matching the base-fit convention). Defers while unlaid-out.
+   */
+  fitPage(): void {
+    this._fit('page');
+  }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: the width-fit factor is the
+   *  established base (`_baseScale`); the page-fit additionally bounds by the
+   *  container height against the first page's height. Applies via {@link setScale}
+   *  so the flicker-free re-anchor / settle path and `onScaleChange` all run. */
+  private _fit(mode: 'width' | 'page'): void {
+    if (!this._doc || this._doc.pageCount === 0) return;
+    const size = this._doc.pageSize(0);
+    const scale = fitScale(
+      {
+        contentWidth: size.widthPt * PT_TO_PX,
+        contentHeight: size.heightPt * PT_TO_PX,
+        containerWidth: this._fitWidthPx(),
+        containerHeight: this._scrollHost.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out — defer
+    this.setScale(scale);
   }
 
   /**
