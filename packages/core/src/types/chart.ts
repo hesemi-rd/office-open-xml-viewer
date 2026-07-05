@@ -746,6 +746,13 @@ export interface SecondaryValueAxis {
   lineHidden: boolean;
   /** `<c:majorTickMark>` — "cross" (default) | "out" | "in" | "none". */
   majorTickMark: string;
+  /**
+   * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between
+   * major ticks/gridlines on THIS secondary axis, overriding the Excel-style
+   * auto "nice" step. null/undefined ⇒ auto step (byte-stable). Symmetric with
+   * {@link ChartModel.valAxisMajorUnit} on the primary axis.
+   */
+  majorUnit?: number | null;
   /** `<c:title>` run-prop font size (hpt). */
   titleFontSizeHpt?: number | null;
   /** `<c:title>` run-prop bold flag. */

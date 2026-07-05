@@ -517,6 +517,39 @@ function valGridStroke(
   return { color, width, explicit: chart.valAxisGridlineColor != null };
 }
 
+/** Whether to draw CATEGORY-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`,
+ *  ECMA-376 §21.2.2.100). Office omits them by default, so only `true` turns
+ *  them on (null/undefined/false ⇒ off, byte-stable). */
+function drawCatMajorGridlines(chart: ChartModel): boolean {
+  return chart.catAxisMajorGridlines === true;
+}
+
+/** Resolve the CATEGORY-axis major gridline stroke, mirroring
+ *  {@link valGridStroke}. `<c:catAx><c:majorGridlines><c:spPr><a:ln>` gives the
+ *  color/width (`chart.catAxisGridlineColor`/`catAxisGridlineWidthEmu`); absent
+ *  ⇒ the same faint `#e0e0e0`/0.5 px default as the value axis. Category
+ *  gridlines have no zero-line emphasis (there is no "zero category"), so a
+ *  single resolved stroke suffices. */
+function catGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number } {
+  return resolveGridline(chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, ptToPx);
+}
+
+/** The plot-fraction positions (0..1 across the category extent) of the CATEGORY
+ *  major gridlines / ticks for `n` categories. With crossBetween="between" (the
+ *  bar/column default) they sit on the `n+1` band BOUNDARIES; under "midCat"
+ *  they sit at the `n` category CENTERS. Shared by the category tick loop and
+ *  the category-gridline pass so both stay aligned (§21.2.2.100/§21.2.2.32). */
+function catGridlineFractions(chart: ChartModel, n: number): number[] {
+  if (n <= 0) return [];
+  const onBoundary = isCrossBetween(chart);
+  const fracs: number[] = [];
+  const last = onBoundary ? n : n - 1;
+  for (let ci = 0; ci <= last; ci++) {
+    fracs.push(onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1)));
+  }
+  return fracs;
+}
+
 /** True when the value axis is reversed (`<c:valAx><c:scaling><c:orientation
  *  val="maxMin">`, ECMA-376 §21.2.2.130). Absent/"minMax" ⇒ false (byte-stable). */
 function valAxisReversed(chart: ChartModel): boolean {
@@ -670,12 +703,37 @@ function catLabelsVisible(chart: ChartModel): boolean {
   return chart.catAxisTickLabelPos !== 'none';
 }
 
+/** 90° in 60000ths of a degree. `ST_FixedAngle` (ECMA-376 §20.1.10.23) bounds
+ *  a fixed-range angle to the OPEN interval "greater than -5400000 / less than
+ *  5400000", so ±5400000 itself lies outside the schema type — but Office's
+ *  Format-Axis "Custom angle" control accepts -90°…+90° INCLUSIVE, so the code
+ *  below deliberately uses a closed boundary (`> LIMIT` rejects, `== LIMIT`
+ *  honors) to keep genuine ±90° (vertical) axis labels working. */
+const FIXED_ANGLE_LIMIT_60K = 5_400_000;
+
 /** Category-axis label rotation in RADIANS (canvas convention), from
- *  `<c:catAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
- *  degree). Returns 0 when unset — the un-rotated fast path callers keep. */
+ *  `<c:catAx|dateAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`
+ *  §20.1.10.3, 60000ths of a degree). Returns 0 when unset — the un-rotated
+ *  fast path callers keep.
+ *
+ *  `bodyPr@rot` is typed `ST_Angle` (a restriction of XML Schema `int`, so any
+ *  integer is schema-valid), but a *text* rotation is only meaningful within
+ *  the `ST_FixedAngle` (§20.1.10.23) fixed-angle domain — an open interval
+ *  (-90°, 90°) at the schema level, which Office's Format-Axis "Custom angle"
+ *  control widens to -90°…+90° inclusive (we follow the UI's closed range; see
+ *  {@link FIXED_ANGLE_LIMIT_60K}). Office writes `rot="-60000000"` (-1000°,
+ *  ≈2.8 full turns) as a sentinel for "auto / horizontal" axis text and renders
+ *  those labels horizontal; the identical value even appears on the numeric
+ *  value axis in sample-1/sample-24, whose labels are indisputably horizontal
+ *  in the Word/Excel PDF ground truth. So a rot whose magnitude exceeds ±90°
+ *  is outside the valid text-rotation domain and is treated as no rotation
+ *  (0°) rather than reduced mod 360 (which would map -1000° → +80°,
+ *  near-vertical — wrong per sample-24.pdf). Genuine rotations within the
+ *  closed range (-45° = -2700000, -90° = -5400000) are honored unchanged. */
 function catLabelRotationRad(chart: ChartModel): number {
   const rot = chart.catAxisLabelRotation;
   if (rot == null || rot === 0) return 0;
+  if (Math.abs(rot) > FIXED_ANGLE_LIMIT_60K) return 0;
   return (rot / 60000) * (Math.PI / 180);
 }
 
@@ -741,7 +799,9 @@ function computeSecondaryAxis(
   }
   const dMin = secVals.length ? Math.min(...secVals) : 0;
   const dMax = secVals.length ? Math.max(...secVals) : 1;
-  const { min, max, step } = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, plotHeightPt);
+  // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
+  // overrides the auto step, mirroring the primary axis. null ⇒ auto.
+  const { min, max, step } = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, plotHeightPt, sec.majorUnit);
   const range = (max - min) || 1;
   return {
     min,
@@ -1200,6 +1260,30 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           ctx.fillText(label, gx, py0 + ph + 10);
         }
       }
+    }
+  }
+
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100).
+  // Perpendicular to the value gridlines: vertical for a column chart (cat axis
+  // runs along x), horizontal for a horizontal-bar chart (cat axis runs along
+  // y). Positioned at the same fractions as the category ticks — band
+  // boundaries under crossBetween="between" (bar default), category centers
+  // under "midCat". Drawn under the bars (like value gridlines). Office omits
+  // these by default so the common path is byte-stable.
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      ctx.beginPath();
+      if (!isH) {
+        const gx = px0 + frac * pw;
+        ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph);
+      } else {
+        const gy = py0 + frac * ph;
+        ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy);
+      }
+      ctx.stroke();
     }
   }
 
@@ -1728,6 +1812,20 @@ function renderLineChart(
         ctx.textAlign = 'right';
         ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
       }
+    }
+  }
+
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
+  // vertical lines at the category ticks across the plot height. Off by default
+  // (byte-stable). Shared placement with the bar renderer via
+  // `catGridlineFractions`.
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      const gx = px0 + frac * pw;
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
   }
 
@@ -2262,8 +2360,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
   // Area anchors the value axis at 0; ignore the returned min. Value axis is
-  // vertical → length = plot height (axis-length-aware auto major unit).
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, ph / ptToPx);
+  // vertical → length = plot height (axis-length-aware auto major unit). An
+  // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit);
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
   // default application-defined) gives each category a band of width pw/n and
@@ -2424,6 +2523,17 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+    }
+  }
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
+  // vertical lines at the category ticks. Off by default (byte-stable).
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      const gx = px0 + frac * pw;
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
   }
   // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`
@@ -3001,16 +3111,27 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   for (const s of chart.series) for (const v of s.values) dataMax = Math.max(dataMax, v ?? 0);
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
-  // Radar anchors the value axis at 0; ignore the returned min.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
+  // Radar anchors the value axis at 0; ignore the returned min. An explicit
+  // `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto ring step. The
+  // axis-length-aware auto density (GRIDLINE_SPACING_PT) is calibrated against
+  // Cartesian bar/line/area axes, not the radial spoke, so radar keeps the
+  // legacy fixed auto target (axisLenPt undefined) — only the explicit majorUnit
+  // path is new (byte-stable auto rings).
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, undefined, chart.valAxisMajorUnit);
 
   const angle0 = -Math.PI / 2;
   const spoke  = (i: number) => angle0 + (i / n) * Math.PI * 2;
 
+  // Rings sit on the value-axis MAJOR ticks — i.e. at value `ri * step`, whose
+  // radius is proportional to the value (`v / axMax`). Deriving the radius from
+  // the value (not `ri / rings`) keeps the rings on the major-unit multiples
+  // even when `axMax` is not an exact multiple of `step` (e.g. an explicit
+  // `<c:majorUnit>` §21.2.2.103 that doesn't divide the auto-rounded max).
   const rings = Math.round(axMax / step);
+  const ringValue = (ri: number): number => Math.min(ri * step, axMax);
   ctx.strokeStyle = '#ddd'; ctx.lineWidth = 0.5;
   for (let ri = 1; ri <= rings; ri++) {
-    const rr = (ri / rings) * rd;
+    const rr = (ringValue(ri) / axMax) * rd;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const a = spoke(i);
@@ -3038,8 +3159,8 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let ri = 1; ri <= rings; ri++) {
-      const v = (ri / rings) * axMax;
-      const rr = (ri / rings) * rd;
+      const v = ringValue(ri);
+      const rr = (v / axMax) * rd;
       ctx.fillText(formatChartVal(v), cx2 - 3, cy2 - rr);
     }
   }
@@ -3233,9 +3354,14 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // chart.valMin/valMax as the explicit args reproduces the prior `?? niceAxis…`
   // behavior exactly. Explicit <c:valAx><c:scaling> wins. NB: the auto major
   // unit is not specified by ECMA-376 (Excel-proprietary); niceStep approximates
-  // it and may differ from Excel by one step on some ranges.
+  // it and may differ from Excel by one step on some ranges. An explicit
+  // `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step. The
+  // axis-length-aware auto density (GRIDLINE_SPACING_PT) is calibrated against
+  // the bar/line/area value axes; scatter/bubble keep the legacy fixed auto
+  // target (axisLenPt undefined) so their auto gridlines stay byte-stable —
+  // only the explicit majorUnit path is new here.
   const { min: niceYMin, max: niceYMax, step: yAxisStep } =
-    valueAxisScale(yMin, yMax, chart.valMin, chart.valMax);
+    valueAxisScale(yMin, yMax, chart.valMin, chart.valMax, undefined, chart.valAxisMajorUnit);
   yMin = niceYMin; yMax = niceYMax;
   if (chart.catAxisMin != null) xMin = chart.catAxisMin;
   if (chart.catAxisMax != null) xMax = chart.catAxisMax;

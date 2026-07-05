@@ -553,6 +553,10 @@ pub struct SecondaryValueAxis {
     pub line_width_emu: Option<u32>,
     pub line_hidden: bool,
     pub major_tick_mark: String,
+    /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major-unit step on
+    /// this secondary axis, overriding the auto "nice" step. `None` ⇒ auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub major_unit: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_size_hpt: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3973,6 +3977,7 @@ pub fn parse_chart_part(
             line_width_emu,
             line_hidden,
             major_tick_mark: extract_axis_tick_mark_or_default(ax, "majorTickMark"),
+            major_unit: extract_axis_major_unit(ax),
             title_font_size_hpt: title_size,
             title_font_bold: title_bold,
             title_font_color: title_color,
@@ -5587,6 +5592,7 @@ mod tests {
                   <c:axPos val="r"/>
                   <c:crosses val="max"/>
                   <c:scaling><c:min val="0"/><c:max val="1"/></c:scaling>
+                  <c:majorUnit val="0.25"/>
                   <c:title><c:tx><c:rich><a:p><a:r><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx></c:title>
                 </c:valAx>
               </c:plotArea></c:chart>
@@ -5616,6 +5622,11 @@ mod tests {
         assert_eq!(sec.max, Some(1.0));
         assert_eq!(sec.title.as_deref(), Some("Margin"));
         assert!(!sec.hidden);
+        // #738: an explicit `<c:majorUnit>` on the secondary axis (§21.2.2.103)
+        // is threaded into the model (was silently dropped before).
+        assert_eq!(sec.major_unit, Some(0.25));
+        // The primary value axis declared no majorUnit → stays None.
+        assert_eq!(m.val_axis_major_unit, None);
     }
 
     /// (c) Doughnut chart with per-point `<c:dPt>` colors, `showPercent`, and

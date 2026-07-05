@@ -1856,6 +1856,13 @@ function horizGridlines(segs: Seg[]): Seg[] {
   });
 }
 
+/** Category-axis MAJOR gridlines: near-vertical segments spanning the plot
+ *  height (x roughly constant, big y span). Filters by the gridline color so
+ *  bar edges / data lines aren't counted. */
+function vertGridlines(segs: Seg[], color = '#e0e0e0'): Seg[] {
+  return segs.filter(s => Math.abs(s.x0 - s.x1) < 0.5 && Math.abs(s.y1 - s.y0) > 50 && s.ss === color);
+}
+
 describe('CH6 — axis scale model', () => {
   const lineModel = (over: Partial<ChartModel>): ChartModel => baseModel({
     chartType: 'line',
@@ -1995,6 +2002,166 @@ describe('CH6 — axis scale model', () => {
   });
 });
 
+// #744: `<c:catAx><c:majorGridlines>` (ECMA-376 §21.2.2.100) draws VERTICAL
+// gridlines at each category tick across the plot height. The parse+type
+// surface (catAxisMajorGridlines / catAxisGridlineColor / catAxisGridlineWidthEmu)
+// already existed but had no renderer consumer, so a chart declaring cat-axis
+// gridlines rendered without them.
+describe('#744 — category-axis (vertical) major gridlines', () => {
+  const colModel = (over: Partial<ChartModel>): ChartModel => baseModel({
+    chartType: 'clusteredBar',
+    categories: ['A', 'B', 'C', 'D'],
+    series: [series({ name: 'S', values: [10, 20, 30, 40] })],
+    ...over,
+  });
+
+  it('OFF by default: no vertical gridlines (byte-stable)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, colModel({}), RECT, 1);
+    expect(vertGridlines(rec.segs).length).toBe(0);
+  });
+
+  it('catAxisMajorGridlines=true draws vertical gridlines spanning the plot height', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisMajorGridlines: true }), RECT, 1);
+    const grids = vertGridlines(rec.segs);
+    // At least one gridline per category boundary/center. crossBetween="between"
+    // (bar default) → n+1 dividers; either way several full-height verticals.
+    expect(grids.length).toBeGreaterThanOrEqual(3);
+    // Each spans (nearly) the whole plot height — much taller than a bar.
+    const tallest = Math.max(...grids.map(s => Math.abs(s.y1 - s.y0)));
+    expect(tallest).toBeGreaterThan(RECT.h * 0.5);
+  });
+
+  it('honors an explicit catAxisGridlineColor / width (§21.2.2.100)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, colModel({
+      catAxisMajorGridlines: true,
+      catAxisGridlineColor: '8fa878',
+      catAxisGridlineWidthEmu: 12700, // 1 pt
+    }), RECT, 1);
+    const colored = vertGridlines(rec.segs, '#8fa878');
+    expect(colored.length).toBeGreaterThanOrEqual(3);
+    // 1 pt × ptToPx=1 → 1 px width.
+    expect(colored.every(s => s.lw === 1)).toBe(true);
+    // No faint default lines remain when a color is pinned.
+    expect(vertGridlines(rec.segs, '#e0e0e0').length).toBe(0);
+  });
+
+  it('line chart also draws category gridlines when declared', () => {
+    // The cat-gridline pass is wired into the bar, line and area renderers.
+    const off = segRecordingCtx();
+    renderChart(off.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    expect(vertGridlines(off.segs).length).toBe(0);
+
+    const on = segRecordingCtx();
+    renderChart(on.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+      catAxisMajorGridlines: true,
+    }), RECT, 1);
+    expect(vertGridlines(on.segs).length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// #738: an explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) must be honored on
+// EVERY chart type's value axis, not just the primary bar/line axis. The area,
+// radar and scatter renderers ignored `chart.valAxisMajorUnit`; the secondary
+// (combo) axis had no majorUnit surface at all.
+describe('#738 — explicit majorUnit honored on every value axis (§21.2.2.103)', () => {
+  /** Numeric value-axis tick labels drawn by a chart, as numbers. */
+  function valTickNumbers(over: Partial<ChartModel>): number[] {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel(over), RECT, 1);
+    return rec.texts
+      .map(t => t.text)
+      .filter(t => /^\d+(\.\d+)?$/.test(t))
+      .map(Number);
+  }
+
+  it('area: majorUnit widens the value-axis step (labels land on multiples of it)', () => {
+    // Data 0..100. Auto step is fine-grained; majorUnit 50 → coarse ticks
+    // 0,50,100 and NOTHING at 25/75.
+    const auto = valTickNumbers({
+      chartType: 'area', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [20, 60, 100] })],
+    });
+    const coarse = valTickNumbers({
+      chartType: 'area', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [20, 60, 100] })],
+      valAxisMajorUnit: 50,
+    });
+    expect(coarse).toContain(50);
+    expect(coarse).not.toContain(25);
+    // Coarser than auto: strictly fewer distinct tick labels.
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+  });
+
+  it('scatter: majorUnit widens the Y (value) axis step', () => {
+    const auto = valTickNumbers({
+      chartType: 'scatter',
+      series: [series({ name: 'S', values: [10, 40, 70, 100] })],
+    });
+    const coarse = valTickNumbers({
+      chartType: 'scatter',
+      series: [series({ name: 'S', values: [10, 40, 70, 100] })],
+      valAxisMajorUnit: 50,
+    });
+    expect(coarse).toContain(50);
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+  });
+
+  it('radar: majorUnit widens the ring step (fewer radial ticks)', () => {
+    const auto = valTickNumbers({
+      chartType: 'radar', categories: ['A', 'B', 'C', 'D'],
+      series: [series({ name: 'S', values: [20, 60, 80, 100] })],
+    });
+    const coarse = valTickNumbers({
+      chartType: 'radar', categories: ['A', 'B', 'C', 'D'],
+      series: [series({ name: 'S', values: [20, 60, 80, 100] })],
+      valAxisMajorUnit: 50,
+    });
+    // Radar skips the center 0-label, so labels are the ring values.
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+    expect(coarse).toContain(50);
+  });
+
+  it('secondary (combo) axis: majorUnit widens its independent step', () => {
+    // A line chart whose secondary series rides an independent right-edge axis
+    // (the shared computeSecondaryAxis path, used by line/area and the bar-combo
+    // line series). Secondary data 0..100; an explicit majorUnit 50 → right-side
+    // ticks land on multiples of 50 (0,50,100) and NOTHING at 25.
+    const secModel = (majorUnit: number | null): ChartModel => baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ name: 'Big', values: [10, 20, 30] }),
+        series({ name: 'Small', values: [20, 60, 100], useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: {
+        min: null, max: null, title: 'Rate', hidden: false,
+        majorTickMark: 'out', lineHidden: false, majorUnit,
+      },
+    });
+    const rightTicks = (m: ChartModel): number[] => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, m, RECT, 1);
+      return rec.texts
+        .filter(t => t.x > RECT.x + RECT.w * 0.75 && /^\d+(\.\d+)?$/.test(t.text))
+        .map(t => Number(t.text));
+    };
+    const auto = rightTicks(secModel(null));
+    const coarse = rightTicks(secModel(50));
+    expect(auto.length).toBeGreaterThan(0); // guard: right-edge ticks exist
+    expect(coarse).toContain(50);
+    expect(coarse).not.toContain(25);
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+  });
+});
+
 /** Recording context that counts rotate() calls and captures fillText, for the
  *  category-label rotation / tickLblPos tests. */
 function rotateRecordingCtx(): { ctx: CanvasRenderingContext2D; rotates: number[]; texts: string[] } {
@@ -2077,6 +2244,31 @@ describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
     const rec = rotateRecordingCtx();
     renderChart(rec.ctx, colModel({ catAxisLabelRotation: 0 }), RECT, 1);
     expect(rec.rotates.length).toBe(0);
+  });
+
+  // #748: a rot outside the ST_FixedAngle (§20.1.10.23) (-90°,90°) text-rotation
+  // range is not a valid axis-label rotation — Office draws such labels
+  // horizontal. sample-24's cat/date/value axes all carry rot="-60000000"
+  // (-1000°) yet Word renders every label horizontal (verified against
+  // sample-24.pdf: "Category" label bbox is wide/short, ratio ≈ 3.0). Naively
+  // dividing -60000000/60000 = -1000° (or wrapping mod 360 → +80°) rotates them
+  // near-vertical, which is wrong.
+  it('an out-of-range rot ("-60000000" = -1000°) draws labels HORIZONTAL, not rotated', () => {
+    const rec = rotateRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisLabelRotation: -60_000_000 }), RECT, 1);
+    // Office ignores the out-of-range rotation: no rotate() calls (horizontal
+    // fast path), labels still drawn.
+    expect(rec.rotates.length).toBe(0);
+    expect(rec.texts.some(t => t.startsWith('Alpha'))).toBe(true);
+  });
+
+  it('a rot at the ±90° ST_FixedAngle boundary (-5400000 = -90°) is still honored', () => {
+    // -90° is the inclusive edge of Office's axis-text rotation range; keep it
+    // working (genuine vertical axis labels).
+    const rec = rotateRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisLabelRotation: -5_400_000 }), RECT, 1);
+    expect(rec.rotates.length).toBeGreaterThan(0);
+    expect(rec.rotates[0]).toBeCloseTo((-90 * Math.PI) / 180, 6);
   });
 });
 
