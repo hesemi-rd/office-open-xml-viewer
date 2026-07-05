@@ -54,10 +54,12 @@ describe('XlsxViewer scroll-render coalescing (C4 commit 1)', () => {
     const raf = installRaf();
     const container = makeContainer();
     const v = new XlsxViewer(container as unknown as HTMLElement);
-    // The scrollHost is the 2nd child of canvasArea (canvas, overlay, scrollHost…).
-    // Reach it via the wrapper subtree the constructor mounted in the container.
+    // The scrollHost lives inside canvasArea (canvas, overlay, scrollHost…).
+    // canvasArea is nested in the gridRegion (XL4 outline gutters) which is the
+    // wrapper's first child. Reach it via the mounted subtree.
     const wrapper = container.children[0] as FakeEl;
-    const canvasArea = wrapper.children[0] as FakeEl;
+    const gridRegion = wrapper.children[0] as FakeEl;
+    const canvasArea = gridRegion.children[0] as FakeEl;
     const scrollHost = canvasArea.children.find(
       (c) => c.style.overflow === 'auto' || c._listeners.has('scroll'),
     ) as FakeEl;
@@ -138,7 +140,8 @@ describe('XlsxViewer scroll-render coalescing (C4 commit 1)', () => {
       'renderCurrentSheet',
     ).mockResolvedValue(undefined);
     const wrapper = container.children[0] as FakeEl;
-    const canvasArea = wrapper.children[0] as FakeEl;
+    const gridRegion = wrapper.children[0] as FakeEl;
+    const canvasArea = gridRegion.children[0] as FakeEl;
     const scrollHost = canvasArea.children.find((c) => c._listeners.has('scroll')) as FakeEl;
     scrollHost.dispatch('scroll');
     // No rAF: the render runs inline, preserving the old synchronous semantics.

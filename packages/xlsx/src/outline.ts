@@ -29,6 +29,21 @@
 /** Which axis a set of outline metadata describes. */
 export type OutlineAxis = 'row' | 'col';
 
+/** Width (row axis) / height (col axis) of one outline lane, in unscaled CSS px.
+ *  Excel draws each nesting level in its own ~19px lane. */
+export const OUTLINE_LANE_PX = 19;
+
+/** Side of the level-number button bank / corner (unscaled CSS px). Holds the
+ *  numbered "1 2 3" buttons that collapse the whole sheet to a level. */
+export const OUTLINE_BUTTON_PX = 12;
+
+/** Extent (px) of the gutter for an axis with `maxLevel` nesting levels, or 0
+ *  when the axis has no outlining. The lanes hold the group brackets; one extra
+ *  lane holds the numbered level buttons (levels 1..maxLevel+1). */
+export function gutterExtentPx(maxLevel: number): number {
+  return maxLevel > 0 ? (maxLevel + 1) * OUTLINE_LANE_PX : 0;
+}
+
 /** Per-band outline metadata, indexed by 1-based band index. */
 export interface BandOutline {
   /** 1-based band index (row number / column number). */
@@ -223,4 +238,56 @@ export function levelButtonHidden(
     else show.push(b.index);
   }
   return { hide, show };
+}
+
+/** Minimal worksheet shape the axis extractors read (kept structural so tests
+ *  can pass a plain object). */
+export interface OutlineWorksheetLike {
+  rows: { index: number; outlineLevel?: number; collapsed?: boolean; hidden?: boolean }[];
+  colOutlineLevels?: Record<number, number>;
+  colCollapsed?: Record<number, boolean>;
+  colHidden?: Record<number, boolean>;
+  outlinePr?: { summaryBelow: boolean; summaryRight: boolean };
+}
+
+/** Row-axis band metadata (only bands with a non-zero level or a set collapsed
+ *  flag are surfaced). Keyed off the parser's per-row fields. */
+export function rowBands(ws: OutlineWorksheetLike): BandOutline[] {
+  const out: BandOutline[] = [];
+  for (const r of ws.rows) {
+    const level = r.outlineLevel ?? 0;
+    const collapsed = r.collapsed ?? false;
+    if (level === 0 && !collapsed) continue;
+    out.push({ index: r.index, level, collapsed, hidden: r.hidden ?? false });
+  }
+  return out;
+}
+
+/** Column-axis band metadata, from the parallel `colOutlineLevels` /
+ *  `colCollapsed` / `colHidden` maps. */
+export function colBands(ws: OutlineWorksheetLike): BandOutline[] {
+  const levels = ws.colOutlineLevels ?? {};
+  const collapsed = ws.colCollapsed ?? {};
+  const hidden = ws.colHidden ?? {};
+  const indices = new Set<number>();
+  for (const k of Object.keys(levels)) indices.add(Number(k));
+  for (const k of Object.keys(collapsed)) indices.add(Number(k));
+  const out: BandOutline[] = [];
+  for (const i of [...indices].sort((a, b) => a - b)) {
+    out.push({
+      index: i,
+      level: levels[i] ?? 0,
+      collapsed: collapsed[i] ?? false,
+      hidden: hidden[i] ?? false,
+    });
+  }
+  return out;
+}
+
+/** `summaryBelow` for rows / `summaryRight` for columns, defaulting to `true`
+ *  (ECMA-376 §18.3.1.61) when the sheet declares no `<outlinePr>`. */
+export function summaryAfterFor(ws: OutlineWorksheetLike, axis: OutlineAxis): boolean {
+  const pr = ws.outlinePr;
+  if (!pr) return true;
+  return axis === 'row' ? pr.summaryBelow : pr.summaryRight;
 }

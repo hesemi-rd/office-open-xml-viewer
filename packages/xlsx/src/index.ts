@@ -25,6 +25,8 @@ export type {
   SheetMeta,
   SheetVisibility,
   Worksheet,
+  // Outline (row/column grouping) display flags, reachable via Worksheet.outlinePr.
+  OutlinePr,
   Row,
   Cell,
   CellValue,

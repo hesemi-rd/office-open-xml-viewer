@@ -11,6 +11,20 @@ import {
   computeValidationPanelPosition,
   type ResolvedList,
 } from './validation-list.js';
+import {
+  buildOutlineLayout,
+  toggleGroupHidden,
+  levelButtonHidden,
+  rowBands,
+  colBands,
+  summaryAfterFor,
+  gutterExtentPx,
+  OUTLINE_LANE_PX,
+  type BandOutline,
+  type OutlineGroup,
+  type OutlineLayout,
+  type OutlineAxis,
+} from './outline.js';
 
 // Re-exported for the existing xlsx zoom tests (resize-zoom.test.ts imports it
 // from this module) and any consumer that referenced it here before it moved to
@@ -335,6 +349,32 @@ export class XlsxViewer {
    *  (empty) state. */
   private wrapper!: HTMLDivElement;
   private canvas: HTMLCanvasElement;
+  /** Region holding the outline gutters (top/left) and the inset {@link canvasArea}.
+   *  When the active sheet has no outlining the gutters collapse to 0 px and this
+   *  is a transparent pass-through, so an outline-free sheet lays out identically. */
+  private gridRegion!: HTMLDivElement;
+  /** Left gutter canvas: row group brackets + toggles (XL4). */
+  private rowGutter!: HTMLCanvasElement;
+  /** Top gutter canvas: column group brackets + toggles (XL4). */
+  private colGutter!: HTMLCanvasElement;
+  /** Top-left corner canvas: numbered level buttons (XL4). */
+  private cornerGutter!: HTMLCanvasElement;
+  /** Cached extents (unscaled CSS px) of the current sheet's gutters; both 0 for
+   *  an outline-free sheet. `w` insets {@link canvasArea} from the left, `h` from
+   *  the top. */
+  private gutter = { w: 0, h: 0 };
+  /** Per-axis outline layout (group brackets + toggles) for the current sheet,
+   *  recomputed on sheet switch and after each collapse/expand. `null` axis ⇒ no
+   *  outlining on that axis. */
+  private rowOutline: OutlineLayout | null = null;
+  private colOutline: OutlineLayout | null = null;
+  private rowOutlineBands: BandOutline[] = [];
+  private colOutlineBands: BandOutline[] = [];
+  /** Original row heights / column widths stashed the first time a band is
+   *  collapsed, so expanding restores a custom size rather than the default.
+   *  Keyed by band index; per current worksheet (cleared on sheet switch). */
+  private stashedRowHeights = new Map<number, number | undefined>();
+  private stashedColWidths = new Map<number, number | undefined>();
   private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
   private spacer: HTMLDivElement;
@@ -493,8 +533,31 @@ export class XlsxViewer {
       `position:relative;width:100%;height:100%;` +
       `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;display:flex;flex-direction:column;`;
 
+    // The grid region fills the space above the tab bar. The outline gutters
+    // (XL4) sit at its top / left edges and {@link canvasArea} is inset by the
+    // gutter extents. With no outlining both extents are 0, so canvasArea covers
+    // the whole region exactly as before (byte-identical layout).
+    this.gridRegion = document.createElement('div');
+    this.gridRegion.style.cssText = `position:relative;flex:1;min-height:0;overflow:hidden;`;
+
+    // Outline gutter canvases. Absolutely positioned inside gridRegion; sized /
+    // shown per sheet in `layoutGutters`. `pointer-events:auto` on the gutters so
+    // +/- toggles and level buttons are clickable; they are painted on the main
+    // thread even in worker mode (cheap chrome, independent of the grid bitmap).
+    const gutterStyle =
+      `position:absolute;top:0;left:0;z-index:3;display:none;background:#f5f5f5;`;
+    this.cornerGutter = document.createElement('canvas');
+    this.cornerGutter.style.cssText = gutterStyle;
+    this.cornerGutter.setAttribute('data-xlsx-outline', 'corner');
+    this.colGutter = document.createElement('canvas');
+    this.colGutter.style.cssText = gutterStyle;
+    this.colGutter.setAttribute('data-xlsx-outline', 'col');
+    this.rowGutter = document.createElement('canvas');
+    this.rowGutter.style.cssText = gutterStyle;
+    this.rowGutter.setAttribute('data-xlsx-outline', 'row');
+
     this.canvasArea = document.createElement('div');
-    this.canvasArea.style.cssText = `position:relative;flex:1;min-height:0;overflow:hidden;`;
+    this.canvasArea.style.cssText = `position:absolute;inset:0;overflow:hidden;`;
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = `position:absolute;top:0;left:0;z-index:0;display:block;`;
@@ -607,9 +670,21 @@ export class XlsxViewer {
       this.tabBar.appendChild(this.buildZoomControl());
     }
 
-    this.wrapper.appendChild(this.canvasArea);
+    // canvasArea first (bottom), gutters above it inside the same region.
+    this.gridRegion.appendChild(this.canvasArea);
+    this.gridRegion.appendChild(this.colGutter);
+    this.gridRegion.appendChild(this.rowGutter);
+    this.gridRegion.appendChild(this.cornerGutter);
+    this.wrapper.appendChild(this.gridRegion);
     this.wrapper.appendChild(this.tabBar);
     container.appendChild(this.wrapper);
+
+    // Gutter click handling (XL4): +/- toggles, group brackets, and the numbered
+    // level buttons in the corner. Registered once; no-op when a sheet has no
+    // gutter (extents 0 ⇒ canvases hidden).
+    this.rowGutter.addEventListener('pointerdown', (e) => this.onGutterPointerDown(e, 'row'));
+    this.colGutter.addEventListener('pointerdown', (e) => this.onGutterPointerDown(e, 'col'));
+    this.cornerGutter.addEventListener('pointerdown', (e) => this.onCornerPointerDown(e));
 
     this.scrollHost.addEventListener('scroll', () => {
       // Any scroll cancels a deferred tap: the press that started it was a
@@ -644,6 +719,10 @@ export class XlsxViewer {
     // view drifts (or, after a hidden mount, stays stranded at the far end).
     this.resizeObserver = new ResizeObserver(() => {
       this.reanchorHorizontalScroll();
+      // Re-place the outline gutter strips for the new region size (XL4). This
+      // only rewrites styles (no canvasArea size change) so it can't feed back
+      // into the observer.
+      this.layoutGutters();
       // Container resizes can burst (a live window/pane drag); coalesce the
       // canvas paint into one frame. The re-anchor, overlay and nav updates are
       // cheap and must reflect the new size at once, so they stay synchronous.
@@ -652,7 +731,7 @@ export class XlsxViewer {
       this.updateFindOverlay();
       this.updateNavButtons();
     });
-    this.resizeObserver.observe(this.canvasArea);
+    this.resizeObserver.observe(this.gridRegion);
 
     this.setupSelectionEvents();
 
@@ -759,6 +838,11 @@ export class XlsxViewer {
     this.currentWorksheet = await this.workbook.getWorksheet(index);
     this.buildCommentMap(this.currentWorksheet);
     this.buildHyperlinkMap(this.currentWorksheet);
+    // XL4: build the outline layout for this sheet and size the gutters. Must run
+    // before `updateSpacerSize` / render so the inset canvasArea has its final
+    // size when the grid geometry is computed.
+    this.buildOutline(this.currentWorksheet);
+    this.layoutGutters();
     this.updateSpacerSize(this.currentWorksheet);
     // Reset the horizontal scroll origin to the natural START of the sheet.
     // For RTL sheets the start column (col A) lives at the RIGHT, which means
@@ -771,6 +855,434 @@ export class XlsxViewer {
     // a sheet switch; only the visible sheet's boxes are drawn).
     this.updateFindOverlay();
     this.opts.onSheetChange?.(index, this.workbook.sheetNames.length);
+  }
+
+  // ─── Outline gutter (XL4: row/column grouping) ────────────────────────────
+
+  /** Recompute the per-axis outline layout for `ws` and cache the band lists.
+   *  Both axes are `null` (gutters collapse to 0) when the sheet has no
+   *  outlining, so an outline-free sheet is untouched. */
+  private buildOutline(ws: Worksheet): void {
+    this.stashedRowHeights.clear();
+    this.stashedColWidths.clear();
+    this.rowOutlineBands = rowBands(ws);
+    this.colOutlineBands = colBands(ws);
+    const rowLayout = buildOutlineLayout(this.rowOutlineBands, summaryAfterFor(ws, 'row'));
+    const colLayout = buildOutlineLayout(this.colOutlineBands, summaryAfterFor(ws, 'col'));
+    this.rowOutline = rowLayout.maxLevel > 0 ? rowLayout : null;
+    this.colOutline = colLayout.maxLevel > 0 ? colLayout : null;
+  }
+
+  /** Size and place the three gutter canvases (corner / col / row) from the
+   *  current outline, and inset {@link canvasArea} by the gutter extents. When
+   *  neither axis is grouped both extents are 0 and canvasArea covers the whole
+   *  region — pixel-identical to a viewer built before XL4. */
+  private layoutGutters(): void {
+    const cs = this.opts.cellScale ?? 1;
+    const gw = this.rowOutline ? Math.round(gutterExtentPx(this.rowOutline.maxLevel) * cs) : 0;
+    const gh = this.colOutline ? Math.round(gutterExtentPx(this.colOutline.maxLevel) * cs) : 0;
+    this.gutter = { w: gw, h: gh };
+
+    // Inset canvasArea so the grid (and every geometry read that keys off its
+    // client rect) starts after the gutters.
+    this.canvasArea.style.left = `${gw}px`;
+    this.canvasArea.style.top = `${gh}px`;
+
+    const show = (el: HTMLCanvasElement, x: number, y: number, w: number, h: number) => {
+      if (w <= 0 || h <= 0) { el.style.display = 'none'; return; }
+      el.style.display = 'block';
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+    };
+    const regionW = this.gridRegion.clientWidth;
+    const regionH = this.gridRegion.clientHeight;
+    // Corner holds the numbered level buttons; only meaningful where both a
+    // horizontal and vertical gutter exist, but we always paint it to cover the
+    // intersection so the two strips meet cleanly.
+    show(this.cornerGutter, 0, 0, gw, gh);
+    show(this.colGutter, gw, 0, Math.max(0, regionW - gw), gh);
+    show(this.rowGutter, 0, gh, gw, Math.max(0, regionH - gh));
+  }
+
+  /** Paint all visible gutter strips for the current scroll offset. Called at the
+   *  end of every grid render so the brackets track scroll / zoom exactly. */
+  private renderGutters(): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    if (this.gutter.h > 0 && this.colOutline) this.paintAxisGutter('col');
+    if (this.gutter.w > 0 && this.rowOutline) this.paintAxisGutter('row');
+    if (this.gutter.w > 0 || this.gutter.h > 0) this.paintCornerGutter();
+  }
+
+  /** Draw one axis's group brackets and +/- toggles into its gutter canvas,
+   *  aligned to the on-screen band positions via {@link getCellRect}. */
+  private paintAxisGutter(axis: OutlineAxis): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const cs = this.opts.cellScale ?? 1;
+    const dpr = window.devicePixelRatio ?? 1;
+    const isRow = axis === 'row';
+    const canvas = isRow ? this.rowGutter : this.colGutter;
+    const layout = isRow ? this.rowOutline : this.colOutline;
+    if (!layout) return;
+    const cssW = parseFloat(canvas.style.width) || 0;
+    const cssH = parseFloat(canvas.style.height) || 0;
+    if (cssW <= 0 || cssH <= 0) return;
+    // Backing-store size at DPR; CSS size stays as laid out.
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#f5f5f5';
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    const lanePx = OUTLINE_LANE_PX * cs;
+    // The gutter canvas's cross-axis origin (0) sits at the grid's cell-area
+    // origin: for the row gutter, y=0 aligns with the top of the row header +
+    // gutter; getCellRect returns coordinates in canvasArea space, which is
+    // offset from the gutter canvas by exactly `gutter.h` (col gutter is above).
+    // The gutter canvas top is at gridRegion y = gutter.h, and canvasArea top is
+    // also at gutter.h — so a band's canvasArea-space y maps 1:1 to gutter-canvas
+    // y. Likewise x for the col gutter (offset by gutter.w).
+    ctx.strokeStyle = '#808080';
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#404040';
+
+    for (const g of layout.groups) {
+      // Lane index for this level: lane 0 is the outermost (level 1). Buttons and
+      // the outermost bracket sit nearest the grid edge? Excel draws level 1 in
+      // the lane FARTHEST from the grid, deeper levels closer. We place level L in
+      // lane (L-1) counted from the sheet-far edge.
+      const laneFromFar = g.level - 1;
+      const laneCenterCross = (laneFromFar + 0.5) * lanePx;
+
+      // Detail run extent along the band axis, from on-screen cell rects.
+      const startRect = isRow ? this.getCellRect(g.start, 1) : this.getCellRect(1, g.start);
+      const endRect = isRow ? this.getCellRect(g.end, 1) : this.getCellRect(1, g.end);
+      if (!startRect || !endRect) continue;
+      const a = isRow ? startRect.y : this.screenX(startRect.x, startRect.w);
+      const b = isRow ? endRect.y + endRect.h : this.screenX(endRect.x, endRect.w) + endRect.w;
+      const runStart = Math.min(a, b);
+      const runEnd = Math.max(a, b);
+
+      // A collapsed group's detail run is hidden (zero visible extent) — Excel
+      // draws only the +/- toggle, no bracket. Skip the bracket when the run has
+      // negligible length.
+      if (!g.collapsed && runEnd - runStart > 1) {
+        ctx.beginPath();
+        if (isRow) {
+          ctx.moveTo(laneCenterCross, runStart);
+          ctx.lineTo(laneCenterCross, runEnd);
+          // Elbow tick toward the grid at the summary end.
+          const tickY = g.summary != null && g.summary > g.end ? runEnd : runStart;
+          ctx.lineTo(laneCenterCross + lanePx / 2, tickY);
+        } else {
+          ctx.moveTo(runStart, laneCenterCross);
+          ctx.lineTo(runEnd, laneCenterCross);
+          const tickX = g.summary != null && g.summary > g.end ? runEnd : runStart;
+          ctx.lineTo(tickX, laneCenterCross + lanePx / 2);
+        }
+        ctx.stroke();
+      }
+
+      // +/- toggle box on the summary band.
+      if (g.summary != null) {
+        const sRect = isRow ? this.getCellRect(g.summary, 1) : this.getCellRect(1, g.summary);
+        if (sRect) {
+          const along = isRow
+            ? sRect.y + sRect.h / 2
+            : this.screenX(sRect.x, sRect.w) + sRect.w / 2;
+          this.drawToggleBox(ctx, isRow ? laneCenterCross : along, isRow ? along : laneCenterCross, g.collapsed, cs);
+        }
+      }
+    }
+  }
+
+  /** Draw a small square +/- toggle centered at (cx, cy) in gutter-canvas CSS px. */
+  private drawToggleBox(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    collapsed: boolean,
+    cs: number,
+  ): void {
+    const s = Math.round(9 * cs);
+    const x = Math.round(cx - s / 2);
+    const y = Math.round(cy - s / 2);
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#808080';
+    ctx.lineWidth = 1;
+    ctx.fillRect(x + 0.5, y + 0.5, s, s);
+    ctx.strokeRect(x + 0.5, y + 0.5, s, s);
+    ctx.strokeStyle = '#404040';
+    ctx.beginPath();
+    // horizontal stroke (present for both + and -)
+    ctx.moveTo(x + 2.5, y + s / 2 + 0.5);
+    ctx.lineTo(x + s - 1.5, y + s / 2 + 0.5);
+    if (collapsed) {
+      // vertical stroke makes it a "+"
+      ctx.moveTo(x + s / 2 + 0.5, y + 2.5);
+      ctx.lineTo(x + s / 2 + 0.5, y + s - 1.5);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Draw the numbered level buttons (1..maxLevel+1) in the corner gutter. */
+  private paintCornerGutter(): void {
+    const cs = this.opts.cellScale ?? 1;
+    const dpr = window.devicePixelRatio ?? 1;
+    const canvas = this.cornerGutter;
+    const cssW = parseFloat(canvas.style.width) || 0;
+    const cssH = parseFloat(canvas.style.height) || 0;
+    if (cssW <= 0 || cssH <= 0) { return; }
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#f5f5f5';
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    // Level buttons for whichever axes are grouped. Row-level buttons stack in the
+    // row gutter's lanes (vertical column of the corner); col-level buttons run
+    // across the col gutter's lanes (horizontal row of the corner).
+    ctx.font = `${Math.round(9 * cs)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const lanePx = OUTLINE_LANE_PX * cs;
+    const drawBtn = (cx: number, cy: number, label: string) => {
+      const s = Math.round(11 * cs);
+      const x = Math.round(cx - s / 2);
+      const y = Math.round(cy - s / 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#808080';
+      ctx.lineWidth = 1;
+      ctx.fillRect(x + 0.5, y + 0.5, s, s);
+      ctx.strokeRect(x + 0.5, y + 0.5, s, s);
+      ctx.fillStyle = '#404040';
+      ctx.fillText(label, cx, cy + 0.5);
+    };
+    // Column-level buttons occupy the rightmost row-gutter lane (a vertical bank
+    // at x = cssW - lanePx/2), aligned to the column gutter's horizontal lanes.
+    // Row-level buttons form a horizontal bank on the bottom corner row, one per
+    // row-gutter lane — but skip the rightmost lane when a column bank already
+    // owns it, so the two banks never overprint the same cell.
+    const colBankX = this.colOutline ? cssW - lanePx / 2 : null;
+    if (this.rowOutline) {
+      const cy = cssH - lanePx / 2;
+      for (let l = 1; l <= this.rowOutline.maxLevel + 1; l++) {
+        const cx = (l - 0.5) * lanePx;
+        if (cx > this.gutter.w) break;
+        // Don't draw over the column bank's lane.
+        if (colBankX != null && Math.abs(cx - colBankX) < 0.5) continue;
+        drawBtn(cx, cy, String(l));
+      }
+    }
+    if (this.colOutline && colBankX != null) {
+      for (let l = 1; l <= this.colOutline.maxLevel + 1; l++) {
+        const cy = (l - 0.5) * lanePx;
+        if (cy > this.gutter.h) break;
+        drawBtn(colBankX, cy, String(l));
+      }
+    }
+  }
+
+  /** Handle a click in a row/col gutter: hit-test the +/- toggles and toggle the
+   *  matching group's collapse state. */
+  private onGutterPointerDown(e: PointerEvent, axis: OutlineAxis): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const isRow = axis === 'row';
+    const layout = isRow ? this.rowOutline : this.colOutline;
+    if (!layout) return;
+    const canvas = isRow ? this.rowGutter : this.colGutter;
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const cs = this.opts.cellScale ?? 1;
+    const lanePx = OUTLINE_LANE_PX * cs;
+    const hitR = 7 * cs; // generous grab radius around the toggle center
+
+    for (const g of layout.groups) {
+      if (g.summary == null) continue;
+      const laneCenterCross = (g.level - 1 + 0.5) * lanePx;
+      const sRect = isRow ? this.getCellRect(g.summary, 1) : this.getCellRect(1, g.summary);
+      if (!sRect) continue;
+      const along = isRow
+        ? sRect.y + sRect.h / 2
+        : this.screenX(sRect.x, sRect.w) + sRect.w / 2;
+      const cx = isRow ? laneCenterCross : along;
+      const cy = isRow ? along : laneCenterCross;
+      if (Math.abs(px - cx) <= hitR && Math.abs(py - cy) <= hitR) {
+        e.preventDefault();
+        this.applyGroupToggle(g, axis);
+        return;
+      }
+    }
+  }
+
+  /** Handle a click on a numbered level button in the corner gutter. */
+  private onCornerPointerDown(e: PointerEvent): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const canvas = this.cornerGutter;
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const cs = this.opts.cellScale ?? 1;
+    const lanePx = OUTLINE_LANE_PX * cs;
+    const hitR = 7 * cs;
+    const cssW = parseFloat(canvas.style.width) || 0;
+    const cssH = parseFloat(canvas.style.height) || 0;
+
+    // Match the draw order in paintCornerGutter: the column bank owns the
+    // rightmost lane, so test it first and let the row bank skip that lane.
+    const colBankX = this.colOutline ? cssW - lanePx / 2 : null;
+    if (this.colOutline && colBankX != null) {
+      for (let l = 1; l <= this.colOutline.maxLevel + 1; l++) {
+        const cy = (l - 0.5) * lanePx;
+        if (cy > this.gutter.h) break;
+        if (Math.abs(px - colBankX) <= hitR && Math.abs(py - cy) <= hitR) {
+          e.preventDefault();
+          this.applyLevelButton(l, 'col');
+          return;
+        }
+      }
+    }
+    if (this.rowOutline) {
+      const cy = cssH - lanePx / 2;
+      for (let l = 1; l <= this.rowOutline.maxLevel + 1; l++) {
+        const cx = (l - 0.5) * lanePx;
+        if (cx > this.gutter.w) break;
+        if (colBankX != null && Math.abs(cx - colBankX) < 0.5) continue;
+        if (Math.abs(px - cx) <= hitR && Math.abs(py - cy) <= hitR) {
+          e.preventDefault();
+          this.applyLevelButton(l, 'row');
+          return;
+        }
+      }
+    }
+  }
+
+  /** Flip a single group's collapse state in the in-memory model, then rebuild
+   *  the outline + repaint. View-only: the file is never written. */
+  private applyGroupToggle(group: OutlineGroup, axis: OutlineAxis): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const bands = axis === 'row' ? this.rowOutlineBands : this.colOutlineBands;
+    const { hide, show, nowCollapsed } = toggleGroupHidden(group, bands);
+    for (const i of hide) this.setBandHidden(axis, i, true);
+    for (const i of show) this.setBandHidden(axis, i, false);
+    // Reflect the new collapsed state on the summary band so the next toggle
+    // reads the correct direction and the +/- glyph flips.
+    if (group.summary != null) this.setBandCollapsed(axis, group.summary, nowCollapsed);
+    this.afterOutlineMutation(ws);
+  }
+
+  /** Collapse/expand the whole sheet to `level` on one axis. */
+  private applyLevelButton(level: number, axis: OutlineAxis): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const bands = axis === 'row' ? this.rowOutlineBands : this.colOutlineBands;
+    const { hide, show } = levelButtonHidden(bands, level);
+    for (const i of hide) this.setBandHidden(axis, i, true);
+    for (const i of show) this.setBandHidden(axis, i, false);
+    // Update each group's summary-band collapsed flag from the new state: a group
+    // at lane L is collapsed exactly when its detail (level >= L) is now hidden,
+    // i.e. `L >= level`. Driving this off the layout's groups (rather than the
+    // band list) also reaches level-0 summary bands, which are not in `bands`.
+    const layout = axis === 'row' ? this.rowOutline : this.colOutline;
+    if (layout) {
+      for (const g of layout.groups) {
+        if (g.summary != null) this.setBandCollapsed(axis, g.summary, g.level >= level);
+      }
+    }
+    this.afterOutlineMutation(ws);
+  }
+
+  /** Set a row/column hidden by mapping to the size-0 encoding the axis/renderer
+   *  already understand, stashing the original size so expand can restore it. */
+  private setBandHidden(axis: OutlineAxis, index: number, hidden: boolean): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    if (axis === 'row') {
+      if (hidden) {
+        if (!this.stashedRowHeights.has(index)) {
+          this.stashedRowHeights.set(index, ws.rowHeights[index]);
+        }
+        ws.rowHeights[index] = 0;
+      } else {
+        if (this.stashedRowHeights.has(index)) {
+          const orig = this.stashedRowHeights.get(index);
+          if (orig === undefined) delete ws.rowHeights[index];
+          else ws.rowHeights[index] = orig;
+          this.stashedRowHeights.delete(index);
+        } else if (ws.rowHeights[index] === 0) {
+          // Was hidden in the source file (height 0) with no stash — reveal at
+          // the default height.
+          delete ws.rowHeights[index];
+        }
+      }
+    } else {
+      if (hidden) {
+        if (!this.stashedColWidths.has(index)) {
+          this.stashedColWidths.set(index, ws.colWidths[index]);
+        }
+        ws.colWidths[index] = 0;
+      } else {
+        if (this.stashedColWidths.has(index)) {
+          const orig = this.stashedColWidths.get(index);
+          if (orig === undefined) delete ws.colWidths[index];
+          else ws.colWidths[index] = orig;
+          this.stashedColWidths.delete(index);
+        } else if (ws.colWidths[index] === 0) {
+          delete ws.colWidths[index];
+        }
+      }
+    }
+  }
+
+  /** Update the `collapsed` flag on a band's model entry so the outline rebuild
+   *  reflects the new state. */
+  private setBandCollapsed(axis: OutlineAxis, index: number, collapsed: boolean): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    if (axis === 'row') {
+      const row = ws.rows.find((r) => r.index === index);
+      if (row) row.collapsed = collapsed;
+    } else {
+      ws.colCollapsed = ws.colCollapsed ?? {};
+      if (collapsed) ws.colCollapsed[index] = true;
+      else delete ws.colCollapsed[index];
+    }
+  }
+
+  /** Shared tail of a gutter interaction: invalidate the axis cache, rebuild the
+   *  outline (collapsed flags changed), refresh dependent geometry, re-render. */
+  private afterOutlineMutation(ws: Worksheet): void {
+    sheetAxisCache.delete(ws);
+    this.buildOutlineLayoutOnly(ws);
+    this.updateSpacerSize(ws);
+    this.updateSelectionOverlay();
+    this.scheduleRender();
+  }
+
+  /** Rebuild only the layout + band lists (not the stashes) after a collapse
+   *  state change, so the +/- glyphs and bracket set stay in sync. */
+  private buildOutlineLayoutOnly(ws: Worksheet): void {
+    this.rowOutlineBands = rowBands(ws);
+    this.colOutlineBands = colBands(ws);
+    const rowLayout = buildOutlineLayout(this.rowOutlineBands, summaryAfterFor(ws, 'row'));
+    const colLayout = buildOutlineLayout(this.colOutlineBands, summaryAfterFor(ws, 'col'));
+    this.rowOutline = rowLayout.maxLevel > 0 ? rowLayout : null;
+    this.colOutline = colLayout.maxLevel > 0 ? colLayout : null;
   }
 
   /** True when the current sheet's grid is laid out right-to-left. */
@@ -2527,6 +3039,9 @@ export class XlsxViewer {
       // so we must re-derive scrollLeft from the preserved effective value or
       // the view would jump toward the start on every zoom step.
       const prevEffective = this.effectiveScrollLeft;
+      // Gutter extents scale with cellScale (XL4); re-lay them out before the
+      // spacer/scroll math reads canvasArea's new inset size.
+      this.layoutGutters();
       this.updateSpacerSize(this.currentWorksheet);
       this.effectiveH = prevEffective;
       if (this.isRtl) {
@@ -2731,6 +3246,9 @@ export class XlsxViewer {
     } else {
       await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, renderOpts);
     }
+    // XL4: repaint the outline gutters over the fresh grid frame, aligned to the
+    // same scroll offset. No-op when the sheet has no outlining.
+    this.renderGutters();
   }
 
   private computeHeaderHighlight(): {
