@@ -45,7 +45,11 @@
 // header/footer + tables in tbRl, and paragraph-relative vertical anchors are
 // follow-ups.
 
-import { verticalOrientation, verticalFormSubstitute } from '@silurus/ooxml-core';
+import {
+  verticalOrientation,
+  verticalFormSubstitute,
+  verticalBracketFormSubstitute,
+} from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
  *   - `upright`  — counter-rotated −90° to stand up (vo=U, and vo=Tu).
@@ -161,6 +165,69 @@ export function splitVerticalOrientationRuns(
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 /**
+ * Cross-axis (column-thickness) offset, in px, from the alphabetic baseline to
+ * the font's EM-BOX CENTRE — i.e. `(fontBoundingBoxAscent − fontBoundingBoxDescent)/2`.
+ *
+ * This is a FONT metric (glyph-independent): `fontBoundingBox*` describe the
+ * font's design box, not one glyph's ink. In vertical text the column's cross
+ * axis is where every cell centres, and the UPRIGHT cells (drawn with a `middle`
+ * textBaseline) already sit their em box on the caller's `baseline`. A SIDEWAYS
+ * (Latin/digit) glyph, however, is drawn on its ALPHABETIC baseline, so its ink
+ * (which sits ~this many px above the baseline) would land off the column centre
+ * by exactly this amount. Shifting the sideways draw down the cross axis by this
+ * offset re-centres its em box on the same line the upright cells use — so mixed
+ * columns like "電話 03-1234-5678" share one centreline (ECMA-376 §17.6.20).
+ *
+ * Falls back to `0.38 × fontPx` (the near-universal CJK/Latin em-box centre ratio)
+ * only if the Canvas does not report `fontBoundingBox*` (older engines); on those
+ * engines the previous baseline-anchored placement is no worse than today.
+ */
+function emBoxCenterAboveBaselinePx(ctx: Ctx2D, sample: string, fontPx: number): number {
+  const prevBaseline = ctx.textBaseline;
+  ctx.textBaseline = 'alphabetic';
+  const m = ctx.measureText(sample);
+  ctx.textBaseline = prevBaseline;
+  const asc = m.fontBoundingBoxAscent;
+  const desc = m.fontBoundingBoxDescent;
+  if (typeof asc === 'number' && typeof desc === 'number' && (asc !== 0 || desc !== 0)) {
+    return (asc - desc) / 2;
+  }
+  return 0.38 * fontPx;
+}
+
+/**
+ * Along-column offset, in px, from a glyph's own cell centre to its INK centre
+ * when the glyph is drawn UPRIGHT — i.e. `(actualBoundingBoxAscent −
+ * actualBoundingBoxDescent)/2` measured with a `middle` textBaseline.
+ *
+ * For an upright-drawn glyph the page transform maps the glyph's VERTICAL extent
+ * onto the along-column axis, so a glyph whose ink is not vertically centred in
+ * its em box (most visibly a substituted vertical bracket form ︵ ︶ ﹁ ﹂,
+ * whose ink hugs one end of the cell) lands off the cell centre by this amount.
+ * The renderer shifts the draw by `+this` so the ink re-centres — a per-GLYPH
+ * measured metric (`actualBoundingBox*` is the tight ink box), NOT a constant.
+ * For an ordinary ideograph/kana this is ≈0, so upright CJK cells are unaffected.
+ *
+ * Returns 0 when the Canvas does not report `actualBoundingBox*` (older engines):
+ * the glyph then draws at the cell centre exactly as before this metric existed.
+ */
+function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
+  const prevAlign = ctx.textAlign;
+  const prevBaseline = ctx.textBaseline;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const m = ctx.measureText(drawStr);
+  ctx.textAlign = prevAlign;
+  ctx.textBaseline = prevBaseline;
+  const asc = m.actualBoundingBoxAscent;
+  const desc = m.actualBoundingBoxDescent;
+  if (typeof asc === 'number' && typeof desc === 'number') {
+    return (asc - desc) / 2;
+  }
+  return 0;
+}
+
+/**
  * Draw one run's glyphs in vertical mode. The context is assumed to already be
  * in the page's SWAPPED logical frame (the +90° page rotation is installed by
  * `renderDocumentToCanvas`), so an ordinary `fillText` advances DOWN the line.
@@ -192,6 +259,11 @@ export function drawVerticalRun(
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
+  // Cross-axis (column-thickness) distance from the alphabetic baseline to the
+  // font's em-box centre — the line the UPRIGHT cells centre on. Measured once
+  // per run (font-level, glyph-independent). Used to re-centre SIDEWAYS glyphs,
+  // which are otherwise drawn on their baseline and so land off the centreline.
+  const emBoxCenterPx = emBoxCenterAboveBaselinePx(ctx, text, fontPx);
   let ax = 0; // cumulative advance from run left (logical +x)
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
@@ -199,58 +271,70 @@ export function drawVerticalRun(
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
     const adv = ctx.measureText(ch).width + letterSpacingPx;
-    if (mode === 'upright') {
-      // vo=U or Tu. Counter-rotate −90° about the cell centre so the glyph
-      // (which the page rotation would otherwise lay on its side) stands upright.
-      // For Tu punctuation with a Unicode vertical presentation form
-      // (、。，！？ → U+FE10–FE12/FE15/FE16), draw THAT glyph so the font places
-      // it in the cell's upper-right (Word behaviour); the original advance is
-      // kept. (：；〖〗 are vo=Tr — they take the rotate branch below, never this
-      // substitution; substitute-first Tr is the #790/#771 follow-up.)
-      // Substitution is a GLYPH-only change: the width above and everything the
-      // renderer reports (selection, find) use the original `ch`.
-      const drawCp = verticalFormSubstitute(cp);
+    // A vo=Tr bracket with a Unicode vertical presentation form (（）「」〈〉…) is
+    // SUBSTITUTED and drawn upright, exactly like the upright cells — UAX#50 §5
+    // Tr means "substitute a vertical glyph; rotate only as fallback". Only Tr
+    // code points with NO vertical form (ー, quotes “”) keep the rotate fallback.
+    const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
+    if (mode === 'upright' || bracketCp !== null) {
+      // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
+      // cell centre so the glyph (which the page rotation would otherwise lay on
+      // its side) stands upright. For Tu punctuation with a Unicode vertical form
+      // (、。，！？ → U+FE10–FE12/FE15/FE16) and Tr brackets (（）「」… → U+FE35–FE44)
+      // draw THAT glyph so the font supplies the vertical shape; the original
+      // advance is kept. Substitution is a GLYPH-only change: the width above and
+      // everything the renderer reports (selection, find) use the original `ch`.
+      const drawCp = bracketCp !== null ? bracketCp : verticalFormSubstitute(cp);
       const drawStr = drawCp !== null ? String.fromCodePoint(drawCp) : ch;
       const cx = x + ax + adv / 2;
-      // No positional nudge when we substituted a vertical form (the glyph is
-      // pre-positioned); otherwise fall back to the corner nudge for ． (FF0E).
+      // Corner nudge fallback only for a Tu punct with NO vertical form (． FF0E);
+      // every substituted glyph is positioned by its own vertical metric below.
       const off = drawCp !== null ? { dx: 0, dy: 0 } : verticalGlyphOffset(cp);
+      // ALONG-COLUMN centring: an upright glyph's VERTICAL ink extent maps to the
+      // column axis, so shift by its measured ink centre so the ink lands on the
+      // cell centre. Per-GLYPH metric (the drawn glyph's tight ink box): for an
+      // ideograph/kana it is ≈0 (cells unchanged); for a substituted vertical
+      // bracket (ink hugging one cell end) it is the needed correction. Replaces
+      // the old `+0.12em` font-tuned heuristic. Skipped when the ． corner nudge is
+      // active (`off.dy`), which is a self-contained upper-right cell placement.
+      const alongEm = off.dy === 0 ? inkCenterAboveMiddlePx(ctx, drawStr) / fontPx : 0;
       ctx.save();
       ctx.translate(cx, baseline);
       ctx.rotate(-Math.PI / 2);
-      // In the upright local frame: draw centred horizontally (the cell centre)
-      // with a `middle` baseline that centres the glyph box on the cell.
-      // HEURISTIC (approximation, font-dependent): the extra +0.12em vertical
-      // shift nudges typical CJK metrics so the visual centre lands on the cell
-      // centre — NOT a spec constant (JIS X 4051 positions the glyph from the
-      // font's ideographic em-box / vertical baseline, which the browser does not
-      // expose here). Replace with the font's vertical metrics (`ideographic`
-      // textBaseline once broadly supported). Tracked in issue #771.
+      // In the upright local frame: `center`/`middle` puts the em box on the cell
+      // centre; local +x = cross axis, local +y = along-column. `off.dx` nudges
+      // ． toward the cell's upper-right corner (cross axis); `alongEm + off.dy`
+      // centres the ink along the column.
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(drawStr, off.dx * fontPx, (0.12 + off.dy) * fontPx);
+      ctx.fillText(drawStr, off.dx * fontPx, (alongEm + off.dy) * fontPx);
       ctx.restore();
     } else if (mode === 'rotate') {
-      // vo=Tr: full-width brackets （「」〈〉“” and the ー prolonged sound mark.
-      // UAX#50's Tr fallback (no vertical glyph reachable on a Canvas) is to
-      // ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame IS
-      // that rotation; centre the (full-width) glyph on the column axis by using
-      // `center`/`middle` at the cell centre and the caller's `baseline` (the
-      // same column-centre reference the upright cells use). This is what makes
-      // the ー and （ ） appear rotated and mid-column rather than upright.
+      // vo=Tr with NO vertical form: ー (U+30FC) and the double quotes “”. UAX#50's
+      // Tr fallback (no vertical glyph reachable on a Canvas) is to ROTATE the
+      // glyph 90° CW. A plain `fillText` in the +90° page frame IS that rotation;
+      // centre it on the column with `center`/`middle` at the cell centre. (The
+      // bracket forms never reach here — they were substituted and drawn upright
+      // above; a rotated bracket's ink offset is not measurable from a Canvas.)
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(ch, cx, baseline);
     } else {
-      // vo=R (Latin/digit): draw as-is (rotated with the page). Keep the caller's
-      // alphabetic baseline; position the glyph's left at the current advance. A
-      // group of consecutive sideways glyphs would ideally be one fillText for
-      // shaping, but per-glyph keeps the advance model uniform and Latin advances
-      // are context-free enough at these sizes.
+      // vo=R (Latin/digit): drawn SIDEWAYS (rotated with the page). Keep the
+      // caller's alphabetic baseline and position the glyph's left at the current
+      // advance, but shift the cross axis by the em-box centre so the glyph's ink
+      // centres on the SAME column centreline the upright cells use — otherwise a
+      // baseline-anchored sideways glyph sits ~0.38em off (its ink is above the
+      // baseline), the "電話 / 03-…" left-right drift. A group of consecutive
+      // sideways glyphs would ideally be one fillText for shaping, but per-glyph
+      // keeps the advance model uniform and Latin advances are context-free enough
+      // at these sizes.
+      // `alphabetic` baseline pins the em-box-centre shift (emBoxCenterPx is
+      // measured relative to the alphabetic baseline).
       ctx.textAlign = prevAlign;
-      ctx.textBaseline = prevBaseline;
-      ctx.fillText(ch, x + ax, baseline);
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(ch, x + ax, baseline + emBoxCenterPx);
     }
     ax += adv;
   }
