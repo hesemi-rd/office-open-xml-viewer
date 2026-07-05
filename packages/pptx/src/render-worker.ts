@@ -123,6 +123,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         mediaElements: pres.slides.map((s) =>
           s.elements.filter((el): el is MediaElement => el.type === 'media')),
         hidden: pres.slides.map((s) => s.hidden ?? false),
+        partNames: pres.slides.map((s) => s.partName),
       };
       post({ kind: 'parsedMeta', id: req.id, meta });
       return;

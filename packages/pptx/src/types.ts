@@ -126,6 +126,17 @@ export interface Slide {
   index: number;
   /** 1-based slide number (index + 1); used to render slidenum fields */
   slideNumber: number;
+  /**
+   * The slide's normalized OPC part name (e.g. `ppt/slides/slide3.xml`),
+   * resolved through `presentation.xml.rels` in `sldIdLst` order (ECMA-376
+   * §19.3.1.42). An internal hyperlink slide jump
+   * (`<a:hlinkClick action="ppaction://hlinksldjump" r:id>`, §21.1.2.3.5)
+   * carries a rel Target that resolves to this same part name — so
+   * {@link PptxPresentation.getSlideIndexByPartName} can turn a click into a
+   * slide index. Absent (`undefined`) only for a slide whose part path was not
+   * recorded; healthy and broken slides both carry it.
+   */
+  partName?: string;
   background: Fill | null;
   elements: SlideElement[];
   /**

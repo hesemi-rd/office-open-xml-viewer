@@ -4,6 +4,11 @@ import { createPresentationHandle, type PresentationHandle } from './presentatio
 import { selectNotes } from './notes';
 import { selectHidden } from './hidden';
 import {
+  buildSlidePartIndex,
+  resolveInternalSlideTarget,
+  type SlidePartNames,
+} from './slide-nav';
+import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
@@ -90,6 +95,11 @@ export class PptxPresentation {
   private _mode: 'main' | 'worker' = 'main';
   private _presentation: Presentation | null = null;
   private _meta: PresentationMeta | null = null;
+  /** Lazily-built `partName → slide index` map for internal hyperlink slide
+   *  jumps (IX-nav). Cleared on {@link destroy}; built on first
+   *  {@link getSlideIndexByPartName}/{@link resolveInternalTarget} from either
+   *  the parsed slides (main) or the worker meta's `partNames` (worker). */
+  private _slidePartIndex: Map<string, number> | null = null;
   private _mediaCache = new Map<string, Promise<Blob>>();
   private _imageCache = new Map<string, Promise<Blob>>();
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
@@ -253,6 +263,58 @@ export class PptxPresentation {
       return Number.isInteger(slideIndex) ? (this._meta.hidden[slideIndex] ?? false) : false;
     }
     return selectHidden(this._presentation?.slides ?? [], slideIndex);
+  }
+
+  /** The per-slide `partName` array (`sldIdLst` order) from either the parsed
+   *  model (main) or the worker meta (worker). Backs the lazy part-index map. */
+  private _partNames(): SlidePartNames {
+    if (this._meta) return this._meta.partNames;
+    return (this._presentation?.slides ?? []).map((s) => s.partName);
+  }
+
+  /** Lazily build (and cache) the `partName → index` map. Nulled by
+   *  {@link destroy} so a reused reference never serves a stale deck's indices. */
+  private _partIndex(): Map<string, number> {
+    if (!this._slidePartIndex) this._slidePartIndex = buildSlidePartIndex(this._partNames());
+    return this._slidePartIndex;
+  }
+
+  /**
+   * Resolve a slide's OPC part name (e.g. `ppt/slides/slide3.xml`) to its
+   * 0-based index in `sldIdLst` order, or `undefined` when no slide has that
+   * part name. This is the map an internal hyperlink slide jump
+   * (`<a:hlinkClick action="ppaction://hlinksldjump" r:id>`, ECMA-376
+   * §21.1.2.3.5) resolves against: the click's rel Target names a slide part, and
+   * this turns it into the index a viewer can navigate to. Works in both `main`
+   * and `worker` mode (the part names ride along in the worker meta).
+   */
+  getSlideIndexByPartName(partName: string): number | undefined {
+    return this._partIndex().get(partName);
+  }
+
+  /**
+   * Resolve an internal hyperlink target string to a 0-based slide index, or
+   * `undefined` when it names no reachable slide. Handles both
+   * `<a:hlinkClick @action>` classes (§21.1.2.3.5):
+   *
+   *   - a **relative** show jump — `ppaction://hlinkshowjump?jump=firstslide |
+   *     lastslide | nextslide | previousslide` — resolved arithmetically from
+   *     `currentIndex` (clamped at the deck ends);
+   *   - a **specific** slide-part jump — `ppaction://hlinksldjump`, whose
+   *     resolved target is a slide-rel part name like `../slides/slide3.xml` —
+   *     resolved through {@link getSlideIndexByPartName}.
+   *
+   * `ref` is the internal reference a `HyperlinkTarget` of kind `'internal'`
+   * carries: the raw `ppaction://…` action string for a relative jump, or the
+   * resolved slide-part target string for a specific jump. A viewer's
+   * `onHyperlinkClick` default calls this with `ref` and the current slide, then
+   * navigates to the returned index.
+   *
+   * @param ref          the internal action/target string.
+   * @param currentIndex the 0-based slide the jump is relative to (default 0).
+   */
+  resolveInternalTarget(ref: string, currentIndex = 0): number | undefined {
+    return resolveInternalSlideTarget(ref, this._partIndex(), currentIndex);
   }
 
   /** Render a slide onto the given canvas. */
@@ -469,6 +531,7 @@ export class PptxPresentation {
     this._bridge.terminate();
     this._presentation = null;
     this._meta = null;
+    this._slidePartIndex = null;
     this._mediaCache.clear();
     this._imageCache.clear();
     // Release this deck's decoded raster bitmaps (GPU-backed) and SVG object

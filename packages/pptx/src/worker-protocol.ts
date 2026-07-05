@@ -16,6 +16,11 @@ export interface PresentationMeta {
   mediaElements: MediaElement[][];
   /** `Slide.hidden` per slide (`<p:sld show="0">`, §19.3.1.38). */
   hidden: boolean[];
+  /** `Slide.partName` per slide (normalized OPC part name, `sldIdLst` order).
+   *  Lets the main-thread proxy build the `partName → index` map that resolves
+   *  an internal hyperlink slide jump in worker mode, mirroring `hidden`/`notes`.
+   *  Entries are `undefined` only for a slide whose part path wasn't recorded. */
+  partNames: (string | undefined)[];
 }
 
 // The base `parse` arm from types.ts is intentionally NOT reused: the render
