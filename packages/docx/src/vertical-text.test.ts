@@ -116,7 +116,20 @@ type Op =
   | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string }
   | { op: 'draw'; dx: number; dy: number; dw: number; dh: number };
 
-function mockCtx(): { ctx: any; ops: Op[] } {
+// Optional metrics the mock returns from `measureText`, keyed by the metric it
+// is asked to model. `fontBoundingBox*` are font-level (glyph-independent, used
+// for the sideways em-box-centre shift); `actualBoundingBox*` are per-glyph tight
+// ink bounds (used for the upright along-column ink centring). Values are read at
+// the CURRENT textBaseline the helper sets before measuring, so the mock reports
+// the same numbers regardless — the helper does the (asc−desc)/2 arithmetic.
+interface MockMetrics {
+  fontBoundingBoxAscent?: number;
+  fontBoundingBoxDescent?: number;
+  // Per-glyph tight ink extent under a `middle` textBaseline, by draw glyph.
+  inkMiddle?: Record<string, { asc: number; desc: number }>;
+}
+
+function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
   const ops: Op[] = [];
   const ctx: any = {
     textAlign: 'start',
@@ -136,7 +149,17 @@ function mockCtx(): { ctx: any; ops: Op[] } {
     },
     measureText(s: string) {
       // Every code point is 10px wide.
-      return { width: [...s].length * 10 };
+      const m: Record<string, number> = { width: [...s].length * 10 };
+      if (metrics.fontBoundingBoxAscent !== undefined) {
+        m.fontBoundingBoxAscent = metrics.fontBoundingBoxAscent;
+        m.fontBoundingBoxDescent = metrics.fontBoundingBoxDescent ?? 0;
+      }
+      const ink = metrics.inkMiddle?.[s];
+      if (ink && this.textBaseline === 'middle') {
+        m.actualBoundingBoxAscent = ink.asc;
+        m.actualBoundingBoxDescent = ink.desc;
+      }
+      return m;
     },
     fillText(text: string, x: number, y: number) {
       ops.push({ op: 'fillText', text, x, y, align: this.textAlign, baseline: this.textBaseline });
@@ -166,8 +189,26 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     drawVerticalRun(ctx, 'A', 100, 200, 12, 0);
     expect(ops.some((o) => o.op === 'rotate')).toBe(false);
     const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
-    // Sideways: left at run x (advance 0), baseline y kept.
-    expect(fill).toMatchObject({ text: 'A', x: 100, y: 200 });
+    // Sideways: left at run x (advance 0), alphabetic baseline. The cross-axis y
+    // is shifted down by the em-box centre so the glyph's ink centres on the same
+    // column line the upright cells use. With no fontBoundingBox metrics the mock
+    // falls back to 0.38·fontPx = 4.56, so y = 200 + 4.56.
+    expect(fill?.text).toBe('A');
+    expect(fill?.x).toBe(100);
+    expect(fill?.baseline).toBe('alphabetic');
+    expect(fill?.y).toBeCloseTo(200 + 0.38 * 12, 6);
+  });
+
+  it('centres a sideways glyph on the em-box centre from fontBoundingBox metrics (§17.6.20)', () => {
+    // Symptom 1: mixed columns like "電話 03-…" must share one centreline. The
+    // sideways glyph is drawn on its alphabetic baseline shifted down by the
+    // font's em-box centre = (fontBoundingBoxAscent − fontBoundingBoxDescent)/2.
+    const { ctx, ops } = mockCtx({ fontBoundingBoxAscent: 40, fontBoundingBoxDescent: 10 });
+    drawVerticalRun(ctx, '0', 100, 200, 48, 0);
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    // emBoxCenter = (40 − 10)/2 = 15 → y = 200 + 15 = 215.
+    expect(fill).toMatchObject({ text: '0', x: 100, baseline: 'alphabetic' });
+    expect(fill?.y).toBeCloseTo(215, 6);
   });
 
   it('advances each glyph by measure + letterSpacing (measure == draw)', () => {
@@ -177,14 +218,49 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fills.map((f) => f.x)).toEqual([0, 14]);
   });
 
-  it('rotates a Tr glyph (ー, （, ）) with the page — centred on the column, NOT counter-rotated', () => {
+  it('rotates a Tr glyph WITHOUT a vertical form (ー) with the page — centred, NOT counter-rotated', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, 'ー', 100, 200, 12, 0);
-    // Tr uses the page rotation (no −90° counter-rotation) and centres on the
-    // column: fill at the cell centre (105, 200) with center/middle alignment.
+    // ー (U+30FC) has no U+FE3x vertical form, so it keeps the rotate fallback:
+    // the page rotation only (no −90° counter-rotation), centred on the column at
+    // the cell centre (105, 200) with center/middle alignment.
     expect(ops.some((o) => o.op === 'rotate')).toBe(false);
     const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
     expect(fill).toMatchObject({ text: 'ー', x: 105, y: 200, align: 'center', baseline: 'middle' });
+  });
+
+  it('substitutes a Tr bracket with its vertical form (（→︵, ）→︶) and draws it UPRIGHT', () => {
+    // Symptom 2: a rotated fullwidth bracket lands its ink off-cell (unmeasurable
+    // on a Canvas). Substituting the U+FE35/FE36 vertical form and drawing it
+    // upright (counter-rotated) lets a per-glyph vertical-ink metric centre it.
+    const { ctx, ops } = mockCtx({
+      // Model ︵/︶ ink hugging opposite cell ends under a `middle` baseline.
+      inkMiddle: { '︵': { asc: -9, desc: 21 }, '︶': { asc: 21, desc: -9 } },
+    });
+    drawVerticalRun(ctx, '（）', 0, 0, 12, 0);
+    // Both are substituted to their vertical forms and COUNTER-ROTATED (upright).
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((f) => f.text)).toEqual(['︵', '︶']);
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(2);
+    expect(rotates.every((r) => Math.abs(r.a - -Math.PI / 2) < 1e-9)).toBe(true);
+    // Along-column ink centring: fillText y = (asc − desc)/2. For ︵: (−9−21)/2 =
+    // −15; for ︶: (21−(−9))/2 = 15. Drawn centred (x = 0, the cell centre).
+    expect(fills.map((f) => f.align)).toEqual(['center', 'center']);
+    expect(fills.map((f) => f.baseline)).toEqual(['middle', 'middle']);
+    expect(fills.map((f) => f.x)).toEqual([0, 0]);
+    expect(fills[0].y).toBeCloseTo(-15, 6);
+    expect(fills[1].y).toBeCloseTo(15, 6);
+  });
+
+  it('keeps a Tr bracket at the cell centre when the Canvas reports no ink metrics', () => {
+    // No actualBoundingBox* → along-column correction is 0, so the substituted
+    // vertical form draws at the cell centre exactly (graceful degradation).
+    const { ctx, ops } = mockCtx();
+    drawVerticalRun(ctx, '「」', 0, 0, 12, 0);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((f) => f.text)).toEqual(['﹁', '﹂']); // FE41 / FE42
+    expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
   });
 
   it('substitutes a Tu comma/period with its vertical presentation form (、→︑, 。→︒)', () => {
@@ -196,8 +272,9 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
     expect(rotates).toHaveLength(2);
     // Substituted forms are pre-positioned by the font → drawn at the cell centre
-    // with no upper-right nudge (local x offset 0).
-    expect(fills.every((f) => f.x === 0)).toBe(true);
+    // with no upper-right nudge (local x offset 0). With no ink metrics the mock
+    // reports none, so the along-column correction is 0 (y = 0) too.
+    expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
   });
 });
 

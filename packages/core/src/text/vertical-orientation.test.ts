@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   verticalOrientation,
   verticalFormSubstitute,
+  verticalBracketFormSubstitute,
 } from './vertical-orientation.js';
 
 const cp = (ch: string): number => ch.codePointAt(0) ?? 0;
@@ -93,11 +94,46 @@ describe('verticalFormSubstitute (UAX #50 §5 vertical-form glyph substitution)'
   it('returns null for code points without a vertical presentation form', () => {
     // Small kana are Tu but have no U+FExx form (font handles them via `vert`).
     expect(verticalFormSubstitute(0x3041)).toBeNull(); // ぁ
-    // Corner brackets are Tr with no U+FExx form (rotated by the renderer).
+    // Corner brackets are Tr; verticalFormSubstitute is the Tu-only map (the Tr
+    // bracket forms live in verticalBracketFormSubstitute), so this stays null.
     expect(verticalFormSubstitute(0x300c)).toBeNull(); // 「
     // Ordinary upright ideographs.
     expect(verticalFormSubstitute(cp('漢'))).toBeNull();
     // Latin.
     expect(verticalFormSubstitute(cp('A'))).toBeNull();
+  });
+});
+
+describe('verticalBracketFormSubstitute (UAX #50 Tr brackets → U+FE30 vertical forms)', () => {
+  it('maps each fullwidth bracket/paren/brace to its U+FE3x vertical form', () => {
+    expect(verticalBracketFormSubstitute(0xff08)).toBe(0xfe35); // （ → ︵
+    expect(verticalBracketFormSubstitute(0xff09)).toBe(0xfe36); // ） → ︶
+    expect(verticalBracketFormSubstitute(0xff5b)).toBe(0xfe37); // ｛ → ︷
+    expect(verticalBracketFormSubstitute(0xff5d)).toBe(0xfe38); // ｝ → ︸
+    expect(verticalBracketFormSubstitute(0x3014)).toBe(0xfe39); // 〔 → ︹
+    expect(verticalBracketFormSubstitute(0x3015)).toBe(0xfe3a); // 〕 → ︺
+    expect(verticalBracketFormSubstitute(0x3010)).toBe(0xfe3b); // 【 → ︻
+    expect(verticalBracketFormSubstitute(0x3011)).toBe(0xfe3c); // 】 → ︼
+    expect(verticalBracketFormSubstitute(0x300a)).toBe(0xfe3d); // 《 → ︽
+    expect(verticalBracketFormSubstitute(0x300b)).toBe(0xfe3e); // 》 → ︾
+    expect(verticalBracketFormSubstitute(0x3008)).toBe(0xfe3f); // 〈 → ︿
+    expect(verticalBracketFormSubstitute(0x3009)).toBe(0xfe40); // 〉 → ﹀
+    expect(verticalBracketFormSubstitute(0x300c)).toBe(0xfe41); // 「 → ﹁
+    expect(verticalBracketFormSubstitute(0x300d)).toBe(0xfe42); // 」 → ﹂
+    expect(verticalBracketFormSubstitute(0x300e)).toBe(0xfe43); // 『 → ﹃
+    expect(verticalBracketFormSubstitute(0x300f)).toBe(0xfe44); // 』 → ﹄
+  });
+
+  it('returns null for Tr code points with no U+FE30 vertical form (ー, quotes)', () => {
+    expect(verticalBracketFormSubstitute(0x30fc)).toBeNull(); // ー prolonged sound mark
+    expect(verticalBracketFormSubstitute(0x201c)).toBeNull(); // “ left double quote
+    expect(verticalBracketFormSubstitute(0x201d)).toBeNull(); // ” right double quote
+  });
+
+  it('returns null for non-bracket code points (Tu punctuation, ideographs, Latin)', () => {
+    expect(verticalBracketFormSubstitute(0x3001)).toBeNull(); // 、 (Tu)
+    expect(verticalBracketFormSubstitute(cp('漢'))).toBeNull(); // ideograph (U)
+    expect(verticalBracketFormSubstitute(cp('A'))).toBeNull(); // Latin (R)
+    expect(verticalBracketFormSubstitute(cp('('))).toBeNull(); // ASCII paren (R)
   });
 });

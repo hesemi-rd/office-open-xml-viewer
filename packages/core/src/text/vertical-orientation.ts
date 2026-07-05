@@ -113,3 +113,71 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
   [0xff01, 0xfe15], // ！ fullwidth exclamation → … FOR VERTICAL EXCLAMATION MARK
   [0xff1f, 0xfe16], // ？ fullwidth question    → … FOR VERTICAL QUESTION MARK
 ]);
+
+/**
+ * DRAW-TIME vertical-form substitution for vo=Tr BRACKETS: the U+FE35–U+FE44
+ * "Presentation Forms For Vertical" glyph for a fullwidth paren / corner
+ * bracket / angle bracket / brace / lenticular bracket, or `null` when the code
+ * point is not one of them (or is a Tr code point with no vertical form).
+ *
+ * WHY this is separate from {@link verticalFormSubstitute} (the Tu map): the two
+ * fallbacks differ. A Tu code point with no vertical form draws UPRIGHT; a Tr
+ * one ROTATES. Keeping the maps distinct lets each draw branch pick the right
+ * fallback (see the docx renderer's `drawVerticalRun`) without conflating the
+ * two UAX #50 transform classes.
+ *
+ * WHY substitute a Tr bracket at all: UAX #50 §5 defines the Tr transform as
+ * "substitute a vertical glyph variant; ROTATE only as the fallback when none is
+ * available." A Canvas cannot reach the font's `vert`/`vrt2` OpenType feature via
+ * `fillText`, but the Unicode "Presentation Forms For Vertical" block supplies a
+ * dedicated, already-vertical code point for every fullwidth bracket, and those
+ * code points ARE reachable. Drawing the vertical form UPRIGHT (rather than
+ * rotating the horizontal bracket) is both closer to Word (which uses the same
+ * `vert` glyphs) and — critically — measurable: an upright glyph's along-column
+ * position is governed by its VERTICAL ink extent (`actualBoundingBoxAscent/
+ * Descent`, which a Canvas exposes), whereas a ROTATED bracket's along-column
+ * position is governed by its HORIZONTAL ink offset inside the advance box, which
+ * `measureText` does NOT expose (it reports the advance box, not the tight ink
+ * box). So substitution is what makes metric-driven cell-centring possible.
+ *
+ * Deliberately NOT here (they are vo=Tr but have no U+FE3x vertical form, so the
+ * renderer keeps the rotate fallback):
+ *   • ー U+30FC prolonged sound mark
+ *   • “ ” U+201C/201D double quotation marks
+ *
+ * Mapping source: the UnicodeData.txt `<vertical>` compatibility decompositions
+ * of the U+FE30 block (each vertical form decomposes to its horizontal bracket).
+ *
+ * Renderers apply this ONLY at glyph-draw time (glyph selection): the advance/
+ * width, text model, selection, and find/highlight all keep the ORIGINAL code
+ * point, so searching for （ still matches a substituted （.
+ *
+ * @param cp A Unicode scalar value.
+ * @returns The U+FE3x vertical presentation-form code point, or null.
+ */
+export function verticalBracketFormSubstitute(cp: number): number | null {
+  return VERTICAL_BRACKET_FORM_MAP.get(cp) ?? null;
+}
+
+// vo=Tr fullwidth brackets → U+FE35–U+FE44 "Presentation Forms For Vertical".
+// Keyed on the horizontal bracket; values from the UnicodeData `<vertical>`
+// decompositions. ー (30FC) and the double quotes (201C/201D) are vo=Tr with no
+// vertical form and are absent, so the renderer rotates them.
+const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
+  [0xff08, 0xfe35], // （ fullwidth left parenthesis  → ︵
+  [0xff09, 0xfe36], // ） fullwidth right parenthesis → ︶
+  [0xff5b, 0xfe37], // ｛ fullwidth left curly brace  → ︷
+  [0xff5d, 0xfe38], // ｝ fullwidth right curly brace → ︸
+  [0x3014, 0xfe39], // 〔 left tortoise-shell bracket → ︹
+  [0x3015, 0xfe3a], // 〕 right tortoise-shell bracket→ ︺
+  [0x3010, 0xfe3b], // 【 left black lenticular       → ︻
+  [0x3011, 0xfe3c], // 】 right black lenticular      → ︼
+  [0x300a, 0xfe3d], // 《 left double angle bracket    → ︽
+  [0x300b, 0xfe3e], // 》 right double angle bracket   → ︾
+  [0x3008, 0xfe3f], // 〈 left angle bracket           → ︿
+  [0x3009, 0xfe40], // 〉 right angle bracket          → ﹀
+  [0x300c, 0xfe41], // 「 left corner bracket          → ﹁
+  [0x300d, 0xfe42], // 」 right corner bracket         → ﹂
+  [0x300e, 0xfe43], // 『 left white corner bracket    → ﹃
+  [0x300f, 0xfe44], // 』 right white corner bracket   → ﹄
+]);

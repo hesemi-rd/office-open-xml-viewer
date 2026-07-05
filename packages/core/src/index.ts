@@ -320,6 +320,7 @@ export { isCjkBreakChar, isLatinWordCodePoint } from './text/cjk-ranges';
 export {
   verticalOrientation,
   verticalFormSubstitute,
+  verticalBracketFormSubstitute,
   VO_UNICODE_VERSION,
 } from './text/vertical-orientation';
 export type { VerticalOrientation } from './text/vertical-orientation';
