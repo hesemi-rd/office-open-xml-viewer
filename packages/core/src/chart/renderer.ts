@@ -232,12 +232,69 @@ function legendSwatchStyle(chartType: string | undefined): LegendSwatchStyle {
   return 'fill';
 }
 
+/** A resolved marker legend key: the glyph a scatter series draws for its
+ *  points, used as the legend swatch when the series has no connecting line
+ *  (§21.2.2.32). `fill`/`line` are hex without `#` (chartColor / markerFill). */
+interface LegendMarker { symbol: string; fill: string; line: string | null }
+
+/** Whether a scatter/bubble series draws a connecting line in the plot, so its
+ *  legend key should be a line swatch rather than a marker glyph. Mirrors the
+ *  plot gate in {@link renderScatterChart}: the group `<c:scatterStyle>` decides
+ *  whether points are connected, and a series-level `<a:noFill/>` line override
+ *  (§21.2.2.198, `lineHidden`) suppresses the connecting line even when the group
+ *  style is `line`/`lineMarker`. Bubble charts are always markers-only. */
+function scatterSeriesDrawsLine(
+  chartType: string | undefined,
+  scatterStyle: string | null | undefined,
+  series: ChartSeries,
+): boolean {
+  if (chartType !== 'scatter') return false;
+  const style = scatterStyle ?? 'marker';
+  const styleDrawsLine =
+    style === 'line' || style === 'lineMarker' || style === 'lineNoMarker' ||
+    style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
+  return styleDrawsLine && series.lineHidden !== true;
+}
+
+/** The marker legend key for a scatter series that draws no connecting line
+ *  (markers-only, whether by group style or a series `<a:noFill/>` override).
+ *  Excel renders such a series' legend key as its point marker, not a line
+ *  swatch. Returns null when a marker key does not apply (non-scatter, or a
+ *  scatter series that does draw a line). Colors/symbol resolve exactly like the
+ *  plotted markers in {@link renderScatterChart}. */
+function legendMarkerFor(
+  chartType: string | undefined,
+  scatterStyle: string | null | undefined,
+  series: ChartSeries[],
+  entryIndex: number,
+): LegendMarker | null {
+  if (chartType !== 'scatter') return null;
+  const s = series[entryIndex];
+  if (!s) return null;
+  if (scatterSeriesDrawsLine(chartType, scatterStyle, s)) return null;
+  const symbol = s.markerSymbol ?? 'circle';
+  // `markerSymbol: "none"` means the series plots no marker at all; there is no
+  // glyph to show, so fall back to the (line) swatch rather than invent one.
+  if (symbol === 'none') return null;
+  const base = chartColor(entryIndex, s); // '#RRGGBB'
+  const fill = s.markerFill ?? base.replace(/^#/, '');
+  return { symbol, fill, line: s.markerLine ?? null };
+}
+
 function drawLegendSwatch(
   ctx: CanvasRenderingContext2D,
   style: LegendSwatchStyle,
   color: string,
   x: number, y: number, w: number, h: number,
+  marker: LegendMarker | null = null,
 ): void {
+  // Markers-only scatter series show their point glyph as the key (#803).
+  if (marker) {
+    // drawMarker sizes by `sizePt * ptToPx`; the swatch slot is `w × h` px, so
+    // pass a point size that yields ~h px at ptToPx=1 and center it in the slot.
+    drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h, marker.fill, marker.line, 1);
+    return;
+  }
   ctx.fillStyle = color;
   if (style === 'line') {
     // Horizontal stroke centered vertically inside the swatch slot. 2 px
@@ -258,13 +315,18 @@ function drawLegendSwatch(
 
 /** A single legend row: a label and the color of its swatch. Built so that the
  *  swatch color is resolved exactly like the mark it represents (slice / bar /
- *  line). See {@link legendEntryColor}. */
-interface LegendEntry { label: string; color: string }
+ *  line). See {@link legendEntryColor}. `marker` is set only for markers-only
+ *  scatter series, whose key is a point glyph instead of the line swatch (#803). */
+interface LegendEntry { label: string; color: string; marker: LegendMarker | null }
 
 /** Build the legend entries for a chart. Pie/doughnut legends are
  *  category-driven (one row per data point of the first series, labeled by
  *  category); every other chart type is series-driven (one row per series). */
-function buildLegendEntries(series: ChartSeries[], chartType: string | undefined): LegendEntry[] {
+function buildLegendEntries(
+  series: ChartSeries[],
+  chartType: string | undefined,
+  scatterStyle?: string | null,
+): LegendEntry[] {
   if (legendIsCategoryDriven(chartType)) {
     const first = series[0];
     const n = first ? first.values.length : 0;
@@ -272,11 +334,13 @@ function buildLegendEntries(series: ChartSeries[], chartType: string | undefined
     return Array.from({ length: n }, (_, i) => ({
       label: (cats[i] ?? `Item ${i + 1}`).toString(),
       color: legendEntryColor(chartType, series, i),
+      marker: null, // pie/doughnut keys are always filled swatches.
     }));
   }
   return series.map((s, i) => ({
     label: s.name || `Series ${i + 1}`,
     color: legendEntryColor(chartType, series, i),
+    marker: legendMarkerFor(chartType, scatterStyle, series, i),
   }));
 }
 
@@ -305,10 +369,11 @@ function drawLegend(
   orient: 'vertical' | 'horizontal' = 'vertical',
   chartType?: string,
   style: LegendTextStyle = DEFAULT_LEGEND_STYLE,
+  scatterStyle?: string | null,
 ): void {
   const sw = 10; const gap = 4;
   const swatchStyle = legendSwatchStyle(chartType);
-  const entries = buildLegendEntries(series, chartType);
+  const entries = buildLegendEntries(series, chartType, scatterStyle);
   const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
@@ -331,7 +396,7 @@ function drawLegend(
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
-      drawLegendSwatch(ctx, swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize);
+      drawLegendSwatch(ctx, swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker);
       ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
@@ -347,7 +412,7 @@ function drawLegend(
   const maxTextPx = lw - sw - gap;
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
-    drawLegendSwatch(ctx, swatchStyle, entries[i].color, lx, ry, sw, fontSize);
+    drawLegendSwatch(ctx, swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker);
     ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
@@ -398,21 +463,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle);
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle);
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle);
       break;
   }
 }

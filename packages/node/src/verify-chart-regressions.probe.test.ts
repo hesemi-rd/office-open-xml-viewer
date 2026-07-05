@@ -47,29 +47,60 @@ function collectCharts(node: Any, out: ChartModel[]): void {
   }
 }
 
-/** Render a chart, capturing fillText calls with the fillStyle in effect and a
- *  count of series-colored (matchColor) connecting-line strokes. */
+/** Render a chart, capturing fillText calls with the fillStyle in effect, a
+ *  count of series-colored (matchColor) connecting-line strokes, and the legend
+ *  KEY kind (marker glyph vs. line swatch) drawn in the bottom legend band. The
+ *  legend band is the strip below `LEGEND_Y_MIN`; a marker key fills a path
+ *  (`fill`/`fillRect`), a line key is a 2-vertex horizontal `stroke`. Used by
+ *  the scatter legend-key check (#803). */
+const RECT_H = 400;
+const LEGEND_Y_MIN = RECT_H - 40; // bottom legend strip (plot is above).
 function renderCapture(
   chart: ChartModel,
   renderChart: (ctx: unknown, c: ChartModel, r: unknown, p?: number) => void,
   matchColor: string,
-): { texts: Array<{ text: string; fill: string }>; seriesStrokes: number } {
-  const canvas = new Canvas(640, 400);
+): {
+  texts: Array<{ text: string; fill: string }>;
+  seriesStrokes: number;
+  legendKeys: Array<'marker' | 'line'>;
+} {
+  const canvas = new Canvas(640, RECT_H);
   const raw = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
   const texts: Array<{ text: string; fill: string }> = [];
+  const legendKeys: Array<'marker' | 'line'> = [];
   let verts = 0;
+  let lastY = 0;
   let seriesStrokes = 0;
+  let pendingKey: 'marker' | 'line' | null = null;
+  const inBand = (): boolean => lastY >= LEGEND_Y_MIN;
   const proxy = new Proxy(raw, {
     get(t, p: string) {
       if (p === 'fillText') {
         return (text: string, x: number, y: number) => {
           texts.push({ text, fill: String((raw as Any).fillStyle) });
+          if (y >= LEGEND_Y_MIN && pendingKey) { legendKeys.push(pendingKey); pendingKey = null; }
           return (raw.fillText as Any)(text, x, y);
         };
       }
       if (p === 'beginPath') return () => { verts = 0; (raw.beginPath as Any)(); };
       if (p === 'moveTo' || p === 'lineTo' || p === 'bezierCurveTo') {
-        return (...a: number[]) => { verts += 1; return (raw as Any)[p](...a); };
+        return (x: number, y: number, ...rest: number[]) => {
+          verts += 1; lastY = y;
+          return (raw as Any)[p](x, y, ...rest);
+        };
+      }
+      if (p === 'arc') {
+        return (cx: number, cy: number, ...rest: number[]) => {
+          verts += 1; lastY = cy;
+          return (raw.arc as Any)(cx, cy, ...rest);
+        };
+      }
+      if (p === 'fill') return () => { if (inBand()) pendingKey = 'marker'; return (raw.fill as Any)(); };
+      if (p === 'fillRect') {
+        return (x: number, y: number, w: number, h: number) => {
+          if (y >= LEGEND_Y_MIN) pendingKey = 'marker';
+          return (raw.fillRect as Any)(x, y, w, h);
+        };
       }
       if (p === 'stroke') {
         return () => {
@@ -79,6 +110,8 @@ function renderCapture(
           if (verts >= 3 && String((raw as Any).strokeStyle).toLowerCase() === matchColor.toLowerCase()) {
             seriesStrokes += 1;
           }
+          // A 2-vertex stroke in the legend band is the line-key swatch.
+          if (inBand() && verts === 2) pendingKey = 'line';
           return (raw.stroke as Any)();
         };
       }
@@ -87,8 +120,8 @@ function renderCapture(
     },
     set(t, p: string, v) { (t as Any)[p] = v; return true; },
   }) as unknown as CanvasRenderingContext2D;
-  renderChart(proxy, chart, { x: 0, y: 0, w: 640, h: 400 }, 1.05);
-  return { texts, seriesStrokes };
+  renderChart(proxy, chart, { x: 0, y: 0, w: 640, h: RECT_H }, 1.05);
+  return { texts, seriesStrokes, legendKeys };
 }
 
 describe.skipIf(!pptxMod || !coreMod)('sample-14 slide-7 pie: white percent-only labels', () => {
@@ -135,5 +168,33 @@ describe.skipIf(!xlsxMod || !coreMod)('sample-30 sheet-1 scatter: markers only (
       const { seriesStrokes } = renderCapture(sc, renderChart, color);
       expect(seriesStrokes, 'noFill scatter draws zero connecting lines').toBe(0);
     }
+  });
+
+  it('draws a MARKER legend key (not a line swatch) for the markers-only scatter (#803)', () => {
+    const { parseSheet } = xlsxMod as Any;
+    const { renderChart } = coreMod as Any;
+    const ws = parseSheet(readFileSync(SAMPLE_30), 0, 'Sheet1');
+    const anchors = (ws.charts ?? []) as Any[];
+    const scatters = anchors.map(a => a.chart as ChartModel).filter(c => c.chartType === 'scatter');
+    expect(scatters.length, 'sheet 1 has scatter charts').toBeGreaterThan(0);
+    // The parser must surface the `<a:noFill/>` line override as lineHidden —
+    // this is the exact input the legend-key fix keys on.
+    expect(
+      scatters.some(sc => sc.series.some(s => s.lineHidden === true)),
+      'a scatter series is lineHidden (noFill line)',
+    ).toBe(true);
+    let sawMarker = false;
+    for (const sc of scatters) {
+      // Force the legend to the bottom so its key lands in the recorded band,
+      // independent of the file's own legend visibility (a separate concern).
+      const model: ChartModel = { ...sc, showLegend: true, legendPos: 'b' };
+      const color = sc.series[0]?.color ? `#${sc.series[0].color}` : '#4f81bd';
+      const { legendKeys } = renderCapture(model, renderChart, color);
+      // A markers-only scatter must never draw a line-swatch key…
+      expect(legendKeys, 'no line-swatch key for a markers-only scatter').not.toContain('line');
+      if (legendKeys.includes('marker')) sawMarker = true;
+    }
+    // …and at least one scatter shows a marker key.
+    expect(sawMarker, 'a scatter draws a marker legend key').toBe(true);
   });
 });
