@@ -32,9 +32,9 @@ use table::*;
 /// passed by `&mut` to every per-sheet loader.
 pub(crate) type XlsxZip = zip::ZipArchive<Cursor<Vec<u8>>>;
 
-/// Part-name tag for a whole-container degradation (#774). Used both for the
-/// container-open error message and as the placeholder sheet's name, symmetric
-/// with docx / pptx `"(zip container)"`.
+/// Part-name tag for a whole-container degradation (#774). Already parenthesized
+/// (`"(zip container)"`), symmetric with docx / pptx `"(zip container)"` — so
+/// error formatting below must not wrap it in another pair of parens.
 const CONTAINER_PART: &str = "(zip container)";
 
 /// Open a xlsx ZIP container, tagging a failure with the container part name.
@@ -47,8 +47,14 @@ const CONTAINER_PART: &str = "(zip container)";
 /// caller build a `degraded_container_workbook` / `degraded_container_sheet`
 /// tagged with the container, symmetric with how a corrupt sheet part is tagged
 /// inside [`parse_sheet_with`].
+///
+/// `CONTAINER_PART` already carries its own parens, so this formats as
+/// `"{CONTAINER_PART}: {e}"` — NOT `"({CONTAINER_PART}): {e}"`, which would
+/// double-parenthesize into `"((zip container)): ..."` (docx / pptx avoid this
+/// by writing the literal `"(zip container)"` directly instead of a
+/// pre-parenthesized constant).
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<XlsxZip, String> {
-    zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("({CONTAINER_PART}): {e}"))
+    zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("{CONTAINER_PART}: {e}"))
 }
 
 /// A placeholder [`ParsedWorkbook`] for a xlsx whose ZIP CONTAINER could not be
@@ -3459,8 +3465,13 @@ mod rb7_partial_degradation_tests {
             .as_str()
             .expect("degraded workbook carries a container-tagged parseError");
         assert!(
-            wb_err.contains("zip container"),
-            "workbook error names the container; got {wb_err:?}"
+            wb_err.starts_with("(zip container): "),
+            "workbook error is tagged with the container exactly once (one paren pair); got {wb_err:?}"
+        );
+        assert_eq!(
+            wb_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {wb_err:?}"
         );
 
         // The lazily-parsed sheet 0 is the container-tagged placeholder overlay.
@@ -3469,8 +3480,13 @@ mod rb7_partial_degradation_tests {
             .as_str()
             .expect("placeholder sheet carries a parseError");
         assert!(
-            ws_err.contains("zip container"),
-            "sheet error names the container; got {ws_err:?}"
+            ws_err.starts_with("(zip container): "),
+            "sheet error is tagged with the container exactly once (one paren pair); got {ws_err:?}"
+        );
+        assert_eq!(
+            ws_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {ws_err:?}"
         );
         assert!(
             ws["rows"].as_array().unwrap().is_empty(),
@@ -3481,11 +3497,17 @@ mod rb7_partial_degradation_tests {
         let garbage =
             parse_workbook_native(b"this is definitely not a zip file").expect("non-zip opens");
         let gv: serde_json::Value = serde_json::from_str(&garbage).unwrap();
+        let garbage_err = gv["parseError"]
+            .as_str()
+            .expect("non-zip degrades with a container-tagged error");
         assert!(
-            gv["parseError"]
-                .as_str()
-                .is_some_and(|e| e.contains("zip container")),
-            "non-zip degrades with a container-tagged error"
+            garbage_err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once (one paren pair); got {garbage_err:?}"
+        );
+        assert_eq!(
+            garbage_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {garbage_err:?}"
         );
     }
 

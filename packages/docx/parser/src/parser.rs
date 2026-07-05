@@ -13226,8 +13226,13 @@ mod embedded_font_tests {
             .as_deref()
             .expect("degraded container doc carries a parse_error");
         assert!(
-            err.contains("zip container"),
-            "error names the container; got {err:?}"
+            err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once; got {err:?}"
+        );
+        assert_eq!(
+            err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {err:?}"
         );
         assert!(
             doc.body.is_empty(),
@@ -13237,12 +13242,18 @@ mod embedded_font_tests {
         // Not-a-zip-at-all also degrades (no local file header).
         let garbage = parse_from_bytes(b"this is definitely not a zip file")
             .expect("non-zip bytes must open as a placeholder");
+        let garbage_err = garbage
+            .parse_error
+            .as_deref()
+            .expect("non-zip degrades with a container-tagged error");
         assert!(
-            garbage
-                .parse_error
-                .as_deref()
-                .is_some_and(|e| e.contains("zip container")),
-            "non-zip degrades with a container-tagged error"
+            garbage_err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once; got {garbage_err:?}"
+        );
+        assert_eq!(
+            garbage_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {garbage_err:?}"
         );
     }
 }

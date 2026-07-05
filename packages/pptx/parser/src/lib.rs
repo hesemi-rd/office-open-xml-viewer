@@ -886,11 +886,25 @@ pub(crate) fn open_zip(data: Vec<u8>) -> Result<PptxZip, String> {
 /// per-slide [`broken_slide`] used inside [`parse_presentation`], but for the
 /// whole-container case. Standard 16:9 slide size (12192000×6858000 EMU) so the
 /// viewer paints a correctly-proportioned "could not be displayed" card.
+///
+/// `parse_error` is already tagged by [`open_zip`] (`"(zip container): {e}"`), so
+/// it is set directly rather than routed through [`broken_slide`], which would
+/// prefix its own `part` name and double-tag the message (`"(zip container):
+/// (zip container): ..."`).
 pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentation {
     Presentation {
         slide_width: 12_192_000,
         slide_height: 6_858_000,
-        slides: vec![broken_slide(0, "(zip container)", &parse_error)],
+        slides: vec![Slide {
+            index: 0,
+            slide_number: 1,
+            background: None,
+            elements: Vec::new(),
+            notes: None,
+            comments: Vec::new(),
+            hidden: false,
+            parse_error: Some(parse_error),
+        }],
         default_text_color: None,
         major_font: None,
         minor_font: None,
@@ -6346,8 +6360,13 @@ mod tests {
             .as_str()
             .expect("placeholder slide carries a parseError");
         assert!(
-            err.contains("zip container"),
-            "error names the container; got {err:?}"
+            err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once; got {err:?}"
+        );
+        assert_eq!(
+            err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {err:?}"
         );
         assert!(
             slides[0]["elements"].as_array().unwrap().is_empty(),
@@ -6358,11 +6377,17 @@ mod tests {
         let garbage = parse_pptx_native(b"this is definitely not a zip file")
             .expect("non-zip bytes must open as a placeholder");
         let gv: serde_json::Value = serde_json::from_str(&garbage).unwrap();
+        let garbage_err = gv["slides"][0]["parseError"]
+            .as_str()
+            .expect("non-zip degrades with a container-tagged error");
         assert!(
-            gv["slides"][0]["parseError"]
-                .as_str()
-                .is_some_and(|e| e.contains("zip container")),
-            "non-zip degrades with a container-tagged error"
+            garbage_err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once; got {garbage_err:?}"
+        );
+        assert_eq!(
+            garbage_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {garbage_err:?}"
         );
     }
 
