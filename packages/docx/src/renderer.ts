@@ -5821,6 +5821,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // advances. That sum drifts wider than the segment's box and would paint
           // the next run over this segment's tail (most visible at a CJK→Latin
           // boundary). See `@silurus/ooxml-core` → text/justify-positions.ts.
+          //
+          // KNOWN LATENT GAP (issue #816): §17.3.2.43 w:w (segCharScale) is NOT
+          // applied to the paint in this arm — the measure pass folded it into
+          // `s.measuredWidth` (segAdvanceWidth), so a scaled run that is also
+          // justify-distributed would draw its glyphs at full width inside a
+          // narrower box (ink overruns the measured span). Not reachable in any
+          // current fixture (w:w never co-occurs with distributed justify), but
+          // possible in a Japanese doc combining 均等割付 with compressed runs.
           const cps = [...s.text]; // code points (handles surrogate pairs)
           if (stretch.splitBefore.length === cps.length - 1) {
             // FULLY distributed: a gap was opened at EVERY inter-glyph boundary
@@ -5871,6 +5879,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // and draw at local origin. Char spacing (if any) is applied in the
           // UNSCALED point space, so set `letterSpacing = charSpacing / scale`
           // inside the scaled frame to keep the fixed pitch un-stretched by w:w.
+          //
+          // KNOWN LATENT GAP (issue #816): this arm is only reached when the
+          // charSpace docGrid arm and the justify-distribution arm above did NOT
+          // claim the segment. When either is active, w:w is folded into the
+          // MEASURED box (segAdvanceWidth) but never applied at paint, so the ink
+          // would overrun the box (probe: box 55px vs ink 105px). No current
+          // fixture hits that combination; the fix (scaling those arms' draws)
+          // is tracked in #816, not patched here.
           ctx.save();
           ctx.translate(x, 0);
           ctx.scale(segCharScale, 1);
