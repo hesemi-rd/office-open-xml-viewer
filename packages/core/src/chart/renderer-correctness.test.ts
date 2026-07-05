@@ -2078,6 +2078,31 @@ describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
     renderChart(rec.ctx, colModel({ catAxisLabelRotation: 0 }), RECT, 1);
     expect(rec.rotates.length).toBe(0);
   });
+
+  // #748: a rot outside the ST_FixedAngle (§20.1.10.23) (-90°,90°) text-rotation
+  // range is not a valid axis-label rotation — Office draws such labels
+  // horizontal. sample-24's cat/date/value axes all carry rot="-60000000"
+  // (-1000°) yet Word renders every label horizontal (verified against
+  // sample-24.pdf: "Category" label bbox is wide/short, ratio ≈ 3.0). Naively
+  // dividing -60000000/60000 = -1000° (or wrapping mod 360 → +80°) rotates them
+  // near-vertical, which is wrong.
+  it('an out-of-range rot ("-60000000" = -1000°) draws labels HORIZONTAL, not rotated', () => {
+    const rec = rotateRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisLabelRotation: -60_000_000 }), RECT, 1);
+    // Office ignores the out-of-range rotation: no rotate() calls (horizontal
+    // fast path), labels still drawn.
+    expect(rec.rotates.length).toBe(0);
+    expect(rec.texts.some(t => t.startsWith('Alpha'))).toBe(true);
+  });
+
+  it('a rot at the ±90° ST_FixedAngle boundary (-5400000 = -90°) is still honored', () => {
+    // -90° is the inclusive edge of Office's axis-text rotation range; keep it
+    // working (genuine vertical axis labels).
+    const rec = rotateRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisLabelRotation: -5_400_000 }), RECT, 1);
+    expect(rec.rotates.length).toBeGreaterThan(0);
+    expect(rec.rotates[0]).toBeCloseTo((-90 * Math.PI) / 180, 6);
+  });
 });
 
 /** Recording context that captures line-dash state alongside stroked segments,
