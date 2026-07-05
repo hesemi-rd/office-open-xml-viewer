@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>* { margin: 0; padding: 0; } canvas { display: block; }</style>
+</head>
+<body>
+  <!-- IX6 functional worker-equivalence: build a real PptxViewer in BOTH main
+       and worker mode, capture the text-selection overlay DOM (per-shape <div>
+       with nested run <span>s) and the findText match set, then expose both so
+       the spec can assert main === worker. Proves the run geometry crosses the
+       worker boundary identically (selection) and that findText works in worker
+       mode. -->
+  <div id="main-host"></div>
+  <div id="worker-host"></div>
+  <script type="module">
+    import { PptxViewer } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('pptx') ?? 'demo/sample-1';
+    const query = params.get('q') ?? 'a';
+    const width = 900;
+
+    // Serialize the text-selection overlay: pptx nests run <span>s inside a
+    // per-shape <div>, so walk shape → span and record the span text plus its
+    // shape-frame origin and in-shape offset (rounded — sub-pixel raster jitter
+    // between the main <canvas> and the worker OffscreenCanvas must not fail an
+    // exact-equality assertion). The run GEOMETRY is computed identically in both
+    // modes (same renderer), so the rounded boxes must match exactly.
+    const serializeOverlay = (host) => {
+      const layer = host.querySelector('div.__pptx-textlayer') ?? host.querySelector('div > div')?.parentElement;
+      // The viewer's wrapper holds [canvas, textLayer, highlightLayer]. The text
+      // layer is the div whose children are shape divs (each holding spans).
+      const wrapper = host.querySelector('div');
+      const layers = wrapper ? [...wrapper.children].filter((c) => c.tagName === 'DIV') : [];
+      // textLayer = the layer that actually contains shape divs with spans.
+      const textLayer = layers.find((l) => l.querySelector('span')) ?? layers[0];
+      const out = [];
+      if (textLayer) {
+        for (const shape of textLayer.children) {
+          const sx = Math.round(parseFloat(shape.style.left) || 0);
+          const sy = Math.round(parseFloat(shape.style.top) || 0);
+          for (const span of shape.querySelectorAll('span')) {
+            out.push({
+              text: span.textContent,
+              shapeLeft: sx,
+              shapeTop: sy,
+              inLeft: Math.round(parseFloat(span.style.left) || 0),
+              inTop: Math.round(parseFloat(span.style.top) || 0),
+            });
+          }
+        }
+      }
+      return out;
+    };
+
+    const buildViewer = async (hostId, mode) => {
+      const host = document.getElementById(hostId);
+      const canvas = document.createElement('canvas');
+      host.appendChild(canvas);
+      const resp = await fetch(`/${name}.pptx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.pptx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      const viewer = new PptxViewer(canvas, {
+        mode,
+        width,
+        enableTextSelection: true,
+        useGoogleFonts: true,
+      });
+      await viewer.load(buf);
+      const matches = await viewer.findText(query);
+      const overlay = serializeOverlay(host);
+      return {
+        overlay,
+        matches: matches.map((m) => ({ text: m.text, slide: m.location.slide })),
+        slideCount: viewer.slideCount,
+        viewer,
+      };
+    };
+
+    try {
+      const main = await buildViewer('main-host', 'main');
+      const worker = await buildViewer('worker-host', 'worker');
+
+      document.body.dataset.mainOverlay = JSON.stringify(main.overlay);
+      document.body.dataset.workerOverlay = JSON.stringify(worker.overlay);
+      document.body.dataset.mainMatches = JSON.stringify(main.matches);
+      document.body.dataset.workerMatches = JSON.stringify(worker.matches);
+      document.body.dataset.slideCount = String(main.slideCount);
+
+      main.viewer.destroy();
+      worker.viewer.destroy();
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[worker-selection-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>

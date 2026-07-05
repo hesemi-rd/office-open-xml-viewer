@@ -1155,11 +1155,12 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     v.destroy();
   });
 
-  it('worker mode: warns once and builds no overlay spans', async () => {
+  it('worker mode: builds a shape div with a nested run span (IX6, no warning)', async () => {
     installDom();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
+    engine.feedTextRuns = [RUN];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
@@ -1168,17 +1169,28 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     v.relayout();
+    // The overlay is built in the renderSlideToBitmap resolution microtask; give
+    // the bitmap promise chain a couple of turns to settle.
     await Promise.resolve();
     await Promise.resolve();
-    // Warned exactly once with the same wording as PptxViewer, across every
-    // mounted slot's render.
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/text selection is unavailable in mode: 'worker'/);
-    // No renderSlide (worker path only) and no overlay children anywhere.
+    await Promise.resolve();
+    // IX6 — worker mode no longer warns; the runs ride back beside the bitmap so
+    // the overlay is populated identically to main mode.
+    expect(warn).not.toHaveBeenCalled();
+    // The worker path (renderSlideToBitmap), NOT renderSlide, was used.
     expect(engine.renderCalls.length).toBe(0);
+    expect(engine.bitmapCalls.length).toBeGreaterThan(0);
+    const mounted = v.mountedSlideIndicesForTest();
+    expect(mounted.length).toBeGreaterThan(0);
     for (const wrapper of scrollHost.children.filter((c) => c.children.some((k) => k.tag === 'canvas'))) {
       const textLayer = wrapper.children.find((c) => c.tag === 'div') as FakeEl;
-      expect(textLayer.children.length).toBe(0);
+      // Same nesting as main mode: textLayer → shape <div> → run <span>.
+      expect(textLayer.children.length).toBe(1);
+      const shapeDiv = textLayer.children[0] as FakeEl;
+      expect(shapeDiv.tag).toBe('div');
+      expect(shapeDiv.children.length).toBe(1);
+      expect(shapeDiv.children[0].tag).toBe('span');
+      expect(shapeDiv.children[0].textContent).toBe('Hi');
     }
     warn.mockRestore();
     v.destroy();

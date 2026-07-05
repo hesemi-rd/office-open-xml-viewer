@@ -1,4 +1,5 @@
 import type { DimOptions, MediaElement, WorkerResponse } from './types';
+import type { PptxTextRunInfo } from './renderer';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -33,9 +34,18 @@ export type RenderWorkerRequest =
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'toMarkdown'; id: number }
   | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
-  | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions };
+  | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions }
+  // IX6 — collect a slide's text-run geometry WITHOUT transferring a bitmap. The
+  // find controller scans every slide for its runs; a bitmap per slide would be
+  // wasted work + transfer for slides the user never looks at.
+  | { kind: 'collectRuns'; id: number; slideIndex: number; width: number };
 
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { kind: 'parsed' }>
   | { kind: 'parsedMeta'; id: number; meta: PresentationMeta }
-  | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap };
+  // IX6 — the render worker collects each rendered slide's `onTextRun` geometry
+  // (a plain, structured-clone-safe `PptxTextRunInfo[]`) and ships it beside the
+  // bitmap, so the main thread can build the text-selection / find-highlight
+  // overlay on the SAME code path as main mode (no second render).
+  | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }
+  | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] };
