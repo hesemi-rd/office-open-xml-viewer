@@ -2114,6 +2114,25 @@ fn parse_paragraph_cond(
         node, &base_run, style_map, media_map, chart_map, rel_map, theme, &mut runs, None, field,
     );
 
+    // ECMA-376 §17.13.6.2 — bookmark destinations that start inside this
+    // paragraph. A `<w:bookmarkStart w:name>` can sit directly under `<w:p>` or
+    // be nested (inside a hyperlink / smartTag / sdt), so scan descendants. The
+    // name is what a `<w:hyperlink w:anchor>` internal link points at; the TS
+    // side maps each name to the page this paragraph lands on. Duplicate names
+    // across a run pair (`bookmarkStart`/`bookmarkEnd`) can't occur here — only
+    // `bookmarkStart` carries a name — but de-dup within the paragraph anyway so
+    // a malformed doc that repeats a name doesn't bloat the list.
+    let mut bookmarks: Vec<String> = Vec::new();
+    for d in node.descendants() {
+        if d.tag_name().name() == "bookmarkStart" && is_w_ns(d.tag_name().namespace()) {
+            if let Some(name) = attr_w(d, "name") {
+                if !name.is_empty() && !bookmarks.contains(&name) {
+                    bookmarks.push(name);
+                }
+            }
+        }
+    }
+
     // NOTE: We do NOT force display-math paragraphs to center here. The math
     // block's justification (ECMA-376 §22.1.2.88 `m:jc` / §22.1.2.30 `m:defJc`)
     // is a concept independent of the paragraph's text `w:jc`; it is resolved by
@@ -2144,6 +2163,7 @@ fn parse_paragraph_cond(
         numbering,
         tab_stops,
         runs,
+        bookmarks,
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
         contextual_spacing: base_para.contextual_spacing.unwrap_or(false),
@@ -7637,6 +7657,42 @@ mod math_jc_tests {
     fn inline_omath_jc_is_none() {
         let p = parse_p(r#"<m:oMath><m:r><m:t>α</m:t></m:r></m:oMath>"#);
         assert_eq!(first_math_jc(&p), Some(&None));
+    }
+
+    // ECMA-376 §17.13.6.2 — a `<w:bookmarkStart w:name>` at the head of a
+    // paragraph is collected as an internal-link destination name.
+    #[test]
+    fn bookmark_start_name_collected() {
+        let p = parse_p(
+            r#"<w:bookmarkStart w:id="1" w:name="_Toc_intro"/><w:r><w:t>Intro</w:t></w:r><w:bookmarkEnd w:id="1"/>"#,
+        );
+        assert_eq!(p.bookmarks, vec!["_Toc_intro".to_string()]);
+    }
+
+    // Multiple bookmarks on one paragraph are collected in document order; a
+    // bookmark nested inside a hyperlink (descendants scan) is included too.
+    #[test]
+    fn multiple_and_nested_bookmarks_collected() {
+        let p = parse_p(
+            r#"<w:bookmarkStart w:id="1" w:name="a"/><w:hyperlink w:anchor="x"><w:bookmarkStart w:id="2" w:name="b"/><w:r><w:t>t</w:t></w:r></w:hyperlink>"#,
+        );
+        assert_eq!(p.bookmarks, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    // A paragraph with no bookmark yields an empty vec (omitted from JSON).
+    #[test]
+    fn no_bookmark_is_empty() {
+        let p = parse_p(r#"<w:r><w:t>plain</w:t></w:r>"#);
+        assert!(p.bookmarks.is_empty());
+    }
+
+    // A duplicated bookmark name within one paragraph is de-duplicated.
+    #[test]
+    fn duplicate_bookmark_name_deduped() {
+        let p = parse_p(
+            r#"<w:bookmarkStart w:id="1" w:name="dup"/><w:bookmarkStart w:id="2" w:name="dup"/>"#,
+        );
+        assert_eq!(p.bookmarks, vec!["dup".to_string()]);
     }
 
     // ECMA-376 §22.1.2.30 `m:defJc` — document-wide default math justification in

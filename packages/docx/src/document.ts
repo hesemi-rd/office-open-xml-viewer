@@ -13,6 +13,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
 import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizePt } from './renderer';
+import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type {
@@ -46,6 +47,11 @@ export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
   private _meta: DocumentMeta | null = null;
   private _pages: PaginatedBodyElement[][] | null = null;
+  /** Lazily-built `bookmarkName → 0-based page index` map for internal hyperlink
+   *  anchors (IX-nav). Built on first {@link getBookmarkPage} from the paginated
+   *  pages (main) or the worker meta's `bookmarkPages` (worker). Nulled by
+   *  {@link destroy} so a reused reference never serves a stale document. */
+  private _bookmarkPages: Map<string, number> | null = null;
   private _mode: 'main' | 'worker' = 'main';
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
@@ -166,6 +172,7 @@ export class DocxDocument {
     this._document = null;
     this._meta = null;
     this._pages = null;
+    this._bookmarkPages = null;
     this._imageCache.clear();
     // Release this document's three per-fetchImage image caches: the decoded
     // base raster bitmaps (GPU-backed, shared with pptx/xlsx), the a:clrChange
@@ -302,6 +309,33 @@ export class DocxDocument {
     if (!this._document) return [];
     this._pages = paginateDocument(this._document);
     return this._pages;
+  }
+
+  /** Lazily build (and cache) the `bookmarkName → page index` map from either
+   *  the worker meta (worker mode) or the paginated pages (main mode). */
+  private _getBookmarkPages(): Map<string, number> {
+    if (this._bookmarkPages) return this._bookmarkPages;
+    this._bookmarkPages = this._meta
+      ? new Map(this._meta.bookmarkPages)
+      : buildBookmarkPageMap(this._getPages());
+    return this._bookmarkPages;
+  }
+
+  /**
+   * ECMA-376 §17.13.6.2 / §17.16.23 — resolve a bookmark name (a
+   * `<w:hyperlink w:anchor>` internal-link target) to the 0-based index of the
+   * page its `<w:bookmarkStart w:name>` destination falls on, or `undefined`
+   * when the document has no bookmark of that name. When a bookmark's paragraph
+   * spans a page break, the page where it *begins* is returned.
+   *
+   * This is the map an internal-hyperlink click resolves against: a viewer's
+   * `onHyperlinkClick` default (or an integrator) turns the anchor into a page
+   * and calls {@link DocxViewer.goToPage} (or scrolls the scroll viewer to it).
+   * Works in BOTH `main` and `worker` mode (the map rides along in the worker
+   * meta, built from the same paginated pages as `pageSizes`).
+   */
+  getBookmarkPage(bookmarkName: string): number | undefined {
+    return this._getBookmarkPages().get(bookmarkName);
   }
 
   /**

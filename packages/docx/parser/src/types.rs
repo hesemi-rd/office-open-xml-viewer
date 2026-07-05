@@ -406,6 +406,18 @@ pub struct DocParagraph {
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
+    /// ECMA-376 §17.13.6.2 `<w:bookmarkStart w:name>` — the names of every
+    /// bookmark that STARTS within (or at the head of) this paragraph, in
+    /// document order. A `<w:hyperlink w:anchor="X">` (§17.16.23) jumps to the
+    /// paragraph whose `bookmarks` contains `"X"`; the TS side turns these into a
+    /// `bookmarkName → pageIndex` map after pagination so an internal-link click
+    /// can scroll/render the destination page. Empty (and omitted from JSON) for
+    /// the common paragraph that anchors nothing, so existing snapshots are
+    /// unchanged. The reserved `_GoBack` bookmark Word inserts is kept — callers
+    /// can ignore it; dropping it here would be a policy decision the map builder
+    /// is free to make instead.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub bookmarks: Vec<String>,
     /// Paragraph background hex color (w:shd fill on paragraph)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shading: Option<String>,

@@ -11,6 +11,7 @@ import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
 import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt } from './renderer';
+import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
@@ -117,6 +118,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         footnotes: doc.footnotes ?? [],
         endnotes: doc.endnotes ?? [],
         pageSizes,
+        bookmarkPages: [...buildBookmarkPageMap(pages)],
       };
       post({ type: 'parsedMeta', id, meta });
       return;
