@@ -72,12 +72,19 @@ describe('verticalOrientation (UAX #50 Vertical_Orientation)', () => {
 });
 
 describe('verticalFormSubstitute (UAX #50 §5 vertical-form glyph substitution)', () => {
-  it('maps the Tu punctuation with a dedicated U+FE1x vertical form', () => {
+  it('maps the CORNER-HANGING Tu punctuation (comma/full stop) to its U+FE1x form', () => {
     expect(verticalFormSubstitute(0x3001)).toBe(0xfe11); // 、 → ︑
     expect(verticalFormSubstitute(0x3002)).toBe(0xfe12); // 。 → ︒
     expect(verticalFormSubstitute(0xff0c)).toBe(0xfe10); // ， → ︐
-    expect(verticalFormSubstitute(0xff01)).toBe(0xfe15); // ！ → ︕
-    expect(verticalFormSubstitute(0xff1f)).toBe(0xfe16); // ？ → ︖
+  });
+
+  it('does NOT substitute ！／？ (they stand upright & centred, not corner-hanging)', () => {
+    // ！ FF01 → FE15 and ？ FF1F → FE16 are deliberately absent. The FE15/FE16
+    // vertical forms are corner-designed in many fonts and shift ！／？ off the
+    // column centre; the original fullwidth mark drawn upright is already the
+    // correct, centred vertical appearance (PDF-verified on sample-26, #771).
+    expect(verticalFormSubstitute(0xff01)).toBeNull(); // ！
+    expect(verticalFormSubstitute(0xff1f)).toBeNull(); // ？
   });
 
   it('returns null for non-Tu punctuation (Tr rotates, R stays sideways — no substitute)', () => {

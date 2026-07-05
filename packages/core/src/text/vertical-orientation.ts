@@ -66,20 +66,31 @@ export function verticalOrientation(cp: number): VerticalOrientation {
  *
  * UAX #50 §5 ("Glyph Changes for Vertical Orientation") describes the Tu/Tr
  * transform as substituting a vertical glyph variant. A Canvas cannot invoke the
- * font's `vert`/`vrt2` OpenType feature, so for the Tu punctuation that has a
- * dedicated Unicode presentation form we substitute the code point itself and
- * let the font supply the pre-positioned glyph (upper-right cell corner).
+ * font's `vert`/`vrt2` OpenType feature, so for the CORNER-HANGING Tu punctuation
+ * that has a dedicated Unicode presentation form we substitute the code point
+ * itself and let the font supply the pre-positioned glyph (upper-right cell
+ * corner). The caller then draws it em-box-centred (NO ink re-centring), so the
+ * font's designed corner offset is preserved — that is what places 、。 in the
+ * cell's upper-right the way Word does (PDF-verified on sample-26: 、 ink at
+ * −0.32em along-column, +0.33em cross-axis).
  *
  * NOTE: this map is a rendering mapping (fullwidth/CJK source → vertical form),
  * NOT the strict inverse of UnicodeData's `<vertical>` compatibility
- * decompositions. Per UnicodeData.txt, FE10/FE13–FE16 decompose to the ASCII
- * comma / colon / semicolon / exclamation / question mark
- * (U+002C/003A/003B/0021/003F) — but vertical Japanese text carries the
- * FULLWIDTH forms, so the map keys on those. Only FE11 (← 3001 、) and
- * FE12 (← 3002 。) are exact inverses.
+ * decompositions. Per UnicodeData.txt, FE10 decomposes to the ASCII comma
+ * (U+002C) — but vertical Japanese text carries the FULLWIDTH comma, so the map
+ * keys on that. Only FE11 (← 3001 、) and FE12 (← 3002 。) are exact inverses.
  *
  * Every key is vo=Tu, i.e. actually reaches the renderers' upright/substitute
  * draw branch. Deliberately NOT in the map:
+ *   • ！ FF01 (→ FE15) and ？ FF1F (→ FE16) — although vo=Tu, the exclamation /
+ *     question marks stand UPRIGHT and HORIZONTALLY CENTRED in a vertical line,
+ *     unlike the corner-hanging comma / full stop. The original fullwidth ！／？
+ *     drawn upright is already the correct vertical shape (the marks are
+ *     vertically symmetric) and lands centred on the column in every font. The
+ *     U+FE15/FE16 "vertical form" glyphs are corner-designed in many fonts
+ *     (Hiragino ink at +0.31em cross-axis), so substituting them pushed ！／？ to
+ *     the right of the column — the sample-26 "！ shifted right" defect (#771).
+ *     PDF ground truth: Word centres ！ (+0.03em), matching the upright original.
  *   • ：FF1A / ；FF1B and 〖3016 / 〗3017 are vo=Tr — the Tr draw branch rotates
  *     them and never consults this map. Making Tr substitute-first (FE13/FE14/
  *     FE17/FE18 here, plus the U+FE35+ forms for fullwidth parens/brackets —
@@ -106,12 +117,21 @@ export function verticalFormSubstitute(cp: number): number | null {
 // verticalFormSubstitute doc above for why the map keys on the fullwidth forms
 // and why Tr/R punctuation (：；〖〗…) is excluded. Names per the Unicode
 // "Vertical Forms" chart (U+FE10–U+FE1F).
+//
+// ONLY the CORNER-HANGING punctuation (comma / full stop) is substituted. In
+// vertical Japanese typography these hang in the UPPER-RIGHT of the cell (JIS X
+// 4051 §4.3 kutōten placement), which is exactly how a font designs its FE10–FE12
+// glyph — ink pushed to the corner of the em box. Substituting the code point and
+// drawing it em-box-centred reproduces that corner placement directly.
+//
+// Deliberately NOT substituted: ！ FF01 (→ FE15) and ？ FF1F (→ FE16) — see the
+// verticalFormSubstitute doc above. They stand upright and centred, so the FE15/
+// FE16 corner-designed forms would shift them off-column; the original ！／？ is
+// drawn upright instead.
 const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
   [0xff0c, 0xfe10], // ， fullwidth comma       → PRESENTATION FORM FOR VERTICAL COMMA
   [0x3001, 0xfe11], // 、 ideographic comma     → … FOR VERTICAL IDEOGRAPHIC COMMA
   [0x3002, 0xfe12], // 。 ideographic full stop → … FOR VERTICAL IDEOGRAPHIC FULL STOP
-  [0xff01, 0xfe15], // ！ fullwidth exclamation → … FOR VERTICAL EXCLAMATION MARK
-  [0xff1f, 0xfe16], // ？ fullwidth question    → … FOR VERTICAL QUESTION MARK
 ]);
 
 /**

@@ -13,11 +13,15 @@
 //     a local −90° counter-rotation about the glyph's own centre, cancelling the
 //     page rotation so it stands UPRIGHT while still advancing down the line.
 //   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. UAX#50
-//     substitutes a vertical presentation glyph; where Unicode supplies one
-//     (、。，！？ → U+FE10–FE12/FE15/FE16, core `verticalFormSubstitute`) we draw
-//     THAT code point upright, so the comma/full stop sit in the cell's
-//     upper-right as Word does; where none exists (．, small kana) we draw the
-//     original upright unchanged (． keeps a corner-nudge fallback).
+//     substitutes a vertical presentation glyph. For the CORNER-HANGING comma/full
+//     stop (、。， → U+FE10–FE12, core `verticalFormSubstitute`) we draw THAT code
+//     point upright and em-box-centred so the font's designed upper-right ink
+//     placement lands the punctuation in the cell corner as Word does. ！？ are
+//     NOT substituted — they stand upright and CENTRED, so the original fullwidth
+//     mark drawn upright is the correct vertical form (the FE15/FE16 forms are
+//     corner-designed in many fonts and would shift ！？ off-column). Where no
+//     form exists (．, small kana) we draw the original upright unchanged (．
+//     keeps a corner-nudge fallback).
 //   • vo=Tr (transform, fallback rotate): （「」〈〉“”：；〖〗 and the ー prolonged
 //     sound mark. UAX#50's fallback (no vertical glyph available to a Canvas —
 //     the font's `vert`/`vrt2` OpenType feature is not reachable via `fillText`)
@@ -94,9 +98,9 @@ export function isUprightVerticalGlyph(cp: number): boolean {
 /** The Tu punctuation whose upper-right cell position is approximated by a
  *  draw-time nudge WHEN the font has no U+FExx vertical form to substitute (see
  *  {@link verticalGlyphOffset}). The comma/full stop that DO have a vertical form
- *  ({@link verticalFormSubstitute}: 、。，！？) are substituted instead and the
- *  font positions them, so they are NOT nudged. The fullwidth full stop ． (FF0E)
- *  has no vertical form in Unicode, so it stays on the nudge fallback. */
+ *  ({@link verticalFormSubstitute}: 、。，) are substituted instead and the font
+ *  positions them, so they are NOT nudged. The fullwidth full stop ． (FF0E) has
+ *  no vertical form in Unicode, so it stays on the nudge fallback. */
 const VERTICAL_PUNCT_UPPER_RIGHT = new Set<number>([
   0xff0e, // ． fullwidth full stop (no U+FExx vertical form → nudge fallback)
 ]);
@@ -279,12 +283,17 @@ export function drawVerticalRun(
     if (mode === 'upright' || bracketCp !== null) {
       // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would otherwise lay on
-      // its side) stands upright. For Tu punctuation with a Unicode vertical form
-      // (、。，！？ → U+FE10–FE12/FE15/FE16) and Tr brackets (（）「」… → U+FE35–FE44)
+      // its side) stands upright. For corner-hanging Tu punctuation with a Unicode
+      // vertical form (、。， → U+FE10–FE12) and Tr brackets (（）「」… → U+FE35–FE44)
       // draw THAT glyph so the font supplies the vertical shape; the original
       // advance is kept. Substitution is a GLYPH-only change: the width above and
       // everything the renderer reports (selection, find) use the original `ch`.
-      const drawCp = bracketCp !== null ? bracketCp : verticalFormSubstitute(cp);
+      // ！？ are NOT substituted (see verticalFormSubstitute) — they draw upright
+      // as the original fullwidth mark, which is already centred on the column.
+      // A substituted Tu punctuation form (、。， → FE10–FE12) vs. everything else.
+      // The Tr bracket substitute is tracked separately by `bracketCp`.
+      const puncCp = bracketCp !== null ? null : verticalFormSubstitute(cp);
+      const drawCp = bracketCp !== null ? bracketCp : puncCp;
       const drawStr = drawCp !== null ? String.fromCodePoint(drawCp) : ch;
       const cx = x + ax + adv / 2;
       // Corner nudge fallback only for a Tu punct with NO vertical form (． FF0E);
@@ -297,7 +306,21 @@ export function drawVerticalRun(
       // bracket (ink hugging one cell end) it is the needed correction. Replaces
       // the old `+0.12em` font-tuned heuristic. Skipped when the ． corner nudge is
       // active (`off.dy`), which is a self-contained upper-right cell placement.
-      const alongEm = off.dy === 0 ? inkCenterAboveMiddlePx(ctx, drawStr) / fontPx : 0;
+      //
+      // NOT applied to a substituted Tu punctuation form (comma/full stop 、。，
+      // → FE10–FE12): those glyphs are DESIGNED with their ink in the cell's
+      // upper-right corner (JIS X 4051 §4.3 kutōten placement — Word keeps them
+      // there, PDF-verified on sample-26: 、 ink at −0.32em along-column). Ink-
+      // centring would force that intentional offset back to the geometric cell
+      // centre, dropping the comma/full stop LOW — the reported "、。 sit too low"
+      // defect (#771). Drawing them em-box-centred preserves the font's corner
+      // design. The Tr brackets DO get the correction: their two halves must sit a
+      // full cell apart and the font centres the em box, not the ink (#792).
+      const isPunctSubstitute = puncCp !== null;
+      const alongEm =
+        off.dy === 0 && !isPunctSubstitute
+          ? inkCenterAboveMiddlePx(ctx, drawStr) / fontPx
+          : 0;
       ctx.save();
       ctx.translate(cx, baseline);
       ctx.rotate(-Math.PI / 2);
