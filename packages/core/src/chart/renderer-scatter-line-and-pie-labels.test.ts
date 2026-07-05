@@ -63,19 +63,23 @@ function series(over: Partial<ChartSeries>): ChartSeries {
   return { name: '', color: null, values: [], ...over };
 }
 
-interface TextCall { text: string; fillStyle: string }
+interface TextCall { text: string; fillStyle: string; x: number; y: number }
 
 /** Recording context that captures: (a) `stroke()` calls that follow a
  *  `moveTo`/`lineTo` path with ≥2 vertices AND whose strokeStyle is `matchColor`
  *  (the series line color) — this isolates the scatter connecting line from
  *  gridlines/axis rules, which stroke in grey; (b) `fillText` calls with the
  *  fillStyle in effect. Enough to assert the scatter line pass and pie labels. */
+interface ArcCall { cx: number; cy: number; r: number }
+
 function recordingCtx(matchColor = '#4f81bd'): {
   ctx: CanvasRenderingContext2D;
   counts: { polylineStrokes: number };
   texts: TextCall[];
+  arcs: ArcCall[];
 } {
   const texts: TextCall[] = [];
+  const arcs: ArcCall[] = [];
   const counts = { polylineStrokes: 0 };
   let pathVerts = 0;
   const state: Record<string, unknown> = {
@@ -106,6 +110,12 @@ function recordingCtx(matchColor = '#4f81bd'): {
           };
         case 'beginPath':
           return () => { pathVerts = 0; };
+        // Pie/doughnut slices are drawn with `arc(cx, cy, r, …)`; recording the
+        // centre + radius lets a test recover the exact pie geometry the renderer
+        // used (the outermost rim is the max-radius arc) without duplicating the
+        // frame math.
+        case 'arc':
+          return (cx: number, cy: number, r: number) => { arcs.push({ cx, cy, r }); };
         case 'moveTo':
         case 'lineTo':
         case 'bezierCurveTo':
@@ -121,8 +131,8 @@ function recordingCtx(matchColor = '#4f81bd'): {
             }
           };
         case 'fillText':
-          return (text: string) =>
-            texts.push({ text, fillStyle: String(state.fillStyle) });
+          return (text: string, x: number, y: number) =>
+            texts.push({ text, fillStyle: String(state.fillStyle), x, y });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -136,7 +146,16 @@ function recordingCtx(matchColor = '#4f81bd'): {
     ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
     counts,
     texts,
+    arcs,
   };
+}
+
+/** Recover the pie/doughnut centre + outer radius from recorded `arc()` calls.
+ *  The outermost rim is the arc with the largest radius; every slice on that ring
+ *  shares the same centre. */
+function pieGeometry(arcs: ArcCall[]): { cx: number; cy: number; outerR: number } {
+  const outer = arcs.reduce((a, b) => (b.r > a.r ? b : a));
+  return { cx: outer.cx, cy: outer.cy, outerR: outer.r };
 }
 
 describe('scatter series-line noFill overrides scatterStyle (§21.2.2.198)', () => {
@@ -239,5 +258,76 @@ describe('pie per-point dLbl flags override series defaults (§21.2.2.47)', () =
     const pctLabels = rec.texts.filter(t => /^\d+%$/.test(t.text));
     // Two slices labeled (idx 1,2); the deleted idx 0 is skipped.
     expect(pctLabels.length).toBe(2);
+  });
+});
+
+describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)', () => {
+  // Radial placement of `ctr` (and default) data labels, verified against the
+  // sample-14.pdf ground truth (PowerPoint's own render):
+  //   • SOLID pie   → labels sit near the rim at ≈0.88·outerR (measured 0.878 /
+  //     0.888 / 0.887 / 0.912 across the 54/27/14/5% slices; center + outer
+  //     radius from a least-squares rim fit, residual std 0.43pt). PowerPoint
+  //     does NOT place a pie `ctr` label at the disc's geometric mid-radius.
+  //   • DOUGHNUT    → labels sit at the RING midpoint (innerR+outerR)/2. For the
+  //     55% hole this is 0.775·outerR, matching the PDF (measured 0.772–0.778
+  //     across all five slices). This branch must not move.
+  const pieModel = (chartType: 'pie' | 'doughnut', position?: string): ChartModel =>
+    baseModel({
+      chartType,
+      showDataLabels: true,
+      holeSize: chartType === 'doughnut' ? 55 : undefined,
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({
+        name: 'Share',
+        values: [54, 27, 14, 5],
+        categories: ['A', 'B', 'C', 'D'],
+        dataPointColors: ['ff0000', '00ff00', '0000ff', 'ffff00'],
+        seriesDataLabels: {
+          showVal: false, showCatName: false, showSerName: false, showPercent: true,
+          fontColor: 'FFFFFF', fontBold: true, formatCode: '0%',
+          ...(position ? { position } : {}),
+        },
+      })],
+    });
+
+  it('places SOLID-pie ctr labels near the rim (≈0.88R), not at mid-radius', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, pieModel('pie', 'ctr'), RECT, 1);
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const labels = rec.texts.filter(t => /^\d+%$/.test(t.text));
+    expect(labels.length).toBe(4);
+    for (const l of labels) {
+      const ratio = Math.hypot(l.x - cx, l.y - cy) / outerR;
+      // Near the rim: comfortably beyond mid-radius, inside the outer edge.
+      expect(ratio).toBeGreaterThan(0.8);
+      expect(ratio).toBeLessThan(1.0);
+      // And specifically close to the PowerPoint-measured ≈0.88 constant.
+      expect(Math.abs(ratio - 0.88)).toBeLessThan(0.06);
+    }
+  });
+
+  it('keeps DOUGHNUT ctr labels at the ring midpoint (0.775R for a 55% hole)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, pieModel('doughnut'), RECT, 1);
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const labels = rec.texts.filter(t => /^\d+%$/.test(t.text));
+    expect(labels.length).toBeGreaterThan(0);
+    for (const l of labels) {
+      const ratio = Math.hypot(l.x - cx, l.y - cy) / outerR;
+      // (innerR + outerR)/2 with innerR = 0.55·outerR ⇒ 0.775.
+      expect(Math.abs(ratio - 0.775)).toBeLessThan(0.02);
+    }
+  });
+
+  it('still pushes outEnd pie labels OUTSIDE the rim', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, pieModel('pie', 'outEnd'), RECT, 1);
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const labels = rec.texts.filter(t => /^\d+%$/.test(t.text));
+    expect(labels.length).toBe(4);
+    for (const l of labels) {
+      const ratio = Math.hypot(l.x - cx, l.y - cy) / outerR;
+      expect(ratio).toBeGreaterThan(1.0);
+    }
   });
 });

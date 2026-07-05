@@ -2606,6 +2606,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 // Pie / Doughnut — supports dataPointColors (per slice).
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Inside-radius fraction (of the outer radius) for a SOLID pie's `ctr` / `inEnd`
+ *  / `bestFit` data labels (§21.2.2.48). PowerPoint places these near the rim,
+ *  not at the disc mid-radius: measured from sample-14.pdf, the 54/27/14/5%
+ *  slice labels sit at 0.878 / 0.888 / 0.887 / 0.912·outerR — a flat near-rim
+ *  constant independent of slice angle (see the `labelR` comment in
+ *  {@link drawPieRichLabels}). 0.88 is the empirical fit; it is an approximation
+ *  of an undocumented PowerPoint layout, not a spec-defined geometry. Doughnut
+ *  labels use the exact ring midpoint instead and never consult this. */
+const PIE_CTR_LABEL_RADIUS_FRAC = 0.88;
+
 function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, isDoughnut: boolean, ptToPx: number): void {
   const { x, y, w, h } = r;
   const s = chart.series[0]; if (!s) return;
@@ -2808,8 +2818,7 @@ function drawPieRichLabels(
     const showPercent = ov?.showPercent ?? def.showPercent;
     // §21.2.2.35 label composition. A per-point custom `<c:tx>` (non-empty
     // override text) wins outright; otherwise compose from the resolved flags.
-    // dLblPos: "outEnd" places the label just beyond the rim; "inEnd"/"ctr"
-    // (and default) sit inside the slice at the radial midpoint. Percent is the
+    // Positioning is handled below (§21.2.2.48 `dLblPos`). Percent is the
     // slice's share of the total.
     let text: string;
     if (ov && ov.text) {
@@ -2825,9 +2834,28 @@ function drawPieRichLabels(
     if (!text) continue;
     const pos = ov?.position ?? def.position ?? 'bestFit';
     const outside = pos === 'outEnd';
+    // §21.2.2.48 ST_DLblPos radial placement. The spec enumerates the positions
+    // (bestFit / ctr / inEnd / outEnd …) but gives no geometry, so the inside
+    // radii below reproduce PowerPoint's own layout, measured from sample-14.pdf
+    // (PowerPoint's render of slide-7's pie + doughnut):
+    //
+    //   • outEnd → just beyond the rim (leader-line territory).
+    //   • DOUGHNUT (innerR > 0), ctr / inEnd / bestFit → the RING midpoint
+    //     (innerR + outerR)/2. Verified on the 55%-hole doughnut: labels sit at
+    //     0.772–0.778·outerR ≈ (0.55+1)/2 = 0.775. Byte-stable — unchanged.
+    //   • SOLID pie (innerR ≈ 0), ctr / inEnd / bestFit → ≈0.88·outerR, NOT the
+    //     disc mid-radius. Measured label-centroid ratios across the 54/27/14/5%
+    //     slices were 0.878 / 0.888 / 0.887 / 0.912 (center + outer radius from a
+    //     least-squares rim fit, residual std 0.43pt), i.e. a flat near-rim
+    //     constant independent of slice angle — so it is a fixed fraction, not a
+    //     sector centroid. The 5% sliver rides marginally further out in
+    //     PowerPoint; we do not model that per-slice nudge. This is an empirical
+    //     approximation of an undocumented PowerPoint layout, not a spec formula.
     const labelR = outside
       ? outerR + Math.max(10, outerR * 0.12)
-      : (innerR + outerR) / 2;
+      : innerR > 0.01
+        ? (innerR + outerR) / 2
+        : outerR * PIE_CTR_LABEL_RADIUS_FRAC;
     const lx2 = cx2 + Math.cos(midAngle) * labelR;
     const ly2 = cy2 + Math.sin(midAngle) * labelR;
     const sizeHpt = ov?.fontSizeHpt ?? def.fontSizeHpt;
