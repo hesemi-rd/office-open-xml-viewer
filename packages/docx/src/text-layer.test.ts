@@ -107,4 +107,48 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(b.textContent).toBe('World');
     expect(b.style.left).toBe('50px');
   });
+
+  // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed into
+  // ONE em cell (`run.w`), but the selection span lays out at the run's NATURAL
+  // font width (~2× for "２９"), so the selection box overshoots into the next cell.
+  // With a measurer, the span composes a horizontal scaleX(run.w/naturalWidth) so
+  // its extent matches the drawn cell.
+  it('compresses an eastAsianVert (縦中横) span to the one-em cell via scaleX', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    // "２９" natural 14px (monospace 7px/char), drawn cell run.w=7px ⇒ scaleX 0.5.
+    const runs = [
+      run({ text: '２９', x: 30, y: 40, w: 7, h: 16, fontSize: 7, font: '7px serif', eastAsianVert: true, transform: 'rotate(90deg)' }),
+    ];
+    const measureForFont = () => (s: string) => [...s].length * 7;
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '1px', '1px', undefined, measureForFont);
+    const span = layer.children[0];
+    // The rotate is preceded by scaleX(0.5) so the natural 14px width compresses to
+    // the 7px cell BEFORE rotating into the column (transform-origin top-left).
+    expect(span.style.transform).toBe('rotate(90deg) scaleX(0.5)');
+    expect(span.style.cssText).toContain('transform-origin:top left');
+  });
+
+  it('leaves a 縦中横 span un-scaled when no measurer is supplied (graceful degrade)', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [
+      run({ text: '２９', w: 7, fontSize: 7, eastAsianVert: true, transform: 'rotate(90deg)' }),
+    ];
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '1px', '1px');
+    // No measurer ⇒ the scale cannot be computed; the span keeps the bare rotate
+    // (byte-identical to the pre-#836 overlay — no regression when the caller
+    // does not thread a measurer).
+    expect(layer.children[0].style.transform).toBe('rotate(90deg)');
+  });
+
+  it('does not scale a non-eastAsianVert run even with a measurer', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'Hello', x: 12, font: '14px Arial' })];
+    const measureForFont = () => (s: string) => s.length * 8;
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '1px', '1px', undefined, measureForFont);
+    // Ordinary run: no transform at all (horizontal page), so no scaleX sneaks in.
+    expect(layer.children[0].style.transform ?? '').toBe('');
+  });
 });

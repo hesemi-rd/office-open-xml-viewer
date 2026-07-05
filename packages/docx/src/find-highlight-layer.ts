@@ -22,6 +22,7 @@
  */
 import { sliceHorizontalExtent, type MatchRunSlice } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
+import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
 /** One page's highlight input: the run-slices a match covers, and whether that
  *  match is the active one (emphasis colour). */
@@ -78,7 +79,16 @@ export function buildDocxHighlightLayer(
       const run = runs[slice.runIndex];
       if (!run) continue;
       const measure = measureForFont(run.font);
-      const { x, width } = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
+      const extent = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
+      // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed
+      // into one em cell (`run.w`), so its natural per-glyph extents overshoot the
+      // drawn box. Scale the slice offset + width by `run.w / naturalWidth` so the
+      // highlight lands on the compressed cell (a no-op factor of 1 for every
+      // ordinary run — see tate-chu-yoko-overlay.ts). Applying one factor keeps a
+      // partial match proportional within the cell.
+      const k = tateChuYokoOverlayScale(run, measure);
+      const x = extent.x * k;
+      const width = extent.width * k;
       if (width <= 0) continue;
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and

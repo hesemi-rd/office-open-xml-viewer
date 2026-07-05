@@ -431,6 +431,14 @@ export interface DocxTextRunInfo {
    *  non-link run. The text-layer overlay turns a run carrying this into a
    *  clickable region; the drawn glyphs are unaffected. */
   hyperlink?: HyperlinkTarget;
+  /** ECMA-376 §17.3.2.10 eastAsianLayout `w:vert` (縦中横 / horizontal-in-vertical):
+   *  `true` when this run was drawn as tate-chu-yoko — its glyphs laid out
+   *  horizontally, side by side, COMPRESSED into ONE em cell of the vertical
+   *  column (see {@link drawTateChuYokoRun}). `w` is the drawn cell extent (one
+   *  em), NOT the natural text width, so the find / selection overlays must clamp
+   *  their horizontal extent to `w` rather than re-measuring the run's natural
+   *  glyphs (issue #836). Absent for every ordinary run. */
+  eastAsianVert?: boolean;
 }
 
 export interface RenderDocumentOptions {
@@ -6420,6 +6428,12 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // run becomes clickable. Undefined for non-link runs (no payload
             // change). Does not touch any drawing above.
             hyperlink: s.hyperlink,
+            // §17.3.2.10 縦中横 — flag a tate-chu-yoko run so the overlays clamp
+            // their extent to the drawn one-em cell (`w`) instead of the run's
+            // natural glyph width (#836). Only set on a vertical page, where the
+            // 縦中横 draw path (above) actually fires; `undefined` otherwise so a
+            // non-縦中横 run's payload is byte-identical.
+            eastAsianVert: state.verticalCJK && s.tateChuYoko ? true : undefined,
           });
         }
 

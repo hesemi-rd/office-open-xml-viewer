@@ -206,6 +206,10 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
+  /** Throwaway 2D context reused to measure text for the §17.3.2.10 縦中横 overlay
+   *  clamp (#836). Lazily created; `null` when canvas metrics are unavailable
+   *  (headless), in which case the overlay degrades to the un-clamped span. */
+  private _measureCtx: CanvasRenderingContext2D | null | undefined;
   /**
    * Concurrent-load latch (generation token). Every self-loading `load()`
    * increments this and captures the value; after its engine finishes loading it
@@ -783,6 +787,7 @@ export class DocxScrollViewer implements ZoomableViewer {
             slot.canvas.style.width || `${slot.canvas.width}px`,
             slot.canvas.style.height || `${slot.canvas.height}px`,
             this._hyperlinkHandler(),
+            (font) => this._measureForFont(font),
           );
         }
       })
@@ -815,6 +820,22 @@ export class DocxScrollViewer implements ZoomableViewer {
       const page = this._doc?.getBookmarkPage(target.ref);
       if (page !== undefined) this.scrollToPage(page);
     };
+  }
+
+  /** A width-measurer primed with a run's `font` — used ONLY to clamp a §17.3.2.10
+   *  縦中横 selection span to its drawn one-em cell (#836). Mirrors DocxViewer's
+   *  `_measureForFont`. Returns a length-based fallback when canvas metrics are
+   *  unavailable so the caller still gets a callable (the overlay then sees scale
+   *  1 and leaves the span un-clamped). */
+  private _measureForFont(font: string): (s: string) => number {
+    if (this._measureCtx === undefined) {
+      const c = document.createElement('canvas');
+      this._measureCtx = c.getContext('2d');
+    }
+    const ctx = this._measureCtx;
+    if (!ctx) return (s) => s.length;
+    ctx.font = font;
+    return (s) => ctx.measureText(s).width;
   }
 
   /** Route an async render failure to `onError`, or `console.error` when none is
@@ -928,6 +949,7 @@ export class DocxScrollViewer implements ZoomableViewer {
             slot.canvas.style.width || `${slot.canvas.width}px`,
             slot.canvas.style.height || `${slot.canvas.height}px`,
             this._hyperlinkHandler(),
+            (font) => this._measureForFont(font),
           );
         }
       }
@@ -1292,6 +1314,7 @@ export class DocxScrollViewer implements ZoomableViewer {
               spare.style.width || `${spare.width}px`,
               spare.style.height || `${spare.height}px`,
               this._hyperlinkHandler(),
+              (font) => this._measureForFont(font),
             );
           }
         }
