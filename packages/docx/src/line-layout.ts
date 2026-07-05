@@ -139,6 +139,20 @@ export interface LayoutTextSeg {
    *  font size ≥ the threshold. Absent ⇒ kerning off (`ctx.fontKerning='none'`
    *  is NOT forced globally; only a threshold-satisfied run enables it). */
   kerning?: number;
+  /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
+   *  (縦中横). Set by {@link buildSegments} ONLY when the run declares `w:vert`
+   *  AND the page is vertical (tbRl); the property is inert in a horizontal page,
+   *  so the gate is folded in here at build time and the measure/paint passes just
+   *  read this flag. When set, the whole segment occupies ONE cell along the
+   *  vertical column (advance = 1em, NOT the per-glyph sideways width), with its
+   *  characters drawn horizontally side by side across the column (§17.3.2.10,
+   *  PDF-verified on sample-26). Absent ⇒ normal per-glyph vertical advance. */
+  tateChuYoko?: boolean;
+  /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vertCompress>` — set alongside
+   *  {@link tateChuYoko} when the run also declares `w:vertCompress`. Compresses
+   *  the horizontally-laid-out run so it fits the line height. Only meaningful
+   *  when {@link tateChuYoko} is set. */
+  tateChuYokoCompress?: boolean;
 }
 
 /**
@@ -689,6 +703,16 @@ export function segAdvanceWidth(
   gridDeltaPx: number,
   scale: number,
 ): number {
+  // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): the whole run is written
+  // horizontally inside ONE cell of the vertical line ("keeping the text on the
+  // same line"), so its advance ALONG the column is exactly one em (one cell),
+  // independent of the character count and of `w:w` (which stretches the
+  // side-by-side glyphs ACROSS the column, not the along-column cell height).
+  // PDF-verified on sample-26: the "２９" run occupies exactly one 12 pt cell.
+  // (Because the vertical page lays out in a swapped logical frame, this
+  // logical-horizontal advance IS the vertical column advance after the page
+  // rotation — see vertical-text.ts and renderer's page transform.)
+  if (seg.tateChuYoko) return seg.fontSize * scale;
   const scaled = naturalWidthPx * charScaleFactor(seg) + gridSegDeltaPx(seg.text, gridDeltaPx);
   const cpCount = [...seg.text].length;
   return scaled + cpCount * charSpacingDeltaPx(seg, scale);
@@ -1640,6 +1664,16 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         charScale: r.charScale,
         position: r.position,
         kerning: r.kerning,
+        // ECMA-376 §17.3.2.10 eastAsianLayout — 縦中横 is meaningful ONLY in a
+        // vertical (tbRl) page, so fold the vertical gate in HERE at build time
+        // (buildSegments has RenderState). Measure/paint then read a single
+        // pre-gated flag. `vertCompress` rides only when `vert` is set (spec: it
+        // is ignored otherwise).
+        tateChuYoko: state.verticalCJK && r.eastAsianVert === true ? true : undefined,
+        tateChuYokoCompress:
+          state.verticalCJK && r.eastAsianVert === true && r.eastAsianVertCompress === true
+            ? true
+            : undefined,
       });
       firstSeg = false;
       gluePending = false; // glue applies only to a piece's FIRST segment

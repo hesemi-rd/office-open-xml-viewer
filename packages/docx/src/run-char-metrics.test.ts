@@ -74,4 +74,25 @@ describe('WD4 run character-metric width helpers', () => {
     // natural 20 + 1 cp × (1 pt × scale 1) = 21.
     expect(segAdvanceWidth(s, 20, 0, 1)).toBe(21);
   });
+
+  it('segAdvanceWidth pins a 縦中横 run to ONE em along the column (§17.3.2.10)', () => {
+    // A tateChuYoko seg occupies exactly one cell (fontSize × scale) regardless
+    // of char count, w:w, or w:spacing — the horizontal side-by-side layout is a
+    // paint concern (drawTateChuYokoRun), not the along-column advance. This is
+    // the measure side of the sample-26 regression fix: the "２９" cell advances
+    // one em, not natural × 0.67, so the following "日" no longer overlaps.
+    const s = seg({ text: '２９', fontSize: 12, tateChuYoko: true, charScale: 0.67, charSpacing: 5 });
+    // Natural width, w:w, and w:spacing are all IGNORED for the advance.
+    expect(segAdvanceWidth(s, 999, 3, 1)).toBe(12); // 12 pt × scale 1 = one em
+    // Scale 2 → one em is 24 px.
+    expect(segAdvanceWidth(s, 999, 3, 2)).toBe(24);
+  });
+
+  it('segAdvanceWidth ignores tateChuYoko when the flag is unset (normal advance)', () => {
+    // Same run WITHOUT the (vertical-gated) flag falls back to the w:w advance —
+    // so a horizontal page (where buildSegments never sets tateChuYoko) is
+    // byte-identical.
+    const s = seg({ text: '２９', fontSize: 12, charScale: 0.67 });
+    expect(segAdvanceWidth(s, 100, 0, 1)).toBeCloseTo(67, 10);
+  });
 });

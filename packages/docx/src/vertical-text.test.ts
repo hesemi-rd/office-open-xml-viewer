@@ -5,6 +5,7 @@ import {
   verticalGlyphOffset,
   splitVerticalOrientationRuns,
   drawVerticalRun,
+  drawTateChuYokoRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
   verticalTextLayerPlacement,
@@ -113,6 +114,7 @@ type Op =
   | { op: 'restore' }
   | { op: 'translate'; x: number; y: number }
   | { op: 'rotate'; a: number }
+  | { op: 'scale'; sx: number; sy: number }
   | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string }
   | { op: 'draw'; dx: number; dy: number; dw: number; dh: number };
 
@@ -146,6 +148,9 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
     },
     rotate(a: number) {
       ops.push({ op: 'rotate', a });
+    },
+    scale(sx: number, sy: number) {
+      ops.push({ op: 'scale', sx, sy });
     },
     measureText(s: string) {
       // Every code point is 10px wide.
@@ -312,6 +317,72 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(rotates).toHaveLength(2);
     expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
+  });
+});
+
+describe('drawTateChuYokoRun (§17.3.2.10 — horizontal-in-vertical / 縦中横)', () => {
+  it('draws the whole run as ONE upright, centred fillText in the cell centre', () => {
+    // Two full-width digits "２９" in a 12px cell (cellAdvance=12), no scale.
+    const { ctx, ops } = mockCtx();
+    drawTateChuYokoRun(ctx, '２９', 100, 200, 12, 12, 1, false);
+    // Exactly one fillText — the whole run, not per glyph.
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills).toHaveLength(1);
+    expect(fills[0].text).toBe('２９');
+    // Centred (center/middle) at local origin.
+    expect(fills[0]).toMatchObject({ align: 'center', baseline: 'middle', x: 0, y: 0 });
+    // Counter-rotated −90° (upright, cancels the +90° page rotation).
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(1);
+    expect(rotates[0].a).toBeCloseTo(-Math.PI / 2, 12);
+    // Pivot = cell centre along the column: x = 100 + cellAdvance/2 = 106, y=200.
+    const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translate).toEqual({ op: 'translate', x: 106, y: 200 });
+  });
+
+  it('applies w:w only to the cross-column (glyph width) axis — scale(charScale, 1)', () => {
+    // §17.3.2.43 w:w=67 compresses the digits side-by-side ACROSS the column
+    // (local x), NOT the along-column cell height (local y stays 1).
+    const { ctx, ops } = mockCtx();
+    drawTateChuYokoRun(ctx, '２９', 0, 0, 12, 12, 0.67, false);
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale).toEqual({ op: 'scale', sx: 0.67, sy: 1 });
+  });
+
+  it('leaves the along-column axis at 1 when vertCompress content already fits one em', () => {
+    // vertCompress on a single-line run whose natural height (asc+desc) equals the
+    // em: no compression needed, so scale y stays 1 (the common 2-digit case).
+    const { ctx, ops } = mockCtx({ fontBoundingBoxAscent: 9, fontBoundingBoxDescent: 3 }); // 12 = 1em
+    drawTateChuYokoRun(ctx, '２９', 0, 0, 12, 12, 1, true);
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale).toEqual({ op: 'scale', sx: 1, sy: 1 });
+  });
+
+  it('compresses the along-column axis when vertCompress content is taller than one em', () => {
+    // A run whose natural upright height exceeds one em is squeezed to fit one
+    // cell (§17.3.2.10): scale y = fontPx / height. Here height = 18 > 12 → 12/18.
+    const { ctx, ops } = mockCtx({ fontBoundingBoxAscent: 14, fontBoundingBoxDescent: 4 }); // 18px
+    drawTateChuYokoRun(ctx, '２９', 0, 0, 12, 12, 1, true);
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale?.sx).toBe(1);
+    expect(scale?.sy).toBeCloseTo(12 / 18, 12);
+  });
+
+  it('does not compress the height when vertCompress is off, even if content is tall', () => {
+    const { ctx, ops } = mockCtx({ fontBoundingBoxAscent: 14, fontBoundingBoxDescent: 4 });
+    drawTateChuYokoRun(ctx, '２９', 0, 0, 12, 12, 1, false);
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale).toEqual({ op: 'scale', sx: 1, sy: 1 });
+  });
+
+  it('combines w:w (width) and vertCompress (height) independently', () => {
+    // 3-digit-style case: w:w=0.5 across the column AND a tall run compressed to
+    // one em along the column — the two axes are set independently.
+    const { ctx, ops } = mockCtx({ fontBoundingBoxAscent: 18, fontBoundingBoxDescent: 6 }); // 24px
+    drawTateChuYokoRun(ctx, '２９９', 0, 0, 12, 12, 0.5, true);
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale?.sx).toBe(0.5);
+    expect(scale?.sy).toBeCloseTo(12 / 24, 12);
   });
 });
 

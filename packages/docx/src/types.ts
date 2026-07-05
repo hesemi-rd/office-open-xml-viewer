@@ -1114,6 +1114,23 @@ export interface DocxTextRun {
    *  to the threshold; absent ⇒ kerning off (the hierarchy default). `0` = kern
    *  at all sizes. */
   kerning?: number;
+  /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
+   *  (縦中横 / tate-chū-yoko). `true` means that in a VERTICAL (tbRl) page this
+   *  run's characters are laid out horizontally side by side within ONE cell of
+   *  the vertical line (rotated 90° relative to the vertical flow). Absent ⇒
+   *  normal vertical stacking. Inert in a horizontal page. */
+  eastAsianVert?: boolean;
+  /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vertCompress>` — compress the
+   *  縦中横 run to fit the existing line height without growing the line. Ignored
+   *  unless {@link eastAsianVert} is set. Absent ⇒ not compressed. */
+  eastAsianVertCompress?: boolean;
+  /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:combine>` — two-lines-in-one.
+   *  PARSED for completeness; not yet rendered (no fixture). */
+  eastAsianCombine?: boolean;
+  /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:combineBrackets>` (§17.18.8) —
+   *  bracket style around two-lines-in-one text. PARSED for completeness; the
+   *  two-lines-in-one draw is a follow-up. */
+  eastAsianCombineBrackets?: string;
   /** ECMA-376 §17.11.6/.7/.16/.17 — set when this run is a footnote/endnote
    *  reference marker (`<w:footnoteReference>` in the body, `<w:footnoteRef>` at
    *  the start of the note's content, and the endnote equivalents). `text` holds
