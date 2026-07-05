@@ -27,8 +27,13 @@
 //!
 //! * **M (content list):** ≥1 displayable node → one synthetic bulleted-list
 //!   shape filling the frame, paragraphs = nodes in tree order, `lvl` = depth.
-//! * **S (placeholder):** the data part is unreadable / empty → a bordered box
-//!   with a "SmartArt" label, so the diagram is never a silent hole.
+//! * **S (placeholder):** the data part is readable but yields no displayable
+//!   text (no `ptLst`, or only structural/empty points) → a bordered box with
+//!   a "SmartArt" label, so a readable-but-empty diagram is still visible.
+//!
+//! A missing `r:dm` relationship, a missing data part, or unparsable XML emits
+//! **nothing** (same as before this fallback existed): a broken reference is
+//! never turned into spurious output.
 
 use crate::text::{empty_level_bullets, parse_text_body, ShapeKind};
 use crate::types::*;
@@ -328,8 +333,9 @@ fn append_point_paragraphs(
 }
 
 /// S stage: a bordered placeholder box with a "SmartArt" label, used when the
-/// data model has no displayable text (or no ptLst). Ensures a diagram is never
-/// a silent hole even when we cannot recover any content.
+/// data model is readable but has no displayable text (no `ptLst`, or only
+/// structural/empty points). Not reached for a missing/unreadable data part —
+/// that case emits nothing (see [`emit_smartart_fallback`]).
 fn emit_placeholder(gf_xfrm: &Transform, out: &mut Vec<SlideElement>) -> bool {
     let mut para = default_paragraph();
     para.alignment = "ctr".into();
