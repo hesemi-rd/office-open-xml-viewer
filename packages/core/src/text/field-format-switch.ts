@@ -13,20 +13,46 @@
 //   ALPHABETIC  → upperLetter    alphabetic → lowerLetter
 // The switch arguments are CASE-SENSITIVE (Roman ≠ roman, ALPHABETIC ≠
 // alphabetic) — §17.16.4.3.1 lists them as distinct rows with different results.
+//
+// The international switch arguments below are the LOCALE-INDEPENDENT ones: each
+// §17.16.4.3.1 row that maps to exactly ONE ST_NumberFormat regardless of the
+// document language. The LOCALE-DEPENDENT arguments — CHINESENUM1/2/3, DBNUM1–4,
+// KANJINUM1–3, IROHA, AIUEO — are intentionally OMITTED: a single argument like
+// `\* DBNUM1` maps to ideographDigital (ja-JP) OR koreanDigital (ko-KR)
+// depending on the field's `w:lang`, which this parser does not thread. Guessing
+// a locale would be a heuristic (root CLAUDE.md forbids), so they return null and
+// the caller keeps the section format instead of choosing the wrong script.
 
 import type { NumberFormat } from './number-format';
 
 // Case-sensitive switch-argument → ST_NumberFormat, restricted to the values
-// `formatOrdinalNumber` renders natively. Arguments outside this set (CardText,
-// Ordinal, DBNUM1, Hex, …) intentionally have no entry: `parseFieldFormatSwitch`
-// returns null for them so the caller keeps the section format rather than
-// silently downgrading to decimal.
+// `formatOrdinalNumber` renders natively AND unambiguous across locales. Text
+// spell-out arguments (CardText, Ordinal, OrdText, BAHTTEXT, …) intentionally
+// have no entry: `parseFieldFormatSwitch` returns null for them so the caller
+// keeps the section format rather than silently downgrading to decimal.
 const SWITCH_TO_FORMAT: Readonly<Record<string, NumberFormat>> = {
+  // §17.16.4.3.1 Latin / roman / hex / dash core.
   Arabic: 'decimal',
+  ArabicDash: 'numberInDash', // "- 123 -"
+  Hex: 'hex', // uppercase hexadecimal
   Roman: 'upperRoman',
   roman: 'lowerRoman',
   ALPHABETIC: 'upperLetter',
   alphabetic: 'lowerLetter',
+  // §17.16.4.3.1 international, locale-independent (one ST_NumberFormat each).
+  ARABICABJAD: 'arabicAbjad', // ascending Abjad numerals
+  ARABICALPHA: 'arabicAlpha', // Arabic alphabet
+  HEBREW1: 'hebrew1', // Hebrew numerals (gematria)
+  HEBREW2: 'hebrew2', // Hebrew alphabet
+  HINDIARABIC: 'hindiNumbers', // Hindi numbers
+  HINDILETTER1: 'hindiVowels', // Hindi vowels
+  HINDILETTER2: 'hindiConsonants', // Hindi consonants
+  THAIARABIC: 'thaiNumbers', // Thai numbers
+  THAILETTER: 'thaiLetters', // Thai letters
+  CHOSUNG: 'chosung', // Korean Chosung
+  GANADA: 'ganada', // Korean Ganada
+  DBCHAR: 'decimalFullWidth', // double-byte (full-width) Arabic
+  SBCHAR: 'decimalHalfWidth', // single-byte (half-width) Arabic
 };
 
 /**
