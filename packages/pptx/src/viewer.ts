@@ -10,7 +10,13 @@ import {
   type HyperlinkTarget,
   type FindMatch,
   type FindMatchesOptions,
+  type ZoomableViewer,
+  EMU_PER_PX,
   openExternalHyperlink,
+  nextZoomStep,
+  prevZoomStep,
+  clampScale,
+  fitScale,
 } from '@silurus/ooxml-core';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
@@ -24,6 +30,17 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   onSlideChange?: (index: number, total: number) => void;
   /** Called on parse or render errors */
   onError?: (err: Error) => void;
+  /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
+   *  {@link PptxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
+   *  as user-facing zoom factors (`1` = 100% = the slide at its natural
+   *  EMU→px size). Defaults 0.1–4 (10%–400%), matching the other viewers. */
+  zoomMin?: number;
+  zoomMax?: number;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100%): from
+   *  {@link PptxViewer.setScale}, `zoomIn`/`zoomOut`, or `fitWidth`/`fitPage`.
+   *  Named `onScaleChange` to match the docx/xlsx viewers so all five share one
+   *  notification shape. */
+  onScaleChange?: (scale: number) => void;
   /**
    * Enable interactive audio/video playback. When true, slides are rendered
    * via {@link PptxPresentation.presentSlide} so media elements become
@@ -78,9 +95,18 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
  *
  * For custom layouts (multi-canvas, thumbnails, scroll view) use PptxPresentation directly.
  */
-export class PptxViewer {
+export class PptxViewer implements ZoomableViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly wrapper: HTMLDivElement;
+  /**
+   * IX9 explicit zoom factor (`1` = 100% = the slide at its natural EMU→px
+   * width), or `null` when the caller has never invoked a zoom method. `null`
+   * preserves the pre-IX9 render path EXACTLY: the slide renders at `opts.width`
+   * (or `canvas.offsetWidth || 960` when unset), so default rendering is
+   * byte-identical. The first zoom call latches a number here, after which
+   * {@link _targetWidth} derives the render width from it.
+   */
+  private _scale: number | null = null;
   /** The canvas's DOM position BEFORE the constructor reparented it into
    *  {@link wrapper}, captured so {@link destroy} can return the caller-owned
    *  canvas to exactly where it was. `null` parent = canvas was passed
@@ -331,13 +357,105 @@ export class PptxViewer {
   /** The underlying <canvas> element. */
   get canvasElement(): HTMLCanvasElement { return this.canvas; }
 
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** Natural (100%) CSS-px width of a slide — `slideWidth(EMU) / EMU_PER_PX`.
+   *  0 when nothing is loaded. The scale-1 reference every zoom factor
+   *  multiplies. */
+  private _naturalWidthPx(): number {
+    const emu = this.engine?.slideWidth ?? 0;
+    return emu > 0 ? emu / EMU_PER_PX : 0;
+  }
+
+  /**
+   * The width (CSS px) the render paths draw the slide at, honouring the zoom
+   * state. `_scale === null` (no zoom method ever called) ⇒ the pre-IX9 value
+   * `opts.width ?? (canvas.offsetWidth || 960)` verbatim (byte-identical
+   * default). Once a factor latched ⇒ `naturalWidth × scale` (rounded), so the
+   * slide is exactly `scale ×` its natural size regardless of `opts.width`.
+   */
+  private _targetWidth(): number {
+    if (this._scale === null) return this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return this.opts.width ?? (this.canvas.offsetWidth || 960);
+    return Math.round(natural * this._scale);
+  }
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor (`1` = 100%). Before
+   *  any zoom method is called this is the EFFECTIVE scale implied by the render
+   *  width: `targetWidth / naturalWidth`, or `1` when nothing is loaded. */
+  getScale(): number {
+    if (this._scale !== null) return this._scale;
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return 1;
+    return this._targetWidth() / natural;
+  }
+
+  private _zoomMin(): number { return this.opts.zoomMin ?? 0.1; }
+  private _zoomMax(): number { return this.opts.zoomMax ?? 4; }
+
+  /**
+   * IX9 {@link ZoomableViewer} — set the absolute zoom factor (`1` = 100% = the
+   * slide at its natural EMU→px width), clamped to `[zoomMin, zoomMax]`, and
+   * re-render the current slide at the new size. Fires `onScaleChange` when the
+   * clamped factor actually changes. Resolves once the re-render settles.
+   */
+  async setScale(scale: number): Promise<void> {
+    const next = clampScale(scale, this._zoomMin(), this._zoomMax());
+    const changed = next !== this.getScale();
+    this._scale = next;
+    await this.renderCurrentSlide();
+    if (changed) this.opts.onScaleChange?.(next);
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder (clamped to `zoomMax`). */
+  async zoomIn(): Promise<void> { await this.setScale(nextZoomStep(this.getScale())); }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  async zoomOut(): Promise<void> { await this.setScale(prevZoomStep(this.getScale())); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the current slide's WIDTH to the host
+   * container (the element the canvas lives in), then re-render. Defers (no-op)
+   * when nothing is loaded or the container is unlaid-out. Routes through
+   * {@link setScale}.
+   */
+  async fitWidth(): Promise<void> { await this._fit('width'); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the WHOLE current slide (width and height)
+   * inside the container so it is fully visible; takes the tighter of the
+   * width/height fit. Defers when unloaded / unlaid-out.
+   */
+  async fitPage(): Promise<void> { await this._fit('page'); }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: measure the natural slide
+   *  size + the container box, ask core's pure `fitScale`, apply via setScale. */
+  private async _fit(mode: 'width' | 'page'): Promise<void> {
+    if (!this.engine) return;
+    const container = this.wrapper.parentElement;
+    if (!container) return;
+    const scale = fitScale(
+      {
+        contentWidth: this.engine.slideWidth / EMU_PER_PX,
+        contentHeight: this.engine.slideHeight / EMU_PER_PX,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out / empty — defer
+    await this.setScale(scale);
+  }
+
   private async renderCurrentSlide(): Promise<void> {
     if (!this.engine) return;
     const dim =
       this._hiddenMode === 'dim' && this.engine.isHidden(this.currentSlide)
         ? this._dim()
         : undefined;
-    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const targetWidth = this._targetWidth();
     const dpr = this.opts.dpr ?? (window.devicePixelRatio || 1);
 
     const scale = targetWidth / this.engine.slideWidth;
@@ -428,7 +546,7 @@ export class PptxViewer {
       typeof OffscreenCanvas !== 'undefined'
         ? new OffscreenCanvas(1, 1)
         : (document.createElement('canvas') as HTMLCanvasElement);
-    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const targetWidth = this._targetWidth();
     await this.engine.renderSlide(off, slide, {
       width: targetWidth,
       onTextRun: (r: PptxTextRunInfo) => runs.push(r),
@@ -504,7 +622,7 @@ export class PptxViewer {
   /** Rebuild the highlight overlay for the current slide from cached runs. */
   private _redrawHighlights(): void {
     const runs = this._find.slideRuns(this.currentSlide) ?? [];
-    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const targetWidth = this._targetWidth();
     const cssHeight = this.engine
       ? Math.round(this.engine.slideHeight * (targetWidth / this.engine.slideWidth))
       : 0;
