@@ -364,6 +364,21 @@ export { computeVisibleRange, type VisibleRange, type VisibleRangePad } from './
 // Shared exponential wheel/pinch zoom step (Ctrl/⌘+wheel). Pure — the caller
 // clamps to its own [zoomMin, zoomMax]. Used by XlsxViewer + the scroll viewers.
 export { zoomStepScale } from './interaction/zoom';
+// IX9 — the shared zoom API contract for all five viewers: the ZoomableViewer
+// interface (getScale/setScale/zoomIn/zoomOut/fitWidth/fitPage) plus its pure
+// support logic (the discrete zoom-step ladder, fit-to-content scale math, clamp).
+// One definition of "what a zoom factor means / what +/- steps are" across
+// docx / pptx / xlsx so a host drives any viewer through the same calls.
+export {
+  type ZoomableViewer,
+  type FitInput,
+  type FitMode,
+  ZOOM_STEP_LADDER,
+  nextZoomStep,
+  prevZoomStep,
+  clampScale,
+  fitScale,
+} from './interaction/zoomable';
 // Shared hyperlink model + URL scheme-allowlist sanitiser (IX1). One
 // HyperlinkTarget shape + one sanitizeHyperlinkUrl predicate for docx / pptx /
 // xlsx so the external-URL safety policy is defined once, not per format.
