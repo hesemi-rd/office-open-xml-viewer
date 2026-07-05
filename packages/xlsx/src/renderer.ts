@@ -3,7 +3,9 @@ import type {
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, GradientFillSpec, ShapeInfo, SlicerItem,
+  PhoneticRun, PhoneticProperties, PhoneticAlignment,
 } from './types.js';
+import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
@@ -635,6 +637,101 @@ function buildFont(font: CellFont, cs = 1): string {
   const weight = font.bold ? 'bold ' : '';
   const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
   return `${style}${weight}${sizePx}px ${fontStackFor(font.name)}`;
+}
+
+/**
+ * Draw the furigana (phonetic-hint) band across the top of a cell
+ * (ECMA-376 §18.4.6 `<rPh>` / §18.4.3 `<phoneticPr>`).
+ *
+ * The caller must have already set the clip to the cell rect and drawn the base
+ * text; this stamps the small reading glyphs ABOVE the base text, sitting in the
+ * top strip Excel reserves when a phonetic row is auto-fitted (that expanded
+ * height is already stored in the row's `ht`, so we never grow the row here —
+ * we draw within the existing rectangle, which clips an over-tall reading the
+ * same way Excel clips when a manual height is too small).
+ *
+ * `phoneticPr.fontId` (§18.18.32) selects the reading font from the style sheet;
+ * out of bounds falls back to font 0 (§18.4.3). `alignment` (§18.18.56) and
+ * `type` (§18.18.57) default to `left` / `fullwidthKatakana` when absent.
+ * `baseLeftX` is the sheet-x of the base text's first glyph — the phonetic
+ * band is positioned relative to the base glyphs it annotates.
+ */
+export function drawPhoneticBand(
+  ctx: CanvasRenderingContext2D,
+  runs: readonly PhoneticRun[],
+  pr: PhoneticProperties | undefined,
+  baseText: string,
+  baseFontStr: string,
+  styles: Styles,
+  baseLeftX: number,
+  cellTopY: number,
+  cs: number,
+  color: string,
+): void {
+  if (runs.length === 0) return;
+  // §18.4.3: fontId selects the reading font; out of bounds → font 0.
+  const fontId = pr?.fontId ?? 0;
+  const phFont: CellFont | undefined = styles.fonts[fontId] ?? styles.fonts[0];
+  if (!phFont) return;
+  const alignment: PhoneticAlignment = pr?.alignment ?? 'left';
+
+  ctx.save();
+  ctx.font = buildFont(phFont, cs);
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = color;
+
+  // Sit the reading just below the cell's top padding.
+  const y = cellTopY + Math.round(2 * cs);
+
+  if (alignment === 'noControl') {
+    // §18.18.56 noControl: NOT per word — lay the readings out left-to-right
+    // from the base text's left edge, each at its own natural (reading-font)
+    // width, in run order. Measured with the reading font already active.
+    let cursor = baseLeftX;
+    for (const run of runs) {
+      ctx.fillText(run.text, cursor, y);
+      cursor += ctx.measureText(run.text).width;
+    }
+    ctx.restore();
+    return;
+  }
+
+  // Per-word (left / center / distributed): position each hint over its base
+  // span using BASE-font advances (so the band lines up with the glyphs it
+  // annotates). `baseFontStr` is the font string the base text was drawn with.
+  const placed = placePhoneticRuns(runs, baseText, baseLeftX, alignment, (s) =>
+    measureInFont(ctx, s, baseFontStr),
+  );
+
+  for (const p of placed) {
+    const naturalW = ctx.measureText(p.text).width;
+    const cps = [...p.text];
+    if (p.spread === 'distribute' && cps.length > 1 && naturalW < p.width) {
+      // §18.18.56 distributed: spread the reading glyphs so the first hugs the
+      // left edge and the last the right edge of the base span.
+      const extra = (p.width - naturalW) / (cps.length - 1);
+      try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${extra}px`; } catch { /* ignore */ }
+      ctx.fillText(p.text, p.x, y);
+      try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = '0px'; } catch { /* ignore */ }
+    } else if (p.spread === 'center') {
+      // §18.18.56 center: centre the natural reading width over the base span.
+      ctx.fillText(p.text, p.x + (p.width - naturalW) / 2, y);
+    } else {
+      // §18.18.56 left: left-justified at the base span's left edge.
+      ctx.fillText(p.text, p.x, y);
+    }
+  }
+  ctx.restore();
+}
+
+/** Measure `s` under `fontStr`, restoring the caller's current font afterward. */
+function measureInFont(ctx: CanvasRenderingContext2D, s: string, fontStr: string): number {
+  const prev = ctx.font;
+  ctx.font = fontStr;
+  const w = ctx.measureText(s).width;
+  ctx.font = prev;
+  return w;
 }
 
 /**
@@ -2599,6 +2696,38 @@ function renderQuadrant(
           else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
           ctx.fillText(drawText, textX, textY + vaYShift);
         }
+      }
+
+      // ECMA-376 §18.4.6 / §18.4.3 furigana: when the cell opts in (`ph="1"`)
+      // and its String Item carries phonetic runs, stamp the reading across the
+      // top of the cell over the base glyphs. Drawn inside the cell clip (so an
+      // over-tall reading clips like Excel) and skipped for stacked/rotated
+      // text (which return early above) and hard-break multi-line values
+      // (furigana over wrapped lines is not a shape Excel produces for
+      // phonetic cells). `baseLeftX` follows where the base text is drawn:
+      // left/general anchors at the text start; center/right shift by the
+      // measured base width.
+      const phRuns = cell.value.type === 'text' ? cell.value.phoneticRuns : undefined;
+      if (cell.showPhonetic && phRuns && phRuns.length > 0 && !text.includes('\n')) {
+        const baseFontStr = buildFont(fontForDraw, cs);
+        const baseTextW = measureInFont(ctx, text, baseFontStr);
+        let baseLeftX: number;
+        if (alignH === 'right') baseLeftX = cx + cellW - paddingX - baseTextW;
+        else if (alignH === 'center') baseLeftX = cx + cellW / 2 - baseTextW / 2;
+        else baseLeftX = cx + leftPad;
+        const phColor = textColor ? hexToRgba(textColor) : '#000000';
+        drawPhoneticBand(
+          ctx,
+          phRuns,
+          cell.value.type === 'text' ? cell.value.phoneticPr : undefined,
+          text,
+          baseFontStr,
+          styles,
+          baseLeftX,
+          cy,
+          cs,
+          phColor,
+        );
       }
 
       ctx.restore();

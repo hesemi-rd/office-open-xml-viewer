@@ -631,11 +631,29 @@ export interface Cell {
    *  so the cached `<v>` — frozen when the file was last saved — doesn't
    *  show a stale date. */
   formula?: string;
+  /** ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell displays its phonetic
+   *  hint (furigana). Omitted on the wire when false (the schema default), so
+   *  read as `showPhonetic ?? false`. A cell whose String Item carries `<rPh>`
+   *  runs still shows NO furigana unless it opts in with `ph="1"`. */
+  showPhonetic?: boolean;
 }
 
 export type CellValue =
   | { type: 'empty' }
-  | { type: 'text'; text: string; runs?: Run[] }
+  | {
+      type: 'text';
+      text: string;
+      runs?: Run[];
+      /** ECMA-376 §18.4.6 phonetic runs (furigana) carried over from the
+       *  resolved String Item. Present for inline strings, and populated by
+       *  {@link resolveSharedStrings} for shared-string cells. Absent when the
+       *  string has no furigana. */
+      phoneticRuns?: PhoneticRun[];
+      /** ECMA-376 §18.4.3 phonetic display properties (font index / char set /
+       *  alignment) for the furigana above. Absent when the `<si>` had no
+       *  `<phoneticPr>`. */
+      phoneticPr?: PhoneticProperties;
+    }
   | { type: 'number'; number: number }
   | { type: 'bool'; bool: boolean }
   | { type: 'error'; error: string }
@@ -644,6 +662,42 @@ export type CellValue =
    *  renderer (or any other consumer) sees it, so downstream code never
    *  encounters this variant. */
   | { type: 'shared'; si: number };
+
+/** ECMA-376 §18.4.6 `<rPh sb=".." eb="..">` — one furigana run. `sb`/`eb` are
+ *  zero-based character offsets into the base text; the hint `text` is shown
+ *  over base characters `[sb, eb)`. */
+export interface PhoneticRun {
+  /** Zero-based start character offset into the base text (inclusive). */
+  sb: number;
+  /** Zero-based end character offset into the base text (exclusive). */
+  eb: number;
+  /** The phonetic hint text (e.g. the katakana reading). */
+  text: string;
+}
+
+/** ECMA-376 §18.18.57 ST_PhoneticType — the East-Asian character set the
+ *  furigana is displayed in. Absent on {@link PhoneticProperties} defaults to
+ *  `'fullwidthKatakana'` per the CT_PhoneticPr schema. */
+export type PhoneticType =
+  | 'fullwidthKatakana'
+  | 'halfwidthKatakana'
+  | 'Hiragana'
+  | 'noConversion';
+
+/** ECMA-376 §18.18.56 ST_PhoneticAlignment — how the furigana is aligned over
+ *  the base text. Absent on {@link PhoneticProperties} defaults to `'left'`. */
+export type PhoneticAlignment = 'left' | 'center' | 'distributed' | 'noControl';
+
+/** ECMA-376 §18.4.3 `<phoneticPr>` — phonetic display properties. */
+export interface PhoneticProperties {
+  /** Zero-based index into `Styles.fonts` (§18.18.32 ST_FontId). Out of bounds
+   *  falls back to font 0 (§18.4.3). Drives the furigana font size / family. */
+  fontId: number;
+  /** §18.18.57 — absent means `'fullwidthKatakana'` (schema default). */
+  type?: PhoneticType;
+  /** §18.18.56 — absent means `'left'` (schema default). */
+  alignment?: PhoneticAlignment;
+}
 
 export interface Run {
   text: string;
@@ -674,6 +728,12 @@ export interface RunFont {
 export interface SharedString {
   text: string;
   runs?: Run[];
+  /** ECMA-376 §18.4.6 phonetic runs (furigana). Absent when the `<si>` has no
+   *  `<rPh>`. */
+  phoneticRuns?: PhoneticRun[];
+  /** ECMA-376 §18.4.3 phonetic display properties. Absent when the `<si>` has
+   *  no `<phoneticPr>`. */
+  phoneticPr?: PhoneticProperties;
 }
 
 export interface NumFmt {

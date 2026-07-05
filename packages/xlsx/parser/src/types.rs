@@ -978,6 +978,13 @@ pub struct Cell {
     /// last saved) doesn't show a stale date.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
+    /// ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell should display its
+    /// phonetic hint (furigana). Defaults to `false` (the schema default), so a
+    /// cell whose String Item carries `<rPh>` runs still shows NO furigana
+    /// unless the cell opts in with `ph="1"`. This mirrors Excel: the shared
+    /// string keeps the reading, but display is a per-cell toggle.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub show_phonetic: bool,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -989,6 +996,15 @@ pub enum CellValue {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         runs: Option<Vec<Run>>,
+        /// ECMA-376 §18.4.6 phonetic runs (furigana) for this text, carried
+        /// over from the resolved String Item. Only populated for inline
+        /// strings here; shared-string cells ship a `Shared { si }` reference
+        /// and the consumer pulls the phonetic data off the `SharedString`.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        phonetic_runs: Vec<PhoneticRun>,
+        /// ECMA-376 §18.4.3 phonetic display properties for the furigana above.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phonetic_pr: Option<PhoneticProperties>,
     },
     Number {
         number: f64,
@@ -1044,6 +1060,56 @@ pub struct SharedString {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runs: Option<Vec<Run>>,
+    /// ECMA-376 §18.4.6 `<rPh>` phonetic runs (furigana) for this string item.
+    /// Each run's `sb`/`eb` are zero-based character offsets into `text`; the
+    /// hint applies over `text[sb..eb)`. Empty when the `<si>` carries no
+    /// furigana. Kept separate from `text`/`runs` so the base string a
+    /// consumer searches / measures never includes the phonetic hint (matching
+    /// Excel, whose Find searches base text, not furigana).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub phonetic_runs: Vec<PhoneticRun>,
+    /// ECMA-376 §18.4.3 `<phoneticPr>` — how the furigana is displayed (font
+    /// record index, character set, alignment). Absent when the `<si>` has no
+    /// `<phoneticPr>`; the renderer then applies the schema defaults
+    /// (fullwidthKatakana / left) and falls back to font 0 for the size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phonetic_pr: Option<PhoneticProperties>,
+}
+
+/// ECMA-376 §18.4.6 `<rPh sb=".." eb=".."><t>..</t></rPh>` — one furigana run.
+/// `sb`/`eb` are zero-based **character** (Unicode scalar) offsets into the
+/// String Item's base text; the phonetic hint `text` is shown over the base
+/// characters `[sb, eb)`. The spec requires `sb < eb` and both within the base
+/// length; the renderer positions the hint over that base span.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneticRun {
+    /// Zero-based start character offset into the base text (inclusive).
+    pub sb: u32,
+    /// Zero-based end character offset into the base text (exclusive).
+    pub eb: u32,
+    /// The phonetic hint text (e.g. the katakana reading).
+    pub text: String,
+}
+
+/// ECMA-376 §18.4.3 `<phoneticPr>` — phonetic display properties for a String
+/// Item. `fontId` is a required zero-based index into `styles.xml`'s font
+/// records; out of bounds falls back to font 0 (§18.4.3). `type` and
+/// `alignment` default to `fullwidthKatakana` and `left` respectively when the
+/// attribute is absent (CT_PhoneticPr schema defaults).
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneticProperties {
+    /// Zero-based index into the style sheet's font records (§18.18.32 ST_FontId).
+    pub font_id: u32,
+    /// ECMA-376 §18.18.57 ST_PhoneticType — "fullwidthKatakana" (default) |
+    /// "halfwidthKatakana" | "Hiragana" | "noConversion".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    /// ECMA-376 §18.18.56 ST_PhoneticAlignment — "left" (default) | "center" |
+    /// "distributed" | "noControl".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]

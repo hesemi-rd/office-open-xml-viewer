@@ -218,10 +218,12 @@ mod tests {
             SharedString {
                 text: "Alpha".to_string(),
                 runs: None,
+                ..Default::default()
             },
             SharedString {
                 text: "Beta".to_string(),
                 runs: None,
+                ..Default::default()
             },
         ];
         let sheet = json!({
