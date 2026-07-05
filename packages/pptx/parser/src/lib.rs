@@ -903,6 +903,9 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
         slides: vec![Slide {
             index: 0,
             slide_number: 1,
+            // A whole-container failure has no readable slide part, so there is
+            // nothing an internal slide jump could resolve to — no part name.
+            part_name: None,
             background: None,
             elements: Vec::new(),
             notes: None,
