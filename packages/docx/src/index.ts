@@ -35,6 +35,11 @@ export type {
   // Per-section page-numbering settings (reachable via SectionProps.pageNumType
   // and the BodyElement sectionBreak arm's `pageNumType`, ECMA-376 §17.6.12).
   PageNumType,
+  // Per-section page decorations (reachable via SectionProps): page borders
+  // (§17.6.10) and line numbering (§17.6.8).
+  PageBorders,
+  PageBorderEdge,
+  LineNumbering,
   // Multi-column section sub-types (reachable via SectionProps.columns).
   ColumnsSpec,
   ColSpec,

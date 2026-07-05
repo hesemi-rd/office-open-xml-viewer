@@ -208,6 +208,81 @@ pub struct PageNumType {
     pub fmt: Option<String>,
 }
 
+/// ECMA-376 §17.6.10 `<w:pgBorders>` — the page borders drawn around each page of
+/// a section. Each edge is a `CT_Border` (§17.18.4: val / sz / space / color);
+/// the container carries the placement globals `offsetFrom`, `display`, `zOrder`.
+/// `None` on `SectionProps` when the sectPr declares no `<w:pgBorders>` (the
+/// common case — no page border), so existing snapshots are byte-identical.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PageBorders {
+    /// `@w:offsetFrom` (ST_PageBorderOffset §17.18.63): "page" ⇒ each edge's
+    /// `space` is measured from the PAGE edge; "text" (the spec DEFAULT) ⇒ from
+    /// the text margin. Carried verbatim; the renderer positions the rectangle
+    /// accordingly.
+    pub offset_from: String,
+    /// `@w:display` (ST_PageBorderDisplay §17.18.62): "allPages" (default) |
+    /// "firstPage" | "notFirstPage". Governs which physical pages of the section
+    /// show the border.
+    pub display: String,
+    /// `@w:zOrder` (ST_PageBorderZOrder §17.18.64): "front" (default) ⇒ the border
+    /// is painted OVER intersecting text/objects; "back" ⇒ UNDER them.
+    pub z_order: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<PageBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<PageBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<PageBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<PageBorderEdge>,
+}
+
+/// ECMA-376 §17.18.4 `CT_Border` as used by one edge of `<w:pgBorders>`. Same
+/// shape as `ParaBorderEdge`: a line style + color + width (pt) + spacing (pt).
+/// Art borders (`@w:val` naming a decorative image, §17.18.2 ST_Border art
+/// values) are NOT modeled — an art `val` is carried verbatim and the renderer
+/// falls back to no ink (documented as unsupported).
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PageBorderEdge {
+    /// `@w:val` — ST_Border line style ("single" | "double" | "dashed" | "dotted"
+    /// | "thick" | …). Reused by the renderer's shared border-line drawing.
+    pub style: String,
+    /// `@w:color` — hex 6, or `None` for "auto" (renderer defaults to black).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// `@w:sz` in pt (eighths of a point ÷ 8), like every other CT_Border width.
+    pub width: f64,
+    /// `@w:space` in pt. For page borders `space` is a POINT measure (ST_PointMeasure
+    /// §17.18.68, 0–31), NOT twips — the offset the border is inset by from the
+    /// `offset_from` reference (page edge or text margin).
+    pub space: f64,
+}
+
+/// ECMA-376 §17.6.8 `<w:lnNumType>` — line numbering for a section: a number is
+/// drawn in the left margin of each body line that is a multiple of `count_by`.
+/// `None` on `SectionProps` when the sectPr declares no `<w:lnNumType>` (line
+/// numbering is off — the common case; snapshots stay byte-identical).
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LineNumbering {
+    /// `@w:countBy` (§17.6.8): only lines whose number is an even multiple of this
+    /// value display a number. Required for the struct to exist — an absent
+    /// `countBy` means NO line numbering, so the whole struct is `None` then.
+    pub count_by: i64,
+    /// `@w:start` — the starting line number after each restart. Default 1.
+    pub start: i64,
+    /// `@w:distance` in pt (twips ÷ 20) — the gap between the text margin and the
+    /// line-number glyphs. `None` ⇒ implementation-defined positioning (§17.6.8);
+    /// the renderer uses a default gap then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
+    /// `@w:restart` (ST_LineNumberRestart §17.18.47): "newPage" (default) |
+    /// "newSection" | "continuous". When the counter is reset to `start`.
+    pub restart: String,
+}
+
 /// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — a section's page
 /// geometry: page size + margins + header/footer distances (all pt, converted
 /// from twips). Carried on a `BodyElement::SectionBreak` (`geom`) so mid-body
@@ -310,6 +385,19 @@ pub struct SectionProps {
     /// physical page from this + the per-section `geom.pageNumType`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_num_type: Option<PageNumType>,
+    /// ECMA-376 §17.6.10 `<w:pgBorders>` — page borders for this section. `None`
+    /// when the sectPr declares none (no page border — the common case).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_borders: Option<PageBorders>,
+    /// ECMA-376 §17.6.8 `<w:lnNumType>` — line numbering for this section. `None`
+    /// when line numbering is off (no `<w:lnNumType countBy>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_numbering: Option<LineNumbering>,
+    /// ECMA-376 §17.6.23 `<w:vAlign w:val>` — vertical alignment of the body text
+    /// between the top/bottom margins ("top" | "center" | "both" | "bottom").
+    /// `None` ⇒ "top" (the default; body flows from the top margin unchanged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v_align: Option<String>,
 }
 
 /// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.

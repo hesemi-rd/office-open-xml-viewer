@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -336,6 +336,27 @@ export interface RenderState {
    *  and replays them after the whole page's flow, so front floats land on top.
    *  `null`/absent ⇒ draw in place (headers/footers and measurement passes). */
   deferFront?: Array<() => void> | null;
+  /** ECMA-376 §17.6.8 `<w:lnNumType>` — active line-numbering config for the
+   *  BODY flow of the current section, or `undefined` when line numbering is off.
+   *  When set, {@link drawParagraphLine} draws the line's number in the left
+   *  margin (for lines whose 1-based count is a multiple of `countBy`) and the
+   *  body flow advances {@link lineNumberCounter}. Only the top-level body render
+   *  sets this — nested renders (headers/footers, table cells, notes) clear it so
+   *  their lines are not numbered (§17.6.8 numbers the main document story). */
+  lineNumbering?: {
+    countBy: number;
+    start: number;
+    /** Left-margin gap from the text margin to the number glyphs (pt). */
+    distancePt: number;
+    /** The number font size (pt) — the document's default, so numbers match the
+     *  body baseline grid. */
+    fontSizePt: number;
+  };
+  /** ECMA-376 §17.6.8 — the running body line count for the current page. Seeded
+   *  to `lineNumbering.start` at the top of each page (restart="newPage", the
+   *  default) or to the continued value for continuous/newSection. Incremented
+   *  once per body line drawn (or measured in a dry-run counting pass). */
+  lineNumberCounter?: number;
   /** ECMA-376 §17.6.20 vertical writing (tbRl). When true the page is laid out
    *  in a SWAPPED logical coordinate space (logical width = physical page height)
    *  and the whole page paint is rotated +90° into physical space by
@@ -1213,7 +1234,79 @@ export async function renderDocumentToCanvas(
   // and the header's extent, so a tall header (headerReservePx > 0) pushes the first
   // body line down to the header's bottom. The same overflow shrank the paginated
   // content area from the top (computeHeaderReserves), so the body fits within margins.
-  const bodyState: RenderState = { ...baseState, y: bodyTopPt * scale + headerReservePx };
+  const bodyTopY = bodyTopPt * scale + headerReservePx;
+  const bodyState: RenderState = { ...baseState, y: bodyTopY };
+
+  // ECMA-376 §17.6.8 — line numbering. Seed the body render's per-line counter so
+  // drawParagraphLine numbers each body line. `newPage` (the default) restarts at
+  // `start` on every page; `continuous`/`newSection` need the running total of body
+  // lines on the pages before this one, obtained by a dry-run body render of each
+  // prior page (the counter is advanced there too — the increment is outside the
+  // `!dryRun` ink guard). Header/footer/cell/note renders never carry `lineNumbering`
+  // (bodyState alone sets it; nested states clear it), so only the main document
+  // story (§17.6.8) is numbered. Line numbering runs only for a single-column body:
+  // per-column numbering geometry is not modeled (documented follow-up).
+  const lnCfg = sec.lineNumbering;
+  if (lnCfg && columns.length <= 1) {
+    const lineNumbering = {
+      countBy: lnCfg.countBy,
+      start: lnCfg.start,
+      distancePt: lnCfg.distance ?? LINE_NUMBER_DEFAULT_DISTANCE_PT,
+      fontSizePt: docDefaultFontSizePt(doc),
+    };
+    bodyState.lineNumbering = lineNumbering;
+    let startCount = lnCfg.start;
+    if ((lnCfg.restart === 'continuous' || lnCfg.restart === 'newSection') && pageIndex > 0) {
+      // Count body lines on all prior pages via a dry-run body render, so this
+      // page's numbering continues from the running total. (newSection restarts at
+      // a section boundary; single-section docs — the only fixtures here — have no
+      // interior boundary, so it behaves like continuous. A per-section reset is a
+      // documented follow-up.)
+      let count = lnCfg.start;
+      for (let p = 0; p < pageIndex; p++) {
+        const priorState: RenderState = {
+          ...bodyState,
+          y: 0,
+          dryRun: true,
+          floats: [],
+          lineNumberCounter: count,
+        };
+        renderBodyElements(pages[p] ?? [], priorState, computeColumns(sec), 0);
+        count = priorState.lineNumberCounter ?? count;
+      }
+      startCount = count;
+    }
+    bodyState.lineNumberCounter = startCount;
+  }
+
+  // ECMA-376 §17.6.23 — body vertical alignment (`<w:vAlign>`). "top" (default)
+  // leaves the body at the top margin. "center"/"bottom" measure the total body
+  // content height for THIS page and shift the whole flow down. "both" (vertical
+  // justification by distributing inter-paragraph space) is parsed but not yet
+  // distributed — it falls back to "top" (documented follow-up). vAlign is skipped
+  // when a header pushed the body down (headerReservePx > 0): the reserved area is
+  // not available for centering.
+  const vAlign = sec.vAlign;
+  if ((vAlign === 'center' || vAlign === 'bottom') && headerReservePx === 0) {
+    // Available vertical band between the top and bottom text margins (§17.6.23).
+    const bandTopY = bodyTopPt * scale;
+    const bandBottomY = cssHeight - bodyBottomPt * scale - footerReservePx;
+    const bandH = bandBottomY - bandTopY;
+    // Measure the body content height for this page (dry run; no ink, no counter).
+    const measureState: RenderState = { ...bodyState, y: 0, dryRun: true, floats: [], lineNumbering: undefined, lineNumberCounter: undefined };
+    renderBodyElements(elements, measureState, columns, 0);
+    const contentH = measureState.y;
+    if (contentH < bandH) {
+      const shift = vAlign === 'center' ? (bandH - contentH) / 2 : bandH - contentH;
+      bodyState.y = bandTopY + shift;
+    }
+  }
+
+  // ECMA-376 §17.6.10 — page borders with zOrder="back" are painted UNDER the body
+  // flow (behind intersecting text/objects). Drawn here, before the body.
+  if (sec.pageBorders && sec.pageBorders.zOrder === 'back' && pageBorderShownOnPage(sec.pageBorders, pageIndex)) {
+    drawPageBorders(ctx, sec.pageBorders, sec, scale);
+  }
   // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
   // so glyphs sit on top. A thin rule is centred in each inter-column gap and
   // spans the content height. With per-section columns a page can carry more than
@@ -1248,6 +1341,12 @@ export async function renderDocumentToCanvas(
   // page, after the body flow. Minimal impl: a heading-less list at doc end.
   if (pageIndex === totalPages - 1) {
     drawEndnotes(doc, bodyState, scale, cssHeight, sec);
+  }
+
+  // ECMA-376 §17.6.10 — page borders with zOrder="front" (the default) are painted
+  // OVER intersecting text/objects, so draw them LAST (after the whole page flow).
+  if (sec.pageBorders && sec.pageBorders.zOrder !== 'back' && pageBorderShownOnPage(sec.pageBorders, pageIndex)) {
+    drawPageBorders(ctx, sec.pageBorders, sec, scale);
   }
 }
 
@@ -1390,7 +1489,8 @@ function drawEndnotes(
   ctx.stroke();
   ctx.restore();
 
-  const noteState: RenderState = { ...bodyState, y: y + FOOTNOTE_SEPARATOR_GAP_PT * scale };
+  // §17.6.8 numbers the main document story only — endnote lines are not numbered.
+  const noteState: RenderState = { ...bodyState, y: y + FOOTNOTE_SEPARATOR_GAP_PT * scale, lineNumbering: undefined, lineNumberCounter: undefined };
   for (const note of notes) {
     noteState.currentNoteNumber = doc.endnotes.findIndex((n) => n.id === note.id) + 1;
     const paras = note.content.filter((e) => e.type === 'paragraph') as unknown as DocParagraph[];
@@ -1542,6 +1642,78 @@ export function computeColumns(section: SectionProps): ColumnGeom[] {
     out.push({ xPt: section.marginLeft + i * (colW + space), wPt: colW });
   }
   return out;
+}
+
+/** ECMA-376 §17.6.8 — default gap (pt) between the text margin and the line-number
+ *  glyphs when `<w:lnNumType w:distance>` is absent (the spec says the positioning
+ *  is then implementation-defined). Word's default is ~1/4" (≈18pt). */
+const LINE_NUMBER_DEFAULT_DISTANCE_PT = 18;
+
+/** The document's default body font size in pt, used to size line-number glyphs so
+ *  they share the body baseline grid. Resolved from the first body paragraph's
+ *  `defaultFontSize` (which the parser folds from docDefaults + the style chain),
+ *  falling back to 10pt (the ECMA-376 docDefaults sz absent value). */
+function docDefaultFontSizePt(doc: DocxDocumentModel): number {
+  for (const el of doc.body) {
+    if (el.type === 'paragraph') {
+      const p = el as unknown as DocParagraph;
+      if (typeof p.defaultFontSize === 'number') return p.defaultFontSize;
+      for (const run of p.runs) {
+        if (run.type === 'text') return (run as unknown as DocxTextRun).fontSize;
+      }
+    }
+  }
+  return 10;
+}
+
+/** ECMA-376 §17.6.10 `@w:display` (§17.18.62) — whether the section's page borders
+ *  are shown on the physical page at `pageIndex` (0-based within the document; for
+ *  a single-section document this equals the section-relative page index — the
+ *  fixture case). "allPages" (default) ⇒ always; "firstPage" ⇒ only page 0;
+ *  "notFirstPage" ⇒ every page except page 0. */
+function pageBorderShownOnPage(pb: PageBorders, pageIndex: number): boolean {
+  switch (pb.display) {
+    case 'firstPage':
+      return pageIndex === 0;
+    case 'notFirstPage':
+      return pageIndex !== 0;
+    default: // "allPages" and any unknown value
+      return true;
+  }
+}
+
+/** ECMA-376 §17.6.10 — draw a section's page borders as a rectangle inset from the
+ *  page edge (`offsetFrom="page"`) or the text margin (`offsetFrom="text"`, the
+ *  default). Each edge's `space` (pt) is the inset from the reference; `sz`→width
+ *  and `val`→style reuse the shared border-line drawing (single/double/dashed/…).
+ *  Art borders (§17.18.2 decorative-image styles) are unsupported — such a `val`
+ *  yields no drawable dash/line and is skipped. */
+function drawPageBorders(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  pb: PageBorders,
+  sec: SectionProps,
+  scale: number,
+): void {
+  // Reference edges (pt): the page box, or the text-margin box.
+  const fromText = pb.offsetFrom === 'text';
+  const refLeftPt = fromText ? sec.marginLeft : 0;
+  const refRightPt = fromText ? sec.pageWidth - sec.marginRight : sec.pageWidth;
+  const refTopPt = fromText ? bodyMarginInsetPt(sec.marginTop) : 0;
+  const refBottomPt = fromText ? sec.pageHeight - bodyMarginInsetPt(sec.marginBottom) : sec.pageHeight;
+
+  // Each edge is inset from its reference by that edge's `space` (pt), TOWARD the
+  // page interior: the top border moves DOWN, bottom UP, left RIGHT, right LEFT.
+  const asSpec = (e: PageBorderEdge): BorderSpec => ({ width: e.width, color: e.color ?? null, style: e.style });
+  const topY = (refTopPt + (pb.top?.space ?? 0)) * scale;
+  const bottomY = (refBottomPt - (pb.bottom?.space ?? 0)) * scale;
+  const leftX = (refLeftPt + (pb.left?.space ?? 0)) * scale;
+  const rightX = (refRightPt - (pb.right?.space ?? 0)) * scale;
+
+  // The four sides span between the two perpendicular inset lines so corners meet.
+  if (pb.top) drawBorderLine(ctx, leftX, topY, rightX, topY, asSpec(pb.top), scale, 1);
+  if (pb.bottom) drawBorderLine(ctx, leftX, bottomY, rightX, bottomY, asSpec(pb.bottom), scale, 1);
+  if (pb.left) drawBorderLine(ctx, leftX, topY, leftX, bottomY, asSpec(pb.left), scale, 1);
+  if (pb.right) drawBorderLine(ctx, rightX, topY, rightX, bottomY, asSpec(pb.right), scale, 1);
 }
 
 /** ECMA-376 §17.6.11 — the per-page content-area insets (pt) reserved for a header
@@ -6040,7 +6212,43 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     flushBorderGroup();
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
+    // ECMA-376 §17.6.8 — line numbering. Each body line advances the section's
+    // line counter; a number is drawn in the left margin when its 1-based count
+    // is an even multiple of countBy. Only the top-level body render sets
+    // `state.lineNumbering` (nested renders clear it), so header/footer/cell/note
+    // lines are never numbered (§17.6.8 numbers the main document story).
+    if (state.lineNumbering && state.lineNumberCounter !== undefined) {
+      const n = state.lineNumberCounter;
+      if (n % state.lineNumbering.countBy === 0 && !dryRun) {
+        drawLineNumber(ctx, n, baseline, contentX, state.lineNumbering, scale, state.defaultColor);
+      }
+      state.lineNumberCounter = n + 1;
+    }
+
     state.y += lineH;
+}
+
+/** ECMA-376 §17.6.8 — draw one line number `n` in the left margin, its RIGHT edge
+ *  `distancePt` to the left of the text margin (`contentX`), aligned to the line's
+ *  `baseline`. The distance attribute is "the distance between the text margin and
+ *  the edge of any line numbers" (§17.6.8). */
+function drawLineNumber(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  n: number,
+  baseline: number,
+  contentX: number,
+  cfg: { distancePt: number; fontSizePt: number },
+  scale: number,
+  color: string,
+): void {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = buildFont(false, false, cfg.fontSizePt * scale, null, {});
+  const prevAlign = ctx.textAlign;
+  ctx.textAlign = 'right';
+  ctx.fillText(String(n), contentX - cfg.distancePt * scale, baseline);
+  ctx.textAlign = prevAlign;
+  ctx.restore();
 }
 
 // ===== Text layout =====
@@ -8322,6 +8530,10 @@ function renderCell(
     contentX: x + ml,
     contentW: w - ml - mr,
     y: y + mt,
+    // ECMA-376 §17.6.8 numbers the MAIN document story only — table-cell lines are
+    // never numbered. Clear any inherited line-numbering config/counter.
+    lineNumbering: undefined,
+    lineNumberCounter: undefined,
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {

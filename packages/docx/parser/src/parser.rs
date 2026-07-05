@@ -1387,6 +1387,88 @@ fn parse_pgnum_type(sect_pr: roxmltree::Node) -> Option<PageNumType> {
     Some(PageNumType { start, fmt })
 }
 
+/// ECMA-376 §17.6.10 `<w:pgBorders>` — parse the page borders of one sectPr.
+/// Returns `None` when the element is absent OR carries no drawable edge (all four
+/// edges missing / `nil`), so a document with no page border stays byte-identical.
+/// Each edge is a `CT_Border` (§17.18.4). For a page border, `@w:space` is a POINT
+/// measure (ST_PointMeasure §17.18.68), NOT twips — read it directly; `@w:sz` is
+/// eighths of a point like every other CT_Border width.
+fn parse_page_borders(sect_pr: roxmltree::Node) -> Option<PageBorders> {
+    let pgb = child_w(sect_pr, "pgBorders")?;
+    // §17.18.63 offsetFrom default = "text"; §17.18.62 display default = "allPages";
+    // §17.18.64 zOrder default = "front".
+    let offset_from = attr_w(pgb, "offsetFrom").unwrap_or_else(|| "text".to_string());
+    let display = attr_w(pgb, "display").unwrap_or_else(|| "allPages".to_string());
+    let z_order = attr_w(pgb, "zOrder").unwrap_or_else(|| "front".to_string());
+
+    let top = child_w(pgb, "top").and_then(parse_page_border_edge);
+    let bottom = child_w(pgb, "bottom").and_then(parse_page_border_edge);
+    let left = child_w(pgb, "left").and_then(parse_page_border_edge);
+    let right = child_w(pgb, "right").and_then(parse_page_border_edge);
+    if top.is_none() && bottom.is_none() && left.is_none() && right.is_none() {
+        return None;
+    }
+    Some(PageBorders {
+        offset_from,
+        display,
+        z_order,
+        top,
+        bottom,
+        left,
+        right,
+    })
+}
+
+/// Parse one edge of `<w:pgBorders>` (a `CT_Border`, §17.18.4). Returns `None` for
+/// an edge whose `@w:val` is absent or resolves to "none"/"nil" (no ink). `@w:sz`
+/// is eighths of a point (÷ 8 ⇒ pt), matching `parse_border_spec`; `@w:space` is a
+/// direct POINT measure for page borders (§17.18.68).
+fn parse_page_border_edge(node: roxmltree::Node) -> Option<PageBorderEdge> {
+    let style = attr_w(node, "val")?;
+    if style == "none" || style == "nil" {
+        return None;
+    }
+    // §17.18.4: sz is eighths of a point; default matches parse_border_spec (0.5pt
+    // when absent). space is a plain point count (0–31) for page borders.
+    let width = attr_w(node, "sz")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|v| v / 8.0)
+        .unwrap_or(0.5);
+    let space = attr_w(node, "space")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let color = attr_w(node, "color")
+        .filter(|c| c != "auto")
+        .map(|c| c.to_lowercase());
+    Some(PageBorderEdge {
+        style,
+        color,
+        width,
+        space,
+    })
+}
+
+/// ECMA-376 §17.6.8 `<w:lnNumType>` — parse a section's line numbering. Returns
+/// `None` when the element is absent OR `@w:countBy` is missing (the spec: "If
+/// this attribute is missing, no line numbering shall be applied to the section").
+/// `@w:start` defaults to 1; `@w:distance` is twips ⇒ pt; `@w:restart` defaults to
+/// "newPage" (§17.18.47).
+fn parse_line_numbering(sect_pr: roxmltree::Node) -> Option<LineNumbering> {
+    let ln = child_w(sect_pr, "lnNumType")?;
+    let count_by = attr_w(ln, "countBy").and_then(|v| v.trim().parse::<i64>().ok())?;
+    let start = attr_w(ln, "start")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(1);
+    let distance = attr_w(ln, "distance").map(|v| twips_to_pt(&v));
+    let restart = attr_w(ln, "restart").unwrap_or_else(|| "newPage".to_string());
+    Some(LineNumbering {
+        count_by,
+        start,
+        distance,
+        restart,
+    })
+}
+
 /// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` spec defaults for a
 /// section's page geometry: US Letter portrait (612×792 pt), 1" margins (72 pt),
 /// 0.5" header/footer distance (36 pt). This is the ONE place these defaults
@@ -1749,6 +1831,9 @@ fn parse_section(
         doc_grid_char_space: None,
         columns: None,
         page_num_type: None,
+        page_borders: None,
+        line_numbering: None,
+        v_align: None,
     };
 
     let Some(sp) = sect_pr else {
@@ -1831,6 +1916,22 @@ fn parse_section(
     // (@w:fmt). `None` when absent (numbering continues; decimal). The renderer
     // resolves the displayed page number per physical page from this.
     props.page_num_type = parse_pgnum_type(sp);
+
+    // ECMA-376 §17.6.10 w:pgBorders — page borders (top/left/bottom/right edges +
+    // placement globals). `None` when absent (no page border).
+    props.page_borders = parse_page_borders(sp);
+
+    // ECMA-376 §17.6.8 w:lnNumType — line numbering. `None` when absent OR when
+    // `@w:countBy` is missing (no line numbering per the spec).
+    props.line_numbering = parse_line_numbering(sp);
+
+    // ECMA-376 §17.6.23 w:vAlign — body vertical alignment. Default "top" is
+    // dropped to `None` so top-aligned (the common case) stays byte-identical.
+    if let Some(va) = child_w(sp, "vAlign").and_then(|n| attr_w(n, "val")) {
+        if va != "top" {
+            props.v_align = Some(va);
+        }
+    }
 
     // Collect header/footer references from THIS sectPr.
     let mut refs = SectionRefs::default();
@@ -11460,6 +11561,136 @@ mod column_tests {
         assert!(parse(r#"<w:pgNumType w:chapStyle="1" w:chapSep="colon"/>"#)
             .page_num_type
             .is_none());
+    }
+
+    /// ECMA-376 §17.6.10 `<w:pgBorders>` — the four edges + placement globals
+    /// (offsetFrom / display / zOrder, with their spec defaults) surface on
+    /// SectionProps.page_borders. Absent element ⇒ None; an all-`nil`/`none`
+    /// pgBorders ⇒ None (no drawable edge).
+    #[test]
+    fn section_props_carries_page_borders() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+        // Spec example (§17.6.10): dashed box, offsetFrom="page", sz=4 (0.5pt),
+        // space=24 (points), color auto ⇒ None.
+        let pb = parse(
+            r#"<w:pgBorders w:offsetFrom="page">
+                 <w:top w:val="dashed" w:sz="4" w:space="24" w:color="auto"/>
+                 <w:left w:val="dashed" w:sz="4" w:space="24" w:color="auto"/>
+                 <w:bottom w:val="dashed" w:sz="4" w:space="24" w:color="auto"/>
+                 <w:right w:val="dashed" w:sz="4" w:space="24" w:color="auto"/>
+               </w:pgBorders>"#,
+        )
+        .page_borders
+        .expect("page_borders surfaced");
+        assert_eq!(pb.offset_from, "page");
+        assert_eq!(pb.display, "allPages"); // §17.18.62 default
+        assert_eq!(pb.z_order, "front"); // §17.18.64 default
+        let top = pb.top.expect("top edge");
+        assert_eq!(top.style, "dashed");
+        assert!((top.width - 0.5).abs() < 1e-9); // sz 4 / 8 = 0.5pt
+        assert!((top.space - 24.0).abs() < 1e-9); // page-border space is POINTS, not twips
+        assert_eq!(top.color, None); // auto ⇒ None
+        assert!(pb.left.is_some() && pb.bottom.is_some() && pb.right.is_some());
+
+        // offsetFrom defaults to "text" (§17.18.63) when omitted; explicit color +
+        // display + zOrder carried.
+        let pb2 = parse(
+            r#"<w:pgBorders w:display="firstPage" w:zOrder="back">
+                 <w:top w:val="single" w:sz="24" w:space="1" w:color="FF0000"/>
+               </w:pgBorders>"#,
+        )
+        .page_borders
+        .expect("page_borders surfaced");
+        assert_eq!(pb2.offset_from, "text");
+        assert_eq!(pb2.display, "firstPage");
+        assert_eq!(pb2.z_order, "back");
+        let t2 = pb2.top.expect("top edge");
+        assert!((t2.width - 3.0).abs() < 1e-9); // sz 24 / 8 = 3pt
+        assert_eq!(t2.color, Some("ff0000".to_string())); // lowercased
+        assert!(pb2.bottom.is_none());
+
+        // Absent element ⇒ None.
+        assert!(parse(r#"<w:cols w:num="2"/>"#).page_borders.is_none());
+        // All edges nil/none ⇒ None (nothing to draw).
+        assert!(parse(
+            r#"<w:pgBorders><w:top w:val="nil"/><w:bottom w:val="none"/></w:pgBorders>"#
+        )
+        .page_borders
+        .is_none());
+    }
+
+    /// ECMA-376 §17.6.8 `<w:lnNumType>` — line numbering surfaces on
+    /// SectionProps.line_numbering. `@w:countBy` is REQUIRED (absent ⇒ no line
+    /// numbering ⇒ None); start defaults to 1, restart to "newPage", distance is
+    /// twips ⇒ pt.
+    #[test]
+    fn section_props_carries_line_numbering() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+        // Minimal: countBy only ⇒ start=1, restart=newPage, distance=None.
+        let ln = parse(r#"<w:lnNumType w:countBy="1"/>"#)
+            .line_numbering
+            .expect("line_numbering surfaced");
+        assert_eq!(ln.count_by, 1);
+        assert_eq!(ln.start, 1); // §17.6.8 default
+        assert_eq!(ln.restart, "newPage"); // §17.18.47 default
+        assert_eq!(ln.distance, None);
+
+        // Full: countBy=5, start=3, distance=720 twips (36pt), restart=continuous.
+        let ln2 = parse(
+            r#"<w:lnNumType w:countBy="5" w:start="3" w:distance="720" w:restart="continuous"/>"#,
+        )
+        .line_numbering
+        .expect("line_numbering surfaced");
+        assert_eq!(ln2.count_by, 5);
+        assert_eq!(ln2.start, 3);
+        assert_eq!(ln2.restart, "continuous");
+        assert!((ln2.distance.unwrap() - 36.0).abs() < 1e-9);
+
+        // Absent element ⇒ None.
+        assert!(parse(r#"<w:cols w:num="2"/>"#).line_numbering.is_none());
+        // countBy missing (spec: no line numbering) ⇒ None.
+        assert!(parse(r#"<w:lnNumType w:start="1"/>"#)
+            .line_numbering
+            .is_none());
+    }
+
+    /// ECMA-376 §17.6.23 `<w:vAlign w:val>` — body vertical alignment surfaces on
+    /// SectionProps.v_align. The default "top" is dropped to None (byte-identical
+    /// top-aligned rendering); center/both/bottom are carried verbatim.
+    #[test]
+    fn section_props_carries_v_align() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+        assert_eq!(
+            parse(r#"<w:vAlign w:val="center"/>"#).v_align,
+            Some("center".to_string())
+        );
+        assert_eq!(
+            parse(r#"<w:vAlign w:val="bottom"/>"#).v_align,
+            Some("bottom".to_string())
+        );
+        assert_eq!(
+            parse(r#"<w:vAlign w:val="both"/>"#).v_align,
+            Some("both".to_string())
+        );
+        // Default "top" ⇒ None (unchanged rendering).
+        assert_eq!(parse(r#"<w:vAlign w:val="top"/>"#).v_align, None);
+        // Absent ⇒ None.
+        assert_eq!(parse(r#"<w:cols w:num="2"/>"#).v_align, None);
     }
 
     /// ECMA-376 §17.6.22 — the body (final) section's `<w:type>` start type is

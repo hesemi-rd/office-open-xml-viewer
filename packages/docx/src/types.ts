@@ -154,6 +154,59 @@ export interface PageNumType {
   fmt?: string;
 }
 
+/** ECMA-376 §17.6.10 `<w:pgBorders>` — page borders drawn around each page of a
+ *  section. Mirrors the Rust `PageBorders`. Each edge is a CT_Border (§17.18.4);
+ *  the container carries the placement globals. Absent on {@link SectionProps}
+ *  (`pageBorders` undefined) ⇒ no page border (the common case). Art borders
+ *  (§17.18.2 decorative-image styles) are unsupported — the renderer draws only
+ *  the standard line styles (single/double/dashed/dotted/thick/…). */
+export interface PageBorders {
+  /** `@w:offsetFrom` (§17.18.63): "page" ⇒ each edge's `space` is from the PAGE
+   *  edge; "text" (the default) ⇒ from the text margin. */
+  offsetFrom: string;
+  /** `@w:display` (§17.18.62): "allPages" (default) | "firstPage" |
+   *  "notFirstPage" — which physical pages of the section show the border. */
+  display: string;
+  /** `@w:zOrder` (§17.18.64): "front" (default; over text) | "back" (under). */
+  zOrder: string;
+  top?: PageBorderEdge;
+  bottom?: PageBorderEdge;
+  left?: PageBorderEdge;
+  right?: PageBorderEdge;
+}
+
+/** ECMA-376 §17.18.4 CT_Border for one edge of `<w:pgBorders>`. Mirrors the Rust
+ *  `PageBorderEdge`. Same shape as a paragraph border edge. */
+export interface PageBorderEdge {
+  /** `@w:val` — ST_Border line style ("single" | "double" | "dashed" | …). */
+  style: string;
+  /** `@w:color` hex 6, or absent for "auto" (renderer defaults to black). */
+  color?: string;
+  /** `@w:sz` in pt (eighths of a point ÷ 8). */
+  width: number;
+  /** `@w:space` in pt — a POINT measure (§17.18.68, 0–31) for page borders, NOT
+   *  twips — the inset from the `offsetFrom` reference. */
+  space: number;
+}
+
+/** ECMA-376 §17.6.8 `<w:lnNumType>` — line numbering for a section. Mirrors the
+ *  Rust `LineNumbering`. A number is drawn in the left margin of each body line
+ *  whose count is a multiple of `countBy`. Absent on {@link SectionProps}
+ *  (`lineNumbering` undefined) ⇒ line numbering off. */
+export interface LineNumbering {
+  /** `@w:countBy` — only lines whose number is a multiple of this display a
+   *  number. Required (absent ⇒ the whole struct is absent per §17.6.8). */
+  countBy: number;
+  /** `@w:start` — the starting number after each restart. Default 1. */
+  start: number;
+  /** `@w:distance` in pt (twips ÷ 20) — gap between the text margin and the
+   *  number glyphs. Absent ⇒ implementation-defined (renderer uses a default). */
+  distance?: number;
+  /** `@w:restart` (§17.18.47): "newPage" (default) | "newSection" |
+   *  "continuous" — when the counter resets to `start`. */
+  restart: string;
+}
+
 /** ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — a section's page
  *  geometry: page size + margins + header/footer distances (pt). Mirrors the Rust
  *  `SectionGeom`. Carried on a {@link BodyElement} `sectionBreak` arm (`geom`) so a
@@ -237,6 +290,18 @@ export interface SectionProps {
    *  renderer resolves the displayed page number per physical page from this plus
    *  the per-section `SectionBreak.pageNumType` markers. */
   pageNumType?: PageNumType | null;
+  /** ECMA-376 §17.6.10 `<w:pgBorders>` — page borders for this section.
+   *  `null`/absent ⇒ no page border (the common case). */
+  pageBorders?: PageBorders | null;
+  /** ECMA-376 §17.6.8 `<w:lnNumType>` — line numbering for this section.
+   *  `null`/absent ⇒ line numbering off. */
+  lineNumbering?: LineNumbering | null;
+  /** ECMA-376 §17.6.23 `<w:vAlign w:val>` — body vertical alignment between the
+   *  top/bottom margins ("top" | "center" | "both" | "bottom"). `null`/absent ⇒
+   *  "top" (body flows from the top margin unchanged). "both" (vertical
+   *  justification) is parsed but rendered as "top" until distribution is
+   *  implemented (see renderer note). */
+  vAlign?: string | null;
 }
 
 /** ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration. */
