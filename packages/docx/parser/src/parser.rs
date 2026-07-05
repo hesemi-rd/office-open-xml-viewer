@@ -3416,12 +3416,21 @@ fn group_member_hidden(node: roxmltree::Node) -> bool {
 /// These are the DrawingML / WordprocessingML drawing-extension namespaces whose
 /// `<w:drawing>` payload `parse_inline_drawing` can turn into renderable runs:
 /// the 2014 chartex chart extension, and the 2010 wordprocessing drawing / shape
-/// / group / canvas extensions (shapes + groups are parsed by local name in the
+/// / group extensions (shapes + groups are parsed by local name in the
 /// anchor/inline paths; the positioning extension is honored by
 /// `find_position_node`). A `Requires` naming anything outside this set (a future
 /// or app-specific extension we cannot draw) is NOT understood, so its Choice is
 /// skipped and the `<mc:Fallback>` — typically a rendered picture or legacy VML —
 /// is processed instead (issue #747).
+///
+/// The contract is strictly "understood = renderable": claiming a namespace we
+/// cannot draw makes MCE select its Choice, drop the Fallback, and emit nothing
+/// — losing content Word shows. Notably `wpc` (wordprocessingCanvas,
+/// `http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas`) is
+/// deliberately ABSENT: the parser has no `<wpc:wpc>` drawing-canvas handler, so
+/// a `<mc:Choice Requires="wpc">` must NOT be selected — the Fallback (Word
+/// writes a rendered picture / legacy VML twin) is the only branch we can draw.
+/// Add it here only together with an actual canvas handler.
 fn docx_understands_drawing_ns(ns: &str) -> bool {
     matches!(
         ns,
@@ -3431,7 +3440,6 @@ fn docx_understands_drawing_ns(ns: &str) -> bool {
         | "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
         | "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
         | "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
-        | "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
     )
 }
 
@@ -10503,6 +10511,7 @@ mod anchor_image_relative_from_tests {
                     xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
                     xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
                     xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"
+                    xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
                     xmlns:unknownns="http://example.com/an/extension/we/do/not/understand">{inner}</w:p>"#
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
@@ -10624,6 +10633,157 @@ mod anchor_image_relative_from_tests {
         assert_eq!(
             images, 1,
             "un-understood Choice → Fallback picture must be emitted (got {images} images)"
+        );
+    }
+
+    /// ECMA-376 Part 3 §9.3 + the "understood = renderable" contract — `wpc`
+    /// (wordprocessingCanvas) is a real Word extension the parser has NO handler
+    /// for: were it claimed as understood, the Choice would be selected, its
+    /// `<wpc:wpc>` canvas would parse to nothing (no chart / image / shape run),
+    /// AND the Fallback picture would be dropped — losing content Word shows.
+    /// `wpc` must therefore stay out of `docx_understands_drawing_ns` until a
+    /// canvas handler exists, so a `Requires="wpc"` document renders its
+    /// Fallback picture.
+    #[test]
+    fn mce_wpc_canvas_choice_falls_back_to_picture() {
+        let chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        let runs = parse_p_with_charts(
+            r#"<w:r><mc:AlternateContent>
+                 <mc:Choice Requires="wpc"><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas">
+                       <wpc:wpc><wpc:bg/><wpc:whole/></wpc:wpc>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Fallback><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                       <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Fallback>
+               </mc:AlternateContent></w:r>"#,
+            &chart_map,
+        );
+        let images = runs
+            .iter()
+            .filter(|r| matches!(r, DocRun::Image(_)))
+            .count();
+        assert_eq!(
+            images, 1,
+            "wpc canvas Choice (no handler) → Fallback picture must be emitted"
+        );
+    }
+
+    /// ECMA-376 Part 3 §9.3(2) — Choice ordering: the FIRST Choice whose
+    /// `Requires` namespaces are all understood is selected; earlier Choices
+    /// requiring un-understood namespaces are skipped (they do not "consume" the
+    /// selection). Here Choice #1 requires an unknown extension and Choice #2
+    /// requires chartex — #2 must be selected and its chart emitted, and the
+    /// Fallback picture dropped.
+    #[test]
+    fn mce_second_choice_selected_when_first_not_understood() {
+        let chart_map = chartex_model_map();
+        let runs = parse_p_with_charts(
+            r#"<w:r><mc:AlternateContent>
+                 <mc:Choice Requires="unknownns"><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://example.com/an/extension/we/do/not/understand">
+                       <unknownns:thing/>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Choice Requires="cx"><w:drawing>
+                   <wp:inline><wp:extent cx="5486400" cy="3200400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex">
+                       <c:chart r:id="rId8"/>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Fallback><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                       <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Fallback>
+               </mc:AlternateContent></w:r>"#,
+            &chart_map,
+        );
+        let charts = runs
+            .iter()
+            .filter(|r| matches!(r, DocRun::Chart(_)))
+            .count();
+        let images = runs
+            .iter()
+            .filter(|r| matches!(r, DocRun::Image(_)))
+            .count();
+        assert_eq!(
+            charts, 1,
+            "second (understood) Choice must be selected over the first (unknown) one"
+        );
+        assert_eq!(
+            images, 0,
+            "Fallback must be dropped once a later Choice is selected"
+        );
+    }
+
+    /// ECMA-376 Part 3 §7.6 requires `Requires` to list ≥1 prefix; a missing or
+    /// whitespace-only `Requires` is non-conformant and can never satisfy
+    /// §9.3(1) ("each of the namespaces … is included"). Such a Choice must not
+    /// be selected — the Fallback picture is processed instead. (Selecting a
+    /// malformed Choice would be the old always-first-Choice behavior.)
+    #[test]
+    fn mce_missing_or_blank_requires_falls_back() {
+        let chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        // Case 1: Requires attribute entirely absent.
+        let runs_missing = parse_p_with_charts(
+            r#"<w:r><mc:AlternateContent>
+                 <mc:Choice><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://example.com/an/extension/we/do/not/understand">
+                       <unknownns:thing/>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Fallback><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                       <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Fallback>
+               </mc:AlternateContent></w:r>"#,
+            &chart_map,
+        );
+        let images_missing = runs_missing
+            .iter()
+            .filter(|r| matches!(r, DocRun::Image(_)))
+            .count();
+        assert_eq!(
+            images_missing, 1,
+            "Choice without Requires must not be selected → Fallback picture"
+        );
+
+        // Case 2: Requires present but whitespace-only (empty prefix list).
+        let runs_blank = parse_p_with_charts(
+            r#"<w:r><mc:AlternateContent>
+                 <mc:Choice Requires="   "><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://example.com/an/extension/we/do/not/understand">
+                       <unknownns:thing/>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Fallback><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                       <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Fallback>
+               </mc:AlternateContent></w:r>"#,
+            &chart_map,
+        );
+        let images_blank = runs_blank
+            .iter()
+            .filter(|r| matches!(r, DocRun::Image(_)))
+            .count();
+        assert_eq!(
+            images_blank, 1,
+            "Choice with whitespace-only Requires must not be selected → Fallback picture"
         );
     }
 
