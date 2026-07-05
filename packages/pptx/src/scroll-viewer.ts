@@ -1,4 +1,4 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, type VisibleRange, type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, nextZoomStep, prevZoomStep, fitScale, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
@@ -116,6 +116,12 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  `computeVisibleRange` (the first slide intersecting the viewport top,
    *  EXCLUDING overscan). */
   onVisibleSlideChange?: (topIndex: number, total: number) => void;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100% = a slide
+   *  at its natural EMU→px size): from {@link PptxScrollViewer.setScale},
+   *  `zoomIn`/`zoomOut`, `fitWidth`/`fitPage`, a Ctrl/⌘+wheel gesture, or a
+   *  container-resize re-fit. Named `onScaleChange` to match the single-canvas
+   *  viewers so all five share one notification shape. */
+  onScaleChange?: (scale: number) => void;
   /** Error callback. When set, `load()` invokes it and resolves (otherwise the
    *  error is rethrown — shared viewer error contract). It ALSO fires for async
    *  per-slot render failures (both main `renderSlide` and worker
@@ -161,7 +167,7 @@ interface SlideSlot {
   bitmapCtx: ImageBitmapRenderingContext | null;
 }
 
-export class PptxScrollViewer {
+export class PptxScrollViewer implements ZoomableViewer {
   private _pres: PptxPresentation | null = null;
   private readonly _injected: boolean;
   private readonly _opts: PptxScrollViewerOptions;
@@ -995,6 +1001,74 @@ export class PptxScrollViewer {
     //     after the LAST setScale so a wheel/pinch burst coalesces into one render.
     this._previewVisible();
     this._scheduleSettle();
+    // IX9 change notification. Only reached when `next` differs from the prior
+    // scale (early-returned above), so every source — the public setScale, the
+    // ladder steppers, fitWidth/fitPage, Ctrl-wheel, and the _onResize re-fit
+    // (which routes through here) — notifies through this one hook.
+    this._opts.onScaleChange?.(next);
+  }
+
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor, where `1` = 100% (a
+   *  slide at its natural EMU→px size). This is the viewer's absolute `_scale`
+   *  (`slideWidth/EMU_PER_PX × _scale` is the drawn width), so it reads `1` at
+   *  true 100% and, after the initial fit-to-width, the base fit factor. `1`
+   *  before a scale is established. */
+  getScale(): number {
+    return this._scaleEstablished ? this._scale : 1;
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder above the current factor (clamped to `zoomMax` by {@link setScale}). */
+  zoomIn(): void {
+    this.setScale(nextZoomStep(this.getScale()));
+  }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  zoomOut(): void {
+    this.setScale(prevZoomStep(this.getScale()));
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit a slide's WIDTH to the container (the classic
+   * continuous-scroll "fit width"). Sets the scale to the width-fit base for the
+   * current container, then re-anchors + re-renders via {@link setScale}. Defers
+   * (no-op) while the container is unlaid-out. The `zoomMin`/`zoomMax` clamp still
+   * applies, so a fit below `zoomMin` pins to `zoomMin`.
+   */
+  fitWidth(): void {
+    this._fit('width');
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit a WHOLE slide (width and height) inside the
+   * container so one slide is visible without scrolling; takes the tighter of the
+   * width/height fit. Uses the deck-wide (uniform) slide size. Defers while
+   * unlaid-out.
+   */
+  fitPage(): void {
+    this._fit('page');
+  }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: the width-fit factor is the
+   *  established base (`_baseScale`); the page-fit additionally bounds by the
+   *  container height against the (uniform) slide height. Applies via
+   *  {@link setScale} so the flicker-free re-anchor / settle path and
+   *  `onScaleChange` all run. */
+  private _fit(mode: 'width' | 'page'): void {
+    if (!this._pres || this._pres.slideCount === 0) return;
+    const scale = fitScale(
+      {
+        contentWidth: this._pres.slideWidth / EMU_PER_PX,
+        contentHeight: this._pres.slideHeight / EMU_PER_PX,
+        containerWidth: this._fitWidthPx(),
+        containerHeight: this._scrollHost.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out — defer
+    this.setScale(scale);
   }
 
   /**
