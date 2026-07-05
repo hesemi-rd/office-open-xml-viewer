@@ -18,6 +18,18 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   // newspaper. width = physical page width (842pt, A4 landscape). Reference is
   // private (gitignored) and generated locally with UPDATE_REFS=1.
   { name: 'private/sample-26', pageCount: 1, width: 842 },
+  // Multilingual / section coverage (references private + gitignored, generated
+  // locally with UPDATE_REFS=1):
+  // sample-27 = continuous section-break page-number restart fixture (US Letter, 612pt).
+  { name: 'private/sample-27', pageCount: 2, width: 612 },
+  // sample-28 = Arabic RTL long-form (A4).
+  { name: 'private/sample-28', pageCount: 21, width: 595 },
+  // sample-29 = Thai script (A4).
+  { name: 'private/sample-29', pageCount: 14, width: 595 },
+  // sample-30 = Korean script (A4).
+  { name: 'private/sample-30', pageCount: 4, width: 595 },
+  // sample-31 = Russian / Cyrillic (A4).
+  { name: 'private/sample-31', pageCount: 12, width: 595 },
   { name: 'demo/sample-1', pageCount: 6, width: 595 },
 ];
 
