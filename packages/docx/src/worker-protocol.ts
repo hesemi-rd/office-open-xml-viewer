@@ -1,4 +1,5 @@
 import type { DocComment, DocNote, RenderPageOptions, WorkerResponse } from './types';
+import type { DocxTextRunInfo } from './renderer';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -32,10 +33,19 @@ export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
+  // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
+  // find controller scans every page for its runs; a bitmap per page would be
+  // wasted work + transfer for pages the user never looks at.
+  | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { type: 'parsed' }>
   | { type: 'parsedMeta'; id: number; meta: DocumentMeta }
-  | { type: 'pageRendered'; id: number; bitmap: ImageBitmap };
+  // IX6 — the render worker collects each rendered page's `onTextRun` geometry
+  // (a plain, structured-clone-safe `DocxTextRunInfo[]`) and ships it beside the
+  // bitmap, so the main thread can build the text-selection / find-highlight
+  // overlay on the SAME code path as main mode (no second render).
+  | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }
+  | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] };

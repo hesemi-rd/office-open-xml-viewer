@@ -1,5 +1,5 @@
 export { XlsxWorkbook, type LoadOptions } from './workbook.js';
-export type { WireRenderViewportOptions } from './worker-protocol.js';
+export type { WireRenderViewportOptions, WireSizeOverrides } from './worker-protocol.js';
 export { XlsxViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
@@ -25,6 +25,8 @@ export type {
   SheetMeta,
   SheetVisibility,
   Worksheet,
+  // Outline (row/column grouping) display flags, reachable via Worksheet.outlinePr.
+  OutlinePr,
   Row,
   Cell,
   CellValue,

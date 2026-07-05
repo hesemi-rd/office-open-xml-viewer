@@ -181,6 +181,19 @@ export {
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
+// ECMA-376 §20.1.9.19 WordArt text-warp envelopes (presetTextWarpDefinitions.xml).
+// Reuses the same guide-formula evaluator as the preset-geometry engine; drives
+// the pptx renderer's per-glyph WordArt path.
+export {
+  hasTextWarp,
+  isSingleEdgeWarp,
+  buildWarpEnvelope,
+  samplePolyline,
+  warpGlyphTransform,
+  type WarpEnvelope,
+  type WarpGlyphTransform,
+  type Polyline,
+} from './shape/text-warp';
 export {
   applyInnerShadow,
   applySoftEdge,

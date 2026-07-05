@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>* { margin: 0; padding: 0; } canvas { display: block; }</style>
+</head>
+<body>
+  <!-- IX6 functional worker-equivalence: build a real DocxViewer in BOTH main
+       and worker mode, capture the text-selection overlay DOM (one span per run),
+       the findText match set, and the find-highlight boxes, then zoom (IX9
+       setScale) and capture again — so the spec can assert main === worker at
+       BOTH scales and that the overlay/highlight geometry follows the zoom.
+       Proves the run geometry crosses the worker boundary identically and that
+       findText + zoom work in worker mode. -->
+  <div id="main-host"></div>
+  <div id="worker-host"></div>
+  <script type="module">
+    import { DocxViewer } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('docx') ?? 'demo/sample-1';
+    const query = params.get('q') ?? 'the';
+    const width = 900;
+    const ZOOM = 1.5;
+
+    // Serialize the text-selection overlay: one entry per span, rounded so
+    // sub-pixel rasterization jitter between the main <canvas> and the worker
+    // OffscreenCanvas cannot spuriously fail an exact-equality assertion. The
+    // run GEOMETRY is computed identically in both modes (same renderer), so the
+    // rounded boxes must match exactly.
+    const layersOf = (host) => {
+      const wrapper = host.querySelector('div'); // the viewer's positioned wrapper
+      return wrapper ? [...wrapper.children].filter((c) => c.tagName === 'DIV') : [];
+    };
+    // Wrapper stacking order: [canvas, textLayer, highlightLayer].
+    const serializeOverlay = (host) => {
+      const layer = layersOf(host)[0];
+      const spans = layer ? [...layer.querySelectorAll('span')] : [];
+      return spans.map((s) => ({
+        text: s.textContent,
+        left: Math.round(parseFloat(s.style.left) || 0),
+        top: Math.round(parseFloat(s.style.top) || 0),
+      }));
+    };
+    // IX2 highlight boxes (absolutely positioned divs in the LAST layer).
+    const serializeHighlights = (host) => {
+      const layers = layersOf(host);
+      const layer = layers[layers.length - 1];
+      const boxes = layer ? [...layer.children] : [];
+      return boxes.map((b) => ({
+        left: Math.round(parseFloat(b.style.left) || 0),
+        top: Math.round(parseFloat(b.style.top) || 0),
+        width: Math.round(parseFloat(b.style.width) || 0),
+      }));
+    };
+
+    const capture = (host, viewer, canvas) => ({
+      overlay: serializeOverlay(host),
+      highlights: serializeHighlights(host),
+      canvasW: Math.round(parseFloat(canvas.style.width) || canvas.width),
+      scale: viewer.getScale(),
+      page: viewer.currentPage,
+    });
+
+    const buildViewer = async (hostId, mode) => {
+      const host = document.getElementById(hostId);
+      const canvas = document.createElement('canvas');
+      host.appendChild(canvas);
+      const resp = await fetch(`/${name}.docx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.docx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      const viewer = new DocxViewer(canvas, {
+        mode,
+        width,
+        enableTextSelection: true,
+        useGoogleFonts: true,
+      });
+      await viewer.load(buf);
+      // findText scans every page; findNext navigates to the first match's page
+      // so the current page is guaranteed to carry highlight boxes.
+      const matches = await viewer.findText(query);
+      await viewer.findNext();
+      const before = capture(host, viewer, canvas);
+      // IX9 × IX6 — zoom while in the same mode: the re-render (worker: bitmap +
+      // runs round-trip) must rebuild the overlay + highlights at the new scale.
+      await viewer.setScale(ZOOM);
+      const after = capture(host, viewer, canvas);
+      return {
+        matches: matches.map((m) => ({ text: m.text, page: m.location.page })),
+        before,
+        after,
+        viewer,
+      };
+    };
+
+    try {
+      const main = await buildViewer('main-host', 'main');
+      const worker = await buildViewer('worker-host', 'worker');
+
+      const pack = ({ matches, before, after }) => ({ matches, before, after });
+      document.body.dataset.main = JSON.stringify(pack(main));
+      document.body.dataset.worker = JSON.stringify(pack(worker));
+
+      main.viewer.destroy();
+      worker.viewer.destroy();
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[worker-selection-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>

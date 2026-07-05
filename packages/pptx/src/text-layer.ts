@@ -10,8 +10,9 @@ import type { PptxTextRunInfo } from './renderer';
  * shape div (`inShapeX`/`inShapeY`). Extracted verbatim from
  * `PptxViewer._buildTextLayer` so the pager (PptxViewer) and the continuous-scroll
  * viewer (PptxScrollViewer, WS4) share one implementation; public API for
- * integrators (design §10). MAIN render mode only — `onTextRun` cannot cross the
- * worker boundary.
+ * integrators (design §10). IX6 — usable in BOTH render modes: worker mode
+ * collects the same `PptxTextRunInfo[]` off-thread and ships it back beside the
+ * bitmap, so the overlay is built from identical geometry regardless of thread.
  *
  * IX1 — when a run carries a resolved `hyperlink` (from `<a:hlinkClick>`) and an
  * `onHyperlinkClick` callback is supplied, its span becomes a click target

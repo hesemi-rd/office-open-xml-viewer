@@ -10,7 +10,7 @@
 import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt } from './renderer';
+import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -126,14 +126,37 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'renderPage') {
       if (!doc || !pages) throw new Error('Document not loaded');
       const canvas = new OffscreenCanvas(1, 1); // renderer resizes it
+      // IX6 — collect the run geometry the same render emits so the main thread
+      // can build its selection / find overlay without a second render. The
+      // callback runs worker-side; only the resulting plain array crosses back.
+      const runs: DocxTextRunInfo[] = [];
       await renderDocumentToCanvas(doc, canvas, req.pageIndex, {
         ...req.opts,
         totalPages: pages.length,
         prebuiltPages: pages,
         fetchImage: getImage,
+        onTextRun: (r) => runs.push(r),
       });
       const bitmap = canvas.transferToImageBitmap();
-      post({ type: 'pageRendered', id, bitmap }, [bitmap]);
+      post({ type: 'pageRendered', id, bitmap, runs }, [bitmap]);
+      return;
+    }
+    if (req.type === 'collectRuns') {
+      // IX6 — render a page purely to harvest its text-run geometry (find scans
+      // every page). The bitmap is discarded worker-side; only `runs` crosses
+      // the wire. Same renderer / prebuilt pagination as `renderPage`, so the
+      // geometry is identical to what a `renderPage` of the same page would draw.
+      if (!doc || !pages) throw new Error('Document not loaded');
+      const canvas = new OffscreenCanvas(1, 1);
+      const runs: DocxTextRunInfo[] = [];
+      await renderDocumentToCanvas(doc, canvas, req.pageIndex, {
+        ...req.opts,
+        totalPages: pages.length,
+        prebuiltPages: pages,
+        fetchImage: getImage,
+        onTextRun: (r) => runs.push(r),
+      });
+      post({ type: 'runsCollected', id, runs });
       return;
     }
     if (req.type === 'extractImage') {

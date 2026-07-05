@@ -15,6 +15,7 @@ import { renderWorksheetViewport, closeAndClearImageCache } from './render-orche
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
+import { applySizeOverrides } from './worker-protocol.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
@@ -144,6 +145,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       if (!workbook) throw new Error('Workbook not loaded');
       await fontsLoaded;
       const ws = parseSheetLocally(req.sheetIndex);
+      // Converge this worker-local sheet to the main-thread model before
+      // drawing: view-only size mutations (outline collapse/expand, drag
+      // resize #567) happen on the main thread's Worksheet copy and would
+      // otherwise never reach this cache — the gutter/overlays would update
+      // while the grid bitmap stayed stale. The override map is cumulative and
+      // idempotent, so re-applying it every frame (and after a worker-side
+      // re-parse rebuilt the cache from the file) always converges.
+      const { sizeOverrides, ...renderOpts } = req.opts;
+      applySizeOverrides(ws, sizeOverrides);
       const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
       await renderWorksheetViewport(
         { ws, styles: workbook.styles, imageCache },
@@ -151,7 +161,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight
         // from the retained rawData (no main-thread round-trip).
-        { ...req.opts, fetchImage: getImage },
+        { ...renderOpts, fetchImage: getImage },
       );
       const bitmap = canvas.transferToImageBitmap();
       post({ type: 'viewportRendered', id, bitmap }, [bitmap]);

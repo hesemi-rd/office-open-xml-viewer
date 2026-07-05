@@ -281,9 +281,12 @@ export class FakePptxEngine {
   renderCalls: RenderCall[] = [];
   bitmapCalls: RenderCall[] = [];
   createdBitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
-  /** Runs fed to `renderSlide`'s `onTextRun` (main mode only) so a test can drive
-   *  the viewer's per-slot text overlay (buildPptxTextLayer) without a real
-   *  render. Empty/undefined ⇒ no runs emitted. */
+  /** Runs fed to the `onTextRun` callback of `renderSlide` (main) /
+   *  `renderSlideToBitmap` (worker) and returned by `collectSlideRuns`, so a test
+   *  can drive the viewer's per-slot text overlay (buildPptxTextLayer) and find
+   *  scan without a real render. Empty/undefined ⇒ no runs emitted. IX6 — the
+   *  worker path now ships runs back beside the bitmap, so the stub mirrors that
+   *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
   constructor(
     private _slideCount: number,
@@ -343,6 +346,10 @@ export class FakePptxEngine {
     const h = this.slideWidth > 0 ? Math.round((w * this.slideHeight) / this.slideWidth) : 0;
     const bmp = { width: w, height: h, close: vi.fn() };
     this.createdBitmaps.push(bmp);
+    // IX6 — replay fed runs to the caller's collector, mirroring the real proxy
+    // which invokes `onTextRun` with the runs the worker shipped beside the
+    // bitmap. Lets a worker-mode test drive the selection overlay from the stub.
+    for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
     return new Promise<ImageBitmap>((resolve, reject) => {
       const call: RenderCall = {
         slide,
@@ -353,6 +360,11 @@ export class FakePptxEngine {
       this.bitmapCalls.push(call);
       if (!this.deferred) resolve(bmp as unknown as ImageBitmap);
     });
+  }
+  /** IX6 — mode-agnostic run collection for the find scan (mirrors the real
+   *  `PptxPresentation.collectSlideRuns`). Returns the fed runs regardless of mode. */
+  collectSlideRuns(_slide: number, _width?: number): Promise<PptxTextRunInfo[]> {
+    return Promise.resolve([...(this.feedTextRuns ?? [])]);
   }
   /** The per-call `width` (px) recorded for every renderSlide call, in call order.
    *  T3 asserts each mounted slide received its OWN px width. */
