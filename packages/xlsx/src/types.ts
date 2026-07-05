@@ -7,6 +7,16 @@ export interface Workbook {
    *  dates are resolved against the 1904 epoch (§18.17.4.1). Omitted from the
    *  parser JSON when false (default 1900 date system). */
   date1904?: boolean;
+  /** #773 partial degradation: a WORKBOOK-LEVEL degradation that leaves every
+   *  sheet openable. Set when a shared workbook part was PRESENT but corrupt —
+   *  most commonly `xl/sharedStrings.xml` (§18.4.9): a broken shared-string table
+   *  silently blanks every string cell across ALL sheets, so unlike a per-sheet
+   *  break it can't be attributed to one placeholder sheet. Tagged with the
+   *  offending part (e.g. `"xl/sharedStrings.xml: <detail>"`) so the loss is
+   *  surfaced instead of silent, while every sheet still renders its non-string
+   *  content. Absent (`undefined`) when every shared part read cleanly. Also set
+   *  (`"(zip container): <detail>"`) for a whole-container degradation (#774). */
+  parseError?: string;
 }
 
 /** Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`). */

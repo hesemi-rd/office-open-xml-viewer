@@ -144,7 +144,13 @@ pub fn extract_image(
 /// functions.
 #[wasm_bindgen]
 pub struct PptxArchive {
-    archive: PptxZip,
+    /// The opened archive, or the container-open error string when the ZIP itself
+    /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
+    /// instead of erroring out of `new` — lets `parse()` return a degraded
+    /// placeholder presentation (symmetric with a corrupt inner slide) rather than
+    /// the constructor throwing an opaque error the viewer can't turn into a
+    /// placeholder slide.
+    archive: Result<PptxZip, String>,
     max: Option<u64>,
 }
 
@@ -163,48 +169,65 @@ impl PptxArchive {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<PptxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        let archive = zip::ZipArchive::new(Cursor::new(data))
-            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
+        // thrown, so `parse()` can degrade it to a placeholder presentation
+        // instead of the constructor failing with an opaque error.
         Ok(PptxArchive {
-            archive,
+            archive: open_zip(data),
             max: max_zip_entry_bytes,
         })
     }
 
     /// Parse the retained archive and return the model as UTF-8 JSON bytes.
-    /// Byte-for-byte identical to `parse_pptx` on the same file.
+    /// Byte-for-byte identical to `parse_pptx` on the same file. When the
+    /// CONTAINER failed to open (#774) the model is a degraded placeholder
+    /// presentation tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        let presentation = parse_presentation(&mut self.archive)
-            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        let presentation = match self.archive.as_mut() {
+            Ok(zip) => parse_presentation(zip)
+                .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?,
+            Err(e) => degraded_container_presentation(e.clone()),
+        };
         serde_json::to_vec(&presentation)
             .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
     /// Extract raw bytes for one media entry (e.g. "ppt/media/media2.mp4") from
     /// the retained archive. Twin of the free `extract_media`, but reads through
-    /// the already-open archive instead of re-opening it.
+    /// the already-open archive instead of re-opening it. A corrupt container has
+    /// no entries, so this surfaces the container-open error.
     pub fn extract_media(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
-            .map_err(|e| JsValue::from_str(&e))
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        ooxml_common::zip::read_zip_bytes(zip, path).map_err(|e| JsValue::from_str(&e))
     }
 
     /// Extract raw bytes for one embedded image entry (e.g.
     /// "ppt/media/image1.png") from the retained archive. Twin of the free
-    /// `extract_image`.
+    /// `extract_image`. A corrupt container has no entries, so this surfaces the
+    /// container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
-            .map_err(|e| JsValue::from_str(&e))
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        ooxml_common::zip::read_zip_bytes(zip, path).map_err(|e| JsValue::from_str(&e))
     }
 
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `pptx_to_markdown`.
+    /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        let pres = parse_presentation(&mut self.archive)
-            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        let pres = match self.archive.as_mut() {
+            Ok(zip) => parse_presentation(zip)
+                .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?,
+            Err(e) => degraded_container_presentation(e.clone()),
+        };
         Ok(render_presentation_md(&pres))
     }
 }
@@ -843,14 +866,69 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
 //  Presentation parser
 // ===========================
 
+/// Open a pptx ZIP container, tagging a failure with the container part name.
+///
+/// #774 (RB7 MAJOR, symmetric with docx `parser::open_zip`): a truncated / corrupt
+/// ZIP is the MOST COMMON way a pptx is broken (an incomplete download, a
+/// byte-mangled attachment). `ZipArchive::new` maps that to an opaque
+/// `zip::result::ZipError` that, if propagated, throws with no indication that the
+/// CONTAINER (not some inner part) is the problem. Naming the failure lets the
+/// caller build a `degraded_container_presentation` tagged with the container,
+/// symmetric with how a corrupt slide part is tagged inside [`parse_presentation`].
+pub(crate) fn open_zip(data: Vec<u8>) -> Result<PptxZip, String> {
+    zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))
+}
+
+/// A placeholder [`Presentation`] for a pptx whose ZIP CONTAINER could not be
+/// opened (truncated / corrupt / not a zip). No parts are readable, so there is
+/// no theme to derive fonts / colors from — fall back to defaults and surface a
+/// single placeholder slide carrying the container-tagged error. Mirrors the
+/// per-slide [`broken_slide`] used inside [`parse_presentation`], but for the
+/// whole-container case. Standard 16:9 slide size (12192000×6858000 EMU) so the
+/// viewer paints a correctly-proportioned "could not be displayed" card.
+///
+/// `parse_error` is already tagged by [`open_zip`] (`"(zip container): {e}"`), so
+/// it is set directly rather than routed through [`broken_slide`], which would
+/// prefix its own `part` name and double-tag the message (`"(zip container):
+/// (zip container): ..."`).
+pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentation {
+    Presentation {
+        slide_width: 12_192_000,
+        slide_height: 6_858_000,
+        slides: vec![Slide {
+            index: 0,
+            slide_number: 1,
+            background: None,
+            elements: Vec::new(),
+            notes: None,
+            comments: Vec::new(),
+            hidden: false,
+            parse_error: Some(parse_error),
+        }],
+        default_text_color: None,
+        major_font: None,
+        minor_font: None,
+        hlink_color: None,
+        fol_hlink_color: None,
+    }
+}
+
 /// Parse a presentation from raw archive bytes. Thin wrapper that opens a fresh
 /// owned [`PptxZip`] (copying `data`) and delegates to [`parse_presentation`].
 /// Kept so the free `parse_pptx` / `pptx_to_markdown` WASM entry points and the
 /// native `parse_pptx_native` path keep their `&[u8]` signature; the stateful
 /// `PptxArchive` handle calls [`parse_presentation`] directly on its retained
 /// archive to avoid re-opening it per call.
+///
+/// #774 (RB7 MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
+/// presentation (`degraded_container_presentation`) rather than erroring,
+/// consistent with a corrupt inner slide — the viewer shows a "could not display"
+/// slide instead of nothing.
 fn parse_presentation_from_bytes(data: &[u8]) -> Result<Presentation, Box<dyn std::error::Error>> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(data.to_vec()))?;
+    let mut zip = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(e) => return Ok(degraded_container_presentation(e)),
+    };
     parse_presentation(&mut zip)
 }
 
@@ -6297,5 +6375,75 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    /// #774 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a
+    /// pptx is broken — degrades to a placeholder deck (one slide) tagged with the
+    /// container, rather than throwing an opaque `ZipArchive::new` error before any
+    /// part is read. Symmetric with docx `rb7_corrupt_zip_container_degrades_...`.
+    #[test]
+    fn corrupt_zip_container_degrades_to_placeholder() {
+        // Truncated container: a valid deck cut off partway is not a readable zip.
+        let full = build_three_slide_deck(9, "<unused/>"); // 9 ⇒ no slide is broken
+        let truncated = &full[..full.len() / 2];
+        let json = parse_pptx_native(truncated)
+            .expect("a corrupt container must open as a placeholder, not error out");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let slides = v["slides"].as_array().expect("placeholder deck has slides");
+        assert_eq!(slides.len(), 1, "one placeholder slide for the whole file");
+        let err = slides[0]["parseError"]
+            .as_str()
+            .expect("placeholder slide carries a parseError");
+        assert!(
+            err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once; got {err:?}"
+        );
+        assert_eq!(
+            err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {err:?}"
+        );
+        assert!(
+            slides[0]["elements"].as_array().unwrap().is_empty(),
+            "placeholder slide has no elements"
+        );
+
+        // Not-a-zip-at-all also degrades (no local file header).
+        let garbage = parse_pptx_native(b"this is definitely not a zip file")
+            .expect("non-zip bytes must open as a placeholder");
+        let gv: serde_json::Value = serde_json::from_str(&garbage).unwrap();
+        let garbage_err = gv["slides"][0]["parseError"]
+            .as_str()
+            .expect("non-zip degrades with a container-tagged error");
+        assert!(
+            garbage_err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once; got {garbage_err:?}"
+        );
+        assert_eq!(
+            garbage_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {garbage_err:?}"
+        );
+    }
+
+    /// A HEALTHY deck never takes the container-degradation branch: no slide
+    /// carries a `parseError` and no "(zip container)" tag appears anywhere, so the
+    /// placeholder path is inert for valid files (VRT non-regression by
+    /// construction).
+    #[test]
+    fn healthy_deck_never_degrades_container() {
+        let data = build_three_slide_deck(9, "<unused/>"); // no broken slide
+        let json = parse_pptx_native(&data).expect("healthy deck parses");
+        assert!(
+            !json.contains("zip container"),
+            "healthy deck must not carry any container-degradation tag"
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for slide in v["slides"].as_array().unwrap() {
+            assert!(
+                slide["parseError"].is_null(),
+                "healthy slide must carry no parseError; got {slide}"
+            );
+        }
     }
 }

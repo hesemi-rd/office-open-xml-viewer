@@ -161,6 +161,16 @@ export class XlsxWorkbook {
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
     }
+    // #773: a workbook-level degradation (a present-but-corrupt shared part such
+    // as `xl/sharedStrings.xml`, which blanks every string cell across all sheets)
+    // still opens the workbook, but must not be SILENT. Surface it once at load —
+    // the model also carries it on `workbook.parseError` for callers that inspect
+    // it. Per-sheet placeholders (a broken worksheet) already surface via the
+    // sheet-grid overlay, so they are not re-logged here.
+    const workbookError = this.parsedWorkbook?.workbook.parseError;
+    if (workbookError) {
+      console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
+    }
     if (this._mode === 'main' && opts.useGoogleFonts) {
       await preloadGoogleFonts(
         xlsxFontPreloadNames(this.parsedWorkbook),

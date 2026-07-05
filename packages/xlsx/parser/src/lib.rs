@@ -32,6 +32,64 @@ use table::*;
 /// passed by `&mut` to every per-sheet loader.
 pub(crate) type XlsxZip = zip::ZipArchive<Cursor<Vec<u8>>>;
 
+/// Part-name tag for a whole-container degradation (#774). Already parenthesized
+/// (`"(zip container)"`), symmetric with docx / pptx `"(zip container)"` — so
+/// error formatting below must not wrap it in another pair of parens.
+const CONTAINER_PART: &str = "(zip container)";
+
+/// Open a xlsx ZIP container, tagging a failure with the container part name.
+///
+/// #774 (RB7 MAJOR, symmetric with docx / pptx `open_zip`): a truncated / corrupt
+/// ZIP is the MOST COMMON way a xlsx is broken (an incomplete download, a
+/// byte-mangled attachment). `ZipArchive::new` maps that to an opaque
+/// `zip::result::ZipError` that, if propagated, throws with no indication that the
+/// CONTAINER (not some inner part) is the problem. Naming the failure lets the
+/// caller build a `degraded_container_workbook` / `degraded_container_sheet`
+/// tagged with the container, symmetric with how a corrupt sheet part is tagged
+/// inside [`parse_sheet_with`].
+///
+/// `CONTAINER_PART` already carries its own parens, so this formats as
+/// `"{CONTAINER_PART}: {e}"` — NOT `"({CONTAINER_PART}): {e}"`, which would
+/// double-parenthesize into `"((zip container)): ..."` (docx / pptx avoid this
+/// by writing the literal `"(zip container)"` directly instead of a
+/// pre-parenthesized constant).
+pub(crate) fn open_zip(data: Vec<u8>) -> Result<XlsxZip, String> {
+    zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("{CONTAINER_PART}: {e}"))
+}
+
+/// A placeholder [`ParsedWorkbook`] for a xlsx whose ZIP CONTAINER could not be
+/// opened (truncated / corrupt / not a zip). No parts are readable, so there is
+/// no styles / theme / sharedStrings to derive — surface a single placeholder
+/// sheet carrying the container-tagged error so the viewer lists one tab and
+/// paints a "could not be displayed" overlay. Mirrors the per-sheet
+/// [`Worksheet::placeholder`] used inside [`parse_sheet_with`], but for the
+/// whole-container case.
+fn degraded_container_workbook(parse_error: String) -> ParsedWorkbook {
+    ParsedWorkbook {
+        workbook: Workbook {
+            sheets: vec![SheetMeta {
+                name: CONTAINER_PART.to_string(),
+                sheet_id: 1,
+                r_id: String::new(),
+                tab_color: None,
+                visibility: SheetVisibility::Visible,
+            }],
+            date1904: false,
+            parse_error: Some(parse_error),
+        },
+        styles: Styles::default(),
+        shared_strings: Vec::new(),
+    }
+}
+
+/// The single placeholder [`Worksheet`] for the whole-container degradation
+/// (#774): the viewer parses sheet 0 of a [`degraded_container_workbook`] and
+/// gets this back, so it paints the same part-tagged error overlay the per-sheet
+/// break uses. `name` is the placeholder tab name (`CONTAINER_PART`).
+fn degraded_container_sheet(parse_error: String) -> Worksheet {
+    Worksheet::placeholder(CONTAINER_PART, parse_error)
+}
+
 // Excel built-in indexed color palette (indices 0-63)
 // Standard Excel 2003 color palette
 const INDEXED_COLORS: &[&str] = &[
@@ -90,6 +148,12 @@ struct WorkbookShared {
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
     shared_strings: Vec<SharedString>,
+    /// #773: a part-tagged degradation error set when `xl/sharedStrings.xml` was
+    /// PRESENT but corrupt (a broken shared-string table blanks every string cell
+    /// across all sheets). `None` when the part read cleanly or is legitimately
+    /// absent. Surfaced onto the workbook index's `parse_error` so the loss is
+    /// visible rather than silent, without taking any sheet down.
+    shared_strings_error: Option<String>,
     /// Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28).
     /// `true` = 1904 date system. Parsed once here and denormalized onto every
     /// worksheet so the renderer/cell formatter can resolve serial dates
@@ -118,7 +182,7 @@ impl WorkbookShared {
         let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
         let theme_colors = parse_theme_colors(archive);
         let theme_fonts = parse_theme_fonts(archive);
-        let shared_strings = read_shared_strings(archive, &theme_colors);
+        let (shared_strings, shared_strings_error) = read_shared_strings(archive, &theme_colors);
         Ok(WorkbookShared {
             workbook_xml,
             rels_xml,
@@ -126,6 +190,7 @@ impl WorkbookShared {
             theme_colors,
             theme_fonts,
             shared_strings,
+            shared_strings_error,
             date1904,
         })
     }
@@ -233,8 +298,16 @@ pub fn parse_sheet(
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    // #774: mirror `parse_xlsx_inner` — a corrupt CONTAINER degrades the sheet to
+    // the container-tagged placeholder so the viewer paints its overlay instead of
+    // the constructor / read throwing an opaque error.
+    let mut archive = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(e) => {
+            let ws = degraded_container_sheet(e);
+            return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
+        }
+    };
     // The free function rebuilds the shared parts per call (behavior unchanged).
     // `XlsxArchive::parse_sheet` reuses a cached `WorkbookShared` instead.
     let shared = WorkbookShared::load(&mut archive).map_err(|e| JsValue::from_str(&e))?;
@@ -270,6 +343,10 @@ fn parse_xlsx_inner_with(
         workbook: Workbook {
             sheets,
             date1904: shared.date1904,
+            // #773: a corrupt-but-present `xl/sharedStrings.xml` surfaces here as a
+            // workbook-level, part-tagged error so the blanked string cells across
+            // all sheets are visible rather than silent. Every sheet still opens.
+            parse_error: shared.shared_strings_error.clone(),
         },
         styles,
         shared_strings: shared.shared_strings.clone(),
@@ -277,8 +354,14 @@ fn parse_xlsx_inner_with(
 }
 
 fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    // #774 (RB7 MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
+    // workbook (one placeholder sheet) rather than erroring, consistent with a
+    // corrupt inner sheet — the viewer shows a "could not display" tab instead of
+    // nothing.
+    let mut archive = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(e) => return Ok(degraded_container_workbook(e)),
+    };
     let shared = WorkbookShared::load(&mut archive)?;
     parse_xlsx_inner_with(&mut archive, &shared)
 }
@@ -632,12 +715,36 @@ fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     None
 }
 
-fn read_shared_strings(archive: &mut XlsxZip, theme_colors: &[String]) -> Vec<SharedString> {
+/// Read + parse `xl/sharedStrings.xml` (§18.4.9) into the dedup'd string table.
+///
+/// Returns the strings plus an optional **part-tagged degradation error** (#773).
+/// The two failure modes are treated differently, on purpose:
+///
+///  - **Missing part** (`read_zip_string` fails): NOT an error. A workbook with no
+///    string cells legitimately ships no `sharedStrings.xml`, so an absent part is
+///    the normal empty-table case — `(Vec::new(), None)`.
+///  - **Present but corrupt** (`parse_guarded` fails on a part that IS in the zip):
+///    a real degradation. Before #773 this returned an empty table silently, so
+///    EVERY string cell across ALL sheets rendered blank with no indication why.
+///    Now it returns `(Vec::new(), Some("xl/sharedStrings.xml: <detail>"))` so the
+///    caller can surface a workbook-level `parse_error`. We still return the empty
+///    table (not an `Err`) so the workbook keeps opening and every sheet renders
+///    its non-string content — partial degradation, just no longer silent.
+fn read_shared_strings(
+    archive: &mut XlsxZip,
+    theme_colors: &[String],
+) -> (Vec<SharedString>, Option<String>) {
     let Ok(xml) = read_zip_string(archive, "xl/sharedStrings.xml") else {
-        return Vec::new();
+        // Absent part ⇒ legitimately empty table, not a degradation.
+        return (Vec::new(), None);
     };
-    let Ok(doc) = parse_guarded(&xml) else {
-        return Vec::new();
+    let doc = match parse_guarded(&xml) {
+        Ok(doc) => doc,
+        Err(e) => {
+            // Present but unparseable ⇒ surface it so the blank string cells aren't
+            // a silent mystery; keep the workbook openable with an empty table.
+            return (Vec::new(), Some(format!("xl/sharedStrings.xml: {e}")));
+        }
     };
     let mut strings = Vec::new();
     for si in doc.descendants() {
@@ -645,7 +752,7 @@ fn read_shared_strings(archive: &mut XlsxZip, theme_colors: &[String]) -> Vec<Sh
             strings.push(parse_si_node(&si, theme_colors));
         }
     }
-    strings
+    (strings, None)
 }
 
 /// Parse a `<si>` (shared) or `<is>` (inline) node into a SharedString.
@@ -2247,7 +2354,13 @@ pub fn extract_image(
 /// install.
 #[wasm_bindgen]
 pub struct XlsxArchive {
-    archive: XlsxZip,
+    /// The opened archive, or the container-open error string when the ZIP itself
+    /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
+    /// instead of erroring out of `new` — lets `parse()` / `parse_sheet()` return a
+    /// degraded placeholder (symmetric with a corrupt inner sheet) rather than the
+    /// constructor throwing an opaque error the viewer can't turn into a
+    /// placeholder tab.
+    archive: Result<XlsxZip, String>,
     max: Option<u64>,
     /// Workbook-level parts parsed once and reused across sheet switches. Loaded
     /// lazily on the first `parse` / `parse_sheet` (see [`XlsxArchive::shared`]).
@@ -2270,10 +2383,11 @@ impl XlsxArchive {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<XlsxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        let archive = zip::ZipArchive::new(Cursor::new(data))
-            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
+        // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
+        // thrown, so `parse()` / `parse_sheet()` can degrade it to a placeholder
+        // instead of the constructor failing with an opaque error.
         Ok(XlsxArchive {
-            archive,
+            archive: open_zip(data),
             max: max_zip_entry_bytes,
             shared: None,
         })
@@ -2281,51 +2395,77 @@ impl XlsxArchive {
 
     /// Parse (once) and return the workbook-level shared parts, caching them for
     /// reuse. Borrows `self` split so the cached `shared` and the `archive` can be
-    /// used together by callers.
+    /// used together by callers. Assumes the container opened; the corrupt-container
+    /// case is short-circuited by the callers before they reach here.
     fn ensure_shared(&mut self) -> Result<(), JsValue> {
         if self.shared.is_none() {
-            let shared =
-                WorkbookShared::load(&mut self.archive).map_err(|e| JsValue::from_str(&e))?;
+            let zip = self
+                .archive
+                .as_mut()
+                .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
+            let shared = WorkbookShared::load(zip).map_err(|e| JsValue::from_str(&e))?;
             self.shared = Some(shared);
         }
         Ok(())
     }
 
     /// Parse the workbook index (sheet list + styles + shared strings) and return
-    /// it as UTF-8 JSON bytes. Byte-for-byte identical to `parse_xlsx`.
+    /// it as UTF-8 JSON bytes. Byte-for-byte identical to `parse_xlsx`. When the
+    /// CONTAINER failed to open (#774) the model is a degraded placeholder
+    /// workbook tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
+        if let Err(e) = &self.archive {
+            let wb = degraded_container_workbook(e.clone());
+            return serde_json::to_vec(&wb)
+                .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")));
+        }
         self.ensure_shared()?;
         let shared = self.shared.as_ref().expect("shared loaded above");
-        let wb =
-            parse_xlsx_inner_with(&mut self.archive, shared).map_err(|e| JsValue::from_str(&e))?;
+        let zip = self.archive.as_mut().expect("container open checked above");
+        let wb = parse_xlsx_inner_with(zip, shared).map_err(|e| JsValue::from_str(&e))?;
         serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
     /// Parse one worksheet by 0-based index and return it as UTF-8 JSON bytes.
     /// Byte-for-byte identical to `parse_sheet`, but the workbook / sharedStrings
     /// / theme parts are taken from the cache instead of re-parsed (the D3 win).
+    /// When the CONTAINER failed to open (#774) the sheet is the container-tagged
+    /// placeholder.
     pub fn parse_sheet(&mut self, sheet_index: u32, name: &str) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
+        if let Err(e) = &self.archive {
+            let ws = degraded_container_sheet(e.clone());
+            return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
+        }
         self.ensure_shared()?;
         let shared = self.shared.as_ref().expect("shared loaded above");
-        parse_sheet_with(&mut self.archive, shared, sheet_index, name)
+        let zip = self.archive.as_mut().expect("container open checked above");
+        parse_sheet_with(zip, shared, sheet_index, name)
     }
 
     /// Extract raw bytes for one embedded image entry (e.g.
     /// "xl/media/image1.png") from the retained archive. Twin of the free
-    /// `extract_image`, but reads through the already-open archive.
+    /// `extract_image`, but reads through the already-open archive. A corrupt
+    /// container has no entries, so this surfaces the container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        ooxml_common::zip::read_zip_bytes(&mut self.archive, path)
-            .map_err(|e| JsValue::from_str(&e))
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
+        ooxml_common::zip::read_zip_bytes(zip, path).map_err(|e| JsValue::from_str(&e))
     }
 
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `xlsx_to_markdown`.
+    /// free `xlsx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
         let _guard = ooxml_common::zip::scoped_max(self.max);
-        to_markdown_from_archive(&mut self.archive).map_err(|e| JsValue::from_str(&e))
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
+        to_markdown_from_archive(zip).map_err(|e| JsValue::from_str(&e))
     }
 }
 
@@ -2339,8 +2479,12 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 /// Shared implementation between `to_markdown_native` (mcp-server) and
 /// `xlsx_to_markdown` (browser / Node WASM).
 fn to_markdown_impl(data: &[u8]) -> Result<String, String> {
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    // #774: a corrupt CONTAINER has no sheets to render — degrade to an empty
+    // markdown document instead of erroring, symmetric with the JSON path.
+    let mut archive = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(_) => return Ok(String::new()),
+    };
     to_markdown_from_archive(&mut archive)
 }
 
@@ -2375,8 +2519,15 @@ fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
 /// the WASM `parse_sheet`, then decodes the JSON bytes to a `String` — so the
 /// native and WASM paths can never drift.
 pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    // #774: mirror the WASM `parse_sheet` — a corrupt CONTAINER degrades to the
+    // container-tagged placeholder sheet rather than erroring.
+    let mut archive = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(e) => {
+            let ws = degraded_container_sheet(e);
+            return serde_json::to_string(&ws).map_err(|e| e.to_string());
+        }
+    };
     let shared = WorkbookShared::load(&mut archive)?;
     let json = parse_sheet_with(&mut archive, &shared, sheet_index, name)
         .map_err(|e| jsvalue_to_string(&e))?;
@@ -2975,8 +3126,8 @@ mod date1904_wire_shape_tests {
 
     fn workbook(date1904: bool) -> Workbook {
         Workbook {
-            sheets: Vec::new(),
             date1904,
+            ..Default::default()
         }
     }
 
@@ -3380,6 +3531,168 @@ mod rb7_partial_degradation_tests {
         assert!(
             err.starts_with("xl/worksheets/sheet3.xml:"),
             "error names the missing part; got {err:?}"
+        );
+    }
+
+    // ── #774: whole-container degradation ────────────────────────────────────
+
+    /// #774 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a
+    /// xlsx is broken — degrades to a placeholder workbook (one tab) tagged with
+    /// the container, rather than throwing an opaque `ZipArchive::new` error before
+    /// any part is read. Symmetric with docx / pptx container degradation.
+    #[test]
+    fn corrupt_zip_container_degrades_to_placeholder_workbook() {
+        // Truncated container: a valid workbook cut off partway is not a readable zip.
+        let full = build_three_sheet_workbook(9, None); // 9 ⇒ no sheet is broken
+        let truncated = &full[..full.len() / 2];
+
+        // Workbook index opens with a single placeholder sheet + a container error.
+        let wb_json =
+            parse_workbook_native(truncated).expect("a corrupt container must open, not error out");
+        let wb: serde_json::Value = serde_json::from_str(&wb_json).unwrap();
+        let sheets = wb["sheets"]
+            .as_array()
+            .expect("placeholder workbook has sheets");
+        assert_eq!(sheets.len(), 1, "one placeholder tab for the whole file");
+        let wb_err = wb["parseError"]
+            .as_str()
+            .expect("degraded workbook carries a container-tagged parseError");
+        assert!(
+            wb_err.starts_with("(zip container): "),
+            "workbook error is tagged with the container exactly once (one paren pair); got {wb_err:?}"
+        );
+        assert_eq!(
+            wb_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {wb_err:?}"
+        );
+
+        // The lazily-parsed sheet 0 is the container-tagged placeholder overlay.
+        let ws = parse_sheet_json(truncated, 0, "(zip container)");
+        let ws_err = ws["parseError"]
+            .as_str()
+            .expect("placeholder sheet carries a parseError");
+        assert!(
+            ws_err.starts_with("(zip container): "),
+            "sheet error is tagged with the container exactly once (one paren pair); got {ws_err:?}"
+        );
+        assert_eq!(
+            ws_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {ws_err:?}"
+        );
+        assert!(
+            ws["rows"].as_array().unwrap().is_empty(),
+            "placeholder sheet has no rows"
+        );
+
+        // Not-a-zip-at-all also degrades (no local file header).
+        let garbage =
+            parse_workbook_native(b"this is definitely not a zip file").expect("non-zip opens");
+        let gv: serde_json::Value = serde_json::from_str(&garbage).unwrap();
+        let garbage_err = gv["parseError"]
+            .as_str()
+            .expect("non-zip degrades with a container-tagged error");
+        assert!(
+            garbage_err.starts_with("(zip container): "),
+            "error is tagged with the container exactly once (one paren pair); got {garbage_err:?}"
+        );
+        assert_eq!(
+            garbage_err.matches("zip container").count(),
+            1,
+            "the container tag must not be doubled; got {garbage_err:?}"
+        );
+    }
+
+    // ── #773: corrupt sharedStrings surfaces (not silent) ────────────────────
+
+    /// Build a 1-sheet workbook whose one string cell (`A1`, `t="s"`) references
+    /// shared-string index 0. `shared_strings_xml` becomes `xl/sharedStrings.xml`
+    /// verbatim; pass malformed XML to simulate corruption, or `None` to omit it.
+    fn build_workbook_with_shared_strings(shared_strings_xml: Option<&str>) -> Vec<u8> {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#;
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Alpha" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let wb_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        // `parse_xlsx_inner_with` (the workbook-index path, unlike the per-sheet
+        // path) reads `xl/styles.xml` with `?`, so a minimal styles part is needed.
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>"#;
+        let mut entries: Vec<(String, String)> = vec![
+            ("xl/workbook.xml".into(), workbook.into()),
+            ("xl/_rels/workbook.xml.rels".into(), wb_rels.into()),
+            ("xl/worksheets/sheet1.xml".into(), sheet.into()),
+            ("xl/styles.xml".into(), styles.into()),
+        ];
+        if let Some(ss) = shared_strings_xml {
+            entries.push(("xl/sharedStrings.xml".into(), ss.into()));
+        }
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in &entries {
+                w.start_file(name.as_str(), o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    /// #773: a PRESENT-but-corrupt `xl/sharedStrings.xml` (§18.4.9) silently
+    /// blanked every string cell before this fix. Now the workbook still opens (no
+    /// sheet is taken down) but the loss is SURFACED as a workbook-level,
+    /// part-tagged `parseError` — no longer silent.
+    #[test]
+    fn corrupt_shared_strings_surfaces_workbook_error() {
+        // Unterminated element → parse_guarded fails on a part that IS present.
+        let data = build_workbook_with_shared_strings(Some("<sst><si><t>hi"));
+        let wb_json = parse_workbook_native(&data).expect("workbook still opens");
+        let wb: serde_json::Value = serde_json::from_str(&wb_json).unwrap();
+        let err = wb["parseError"]
+            .as_str()
+            .expect("corrupt sharedStrings surfaces a workbook-level parseError");
+        assert!(
+            err.starts_with("xl/sharedStrings.xml:"),
+            "error names the offending part; got {err:?}"
+        );
+        // The sheet itself is NOT taken down — it still opens as a real sheet
+        // (no per-sheet parseError), only its string cell is blank.
+        let ws = parse_sheet_json(&data, 0, "Alpha");
+        assert!(
+            ws["parseError"].is_null(),
+            "the sheet must still open (partial degradation, not a placeholder)"
+        );
+    }
+
+    /// A HEALTHY sharedStrings.xml leaves NO workbook-level `parseError` (the
+    /// silent-degradation surfacing is inert for valid files — wire-unchanged).
+    #[test]
+    fn healthy_shared_strings_no_workbook_error() {
+        let data = build_workbook_with_shared_strings(Some(
+            r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><t>hi</t></si></sst>"#,
+        ));
+        let wb_json = parse_workbook_native(&data).expect("workbook opens");
+        let wb: serde_json::Value = serde_json::from_str(&wb_json).unwrap();
+        assert!(
+            wb["parseError"].is_null(),
+            "a healthy sharedStrings must not surface any parseError; got {wb}"
+        );
+        assert!(
+            !wb_json.contains("parseError"),
+            "healthy workbook JSON must not carry a parseError key"
+        );
+    }
+
+    /// An ABSENT sharedStrings.xml is legitimate (a workbook with no string cells)
+    /// and must NOT surface a `parseError` — only a present-but-corrupt part does.
+    #[test]
+    fn absent_shared_strings_no_workbook_error() {
+        let data = build_workbook_with_shared_strings(None);
+        let wb_json = parse_workbook_native(&data).expect("workbook opens");
+        let wb: serde_json::Value = serde_json::from_str(&wb_json).unwrap();
+        assert!(
+            wb["parseError"].is_null(),
+            "an absent sharedStrings is normal, not a degradation; got {wb}"
         );
     }
 }
