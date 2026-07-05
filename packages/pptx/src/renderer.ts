@@ -89,6 +89,7 @@ import {
 import { fitCjkLine, type MeasuredChar } from './cjk-wrap.js';
 import { justifyLine, type Justified } from './text-justify';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
+import { resolveTableBorderConflict } from './table-border-conflict.js';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -3850,7 +3851,7 @@ function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale
 
 // ─── Table rendering ─────────────────────────────────────────────────────────
 
-function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }) {
+export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }) {
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
@@ -3955,7 +3956,19 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
   // non-continuation cell's paint box once; rowSpan/gridSpan and the RTL
   // coordinate flip are already baked into colX/rowY/cellW/cellH, so both passes
   // replay identical geometry.
-  const jobs: Array<{ cell: TableCell; colX: number; rowY: number; cellW: number; cellH: number }> = [];
+  // Each job also records its GRID footprint (top-left slot ci/ri, its column
+  // span and last row) so the border pass can find, for every interior gridline,
+  // the neighbouring cell that shares it — DrawingML tables populate every grid
+  // slot (a spanning `<a:tc>` is followed by `hMerge`/`vMerge` continuation
+  // `<a:tc>`s), so `ci` is the true grid column index.
+  const jobs: Array<{
+    cell: TableCell; colX: number; rowY: number; cellW: number; cellH: number;
+    ci: number; ri: number; span: number; lastRi: number;
+  }> = [];
+  // Grid-slot → job index occupancy, so an interior edge can look up the adjacent
+  // cell. A spanning anchor fills every slot it covers; the neighbour query on any
+  // covered slot resolves back to that anchor job.
+  const occupancy: number[][] = el.rows.map(() => new Array<number>(numCols).fill(-1));
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
     const rowY = rowTop[ri];
@@ -3963,11 +3976,22 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
       const cell = row.cells[ci];
       // Merged-cell continuations are drawn by their anchor cell.
       if (cell.hMerge || cell.vMerge) continue;
-      const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const span = cell.gridSpan || 1;
+      const rspan = cell.rowSpan || 1;
+      const cellW = spannedWidth(ci, span);
       let cellH = 0;
-      for (let span = 0; span < (cell.rowSpan || 1); span++) cellH += rowHeights[ri + span] ?? 0;
-      const colX = spannedLeft(ci, cell.gridSpan || 1);
-      jobs.push({ cell, colX, rowY, cellW, cellH });
+      for (let s = 0; s < rspan; s++) cellH += rowHeights[ri + s] ?? 0;
+      const colX = spannedLeft(ci, span);
+      const lastRi = Math.min(ri + rspan - 1, el.rows.length - 1);
+      const jobIndex = jobs.length;
+      jobs.push({ cell, colX, rowY, cellW, cellH, ci, ri, span, lastRi });
+      // Record this cell's grid footprint so interior-edge neighbour lookups
+      // resolve to it (a spanning cell owns every slot it covers).
+      for (let rj = ri; rj <= lastRi; rj++) {
+        for (let cj = ci; cj < ci + span && cj < numCols; cj++) {
+          occupancy[rj][cj] = jobIndex;
+        }
+      }
     }
   }
 
@@ -3987,6 +4011,23 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
   }
 
   // Pass 2: borders, painted on top of every fill.
+  //
+  // SPEC IS SILENT on adjacent-cell border conflict for DrawingML/PresentationML
+  // tables (unlike WordprocessingML §17.4.66). When cell spacing is zero, two
+  // neighbouring cells each contribute a line for the SHARED interior gridline;
+  // the OLD code drew both, so the later-painted cell won by paint order (and a
+  // translucent line doubled its ink). We now draw each gridline EXACTLY ONCE via
+  // a single-ownership convention (the pptx leg / structural mirror of docx
+  // PR #811, §17.4.66):
+  //   • outer table edges → the single bordering cell draws its own line;
+  //   • interior VERTICAL line → the physically-LEFT cell owns it (drawn as its
+  //     physical-right edge), resolved against the physically-right neighbour;
+  //   • interior HORIZONTAL line → the physically-ABOVE cell owns it (drawn as its
+  //     bottom edge), resolved against the below neighbour.
+  // The winner between two conflicting facing lines is chosen by our DEFINED,
+  // deterministic rule (spec silent): null loses → wider wins → darker wins →
+  // owner (reading-order-first) wins. See `resolveTableBorderConflict`.
+  //
   // Crispness nudge (see crispOffset): an axis-aligned thin grid line whose
   // device-pixel width is odd straddles two device rows/cols on a DPR=1 display
   // (each ~50% ink → blurry). Snapping the cell edge perpendicular to the line
@@ -3997,41 +4038,91 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
   // (T/B) shift Y from their y; vertical edges (L/R) shift X from their x.
   // Diagonals can't be pixel-aligned, so untouched.
   const dpr = rc.dpr;
-  for (const { cell, colX, rowY, cellW, cellH } of jobs) {
+
+  // Resolve the job whose grid footprint covers slot (ri, ci), or null when the
+  // slot is empty / out of range (an occupancy value of -1 or an index off-grid).
+  const jobAt = (ri: number, ci: number): typeof jobs[number] | null => {
+    if (ri < 0 || ri >= occupancy.length) return null;
+    if (ci < 0 || ci >= numCols) return null;
+    const idx = occupancy[ri][ci];
+    return idx < 0 ? null : jobs[idx];
+  };
+
+  const strokeSeg = (
+    stroke: Stroke,
+    x1: number, y1: number, x2: number, y2: number,
+  ) => {
+    applyStroke(ctx, stroke, scale);
+    // Vertical edge (x1===x2) nudges X; horizontal edge (y1===y2) nudges Y.
+    const dx = x1 === x2 ? crispOffset(x1, ctx.lineWidth, dpr) : 0;
+    const dy = y1 === y2 ? crispOffset(y1, ctx.lineWidth, dpr) : 0;
+    ctx.beginPath();
+    ctx.moveTo(x1 + dx, y1 + dy);
+    ctx.lineTo(x2 + dx, y2 + dy);
+    ctx.stroke();
+  };
+
+  for (const j of jobs) {
+    const { cell, colX, rowY, cellW, cellH } = j;
     ctx.save();
-    if (cell.borderT) {
-      applyStroke(ctx, cell.borderT, scale);
-      const dy = crispOffset(rowY, ctx.lineWidth, dpr);
-      ctx.beginPath();
-      ctx.moveTo(colX, rowY + dy);
-      ctx.lineTo(colX + cellW, rowY + dy);
-      ctx.stroke();
+
+    // Map this cell's LOGICAL border specs onto PHYSICAL sides. Under a
+    // right-to-left table (§21.1.3.13) logical column 0 is at the physical RIGHT,
+    // so a cell's logical-left border (`borderL`) paints on its physical-right
+    // edge and its logical-right border (`borderR`) on its physical-left edge;
+    // the physically-right NEIGHBOUR sits at a LOWER logical column. LTR keeps the
+    // natural mapping.
+    const physLeftSpec = el.rtl ? cell.borderR : cell.borderL;
+    const physRightSpec = el.rtl ? cell.borderL : cell.borderR;
+    const physLeftOuter = el.rtl ? j.ci + j.span === numCols : j.ci === 0;
+    const physRightOuter = el.rtl ? j.ci === 0 : j.ci + j.span === numCols;
+    // Grid slot of the physically-right neighbour (whose facing edge conflicts
+    // with THIS cell's physical-right line). LTR: the column just past this span.
+    // RTL: the column just before this cell's leading logical column.
+    const physRightNbrCi = el.rtl ? j.ci - 1 : j.ci + j.span;
+    // The neighbour's facing edge is the one on ITS physical-left side, i.e. its
+    // logical-right spec under RTL, logical-left spec otherwise.
+    const nbrPhysLeftSpec = (nb: TableCell): Stroke | null => (el.rtl ? nb.borderR : nb.borderL);
+
+    // TOP: only the outer top row draws its own top; interior tops are owned by
+    // the cell above (its bottom). Vertical direction is unaffected by RTL.
+    if (j.ri === 0 && cell.borderT) {
+      strokeSeg(cell.borderT, colX, rowY, colX + cellW, rowY);
     }
-    if (cell.borderB) {
-      applyStroke(ctx, cell.borderB, scale);
-      const dy = crispOffset(rowY + cellH, ctx.lineWidth, dpr);
-      ctx.beginPath();
-      ctx.moveTo(colX, rowY + cellH + dy);
-      ctx.lineTo(colX + cellW, rowY + cellH + dy);
-      ctx.stroke();
+    // PHYSICAL LEFT: only the outer-left column draws its own left; interior
+    // lefts are owned by the physically-left neighbour (its right edge).
+    if (physLeftOuter && physLeftSpec) {
+      strokeSeg(physLeftSpec, colX, rowY, colX, rowY + cellH);
     }
-    if (cell.borderL) {
-      applyStroke(ctx, cell.borderL, scale);
-      const dx = crispOffset(colX, ctx.lineWidth, dpr);
-      ctx.beginPath();
-      ctx.moveTo(colX + dx, rowY);
-      ctx.lineTo(colX + dx, rowY + cellH);
-      ctx.stroke();
+    // BOTTOM: outer bottom → own spec; interior → resolve THIS cell's bottom
+    // against the below neighbour's top and draw the single winner.
+    {
+      let spec: Stroke | null;
+      if (j.lastRi === el.rows.length - 1) {
+        spec = cell.borderB;
+      } else {
+        const below = jobAt(j.lastRi + 1, j.ci);
+        spec = resolveTableBorderConflict(cell.borderB, below ? below.cell.borderT : null);
+      }
+      if (spec) strokeSeg(spec, colX, rowY + cellH, colX + cellW, rowY + cellH);
     }
-    if (cell.borderR) {
-      applyStroke(ctx, cell.borderR, scale);
-      const dx = crispOffset(colX + cellW, ctx.lineWidth, dpr);
-      ctx.beginPath();
-      ctx.moveTo(colX + cellW + dx, rowY);
-      ctx.lineTo(colX + cellW + dx, rowY + cellH);
-      ctx.stroke();
+    // PHYSICAL RIGHT: outer-right → own spec; interior → resolve THIS cell's
+    // physical-right line against the physically-right neighbour's facing edge
+    // (so each shared vertical line is drawn once).
+    {
+      let spec: Stroke | null;
+      if (physRightOuter) {
+        spec = physRightSpec;
+      } else {
+        const right = jobAt(j.ri, physRightNbrCi);
+        spec = resolveTableBorderConflict(physRightSpec, right ? nbrPhysLeftSpec(right.cell) : null);
+      }
+      if (spec) strokeSeg(spec, colX + cellW, rowY, colX + cellW, rowY + cellH);
     }
-    // Diagonal borders: top-left→bottom-right and bottom-left→top-right
+
+    // Diagonal borders: top-left→bottom-right and bottom-left→top-right. These
+    // are never shared between cells, so they are always drawn per-cell (and are
+    // not pixel-aligned).
     if (cell.diagonalTL) {
       applyStroke(ctx, cell.diagonalTL, scale);
       ctx.beginPath();
