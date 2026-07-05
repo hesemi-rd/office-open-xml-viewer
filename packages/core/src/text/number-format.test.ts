@@ -181,10 +181,14 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       ['arabicAbjad', [
         [1, 'أ'], [12, 'ل'], [28, 'ظ'], [29, 'أأ'],
       ]],
-      // hebrew2 (22-letter alphabet, repeat). 23 = א twice, 24 = ב twice,
-      // 44 = ת twice (2×22, last letter of the second cycle).
+      // hebrew2 (22-letter alphabet + ת suffix — NOT the repeat scheme).
+      // §17.18.59 steps: write the RESULT glyph once, then append ת once per
+      // 22 subtracted: 23 -> את, 24 -> בת. §17.16.4.3.1 field example:
+      // 123 \* HEBREW2 -> מ + 5×ת (123 − 5×22 = 13 -> מ). 44 − 22 = 22 stops
+      // ("equal to or less than the size of the set") -> glyph ת + 1×ת = תת.
       ['hebrew2', [
-        [1, 'א'], [10, 'י'], [22, 'ת'], [23, 'אא'], [24, 'בב'], [44, 'תת'],
+        [1, 'א'], [10, 'י'], [22, 'ת'], [23, 'את'], [24, 'בת'], [44, 'תת'],
+        [45, 'אתת'], [123, 'מתתתתת'],
       ]],
       // russianLower / russianUpper (29-letter alphabet, repeat).
       ['russianLower', [

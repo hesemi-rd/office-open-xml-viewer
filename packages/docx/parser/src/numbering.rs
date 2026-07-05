@@ -485,7 +485,6 @@ fn format_counter(n: u32, format: &str) -> String {
         "upperLetter" => repeat_alphabet(n, &latin_upper()),
         "arabicAlpha" => repeat_alphabet(n, ARABIC_ALPHA),
         "arabicAbjad" => repeat_alphabet(n, ARABIC_ABJAD),
-        "hebrew2" => repeat_alphabet(n, HEBREW_ALPHABET),
         "russianLower" => repeat_alphabet(n, RUSSIAN_LOWER),
         "russianUpper" => repeat_alphabet(n, RUSSIAN_UPPER),
         "thaiLetters" => repeat_alphabet(n, THAI_LETTERS),
@@ -493,8 +492,9 @@ fn format_counter(n: u32, format: &str) -> String {
         "ganada" => repeat_alphabet(n, KOREAN_GANADA),
         "hindiVowels" => repeat_alphabet(n, HINDI_VOWELS),
         "hindiConsonants" => repeat_alphabet(n, HINDI_CONSONANTS),
-        // Positional Hebrew gematria.
+        // Hebrew: positional gematria / alphabet-with-ת-suffix (NOT repeat).
         "hebrew1" => to_hebrew_gematria(n),
+        "hebrew2" => to_hebrew2(n),
         // Positional digit substitution.
         "decimalFullWidth" => to_positional_digits(n, DIGITS_FULLWIDTH),
         "thaiNumbers" => to_positional_digits(n, DIGITS_THAI),
@@ -844,6 +844,21 @@ fn to_hebrew_gematria(n: u32) -> String {
     out.push_str(HEBREW_TENS[tens as usize]);
     out.push_str(HEBREW_ONES[ones as usize]);
     out
+}
+
+/// §17.18.59 hebrew2 — NOT the repeat-letter scheme: subtract 22 until the
+/// result is ≤ 22, write THAT glyph once, then append ת once per subtraction
+/// (23 → את, 24 → בת; §17.16.4.3.1 field example 123 → מ + 5×ת). Mirrors TS
+/// `toHebrew2`.
+fn to_hebrew2(n: u32) -> String {
+    let size = HEBREW_ALPHABET.len() as u32; // 22
+    let subtractions = (n - 1) / size;
+    let remainder = n - size * subtractions; // 1..=22
+    format!(
+        "{}{}",
+        HEBREW_ALPHABET[(remainder - 1) as usize],
+        "ת".repeat(subtractions as usize)
+    )
 }
 
 #[cfg(test)]
@@ -1231,7 +1246,6 @@ mod tests {
             // Repeat-letter non-Latin alphabets.
             ("arabicAlpha", &[(1, "أ"), (12, "س"), (28, "ي"), (29, "أأ")]),
             ("arabicAbjad", &[(1, "أ"), (12, "ل"), (28, "ظ"), (29, "أأ")]),
-            ("hebrew2", &[(1, "א"), (22, "ת"), (23, "אא"), (24, "בב")]),
             ("russianLower", &[(1, "а"), (29, "я"), (30, "аа")]),
             ("thaiLetters", &[(1, "ก"), (41, "ฮ"), (42, "กก")]),
             ("chosung", &[(1, "ㄱ"), (14, "ㅎ"), (15, "ㄱㄱ")]),
@@ -1241,7 +1255,7 @@ mod tests {
                 "hindiConsonants",
                 &[(1, "अ"), (16, "औ"), (17, "अं"), (18, "अः")],
             ),
-            // Positional Hebrew gematria.
+            // Hebrew: positional gematria / alphabet-with-ת-suffix.
             (
                 "hebrew1",
                 &[
@@ -1251,6 +1265,20 @@ mod tests {
                     (17, "יז"),
                     (123, "קכג"),
                     (500, "ך"),
+                ],
+            ),
+            // hebrew2: result glyph once + ת per 22 subtracted (§17.18.59 steps;
+            // §17.16.4.3.1 example 123 → מ + 5×ת). NOT the repeat scheme.
+            (
+                "hebrew2",
+                &[
+                    (1, "א"),
+                    (22, "ת"),
+                    (23, "את"),
+                    (24, "בת"),
+                    (44, "תת"),
+                    (45, "אתת"),
+                    (123, "מתתתתת"),
                 ],
             ),
             // Documented residual / spell-outs fall back to decimal.

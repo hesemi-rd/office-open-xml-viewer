@@ -62,7 +62,6 @@ export type NumberFormat =
   // Repeat-letter alphabets (subtract set size, repeat the glyph).
   | 'arabicAlpha'
   | 'arabicAbjad'
-  | 'hebrew2'
   | 'russianLower'
   | 'russianUpper'
   | 'thaiLetters'
@@ -70,8 +69,9 @@ export type NumberFormat =
   | 'ganada'
   | 'hindiVowels'
   | 'hindiConsonants'
-  // Positional Hebrew gematria.
+  // Hebrew (positional gematria / alphabet-with-ת-suffix — NOT the repeat scheme).
   | 'hebrew1'
+  | 'hebrew2'
   // Accepted but rendered as decimal (documented residual) — kept in the type so
   // callers can pass a raw parsed value without a cast for the common ones.
   | 'none'
@@ -116,13 +116,14 @@ function toUpperRoman(n: number): string {
 }
 
 // ── Repeat-letter alphabets ─────────────────────────────────────────────────
-// §17.18.59 upperLetter/lowerLetter/arabicAlpha/arabicAbjad/hebrew2/russian*/
+// §17.18.59 upperLetter/lowerLetter/arabicAlpha/arabicAbjad/russian*/
 // thaiLetters/chosung/ganada/hindiVowels/hindiConsonants all share ONE scheme:
 // a fixed ordered character set of size N; the value maps into 1..N, and for
 // values > N the SAME character is REPEATED once per full N subtracted (§17.18.59
 // "written once and then repeated for each time the size of the set was
 // subtracted"). This is Word's letter-column-UNLIKE scheme — NOT base-N. For
 // English (N=26): 27 → "aa", 53 → "aaa", 54 → "BBB". Caller guarantees n ≥ 1.
+// (hebrew2 is NOT in this family — it appends a ת run instead; see toHebrew2.)
 function repeatAlphabet(n: number, glyphs: readonly string[]): string {
   const size = glyphs.length;
   const repeats = Math.floor((n - 1) / size) + 1;
@@ -312,8 +313,6 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
       return n >= 1 ? repeatAlphabet(n, ARABIC_ALPHA) : String(n);
     case 'arabicAbjad':
       return n >= 1 ? repeatAlphabet(n, ARABIC_ABJAD) : String(n);
-    case 'hebrew2':
-      return n >= 1 ? repeatAlphabet(n, HEBREW_ALPHABET) : String(n);
     case 'russianLower':
       return n >= 1 ? repeatAlphabet(n, RUSSIAN_LOWER) : String(n);
     case 'russianUpper':
@@ -328,9 +327,11 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
       return n >= 1 ? repeatAlphabet(n, HINDI_VOWELS) : String(n);
     case 'hindiConsonants':
       return n >= 1 ? repeatAlphabet(n, HINDI_CONSONANTS) : String(n);
-    // Positional Hebrew gematria.
+    // Hebrew.
     case 'hebrew1':
       return n >= 1 ? toHebrewGematria(n) : String(n);
+    case 'hebrew2':
+      return n >= 1 ? toHebrew2(n) : String(n);
     // Positional digit substitution (n=0 renders the zero glyph — but list/page
     // numbering is 1-based, so we still gate ≥1 and fall back for ≤0).
     case 'decimalFullWidth':
@@ -420,6 +421,24 @@ function toHebrewGematria(n: number): string {
   out += HEBREW_TENS[tens];
   out += HEBREW_ONES[ones];
   return out;
+}
+
+// ── Hebrew alphabet with ת suffix (hebrew2) ─────────────────────────────────
+// §17.18.59 hebrew2: NOT the repeat-letter scheme. For n > 22: "1. Repeatedly
+// subtract the size of the set (22) from the value until the result is equal to
+// or less than the size of the set. 2. Write the symbol represented by the
+// result value. 3. Then the ת symbol is repeated … for each time the size of the
+// set was subtracted." So the RESULT glyph appears ONCE, followed by one ת per
+// subtraction — 23 → את, 24 → בת; and per the §17.16.4.3.1 field example,
+// 123 \* HEBREW2 → מ + 5×ת (5 subtractions leave 13 → מ).
+// Caller guarantees n ≥ 1.
+function toHebrew2(n: number): string {
+  const size = HEBREW_ALPHABET.length; // 22
+  // Subtractions until the remainder is in 1..22 (a remainder of exactly 22
+  // stops — "equal to or less than the size of the set", so 44 → ת + 1×ת).
+  const subtractions = Math.floor((n - 1) / size);
+  const remainder = n - size * subtractions; // 1..22
+  return HEBREW_ALPHABET[remainder - 1] + 'ת'.repeat(subtractions);
 }
 
 // ── Grouped CJK counting / legal (myriad grouping) ──────────────────────────
