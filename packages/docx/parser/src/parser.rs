@@ -3234,9 +3234,18 @@ fn parse_run_inner(
                 })));
             }
             "AlternateContent" => {
-                // mc:AlternateContent/mc:Choice may contain w:drawing
-                if let Some(choice) = child.children().find(|n| n.tag_name().name() == "Choice") {
-                    for inner in choice.children().filter(|n| n.is_element()) {
+                // ECMA-376 Part 3 §9.3 (MCE Step 2) — select the active branch:
+                // the first `<mc:Choice>` whose `Requires` namespaces are all
+                // understood, else the `<mc:Fallback>`. The old code always took
+                // the first Choice and never the Fallback, so a picture living
+                // only behind an un-understood Choice was silently dropped
+                // (issue #747). For sample-24 the Choice `Requires="cx"` IS
+                // understood, so the live chartex chart wins and its rendered-PNG
+                // Fallback is correctly NOT re-emitted (no double draw).
+                if let Some(selected) =
+                    select_mce_alternate_content(child, &docx_understands_drawing_ns)
+                {
+                    for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
                             for r in
                                 parse_inline_drawing(style_map, inner, media_map, chart_map, theme)
@@ -3397,6 +3406,73 @@ fn group_member_hidden(node: roxmltree::Node) -> bool {
         }
     }
     false
+}
+
+/// The consumer's "application configuration" (ECMA-376 Part 3 §9.1): the set of
+/// namespace URIs this docx parser understands well enough to render the drawing
+/// content a run-level `<mc:Choice>` gates on. A `<mc:Choice Requires="…">` is
+/// selected only when EVERY namespace it lists is in this set (§9.3).
+///
+/// These are the DrawingML / WordprocessingML drawing-extension namespaces whose
+/// `<w:drawing>` payload `parse_inline_drawing` can turn into renderable runs:
+/// the 2014 chartex chart extension, and the 2010 wordprocessing drawing / shape
+/// / group / canvas extensions (shapes + groups are parsed by local name in the
+/// anchor/inline paths; the positioning extension is honored by
+/// `find_position_node`). A `Requires` naming anything outside this set (a future
+/// or app-specific extension we cannot draw) is NOT understood, so its Choice is
+/// skipped and the `<mc:Fallback>` — typically a rendered picture or legacy VML —
+/// is processed instead (issue #747).
+fn docx_understands_drawing_ns(ns: &str) -> bool {
+    matches!(
+        ns,
+        // Microsoft 2014 chartEx (waterfall / boxWhisker / treemap / sunburst …).
+        "http://schemas.microsoft.com/office/drawing/2014/chartex"
+        // Microsoft 2010 WordprocessingML drawing extensions.
+        | "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+        | "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+        | "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+        | "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
+    )
+}
+
+/// Select the active branch of an `<mc:AlternateContent>` per the MCE reference
+/// processing model (ECMA-376 Part 3 §9.3, Step 2):
+///
+/// - A `<mc:Choice>` is selected iff EVERY namespace named by its `Requires`
+///   attribute is understood (`understood`) AND no preceding sibling Choice was
+///   already selected. `Requires` is a whitespace-delimited list of namespace
+///   *prefixes*, resolved to URIs against the element's in-scope xmlns via
+///   `lookup_namespace_uri`. An empty / all-whitespace `Requires` (non-conformant
+///   — the schema requires ≥1 prefix) is treated as not-understood.
+/// - If no Choice is selected, the `<mc:Fallback>` (if present) is selected.
+///
+/// Returns the selected element node, or `None` when there is neither a
+/// selectable Choice nor a Fallback.
+fn select_mce_alternate_content<'a, 'i>(
+    ac: roxmltree::Node<'a, 'i>,
+    understood: &dyn Fn(&str) -> bool,
+) -> Option<roxmltree::Node<'a, 'i>> {
+    for choice in ac
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Choice")
+    {
+        let requires = choice.attribute("Requires").unwrap_or("");
+        let prefixes: Vec<&str> = requires.split_whitespace().collect();
+        // §9.3(1): each Requires prefix must resolve to an understood namespace.
+        // A conformant Choice has ≥1 prefix; an empty list can never be selected.
+        let all_understood = !prefixes.is_empty()
+            && prefixes.iter().all(|prefix| {
+                choice
+                    .lookup_namespace_uri(Some(*prefix))
+                    .is_some_and(understood)
+            });
+        if all_understood {
+            return Some(choice);
+        }
+    }
+    // §9.3: no Choice selected → the Fallback (if any) is selected.
+    ac.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
 }
 
 fn parse_inline_drawing(
@@ -10372,6 +10448,182 @@ mod anchor_image_relative_from_tests {
             chart_types.len(),
             6,
             "expected 6 total chart runs (4 legacy + 2 chartex), got {chart_types:?}"
+        );
+
+        // The two chartex Fallback PNGs (image1.png/image2.png) must NOT surface
+        // as image runs: MCE (ECMA-376 Part 3 §9.3) selects the understood `cx`
+        // Choice, so the Fallback is dropped — no double-emit. (Guards #747.)
+        fn count_images_para(p: &DocParagraph, n: &mut usize) {
+            for run in &p.runs {
+                if let DocRun::Image(_) = run {
+                    *n += 1;
+                }
+            }
+        }
+        fn count_images_table(t: &DocTable, n: &mut usize) {
+            for row in &t.rows {
+                for cell in &row.cells {
+                    for el in &cell.content {
+                        match el {
+                            CellElement::Paragraph(p) => count_images_para(p, n),
+                            CellElement::Table(t) => count_images_table(t, n),
+                        }
+                    }
+                }
+            }
+        }
+        let mut image_count = 0usize;
+        for el in &doc.body {
+            match el {
+                BodyElement::Paragraph(p) => count_images_para(p, &mut image_count),
+                BodyElement::Table(t) => count_images_table(t, &mut image_count),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            image_count, 0,
+            "chartex mc:Fallback PNGs must not surface as image runs (got {image_count})"
+        );
+    }
+
+    /// Parse a `<w:p>` whose namespaces + chart_map are supplied by the caller,
+    /// so an MCE `<mc:AlternateContent>` test can bind arbitrary `Requires`
+    /// prefixes and register a chart model for a chartex Choice. Returns the
+    /// paragraph's runs.
+    fn parse_p_with_charts(
+        inner: &str,
+        chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    ) -> Vec<DocRun> {
+        let xml = format!(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                    xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                    xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+                    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                    xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                    xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"
+                    xmlns:unknownns="http://example.com/an/extension/we/do/not/understand">{inner}</w:p>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        // rId9 → media path so the Fallback picture resolves to an image run.
+        let mut media: HashMap<String, String> = HashMap::new();
+        media.insert("rId9".to_string(), "word/media/image1.png".to_string());
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        let p = parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            chart_map,
+            &rels,
+            &theme,
+            None,
+            &mut field,
+        );
+        p.runs
+    }
+
+    fn chartex_model_map() -> HashMap<String, ooxml_common::chart::ChartModel> {
+        let theme = ThemeColors::default();
+        let model = parse_docx_chart(
+            r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
+              <cx:chartData><cx:data id="0">
+                <cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="sunburst"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#,
+            None,
+            &theme,
+        )
+        .expect("chartex model");
+        let mut m: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        m.insert("rId8".to_string(), model);
+        m
+    }
+
+    /// ECMA-376 Part 3 §9.3 — a `<mc:Choice>` is selected only when EVERY
+    /// namespace in its `Requires` is understood by the consumer; otherwise the
+    /// `<mc:Fallback>` is selected. This mirrors sample-24's exact Word wire
+    /// format: `<mc:Choice Requires="cx">` (chartex) wrapping a chart, with a
+    /// rendered-PNG `<mc:Fallback>`. Because the parser understands chartex, the
+    /// Choice wins and the Fallback picture is dropped (no double emit). The
+    /// inline-drawing chart gate then turns the Choice into a ChartRun.
+    #[test]
+    fn mce_understood_choice_selected_fallback_picture_dropped() {
+        let chart_map = chartex_model_map();
+        let runs = parse_p_with_charts(
+            r#"<w:r><mc:AlternateContent>
+                 <mc:Choice Requires="cx"><w:drawing>
+                   <wp:inline><wp:extent cx="5486400" cy="3200400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex">
+                       <c:chart r:id="rId8"/>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Fallback><w:drawing>
+                   <wp:inline><wp:extent cx="5486400" cy="3200400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                       <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Fallback>
+               </mc:AlternateContent></w:r>"#,
+            &chart_map,
+        );
+        let charts = runs
+            .iter()
+            .filter(|r| matches!(r, DocRun::Chart(_)))
+            .count();
+        let images = runs
+            .iter()
+            .filter(|r| matches!(r, DocRun::Image(_)))
+            .count();
+        assert_eq!(charts, 1, "understood cx Choice must emit its chart");
+        assert_eq!(
+            images, 0,
+            "Fallback picture must be dropped (Choice selected)"
+        );
+    }
+
+    /// ECMA-376 Part 3 §9.3 — when NO `<mc:Choice>`'s `Requires` namespaces are
+    /// understood, the consumer selects the `<mc:Fallback>`. Before this fix the
+    /// parser always processed the FIRST Choice and never the Fallback, so a
+    /// picture living only in the Fallback (behind an un-understood Choice) was
+    /// silently dropped. Here the sole Choice requires a namespace the parser
+    /// does not understand, and the Fallback holds an inline picture — which
+    /// must now surface as an image run.
+    #[test]
+    fn mce_unknown_choice_falls_back_to_picture() {
+        let chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        let runs = parse_p_with_charts(
+            r#"<w:r><mc:AlternateContent>
+                 <mc:Choice Requires="unknownns"><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://example.com/an/extension/we/do/not/understand">
+                       <unknownns:thing/>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Choice>
+                 <mc:Fallback><w:drawing>
+                   <wp:inline><wp:extent cx="914400" cy="914400"/>
+                     <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                       <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+                     </a:graphicData></a:graphic>
+                   </wp:inline></w:drawing></mc:Fallback>
+               </mc:AlternateContent></w:r>"#,
+            &chart_map,
+        );
+        let images = runs
+            .iter()
+            .filter(|r| matches!(r, DocRun::Image(_)))
+            .count();
+        assert_eq!(
+            images, 1,
+            "un-understood Choice → Fallback picture must be emitted (got {images} images)"
         );
     }
 
