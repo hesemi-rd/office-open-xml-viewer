@@ -6,7 +6,7 @@ import type {
 } from './types.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
-import { formatCellValue } from './number-format.js';
+import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { parseA1 } from './a1.js';
@@ -1832,7 +1832,8 @@ function renderQuadrant(
     mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, dpr));
 
     if (!cell) continue;
-    const text = formatCellValue(cell, styles, cf.numFmt, rc.worksheet.date1904);
+    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
+    const text = formatted.text;
     if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
     const effectiveBold = font.bold || !!cf.fontBold;
@@ -1846,7 +1847,10 @@ function renderQuadrant(
       : font;
     ctx.font = buildFont(fontForDraw, cs);
     const hyperlinkUrl = rc.hyperlinkMap.get(key);
-    const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? font.color);
+    // Colour precedence: hyperlink theme colour > conditional-formatting font
+    // colour > number-format section colour ([Red] etc., §18.8.30) > the cell's
+    // own font colour.
+    const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? formatted.color ?? font.color);
     ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
     const paddingX = 3, paddingY = 2;
@@ -2210,7 +2214,8 @@ function renderQuadrant(
       }
 
       if (!cell) continue;
-      const text = formatCellValue(cell, styles, cf.numFmt, rc.worksheet.date1904);
+      const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
+      const text = formatted.text;
       if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
       textTasks.push(() => {
@@ -2246,9 +2251,12 @@ function renderQuadrant(
       // Table-style element dxfs can override font color (ECMA-376 §18.8.83),
       // following the same element hierarchy as the fill/bold above.
       const tableFontColor = tableFontDxf?.font?.color ?? null;
+      // Colour precedence: hyperlink > conditional-formatting font colour >
+      // number-format section colour ([Red] etc., §18.8.30) > table-style dxf
+      // colour > the cell's own font colour.
       const textColor = hyperlinkUrl
         ? '#0563C1'
-        : (cf.fontColor ?? tableFontColor ?? font.color);
+        : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
       ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
       const paddingX = 3;

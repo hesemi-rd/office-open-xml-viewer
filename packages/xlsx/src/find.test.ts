@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { XlsxFindController, type FindCell } from './find.js';
+import { formatCellValueWithColor } from './number-format.js';
+import type { Styles } from './types.js';
+
+/** Minimal Styles carrying a single custom numFmt at style index 0. */
+function makeStyles(formatCode: string): Styles {
+  return {
+    fonts: [], fills: [], borders: [], dxfs: [],
+    cellXfs: [{ fontId: 0, fillId: 0, borderId: 0, numFmtId: 164, alignH: null, alignV: null, wrapText: false }],
+    numFmts: [{ numFmtId: 164, formatCode }],
+  };
+}
 
 /**
  * IX2 xlsx find controller. Cell-based: each non-empty cell's rendered text is
@@ -63,6 +74,22 @@ describe('XlsxFindController.find', () => {
   it('returns [] for an empty query', async () => {
     const c = controllerFor([{ name: 'S', cells: [cell(1, 1, 'x')] }]);
     expect(await c.find('')).toEqual([]);
+  });
+
+  it('matches a query against the number-format display string (XL3)', async () => {
+    // findText searches the *rendered* text (the same string the grid draws via
+    // formatCellValue), so a value stored as 1234.5 but formatted with a yen
+    // currency + grouping code is found by its displayed grouping — "1,234" —
+    // and by the currency glyph, but NOT by the raw "1234.5".
+    const fc = formatCellValueWithColor(
+      { row: 5, col: 3, value: { type: 'number', number: 1234.5 }, styleIndex: 0 },
+      makeStyles('[$¥-411]#,##0.00'),
+    );
+    expect(fc.text).toBe('¥1,234.50'); // the display string
+    const c = controllerFor([{ name: 'S', cells: [cell(5, 3, fc.text)] }]);
+    expect(await c.find('1,234')).toHaveLength(1);
+    expect(await c.find('¥')).toHaveLength(1);
+    expect(await c.find('1234.5')).toHaveLength(0); // raw value is not searchable
   });
 });
 
