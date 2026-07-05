@@ -3293,13 +3293,28 @@ fn parse_run_inner(
                 }
             }
             "object" => {
-                // Embedded OLE object (§17.3.3.19 CT_Object). We can't run the
-                // embedded application, but Word bakes a preview image into a
-                // legacy VML `<v:shape><v:imagedata r:id>` for exactly this case.
-                // Surface that preview through the ordinary inline-image pipeline
-                // (the preview is usually EMF/WMF, which core already rasterizes)
-                // instead of silently dropping the object.
-                if let Some(img) = parse_object_ole_image(child, media_map) {
+                // Embedded OLE object (§17.3.3.19 CT_Object). The schema is
+                // `sequence(drawing?, choice(control|objectLink|objectEmbed|
+                // movie)?)`: the OPTIONAL first child is a modern `<w:drawing>`
+                // carrying the object's DrawingML static representation, and the
+                // choice names the actual embedding. Precedence:
+                //   1. If a `<w:drawing>` child is present, it IS the on-page
+                //      picture — delegate to the DrawingML picture path
+                //      (§17.3.3.9). Word emits this in its back-compat output
+                //      alongside a legacy VML fallback, so taking the drawing
+                //      first also prevents a double-draw.
+                //   2. Otherwise fall back to the legacy VML preview Word bakes
+                //      into a `<v:shape><v:imagedata r:id>` (usually EMF/WMF,
+                //      which core rasterizes), surfaced through the inline-image
+                //      pipeline instead of being silently dropped.
+                let drawing = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "drawing");
+                if let Some(drawing) = drawing {
+                    for r in parse_inline_drawing(style_map, drawing, media_map, chart_map, theme) {
+                        runs.push(r);
+                    }
+                } else if let Some(img) = parse_object_ole_image(child, media_map) {
                     runs.push(DocRun::Image(img));
                 }
             }
@@ -5258,10 +5273,10 @@ fn parse_vml_pict(
 /// silent-skip rather than emitting a zero-sized or path-less image.
 ///
 /// Note: CT_Object (§17.3.3.19) may hold a modern `<w:drawing>` as its first
-/// child instead of (or beside) the VML fallback; Word's real output is
-/// back-compat and VML-dominant, so only the VML preview path is handled here.
-/// Delegating a `<w:drawing>`-first CT_Object to the DrawingML picture path is a
-/// follow-up.
+/// child instead of (or beside) the VML fallback. The `object` run dispatcher
+/// takes that drawing first (delegating to `parse_inline_drawing`); this
+/// function is only reached when there is NO `<w:drawing>` child, so it handles
+/// the pure legacy-VML preview form.
 fn parse_object_ole_image(
     object: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -13596,6 +13611,103 @@ mod ole_object_tests {
             "a dangling v:imagedata rId ⇒ no image run, got {}",
             imgs.len()
         );
+    }
+
+    /// §17.3.3.19 CT_Object — the FIRST child may be a modern `<w:drawing>` (the
+    /// DrawingML static representation), per the schema
+    /// `sequence(drawing?, choice(control|objectLink|objectEmbed|movie)?)`. When
+    /// present, the object's on-page appearance is that inline picture, so it
+    /// must be delegated to the DrawingML picture path (`parse_inline_drawing`) —
+    /// not the VML `<v:imagedata>` fallback. This exercises a `<w:object>` whose
+    /// first child is a `<w:drawing><wp:inline>` blip picture.
+    #[test]
+    fn object_with_drawing_first_child_emits_inline_picture() {
+        let body = format!(
+            r##"<w:document{ns}
+                xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <w:body>
+              <w:p><w:r><w:object w:dxaOrig="3000" w:dyaOrig="1500">
+                <w:drawing>
+                  <wp:inline>
+                    <wp:extent cx="1905000" cy="952500"/>
+                    <a:graphic><a:graphicData
+                        uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                      <pic:pic><pic:blipFill>
+                        <a:blip r:embed="rIdDraw"/>
+                      </pic:blipFill></pic:pic>
+                    </a:graphicData></a:graphic>
+                  </wp:inline>
+                </w:drawing>
+                <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdDraw".to_string(), "word/media/image1.png".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1, "the modern <w:drawing> child is the picture");
+        assert_eq!(imgs[0].image_path, "word/media/image1.png");
+        // 1905000 EMU / 12700 = 150pt, 952500 / 12700 = 75pt (from <wp:extent>,
+        // NOT the object's dxaOrig — the drawing carries its own natural size).
+        assert!(
+            (imgs[0].width_pt - 150.0).abs() < 1e-6,
+            "width from wp:extent, got {}",
+            imgs[0].width_pt
+        );
+        assert!(
+            (imgs[0].height_pt - 75.0).abs() < 1e-6,
+            "height from wp:extent, got {}",
+            imgs[0].height_pt
+        );
+    }
+
+    /// A `<w:object>` that carries BOTH a modern `<w:drawing>` first child AND a
+    /// legacy VML `<v:imagedata>` fallback (Word's back-compat output) must NOT
+    /// double-emit — the `<w:drawing>` wins and the VML fallback is skipped, so
+    /// exactly one image run surfaces.
+    #[test]
+    fn object_with_drawing_and_vml_fallback_does_not_double_emit() {
+        let body = format!(
+            r##"<w:document{ns}
+                xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <w:body>
+              <w:p><w:r><w:object w:dxaOrig="3000" w:dyaOrig="1500">
+                <w:drawing>
+                  <wp:inline>
+                    <wp:extent cx="1905000" cy="952500"/>
+                    <a:graphic><a:graphicData
+                        uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                      <pic:pic><pic:blipFill>
+                        <a:blip r:embed="rIdDraw"/>
+                      </pic:blipFill></pic:pic>
+                    </a:graphicData></a:graphic>
+                  </wp:inline>
+                </w:drawing>
+                <v:shape id="s5" type="#_x0000_t75" style="width:150pt;height:75pt">
+                  <v:imagedata r:id="rIdPrev" o:title=""/>
+                </v:shape>
+                <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" ShapeID="s5" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdDraw".to_string(), "word/media/image1.png".to_string());
+        media.insert("rIdPrev".to_string(), "word/media/image2.emf".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(
+            imgs.len(),
+            1,
+            "the <w:drawing> child wins; the VML fallback must not also emit"
+        );
+        assert_eq!(imgs[0].image_path, "word/media/image1.png");
     }
 }
 
