@@ -912,6 +912,14 @@ fn parse_worksheet(
     let mut rows = Vec::new();
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
     let mut row_heights: BTreeMap<u32, f64> = BTreeMap::new();
+    // Outline (grouping) metadata — ECMA-376 §18.3.1.13 (col) / §18.3.1.73
+    // (row) / §18.3.1.61 (outlinePr). Only non-default entries are recorded so
+    // an outline-free sheet keeps empty maps / a `None` outlinePr (byte-stable
+    // JSON, §CLAUDE "1px identical").
+    let mut col_outline_levels: BTreeMap<u32, u8> = BTreeMap::new();
+    let mut col_collapsed: BTreeMap<u32, bool> = BTreeMap::new();
+    let mut col_hidden: BTreeMap<u32, bool> = BTreeMap::new();
+    let mut outline_pr: Option<crate::types::OutlinePr> = None;
     let mut merge_cells: Vec<MergeCell> = Vec::new();
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
@@ -1071,8 +1079,21 @@ fn parse_worksheet(
             "col" if is_x_ns(node.tag_name().namespace()) => {
                 let custom = attr_bool(&node, "customWidth").unwrap_or(false);
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
-                // Only record widths for custom-widthed columns OR hidden columns
-                if !custom && !hidden {
+                // §18.3.1.13 outline metadata: `outlineLevel` (0-7) and the
+                // summary-column `collapsed` flag. Recorded independently of the
+                // width so a grouped column at the default width is still
+                // surfaced to the gutter.
+                let outline_level = node
+                    .attribute("outlineLevel")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0)
+                    .min(7);
+                let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
+                // Record widths for custom-widthed OR hidden columns, and also
+                // for columns that carry outline info (level > 0 or collapsed) —
+                // those must reach the viewer even at the default width.
+                let has_outline = outline_level > 0 || collapsed;
+                if !custom && !hidden && !has_outline {
                     continue;
                 }
                 let min: u32 = node
@@ -1093,7 +1114,22 @@ fn parse_worksheet(
                         .unwrap_or(default_col_width)
                 };
                 for c in min..=max {
-                    col_widths.insert(c, width);
+                    // Only store a width entry when the column actually has a
+                    // custom / hidden width; a default-width grouped column keeps
+                    // the workbook default (no colWidths entry) so its rendered
+                    // width is byte-identical to an ungrouped default column.
+                    if custom || hidden {
+                        col_widths.insert(c, width);
+                    }
+                    if outline_level > 0 {
+                        col_outline_levels.insert(c, outline_level);
+                    }
+                    if collapsed {
+                        col_collapsed.insert(c, true);
+                    }
+                    if hidden {
+                        col_hidden.insert(c, true);
+                    }
                 }
             }
             "sheetView" if is_x_ns(node.tag_name().namespace()) => {
@@ -1102,6 +1138,14 @@ fn parse_worksheet(
                 // ECMA-376 §18.3.1.87 `rightToLeft` — mirrors the whole grid so
                 // column A is on the right. Default false (left-to-right).
                 right_to_left = attr_bool(&node, "rightToLeft").unwrap_or(false);
+            }
+            "outlinePr" if is_x_ns(node.tag_name().namespace()) => {
+                // §18.3.1.61 `<sheetPr><outlinePr>`. Both flags default to true
+                // (summary below/right of detail). `applyStyles` is out of scope.
+                outline_pr = Some(crate::types::OutlinePr {
+                    summary_below: attr_bool(&node, "summaryBelow").unwrap_or(true),
+                    summary_right: attr_bool(&node, "summaryRight").unwrap_or(true),
+                });
             }
             "tabColor" if is_x_ns(node.tag_name().namespace()) => {
                 tab_color = parse_color(&node, theme_colors);
@@ -1208,11 +1252,24 @@ fn parse_worksheet(
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
                 }
+                // §18.3.1.73 outline metadata: `outlineLevel` (0-7) and the
+                // summary-row `collapsed` flag. `hidden` is surfaced explicitly
+                // (not just as `height == 0`) so the gutter can distinguish a
+                // collapsed-detail row from a deliberately zero-height row.
+                let outline_level = node
+                    .attribute("outlineLevel")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0)
+                    .min(7);
+                let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
                 let cells = parse_row_cells(&node, shared_strings, theme_colors);
                 rows.push(Row {
                     index: row_idx,
                     height,
                     cells,
+                    outline_level,
+                    collapsed,
+                    hidden,
                 });
             }
             "conditionalFormatting" if is_x_ns(node.tag_name().namespace()) => {
@@ -1498,6 +1555,9 @@ fn parse_worksheet(
             rows,
             col_widths,
             row_heights,
+            col_outline_levels,
+            col_collapsed,
+            col_hidden,
             default_col_width,
             default_row_height,
             merge_cells,
@@ -1510,6 +1570,7 @@ fn parse_worksheet(
             show_zeros,
             show_gridlines,
             right_to_left,
+            outline_pr,
             tab_color,
             auto_filter,
             hyperlinks: Vec::new(),
@@ -2739,6 +2800,129 @@ mod sheet_view_tests {
             p1 < p2 && p2 < p3,
             "colWidths keys must serialize in ascending order (1,2,3), got positions {p1},{p2},{p3} in {widths}"
         );
+    }
+
+    // ── Outline grouping (ECMA-376 §18.3.1.13 / §18.3.1.61 / §18.3.1.73) ──
+
+    /// The row-outline example from §18.3.1.73 (middle + lowest level collapsed):
+    /// rows 6-8 are collapsed-hidden detail at levels 3/3/2, and row 9 is the
+    /// level-1 summary carrying `collapsed="1"`. The parser must surface each
+    /// row's `outlineLevel`, `collapsed`, and `hidden` flags verbatim.
+    #[test]
+    fn row_outline_levels_collapsed_and_hidden() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData>
+                 <row r="6" hidden="1" outlineLevel="3"/>
+                 <row r="7" hidden="1" outlineLevel="3"/>
+                 <row r="8" hidden="1" outlineLevel="2"/>
+                 <row r="9" hidden="1" outlineLevel="1" collapsed="1"/>
+                 <row r="10" collapsed="1"/>
+               </sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        let by_idx = |i: u32| ws.rows.iter().find(|r| r.index == i).expect("row present");
+        assert_eq!(by_idx(6).outline_level, 3);
+        assert!(by_idx(6).hidden);
+        assert!(!by_idx(6).collapsed);
+        assert_eq!(by_idx(8).outline_level, 2);
+        assert!(by_idx(8).hidden);
+        assert_eq!(by_idx(9).outline_level, 1);
+        assert!(by_idx(9).hidden);
+        assert!(by_idx(9).collapsed);
+        // Row 10 is the top-level summary: collapsed but visible, level 0.
+        assert_eq!(by_idx(10).outline_level, 0);
+        assert!(!by_idx(10).hidden);
+        assert!(by_idx(10).collapsed);
+    }
+
+    /// `outlineLevel` is clamped to the §18.3.1.73 range max of 7.
+    #[test]
+    fn row_outline_level_clamped_to_seven() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData><row r="1" outlineLevel="9"/></sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.rows[0].outline_level, 7);
+    }
+
+    /// A grouped column at the *default* width (no `customWidth`, not hidden) must
+    /// still be surfaced: its outline level reaches `col_outline_levels` even
+    /// though no `colWidths` entry is recorded (so its rendered width stays the
+    /// workbook default). `collapsed` and `hidden` map likewise.
+    #[test]
+    fn col_outline_level_recorded_without_custom_width() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols>
+                 <col min="2" max="3" outlineLevel="1"/>
+                 <col min="4" max="4" outlineLevel="1" collapsed="1"/>
+                 <col min="2" max="2" hidden="1" outlineLevel="1"/>
+               </cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.col_outline_levels.get(&2).copied(), Some(1));
+        assert_eq!(ws.col_outline_levels.get(&3).copied(), Some(1));
+        assert_eq!(ws.col_outline_levels.get(&4).copied(), Some(1));
+        assert_eq!(ws.col_collapsed.get(&4).copied(), Some(true));
+        // The last <col> hides column 2.
+        assert_eq!(ws.col_hidden.get(&2).copied(), Some(true));
+        // A default-width grouped column gets NO colWidths entry (col 3 was never
+        // custom-width nor hidden), so its width stays the workbook default.
+        assert_eq!(ws.col_widths.get(&3).copied(), None);
+    }
+
+    /// `<sheetPr><outlinePr>` flags parse with the §18.3.1.61 defaults (both
+    /// `true`) and honor explicit `false`.
+    #[test]
+    fn outline_pr_summary_flags() {
+        let default_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetPr><outlinePr/></sheetPr><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&default_xml, &[], &[], "Sheet1").expect("parses");
+        let pr = ws.outline_pr.expect("outlinePr present");
+        assert!(pr.summary_below);
+        assert!(pr.summary_right);
+
+        let above_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetPr><outlinePr summaryBelow="0" summaryRight="0"/></sheetPr><sheetData/></worksheet>"#
+        );
+        let (ws2, _) = parse_worksheet(&above_xml, &[], &[], "Sheet1").expect("parses");
+        let pr2 = ws2.outline_pr.expect("outlinePr present");
+        assert!(!pr2.summary_below);
+        assert!(!pr2.summary_right);
+    }
+
+    /// A sheet with no outlining (no `<outlinePr>`, all `outlineLevel="0"`, as
+    /// LibreOffice emits) serializes byte-for-byte as before: no `outlinePr`,
+    /// `colOutlineLevels`, `colCollapsed`, `colHidden`, and no per-row
+    /// `outlineLevel` / `collapsed` / `hidden` keys.
+    #[test]
+    fn outline_free_sheet_is_wire_stable() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}">
+                 <cols><col customWidth="1" min="1" max="1" width="22" outlineLevel="0" collapsed="0"/></cols>
+                 <sheetData>
+                   <row r="1" hidden="0" outlineLevel="0" collapsed="0"><c r="A1"/></row>
+                 </sheetData>
+               </worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parses");
+        let v = serde_json::to_value(&ws).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("outlinePr"), "no outlinePr key");
+        assert!(
+            !obj.contains_key("colOutlineLevels"),
+            "no colOutlineLevels key"
+        );
+        assert!(!obj.contains_key("colCollapsed"), "no colCollapsed key");
+        assert!(!obj.contains_key("colHidden"), "no colHidden key");
+        let row0 = &v["rows"][0];
+        let row_obj = row0.as_object().unwrap();
+        assert!(
+            !row_obj.contains_key("outlineLevel"),
+            "no row outlineLevel key"
+        );
+        assert!(!row_obj.contains_key("collapsed"), "no row collapsed key");
+        assert!(!row_obj.contains_key("hidden"), "no row hidden key");
     }
 }
 

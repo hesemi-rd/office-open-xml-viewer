@@ -49,6 +49,17 @@ export interface Worksheet {
   rows: Row[];
   colWidths: Record<number, number>;
   rowHeights: Record<number, number>;
+  /** Per-column outline (grouping) depth 0-7 (ECMA-376 §18.3.1.13
+   *  `<col outlineLevel>`), keyed by 1-based column index. Present only for
+   *  grouped columns; absent (⇒ level 0) on outline-free sheets. */
+  colOutlineLevels?: Record<number, number>;
+  /** Per-column `<col collapsed>` (§18.3.1.13): `true` on a summary column whose
+   *  one-level-deeper detail columns are collapsed. Only `true` entries. */
+  colCollapsed?: Record<number, boolean>;
+  /** Per-column `<col hidden>` (§18.3.1.13): `true` when the column is hidden
+   *  (e.g. a collapsed outline hides its detail columns). Distinct from
+   *  `colWidths[c] === 0`. Only `true` entries. */
+  colHidden?: Record<number, boolean>;
   defaultColWidth: number;
   defaultRowHeight: number;
   mergeCells: MergeCell[];
@@ -71,6 +82,11 @@ export interface Worksheet {
    *  grid so column A sits on the right (ECMA-376 §18.3.1.87
    *  `<sheetView rightToLeft>`). Defaults to false. */
   rightToLeft?: boolean;
+  /** Outline display flags from `<sheetPr><outlinePr>` (ECMA-376 §18.3.1.61).
+   *  Absent when the sheet declares no `<outlinePr>`; consumers apply the
+   *  schema defaults (`summaryBelow` / `summaryRight` both `true`). Decides
+   *  which side of a group the summary row/column (and its +/- toggle) sits. */
+  outlinePr?: OutlinePr;
   /** Sheet tab color (ECMA-376 §18.3.1.79). */
   tabColor?: string | null;
   /** AutoFilter header range (ECMA-376 §18.3.1.2). */
@@ -617,6 +633,26 @@ export interface Row {
   index: number;
   height: number | null;
   cells: Cell[];
+  /** Outline (grouping) depth 0-7 (ECMA-376 §18.3.1.73 `<row outlineLevel>`).
+   *  Omitted on the wire when `0` (ungrouped); read as `outlineLevel ?? 0`. */
+  outlineLevel?: number;
+  /** `<row collapsed>` (§18.3.1.73): `true` on a summary row whose
+   *  one-level-deeper detail rows are collapsed. Omitted when false. */
+  collapsed?: boolean;
+  /** `<row hidden>` (§18.3.1.73): `true` when the row is hidden — most often
+   *  because a collapsed outline hides its detail rows. Distinct from
+   *  `height === 0`. Omitted on the wire when false. */
+  hidden?: boolean;
+}
+
+/** `<sheetPr><outlinePr>` flags (ECMA-376 §18.3.1.61). Both default to `true`. */
+export interface OutlinePr {
+  /** `true` (default) ⇒ a group's summary row sits *below* its detail rows;
+   *  `false` ⇒ above. */
+  summaryBelow: boolean;
+  /** `true` (default) ⇒ a group's summary column sits to the *right* of its
+   *  detail columns; `false` ⇒ to the left. */
+  summaryRight: boolean;
 }
 
 export interface Cell {
