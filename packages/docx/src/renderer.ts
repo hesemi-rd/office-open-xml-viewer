@@ -3248,7 +3248,15 @@ function buildMeasureState(
     ctx,
     scale: 1,
     dpr: 1,
-    contentX: 0,
+    // Mirror the PAINT pass seed (renderDocumentToCanvas: `contentX =
+    // sec.marginLeft × scale`; scale is 1 here). contentX/contentW carry the
+    // current text column, and §20.4.3.4 `relativeFrom="column"` anchors
+    // resolve against them (xContainer). Seeding 0 made the MEASURE pass place
+    // body-level column anchors a full marginLeft LEFT of where the paint pass
+    // draws them, so floats entered/left the wrap band only during pagination
+    // and paragraphs split differently from the painted layout (PR #844 review
+    // F1; pinned by paginate-column-anchor.test.ts).
+    contentX: section.marginLeft,
     contentW: section.pageWidth - section.marginLeft - section.marginRight,
     y: 0,
     pageH: section.pageHeight,
