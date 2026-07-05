@@ -699,11 +699,14 @@ export class XlsxViewer implements ZoomableViewer {
       this.tabBar.appendChild(this.buildZoomControl());
     }
 
-    // canvasArea first (bottom), gutters above it inside the same region.
+    // canvasArea only — the gutter canvases are attached lazily by
+    // layoutGutters when (and only when) the shown sheet actually has an
+    // outline, and detached again otherwise. Keeping them OUT of the DOM for
+    // outline-free sheets preserves exact element parity with the pre-outline
+    // viewer: consumers that count or index `<canvas>` elements (the layouts
+    // smoke does `page.locator('canvas').count()`, which includes
+    // `display:none` nodes) must see no difference.
     this.gridRegion.appendChild(this.canvasArea);
-    this.gridRegion.appendChild(this.colGutter);
-    this.gridRegion.appendChild(this.rowGutter);
-    this.gridRegion.appendChild(this.cornerGutter);
     this.wrapper.appendChild(this.gridRegion);
     this.wrapper.appendChild(this.tabBar);
     container.appendChild(this.wrapper);
@@ -912,6 +915,25 @@ export class XlsxViewer implements ZoomableViewer {
     const gw = this.rowOutline ? Math.round(gutterExtentPx(this.rowOutline.maxLevel) * cs) : 0;
     const gh = this.colOutline ? Math.round(gutterExtentPx(this.colOutline.maxLevel) * cs) : 0;
     this.gutter = { w: gw, h: gh };
+
+    // Attach the gutter canvases only while an outline exists; detach them
+    // entirely for outline-free sheets. A hidden-but-attached canvas is NOT
+    // neutral — DOM consumers that count/index `<canvas>` elements (e.g. the
+    // layouts smoke's `page.locator('canvas').count()`) see it — so element
+    // parity with the pre-outline viewer requires absence, not `display:none`.
+    // The elements (and their pointer listeners) are constructed once and
+    // survive detach/reattach across sheet switches.
+    if (gw > 0 || gh > 0) {
+      if (!this.colGutter.parentElement) {
+        this.gridRegion.appendChild(this.colGutter);
+        this.gridRegion.appendChild(this.rowGutter);
+        this.gridRegion.appendChild(this.cornerGutter);
+      }
+    } else {
+      this.colGutter.remove();
+      this.rowGutter.remove();
+      this.cornerGutter.remove();
+    }
 
     // Inset canvasArea so the grid (and every geometry read that keys off its
     // client rect) starts after the gutters.
