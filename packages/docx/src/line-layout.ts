@@ -113,6 +113,25 @@ export interface LayoutTextSeg {
    *  overlay can build a clickable region; it does NOT affect measurement, line
    *  breaking, or the drawn glyphs. Absent for a non-link run. */
   hyperlink?: HyperlinkTarget;
+  /** ECMA-376 §17.3.2.35 `<w:spacing>` — character-spacing pitch in POINTS
+   *  (signed), added after every character of the run. Applied as a per-glyph
+   *  `ctx.letterSpacing` delta on BOTH measure and paint (measure==paint), on top
+   *  of any docGrid / justify delta. Absent ⇒ 0. */
+  charSpacing?: number;
+  /** ECMA-376 §17.3.2.43 `<w:w>` — horizontal glyph-width scale as a FRACTION
+   *  (0.67 = 67%). Measured widths are multiplied by it and the paint pass draws
+   *  under `ctx.scale(charScale, 1)`; decorations follow the scaled extent.
+   *  Absent ⇒ 1 (100%). */
+  charScale?: number;
+  /** ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in POINTS,
+   *  applied as a y-offset to the glyphs and decorations without changing the
+   *  font size or the line box. Absent ⇒ 0. */
+  position?: number;
+  /** ECMA-376 §17.3.2.19 `<w:kern>` — font-kerning threshold in POINTS (smallest
+   *  kerned size). Sets `ctx.fontKerning` on measure and paint when the run's
+   *  font size ≥ the threshold. Absent ⇒ kerning off (`ctx.fontKerning='none'`
+   *  is NOT forced globally; only a threshold-satisfied run enables it). */
+  kerning?: number;
 }
 
 /**
@@ -616,6 +635,58 @@ export function gridWidth(naturalWidthPx: number, text: string, deltaPx: number)
   return naturalWidthPx + gridSegDeltaPx(text, deltaPx);
 }
 
+/** ECMA-376 §17.3.2.35 `<w:spacing>` — the per-GLYPH character-spacing pitch in
+ *  px for a segment (its authored points × the paint scale). Unlike the docGrid
+ *  delta this applies to EVERY code point of the run, not just East-Asian ones
+ *  ("the amount of character pitch … added after each character in this run").
+ *  0 when the run declares no `w:spacing`. */
+export function charSpacingDeltaPx(seg: LayoutTextSeg, scale: number): number {
+  return (seg.charSpacing ?? 0) * scale;
+}
+
+/** ECMA-376 §17.3.2.43 `<w:w>` — the horizontal glyph-width scale fraction of a
+ *  segment (0.67 = 67%). 1 when the run declares no `w:w`. Multiplies the
+ *  natural `measureText` width; the paint pass reproduces it with `ctx.scale`. */
+export function charScaleFactor(seg: LayoutTextSeg): number {
+  return seg.charScale ?? 1;
+}
+
+/** Total per-code-point letter-spacing (px) a segment draws with: the docGrid
+ *  cell delta (East-Asian-only, {@link gridSegDeltaPx}'s per-cp value) PLUS the
+ *  §17.3.2.35 character-spacing pitch (all code points). Because Canvas
+ *  `ctx.letterSpacing` inserts the SAME advance after every glyph, the two are
+ *  additive only when the grid delta applies to every glyph — i.e. a pure-EA
+ *  segment (or none, when grid is inactive). For a mixed / Latin segment the
+ *  grid delta is 0 (Latin is never snapped, §17.6.5) so only char-spacing
+ *  contributes, and the value is still uniform across the segment. This single
+ *  value is used for BOTH the measured advance and the painted `ctx.letterSpacing`
+ *  so measure==paint holds. */
+export function segLetterSpacingPx(
+  seg: LayoutTextSeg,
+  gridDeltaPx: number,
+  scale: number,
+): number {
+  const grid = gridSegDeltaPx(seg.text, gridDeltaPx) === 0 ? 0 : gridDeltaPx;
+  return grid + charSpacingDeltaPx(seg, scale);
+}
+
+/** A text segment's laid-out advance INCLUDING the §17.3.2.43 horizontal scale
+ *  and the §17.3.2.35 character spacing, on top of the docGrid delta. The
+ *  natural width is scaled first (w:w stretches the glyphs), then the char-spacing
+ *  pitch is added per code point (w:spacing adds fixed gaps that w:w does not
+ *  stretch), matching Word's independent treatment of the two axes. Reduces to
+ *  {@link gridWidth} when the run declares neither attribute. */
+export function segAdvanceWidth(
+  seg: LayoutTextSeg,
+  naturalWidthPx: number,
+  gridDeltaPx: number,
+  scale: number,
+): number {
+  const scaled = naturalWidthPx * charScaleFactor(seg) + gridSegDeltaPx(seg.text, gridDeltaPx);
+  const cpCount = [...seg.text].length;
+  return scaled + cpCount * charSpacingDeltaPx(seg, scale);
+}
+
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
   if (!ctx || !ctx.linePitchPt || ctx.linePitchPt <= 0) return false;
   return ctx.type === 'lines' || ctx.type === 'linesAndChars';
@@ -906,13 +977,23 @@ export function fitCJKPrefix(
   // The fit must compare CELL widths so the grid's char count lands per line —
   // the same `gridWidth` the line box / draw uses, keeping the split consistent.
   gridDeltaPx = 0,
+  // WD4 — the run's §17.3.2.43 horizontal glyph scale (1 = 100%) and §17.3.2.35
+  // per-code-point character-spacing pitch in px. Threaded so a CJK run that is
+  // scaled/spaced splits at the SAME cell boundary the whole-segment advance
+  // model uses (measure==paint). Default (1, 0) reproduces the prior behaviour.
+  charScale = 1,
+  charSpacingPx = 0,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
   let lo = 0, hi = chars.length;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
     const prefix = chars.slice(0, mid).join('');
-    if (gridWidth(ctx.measureText(prefix).width, prefix, gridDeltaPx) <= maxWidth) lo = mid;
+    const advance =
+      ctx.measureText(prefix).width * charScale +
+      gridSegDeltaPx(prefix, gridDeltaPx) +
+      mid * charSpacingPx;
+    if (advance <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
   return chars.slice(0, lo).join('');
@@ -1350,6 +1431,14 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
         hyperlink,
+        // WD4 — run character metrics (§17.3.2.35 spacing / §17.3.2.43 w /
+        // §17.3.2.24 position / §17.3.2.19 kern). Uniform across the run, so
+        // every emitted segment carries the same values; the measure and paint
+        // passes apply them identically (measure==paint).
+        charSpacing: r.charSpacing,
+        charScale: r.charScale,
+        position: r.position,
+        kerning: r.kerning,
       });
       firstSeg = false;
       gluePending = false; // glue applies only to a piece's FIRST segment
@@ -1758,22 +1847,57 @@ export function layoutLines(
     }
   };
 
+  // ECMA-376 §17.3.2.19 `<w:kern>` — set `ctx.fontKerning` to match how the PAINT
+  // pass will draw a run, so a kerned run measures exactly as it is drawn
+  // (measure==paint). Returns the value to restore afterwards (only when the run
+  // opts in). Kerning is enabled only when the run declares `w:kern` AND its font
+  // size is at or above the threshold (the spec's "smallest font size which shall
+  // have its kerning automatically adjusted"). A run that does not opt in leaves
+  // `ctx.fontKerning` at its inherited value rather than being forced off — Word's
+  // hierarchy default is off, but the browser default `'auto'` already produced
+  // the ±1–2px body-text behaviour the existing references were captured against;
+  // forcing `'none'` document-wide is a separate decision measured against the
+  // Word PDFs (see the WD4 report), not made here. `setSegKerning` mirrors the
+  // paint-side `paintSegKerning` in renderer.ts EXACTLY.
+  const setSegKerning = (s: LayoutTextSeg): CanvasFontKerning | null => {
+    if (s.kerning == null) return null;
+    const prev = ctx.fontKerning;
+    ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+    return prev;
+  };
+  const restoreKerning = (prev: CanvasFontKerning | null): void => {
+    if (prev != null) ctx.fontKerning = prev;
+  };
+
   const measureText = (s: LayoutTextSeg): TextMetrics => {
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
-    return ctx.measureText(s.text);
+    const prevKern = setSegKerning(s);
+    const m = ctx.measureText(s.text);
+    restoreKerning(prevKern);
+    return m;
   };
 
   // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
-  // character-grid delta. This is the SINGLE source of truth shared with the
-  // draw paths (gridWidth) — every line-break / fit / tab measurement uses it so
-  // line wrapping packs the grid's char count and the box matches what is drawn.
+  // character-grid delta, the §17.3.2.43 horizontal glyph scale (w:w) and the
+  // §17.3.2.35 character-spacing pitch (w:spacing). This is the SINGLE source of
+  // truth shared with the draw paths (segAdvanceWidth) — every line-break / fit /
+  // tab measurement uses it so line wrapping packs the grid's char count and the
+  // box matches what is drawn (measure==paint). `kerning` (§17.3.2.19) is applied
+  // via `ctx.fontKerning` inside `withSegKerning`, wrapping the measureText call.
   const segAdvance = (s: LayoutTextSeg): number =>
-    gridWidth(measureText(s).width, s.text, gridDeltaPx);
-  // Grid advance of an arbitrary string under a segment's font (for split
-  // prefixes/tails). Selects the font, then applies the same gridWidth model.
+    segAdvanceWidth(s, measureText(s).width, gridDeltaPx, scale);
+  // Grid advance of an arbitrary substring under a segment's font (for split
+  // prefixes/tails). Selects the font (and the run's kerning state), then applies
+  // the same width model as a whole segment BUT with the substring's own
+  // text/length so char-spacing scales with the piece — the split-prefix vs
+  // whole-segment advances must agree.
   const strAdvance = (s: LayoutTextSeg, text: string): number => {
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
-    return gridWidth(ctx.measureText(text).width, text, gridDeltaPx);
+    const prevKern = setSegKerning(s);
+    const natural = ctx.measureText(text).width;
+    restoreKerning(prevKern);
+    const scaled = natural * charScaleFactor(s) + gridSegDeltaPx(text, gridDeltaPx);
+    return scaled + [...text].length * charSpacingDeltaPx(s, scale);
   };
 
   // Width of a queued segment, for right/center tab look-ahead.
@@ -1882,7 +2006,7 @@ export function layoutLines(
               addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
             } else {
               const m = measureText(q);
-              const w = gridWidth(m.width, q.text, gridDeltaPx);
+              const w = segAdvanceWidth(q, m.width, gridDeltaPx, scale);
               q.measuredWidth = w;
               const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
               const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
@@ -1935,7 +2059,7 @@ export function layoutLines(
             addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
           } else {
             const m = measureText(q);
-            const w = gridWidth(m.width, q.text, gridDeltaPx);
+            const w = segAdvanceWidth(q, m.width, gridDeltaPx, scale);
             q.measuredWidth = w;
             const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
             const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
@@ -2009,7 +2133,7 @@ export function layoutLines(
     const m = measureText(s);
     // Advance = natural width + character-grid delta (the SINGLE model shared
     // with the draw paths; 0 unless an active grid AND a pure-EA segment).
-    const w = gridWidth(m.width, s.text, gridDeltaPx);
+    const w = segAdvanceWidth(s, m.width, gridDeltaPx, scale);
     // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
@@ -2061,12 +2185,11 @@ export function layoutLines(
     //      (shrinkFitCompression in text-distribute.ts) rather than overrunning
     //      its box. See the SPACE_SHRINK_RATIO doc above.
     const trimmed = s.text.replace(/ +$/, '');
-    // Subtract the GRID width of the trimmed text (not the natural width) so the
-    // grid delta on EA glyphs cancels and trailingSpaceW is the bare space
-    // advance — keeping `w` and `wForFit` on the one advance model.
-    const trailingSpaceW = s.text.endsWith(' ')
-      ? w - gridWidth(ctx.measureText(trimmed).width, trimmed, gridDeltaPx)
-      : 0;
+    // Subtract the full-model advance of the trimmed text (not the natural width)
+    // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
+    // cancel and trailingSpaceW is the bare trailing-space advance — keeping `w`
+    // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
+    const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
     const wForFit = w - trailingSpaceW;
     const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
 
@@ -2124,7 +2247,7 @@ export function layoutLines(
         const fw = segAdvance(f);
         groupW += fw;
         const ft = f.text.replace(/ +$/, '');
-        groupTrail = f.text.endsWith(' ') ? fw - gridWidth(ctx.measureText(ft).width, ft, gridDeltaPx) : 0;
+        groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
       }
       if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) flush();
     }
@@ -2140,7 +2263,7 @@ export function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, gridDeltaPx) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, gridDeltaPx, charScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -2218,7 +2341,7 @@ export function layoutLines(
       const available = availW();
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const allChars = [...s.text];
-      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, gridDeltaPx)].length : 0;
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, gridDeltaPx, charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
       if (split < 1) split = 1;
       if (split >= allChars.length) {
         // The visible glyphs actually fit (only a trailing space pushed it over the

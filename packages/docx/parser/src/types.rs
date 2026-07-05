@@ -1298,6 +1298,28 @@ pub struct TextRun {
     /// Arabic/Hebrew digit ordering). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment in
+    /// POINTS (signed): the extra pitch added after each character before the
+    /// next. The renderer feeds it to `ctx.letterSpacing` on BOTH the measure and
+    /// paint passes so wrapping/pagination stay consistent. `None` = no extra
+    /// pitch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub char_spacing: Option<f64>,
+    /// ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal text scale as a FRACTION of
+    /// normal character width (e.g. 0.67 = 67%, 2.0 = 200%). Stretches each
+    /// glyph's width (not the gap). `None` = 100%.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub char_scale: Option<f64>,
+    /// ECMA-376 §17.3.2.24 `<w:position w:val>` — baseline raise (positive) /
+    /// lower (negative) in POINTS, without changing the font size or line box.
+    /// `None` = no shift.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<f64>,
+    /// ECMA-376 §17.3.2.19 `<w:kern w:val>` — font-kerning threshold in POINTS
+    /// (the smallest font size that is kerned). Presence enables kerning; `None`
+    /// = kerning off (the hierarchy default). `Some(0.0)` = kern at all sizes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kerning: Option<f64>,
     /// ECMA-376 §17.11.6 / §17.11.7 / §17.11.16 / §17.11.17 — set when this run
     /// is a footnote/endnote reference mark (`<w:footnoteReference>` in the body,
     /// `<w:footnoteRef>` inside the note content, and the endnote equivalents).

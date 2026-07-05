@@ -2926,6 +2926,15 @@ fn parse_run_inner(
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
+    // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
+    // §17.3.2.24 position / §17.3.2.19 kern), resolved through the style chain
+    // into `fmt`. The renderer applies char_spacing via ctx.letterSpacing,
+    // char_scale as a horizontal glyph stretch, position as a baseline y-offset,
+    // and kern as the ctx.fontKerning threshold (all measure==paint).
+    let char_spacing = fmt.char_spacing;
+    let char_scale = fmt.char_scale;
+    let position = fmt.position;
+    let kerning = fmt.kerning;
 
     // Set by the "noBreakHyphen" arm below when it just pushed/extended a text
     // run for a `<w:noBreakHyphen/>` — tells the VERY NEXT loop iteration's
@@ -2979,6 +2988,10 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        char_spacing,
+                        char_scale,
+                        position,
+                        kerning,
                         note_ref: None,
                     };
                     match runs.last_mut() {
@@ -3048,6 +3061,10 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        char_spacing,
+                        char_scale,
+                        position,
+                        kerning,
                         note_ref: None,
                     })));
                 }
@@ -3087,6 +3104,10 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    char_spacing,
+                    char_scale,
+                    position,
+                    kerning,
                     note_ref: None,
                 })));
             }
@@ -3171,6 +3192,10 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    char_spacing,
+                    char_scale,
+                    position,
+                    kerning,
                     note_ref: None,
                 };
                 match runs.last_mut() {
@@ -3354,6 +3379,10 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    char_spacing,
+                    char_scale,
+                    position,
+                    kerning,
                     note_ref: Some(crate::types::NoteRef {
                         kind: kind.to_string(),
                         id: id_str,
@@ -8543,6 +8572,26 @@ mod cs_toggle_tests {
         // §17.3.2.7 <w:cs/> — the complex-script run toggle.
         let run = run_of(r#"<w:p><w:r><w:rPr><w:cs/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, Some(true));
+    }
+
+    #[test]
+    fn wd4_run_char_metrics_flow_to_text_run_model() {
+        // WD4: the four run character metrics (§17.3.2.35 spacing / §17.3.2.43 w
+        // / §17.3.2.24 position / §17.3.2.19 kern) survive from direct rPr all the
+        // way onto the serialized TextRun model in the documented units (points,
+        // and a fraction for scale).
+        let run = run_of(
+            r#"<w:p><w:r><w:rPr>
+                 <w:spacing w:val="200"/>
+                 <w:w w:val="67"/>
+                 <w:position w:val="-10"/>
+                 <w:kern w:val="28"/>
+               </w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.char_spacing, Some(10.0)); // 200 twips = 10 pt
+        assert!((run.char_scale.unwrap() - 0.67).abs() < 1e-9); // 67%
+        assert_eq!(run.position, Some(-5.0)); // -10 half-pt = -5 pt (lowered)
+        assert_eq!(run.kerning, Some(14.0)); // 28 half-pt = 14 pt threshold
     }
 
     /// §17.3.2.40 `<w:u w:val>` → ST_Underline (§17.18.99). All 18 enum values

@@ -5787,12 +5787,32 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       const internalStretch = stretch?.internalStretch ?? 0;
       if (!dryRun) {
         const effSizePx = calcEffectiveFontPx(s, scale);
-        const yOffset = s.vertAlign === 'super'
-          ? -s.fontSize * scale * 0.35
-          : s.vertAlign === 'sub'
-            ? s.fontSize * scale * 0.15
-            : 0;
+        // ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in pt.
+        // Canvas y grows DOWNWARD, so a positive (raised) position subtracts from
+        // y. It layers ON TOP of the super/sub offset (a positioned superscript
+        // moves by both) and, per spec, does NOT change the font size or line box.
+        const positionOffset = -(s.position ?? 0) * scale;
+        const yOffset =
+          (s.vertAlign === 'super'
+            ? -s.fontSize * scale * 0.35
+            : s.vertAlign === 'sub'
+              ? s.fontSize * scale * 0.15
+              : 0) + positionOffset;
         ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+
+        // ECMA-376 §17.3.2.43 `<w:w>` horizontal glyph scale (1 = 100%) and
+        // §17.3.2.35 `<w:spacing>` per-code-point character pitch in px. Both were
+        // already folded into `s.measuredWidth` during layout, so decorations
+        // (which use `decoW`/`spanW` below) follow automatically; here they drive
+        // the glyph draw so paint == measure. §17.3.2.19 `<w:kern>` sets
+        // `ctx.fontKerning` to match the measure pass exactly (see line-layout's
+        // `setSegKerning`); restored after the glyph block.
+        const segCharScale = s.charScale ?? 1;
+        const segCharSpacingPx = (s.charSpacing ?? 0) * scale;
+        const prevFontKerning = ctx.fontKerning;
+        if (s.kerning != null) {
+          ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+        }
 
         // Width spanned by the glyphs after justification, for ruby centring /
         // onTextRun reporting.
@@ -5946,15 +5966,23 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // WITHIN each piece — together glyph i lands at measure(prefix)+i·Δ, the
           // same target as before). See @silurus/ooxml-core → justify-positions.ts.
           const measure = (str: string): number => ctx.measureText(str).width;
+          // §17.3.2.35 char spacing adds to EVERY glyph (all code points), uniform
+          // with the per-EA-cell grid delta on this pure-EA segment, so the two
+          // combine into one per-glyph pitch. Pass the COMBINED value both as
+          // `justifiedPiecePositions`' letter-spacing term (so each piece's `dx`
+          // includes the accumulated pitch of the glyphs before it) and as
+          // `ctx.letterSpacing` (so the canvas adds it WITHIN each piece) —
+          // together glyph i lands at measure(prefix)+i·pitch (measure==paint).
+          const gridPlusSpacing = drawGridDeltaPx + segCharSpacingPx;
           const pieces = justifiedPiecePositions(
             cps,
             stretch?.splitBefore ?? [],
             distPerGap,
             measure,
-            drawGridDeltaPx,
+            gridPlusSpacing,
           );
           const prevLetterSpacing = ctx.letterSpacing;
-          ctx.letterSpacing = `${drawGridDeltaPx}px`;
+          ctx.letterSpacing = `${gridPlusSpacing}px`;
           for (const { text: piece, dx } of pieces) {
             ctx.fillText(piece, x + dx, baseline + yOffset);
           }
@@ -5966,6 +5994,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // advances. That sum drifts wider than the segment's box and would paint
           // the next run over this segment's tail (most visible at a CJK→Latin
           // boundary). See `@silurus/ooxml-core` → text/justify-positions.ts.
+          //
+          // KNOWN LATENT GAP (issue #816): §17.3.2.43 w:w (segCharScale) is NOT
+          // applied to the paint in this arm — the measure pass folded it into
+          // `s.measuredWidth` (segAdvanceWidth), so a scaled run that is also
+          // justify-distributed would draw its glyphs at full width inside a
+          // narrower box (ink overruns the measured span). Not reachable in any
+          // current fixture (w:w never co-occurs with distributed justify), but
+          // possible in a Japanese doc combining 均等割付 with compressed runs.
           const cps = [...s.text]; // code points (handles surrogate pairs)
           if (stretch.splitBefore.length === cps.length - 1) {
             // FULLY distributed: a gap was opened at EVERY inter-glyph boundary
@@ -5984,23 +6020,71 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // (= internalStretch). Restore the prior letterSpacing afterwards; no
             // measureText runs inside the set/restore window.
             const prevLetterSpacing = ctx.letterSpacing;
-            ctx.letterSpacing = `${distPerGap}px`;
+            // §17.3.2.35 char spacing is a per-glyph pitch on top of the justify
+            // slack; both add uniformly, so combine them (the box measured
+            // len·charSpacingPx separately from the justify slack — measure==paint).
+            ctx.letterSpacing = `${distPerGap + segCharSpacingPx}px`;
             ctx.fillText(s.text, x, baseline + yOffset);
             ctx.letterSpacing = prevLetterSpacing;
           } else {
             const measure = (str: string): number => ctx.measureText(str).width;
+            const prevLetterSpacing = ctx.letterSpacing;
+            // Partial justify split: pass the char-spacing pitch both as the
+            // per-glyph letter-spacing term (so each piece's `dx` includes the
+            // spacing of the glyphs before it) and as `ctx.letterSpacing` (so it
+            // is added WITHIN each piece) — measure==paint across the split.
             for (const { text: piece, dx } of justifiedPiecePositions(
               cps,
               stretch.splitBefore,
               distPerGap,
               measure,
+              segCharSpacingPx,
             )) {
+              ctx.letterSpacing = `${segCharSpacingPx}px`;
               ctx.fillText(piece, x + dx, baseline + yOffset);
             }
+            ctx.letterSpacing = prevLetterSpacing;
           }
+        } else if (segCharScale !== 1) {
+          // ECMA-376 §17.3.2.43 `<w:w>` — draw each glyph at `segCharScale`× its
+          // normal width. Canvas has no per-glyph width scale, so paint under a
+          // horizontal `ctx.scale`: translate to the run's pen x, scale x only,
+          // and draw at local origin. Char spacing (if any) is applied in the
+          // UNSCALED point space, so set `letterSpacing = charSpacing / scale`
+          // inside the scaled frame to keep the fixed pitch un-stretched by w:w.
+          //
+          // KNOWN LATENT GAP (issue #816): this arm is only reached when the
+          // charSpace docGrid arm and the justify-distribution arm above did NOT
+          // claim the segment. When either is active, w:w is folded into the
+          // MEASURED box (segAdvanceWidth) but never applied at paint, so the ink
+          // would overrun the box (probe: box 55px vs ink 105px). No current
+          // fixture hits that combination; the fix (scaling those arms' draws)
+          // is tracked in #816, not patched here.
+          ctx.save();
+          ctx.translate(x, 0);
+          ctx.scale(segCharScale, 1);
+          const prevLetterSpacing = ctx.letterSpacing;
+          if (segCharSpacingPx !== 0) {
+            ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
+          }
+          ctx.fillText(s.text, 0, baseline + yOffset);
+          ctx.letterSpacing = prevLetterSpacing;
+          ctx.restore();
+        } else if (segCharSpacingPx !== 0) {
+          // §17.3.2.35 `<w:spacing>` only (no grid, no justify, no scale): the
+          // whole run draws with a uniform per-glyph letter-spacing pitch that the
+          // layout already folded into `s.measuredWidth` (measure==paint).
+          const prevLetterSpacing = ctx.letterSpacing;
+          ctx.letterSpacing = `${segCharSpacingPx}px`;
+          ctx.fillText(s.text, x, baseline + yOffset);
+          ctx.letterSpacing = prevLetterSpacing;
         } else {
           ctx.fillText(s.text, x, baseline + yOffset);
         }
+        // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
+        // painted (the following ruby / emphasis-mark draws are separate glyphs at
+        // their own sizes and use the inherited kerning). No-op when unset.
+        if (s.kerning != null) ctx.fontKerning = prevFontKerning;
 
         // Ruby annotation: small text centered above the base glyphs.
         if (s.ruby) {

@@ -99,6 +99,34 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.20 w:lang/@w:bidi — complex-script (RTL) language tag,
     /// lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering.
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
+    /// the pitch added AFTER each character before the next is rendered
+    /// ("equivalent to the additional character pitch added by a document
+    /// grid"). Stored in POINTS, signed (source is ST_SignedTwipsMeasure =
+    /// twips = 1/20 pt); the renderer feeds it to `ctx.letterSpacing` for both
+    /// measure and paint so wrapping/pagination stay measure==paint. `None` =
+    /// inherit (no additional pitch when never set in the style hierarchy).
+    pub char_spacing: Option<f64>,
+    /// ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal Expanded/Compressed text
+    /// scale. ST_TextScale is a percentage of the normal (100%) character width
+    /// (1%–600%), stored here as a FRACTION (e.g. `w:val="67"` or `"67%"` →
+    /// 0.67). Unlike `char_spacing` this stretches each glyph's WIDTH, not the
+    /// gap between glyphs. `None` = inherit (100% when never set).
+    pub char_scale: Option<f64>,
+    /// ECMA-376 §17.3.2.24 `<w:position w:val>` — baseline raise (positive) or
+    /// lower (negative) WITHOUT changing the font size. Stored in POINTS, signed
+    /// (source is ST_SignedHpsMeasure = half-points = 1/144 in). `None` =
+    /// inherit (no shift when never set). Word does not grow the line box for a
+    /// positioned run; the shift is a pure baseline offset (§17.3.2.24).
+    pub position: Option<f64>,
+    /// ECMA-376 §17.3.2.19 `<w:kern w:val>` — the SMALLEST font size (threshold)
+    /// that has automatic font kerning applied; a run whose `sz` is below this
+    /// value is not kerned. Stored in POINTS (source is ST_HpsMeasure =
+    /// half-points). Presence itself enables kerning (subject to the threshold);
+    /// `None` = inherit, and "never set in the hierarchy" ⇒ no kerning at all
+    /// (Word's default is OFF, unlike Canvas's default `fontKerning='auto'`).
+    /// `Some(0.0)` = kern at every size.
+    pub kerning: Option<f64>,
 }
 
 /// Resolved paragraph formatting.
@@ -819,6 +847,22 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
     }
+    // Run character-metric axes (§17.3.2.35 spacing / §17.3.2.43 w / §17.3.2.24
+    // position / §17.3.2.19 kern). Each carries the same "if omitted, inherit;
+    // if set, override" rule as the other run properties, so a level that names
+    // the attribute wins and absence inherits.
+    if src.char_spacing.is_some() {
+        dst.char_spacing = src.char_spacing;
+    }
+    if src.char_scale.is_some() {
+        dst.char_scale = src.char_scale;
+    }
+    if src.position.is_some() {
+        dst.position = src.position;
+    }
+    if src.kerning.is_some() {
+        dst.kerning = src.kerning;
+    }
 
     // Complex-script font size resolution (ECMA-376 §17.3.2.18). Word treats a
     // directly-applied `w:sz` as also setting the complex-script size UNLESS the
@@ -1288,6 +1332,57 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // §17.3.2.7 w:cs — complex-script run toggle (distinct from rFonts@cs,
     // which is only a font SLOT and must not force cs formatting).
     fmt.cs_toggle = bool_prop(rpr, "cs");
+
+    // Character-spacing adjustment (ECMA-376 §17.3.2.35 `<w:spacing w:val>`).
+    // ST_SignedTwipsMeasure (twips, 1/20 pt), signed — pitch added AFTER each
+    // character. NOTE: the run-level `<w:spacing>` element carries only `w:val`;
+    // the identically-named paragraph `<w:spacing>` (§17.3.1.33) uses
+    // before/after/line and is parsed by `parse_para_fmt`, never here (this is
+    // the run `rPr` context). `w:val="0"` is a real "no extra pitch" override,
+    // so `Some(0.0)` must survive to shadow an inherited positive value.
+    if let Some(sp) = child_w(rpr, "spacing") {
+        if let Some(v) = attr_w(sp, "val") {
+            fmt.char_spacing = Some(twips_to_pt(&v));
+        }
+    }
+
+    // Expanded/Compressed text scale (ECMA-376 §17.3.2.43 `<w:w w:val>`).
+    // ST_TextScale (§17.18.95): a percentage of normal character width, 1%–600%.
+    // Word writes either a bare integer (`67`) or a percent literal (`67%`);
+    // accept both by stripping a trailing '%'. Stored as a fraction (67 → 0.67)
+    // and clamped to the spec's [0.01, 6.0] range. A malformed value is ignored
+    // (leaves inheritance intact) rather than defaulting to 1.0, which would
+    // incorrectly shadow an inherited scale.
+    if let Some(w) = child_w(rpr, "w") {
+        if let Some(v) = attr_w(w, "val") {
+            let trimmed = v.trim().trim_end_matches('%');
+            if let Ok(pct) = trimmed.parse::<f64>() {
+                if pct > 0.0 {
+                    fmt.char_scale = Some((pct / 100.0).clamp(0.01, 6.0));
+                }
+            }
+        }
+    }
+
+    // Vertically raised/lowered text (ECMA-376 §17.3.2.24 `<w:position w:val>`).
+    // ST_SignedHpsMeasure (half-points), signed — positive = raised above the
+    // baseline, negative = lowered. Converted to points here; the renderer adds
+    // it as a baseline y-offset without changing the font size or line box.
+    if let Some(pos) = child_w(rpr, "position") {
+        if let Some(v) = attr_w(pos, "val") {
+            fmt.position = Some(half_pt_to_pt(&v));
+        }
+    }
+
+    // Font kerning threshold (ECMA-376 §17.3.2.19 `<w:kern w:val>`). ST_HpsMeasure
+    // (half-points) — the SMALLEST font size that has kerning applied. The mere
+    // presence of the element turns kerning on (subject to the threshold); Word's
+    // hierarchy default is OFF. `w:val="0"` = kern at all sizes. Stored in points.
+    if let Some(kern) = child_w(rpr, "kern") {
+        if let Some(v) = attr_w(kern, "val") {
+            fmt.kerning = Some(half_pt_to_pt(&v));
+        }
+    }
 
     fmt
 }
@@ -1981,5 +2076,106 @@ mod tests {
         assert!(fr.para.is_none());
         // shd still parses (existing behavior unchanged).
         assert_eq!(fr.shd.as_deref(), Some("cccccc"));
+    }
+
+    // ── WD4: run-level character metrics (§17.3.2.35 / .43 / .24 / .19) ──────
+
+    #[test]
+    fn char_spacing_parses_signed_twips_to_pt() {
+        // §17.3.2.35: val is ST_SignedTwipsMeasure (twips = 1/20 pt). The spec
+        // example `<w:spacing w:val="200"/>` == 10 pt of extra pitch.
+        let f = run_fmt_from(r#"<w:spacing w:val="200"/>"#);
+        assert_eq!(f.char_spacing, Some(10.0));
+        // Negative (tighter) — sample-1/3/4/5/14 style, e.g. -10 twips = -0.5 pt.
+        let f = run_fmt_from(r#"<w:spacing w:val="-10"/>"#);
+        assert_eq!(f.char_spacing, Some(-0.5));
+        // val="0" is a real "no extra pitch" override, not absence.
+        let f = run_fmt_from(r#"<w:spacing w:val="0"/>"#);
+        assert_eq!(f.char_spacing, Some(0.0));
+        // Absent ⇒ inherit (None).
+        let f = run_fmt_from(r#"<w:b/>"#);
+        assert_eq!(f.char_spacing, None);
+    }
+
+    #[test]
+    fn run_spacing_does_not_collide_with_para_spacing() {
+        // The paragraph `<w:spacing before/after/line>` (§17.3.1.33) must never
+        // populate the run char_spacing, and the run `<w:spacing w:val>` must
+        // never touch paragraph spacing. Different elements, same tag name.
+        let p = para_fmt_from(
+            r#"<w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>"#,
+        );
+        assert_eq!(p.space_before, Some(12.0));
+        assert_eq!(p.space_after, Some(6.0));
+        assert_eq!(
+            p.run.char_spacing, None,
+            "para spacing must not set run char_spacing"
+        );
+    }
+
+    #[test]
+    fn char_scale_parses_percent_bare_and_literal() {
+        // §17.3.2.43 / ST_TextScale (§17.18.95): percentage of normal width.
+        // Word writes a bare integer (sample-13 `w:val="80"`, sample-26 `"67"`).
+        let f = run_fmt_from(r#"<w:w w:val="80"/>"#);
+        assert_eq!(f.char_scale, Some(0.80));
+        let f = run_fmt_from(r#"<w:w w:val="67"/>"#);
+        assert!((f.char_scale.unwrap() - 0.67).abs() < 1e-9);
+        // The `%` literal form is also valid ST_TextScale.
+        let f = run_fmt_from(r#"<w:w w:val="200%"/>"#);
+        assert_eq!(f.char_scale, Some(2.0));
+        // Clamp to the [1%, 600%] range.
+        let f = run_fmt_from(r#"<w:w w:val="1000"/>"#);
+        assert_eq!(f.char_scale, Some(6.0));
+        // Malformed / zero ⇒ ignored (leaves inheritance), not defaulted to 1.0.
+        let f = run_fmt_from(r#"<w:w w:val="0"/>"#);
+        assert_eq!(f.char_scale, None);
+        let f = run_fmt_from(r#"<w:b/>"#);
+        assert_eq!(f.char_scale, None);
+    }
+
+    #[test]
+    fn position_parses_signed_half_points_to_pt() {
+        // §17.3.2.24: val is ST_SignedHpsMeasure (half-points). Spec example
+        // `<w:position w:val="24"/>` == 12 pt raised above the baseline.
+        let f = run_fmt_from(r#"<w:position w:val="24"/>"#);
+        assert_eq!(f.position, Some(12.0));
+        // Negative = lowered (sample-11 uses -10 half-pt = -5 pt).
+        let f = run_fmt_from(r#"<w:position w:val="-10"/>"#);
+        assert_eq!(f.position, Some(-5.0));
+        let f = run_fmt_from(r#"<w:b/>"#);
+        assert_eq!(f.position, None);
+    }
+
+    #[test]
+    fn kern_parses_half_point_threshold() {
+        // §17.3.2.19: val is ST_HpsMeasure (half-points) — the smallest font
+        // size that gets kerning. Spec example `<w:kern w:val="28"/>` == 14 pt.
+        let f = run_fmt_from(r#"<w:kern w:val="28"/>"#);
+        assert_eq!(f.kerning, Some(14.0));
+        // val="0" (common in Word documents) = kern at every size — presence,
+        // not absence, so it must be Some(0.0) to keep kerning enabled.
+        let f = run_fmt_from(r#"<w:kern w:val="0"/>"#);
+        assert_eq!(f.kerning, Some(0.0));
+        // Absent ⇒ None (inherit; the hierarchy default is kerning OFF).
+        let f = run_fmt_from(r#"<w:b/>"#);
+        assert_eq!(f.kerning, None);
+    }
+
+    #[test]
+    fn char_metrics_merge_set_over_unset_and_inherit() {
+        // The four axes follow the shared "set overrides, absent inherits" rule
+        // in `apply_run` (used by both the style cascade and apply_direct_run).
+        let mut base = run_fmt_from(
+            r#"<w:spacing w:val="200"/><w:w w:val="90"/><w:position w:val="4"/><w:kern w:val="24"/>"#,
+        );
+        // A later level that only re-sets spacing must keep the inherited w /
+        // position / kern.
+        let over = run_fmt_from(r#"<w:spacing w:val="-20"/>"#);
+        apply_run(&mut base, &over);
+        assert_eq!(base.char_spacing, Some(-1.0)); // overridden
+        assert_eq!(base.char_scale, Some(0.90)); // inherited
+        assert_eq!(base.position, Some(2.0)); // inherited (8 half-pt = 4 pt? no: val=4 → 2pt)
+        assert_eq!(base.kerning, Some(12.0)); // inherited (24 half-pt = 12 pt)
     }
 }
