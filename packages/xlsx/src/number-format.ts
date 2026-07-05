@@ -1095,21 +1095,32 @@ function applyFormatCode(num: number, formatCode: string): FormattedCell {
   let useMagnitude = false;
 
   if (hasConditions) {
+    let matchedByCondition = false;
     for (const sec of parsed) {
       if (sec.condition) {
-        if (testCondition(sec.condition, num)) { chosen = sec; break; }
+        if (testCondition(sec.condition, num)) { chosen = sec; matchedByCondition = true; break; }
       } else {
         // Unconditional section acts as the default/else clause.
         chosen = chosen ?? sec;
         if (chosen === sec) break;
       }
     }
-    // The "else" section formats the raw value (its own literals carry any
-    // sign); no magnitude stripping when conditions drive selection.
     if (!chosen) {
       // No criterion met and no else → Excel shows "#" across the cell.
       return { text: '#' };
     }
+    // Sign semantics (§18.8.30 / §18.8.31): a section selected by its own
+    // matching condition formats the value's *magnitude* — the section's
+    // literals carry the sign presentation, exactly like the positional
+    // negative section (the spec's `$0.00" Surplus";$-0.00" Shortage"` example
+    // on p.1785 shows -125.74 as "$-125.74 Shortage": magnitude plus the
+    // section's own literal `-`; built-ins 37-40 use parentheses the same way).
+    // Prepending the sign on top would double it: `[<0]\-0.0` @ -5 would print
+    // "--5.0". The unconditional "else" section, by contrast, mirrors the
+    // positional fallback rule (a negative formatted by the only/positive
+    // section keeps its sign, e.g. `0.0` @ -5 → "-5.0"), so a value that no
+    // condition claimed keeps its sign there.
+    useMagnitude = matchedByCondition && num < 0;
   } else {
     // Positional selection: positive;negative;zero (§18.8.31 p.1783).
     if (num > 0) chosen = parsed[0];

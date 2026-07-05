@@ -179,6 +179,28 @@ table('conditional sections (§18.8.30 p.1787)', [
   [12, '[<=999]000;[<=9999]000\\-00;000\\-0000', '012', 'CORPUS'],
   [1234, '[<=999]000;[<=9999]000\\-00;000\\-0000', '012-34', 'CORPUS'],
   [123456, '[<=999]000;[<=9999]000\\-00;000\\-0000', '012-3456', 'CORPUS'],
+  // ── Sign handling in condition-selected sections ──────────────────────────
+  // A section selected by its *matching condition* formats the value's
+  // magnitude; the section's own literals carry the sign presentation. This is
+  // the same model §18.8.30 uses for the positional negative section: the
+  // spec's own example `$0.00" Surplus";$-0.00" Shortage"` (p.1785) renders
+  // -125.74 as "$-125.74 Shortage" — magnitude + the section's literal `-` —
+  // and built-ins 37-40 (`#,##0 ;(#,##0)`) put parentheses where the minus
+  // would be. Applying the sign on top would double it ("--5.0",
+  // "-(1,234.50)"), which Excel does not do (independently verified against
+  // Excel in the PR #799 review).
+  [-5, '[>0]0.0;[<0]\\-0.0', '-5.0', 'XL'],
+  [-1234.5, '[>=0]#,##0.00;[<0](#,##0.00)', '(1,234.50)', 'XL'],
+  // No sign literal in the condition-matched section → the sign is simply not
+  // rendered (the section owns the sign presentation and provides none) —
+  // mechanically the same rule that makes positional `0;(0)` show -5 as "(5)"
+  // rather than re-adding a minus.
+  [-5, '[<0]0.0;0.0', '5.0', 'XL'],
+  // The unconditional "else" section is the fallback for values no condition
+  // claimed. It mirrors the positional fallback rule (§18.8.31: a negative
+  // formatted by the only/positive section keeps its sign, cf. `0.0` @ -5 →
+  // "-5.0" above), so the sign survives here.
+  [-500, '[>=1000]#,##0,"K";0', '-500', 'XL'],
 ]);
 
 // ── Currency / locale-currency `[$sym-LCID]` (§18.8.30 p.1791) ──────────────
