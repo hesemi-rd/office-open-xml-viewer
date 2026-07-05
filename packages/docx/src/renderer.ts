@@ -2578,7 +2578,14 @@ export function computePages(
       const paragraphAnchorY = measureState.y;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
-      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX());
+      // §17.3.1.7 border-box merge: the bottom-border extent is only reserved when
+      // this paragraph's bottom edge is actually drawn. It is suppressed when the
+      // NEXT in-flow element is a paragraph that shares this border box (a
+      // sectionBreak / table / any non-paragraph breaks the run → not shared).
+      const nextEl = body[i + 1];
+      const nextShares = nextEl?.type === 'paragraph'
+        && parasShareBorderBox(para, nextEl);
+      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX(), nextShares);
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
       // body must stop short of the footnote area. Measure the footnotes this
@@ -3298,6 +3305,9 @@ function estimateParagraphHeight(
   contentWPt: number,
   suppressSpaceBefore = false,
   paraXPt = 0,
+  /** §17.3.1.7: the next in-flow paragraph shares this paragraph's border box, so
+   *  its bottom edge is suppressed (the box continues) and reserves no extent. */
+  nextSharesBottomBorder = false,
 ): number {
   // ECMA-376 §17.3.1.12 / Part 4 §14.11.2 — the transitional left/right indent
   // attributes are logical start/end, so they swap physical sides in a bidi
@@ -3386,7 +3396,14 @@ function estimateParagraphHeight(
       }
     }
   }
-  cursor += para.spaceAfter;
+  // §17.3.1.7: a BOTTOM border extends `space + width/2` below the text box; the
+  // next paragraph must clear it (bottomBorderExtentPt). spaceAfter (trailing
+  // whitespace) already pushes content down, so reserve only the amount by which
+  // the border pokes PAST spaceAfter — MAX, not SUM — matching Word (which does not
+  // stack the border extent on top of a larger spaceAfter). Suppressed when a
+  // same-border paragraph follows (the box continues; no bottom edge is drawn).
+  const bottomExtent = nextSharesBottomBorder ? 0 : bottomBorderExtentPt(para.borders);
+  cursor += Math.max(para.spaceAfter, bottomExtent);
   return cursor - startY;
 }
 
@@ -4828,9 +4845,14 @@ function renderEmptyMarkParagraph(
     drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr, borderMerge);
   }
   // Only the slice covering the FINAL line emits spaceAfter. With no inline
-  // lines there is a single slice, so this is the whole paragraph.
+  // lines there is a single slice, so this is the whole paragraph. §17.3.1.7: a
+  // drawn bottom border extends `space + width/2` below the mark box; reserve the
+  // amount it pokes past spaceAfter (MAX) so the next paragraph clears it — mirrors
+  // estimateParagraphHeight, keeping paint and pagination in lockstep.
   const isFinalSlice = !lineSlice || lineSlice.end >= totalLines;
-  if (isFinalSlice) state.y += para.spaceAfter * scale;
+  if (isFinalSlice) {
+    state.y += Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders, borderMerge)) * scale;
+  }
   // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
   // the mark line flowed below a float band the paragraph (and its wrapNone
   // image) drops by the same amount, so shift the anchor base by flowShift while
@@ -5488,9 +5510,14 @@ function renderParagraph(
   }
 
   // spaceAfter is paragraph-level; only emit it on the slice that covers
-  // the FINAL line of the paragraph (or when no slice is set at all).
+  // the FINAL line of the paragraph (or when no slice is set at all). §17.3.1.7: a
+  // drawn bottom border extends `space + width/2` below the text box; reserve the
+  // amount it pokes past spaceAfter (MAX) so the next paragraph clears the rule —
+  // mirrors estimateParagraphHeight / renderEmptyMarkParagraph.
   const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
-  if (isFinalSlice) state.y += para.spaceAfter * scale;
+  if (isFinalSlice) {
+    state.y += Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders, borderMerge)) * scale;
+  }
 
   // Anchor images are absolutely positioned — draw after inline flow.
   // Skip this for continuation slices: anchor positioning is paragraph-relative
@@ -8145,10 +8172,11 @@ function measureCellContentHeightPx(
   // The mark itself is still painted by renderCellContent; being empty it adds no
   // visible content, so excluding it from sizing cannot hide anything.
   const measured = trimTrailingStructuralMarker(cell.content);
-  // measureCellElementHeight always includes paragraph spaceBefore+spaceAfter;
-  // sumCellContentHeight folds in contextualSuppressed (§17.3.1.33) and the
-  // prevSpaceAfter/spaceBefore overlap collapse to match the paint pass's
-  // renderCellContent. Spacing is converted from pt to px with `scale`.
+  // measureCellElementHeight always includes paragraph spaceBefore plus
+  // max(spaceAfter, bottom-border extent) — the same trailing advance the paint
+  // pass emits (§17.3.1.7); sumCellContentHeight folds in contextualSuppressed
+  // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap collapse to match the
+  // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
     measured,
     (ce) => measureCellElementHeight(state, ce, contentW, scale),
@@ -8724,8 +8752,13 @@ function measureCellElementHeight(
 ): number {
   if (ce.type === 'paragraph') {
     const para = ce as unknown as DocParagraph;
+    // §17.3.1.7: the paint pass (renderCellContent → renderParagraph) advances
+    // `max(spaceAfter, bottomBorderExtentPt)` below the text box so following
+    // content clears a drawn bottom border. Mirror it here, or a bordered cell
+    // paragraph paints taller than the cell measures (B2: single measurer).
+    // renderCellContent never passes a borderMerge, so no suppression term.
     return measureParaHeight(state, para, innerWPx, scale)
-      + (para.spaceBefore + para.spaceAfter) * scale;
+      + (para.spaceBefore + Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))) * scale;
   }
   // Nested table — estimateTableHeight works in pt; convert to px.
   const tbl = ce as unknown as DocTable;
@@ -9101,6 +9134,32 @@ function drawParaBorders(
   }
   drawEdge(borders.left,   x - sp(borders.left), y,        x - sp(borders.left), y + h);
   drawEdge(borders.right,  x + w + sp(borders.right), y,   x + w + sp(borders.right), y + h);
+}
+
+/** ECMA-376 §17.3.1.7 — the vertical extent (in scale-1 points) a paragraph's
+ *  BOTTOM border adds BELOW the text box, so following content clears it.
+ *
+ *  §17.3.1.7 places the bottom border `w:space` points below the text ("the space
+ *  after the bottom of the text … before this border is drawn"), and §17.3.4 gives
+ *  the border its own width (`w:sz`, eighths of a point). {@link drawParaBorders}
+ *  strokes the line CENTERED on `textBottom + space`, so its outer (bottom) edge is
+ *  at `textBottom + space + width/2`. Word reserves that whole extent in the flow —
+ *  a bottom-bordered paragraph pushes the next paragraph BELOW the border rather
+ *  than letting the following line box overlap it (the spec is silent on the flow
+ *  reservation; this is Word's observed layout, verified against sample-14's
+ *  reference-list rule, whose `space=1 sz=12` rule sat ~1.75 pt too high without it).
+ *
+ *  Returns 0 when there is no visible bottom edge, or when a same-border paragraph
+ *  follows (the bottom edge is suppressed by the §17.3.1.7 merge — the box
+ *  continues into the next paragraph, so nothing is drawn here to clear). */
+function bottomBorderExtentPt(
+  borders: ParagraphBorders | null | undefined,
+  merge?: ParaBorderMerge,
+): number {
+  if (!borders || merge?.suppressBottom) return 0;
+  const b = borders.bottom;
+  if (!b || b.style === 'none') return 0;
+  return (b.space ?? 0) + (b.width ?? 0) / 2;
 }
 
 // ===== Utilities =====
