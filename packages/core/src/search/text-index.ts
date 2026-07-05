@@ -22,7 +22,10 @@
  * (`caseSensitive: false`), matching a browser's Ctrl+F. Full-/half-width (zenkaku
  * ↔ hankaku) folding and diacritic-insensitive matching are intentionally NOT
  * done in this minimal pass — they are locale-sensitive and easy to get subtly
- * wrong; a later opt-in can add them without changing this contract.
+ * wrong; a later opt-in can add them without changing this contract. Case
+ * folding is length-preserving (see {@link foldPreservingLength}): the few code
+ * points whose lowercase changes UTF-16 length (e.g. U+0130 İ) match by
+ * identity only, so match offsets always index the original text.
  */
 
 /**
@@ -41,9 +44,12 @@ export interface SearchRun {
  * the character offset in `text` where run `i` begins, so a match position in
  * `text` can be resolved back to a (run, offset-within-run) pair by binary
  * search. `folded` is the case-folded form used for matching when the search is
- * case-insensitive (kept parallel to `text`, same length — folding is 1:1 for
- * the ASCII/Unicode simple case-fold we use, `String.prototype.toLowerCase`,
- * which never changes code-unit count for the scripts these documents contain).
+ * case-insensitive. INVARIANT: `folded.length === text.length` — guaranteed by
+ * {@link foldPreservingLength} — so a match offset found in `folded` indexes
+ * `text` directly. (A whole-string `toLowerCase()` does NOT hold this: e.g.
+ * U+0130 İ lowercases to "i" + U+0307 combining dot, 1 → 2 UTF-16 code units,
+ * which would shift every later match right by the delta and could even push a
+ * match range past `text.length`, hanging the slice walk.)
  */
 export interface TextIndex {
   /** The concatenated run texts, in run order. */
@@ -93,6 +99,39 @@ export interface FindMatchesOptions {
 }
 
 /**
+ * Case-fold `s` for case-insensitive matching WITHOUT changing its UTF-16
+ * length, so every offset in the folded string indexes the original directly.
+ *
+ * `String.prototype.toLowerCase` is not length-preserving: a handful of code
+ * points expand (U+0130 İ → "i" + U+0307, 1 → 2 code units; ligature-style
+ * upper-case mappings likewise). A whole-string lowercase therefore de-syncs
+ * folded offsets from text offsets and corrupts every match after the first
+ * such character. Instead we fold per code point and KEEP a code point
+ * unfolded whenever its lowercase form has a different code-unit length.
+ *
+ * Trade-off (documented contract): those rare code points only match by
+ * identity, not case-insensitively (a query "i̇" will not find "İ"). That is
+ * the correct side of the trade — a slightly narrower match set for a few
+ * exotic characters versus wrong-glyph highlights (or a hang) for every match
+ * that follows one.
+ *
+ * Fast path: when the whole-string lowercase already has the same length
+ * (true for effectively all real documents), use it as-is; the per-code-point
+ * walk only runs for strings containing a length-changing fold.
+ */
+function foldPreservingLength(s: string): string {
+  const whole = s.toLowerCase();
+  if (whole.length === s.length) return whole;
+  let out = '';
+  for (const ch of s) {
+    // `ch` is one code point (1 or 2 code units via the string iterator).
+    const lower = ch.toLowerCase();
+    out += lower.length === ch.length ? lower : ch;
+  }
+  return out;
+}
+
+/**
  * Build a reusable {@link TextIndex} from an ordered run list. O(total chars).
  * The index is independent of the query, so a viewer builds it once per rendered
  * page/slide/sheet and reuses it across `findText` / `findNext` calls until the
@@ -109,7 +148,9 @@ export function buildTextIndex(runs: readonly SearchRun[]): TextIndex {
   }
   return {
     text: joined,
-    folded: joined.toLowerCase(),
+    // Length-preserving fold: folded offsets must index `text` directly (see
+    // the TextIndex invariant).
+    folded: foldPreservingLength(joined),
     runStart,
     runCount: runs.length,
   };
@@ -145,7 +186,13 @@ function sliceRange(index: TextIndex, matchStart: number, matchEnd: number): Mat
   const slices: MatchRunSlice[] = [];
   let run = runAtOffset(index, matchStart);
   let cursor = matchStart;
-  while (cursor < matchEnd) {
+  // `run < runCount` is a termination guard, not a semantic bound: under the
+  // TextIndex invariant (folded.length === text.length) every match range lies
+  // within [0, text.length] and the walk always ends by cursor reaching
+  // matchEnd inside the last run. Without the guard, a range past text.length
+  // (as a length-CHANGING fold used to produce) would loop forever — cursor
+  // pins at text.length while run increments unboundedly.
+  while (cursor < matchEnd && run < runCount) {
     // End of the current run in joined-text coordinates.
     const runEndOffset = run + 1 < runCount ? runStart[run + 1] : text.length;
     const sliceEnd = Math.min(matchEnd, runEndOffset);
@@ -179,7 +226,10 @@ export function findMatches(
   if (query.length === 0) return [];
   const caseSensitive = opts.caseSensitive ?? false;
   const haystack = caseSensitive ? index.text : index.folded;
-  const needle = caseSensitive ? query : query.toLowerCase();
+  // The needle must be folded with the SAME length-preserving fold as the
+  // haystack: a plain toLowerCase() would expand e.g. "İ" to "i" + U+0307 and
+  // never match the haystack, where "İ" was deliberately kept unfolded.
+  const needle = caseSensitive ? query : foldPreservingLength(query);
 
   const matches: TextMatch[] = [];
   let from = 0;

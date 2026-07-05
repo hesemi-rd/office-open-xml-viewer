@@ -111,6 +111,49 @@ describe('findMatches — cross-run matches', () => {
   });
 });
 
+describe('findMatches — length-changing case folds must not shift offsets', () => {
+  // U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to "i" +
+  // U+0307 (combining dot above): 1 → 2 UTF-16 code units. A whole-string
+  // toLowerCase() therefore de-syncs `folded` offsets from `text` offsets and
+  // shifts every later match right by the length delta (reviewer repro:
+  // "İstanbul" + "bul" sliced "ul"). The fold must preserve length — such code
+  // points stay unfolded — so a match offset always indexes `text` correctly.
+  it('finds a match after İ at the correct text offset', () => {
+    const index = buildTextIndex(runs('İstanbul'));
+    expect(index.folded.length).toBe(index.text.length);
+    const m = findMatches(index, 'bul');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([{ runIndex: 0, start: 5, end: 8 }]);
+    // The slice must select the actual matched glyphs in the original text.
+    expect('İstanbul'.slice(m[0].slices[0].start, m[0].slices[0].end)).toBe('bul');
+  });
+
+  it('keeps offsets aligned across a run boundary after İ', () => {
+    const index = buildTextIndex(runs('İst', 'anbul'));
+    const m = findMatches(index, 'STAN');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([
+      { runIndex: 0, start: 1, end: 3 },
+      { runIndex: 1, start: 0, end: 2 },
+    ]);
+  });
+
+  it('matches İ by identity (query İ ↔ text İ, both kept unfolded)', () => {
+    const index = buildTextIndex(runs('İstanbul'));
+    const m = findMatches(index, 'İstan');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([{ runIndex: 0, start: 0, end: 5 }]);
+  });
+
+  it('ordinary folding still applies around the preserved code point', () => {
+    const index = buildTextIndex(runs('İSTANBUL and istanbul'));
+    // The İ variant's trailing letters and the plain-I word both fold normally.
+    const m = findMatches(index, 'stanbul');
+    expect(m).toHaveLength(2);
+    expect(m.map((x) => x.slices[0].start)).toEqual([1, 14]);
+  });
+});
+
 describe('findMatches — edge cases', () => {
   it('returns [] for an empty query', () => {
     const index = buildTextIndex(runs('anything'));
