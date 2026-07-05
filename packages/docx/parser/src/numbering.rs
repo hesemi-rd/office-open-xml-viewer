@@ -495,6 +495,16 @@ fn format_counter(n: u32, format: &str) -> String {
         // Hebrew: positional gematria / alphabet-with-ת-suffix (NOT repeat).
         "hebrew1" => to_hebrew_gematria(n),
         "hebrew2" => to_hebrew2(n),
+        // Other algorithmic systems (§17.18.59 hex / numberInDash / decimalZero).
+        "hex" => format!("{:X}", n),
+        "numberInDash" => format!("- {} -", n),
+        "decimalZero" => {
+            if n <= 9 {
+                format!("0{}", n)
+            } else {
+                n.to_string()
+            }
+        }
         // Positional digit substitution.
         "decimalFullWidth" => to_positional_digits(n, DIGITS_FULLWIDTH),
         "thaiNumbers" => to_positional_digits(n, DIGITS_THAI),
@@ -1280,6 +1290,19 @@ mod tests {
                     (45, "אתת"),
                     (123, "מתתתתת"),
                 ],
+            ),
+            // Other algorithmic systems.
+            (
+                "hex",
+                &[(1, "1"), (10, "A"), (16, "10"), (31, "1F"), (255, "FF")],
+            ),
+            (
+                "numberInDash",
+                &[(1, "- 1 -"), (10, "- 10 -"), (123, "- 123 -")],
+            ),
+            (
+                "decimalZero",
+                &[(1, "01"), (9, "09"), (10, "10"), (100, "100")],
             ),
             // Documented residual / spell-outs fall back to decimal.
             ("cardinalText", &[(5, "5")]),

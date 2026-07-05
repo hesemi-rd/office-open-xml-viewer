@@ -40,6 +40,7 @@ export type NumberFormat =
   // Positional digit substitution (base-10, own zero glyph).
   | 'decimalFullWidth'
   | 'decimalHalfWidth'
+  | 'decimalZero'
   | 'thaiNumbers'
   | 'hindiNumbers'
   | 'ideographDigital'
@@ -72,6 +73,9 @@ export type NumberFormat =
   // Hebrew (positional gematria / alphabet-with-ת-suffix — NOT the repeat scheme).
   | 'hebrew1'
   | 'hebrew2'
+  // Other algorithmic systems.
+  | 'hex'
+  | 'numberInDash'
   // Accepted but rendered as decimal (documented residual) — kept in the type so
   // callers can pass a raw parsed value without a cast for the common ones.
   | 'none'
@@ -332,6 +336,20 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
       return n >= 1 ? toHebrewGematria(n) : String(n);
     case 'hebrew2':
       return n >= 1 ? toHebrew2(n) : String(n);
+    // Other algorithmic systems.
+    case 'hex':
+      // §17.18.59 hex: base-16 positional over 0–9, A–F (U+0030–U+0039,
+      // U+0041–U+0046 — uppercase). Example: …, E, F, 10, 11, …, 1E, 1F, 20.
+      return n >= 1 ? n.toString(16).toUpperCase() : String(n);
+    case 'numberInDash':
+      // §17.18.59 numberInDash: the Arabic decimal "placed between two dashes";
+      // the example pattern spaces them: - 1 -, - 2 -, …, - 10 -. §17.16.4.3.1
+      // ArabicDash concurs: 'prefix of "- " and a suffix of " -"' (123 → - 123 -).
+      return n >= 1 ? `- ${n} -` : String(n);
+    case 'decimalZero':
+      // §17.18.59 decimalZero: Arabic decimal "with a zero added to numbers one
+      // through nine" — 01, 02, …, 09, 10, 11, …, 99, 100 (only 1–9 are padded).
+      return n >= 1 && n <= 9 ? `0${n}` : String(n);
     // Positional digit substitution (n=0 renders the zero glyph — but list/page
     // numbering is 1-based, so we still gate ≥1 and fall back for ≤0).
     case 'decimalFullWidth':

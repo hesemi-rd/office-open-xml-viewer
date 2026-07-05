@@ -9,8 +9,10 @@ describe('parseFieldFormatSwitch — ECMA-376 §17.16.4.3.1 general-formatting s
   });
 
   it('maps the numeric switch arguments to ST_NumberFormat values (case-sensitive)', () => {
-    // Arabic -> decimal
+    // Arabic -> decimal; ArabicDash -> "- N -"; Hex -> uppercase hexadecimal
     expect(parseFieldFormatSwitch('PAGE \\* Arabic')).toBe('decimal');
+    expect(parseFieldFormatSwitch('PAGE \\* ArabicDash')).toBe('numberInDash');
+    expect(parseFieldFormatSwitch('PAGE \\* Hex')).toBe('hex');
     // Roman (uppercase) vs roman (lowercase) are DISTINCT arguments
     expect(parseFieldFormatSwitch('PAGE \\* Roman')).toBe('upperRoman');
     expect(parseFieldFormatSwitch('PAGE \\* roman')).toBe('lowerRoman');

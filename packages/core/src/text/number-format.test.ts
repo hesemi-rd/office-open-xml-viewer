@@ -223,6 +223,25 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
         [20, 'כ'], [21, 'כא'], [100, 'ק'], [123, 'קכג'], [200, 'ר'],
         [400, 'ת'], [500, 'ך'],
       ]],
+
+      // ── Other algorithmic systems ───────────────────────────────────────
+      // hex: base-16 over 0–9, A–F, UPPERCASE (§17.18.59 example: …, E, F, 10,
+      // 11, …, 1E, 1F, 20). NOTE the §17.16.4.3.1 field example "355 → FF" is
+      // the spec's own arithmetic error (0xFF = 255); the algorithm is normative.
+      ['hex', [
+        [1, '1'], [9, '9'], [10, 'A'], [15, 'F'], [16, '10'], [30, '1E'],
+        [31, '1F'], [32, '20'], [255, 'FF'], [4096, '1000'],
+      ]],
+      // numberInDash: decimal between two dashes (§17.18.59 example: - 1 -,
+      // - 2 -, …, - 10 -; §17.16.4.3.1 ArabicDash: 123 -> - 123 -).
+      ['numberInDash', [
+        [1, '- 1 -'], [9, '- 9 -'], [10, '- 10 -'], [123, '- 123 -'],
+      ]],
+      // decimalZero: 1–9 zero-padded, everything else plain decimal (§17.18.59
+      // example: 01, 02, …, 09, 10, 11, …, 99, 100, 101).
+      ['decimalZero', [
+        [1, '01'], [9, '09'], [10, '10'], [99, '99'], [100, '100'],
+      ]],
     ];
 
     for (const [fmt, rows] of cases) {

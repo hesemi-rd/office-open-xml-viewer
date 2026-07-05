@@ -31,8 +31,10 @@ import type { NumberFormat } from './number-format';
 // have no entry: `parseFieldFormatSwitch` returns null for them so the caller
 // keeps the section format rather than silently downgrading to decimal.
 const SWITCH_TO_FORMAT: Readonly<Record<string, NumberFormat>> = {
-  // §17.16.4.3.1 Latin / roman core.
+  // §17.16.4.3.1 Latin / roman / hex / dash core.
   Arabic: 'decimal',
+  ArabicDash: 'numberInDash', // "- 123 -"
+  Hex: 'hex', // uppercase hexadecimal
   Roman: 'upperRoman',
   roman: 'lowerRoman',
   ALPHABETIC: 'upperLetter',
