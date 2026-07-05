@@ -45,11 +45,6 @@ import {
   resolveLineFloatWindow,
   wordMinLineStartPx,
 } from './float-layout.js';
-// Pure UAX#9 per-line reorder helper. `bidi-line.ts` imports only from
-// `@silurus/ooxml-core` (never from this module), so this is a one-directional
-// value import — no runtime cycle (same rule as the renderer.ts → line-layout.ts
-// split documented above).
-import { computeLineVisualOrder } from './bidi-line.js';
 
 export interface LayoutTextSeg {
   text: string;
@@ -1348,15 +1343,12 @@ export interface BidiTabResult {
   width: number;
   /** Leader to paint across this tab's span (`'none'`/undefined ⇒ blank). */
   leader?: TabStop['leader'];
-  /** Visual x (px, from the line's LEFT text edge) of this segment's left edge —
-   *  where the draw walk should paint it. */
-  visualX: number;
 }
 
 /**
  * ECMA-376 §17.3.1.37 / §17.15.1.25 / §17.18.84 — lay out ONE line of a BIDI
- * (RTL-base) paragraph's tab-aligned cells, returning each segment's tab width
- * and its final VISUAL x.
+ * (RTL-base) paragraph's tab-aligned cells, returning each tab's width and
+ * leader BY LOGICAL INDEX.
  *
  * The LTR layout pass ({@link layoutLines}) resolves tab widths against the pen
  * in LOGICAL order but in a LEFT-to-right frame, which is wrong for a bidi
@@ -1366,29 +1358,46 @@ export interface BidiTabResult {
  * wrong visual side — often overflowing and wrapping to a new line (the "leaders
  * appear/disappear" and "page number on its own row" symptoms of issue #820).
  *
- * This lays the line out in the RTL reading frame: the pen starts at the LEADING
- * (right) text edge and moves LEFT. A tab stop's `pos` is its distance from that
- * leading edge; the Nth tab in reading order advances to the next stop further
- * left (larger `pos`), exactly like the LTR pen advances rightward through
- * stops. Alignment is logical (Part 4 §14.11.2): physical `left` = `start`
- * (leading ⇒ following content's leading/RIGHT edge on the stop), physical
- * `right` = `end` (trailing ⇒ its trailing/LEFT edge on the stop); `center` is
- * unchanged; `bar`/`clear` advance like `start`. Automatic stops fall on the
- * §17.15.1.25 grid from the leading edge, after all custom stops. A stop past
- * the left margin pins its content to the margin (Word never pushes it off the
- * page). The reading-frame positions are converted to the draw loop's visual
- * L→R x at the end.
+ * This lays the line out in the RTL READING frame: the pen starts at the right
+ * TEXT MARGIN (pen 0) and moves LEFT (increasing pen). A tab stop's `pos` is its
+ * distance from that MARGIN — not from the paragraph's indented edge (verified
+ * against Word: sample-28's TOC2 title tab at 1017 twips lands 50.85pt from the
+ * page margin even though the paragraph carries a 36pt logical-left indent).
+ * Content begins at `startPenPx` (the paragraph's leading-indent + first-line
+ * indent); the Nth tab in reading order advances to the next stop further left
+ * (larger `pos`), exactly like the LTR pen advances rightward through stops.
+ * Alignment is logical (Part 4 §14.11.2): physical `left` = `start` (leading ⇒
+ * following content's leading/RIGHT edge on the stop), physical `right` = `end`
+ * (trailing ⇒ its trailing/LEFT edge on the stop); `center` is unchanged;
+ * `bar`/`clear` advance like `start`. Automatic stops fall on the §17.15.1.25
+ * grid from the margin, after all custom stops. A stop past the LEFT text
+ * margin (`leftLimitPx`) pins its content to that margin (Word never pushes it
+ * off the page — sample-28's page numbers pin at x=72).
+ *
+ * The widths returned here reproduce Word's layout through the draw loop's
+ * VISUAL walk because {@link computeLineVisualOrder} classifies tabs as UAX#9 S:
+ * rule L2 then reverses cells AND tabs together, so the logical tab between
+ * cells k−1 and k sits visually between the mirrored cells k and k−1 — its
+ * reading-frame gap IS its visual gap. (This is why results map back by logical
+ * index; resolving stops against the visual sequence would reverse the tab→stop
+ * assignment and paint the leader in the wrong cell gap — the #830 follow-up
+ * bug where the TOC leader appeared between the title and the chapter number
+ * instead of between the page number and the title.)
  *
  * @param items line segments in LOGICAL order (as `line.segments`).
- * @param customStopsPx custom tab stops in leading-edge px (`pos * scale`).
- * @param availWidthPx the line's available content width in px.
+ * @param customStopsPx custom tab stops in margin px (`pos * scale`).
+ * @param startPenPx reading-frame pen at the line's content start = the leading
+ *   (logical-left ⇒ physical-right) indent, plus any first-line indent.
+ * @param leftLimitPx reading-frame position of the LEFT text margin (= the
+ *   margin-to-margin text width).
  * @param intervalPx automatic-stop interval = `defaultTabPt * scale`.
  * @returns one {@link BidiTabResult} per LOGICAL index (1:1 with `items`).
  */
 export function layoutBidiTabStops(
   items: BidiTabItem[],
   customStopsPx: { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] }[],
-  availWidthPx: number,
+  startPenPx: number,
+  leftLimitPx: number,
   intervalPx: number,
 ): BidiTabResult[] {
   const n = items.length;
@@ -1406,30 +1415,23 @@ export function layoutBidiTabStops(
     return w;
   };
 
-  // Reading-frame layout. `pen` = distance from the LEADING (right) edge; content
-  // and tabs push it further LEFT (increasing). `leftEdge[i]` / `rightEdge[i]` are
-  // each segment's edges in this frame (leftEdge = larger margin = further left).
-  const leftMargin = availWidthPx; // pen value at the physical LEFT text edge
-  let pen = 0;
-  const rightEdge = new Array(n).fill(0);
-  const leftEdge = new Array(n).fill(0);
+  // Reading-frame walk. `pen` = distance from the right TEXT MARGIN; content and
+  // tabs push it further LEFT (increasing).
+  let pen = startPenPx;
   for (let i = 0; i < n; i++) {
     const it = items[i];
     if (!it.isTab) {
-      rightEdge[i] = pen;
       pen += width[i];
-      leftEdge[i] = pen;
       continue;
     }
     const stop = nextTabStopRtl(pen, customStopsPx, intervalPx);
     if (!stop) {
       // No stop further left: the tab collapses (following content continues).
-      rightEdge[i] = pen;
-      leftEdge[i] = pen;
+      width[i] = 0;
       continue;
     }
-    // Where the tab's OWN leading (right) edge sits: at the pen. Its trailing
-    // (left) edge is the stop-aligned target, giving the gap it fills.
+    // The tab's leading (right) edge sits at the pen; its trailing (left) edge
+    // is the stop-aligned target, giving the gap it fills.
     const fw = followW(i + 1);
     let target: number; // pen value after the tab (its trailing/left edge)
     if (stop.alignment === 'right') {
@@ -1443,27 +1445,18 @@ export function layoutBidiTabStops(
       // edge on the stop.
       target = stop.pos;
     }
-    // Pin content that would fall past the left margin onto the margin: the
+    // Pin content that would fall past the left text margin onto the margin: the
     // following cell spans [target, target + fw] in reading-frame margins, so its
-    // far (left) edge must stay ≤ leftMargin (Word never pushes it off the page).
-    if (target + fw > leftMargin) target = leftMargin - fw;
+    // far (left) edge must stay ≤ leftLimitPx.
+    if (target + fw > leftLimitPx) target = leftLimitPx - fw;
     // Never let a tab move the pen backwards (right).
     if (target < pen) target = pen;
-    rightEdge[i] = pen;
     width[i] = target - pen;
-    leftEdge[i] = target;
     leader[i] = stop.leader;
     pen = target;
   }
 
-  // Convert reading-frame margins to visual (L→R from the left text edge) x:
-  // visualX = availWidthPx − leftEdge (the segment's LEFT visual edge is the
-  // FURTHEST-left reading-frame edge = its largest margin value).
-  return items.map((_, i) => ({
-    width: width[i],
-    leader: leader[i],
-    visualX: availWidthPx - leftEdge[i],
-  }));
+  return items.map((_, i) => ({ width: width[i], leader: leader[i] }));
 }
 
 /** Value equivalence of two resolved kinsoku rule sets, with a reference fast
@@ -1987,21 +1980,37 @@ export function layoutLines(
   const applyBidiTabs = (): void => {
     if (!baseRtl) return;
     if (!currentLine.some((s) => 'isTab' in s)) return;
-    const order = computeLineVisualOrder(currentLine, true).order;
-    const items: BidiTabItem[] = order.map((li) => {
-      const s = currentLine[li];
-      return { isTab: 'isTab' in s, width: s.measuredWidth };
-    });
-    const availW = lineMaxWidth - (isFirst ? firstIndent : 0);
-    const res = layoutBidiTabStops(items, bidiCustomStopsPx, availW, bidiIntervalPx);
-    // Map visual results back to the logical segments (order[vi] = logical idx).
+    // LOGICAL order — the reading-frame walk resolves the Nth tab against the
+    // Nth-reachable stop, exactly like Word's pen. Do NOT feed the VISUAL
+    // sequence here: UAX#9 L2 reverses cells AND tabs together, so a
+    // visual-order walk assigns the stops in reverse and paints the leader in
+    // the wrong cell gap (the #830 follow-up bug — the TOC underscore leader
+    // appeared between the title and the chapter number instead of between the
+    // page number and the title). Because the reversal is symmetric, each
+    // logical tab's reading-frame gap IS its visual gap, so widths mapped back
+    // by logical index tile correctly under the draw loop's visual walk.
+    const items: BidiTabItem[] = currentLine.map((s) => ({
+      isTab: 'isTab' in s,
+      width: s.measuredWidth,
+    }));
+    // Margin-anchored frame (§17.3.1.37 — stops measure from the TEXT MARGIN):
+    // pen 0 = right text margin. Content starts after the leading indent — the
+    // line window's RIGHT edge is paraX-relative `lineXOffset + lineMaxWidth`
+    // (= maxWidth when no float narrows it), so its margin distance is
+    // marginRightPx minus that — plus the first line's first-line indent
+    // (which narrows the leading edge under an RTL base, mirroring the draw
+    // loop's `effAvailW`). The left text margin sits tabOriginPx past the
+    // paragraph box (its trailing indent).
+    const startPen = marginRightPx - (lineXOffset + lineMaxWidth) + (isFirst ? firstIndent : 0);
+    const leftLimit = marginRightPx + tabOriginPx;
+    const res = layoutBidiTabStops(items, bidiCustomStopsPx, startPen, leftLimit, bidiIntervalPx);
     let delta = 0;
-    for (let vi = 0; vi < order.length; vi++) {
-      const s = currentLine[order[vi]];
+    for (let i = 0; i < currentLine.length; i++) {
+      const s = currentLine[i];
       if (!('isTab' in s)) continue;
-      delta += res[vi].width - s.measuredWidth;
-      s.measuredWidth = res[vi].width;
-      (s as LayoutTabSeg).leader = res[vi].leader;
+      delta += res[i].width - s.measuredWidth;
+      s.measuredWidth = res[i].width;
+      (s as LayoutTabSeg).leader = res[i].leader;
     }
     currentWidth += delta;
   };
