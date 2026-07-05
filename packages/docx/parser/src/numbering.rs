@@ -458,20 +458,65 @@ impl NumberingMap {
     }
 }
 
+// ── ST_NumberFormat rendering (ECMA-376 §17.18.59) ──────────────────────────
+// This is the RUST twin of `packages/core/src/text/number-format.ts`
+// (`formatOrdinalNumber`). List markers resolve to a final string at PARSE time
+// (`resolve_text` composes `%1.%2` here in Rust), so the same numbering systems
+// must be implemented on both sides and produce BYTE-IDENTICAL output. When you
+// touch a format here, mirror it there (and vice versa); the TS unit tests are
+// the reference values. `bullet` is a list-only concern (no §17.18.59 numeric
+// meaning) and stays Rust-only.
 fn format_counter(n: u32, format: &str) -> String {
+    if format == "bullet" {
+        return "•".to_string();
+    }
+    // The numeric systems are 1-based; a level with start=0 (rare) or an
+    // underflow falls back to the decimal string, matching the TS `n >= 1` gate.
+    if n == 0 {
+        return n.to_string();
+    }
     match format {
-        "decimal" => n.to_string(),
-        "bullet" => "•".to_string(),
-        "lowerLetter" => {
-            let c = (b'a' + ((n - 1) % 26) as u8) as char;
-            c.to_string()
-        }
-        "upperLetter" => {
-            let c = (b'A' + ((n - 1) % 26) as u8) as char;
-            c.to_string()
-        }
+        "decimal" | "decimalHalfWidth" => n.to_string(),
+        // Roman.
         "lowerRoman" => to_roman(n).to_lowercase(),
         "upperRoman" => to_roman(n),
+        // Latin + non-Latin repeat-letter alphabets (§17.18.59).
+        "lowerLetter" => repeat_alphabet(n, &latin_upper()).to_lowercase(),
+        "upperLetter" => repeat_alphabet(n, &latin_upper()),
+        "arabicAlpha" => repeat_alphabet(n, ARABIC_ALPHA),
+        "arabicAbjad" => repeat_alphabet(n, ARABIC_ABJAD),
+        "hebrew2" => repeat_alphabet(n, HEBREW_ALPHABET),
+        "russianLower" => repeat_alphabet(n, RUSSIAN_LOWER),
+        "russianUpper" => repeat_alphabet(n, RUSSIAN_UPPER),
+        "thaiLetters" => repeat_alphabet(n, THAI_LETTERS),
+        "chosung" => repeat_alphabet(n, KOREAN_CHOSUNG),
+        "ganada" => repeat_alphabet(n, KOREAN_GANADA),
+        "hindiVowels" => repeat_alphabet(n, HINDI_VOWELS),
+        "hindiConsonants" => repeat_alphabet(n, HINDI_CONSONANTS),
+        // Positional Hebrew gematria.
+        "hebrew1" => to_hebrew_gematria(n),
+        // Positional digit substitution.
+        "decimalFullWidth" => to_positional_digits(n, DIGITS_FULLWIDTH),
+        "thaiNumbers" => to_positional_digits(n, DIGITS_THAI),
+        "hindiNumbers" => to_positional_digits(n, DIGITS_HINDI),
+        "ideographDigital" | "japaneseDigitalTenThousand" => {
+            to_positional_digits(n, DIGITS_IDEOGRAPH)
+        }
+        "koreanDigital" => to_positional_digits(n, DIGITS_KOREAN),
+        "koreanDigital2" => to_positional_digits(n, DIGITS_KOREAN2),
+        "taiwaneseDigital" => to_positional_digits(n, DIGITS_TAIWANESE),
+        // 十-prefix positional.
+        "chineseCounting" => to_chinese_counting(n, DIGITS_IDEOGRAPH),
+        "taiwaneseCounting" => to_chinese_counting(n, DIGITS_TAIWANESE),
+        // Grouped counting / legal CJK.
+        "japaneseCounting" => to_myriad_grouped(n, &MYRIAD_JAPANESE),
+        "chineseCountingThousand" => to_myriad_grouped(n, &MYRIAD_CHINESE),
+        "taiwaneseCountingThousand" => to_myriad_grouped(n, &MYRIAD_CHINESE),
+        "chineseLegalSimplified" => to_myriad_grouped(n, &MYRIAD_CHINESE_LEGAL),
+        "ideographLegalTraditional" => to_myriad_grouped(n, &MYRIAD_TRAD_LEGAL),
+        "japaneseLegal" => to_myriad_grouped(n, &MYRIAD_JAPANESE_LEGAL),
+        "koreanCounting" => to_myriad_grouped(n, &MYRIAD_KOREAN),
+        // Documented residual (language spell-outs / unimplemented) → decimal.
         _ => n.to_string(),
     }
 }
@@ -501,6 +546,282 @@ fn to_roman(n: u32) -> String {
         }
     }
     s
+}
+
+// A–Z, built for the Latin letter converters (repeat scheme, not base-26).
+fn latin_upper() -> Vec<&'static str> {
+    const A: [&str; 26] = [
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+        "S", "T", "U", "V", "W", "X", "Y", "Z",
+    ];
+    A.to_vec()
+}
+
+// §17.18.59 arabicAlpha "Arabic Alphabet" — positions 1–28.
+const ARABIC_ALPHA: &[&str] = &[
+    "أ", "ب", "ت", "ث", "ج", "ح", "خ", "د", "ذ", "ر", "ز", "س", "ش", "ص", "ض", "ط", "ظ", "ع", "غ",
+    "ف", "ق", "ك", "ل", "م", "ن", "ه", "و", "ي",
+];
+// §17.18.59 arabicAbjad "Arabic Abjad Numerals" — positions 1–28.
+const ARABIC_ABJAD: &[&str] = &[
+    "أ", "ب", "ج", "د", "ه", "و", "ز", "ح", "ط", "ي", "ك", "ل", "م", "ن", "س", "ع", "ف", "ص", "ق",
+    "ر", "ش", "ت", "ث", "خ", "ذ", "ض", "غ", "ظ",
+];
+// §17.18.59 hebrew2 "Hebrew Alphabet" — positions 1–22.
+const HEBREW_ALPHABET: &[&str] = &[
+    "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ", "ק",
+    "ר", "ש", "ת",
+];
+// §17.18.59 russianLower/Upper — positions 1–29 (alphabet minus ё, й, ъ, ь).
+const RUSSIAN_LOWER: &[&str] = &[
+    "а", "б", "в", "г", "д", "е", "ж", "з", "и", "к", "л", "м", "н", "о", "п", "р", "с", "т", "у",
+    "ф", "х", "ц", "ч", "ш", "щ", "ы", "э", "ю", "я",
+];
+const RUSSIAN_UPPER: &[&str] = &[
+    "А", "Б", "В", "Г", "Д", "Е", "Ж", "З", "И", "К", "Л", "М", "Н", "О", "П", "Р", "С", "Т", "У",
+    "Ф", "Х", "Ц", "Ч", "Ш", "Щ", "Ы", "Э", "Ю", "Я",
+];
+// §17.18.59 thaiLetters — positions 1–41 (U+0E01, U+0E02, U+0E04, U+0E07–U+0E23,
+// U+0E25, U+0E27–U+0E2E).
+const THAI_LETTERS: &[&str] = &[
+    "ก", "ข", "ค", "ง", "จ", "ฉ", "ช", "ซ", "ฌ", "ญ", "ฎ", "ฏ", "ฐ", "ฑ", "ฒ", "ณ", "ด", "ต", "ถ",
+    "ท", "ธ", "น", "บ", "ป", "ผ", "ฝ", "พ", "ฟ", "ภ", "ม", "ย", "ร", "ล", "ว", "ศ", "ษ", "ส", "ห",
+    "ฬ", "อ", "ฮ",
+];
+// §17.18.59 chosung "Korean Chosung" — positions 1–14.
+const KOREAN_CHOSUNG: &[&str] = &[
+    "ㄱ", "ㄴ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅅ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ",
+];
+// §17.18.59 ganada "Korean Ganada" — positions 1–14.
+const KOREAN_GANADA: &[&str] = &[
+    "가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타", "파", "하",
+];
+// §17.18.59 hindiVowels — positions 1–37 = U+0915–U+0939 (contiguous).
+const HINDI_VOWELS: &[&str] = &[
+    "क", "ख", "ग", "घ", "ङ", "च", "छ", "ज", "झ", "ञ", "ट", "ठ", "ड", "ढ", "ण", "त", "थ", "द", "ध",
+    "न", "ऩ", "प", "फ", "ब", "भ", "म", "य", "र", "ऱ", "ल", "ळ", "ऴ", "व", "श", "ष", "स", "ह",
+];
+// §17.18.59 hindiConsonants — positions 1–18 = U+0905–U+0914 then अं / अः.
+const HINDI_CONSONANTS: &[&str] = &[
+    "अ", "आ", "इ", "ई", "उ", "ऊ", "ऋ", "ऌ", "ऍ", "ऎ", "ए", "ऐ", "ऑ", "ऒ", "ओ", "औ", "अं", "अः",
+];
+
+/// §17.18.59 repeat-letter alphabets: map 1..N into the set; for n>N repeat the
+/// SAME glyph once per full N subtracted (not base-N). Mirrors the TS
+/// `repeatAlphabet`.
+fn repeat_alphabet(n: u32, glyphs: &[&str]) -> String {
+    let size = glyphs.len() as u32;
+    let repeats = (n - 1) / size + 1;
+    let glyph = glyphs[((n - 1) % size) as usize];
+    glyph.repeat(repeats as usize)
+}
+
+// Positional digit sets, index 0 = zero glyph … index 9 (§17.18.59).
+const DIGITS_FULLWIDTH: &[&str] = &["０", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
+const DIGITS_THAI: &[&str] = &["๐", "๑", "๒", "๓", "๔", "๕", "๖", "๗", "๘", "๙"];
+const DIGITS_HINDI: &[&str] = &["०", "१", "२", "३", "४", "५", "६", "७", "८", "९"];
+const DIGITS_IDEOGRAPH: &[&str] = &["〇", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+const DIGITS_KOREAN: &[&str] = &["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
+const DIGITS_KOREAN2: &[&str] = &["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+const DIGITS_TAIWANESE: &[&str] = &["○", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
+/// §17.18.59 base-10 positional digit substitution. Mirrors TS `toPositionalDigits`.
+fn to_positional_digits(n: u32, digits: &[&str]) -> String {
+    n.to_string()
+        .bytes()
+        .map(|b| digits[(b - b'0') as usize])
+        .collect()
+}
+
+/// §17.18.59 chineseCounting / taiwaneseCounting: base-10 positional with the 十
+/// tens-word for 2-digit values only (10 → 十, 20 → 二十, 99 → 九十九), pure
+/// positional at ≥ 100 (100 → 一〇〇). Mirrors TS `toChineseCounting`.
+fn to_chinese_counting(n: u32, digits: &[&str]) -> String {
+    if n < 10 {
+        return digits[n as usize].to_string();
+    }
+    if n < 100 {
+        let tens = n / 10;
+        let ones = n % 10;
+        let head = if tens == 1 {
+            "十".to_string()
+        } else {
+            format!("{}十", digits[tens as usize])
+        };
+        return if ones == 0 {
+            head
+        } else {
+            format!("{}{}", head, digits[ones as usize])
+        };
+    }
+    to_positional_digits(n, digits)
+}
+
+// ── Grouped CJK counting / legal (myriad grouping) ──────────────────────────
+// Mirrors the TS `MyriadTable` + `toMyriadGrouped`.
+struct MyriadTable {
+    digits: &'static [&'static str], // index 0 = 零/〇 zero-fill glyph … 9
+    ten: &'static str,
+    hundred: &'static str,
+    thousand: &'static str,
+    myriad: &'static str,
+    elide_one: bool,   // Japanese/Korean elide the "1" before 十/百/千.
+    insert_zero: bool, // Chinese counting/legal fill an interior gap with 零.
+}
+
+const CJK_DIGITS: &[&str] = DIGITS_KOREAN2; // 零 一 二 … 九
+const MYRIAD_JAPANESE: MyriadTable = MyriadTable {
+    digits: CJK_DIGITS,
+    ten: "十",
+    hundred: "百",
+    thousand: "千",
+    myriad: "万",
+    elide_one: true,
+    insert_zero: false,
+};
+const MYRIAD_CHINESE: MyriadTable = MyriadTable {
+    elide_one: false,
+    insert_zero: true,
+    ..MYRIAD_JAPANESE
+};
+const MYRIAD_KOREAN: MyriadTable = MyriadTable {
+    digits: &["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"],
+    ten: "십",
+    hundred: "백",
+    thousand: "천",
+    myriad: "만",
+    elide_one: true,
+    insert_zero: false,
+};
+const MYRIAD_CHINESE_LEGAL: MyriadTable = MyriadTable {
+    digits: &["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"],
+    ten: "拾",
+    hundred: "佰",
+    thousand: "仟",
+    myriad: "万",
+    elide_one: false,
+    insert_zero: true,
+};
+const MYRIAD_JAPANESE_LEGAL: MyriadTable = MyriadTable {
+    digits: &["零", "壱", "弐", "参", "四", "伍", "六", "七", "八", "九"],
+    ten: "拾",
+    hundred: "百",
+    thousand: "阡",
+    myriad: "萬",
+    elide_one: false,
+    insert_zero: false,
+};
+const MYRIAD_TRAD_LEGAL: MyriadTable = MyriadTable {
+    digits: &["零", "壹", "貳", "參", "肆", "伍", "陸", "柒", "捌", "玖"],
+    ten: "拾",
+    hundred: "佰",
+    thousand: "仟",
+    myriad: "萬",
+    elide_one: false,
+    insert_zero: false,
+};
+
+/// Render one 4-digit myriad group (0–9999). Mirrors TS `renderMyriadGroup`.
+fn render_myriad_group(group: u32, t: &MyriadTable) -> String {
+    let thousands = group / 1000 % 10;
+    let hundreds = group / 100 % 10;
+    let tens = group / 10 % 10;
+    let ones = group % 10;
+    let places = [
+        (thousands, t.thousand),
+        (hundreds, t.hundred),
+        (tens, t.ten),
+        (ones, ""),
+    ];
+    let mut out = String::new();
+    let mut saw_non_zero = false;
+    let mut pending_zero = false;
+    for (digit, unit) in places {
+        if digit == 0 {
+            if saw_non_zero {
+                pending_zero = true;
+            }
+            continue;
+        }
+        if pending_zero {
+            if t.insert_zero {
+                out.push_str(t.digits[0]);
+            }
+            pending_zero = false;
+        }
+        if t.elide_one && digit == 1 && !unit.is_empty() {
+            out.push_str(unit);
+        } else {
+            out.push_str(t.digits[digit as usize]);
+            out.push_str(unit);
+        }
+        saw_non_zero = true;
+    }
+    out
+}
+
+/// East-Asian myriad-grouped counting/legal formatter. Mirrors TS
+/// `toMyriadGrouped` (values ≥ 10^8 recurse through 億).
+fn to_myriad_grouped(n: u32, t: &MyriadTable) -> String {
+    if n >= 100_000_000 {
+        let upper = n / 100_000_000;
+        let lower = n % 100_000_000;
+        let head = format!("{}億", to_myriad_grouped(upper, t));
+        if lower == 0 {
+            return head;
+        }
+        let gap = if t.insert_zero && lower < 10_000_000 {
+            t.digits[0]
+        } else {
+            ""
+        };
+        return format!("{}{}{}", head, gap, to_myriad_grouped(lower, t));
+    }
+    let upper_group = n / 10000;
+    let lower_group = n % 10000;
+    let mut out = String::new();
+    if upper_group > 0 {
+        out.push_str(&render_myriad_group(upper_group, t));
+        out.push_str(t.myriad);
+    }
+    if lower_group > 0 {
+        if t.insert_zero && upper_group > 0 && lower_group < 1000 {
+            out.push_str(t.digits[0]);
+        }
+        out.push_str(&render_myriad_group(lower_group, t));
+    }
+    out
+}
+
+// §17.18.59 hebrew1 gematria. Mirrors TS `toHebrewGematria`.
+const HEBREW_ONES: &[&str] = &["", "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט"];
+const HEBREW_TENS: &[&str] = &["", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"];
+const HEBREW_HUNDREDS: &[&str] = &["", "ק", "ר", "ש", "ת", "ך", "ם", "ן", "ף", "ץ"];
+
+fn to_hebrew_gematria(n: u32) -> String {
+    let mut out = String::new();
+    let mut rem = n;
+    let thousands = rem / 1000;
+    rem %= 1000;
+    let hundreds = rem / 100;
+    rem %= 100;
+    if thousands > 0 {
+        out.push_str(HEBREW_ONES[(thousands % 10) as usize]);
+    }
+    out.push_str(HEBREW_HUNDREDS[hundreds as usize]);
+    if rem == 15 {
+        out.push_str("טו");
+        return out;
+    }
+    if rem == 16 {
+        out.push_str("טז");
+        return out;
+    }
+    let tens = rem / 10;
+    let ones = rem % 10;
+    out.push_str(HEBREW_TENS[tens as usize]);
+    out.push_str(HEBREW_ONES[ones as usize]);
+    out
 }
 
 #[cfg(test)]
@@ -786,5 +1107,146 @@ mod tests {
         // abstractNumId 4's counter (which would yield 2).
         let b = m.advance(4, 0);
         assert_eq!(m.resolve_text(4, 0, b), "1.");
+    }
+
+    /// ECMA-376 §17.18.59 — the Rust `format_counter` MUST match the core TS
+    /// `formatOrdinalNumber` byte-for-byte (list markers resolve here at parse
+    /// time). These expected values are the SAME rows as
+    /// packages/core/src/text/number-format.test.ts — keep the two in sync.
+    #[test]
+    fn format_counter_international_matches_core_ts() {
+        let cases: &[(&str, &[(u32, &str)])] = &[
+            // Latin repeat-letter (beyond 26 now repeats — previously Rust only
+            // handled 1–26, a bug this parity pass fixes).
+            (
+                "upperLetter",
+                &[(1, "A"), (26, "Z"), (27, "AA"), (54, "BBB")],
+            ),
+            (
+                "lowerLetter",
+                &[(1, "a"), (26, "z"), (27, "aa"), (53, "aaa")],
+            ),
+            (
+                "upperRoman",
+                &[(4, "IV"), (123, "CXXIII"), (3999, "MMMCMXCIX")],
+            ),
+            ("lowerRoman", &[(1, "i"), (123, "cxxiii")]),
+            // Positional digit substitution.
+            ("decimalFullWidth", &[(1, "１"), (123, "１２３")]),
+            ("thaiNumbers", &[(1, "๑"), (123, "๑๒๓")]),
+            ("hindiNumbers", &[(1, "१"), (123, "१२३")]),
+            (
+                "ideographDigital",
+                &[(10, "一〇"), (100, "一〇〇"), (2024, "二〇二四")],
+            ),
+            ("koreanDigital", &[(10, "일영"), (100, "일영영")]),
+            // 十-prefix positional.
+            (
+                "chineseCounting",
+                &[
+                    (10, "十"),
+                    (20, "二十"),
+                    (99, "九十九"),
+                    (100, "一〇〇"),
+                    (101, "一〇一"),
+                ],
+            ),
+            // Grouped counting / legal.
+            (
+                "japaneseCounting",
+                &[
+                    (10, "十"),
+                    (11, "十一"),
+                    (100, "百"),
+                    (111, "百十一"),
+                    (2024, "二千二十四"),
+                    (10005, "一万五"),
+                    (12345, "一万二千三百四十五"),
+                ],
+            ),
+            (
+                "chineseCountingThousand",
+                &[
+                    (10, "一十"),
+                    (100, "一百"),
+                    (1001, "一千零一"),
+                    (2024, "二千零二十四"),
+                    (10005, "一万零五"),
+                ],
+            ),
+            (
+                "chineseLegalSimplified",
+                &[
+                    (1, "壹"),
+                    (10, "壹拾"),
+                    (123, "壹佰贰拾叁"),
+                    (1001, "壹仟零壹"),
+                ],
+            ),
+            (
+                "ideographLegalTraditional",
+                &[(10, "壹拾"), (123, "壹佰貳拾參")],
+            ),
+            (
+                "japaneseLegal",
+                &[(10, "壱拾"), (2024, "弐阡弐拾四"), (10000, "壱萬")],
+            ),
+            (
+                "koreanCounting",
+                &[(10, "십"), (11, "십일"), (2024, "이천이십사")],
+            ),
+            // Repeat-letter non-Latin alphabets.
+            ("arabicAlpha", &[(1, "أ"), (12, "س"), (28, "ي"), (29, "أأ")]),
+            ("arabicAbjad", &[(1, "أ"), (12, "ل"), (28, "ظ"), (29, "أأ")]),
+            ("hebrew2", &[(1, "א"), (22, "ת"), (23, "אא"), (24, "בב")]),
+            ("russianLower", &[(1, "а"), (29, "я"), (30, "аа")]),
+            ("thaiLetters", &[(1, "ก"), (41, "ฮ"), (42, "กก")]),
+            ("chosung", &[(1, "ㄱ"), (14, "ㅎ"), (15, "ㄱㄱ")]),
+            ("ganada", &[(1, "가"), (14, "하"), (15, "가가")]),
+            ("hindiVowels", &[(1, "क"), (37, "ह"), (38, "कक")]),
+            (
+                "hindiConsonants",
+                &[(1, "अ"), (16, "औ"), (17, "अं"), (18, "अः")],
+            ),
+            // Positional Hebrew gematria.
+            (
+                "hebrew1",
+                &[
+                    (1, "א"),
+                    (15, "טו"),
+                    (16, "טז"),
+                    (17, "יז"),
+                    (123, "קכג"),
+                    (500, "ך"),
+                ],
+            ),
+            // Documented residual / spell-outs fall back to decimal.
+            ("cardinalText", &[(5, "5")]),
+            ("thaiCounting", &[(5, "5")]),
+            ("none", &[(5, "5")]),
+        ];
+        for (fmt, rows) in cases {
+            for (input, expected) in *rows {
+                assert_eq!(
+                    format_counter(*input, fmt),
+                    *expected,
+                    "format_counter({input}, {fmt:?})"
+                );
+            }
+        }
+    }
+
+    /// A numbered list whose level uses an international `<w:numFmt>` resolves the
+    /// marker through `format_counter` — the end-to-end list path (§17.9.17).
+    #[test]
+    fn list_marker_uses_international_numfmt() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="9">
+                 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="ideographDigital"/><w:lvlText w:val="%1."/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="9"><w:abstractNumId w:val="9"/></w:num>"#);
+        let a = m.advance(9, 0);
+        assert_eq!(m.resolve_text(9, 0, a), "一."); // 1 → 一
+        let b = m.advance(9, 0);
+        assert_eq!(m.resolve_text(9, 0, b), "二."); // 2 → 二
     }
 }
