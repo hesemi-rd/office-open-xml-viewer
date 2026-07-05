@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isUprightVerticalGlyph,
+  verticalDrawMode,
   verticalGlyphOffset,
   splitVerticalOrientationRuns,
   drawVerticalRun,
@@ -11,58 +12,87 @@ import {
 
 // ECMA-376 §17.6.20 vertical writing (tbRl). These are the pure classification
 // + geometry primitives the renderer wires into the glyph/image draw path behind
-// the `verticalCJK` flag.
+// the `verticalCJK` flag. Orientation is decided by the Unicode UAX#50
+// Vertical_Orientation property (core `verticalOrientation`).
 
-describe('isUprightVerticalGlyph (§17.6.20 — CJK stands upright, Latin rotates)', () => {
+describe('verticalDrawMode (UAX#50 vo → draw mode)', () => {
   const cp = (ch: string): number => ch.codePointAt(0) ?? 0;
 
-  it('classifies CJK ideographs / kana / CJK punctuation as upright', () => {
-    for (const ch of ['富', '士', 'あ', 'ア', 'ー', '、', '。', '「', '」', '（', '）']) {
-      expect(isUprightVerticalGlyph(cp(ch))).toBe(true);
+  it('U/Tu → upright (ideographs, kana, 、。！？, small kana)', () => {
+    for (const ch of ['富', '士', 'あ', 'ア', '、', '。', '！', '？', 'ぁ', 'ッ']) {
+      expect(verticalDrawMode(cp(ch))).toBe('upright');
     }
   });
 
-  it('classifies Latin letters and Western digits as NOT upright (they rotate)', () => {
+  it('Tr → rotate (long vowel mark ー, corner brackets, parens, quotes)', () => {
+    for (const ch of ['ー', '「', '」', '（', '）', '〈', '〉', '“', '”']) {
+      expect(verticalDrawMode(cp(ch))).toBe('rotate');
+    }
+  });
+
+  it('R → sideways (Latin, digits, ASCII punctuation)', () => {
     for (const ch of ['A', 'z', '0', '5', '9', '@', '-', '.']) {
-      expect(isUprightVerticalGlyph(cp(ch))).toBe(false);
+      expect(verticalDrawMode(cp(ch))).toBe('sideways');
     }
   });
 });
 
-describe('verticalGlyphOffset (§ JIS X 4051 — small comma/period sit upper-right)', () => {
+describe('isUprightVerticalGlyph (UAX#50 vo ∈ {U, Tu})', () => {
   const cp = (ch: string): number => ch.codePointAt(0) ?? 0;
 
-  it('nudges the ideographic comma/full stop toward the upper-right corner', () => {
-    for (const ch of ['、', '。', '，', '．']) {
-      const off = verticalGlyphOffset(cp(ch));
-      expect(off.dx).toBeGreaterThan(0); // rightward
-      expect(off.dy).toBeLessThan(0); // upward
-    }
+  it('is true for U/Tu (ideographs, kana, 、。) and false for Tr/R', () => {
+    for (const ch of ['富', 'あ', '、', '。']) expect(isUprightVerticalGlyph(cp(ch))).toBe(true);
+    // ー「」（） are Tr (rotate), Latin/digits are R — not upright.
+    for (const ch of ['ー', '「', '）', 'A', '5']) expect(isUprightVerticalGlyph(cp(ch))).toBe(false);
+  });
+});
+
+describe('verticalGlyphOffset (upper-right nudge — fallback when no vertical form)', () => {
+  const cp = (ch: string): number => ch.codePointAt(0) ?? 0;
+
+  it('nudges ． (FF0E, no U+FExx vertical form) toward the upper-right corner', () => {
+    const off = verticalGlyphOffset(cp('．'));
+    expect(off.dx).toBeGreaterThan(0); // rightward
+    expect(off.dy).toBeLessThan(0); // upward
   });
 
-  it('leaves other glyphs centred in their cell', () => {
-    for (const ch of ['富', 'A', 'ー']) {
+  it('returns {0,0} for glyphs that get a substituted vertical form (、。，) or need no shift', () => {
+    // These have vertical presentation forms → substituted, not nudged.
+    for (const ch of ['、', '。', '，', '富', 'A', 'ー']) {
       expect(verticalGlyphOffset(cp(ch))).toEqual({ dx: 0, dy: 0 });
     }
   });
 });
 
-describe('splitVerticalOrientationRuns (§17.6.20 — group by upright vs sideways)', () => {
-  it('splits a mixed run into maximal same-orientation pieces in logical order', () => {
+describe('splitVerticalOrientationRuns (§17.6.20 — group by draw mode)', () => {
+  it('splits a mixed run into maximal same-mode pieces in logical order', () => {
     const pieces = splitVerticalOrientationRuns('第5回大会');
     expect(pieces).toEqual([
-      { text: '第', upright: true },
-      { text: '5', upright: false },
-      { text: '回大会', upright: true },
+      { text: '第', mode: 'upright' },
+      { text: '5', mode: 'sideways' },
+      { text: '回大会', mode: 'upright' },
+    ]);
+  });
+
+  it('separates a Tr bracket/長音符 into its own rotate piece', () => {
+    // チーム(土): チ=upright, ー=rotate(Tr), ム=upright, (=rotate(Tr), 土=upright, )=rotate(Tr)
+    const pieces = splitVerticalOrientationRuns('チーム（土）');
+    expect(pieces).toEqual([
+      { text: 'チ', mode: 'upright' },
+      { text: 'ー', mode: 'rotate' },
+      { text: 'ム', mode: 'upright' },
+      { text: '（', mode: 'rotate' },
+      { text: '土', mode: 'upright' },
+      { text: '）', mode: 'rotate' },
     ]);
   });
 
   it('keeps a pure-CJK run as one upright piece', () => {
-    expect(splitVerticalOrientationRuns('富士町')).toEqual([{ text: '富士町', upright: true }]);
+    expect(splitVerticalOrientationRuns('富士町')).toEqual([{ text: '富士町', mode: 'upright' }]);
   });
 
   it('keeps a pure-Latin run as one sideways piece', () => {
-    expect(splitVerticalOrientationRuns('2026')).toEqual([{ text: '2026', upright: false }]);
+    expect(splitVerticalOrientationRuns('2026')).toEqual([{ text: '2026', mode: 'sideways' }]);
   });
 
   it('returns nothing for empty text', () => {
@@ -145,6 +175,29 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     drawVerticalRun(ctx, 'AB', 0, 0, 12, 4); // adv = 10 + 4 = 14 per glyph
     const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
     expect(fills.map((f) => f.x)).toEqual([0, 14]);
+  });
+
+  it('rotates a Tr glyph (ー, （, ）) with the page — centred on the column, NOT counter-rotated', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRun(ctx, 'ー', 100, 200, 12, 0);
+    // Tr uses the page rotation (no −90° counter-rotation) and centres on the
+    // column: fill at the cell centre (105, 200) with center/middle alignment.
+    expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', x: 105, y: 200, align: 'center', baseline: 'middle' });
+  });
+
+  it('substitutes a Tu comma/period with its vertical presentation form (、→︑, 。→︒)', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRun(ctx, '、。', 0, 0, 12, 0);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    // Drawn glyphs are the vertical forms U+FE11 / U+FE12; both counter-rotated.
+    expect(fills.map((f) => f.text)).toEqual(['︑', '︒']);
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(2);
+    // Substituted forms are pre-positioned by the font → drawn at the cell centre
+    // with no upper-right nudge (local x offset 0).
+    expect(fills.every((f) => f.x === 0)).toBe(true);
   });
 });
 

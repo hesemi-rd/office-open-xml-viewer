@@ -6,64 +6,95 @@
 // After the page transform, a normal `ctx.fillText(text, x, baseline)` paints
 // the run flowing DOWNWARD in physical space (logical +x → physical +y), which
 // is exactly the character progression a vertical line wants — but every glyph
-// is lying on its right side (rotated +90° CW with the page). For vertical
-// Japanese:
-//   • CJK ideographs, kana and CJK punctuation must stand UPRIGHT. We draw each
-//     such glyph with a local −90° counter-rotation about its own centre, which
-//     cancels the page rotation so it appears upright while still advancing down
-//     the line.
-//   • Latin letters and Western digits stay SIDEWAYS (rotated with the page):
-//     that is the conventional "縦中横 not applied" appearance for runs of Latin
-//     text set in vertical Japanese, so they need no counter-rotation and are
-//     drawn as an ordinary contextual `fillText` (which also preserves the
-//     browser's shaping/advance for the run).
+// is lying on its right side (rotated +90° CW with the page). The per-glyph
+// orientation is decided by the Unicode UAX#50 Vertical_Orientation (vo)
+// property (core `verticalOrientation`), NOT by an ad-hoc CJK-vs-Latin guess:
+//   • vo=U  (upright): CJK ideographs, kana, Hangul, fullwidth forms. Drawn with
+//     a local −90° counter-rotation about the glyph's own centre, cancelling the
+//     page rotation so it stands UPRIGHT while still advancing down the line.
+//   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. UAX#50
+//     substitutes a vertical presentation glyph; where Unicode supplies one
+//     (、。，！？ → U+FE10–FE12/FE15/FE16, core `verticalFormSubstitute`) we draw
+//     THAT code point upright, so the comma/full stop sit in the cell's
+//     upper-right as Word does; where none exists (．, small kana) we draw the
+//     original upright unchanged (． keeps a corner-nudge fallback).
+//   • vo=Tr (transform, fallback rotate): （「」〈〉“”：；〖〗 and the ー prolonged
+//     sound mark. UAX#50's fallback (no vertical glyph available to a Canvas —
+//     the font's `vert`/`vrt2` OpenType feature is not reachable via `fillText`)
+//     is to ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame is
+//     already that rotation; we draw the glyph CENTRED on the column axis (these
+//     are full-width cells) so the rotated bracket/長音符 sits mid-column.
+//     Substitute-first Tr (FE13/FE14/FE17/FE18, FE35+) is the #790/#771 follow-up.
+//   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
+//     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied"
+//     appearance — drawn as an ordinary contextual `fillText` at the alphabetic
+//     baseline, preserving the browser's shaping/advance for the run.
 //
 // This module owns ONLY the pure geometry + classification; the renderer wires
 // it into the whole-run glyph draw sites, the anchor/inline/float image draws,
 // and the text-selection overlay behind the `verticalCJK` flag, so the
 // horizontal path stays byte-identical.
 //
-// STAGE-1 SCOPE (issue #771 tracks stage-2). Implemented: +90° page rotation,
-// upright-CJK / sideways-Latin glyph draw, anchor images resolved against the
-// physical page then projected into the logical flow (PDF-verified centroid),
-// inline/anchored/float image uprighting, and the vertical text-layer transform.
-// NOT yet implemented (approximated or deferred): vertical-form punctuation
-// substitution (U+FE10–U+FE19) and the `0.12em`/`0.4em` glyph nudges are
-// font-dependent stage-1 heuristics (flagged inline); 縦中横 (tate-chū-yoko),
-// `btLr` flow, header/footer + tables in tbRl, and paragraph-relative vertical
-// anchors are follow-ups.
+// SCOPE (issue #771). Implemented: +90° page rotation; vo-driven upright(U) /
+// substituted-upright(Tu) / rotated(Tr) / sideways(R) glyph draw; anchor images
+// resolved against the physical page then projected into the logical flow
+// (PDF-verified centroid); inline/anchored/float image uprighting; and the
+// vertical text-layer transform. Still approximated / deferred (flagged inline):
+// the `0.12em` upright-centring nudge and the Tu upper-right corner nudge are
+// font-dependent stage-1 heuristics; 縦中横 (tate-chū-yoko), `btLr` flow,
+// header/footer + tables in tbRl, and paragraph-relative vertical anchors are
+// follow-ups.
 
-import { isCjkBreakChar } from '@silurus/ooxml-core';
+import { verticalOrientation, verticalFormSubstitute } from '@silurus/ooxml-core';
+
+/** How a code point is painted inside the +90°-rotated vertical page:
+ *   - `upright`  — counter-rotated −90° to stand up (vo=U, and vo=Tu).
+ *   - `rotate`   — left rotated with the page but CENTRED on the column axis,
+ *                  the UAX#50 Tr fallback for full-width brackets / 長音符.
+ *   - `sideways` — left rotated with the page at the alphabetic baseline (vo=R,
+ *                  Latin/digits). */
+export type VerticalDrawMode = 'upright' | 'rotate' | 'sideways';
 
 /**
- * True when `cp` renders UPRIGHT in vertical Japanese (UTR#50 Vertical_
- * Orientation ≈ "U"/"Tu"): CJK ideographs, kana, Hangul, and CJK/fullwidth
- * punctuation. Latin letters, Western digits and other rotate-in-vertical
- * ("R") code points return false so the renderer leaves them sideways.
+ * The draw mode for a code point in vertical text, from its UAX#50
+ * Vertical_Orientation (vo). Single source of truth: core `verticalOrientation`.
  *
- * Stage-1 scope (§ JIS X 4051): we reuse core's CJK block predicate
- * ({@link isCjkBreakChar}), which already covers the upright set — CJK
- * Symbols & Punctuation, Hiragana, Katakana, CJK Unified Ideographs (incl.
- * Ext-A), Hangul Syllables, CJK Compatibility Ideographs, and the Halfwidth/
- * Fullwidth Forms block — while excluding ASCII Latin/digits, which rotate.
+ *   U  → upright   (stand the glyph up)
+ *   Tu → upright   (draw upright; the caller substitutes a vertical form glyph
+ *                   via {@link verticalFormSubstitute} when one exists so the
+ *                   comma/full stop land in the upper-right of the cell)
+ *   Tr → rotate    (rotate 90° CW — the fallback when no vertical glyph is
+ *                   reachable on a Canvas — centred on the column)
+ *   R  → sideways  (leave rotated with the page: Latin/digits)
+ *
+ * @param cp A Unicode scalar value (e.g. from `String.prototype.codePointAt`).
+ */
+export function verticalDrawMode(cp: number): VerticalDrawMode {
+  const vo = verticalOrientation(cp);
+  if (vo === 'U' || vo === 'Tu') return 'upright';
+  if (vo === 'Tr') return 'rotate';
+  return 'sideways'; // vo === 'R'
+}
+
+/**
+ * True when `cp` stands UPRIGHT in vertical text (UAX#50 vo ∈ {U, Tu}). Kept for
+ * callers that only need the upright/not-upright split; new code should prefer
+ * {@link verticalDrawMode} which also distinguishes the Tr (rotate) case.
  *
  * @param cp A Unicode scalar value (e.g. from `String.prototype.codePointAt`).
  */
 export function isUprightVerticalGlyph(cp: number): boolean {
-  return isCjkBreakChar(cp);
+  return verticalDrawMode(cp) === 'upright';
 }
 
-/** A punctuation glyph that is DRAWN at a shifted position in vertical text
- *  (§ JIS X 4051): the small ideographic comma/period sit in the upper-right
- *  cell corner rather than the lower-left, and the corner brackets / parens are
- *  mirrored to their vertical forms. Stage-1 handles the most visible ones by a
- *  draw-time offset (see {@link verticalGlyphOffset}); full vertical-form glyph
- *  substitution (U+FE10–U+FE19) is a follow-up. */
+/** The Tu punctuation whose upper-right cell position is approximated by a
+ *  draw-time nudge WHEN the font has no U+FExx vertical form to substitute (see
+ *  {@link verticalGlyphOffset}). The comma/full stop that DO have a vertical form
+ *  ({@link verticalFormSubstitute}: 、。，！？) are substituted instead and the
+ *  font positions them, so they are NOT nudged. The fullwidth full stop ． (FF0E)
+ *  has no vertical form in Unicode, so it stays on the nudge fallback. */
 const VERTICAL_PUNCT_UPPER_RIGHT = new Set<number>([
-  0x3001, // 、 ideographic comma
-  0x3002, // 。 ideographic full stop
-  0xff0c, // ， fullwidth comma
-  0xff0e, // ． fullwidth full stop
+  0xff0e, // ． fullwidth full stop (no U+FExx vertical form → nudge fallback)
 ]);
 
 /**
@@ -72,58 +103,57 @@ const VERTICAL_PUNCT_UPPER_RIGHT = new Set<number>([
  * physical (dx = rightward, dy = downward) terms. Returns `{ dx, dy }` em
  * fractions; the caller multiplies by the font px size.
  *
- * The small ideographic comma / full stop occupy the upper-right of their cell
- * in vertical text (unlike horizontal, where they sit at the lower-left). We
- * approximate that by nudging them up and to the right within the cell. Every
- * other glyph returns `{0,0}` (centred in its cell).
+ * This is the FALLBACK for a Tu code point whose upper-right cell position would
+ * otherwise be supplied by a substituted vertical presentation form
+ * ({@link verticalFormSubstitute}) but for which Unicode has none (only ． FF0E
+ * today). The nudge moves the glyph toward the upper-right corner of the cell.
+ * Everything with a vertical form is substituted and returns `{0,0}` here.
  */
 export function verticalGlyphOffset(cp: number): { dx: number; dy: number } {
   if (VERTICAL_PUNCT_UPPER_RIGHT.has(cp)) {
-    // HEURISTIC (stage-1 approximation, font-dependent): move the small comma/
-    // full stop toward the upper-right corner of the cell by ~0.4em each way.
-    // This is NOT a spec constant — JIS X 4051 §4.x gives the punctuation cell
-    // geometry (the glyph occupies a quarter-em corner box), not a 0.4em nudge.
-    // The correct fix is full vertical-form glyph substitution (U+FE10–U+FE19,
-    // Unicode CJK Compatibility Forms) so the font supplies the pre-positioned
-    // vertical comma/period; then this offset is deleted. Tracked in issue #771
-    // (vertical-text stage-2).
+    // HEURISTIC (approximation, font-dependent): move ． toward the upper-right
+    // corner of the cell by ~0.4em each way. NOT a spec constant — JIS X 4051
+    // §4.x gives the punctuation cell geometry (the glyph occupies a quarter-em
+    // corner box), not a 0.4em nudge. The correct fix would be a Unicode vertical
+    // form for ． (none exists), so this narrow fallback remains. Tracked in issue
+    // #771 (vertical-text).
     return { dx: 0.4, dy: -0.4 };
   }
   return { dx: 0, dy: 0 };
 }
 
 /**
- * Split a run's text into maximal runs of same-orientation code points, so the
- * vertical draw path can counter-rotate the UPRIGHT (CJK) segments per glyph
- * while drawing SIDEWAYS (Latin/digit) segments as a single contextual
- * `fillText`. Preserves surrogate pairs (iterates by code point) and returns
- * the pieces in logical order with each piece's starting code-point index.
+ * Split a run's text into maximal runs of same-draw-mode code points (UAX#50 vo,
+ * via {@link verticalDrawMode}), so the vertical draw path can counter-rotate
+ * the UPRIGHT segments per glyph, rotate the Tr segments, and draw the SIDEWAYS
+ * (Latin/digit) segments as a single contextual `fillText`. Preserves surrogate
+ * pairs (iterates by code point) and returns the pieces in logical order.
  *
  * @param text The run's text.
- * @returns Ordered pieces, each `{ text, upright }`.
+ * @returns Ordered pieces, each `{ text, mode }`.
  */
 export function splitVerticalOrientationRuns(
   text: string,
-): Array<{ text: string; upright: boolean }> {
-  const pieces: Array<{ text: string; upright: boolean }> = [];
+): Array<{ text: string; mode: VerticalDrawMode }> {
+  const pieces: Array<{ text: string; mode: VerticalDrawMode }> = [];
   let cur = '';
-  let curUpright: boolean | null = null;
+  let curMode: VerticalDrawMode | null = null;
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
-    const upright = isUprightVerticalGlyph(cp);
-    if (curUpright === null) {
-      curUpright = upright;
+    const mode = verticalDrawMode(cp);
+    if (curMode === null) {
+      curMode = mode;
       cur = ch;
-    } else if (upright === curUpright) {
+    } else if (mode === curMode) {
       cur += ch;
     } else {
-      pieces.push({ text: cur, upright: curUpright });
+      pieces.push({ text: cur, mode: curMode });
       cur = ch;
-      curUpright = upright;
+      curMode = mode;
     }
   }
-  if (cur !== '' && curUpright !== null) {
-    pieces.push({ text: cur, upright: curUpright });
+  if (cur !== '' && curMode !== null) {
+    pieces.push({ text: cur, mode: curMode });
   }
   return pieces;
 }
@@ -165,40 +195,59 @@ export function drawVerticalRun(
   let ax = 0; // cumulative advance from run left (logical +x)
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
-    const upright = isUprightVerticalGlyph(cp);
+    const mode = verticalDrawMode(cp);
+    // Advance/width uses the ORIGINAL code point (measure == draw, and the text
+    // model / selection / find keep the original character — see the module doc).
     const adv = ctx.measureText(ch).width + letterSpacingPx;
-    if (upright) {
-      // Cell centre in logical space. Counter-rotate −90° about it so the glyph
+    if (mode === 'upright') {
+      // vo=U or Tu. Counter-rotate −90° about the cell centre so the glyph
       // (which the page rotation would otherwise lay on its side) stands upright.
+      // For Tu punctuation with a Unicode vertical presentation form
+      // (、。，！？ → U+FE10–FE12/FE15/FE16), draw THAT glyph so the font places
+      // it in the cell's upper-right (Word behaviour); the original advance is
+      // kept. (：；〖〗 are vo=Tr — they take the rotate branch below, never this
+      // substitution; substitute-first Tr is the #790/#771 follow-up.)
+      // Substitution is a GLYPH-only change: the width above and everything the
+      // renderer reports (selection, find) use the original `ch`.
+      const drawCp = verticalFormSubstitute(cp);
+      const drawStr = drawCp !== null ? String.fromCodePoint(drawCp) : ch;
       const cx = x + ax + adv / 2;
-      const off = verticalGlyphOffset(cp);
+      // No positional nudge when we substituted a vertical form (the glyph is
+      // pre-positioned); otherwise fall back to the corner nudge for ． (FF0E).
+      const off = drawCp !== null ? { dx: 0, dy: 0 } : verticalGlyphOffset(cp);
       ctx.save();
       ctx.translate(cx, baseline);
       ctx.rotate(-Math.PI / 2);
       // In the upright local frame: draw centred horizontally (the cell centre)
       // with a `middle` baseline that centres the glyph box on the cell.
-      // HEURISTIC (stage-1 approximation, font-dependent): the extra +0.12em
-      // vertical shift nudges typical CJK metrics so the visual centre lands on
-      // the cell centre — it is NOT a spec constant (JIS X 4051 positions the
-      // glyph from the font's ideographic em-box / vertical baseline, which the
-      // browser does not expose here). The correct fix is to place each glyph
-      // from the font's vertical metrics (ideographic baseline / `ideographic`
-      // textBaseline once broadly supported); replace 0.12em then. Tracked in
-      // issue #771 (vertical-text stage-2).
+      // HEURISTIC (approximation, font-dependent): the extra +0.12em vertical
+      // shift nudges typical CJK metrics so the visual centre lands on the cell
+      // centre — NOT a spec constant (JIS X 4051 positions the glyph from the
+      // font's ideographic em-box / vertical baseline, which the browser does not
+      // expose here). Replace with the font's vertical metrics (`ideographic`
+      // textBaseline once broadly supported). Tracked in issue #771.
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(
-        ch,
-        off.dx * fontPx,
-        (0.12 + off.dy) * fontPx,
-      );
+      ctx.fillText(drawStr, off.dx * fontPx, (0.12 + off.dy) * fontPx);
       ctx.restore();
+    } else if (mode === 'rotate') {
+      // vo=Tr: full-width brackets （「」〈〉“” and the ー prolonged sound mark.
+      // UAX#50's Tr fallback (no vertical glyph reachable on a Canvas) is to
+      // ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame IS
+      // that rotation; centre the (full-width) glyph on the column axis by using
+      // `center`/`middle` at the cell centre and the caller's `baseline` (the
+      // same column-centre reference the upright cells use). This is what makes
+      // the ー and （ ） appear rotated and mid-column rather than upright.
+      const cx = x + ax + adv / 2;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ch, cx, baseline);
     } else {
-      // Sideways (Latin/digit): draw as-is (rotated with the page). Keep the
-      // caller's alphabetic baseline; position the glyph's left at the current
-      // advance. Group of consecutive sideways glyphs would ideally be one
-      // fillText for shaping, but per-glyph keeps the advance model uniform and
-      // Latin advances are context-free enough at these sizes.
+      // vo=R (Latin/digit): draw as-is (rotated with the page). Keep the caller's
+      // alphabetic baseline; position the glyph's left at the current advance. A
+      // group of consecutive sideways glyphs would ideally be one fillText for
+      // shaping, but per-glyph keeps the advance model uniform and Latin advances
+      // are context-free enough at these sizes.
       ctx.textAlign = prevAlign;
       ctx.textBaseline = prevBaseline;
       ctx.fillText(ch, x + ax, baseline);

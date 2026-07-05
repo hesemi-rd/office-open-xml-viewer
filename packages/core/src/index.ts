@@ -315,6 +315,14 @@ export {
   crossRunKinsokuRetract,
 } from './text/kinsoku';
 export { isCjkBreakChar, isLatinWordCodePoint } from './text/cjk-ranges';
+// UAX #50 Vertical_Orientation (vo): how a code point orients in vertical text
+// (tbRl / eaVert). Consumed by the vertical-text draw paths across packages.
+export {
+  verticalOrientation,
+  verticalFormSubstitute,
+  VO_UNICODE_VERSION,
+} from './text/vertical-orientation';
+export type { VerticalOrientation } from './text/vertical-orientation';
 // Shared Excel serial-date → UTC `Date` conversion (ECMA-376 §18.17.4.1),
 // with the 1900 Lotus leap-year-bug compat and 1900/1904 date-system select.
 // Used by the xlsx cell formatter and the core chart date formatter.
