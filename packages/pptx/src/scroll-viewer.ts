@@ -1,4 +1,4 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, type VisibleRange, type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, nextZoomStep, prevZoomStep, fitScale, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
@@ -70,9 +70,10 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
   paddingRight?: number;
   /** Slides kept mounted beyond the viewport on each side. Default 1. */
   overscan?: number;
-  /** Per-slide transparent text-selection overlay. MAIN render mode only:
-   *  in worker mode `onTextRun` cannot cross the worker boundary, so the overlay
-   *  stays empty and the viewer logs one warning (design §11). */
+  /** Per-slide transparent text-selection overlay. IX6 — works in BOTH render
+   *  modes: in worker mode the per-run geometry is collected off-thread and
+   *  shipped back beside the slide bitmap, so the overlay is populated identically
+   *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
   /** Minimum zoom scale — a DIMENSIONLESS multiplier over the 96-dpi natural
    *  slide size (10% = 0.1), matching `DocxScrollViewer`. Default 0.1. */
@@ -116,6 +117,12 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  `computeVisibleRange` (the first slide intersecting the viewport top,
    *  EXCLUDING overscan). */
   onVisibleSlideChange?: (topIndex: number, total: number) => void;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100% = a slide
+   *  at its natural EMU→px size): from {@link PptxScrollViewer.setScale},
+   *  `zoomIn`/`zoomOut`, `fitWidth`/`fitPage`, a Ctrl/⌘+wheel gesture, or a
+   *  container-resize re-fit. Named `onScaleChange` to match the single-canvas
+   *  viewers so all five share one notification shape. */
+  onScaleChange?: (scale: number) => void;
   /** Error callback. When set, `load()` invokes it and resolves (otherwise the
    *  error is rethrown — shared viewer error contract). It ALSO fires for async
    *  per-slot render failures (both main `renderSlide` and worker
@@ -137,7 +144,8 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
 }
 
 /** One mounted slide. `canvas` is the drawn slide; `textLayer` the optional
- *  per-slide selection overlay (main mode only). `renderedSlide` guards against
+ *  per-slide selection overlay (both render modes — IX6 ships the worker's run
+ *  geometry back beside the bitmap). `renderedSlide` guards against
  *  re-rendering a recycled slot for a slide whose render is still in flight. */
 interface SlideSlot {
   wrapper: HTMLDivElement;
@@ -161,7 +169,7 @@ interface SlideSlot {
   bitmapCtx: ImageBitmapRenderingContext | null;
 }
 
-export class PptxScrollViewer {
+export class PptxScrollViewer implements ZoomableViewer {
   private _pres: PptxPresentation | null = null;
   private readonly _injected: boolean;
   private readonly _opts: PptxScrollViewerOptions;
@@ -186,6 +194,18 @@ export class PptxScrollViewer {
    *  than a `_scale === 1` sentinel because a fit scale of exactly 1 is a valid
    *  established state (a 1× fit would otherwise be re-fit forever). */
   private _scaleEstablished = false;
+  /**
+   * IX9 F1 — a `setScale` factor requested BEFORE the base fit is established
+   * (pre-load, or a zero-width container), already clamped to
+   * `[zoomMin, zoomMax]`, or `null` when none is pending. The single-canvas
+   * viewers latch a pre-load `setScale` and honour it on the first render; the
+   * scroll viewers used to silently DROP it — the family-unified semantics are
+   * "latch and apply once the layout establishes". `relayout()` applies (and
+   * clears) this right after establishing the base, firing `onScaleChange` at
+   * application time; `getScale()` reports it while pending so the caller sees
+   * the same value a single-canvas viewer would show.
+   */
+  private _pendingScale: number | null = null;
   /** Live slots keyed by slide index. */
   private readonly _slots = new Map<number, SlideSlot>();
   /** Recyclable detached slots (canvas + textLayer reused across slides). */
@@ -247,11 +267,6 @@ export class PptxScrollViewer {
    *  is host-agnostic. */
   private _settleTimer: ReturnType<typeof setTimeout> | null = null;
   private _wheelListener: ((e: WheelEvent) => void) | null = null;
-  /** One-shot latch for the worker-mode text-selection warning. The overlay is a
-   *  main-mode-only feature: in worker mode the per-run `onTextRun` geometry
-   *  cannot cross the worker boundary, so an `enableTextSelection` overlay stays
-   *  empty. We warn once (parity with `PptxViewer`) rather than per slot. */
-  private _warnedNoTextSelection = false;
   /** Observes the container so a width change re-fits the base scale. Disconnected
    *  in `destroy()`. */
   private _resizeObserver: ResizeObserver | null = null;
@@ -491,6 +506,22 @@ export class PptxScrollViewer {
         this._prevBase = base;
         this._lastFitWidth = this._fitWidthPx();
         this._scaleEstablished = true;
+        // IX9 F1: apply a setScale latched BEFORE establishment (pre-load / a
+        // zero-width container), now that the base exists. Applied here — before
+        // heights/spacer/mount below — so the first window renders directly at
+        // the requested factor (no intermediate base-scale frame). `_prevBase`
+        // stays the true base so a later resize re-fit preserves the implied
+        // zoom multiplier. onScaleChange fires at application time (the latch
+        // itself was silent), and only when the pending factor actually moved
+        // the scale off the base fit.
+        if (this._pendingScale !== null) {
+          const pending = this._pendingScale;
+          this._pendingScale = null;
+          if (pending !== this._scale) {
+            this._scale = pending;
+            this._opts.onScaleChange?.(pending);
+          }
+        }
       } else {
         return; // container has no width yet — retry on the next resize
       }
@@ -771,18 +802,6 @@ export class PptxScrollViewer {
       });
   }
 
-  /** Warn once when an `enableTextSelection` overlay was requested but the render
-   *  mode is `worker` (so the overlay stays empty). Same wording as
-   *  `PptxViewer` — one warning per viewer, not per slot. */
-  private _maybeWarnNoTextSelection(): void {
-    if (this._opts.enableTextSelection && !this._warnedNoTextSelection) {
-      this._warnedNoTextSelection = true;
-      console.warn(
-        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
-      );
-    }
-  }
-
   /** Route an async render failure to `onError`, or `console.error` when none is
    *  set (so failures are never fully silent), and never after teardown. */
   private _reportRenderError(err: unknown): void {
@@ -824,11 +843,6 @@ export class PptxScrollViewer {
     dpr: number,
     scale: number,
   ): Promise<void> {
-    // Worker-mode + enableTextSelection: the overlay can't be populated (onTextRun
-    // doesn't cross the worker boundary), so warn once (parity with PptxViewer)
-    // and leave the overlay empty. Fires before the coalescing guards so it is
-    // reported even when this particular dispatch is coalesced/dropped.
-    this._maybeWarnNoTextSelection();
     if (this._slideInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this slide already scrolled out of the
     // mounted window, don't dispatch at all.
@@ -847,10 +861,17 @@ export class PptxScrollViewer {
     if (!slot.bitmapCtx) {
       slot.bitmapCtx = slot.canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
     }
+    // IX6 — harvest the slide's run geometry alongside the bitmap so the
+    // worker-mode selection overlay is built from the SAME data main mode uses.
+    // The runs ride back beside the bitmap (one round-trip), collected only when
+    // an overlay is actually wanted.
+    const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
+    const runs: PptxTextRunInfo[] = [];
     try {
       const bmp = await this._pres!.renderSlideToBitmap(i, {
         width: widthPx,
         dpr,
+        onTextRun: wantOverlay ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
       // this bitmap is at a superseded resolution — this catches the case where
@@ -878,6 +899,25 @@ export class PptxScrollViewer {
       // This bitmap now defines the scale the on-screen canvas lives at, so a
       // later zoom preview stretches from HERE (design §7 renderedScale).
       slot.renderedScale = scale;
+      // IX6 — build the selection overlay from the runs the worker just shipped.
+      // Reached only past the staleness gate, so the geometry matches THIS paint.
+      // Clear any preview transform first (a settle lands at the current scale, so
+      // the `scale()` from `_previewSlot` is stale) — mirrors the main path. The
+      // overlay is sized to the slot's CSS box (Math.round of the uniform slide
+      // width/height at the current scale), NOT the dpr-scaled backing store.
+      if (slot.textLayer) {
+        slot.textLayer.style.transform = '';
+        slot.textLayer.style.transformOrigin = '';
+        if (wantOverlay) {
+          buildPptxTextLayer(
+            slot.textLayer,
+            runs,
+            Math.round(widthPx),
+            Math.round(this._slideHeightPx()),
+            (t) => this._onHyperlinkClick(t),
+          );
+        }
+      }
       painted = true;
     } catch (err) {
       this._reportRenderError(err);
@@ -923,7 +963,10 @@ export class PptxScrollViewer {
    * `[zoomMin ?? 0.1, zoomMax ?? 4]` (absolute bounds, XlsxViewer convention — NOT
    * multiples of the base fit; design §3 keeps the clamp in the viewer, not core),
    * then re-anchor VERTICALLY so the slide currently under the viewport top stays
-   * fixed. A no-op when nothing is loaded or when the clamped scale is unchanged.
+   * fixed. A no-op when the clamped scale is unchanged. Called BEFORE the deck is
+   * loaded / the base fit is established, the clamped factor is LATCHED (IX9 F1,
+   * family-unified with the single-canvas viewers) and applied by `relayout()`
+   * once the layout establishes — `onScaleChange` fires then.
    *
    * FLICKER-FREE (design §7): this does NOT re-render the visible slides inline.
    * It shows an immediate CSS preview (stretch the existing bitmaps, scale the
@@ -944,10 +987,18 @@ export class PptxScrollViewer {
    * can no longer return below the floor to the original base fit through this API.
    */
   setScale(scale: number): void {
-    if (!this._pres || this._pres.slideCount === 0 || !this._scaleEstablished) return;
     const zoomMin = this._opts.zoomMin ?? 0.1;
     const zoomMax = this._opts.zoomMax ?? 4;
     const next = Math.min(zoomMax, Math.max(zoomMin, scale));
+    if (!this._pres || this._pres.slideCount === 0 || !this._scaleEstablished) {
+      // IX9 F1 (family-unified pre-load semantics): a setScale before the deck is
+      // loaded / before the base fit is established is LATCHED, not dropped —
+      // matching the single-canvas viewers, which honour a pre-load setScale on
+      // their first render. relayout() applies it right after establishing the
+      // base and fires onScaleChange there (at application time).
+      this._pendingScale = next;
+      return;
+    }
     if (next === this._scale) return;
 
     // Capture the anchor from the CURRENT layout, before rescale.
@@ -995,6 +1046,76 @@ export class PptxScrollViewer {
     //     after the LAST setScale so a wheel/pinch burst coalesces into one render.
     this._previewVisible();
     this._scheduleSettle();
+    // IX9 change notification. Only reached when `next` differs from the prior
+    // scale (early-returned above), so every source — the public setScale, the
+    // ladder steppers, fitWidth/fitPage, Ctrl-wheel, and the _onResize re-fit
+    // (which routes through here) — notifies through this one hook.
+    this._opts.onScaleChange?.(next);
+  }
+
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor, where `1` = 100% (a
+   *  slide at its natural EMU→px size). This is the viewer's absolute `_scale`
+   *  (`slideWidth/EMU_PER_PX × _scale` is the drawn width), so it reads `1` at
+   *  true 100% and, after the initial fit-to-width, the base fit factor. Before
+   *  the fit is established it reports a latched pre-load `setScale` (IX9 F1) if
+   *  one is pending — matching what a single-canvas viewer would show — else `1`. */
+  getScale(): number {
+    if (this._scaleEstablished) return this._scale;
+    return this._pendingScale ?? 1;
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder above the current factor (clamped to `zoomMax` by {@link setScale}). */
+  zoomIn(): void {
+    this.setScale(nextZoomStep(this.getScale()));
+  }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  zoomOut(): void {
+    this.setScale(prevZoomStep(this.getScale()));
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit a slide's WIDTH to the container (the classic
+   * continuous-scroll "fit width"). Sets the scale to the width-fit base for the
+   * current container, then re-anchors + re-renders via {@link setScale}. Defers
+   * (no-op) while the container is unlaid-out. The `zoomMin`/`zoomMax` clamp still
+   * applies, so a fit below `zoomMin` pins to `zoomMin`.
+   */
+  fitWidth(): void {
+    this._fit('width');
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit a WHOLE slide (width and height) inside the
+   * container so one slide is visible without scrolling; takes the tighter of the
+   * width/height fit. Uses the deck-wide (uniform) slide size. Defers while
+   * unlaid-out.
+   */
+  fitPage(): void {
+    this._fit('page');
+  }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: the width-fit factor is the
+   *  established base (`_baseScale`); the page-fit additionally bounds by the
+   *  container height against the (uniform) slide height. Applies via
+   *  {@link setScale} so the flicker-free re-anchor / settle path and
+   *  `onScaleChange` all run. */
+  private _fit(mode: 'width' | 'page'): void {
+    if (!this._pres || this._pres.slideCount === 0) return;
+    const scale = fitScale(
+      {
+        contentWidth: this._pres.slideWidth / EMU_PER_PX,
+        contentHeight: this._pres.slideHeight / EMU_PER_PX,
+        containerWidth: this._fitWidthPx(),
+        containerHeight: this._scrollHost.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out — defer
+    this.setScale(scale);
   }
 
   /**
@@ -1069,12 +1190,11 @@ export class PptxScrollViewer {
 
   /** Full-resolution settle re-render of the visible window (design §7 mechanisms
    *  2+3). Re-renders each mounted slot at the current scale via the double-buffer
-   *  swap (main) / same-canvas transfer (worker). Main mode also rebuilds the text
-   *  overlay and clears its preview transform; in worker mode the overlay is
-   *  permanently empty (text selection is main-mode-only), so the transform is
-   *  inert there and is reset on recycle. Dispatched at the CURRENT epoch; the
-   *  existing epoch gate discards it if a later `setScale` supersedes it
-   *  mid-render. */
+   *  swap (main) / same-canvas transfer (worker). Both modes rebuild the text
+   *  overlay from the fresh render's run geometry (IX6 — worker mode collects the
+   *  runs off-thread via `_renderSlotBitmap`) and clear the preview transform.
+   *  Dispatched at the CURRENT epoch; the existing epoch gate discards it if a
+   *  later `setScale` supersedes it mid-render. */
   private _settleRender(): void {
     if (this._destroyed || !this._pres || this._pres.slideCount === 0) return;
     for (const [i, slot] of [...this._slots]) {

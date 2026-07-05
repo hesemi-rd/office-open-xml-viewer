@@ -279,9 +279,12 @@ export class FakeDocxEngine {
   renderCalls: RenderCall[] = [];
   bitmapCalls: RenderCall[] = [];
   createdBitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
-  /** Runs fed to `renderPage`'s `onTextRun` (main mode only) so a test can drive
-   *  the viewer's per-slot text overlay (buildDocxTextLayer) without a real
-   *  render. Empty/undefined ⇒ no runs emitted. */
+  /** Runs fed to the `onTextRun` callback of `renderPage` (main) /
+   *  `renderPageToBitmap` (worker) and returned by `collectPageRuns`, so a test
+   *  can drive the viewer's per-slot text overlay (buildDocxTextLayer) and find
+   *  scan without a real render. Empty/undefined ⇒ no runs emitted. IX6 — the
+   *  worker path now ships runs back beside the bitmap, so the stub mirrors that
+   *  by replaying `feedTextRuns` to `renderPageToBitmap`'s `onTextRun` too. */
   feedTextRuns?: DocxTextRunInfo[];
   constructor(
     private _pageCount: number,
@@ -341,10 +344,17 @@ export class FakeDocxEngine {
       if (!this.deferred) resolve();
     });
   }
-  renderPageToBitmap(page: number, opts?: WireRenderPageOptions): Promise<ImageBitmap> {
+  renderPageToBitmap(
+    page: number,
+    opts?: WireRenderPageOptions & { onTextRun?: (r: DocxTextRunInfo) => void },
+  ): Promise<ImageBitmap> {
     const size = this.pageSize(page);
     const bmp = { width: Math.round(size.widthPt), height: Math.round(size.heightPt), close: vi.fn() };
     this.createdBitmaps.push(bmp);
+    // IX6 — replay fed runs to the caller's collector, mirroring the real proxy
+    // which invokes `onTextRun` with the runs the worker shipped beside the
+    // bitmap. Lets a worker-mode test drive the selection overlay from the stub.
+    for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
     return new Promise<ImageBitmap>((resolve, reject) => {
       const call: RenderCall = {
         page,
@@ -355,6 +365,11 @@ export class FakeDocxEngine {
       this.bitmapCalls.push(call);
       if (!this.deferred) resolve(bmp as unknown as ImageBitmap);
     });
+  }
+  /** IX6 — mode-agnostic run collection for the find scan (mirrors the real
+   *  `DocxDocument.collectPageRuns`). Returns the fed runs regardless of mode. */
+  collectPageRuns(_page: number, _opts?: WireRenderPageOptions): Promise<DocxTextRunInfo[]> {
+    return Promise.resolve([...(this.feedTextRuns ?? [])]);
   }
   /** The per-call `width` (px) recorded for every renderPage call, in call order.
    *  T3 asserts each mounted page received its OWN px width. */

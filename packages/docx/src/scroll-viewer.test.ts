@@ -1010,11 +1010,12 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     v.destroy();
   });
 
-  it('worker mode: warns once and builds no overlay spans', async () => {
+  it('worker mode: builds an overlay span per run (IX6, no warning)', async () => {
     installDom();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }], 'worker');
+    engine.feedTextRuns = [RUN];
     const v = new DocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       enableTextSelection: true,
@@ -1023,17 +1024,24 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     v.relayout();
+    // The overlay is built in the renderPageToBitmap resolution microtask; give
+    // the bitmap promise chain a couple of turns to settle.
     await Promise.resolve();
     await Promise.resolve();
-    // Warned exactly once with the same wording as DocxViewer, across every
-    // mounted slot's render.
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/text selection is unavailable in mode: 'worker'/);
-    // No renderPage (worker path only) and no overlay spans anywhere.
+    await Promise.resolve();
+    // IX6 — worker mode no longer warns; the runs ride back beside the bitmap so
+    // the overlay is populated identically to main mode.
+    expect(warn).not.toHaveBeenCalled();
+    // The worker path (renderPageToBitmap), NOT renderPage, was used.
     expect(engine.renderCalls.length).toBe(0);
+    expect(engine.bitmapCalls.length).toBeGreaterThan(0);
+    // Every mounted slot got its overlay built from the worker-shipped runs.
+    const mounted = v.mountedPageIndicesForTest();
+    expect(mounted.length).toBeGreaterThan(0);
     for (const wrapper of scrollHost.children.filter((c) => c.children.some((k) => k.tag === 'canvas'))) {
       const textLayer = wrapper.children.find((c) => c.tag === 'div') as FakeEl;
-      expect(textLayer.children.length).toBe(0);
+      expect(textLayer.children.length).toBe(1);
+      expect(textLayer.children[0].textContent).toBe('Hi');
     }
     warn.mockRestore();
     v.destroy();

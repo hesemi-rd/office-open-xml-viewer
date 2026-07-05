@@ -81,6 +81,23 @@ pub struct Worksheet {
     /// identical input.
     pub col_widths: BTreeMap<u32, f64>,
     pub row_heights: BTreeMap<u32, f64>,
+    /// Per-column outline (grouping) depth, 0-7 (ECMA-376 §18.3.1.13
+    /// `<col outlineLevel>`). Only columns whose level is non-zero are recorded,
+    /// so a sheet without column outlining serializes an empty map (omitted from
+    /// JSON). Keyed by 1-based column index like {@link col_widths}.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub col_outline_levels: BTreeMap<u32, u8>,
+    /// Per-column `<col collapsed>` (§18.3.1.13): set on the *summary* column
+    /// when the columns one level deeper are collapsed. Only `true` entries are
+    /// recorded. Keyed by 1-based column index.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub col_collapsed: BTreeMap<u32, bool>,
+    /// Per-column `<col hidden>` (§18.3.1.13): `true` when the column is hidden
+    /// (e.g. a collapsed outline hides its detail columns). Recorded explicitly —
+    /// distinct from `width == 0` — so the outline gutter can tell collapsed
+    /// detail columns apart. Only `true` entries are recorded.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub col_hidden: BTreeMap<u32, bool>,
     pub default_col_width: f64,
     pub default_row_height: f64,
     pub merge_cells: Vec<MergeCell>,
@@ -103,6 +120,14 @@ pub struct Worksheet {
     /// grid so column A sits on the right. Parsed from `<sheetView rightToLeft>`
     /// (ECMA-376 §18.3.1.87). Defaults to false (left-to-right).
     pub right_to_left: bool,
+    /// Outline display properties from `<sheetPr><outlinePr>` (ECMA-376
+    /// §18.3.1.61): `summaryBelow` / `summaryRight` decide which side of a group
+    /// the summary row/column (and its +/- toggle) sits on. `None` (omitted from
+    /// JSON) when the sheet declares no `<outlinePr>`; the viewer then applies the
+    /// schema defaults (both `true`). Only surfaced when the sheet actually has
+    /// outlining so outline-free sheets keep byte-identical JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline_pr: Option<OutlinePr>,
     /// Tab color for the sheet tab (ECMA-376 §18.3.1.79)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
@@ -181,6 +206,9 @@ impl Worksheet {
             rows: Vec::new(),
             col_widths: BTreeMap::new(),
             row_heights: BTreeMap::new(),
+            col_outline_levels: BTreeMap::new(),
+            col_collapsed: BTreeMap::new(),
+            col_hidden: BTreeMap::new(),
             default_col_width: 0.0,
             default_row_height: 0.0,
             merge_cells: Vec::new(),
@@ -193,6 +221,7 @@ impl Worksheet {
             show_zeros: true,
             show_gridlines: true,
             right_to_left: false,
+            outline_pr: None,
             tab_color: None,
             auto_filter: None,
             hyperlinks: Vec::new(),
@@ -949,18 +978,63 @@ pub struct Hyperlink {
     pub display: Option<String>,
 }
 
+/// `<sheetPr><outlinePr>` display flags (ECMA-376 §18.3.1.61). When
+/// `summary_below` is `true` (the default) a group's summary row sits *below*
+/// its detail rows; when `false`, above. `summary_right` is the column analogue
+/// (summary to the right of detail by default). These decide where the outline
+/// gutter draws each group's collapse toggle.
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct OutlinePr {
+    pub summary_below: bool,
+    pub summary_right: bool,
+}
+
+impl Default for OutlinePr {
+    fn default() -> Self {
+        // ECMA-376 §18.3.1.61 defaults: both flags true.
+        OutlinePr {
+            summary_below: true,
+            summary_right: true,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     pub index: u32,
     pub height: Option<f64>,
     pub cells: Vec<Cell>,
+    /// Outline (grouping) depth of this row, 0-7 (ECMA-376 §18.3.1.73
+    /// `<row outlineLevel>`). `0` (the ungrouped default) is omitted from JSON
+    /// so a sheet without outlining serializes byte-for-byte as before.
+    #[serde(skip_serializing_if = "is_zero_u8", default)]
+    pub outline_level: u8,
+    /// `<row collapsed>` (§18.3.1.73): set on the *summary* row when the rows one
+    /// outline level deeper are in the collapsed state. Drives which +/- toggle
+    /// the gutter draws. Omitted from JSON when false (the schema default).
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub collapsed: bool,
+    /// `<row hidden>` (§18.3.1.73): `1` when the row is hidden — most commonly
+    /// because a collapsed outline hides its detail rows, but also plain
+    /// user-hidden rows. Kept as an explicit flag (distinct from `height == 0`)
+    /// so the outline gutter can tell collapsed-detail rows apart from
+    /// zero-height rows. Omitted from JSON when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub hidden: bool,
 }
 
 /// serde `skip_serializing_if` predicate: drop the common unstyled `0` so the
 /// per-cell JSON doesn't carry a redundant `styleIndex` on every plain cell.
 /// The TS side reads it as `styleIndex ?? 0`, so an omitted field is equivalent.
 fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+/// serde `skip_serializing_if` predicate for the common ungrouped `outlineLevel`
+/// of `0`, so a sheet without outlining keeps its byte-identical JSON.
+fn is_zero_u8(v: &u8) -> bool {
     *v == 0
 }
 

@@ -1404,20 +1404,18 @@ function drawPageFootnotes(
   const noteById = indexNotes(doc.footnotes);
 
   // Collect referenced footnote ids in document (reading) order, de-duplicated.
+  // Descends into table cells / nested tables (§17.4.7) so a footnote referenced
+  // only from inside a table is still drawn at the page bottom (issue #840).
   const ids: string[] = [];
   const seen = new Set<string>();
-  const scan = (els: PaginatedBodyElement[]) => {
-    for (const el of els) {
-      if (el.type !== 'paragraph') continue;
-      for (const id of footnoteRefsInRuns((el as unknown as DocParagraph).runs)) {
-        if (!seen.has(id) && noteById.has(id)) {
-          seen.add(id);
-          ids.push(id);
-        }
+  for (const el of elements) {
+    for (const id of footnoteRefsInElement(el)) {
+      if (!seen.has(id) && noteById.has(id)) {
+        seen.add(id);
+        ids.push(id);
       }
     }
-  };
-  scan(elements);
+  }
   if (ids.length === 0) return;
 
   // Total block height (pt). The last note's trailing spaceAfter overflows the
@@ -1571,6 +1569,30 @@ function footnoteRefsInRuns(runs: DocRun[]): string[] {
     if (nr && nr.kind === 'footnote' && nr.id) ids.push(nr.id);
   }
   return ids;
+}
+
+/** Collect, in document (reading) order, every footnote id referenced anywhere
+ *  in a body element — including inside table cells and nested tables (ECMA-376
+ *  §17.4.7). §17.11.10 anchors a footnote to the bottom of the page holding its
+ *  reference no matter WHERE in the story the reference sits, so both the
+ *  reserve pass and the draw scan must descend into tables (a reference that
+ *  lives only in a cell would otherwise reserve no space and never be drawn —
+ *  issue #840). Paragraphs contribute their own runs' refs; a table contributes
+ *  every cell's content recursively. */
+function footnoteRefsInElement(el: BodyElement | CellElement): string[] {
+  if (el.type === 'paragraph') {
+    return footnoteRefsInRuns(el.runs);
+  }
+  if (el.type === 'table') {
+    const ids: string[] = [];
+    for (const r of el.rows) {
+      for (const c of r.cells) {
+        for (const ce of c.content) ids.push(...footnoteRefsInElement(ce));
+      }
+    }
+    return ids;
+  }
+  return [];
 }
 
 /** Measure one footnote's content block (pt). `total` is every paragraph's full
@@ -2060,6 +2082,20 @@ export function computePages(
   const effContentH = () => {
     const r = reserveAt(pages.length - 1);
     return fullContentH() - (footnoteReservePt[pages.length - 1] ?? 0) - r.bottom - r.top;
+  };
+  // ECMA-376 §17.11 — sum the reserve height (pt) for a set of newly-referenced
+  // notes, charging the separator region only to the first note on a page (when
+  // that page has no reserve yet). Shared by the paragraph and table placement
+  // paths so a footnote referenced from either reserves body space consistently.
+  const sumReserve = (ids: string[]): number => {
+    let sum = 0;
+    for (let k = 0; k < ids.length; k++) {
+      const note = noteById.get(ids[k]);
+      if (!note) continue;
+      const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
+      sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
+    }
+    return sum;
   };
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
@@ -2551,19 +2587,6 @@ export function computePages(
       // don't fit, both move to the next page together.
       let newRefIds: string[] = [];
       let addReservePt = 0;
-      // Sum the reserve for a set of newly-referenced notes, charging the
-      // separator region only to the first note on a page (when that page has
-      // no reserve yet).
-      const sumReserve = (ids: string[]): number => {
-        let sum = 0;
-        for (let k = 0; k < ids.length; k++) {
-          const note = noteById.get(ids[k]);
-          if (!note) continue;
-          const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
-          sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
-        }
-        return sum;
-      };
       if (haveFootnotes) {
         const seen = new Set<string>();
         for (const id of footnoteRefsInRuns(para.runs)) {
@@ -2893,11 +2916,39 @@ export function computePages(
       const { colWidthsPt: tblColWidthsPt, rowHeightsPt: rowHs } =
         computeTablePtLayout(measureState, tbl, tblContentWPt);
       const h = rowHs.reduce((s, x) => s + x, 0);
-      // Footnote references inside table cells are not folded into the reserve
-      // (the per-page reserve is driven by body paragraphs); they still draw at
-      // page bottom via the renderer's page scan. effContentH() respects any
-      // reserve already accumulated on this page.
-      const tableContentH = effContentH();
+      // ECMA-376 §17.11.10 — a footnote referenced from inside a table cell is
+      // drawn at the bottom of the page holding the table, so the body area must
+      // shrink by the note height just as it does for a body-paragraph reference
+      // (issue #840). Collect the table's not-yet-reserved footnote ids and fold
+      // their height into BOTH the fit decision and the committed page reserve.
+      // (A row-split table reserves on the page where it ends — the same
+      // approximation a split footnote-bearing paragraph uses above; §17.11.10's
+      // per-row placement across a split is a documented residual.)
+      let tblNewRefIds: string[] = [];
+      let tblReservePt = 0;
+      if (haveFootnotes) {
+        const seen = new Set<string>();
+        for (const id of footnoteRefsInElement(el)) {
+          if (pageNoteIds.has(id) || seen.has(id) || !noteById.has(id)) continue;
+          seen.add(id);
+          tblNewRefIds.push(id);
+        }
+        tblReservePt = sumReserve(tblNewRefIds);
+      }
+      // effContentH() respects any reserve already accumulated on this page; the
+      // table's own footnote reserve is subtracted on top so the note clears the
+      // table content.
+      const tableContentH = effContentH() - tblReservePt;
+      const commitTableReserve = () => {
+        if (!haveFootnotes || tblNewRefIds.length === 0) return;
+        // Re-filter against the landing page (a split may have advanced pages, so
+        // the separator region is charged only if that page had no note yet).
+        tblNewRefIds = tblNewRefIds.filter((id) => !pageNoteIds.has(id));
+        const addPt = sumReserve(tblNewRefIds);
+        const idx = pages.length - 1;
+        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
+        for (const id of tblNewRefIds) pageNoteIds.add(id);
+      };
       if (h > tableContentH) {
         // Taller than a full column: split row-by-row so the overflow continues
         // into the next column / page instead of being clipped (ECMA-376 table
@@ -2923,6 +2974,7 @@ export function computePages(
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
+        commitTableReserve();
       } else {
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
@@ -2932,6 +2984,7 @@ export function computePages(
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
+        commitTableReserve();
       }
       prevPara = null;
     }
@@ -3246,16 +3299,17 @@ function estimateParagraphHeight(
   suppressSpaceBefore = false,
   paraXPt = 0,
 ): number {
-  const indLeft = para.indentLeft;
-  const indRight = para.indentRight;
+  // ECMA-376 §17.3.1.12 / Part 4 §14.11.2 — the transitional left/right indent
+  // attributes are logical start/end, so they swap physical sides in a bidi
+  // paragraph. Resolve the PHYSICAL indents once and use them for the float
+  // window (paraX), the tab origin and the text-margin right edge below, so
+  // this measure pass agrees with renderParagraph's paint pass (a bidi
+  // paragraph's tab stops anchor at the text margin — layoutBidiTabStops —
+  // and a mismatched tabOrigin/marginRight here would wrap differently).
+  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
+  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
-  // Float-wrap windows are evaluated at the paragraph's content left edge =
-  // contentX + physical left indent, matching renderParagraph. The left/right
-  // indents swap to physical sides in a bidi paragraph (§17.3.1.12 / Part 4
-  // §14.11.2), so use the bidi-resolved left indent; otherwise an indented / RTL
-  // paragraph wrapping a square float would measure the gap at the wrong X and
-  // diverge from the paint pass.
-  const paraX = paraXPt + (para.bidi === true ? indRight : indLeft);
+  const paraX = paraXPt + indLeft;
   const segs = buildSegments(para.runs, state);
   // Word renders ruby paragraphs with consistent line spacing — every line
   // in a paragraph that carries ANY furigana snaps to the same pitch
@@ -3487,16 +3541,17 @@ function splitParagraphAcrossPages(
     if (tagSectionPageNumType) el.sectionPageNumType = tagSectionPageNumType();
     return el;
   };
-  const indLeft = para.indentLeft;
-  const indRight = para.indentRight;
+  // Mirror renderParagraph's PHYSICAL indents (ECMA-376 §17.3.1.12; the
+  // left/right indents swap to physical sides in a bidi paragraph, Part 4
+  // §14.11.2). They feed the float-window X (paraX), the tab origin and the
+  // text-margin right edge passed to layoutLines below — a logical/physical
+  // mismatch there would anchor a bidi paragraph's tab stops differently from
+  // the paint pass (layoutBidiTabStops measures stops from the text margin)
+  // and re-introduce a paginate/render disagreement.
+  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
+  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
-  // Mirror renderParagraph's paragraph-content left edge: contentX + the
-  // physical left indent (ECMA-376 §17.3.1.12; the left/right indents swap to
-  // physical sides in a bidi paragraph, Part 4 §14.11.2). Using the bare margin
-  // here would evaluate square-float wrap windows at the wrong X for indented /
-  // RTL paragraphs, re-introducing a paginate/render disagreement.
-  const physLeftInd = para.bidi === true ? indRight : indLeft;
-  const paraX = marginLeftPt + physLeftInd;
+  const paraX = marginLeftPt + indLeft;
   // A paragraph with no layoutable inline lines (literally empty, or only
   // wrap-float anchors) is a single paragraph-mark line (§17.3.1.29) that cannot
   // be split. If it doesn't fit in the space left on this page, relocate it
@@ -8538,8 +8593,12 @@ function measureParaHeight(
   // slightly differently from the paint pass. No such cell exists in the covered
   // samples; revisit together with estimateParagraphHeight if list-in-cell
   // fidelity is needed.
-  const indLeftPx = para.indentLeft * scale;
-  const indRightPx = para.indentRight * scale;
+  // PHYSICAL indents (§17.3.1.12 / Part 4 §14.11.2 — logical start/end swap
+  // sides under a bidi paragraph), matching renderParagraph's paint pass so a
+  // bidi cell paragraph's tab origin / text-margin edge agree between the row
+  // measurer and the paint (LTR values are untouched).
+  const indLeftPx = (para.bidi === true ? para.indentRight : para.indentLeft) * scale;
+  const indRightPx = (para.bidi === true ? para.indentLeft : para.indentRight) * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
   // RESERVATION: no `marginRightPx` argument is passed here, so a
   // `<w:ptab w:relativeTo="margin">` inside a table cell resolves its target
@@ -8558,7 +8617,11 @@ function measureParaHeight(
   // to the margin rather than the indent), so it's deferred rather than
   // threaded through opportunistically. Revisit together with any other
   // measure/paint mismatch cleanup in this area.
-  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt, paraW, para.bidi === true);
+  // marginRightPx: LTR keeps the deliberate `paraW` reservation above (ptab in a
+  // cell). A BIDI cell paragraph needs the true text-margin edge — its tab stops
+  // anchor there (layoutBidiTabStops) — so pass `paraW + indRightPx` only then;
+  // LTR cell layout is byte-identical.
+  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt, para.bidi === true ? paraW + indRightPx : paraW, para.bidi === true);
   // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
   // point a cell paragraph's lines are laid out at scale 1: the paginator sizes
   // every table row through computeTablePtLayout → resolveTableRowHeights →
@@ -8596,7 +8659,7 @@ function measureParaHeight(
     stampParagraphLines(para, lines, {
       paraW,
       firstIndent: para.indentFirst,
-      tabOriginPx: indLeftPx, // == para.indentLeft at scale 1
+      tabOriginPx: indLeftPx, // == the PHYSICAL left indent at scale 1 (bidi swaps sides)
       gridDeltaPx: gridCharDeltaPx(grid, 1),
       hasFloats: false,
       kinsoku: state.kinsoku,

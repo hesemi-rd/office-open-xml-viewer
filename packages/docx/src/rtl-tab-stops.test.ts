@@ -58,57 +58,74 @@ describe('computeLineVisualOrder treats a tab as a segment separator (UAX#9 S)',
   });
 });
 
-describe('layoutBidiTabStops (§17.3.1.37 mirror — reading-frame layout)', () => {
-  const avail = 400; // content width px (0 = left edge, 400 = leading/right edge)
+describe('layoutBidiTabStops (§17.3.1.37 mirror — margin-anchored reading frame)', () => {
+  const avail = 400; // margin-to-margin width px (no-indent case: startPen 0, leftLimit 400)
+
+  /** Reading-frame LEFT edge (px from the right text margin) of each segment
+   *  after the walk: startPen + cumulative widths through index i. */
+  const readingEdges = (
+    items: BidiTabItem[],
+    res: { width: number }[],
+    startPen: number,
+  ): number[] => {
+    let pen = startPen;
+    return items.map((_, i) => (pen += res[i].width));
+  };
 
   it('places an end (right) tab so its page number trails at the mirrored stop', () => {
     // TOC row logical order: chapNum(20) space(4) title(80) TAB pageNum(8).
-    // The tab is the style right/underscore leader stop at pos 300 from the right
-    // edge. The page number is trailing-aligned: its LEFT edge sits on the stop
-    // (visual x = avail-300 = 100).
+    // The tab is the style right/underscore leader stop at pos 300 from the
+    // right text margin. The page number is trailing-aligned: its trailing
+    // (reading-left) edge sits ON the stop.
     const items: BidiTabItem[] = [
       { isTab: false, width: 20 }, { isTab: false, width: 4 }, { isTab: false, width: 80 },
       { isTab: true, width: 0 },
       { isTab: false, width: 8 },
     ];
     const stops = [{ pos: 300, alignment: 'right' as const, leader: 'underscore' as const }];
-    const res = layoutBidiTabStops(items, stops, avail, 36);
-    expect(res[4].visualX).toBeCloseTo(100, 1);
-    // Chapter number (first logical, leading) sits at the RIGHT edge: its right
-    // edge = avail.
-    expect(res[0].visualX + 20).toBeCloseTo(avail, 1);
+    const res = layoutBidiTabStops(items, stops, 0, avail, 36);
+    const edge = readingEdges(items, res, 0);
+    // The page number's trailing (reading-left) edge is on the stop: the tab
+    // advances the pen to stop − fw (edge[3] = 292), and the page number's own
+    // width carries it onto the stop (edge[4] = 300).
+    expect(edge[3]).toBeCloseTo(292, 6);
+    expect(edge[4]).toBeCloseTo(300, 6);
+    // Chapter number (first logical, leading) starts at the RIGHT text margin.
+    expect(edge[0]).toBeCloseTo(20, 6);
     // The tab carries the underscore leader and fills the visible gap.
     expect(res[3].leader).toBe('underscore');
     expect(res[3].width).toBeGreaterThan(0);
   });
 
-  it('pins a page number to the left margin when the stop is past it', () => {
-    // A right/leader stop at pos 420 (past avail=400) would place the page
-    // number's left edge left of the margin; it pins so its far (left) edge is on
-    // the margin (visual x 0), the page number spanning [0, 8].
+  it('pins a page number to the left text margin when the stop is past it', () => {
+    // A right/leader stop at pos 420 (past the 400px left margin) would place
+    // the page number past the margin; it pins so its far (left) edge is ON the
+    // margin: reading left edge = 400.
     const items: BidiTabItem[] = [
       { isTab: false, width: 20 }, { isTab: false, width: 80 },
       { isTab: true, width: 0 },
       { isTab: false, width: 8 },
     ];
     const stops = [{ pos: 420, alignment: 'right' as const, leader: 'underscore' as const }];
-    const res = layoutBidiTabStops(items, stops, avail, 36);
-    expect(res[3].visualX).toBeCloseTo(0, 1);
+    const res = layoutBidiTabStops(items, stops, 0, avail, 36);
+    const edge = readingEdges(items, res, 0);
+    expect(edge[3]).toBeCloseTo(avail, 6); // page number's far (left) edge on the margin
   });
 
   it('flips physical left (leading) so its content ends at the mirrored stop', () => {
-    // Single leading (left) tab at pos 150 from the right edge → visual x
-    // avail-150 = 250. Following content (width 30) has its LEADING (right) edge
-    // there, so it spans [220, 250].
+    // Single leading (left) tab at pos 150 from the right margin. Following
+    // content (width 30) has its LEADING (right) edge there: reading span
+    // [150, 180] (= visual [220, 250]).
     const items: BidiTabItem[] = [
       { isTab: false, width: 40 }, // leading content
       { isTab: true, width: 0 },
       { isTab: false, width: 30 }, // follows the tab
     ];
     const stops = [{ pos: 150, alignment: 'left' as const, leader: 'none' as const }];
-    const res = layoutBidiTabStops(items, stops, avail, 1000 /* no auto grid */);
-    // Following content's RIGHT edge at the stop (visual x 250).
-    expect(res[2].visualX + 30).toBeCloseTo(250, 1);
+    const res = layoutBidiTabStops(items, stops, 0, avail, 1000 /* no auto grid */);
+    const edge = readingEdges(items, res, 0);
+    expect(edge[1]).toBeCloseTo(150, 6); // pen after the tab = the stop
+    expect(edge[2]).toBeCloseTo(180, 6); // content extends 30 further left
     expect(res[1].leader ?? 'none').toBe('none');
   });
 
@@ -119,15 +136,60 @@ describe('layoutBidiTabStops (§17.3.1.37 mirror — reading-frame layout)', () 
       { isTab: false, width: 20 },
     ];
     const stops = [{ pos: 200, alignment: 'center' as const, leader: 'none' as const }];
-    const res = layoutBidiTabStops(items, stops, avail, 1000);
-    // Center stop mirrors to visual x avail-200 = 200; the width-20 content is
-    // centered on it → spans [190, 210], midpoint 200.
-    expect(res[2].visualX + 10).toBeCloseTo(200, 1);
+    const res = layoutBidiTabStops(items, stops, 0, avail, 1000);
+    const edge = readingEdges(items, res, 0);
+    // Content spans reading [190, 210]: centered on the stop (200).
+    expect(edge[1]).toBeCloseTo(190, 6);
+    expect(edge[2]).toBeCloseTo(210, 6);
+  });
+
+  it('assigns the Nth tab the Nth-reachable stop IN READING ORDER (leader cell)', () => {
+    // sample-28 TOC2 shape: [chapNum][TAB][title][TAB][pageNum] with an early
+    // left stop and the right/underscore leader stop. The FIRST logical tab must
+    // take the early left stop and the SECOND (the one before the page number)
+    // the leader stop — resolving against the VISUAL sequence reverses the
+    // assignment and paints the leader between the title and the chapter number
+    // (the #830 follow-up bug).
+    const items: BidiTabItem[] = [
+      { isTab: false, width: 20 },  // chapter number
+      { isTab: true, width: 0 },    // → left@50
+      { isTab: false, width: 100 }, // title
+      { isTab: true, width: 0 },    // → right/underscore@380
+      { isTab: false, width: 8 },   // page number
+    ];
+    const stops = [
+      { pos: 50, alignment: 'left' as const, leader: 'none' as const },
+      { pos: 380, alignment: 'right' as const, leader: 'underscore' as const },
+    ];
+    const res = layoutBidiTabStops(items, stops, 0, avail, 1000);
+    expect(res[1].leader ?? 'none').toBe('none'); // first tab: plain left stop
+    expect(res[3].leader).toBe('underscore');     // second tab: the leader
+    const edge = readingEdges(items, res, 0);
+    expect(edge[1]).toBeCloseTo(50, 6);  // title's leading (right) edge on 50
+    expect(edge[3]).toBeCloseTo(372, 6); // page number trails at 380 − 8
+  });
+
+  it('anchors stops at the TEXT MARGIN, not the indented paragraph edge', () => {
+    // A 36px leading indent (startPen 36, sample-28 TOC2's w:ind left=720): the
+    // chapter number begins at the indent, but the tab's stop at pos 100 still
+    // measures from the MARGIN — the following title's leading edge lands at
+    // reading 100, NOT 136 (verified against the Word PDF: TOC2 titles align at
+    // margin − 50.85pt despite the 36pt indent).
+    const items: BidiTabItem[] = [
+      { isTab: false, width: 20 },
+      { isTab: true, width: 0 },
+      { isTab: false, width: 50 },
+    ];
+    const stops = [{ pos: 100, alignment: 'left' as const, leader: 'none' as const }];
+    const res = layoutBidiTabStops(items, stops, 36, avail, 1000);
+    const edge = readingEdges(items, res, 36);
+    expect(edge[0]).toBeCloseTo(56, 6);  // chapter: indent 36 + width 20
+    expect(edge[1]).toBeCloseTo(100, 6); // stop is margin-anchored
   });
 
   it('is a no-op shape for a line with no tabs (widths unchanged)', () => {
     const items: BidiTabItem[] = [{ isTab: false, width: 10 }, { isTab: false, width: 20 }];
-    const res = layoutBidiTabStops(items, [], avail, 36);
+    const res = layoutBidiTabStops(items, [], 0, avail, 36);
     expect(res.map((r) => r.width)).toEqual([10, 20]);
   });
 });
@@ -249,5 +311,58 @@ describe('bidi TOC / footer rows render on one line, mirrored (issue #820)', () 
     // the mirrored stop (400-380 = 20) on the visual LEFT.
     expect(n!.x).toBeCloseTo(20, 0);
     expect(p!.x).toBeGreaterThan(n!.x);
+  });
+
+  it('paints the leader in the tab CELL GAP between page number and title (#830 follow-up)', async () => {
+    const { canvas, fills, leaderXs } = makeRecordingCanvas();
+    // sample-28 TOC2 shape: [chapNum][TAB→left@50][title][TAB→underscore@380][pageNum].
+    // Correct visual layout (Word PDF): [pageNum][LEADER][title][blank][chapNum].
+    // The regression drew [pageNum][blank][title][LEADER][chapNum] — the leader
+    // migrated to the wrong cell gap because the tab→stop assignment was made
+    // against the visual sequence instead of reading order.
+    const row = bidiPara(
+      [txt('AB', true), txt('\t', true), txt('TITLE', true), txt('\t', true), txt('9', true)],
+      [
+        { pos: 50, alignment: 'left', leader: 'none' },
+        { pos: 380, alignment: 'right', leader: 'underscore' },
+      ],
+    );
+    await renderDocumentToCanvas(docOf([row]), canvas, 0, { dpr: 1, width: 400 });
+    const pageNum = fills.find((f) => f.text === '9');
+    const title = fills.find((f) => f.text === 'TITLE');
+    const chapter = fills.find((f) => f.text === 'AB');
+    expect(pageNum).toBeDefined();
+    expect(title).toBeDefined();
+    expect(chapter).toBeDefined();
+    // Page number trails at the mirrored leader stop: 400 − 380 = 20.
+    expect(pageNum!.x).toBeCloseTo(20, 0);
+    // Title's leading (right) edge on the mirrored left stop: 400 − 50 = 350
+    // (5 glyphs × 10px ⇒ left edge 300).
+    expect(title!.x).toBeCloseTo(300, 0);
+    // The underscore leader lies ENTIRELY between the page number and the title
+    // (the visual span of the leader tab's cell gap) — not right of the title.
+    expect(leaderXs.length).toBeGreaterThan(3);
+    expect(Math.min(...leaderXs)).toBeGreaterThan(pageNum!.x);
+    expect(Math.max(...leaderXs)).toBeLessThan(title!.x);
+  });
+
+  it('anchors a bidi tab stop at the text margin under a leading indent', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    // Paragraph with logical-left indent 36 (physical RIGHT under bidi): the
+    // chapter starts at the indented edge (400−36−20 ⇒ x=344), but the tab's
+    // stop at pos 100 measures from the MARGIN, so the title's right edge lands
+    // at 400−100 = 300 (left edge 250) — not 300−36.
+    const row = bidiPara(
+      [txt('AB', true), txt('\t', true), txt('TITLE', true)],
+      [{ pos: 100, alignment: 'left', leader: 'none' }],
+      { indentLeft: 36 },
+    );
+    await renderDocumentToCanvas(docOf([row]), canvas, 0, { dpr: 1, width: 400 });
+    const chapter = fills.find((f) => f.text === 'AB');
+    const title = fills.find((f) => f.text === 'TITLE');
+    expect(chapter).toBeDefined();
+    expect(title).toBeDefined();
+    expect(chapter!.x).toBeCloseTo(344, 0);
+    expect(title!.x).toBeCloseTo(250, 0);
   });
 });

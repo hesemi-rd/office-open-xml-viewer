@@ -1,4 +1,4 @@
-export { DocxDocument, type LoadOptions } from './document';
+export { DocxDocument, type LoadOptions, type RenderPageToBitmapOptions } from './document';
 export type { WireRenderPageOptions } from './worker-protocol';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';

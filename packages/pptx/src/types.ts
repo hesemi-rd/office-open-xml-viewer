@@ -99,6 +99,19 @@ export interface TextBody extends CoreTextBody {
    */
   rtlCol?: boolean;
   /**
+   * `<a:bodyPr><a:prstTxWarp>` (ECMA-376 §20.1.9.19) — WordArt text warp. When
+   * present the renderer maps each glyph through the named envelope
+   * (presetTextWarpDefinitions) instead of laying text out flat. Omitted from
+   * JSON when the body has no warp, so unwarped bodies are byte-identical.
+   */
+  textWarp?: {
+    /** The `prst` name, e.g. `"textArchUp"`, `"textWave1"`. */
+    preset: string;
+    /** `<a:avLst>` adjust values (adj1, adj2, …) in thousandths of a percent.
+     *  Omitted when the author supplied none (preset defaults apply). */
+    adj?: number[];
+  };
+  /**
    * Narrow the inherited `paragraphs` to the PPTX `Paragraph` so consumers see
    * the PPTX-only `eaLnBrk` flag. PPTX `Paragraph extends CoreParagraph`, so
    * this is a covariant refinement of `CoreTextBody.paragraphs`.

@@ -11,7 +11,7 @@
  */
 import type { MediaElement, Presentation } from './types';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
-import { renderSlide } from './renderer';
+import { renderSlide, type PptxTextRunInfo } from './renderer';
 import { selectNotes } from './notes';
 import { findMimeTypeForPath } from './media-mime';
 import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
@@ -138,6 +138,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       if (!slide) throw new Error(`Slide index ${req.slideIndex} out of range (count: ${pres.slides.length})`);
       await fontsLoaded;
       const canvas = new OffscreenCanvas(1, 1); // renderSlide resizes it
+      // IX6 — collect the run geometry the same render emits so the main thread
+      // can build its selection / find overlay without a second render. The
+      // callback runs worker-side; only the resulting plain array crosses back.
+      const runs: PptxTextRunInfo[] = [];
       await renderSlide(canvas, slide, pres.slideWidth, pres.slideHeight, {
         width: req.width,
         dpr: req.dpr,
@@ -151,9 +155,34 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         dim: req.dim,
         // math intentionally omitted: MathJax needs a DOM <script>; worker
         // mode skips equations (documented in the design spec).
-      });
+      }, (r) => runs.push(r));
       const bitmap = canvas.transferToImageBitmap();
-      post({ kind: 'slideRendered', id: req.id, bitmap }, [bitmap]);
+      post({ kind: 'slideRendered', id: req.id, bitmap, runs }, [bitmap]);
+      return;
+    }
+    if (req.kind === 'collectRuns') {
+      // IX6 — render a slide purely to harvest its text-run geometry (find scans
+      // every slide). The bitmap is discarded worker-side; only `runs` crosses
+      // the wire. Same renderer / width as the main-mode `_collectSlideRuns`, so
+      // the geometry is identical to what a `renderSlide` of the same slide draws
+      // (no dpr / dim needed: run geometry is in CSS px, independent of dpr, and
+      // dimming does not move glyphs — matching main-mode `_collectSlideRuns`).
+      if (!pres) throw new Error('No pptx loaded');
+      const slide = pres.slides[req.slideIndex];
+      if (!slide) throw new Error(`Slide index ${req.slideIndex} out of range (count: ${pres.slides.length})`);
+      await fontsLoaded;
+      const canvas = new OffscreenCanvas(1, 1);
+      const runs: PptxTextRunInfo[] = [];
+      await renderSlide(canvas, slide, pres.slideWidth, pres.slideHeight, {
+        width: req.width,
+        defaultTextColor: pres.defaultTextColor,
+        majorFont: pres.majorFont,
+        minorFont: pres.minorFont,
+        hlinkColor: pres.hlinkColor ?? null,
+        fetchMedia: getMedia,
+        fetchImage: getImage,
+      }, (r) => runs.push(r));
+      post({ kind: 'runsCollected', id: req.id, runs });
       return;
     }
 

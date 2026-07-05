@@ -3713,6 +3713,83 @@ mod tests {
         );
     }
 
+    /// ECMA-376 §20.1.9.19 — `<a:bodyPr><a:prstTxWarp prst="…">` (WordArt text
+    /// warp). parse_text_body should surface the preset name and its `<a:avLst>`
+    /// adjust values; an absent element (or `prst="textNoShape"`) yields None,
+    /// which skip_serializing_if omits from the JSON so unwarped bodies are
+    /// byte-identical.
+    #[test]
+    fn test_parse_text_body_prst_tx_warp() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.clone());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let mut parse = |body_pr: &str| -> TextBody {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{body_pr}<p><r><t>x</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_text_body(
+                doc.root_element(),
+                &theme,
+                &rels,
+                None,
+                [None; 9],
+                Default::default(),
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                ShapeKind::Sp,
+                &mut zip,
+            )
+        };
+
+        // A warp with two avLst adjust values, in the real Office child order:
+        // CT_TextBodyProperties is an xsd:sequence with prstTxWarp FIRST, then
+        // the EG_TextAutofit group (here <spAutoFit/>) — PowerPoint emits (and
+        // only honours) this order, so the fixture mimics it.
+        let tb = parse(
+            r#"<bodyPr wrap="none"><prstTxWarp prst="textArchUp"><avLst><gd name="adj1" fmla="val 10800000"/><gd name="adj2" fmla="val 25000"/></avLst></prstTxWarp><spAutoFit/></bodyPr>"#,
+        );
+        let warp = tb.text_warp.as_ref().expect("textArchUp warp present");
+        assert_eq!(warp.preset, "textArchUp");
+        assert_eq!(warp.adj, vec![10_800_000, 25_000]);
+
+        // A warp with an empty avLst → preset defaults (empty adj vec).
+        let tb_empty =
+            parse(r#"<bodyPr><prstTxWarp prst="textWave1"><avLst/></prstTxWarp></bodyPr>"#);
+        let warp_empty = tb_empty.text_warp.as_ref().expect("textWave1 warp present");
+        assert_eq!(warp_empty.preset, "textWave1");
+        assert!(warp_empty.adj.is_empty());
+        // Empty adj is omitted from JSON.
+        let json_empty = serde_json::to_string(&tb_empty).unwrap();
+        assert!(
+            json_empty.contains(r#""textWarp":{"preset":"textWave1"}"#),
+            "empty-adj warp should omit the adj key; got {json_empty}"
+        );
+
+        // prst="textNoShape" is treated as no warp.
+        let tb_none = parse(r#"<bodyPr><prstTxWarp prst="textNoShape"/></bodyPr>"#);
+        assert!(tb_none.text_warp.is_none(), "textNoShape → no warp");
+
+        // No prstTxWarp at all → None, and omitted from JSON.
+        let tb_absent = parse(r#"<bodyPr/>"#);
+        assert!(tb_absent.text_warp.is_none());
+        let json_absent = serde_json::to_string(&tb_absent).unwrap();
+        assert!(
+            !json_absent.contains("textWarp"),
+            "absent warp must be omitted from JSON; got {json_absent}"
+        );
+    }
+
     /// ECMA-376 §21.1.2.2.7 — `<a:pPr eaLnBrk>` (xsd:boolean, default true)
     /// controls whether East Asian words may break at a line wrap. The parser
     /// must surface the paragraph's own value, fall back to the body lstStyle
