@@ -2943,6 +2943,15 @@ fn parse_run_inner(
     let char_scale = fmt.char_scale;
     let position = fmt.position;
     let kerning = fmt.kerning;
+    // East Asian typography (ECMA-376 §17.3.2.10 eastAsianLayout), resolved
+    // through the style chain into `fmt`. `east_asian_vert` (縦中横) drives the
+    // vertical (tbRl) renderer's horizontal-in-vertical cell; `vert_compress`
+    // fits it to the line height. `combine`/`combine_brackets` are carried for a
+    // future two-lines-in-one implementation (parsed, not yet drawn).
+    let east_asian_vert = fmt.east_asian_vert;
+    let east_asian_vert_compress = fmt.east_asian_vert_compress;
+    let east_asian_combine = fmt.east_asian_combine;
+    let east_asian_combine_brackets = fmt.east_asian_combine_brackets.clone();
 
     // Set by the "noBreakHyphen" arm below when it just pushed/extended a text
     // run for a `<w:noBreakHyphen/>` — tells the VERY NEXT loop iteration's
@@ -3000,6 +3009,10 @@ fn parse_run_inner(
                         char_scale,
                         position,
                         kerning,
+                        east_asian_vert,
+                        east_asian_vert_compress,
+                        east_asian_combine,
+                        east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
                     };
                     match runs.last_mut() {
@@ -3073,6 +3086,10 @@ fn parse_run_inner(
                         char_scale,
                         position,
                         kerning,
+                        east_asian_vert,
+                        east_asian_vert_compress,
+                        east_asian_combine,
+                        east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
                     })));
                 }
@@ -3116,6 +3133,10 @@ fn parse_run_inner(
                     char_scale,
                     position,
                     kerning,
+                    east_asian_vert,
+                    east_asian_vert_compress,
+                    east_asian_combine,
+                    east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
                 })));
             }
@@ -3204,6 +3225,10 @@ fn parse_run_inner(
                     char_scale,
                     position,
                     kerning,
+                    east_asian_vert,
+                    east_asian_vert_compress,
+                    east_asian_combine,
+                    east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
                 };
                 match runs.last_mut() {
@@ -3391,6 +3416,10 @@ fn parse_run_inner(
                     char_scale,
                     position,
                     kerning,
+                    east_asian_vert,
+                    east_asian_vert_compress,
+                    east_asian_combine,
+                    east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: Some(crate::types::NoteRef {
                         kind: kind.to_string(),
                         id: id_str,
@@ -8748,6 +8777,42 @@ mod cs_toggle_tests {
         // §17.3.2.7 <w:cs/> — the complex-script run toggle.
         let run = run_of(r#"<w:p><w:r><w:rPr><w:cs/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, Some(true));
+    }
+
+    #[test]
+    fn east_asian_layout_vert_flows_to_text_run_model() {
+        // §17.3.2.10 <w:eastAsianLayout w:vert="1" w:vertCompress="1"> — the 縦中横
+        // (horizontal-in-vertical) toggles survive from direct rPr onto the
+        // serialized TextRun model. Mirrors sample-26's date-digit run.
+        let run = run_of(
+            r#"<w:p><w:r><w:rPr>
+                 <w:w w:val="67"/>
+                 <w:eastAsianLayout w:id="121422848" w:vert="1" w:vertCompress="1"/>
+               </w:rPr><w:t>２９</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.east_asian_vert, Some(true));
+        assert_eq!(run.east_asian_vert_compress, Some(true));
+        assert!((run.char_scale.unwrap() - 0.67).abs() < 1e-9); // w:w still parsed
+                                                                // combine/combineBrackets absent ⇒ None (parsed but not present here).
+        assert_eq!(run.east_asian_combine, None);
+        assert_eq!(run.east_asian_combine_brackets, None);
+    }
+
+    #[test]
+    fn east_asian_layout_combine_and_off_values_parse() {
+        // §17.3.2.10 combine + combineBrackets parse (two-lines-in-one; carried
+        // for a future implementation). And the ST_OnOff "off"/"0"/"false"
+        // vocabulary (§22.9.2.7) reads as Some(false), distinct from an absent
+        // attribute (None → inherit).
+        let run = run_of(
+            r#"<w:p><w:r><w:rPr>
+                 <w:eastAsianLayout w:combine="on" w:combineBrackets="curly" w:vert="off"/>
+               </w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.east_asian_combine, Some(true));
+        assert_eq!(run.east_asian_combine_brackets.as_deref(), Some("curly"));
+        assert_eq!(run.east_asian_vert, Some(false)); // explicit off ≠ inherit
+        assert_eq!(run.east_asian_vert_compress, None); // absent → inherit
     }
 
     #[test]

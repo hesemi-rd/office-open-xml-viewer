@@ -366,6 +366,96 @@ export function drawVerticalRun(
 }
 
 /**
+ * Draw one 縦中横 (tate-chū-yoko / horizontal-in-vertical) run — ECMA-376
+ * §17.3.2.10 `<w:eastAsianLayout w:vert="1">`. In a vertical (tbRl) page the run
+ * "keeps the text on the same line as all other text" while its characters are
+ * rendered HORIZONTALLY: the whole run string is drawn UPRIGHT (counter-rotated
+ * −90° to cancel the +90° page rotation, exactly like the upright CJK cells) so
+ * the glyphs read left-to-right ACROSS the column, packed into ONE cell of the
+ * vertical line.
+ *
+ * Geometry (all in the rotated logical page frame; `x` advances DOWN the column
+ * = logical +x, `baseline` is the column centre-line = logical +y):
+ *   - The cell spans `[x, x + cellAdvance]` along the column; the run centres on
+ *     the cell centre `x + cellAdvance/2`. `cellAdvance` is one em (one cell) —
+ *     the same value the layout measured (`segAdvanceWidth`), so measure==paint.
+ *   - After the −90° counter-rotation the run is upright; local +x is the
+ *     cross-column (the glyphs' own left→right width) and local +y is the
+ *     along-column (the text's height). Drawn `center`/`middle`, so the run's
+ *     em box centres on the cell centre AND on the column centre-line.
+ *   - `charScale` (§17.3.2.43 `w:w`) compresses the glyphs' WIDTH via
+ *     `ctx.scale(charScale, 1)` in the upright local frame — i.e. across the
+ *     column — matching Word (PDF-verified on sample-26: "２９" at w:w=67 spans
+ *     ≈15.6 pt wide inside a 12 pt cell). It does NOT change the along-column
+ *     cell height.
+ *   - `vertCompress` (§17.3.2.10) compresses the run's HEIGHT to one cell so the
+ *     rotated text never grows the line: if the run's natural upright height
+ *     (`fontBoundingBox*`) exceeds one em, scale the along-column axis down to
+ *     fit. For a single-line run (height ≈ 1 em) this is a no-op, so the common
+ *     2-digit date case is unaffected; it only bites a run whose glyphs are
+ *     taller than the em box.
+ *
+ * The whole run is one contextually-shaped `fillText`, so kerning/shaping across
+ * the digits is preserved and the text model / selection keep the original
+ * characters.
+ *
+ * @param ctx          2D context, already in the rotated logical page frame.
+ *                     `ctx.font`/`ctx.fillStyle` are set by the caller.
+ * @param text         The run's text (e.g. "２９").
+ * @param x            Logical left edge of the cell along the column (px).
+ * @param baseline     Logical column centre-line y (px).
+ * @param fontPx       Effective font size in px (one em = one cell).
+ * @param cellAdvance  The cell's along-column advance in px (one em; the value
+ *                     the layout measured for this segment).
+ * @param charScale    §17.3.2.43 `w:w` fraction (1 = 100%); compresses the
+ *                     glyphs' cross-column width.
+ * @param compress     §17.3.2.10 `w:vertCompress`; fit the run's height to one em.
+ */
+export function drawTateChuYokoRun(
+  ctx: Ctx2D,
+  text: string,
+  x: number,
+  baseline: number,
+  fontPx: number,
+  cellAdvance: number,
+  charScale: number,
+  compress: boolean,
+): void {
+  const prevAlign = ctx.textAlign;
+  const prevBaseline = ctx.textBaseline;
+  // Along-column compression factor (§17.3.2.10 vertCompress). The run is drawn
+  // upright, so its along-column extent is the font's design HEIGHT
+  // (fontBoundingBoxAscent + descent). When that exceeds one em and vertCompress
+  // is set, scale the along-column (local y) axis so the height fits one cell.
+  // Measured with a `middle` baseline (the box used below). For ordinary
+  // single-line text the height is ≈1 em, so `compY` stays 1 (no-op).
+  let compY = 1;
+  if (compress) {
+    const m = ctx.measureText(text);
+    const asc = m.fontBoundingBoxAscent;
+    const desc = m.fontBoundingBoxDescent;
+    if (typeof asc === 'number' && typeof desc === 'number') {
+      const heightPx = asc + desc;
+      if (heightPx > fontPx && heightPx > 0) compY = fontPx / heightPx;
+    }
+  }
+  const cx = x + cellAdvance / 2;
+  ctx.save();
+  ctx.translate(cx, baseline);
+  ctx.rotate(-Math.PI / 2);
+  // Upright local frame: local +x = cross-column (glyph width), local +y =
+  // along-column (glyph height). `w:w` compresses width (local x); vertCompress
+  // fits height (local y). center/middle centres the run's em box on the cell.
+  ctx.scale(charScale, compY);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+  ctx.textAlign = prevAlign;
+  ctx.textBaseline = prevBaseline;
+}
+
+/**
  * Run `draw` with the context counter-rotated so a graphic that would otherwise
  * be painted lying on its side (rotated with the +90° page transform) appears
  * UPRIGHT. Used for inline / anchored images and shapes in a vertical (tbRl)

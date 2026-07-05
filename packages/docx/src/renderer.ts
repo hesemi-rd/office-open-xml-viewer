@@ -143,6 +143,7 @@ import {
 } from './emphasis-mark.js';
 import {
   drawVerticalRun,
+  drawTateChuYokoRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
   verticalTextLayerPlacement,
@@ -5948,7 +5949,24 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //      `justifiedPiecePositions` slice-at-gaps path.
         //   3. Neither: a single fillText (the common path).
         const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
-        if (state.verticalCJK) {
+        if (state.verticalCJK && s.tateChuYoko) {
+          // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
+          // horizontally, side by side, inside ONE cell of the vertical column.
+          // The cell's along-column advance is `spanW` (= s.measuredWidth, which
+          // segAdvanceWidth pinned to one em for a 縦中横 seg — measure==paint).
+          // `w:w` (segCharScale) compresses the digits' cross-column width;
+          // vertCompress fits their height to the cell. See vertical-text.ts.
+          drawTateChuYokoRun(
+            ctx,
+            s.text,
+            x,
+            baseline + yOffset,
+            effSizePx,
+            spanW,
+            segCharScale,
+            !!s.tateChuYokoCompress,
+          );
+        } else if (state.verticalCJK) {
           // ECMA-376 §17.6.20 (tbRl) — the run flows DOWN the column (logical
           // +x). Draw each glyph advancing by its measured horizontal width plus
           // the per-cell grid delta, counter-rotating upright (CJK) glyphs so
