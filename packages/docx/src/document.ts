@@ -14,7 +14,7 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizePt } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizePt, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -44,6 +44,15 @@ export interface LoadOptions extends CoreLoadOptions {
    */
   mode?: 'main' | 'worker';
 }
+
+/** IX6 — options for {@link DocxDocument.renderPageToBitmap}: the serializable
+ *  render knobs plus an OPTIONAL `onTextRun`. The callback stays main-thread (it
+ *  never crosses the wire); in worker mode the proxy invokes it with the runs
+ *  the worker shipped back beside the bitmap, so a caller gets the selection /
+ *  find geometry on the same path in both modes. */
+export type RenderPageToBitmapOptions = WireRenderPageOptions & {
+  onTextRun?: (run: DocxTextRunInfo) => void;
+};
 
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
@@ -433,9 +442,19 @@ export class DocxDocument {
    * The returned ImageBitmap is owned by the caller: pass it to
    * `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`
    * when done, or its backing memory is held until GC.
+   *
+   * IX6 — an optional `onTextRun` in `opts` receives the page's text-run
+   * geometry (the same stream `renderPage` emits in main mode), so a caller can
+   * build the selection / find overlay from a worker-rendered page on the SAME
+   * code path as main mode. In worker mode the runs ride back beside the bitmap
+   * (one round-trip, no second render).
    */
-  async renderPageToBitmap(pageIndex: number, opts: WireRenderPageOptions = {}): Promise<ImageBitmap> {
-    const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+  async renderPageToBitmap(
+    pageIndex: number,
+    opts: RenderPageToBitmapOptions = {},
+  ): Promise<ImageBitmap> {
+    const { onTextRun, ...wire } = opts;
+    const wireOpts: WireRenderPageOptions = { ...wire, dpr: wire.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= this.pageCount) {
         throw new Error(`Page index ${pageIndex} out of range (count: ${this.pageCount})`);
@@ -443,10 +462,43 @@ export class DocxDocument {
       const res = await this._bridge.request(
         (id) => ({ type: 'renderPage', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
-      return (res as Extract<RenderWorkerResponse, { type: 'pageRendered' }>).bitmap;
+      const rendered = res as Extract<RenderWorkerResponse, { type: 'pageRendered' }>;
+      if (onTextRun) for (const r of rendered.runs) onTextRun(r);
+      return rendered.bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
-    await this.renderPage(off, pageIndex, wireOpts);
+    await this.renderPage(off, pageIndex, { ...wireOpts, onTextRun });
     return off.transferToImageBitmap();
+  }
+
+  /**
+   * IX6 — collect a page's text-run geometry (`DocxTextRunInfo[]`) without
+   * painting a visible canvas. Works in BOTH modes: worker mode renders the page
+   * off-thread and ships only the runs (no bitmap transfer); main mode renders
+   * to a throwaway offscreen canvas. Used by the find controller to scan every
+   * page for matches. The geometry is identical to a `renderPage` of the same
+   * page at the same width/dpr.
+   */
+  async collectPageRuns(
+    pageIndex: number,
+    opts: WireRenderPageOptions = {},
+  ): Promise<DocxTextRunInfo[]> {
+    const wireOpts: WireRenderPageOptions = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    if (this._mode === 'worker') {
+      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= this.pageCount) {
+        throw new Error(`Page index ${pageIndex} out of range (count: ${this.pageCount})`);
+      }
+      const res = await this._bridge.request(
+        (id) => ({ type: 'collectRuns', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
+    }
+    const runs: DocxTextRunInfo[] = [];
+    const off =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(1, 1)
+        : (globalThis.document?.createElement('canvas') as HTMLCanvasElement);
+    await this.renderPage(off, pageIndex, { ...wireOpts, onTextRun: (r) => runs.push(r) });
+    return runs;
   }
 }

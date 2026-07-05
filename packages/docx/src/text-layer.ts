@@ -8,8 +8,9 @@ import type { HyperlinkTarget } from '@silurus/ooxml-core';
  * lands on the drawn glyphs. Extracted verbatim from `DocxViewer._buildTextLayer`
  * so both the pager (DocxViewer) and the continuous-scroll viewer (DocxScrollViewer)
  * share one implementation; also public API for integrators building their own
- * overlay (design §10). MAIN render mode only — `onTextRun` cannot cross the
- * worker boundary.
+ * overlay (design §10). IX6 — usable in BOTH render modes: worker mode collects
+ * the same `DocxTextRunInfo[]` off-thread and ships it back beside the bitmap, so
+ * the overlay is built from identical geometry regardless of thread.
  *
  * @param layer            the overlay div (position:relative parent expected).
  * @param runs             per-run geometry from `renderPage({ onTextRun })`.

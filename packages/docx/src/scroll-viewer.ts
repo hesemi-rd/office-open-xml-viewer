@@ -67,9 +67,10 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
   paddingRight?: number;
   /** Pages kept mounted beyond the viewport on each side. Default 1. */
   overscan?: number;
-  /** Per-page transparent text-selection overlay. MAIN render mode only:
-   *  in worker mode `onTextRun` cannot cross the worker boundary, so the overlay
-   *  stays empty and the viewer logs one warning (design §11). */
+  /** Per-page transparent text-selection overlay. IX6 — works in BOTH render
+   *  modes: in worker mode the per-run geometry is collected off-thread and
+   *  shipped back beside the page bitmap, so the overlay is populated identically
+   *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
   /** Minimum zoom scale (px-per-pt multiplier floor). Default 0.1. */
   zoomMin?: number;
@@ -133,7 +134,8 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
 }
 
 /** One mounted page. `canvas` is the drawn page; `textLayer` the optional
- *  per-page selection overlay (main mode only). `renderedPage` guards against
+ *  per-page selection overlay (both render modes — IX6 ships the worker's run
+ *  geometry back beside the bitmap). `renderedPage` guards against
  *  re-rendering a recycled slot for a page whose render is still in flight. */
 interface PageSlot {
   wrapper: HTMLDivElement;
@@ -251,11 +253,6 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  is host-agnostic. */
   private _settleTimer: ReturnType<typeof setTimeout> | null = null;
   private _wheelListener: ((e: WheelEvent) => void) | null = null;
-  /** One-shot latch for the worker-mode text-selection warning. The overlay is a
-   *  main-mode-only feature: in worker mode the per-run `onTextRun` geometry
-   *  cannot cross the worker boundary, so an `enableTextSelection` overlay stays
-   *  empty. We warn once (parity with `DocxViewer`) rather than per slot. */
-  private _warnedNoTextSelection = false;
   /** Observes the container so a width change re-fits the base scale. Disconnected
    *  in `destroy()`. */
   private _resizeObserver: ResizeObserver | null = null;
@@ -794,18 +791,6 @@ export class DocxScrollViewer implements ZoomableViewer {
       });
   }
 
-  /** Warn once when an `enableTextSelection` overlay was requested but the render
-   *  mode is `worker` (so the overlay stays empty). Same wording as
-   *  `DocxViewer._render` — one warning per viewer, not per slot. */
-  private _maybeWarnNoTextSelection(): void {
-    if (this._opts.enableTextSelection && !this._warnedNoTextSelection) {
-      this._warnedNoTextSelection = true;
-      console.warn(
-        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
-      );
-    }
-  }
-
   /**
    * IX1/IX-nav — the click handler passed to the text-layer overlay. When the
    * caller supplied `onHyperlinkClick`, it fully owns the behaviour (the default
@@ -868,11 +853,6 @@ export class DocxScrollViewer implements ZoomableViewer {
     dpr: number,
     scale: number,
   ): Promise<void> {
-    // Worker-mode + enableTextSelection: the overlay can't be populated (onTextRun
-    // doesn't cross the worker boundary), so warn once (parity with DocxViewer)
-    // and leave the overlay empty. Fires before the coalescing guards so it is
-    // reported even when this particular dispatch is coalesced/dropped.
-    this._maybeWarnNoTextSelection();
     if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this page already scrolled out of the
     // mounted window, don't dispatch at all.
@@ -891,12 +871,19 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (!slot.bitmapCtx) {
       slot.bitmapCtx = slot.canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
     }
+    // IX6 — harvest the page's run geometry alongside the bitmap so the
+    // worker-mode selection overlay is built from the SAME data main mode uses.
+    // The runs ride back beside the bitmap (one round-trip), collected only when
+    // an overlay is actually wanted.
+    const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
+    const runs: DocxTextRunInfo[] = [];
     try {
       const bmp = await this._doc!.renderPageToBitmap(i, {
         width: widthPx,
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
+        onTextRun: wantOverlay ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
       // this bitmap is at a superseded resolution — this catches the case where
@@ -924,6 +911,26 @@ export class DocxScrollViewer implements ZoomableViewer {
       // This bitmap now defines the scale the on-screen canvas lives at, so a
       // later zoom preview stretches from HERE (design §7 renderedScale).
       slot.renderedScale = scale;
+      // IX6 — build the selection overlay from the runs the worker just shipped.
+      // Reached only past the staleness gate, so the geometry matches THIS paint
+      // (same epoch guard the main-mode path relies on for stale-scale safety).
+      // Clear any preview transform first: a settle re-render lands at the
+      // current scale, so the overlay's `scale()` from `_previewSlot` is stale
+      // and the rebuilt spans already sit at the crisp geometry (mirrors the
+      // main-mode `_settleSlot` clear).
+      if (slot.textLayer) {
+        slot.textLayer.style.transform = '';
+        slot.textLayer.style.transformOrigin = '';
+        if (wantOverlay) {
+          buildDocxTextLayer(
+            slot.textLayer,
+            runs,
+            slot.canvas.style.width || `${slot.canvas.width}px`,
+            slot.canvas.style.height || `${slot.canvas.height}px`,
+            this._hyperlinkHandler(),
+          );
+        }
+      }
       painted = true;
     } catch (err) {
       this._reportRenderError(err);
@@ -1195,12 +1202,11 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   /** Full-resolution settle re-render of the visible window (design §7 mechanisms
    *  2+3). Re-renders each mounted slot at the current scale via the double-buffer
-   *  swap (main) / same-canvas transfer (worker). Main mode also rebuilds the text
-   *  overlay and clears its preview transform; in worker mode the overlay is
-   *  permanently empty (text selection is main-mode-only), so the transform is
-   *  inert there and is reset on recycle. Dispatched at the CURRENT epoch; the
-   *  existing epoch gate discards it if a later `setScale` supersedes it
-   *  mid-render. */
+   *  swap (main) / same-canvas transfer (worker). Both modes rebuild the text
+   *  overlay from the fresh render's run geometry (IX6 — worker mode collects the
+   *  runs off-thread via `_renderSlotBitmap`) and clear the preview transform.
+   *  Dispatched at the CURRENT epoch; the existing epoch gate discards it if a
+   *  later `setScale` supersedes it mid-render. */
   private _settleRender(): void {
     if (this._destroyed || !this._doc || this._doc.pageCount === 0) return;
     for (const [i, slot] of [...this._slots]) {
