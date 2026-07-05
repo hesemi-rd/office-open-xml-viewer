@@ -1,0 +1,273 @@
+import { describe, it, expect } from 'vitest';
+import { renderDocumentToCanvas } from './renderer.js';
+import type {
+  BodyElement,
+  BorderSpec,
+  CellElement,
+  DocTable,
+  DocTableCell,
+  DocTableRow,
+  DocxDocumentModel,
+  DocxTextRun,
+  SectionProps,
+} from './types';
+
+// ECMA-376 §17.4.66 — end-to-end: render a table whose adjacent cells DISAGREE on
+// their shared interior gridline and assert the drawn line uses the §17.4.66
+// WINNER (not the later-painted cell). We record each border stroke as a segment
+// with its width + colour, then read the shared vertical/horizontal line.
+
+const TEST_FONT = 'Synthetic Untabled Serif';
+
+interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
+
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[] } {
+  let font = '10px serif';
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+  const strokes: StrokeSeg[] = [];
+  let cur = { x: 0, y: 0 };
+  let pending: { x1: number; y1: number; x2: number; y2: number } | null = null;
+  let lineWidth = 1;
+  let strokeStyle = '#000000';
+  let fillStyle = '#000000';
+  const ctx = {
+    get font() { return font; },
+    set font(v: string) { font = v; },
+    get lineWidth() { return lineWidth; },
+    set lineWidth(v: number) { lineWidth = v; },
+    get strokeStyle() { return strokeStyle; },
+    set strokeStyle(v: string) { strokeStyle = v; },
+    get fillStyle() { return fillStyle; },
+    set fillStyle(v: string) { fillStyle = v; },
+    textAlign: 'left' as CanvasTextAlign,
+    letterSpacing: '0px',
+    measureText: (s: string) => {
+      const p = px();
+      return {
+        width: [...s].length * p,
+        fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, beginPath() { pending = null; }, closePath() {},
+    moveTo(x: number, y: number) { cur = { x, y }; },
+    lineTo(x: number, y: number) { pending = { x1: cur.x, y1: cur.y, x2: x, y2: y }; cur = { x, y }; },
+    stroke() {
+      if (pending) strokes.push({ ...pending, width: lineWidth, color: strokeStyle });
+    },
+    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
+    bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
+    fillText() {}, strokeText() {},
+    direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  return { canvas: canvas as unknown as HTMLCanvasElement, strokes };
+}
+
+function textRun(text: string): DocxTextRun {
+  return {
+    text, bold: false, italic: false, underline: false, strikethrough: false,
+    fontSize: 10, color: null, fontFamily: TEST_FONT, fontFamilyEastAsia: '',
+    isLink: false, background: null, vertAlign: null, hyperlink: null,
+  } as unknown as DocxTextRun;
+}
+
+function paraOf(text: string): CellElement {
+  return {
+    type: 'paragraph', alignment: 'left',
+    indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null, tabStops: [],
+    runs: [{ type: 'text', ...textRun(text) }],
+    defaultFontSize: 10, defaultFontFamily: TEST_FONT, widowControl: false,
+  } as unknown as CellElement;
+}
+
+type Edges = { top: BorderSpec | null; bottom: BorderSpec | null; left: BorderSpec | null; right: BorderSpec | null; insideH: BorderSpec | null; insideV: BorderSpec | null };
+const NO_BORDERS: Edges = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
+
+function cell(text: string, borders: Partial<Edges> = {}): DocTableCell {
+  return {
+    content: [paraOf(text)], colSpan: 1, vMerge: null,
+    borders: { ...NO_BORDERS, ...borders },
+    background: null, vAlign: 'top', widthPt: 60,
+  } as unknown as DocTableCell;
+}
+
+function tableOf(rows: DocTableRow[], tableBorders: Partial<Edges> = {}): DocTable {
+  // Fixed 60 pt columns (one per logical column of the widest row). The page is
+  // sized to the grid sum below so autofit never stretches the columns — the
+  // shared interior vertical gridline then sits at a known x (60 for two cols).
+  const cols = Math.max(...rows.map((r) => r.cells.length));
+  return {
+    colWidths: new Array(cols).fill(60), rows,
+    borders: { ...NO_BORDERS, ...tableBorders },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  } as unknown as DocTable;
+}
+
+function rowOf(cells: DocTableCell[]): DocTableRow {
+  return { cells, rowHeight: 20, rowHeightRule: 'atLeast', isHeader: false } as unknown as DocTableRow;
+}
+
+function docOf(t: DocTable): DocxDocumentModel {
+  // Page width == grid sum so the content band exactly holds the fixed columns
+  // (no autofit stretch). marginLeft 0 ⇒ grid origin at x=0.
+  const gridSum = t.colWidths.reduce((s, w) => s + w, 0);
+  return {
+    section: {
+      pageWidth: gridSum, pageHeight: 200,
+      marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps,
+    body: [{ type: 'table', ...t } as BodyElement],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: { [TEST_FONT]: 'roman' },
+  } as unknown as DocxDocumentModel;
+}
+
+async function render(t: DocTable) {
+  const { canvas, strokes } = makeRecordingCanvas();
+  const gridSum = t.colWidths.reduce((s, w) => s + w, 0);
+  await renderDocumentToCanvas(docOf(t), canvas, 0, { dpr: 1, width: gridSum });
+  return strokes;
+}
+
+const bs = (over: Partial<BorderSpec>): BorderSpec => ({ style: 'single', width: 0.5, color: null, ...over });
+
+// The two cells are 60 pt wide each at scale 1 ⇒ the shared vertical gridline is
+// at x=60. Only vertical strokes near x=60 are the shared interior line.
+function verticalAt(strokes: StrokeSeg[], x: number): StrokeSeg[] {
+  return strokes.filter((s) => Math.abs(s.x1 - s.x2) < 0.5 && Math.abs(s.x1 - x) <= 1);
+}
+function horizontalAt(strokes: StrokeSeg[], y: number): StrokeSeg[] {
+  return strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.y1 - y) <= 1);
+}
+
+describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () => {
+  it('shared vertical gridline is drawn exactly ONCE (not once per cell)', async () => {
+    // Both cells set their facing edge to the SAME single 1pt border. Previously
+    // each cell drew it (two strokes at x=60); now it is drawn once.
+    const strokes = await render(tableOf([
+      rowOf([
+        cell('a', { right: bs({ width: 1 }) }),
+        cell('b', { left: bs({ width: 1 }) }),
+      ]),
+    ]));
+    expect(verticalAt(strokes, 60)).toHaveLength(1);
+  });
+
+  it('heavier border wins the shared gridline (dashed beats single, ignoring width)', async () => {
+    // Left cell right = single 3pt; right cell left = dashed 1pt. §17.4.66 weight:
+    // single 1×1=1 vs dashed 1×5=5 ⇒ dashed wins DESPITE its smaller width (the
+    // spec weights style, not sz). Both are stroke-based so the mock reads the
+    // winner's colour directly.
+    const strokes = await render(tableOf([
+      rowOf([
+        cell('a', { right: bs({ style: 'single', width: 3, color: 'ff0000' }) }),
+        cell('b', { left: bs({ style: 'dashed', width: 1, color: '0000ff' }) }),
+      ]),
+    ]));
+    const shared = verticalAt(strokes, 60);
+    expect(shared.length).toBeGreaterThanOrEqual(1);
+    // The winner (dashed, blue) must appear at x=60; the loser (single, red) must not.
+    const colors = shared.map((s) => s.color.toLowerCase());
+    expect(colors.some((c) => c.includes('0000ff'))).toBe(true);
+    expect(colors.some((c) => c.includes('ff0000'))).toBe(false);
+    // And the width drawn is the WINNER's (dashed 1pt), not the loser's 3pt.
+    expect(shared.every((s) => Math.abs(s.width - 1) < 0.5)).toBe(true);
+  });
+
+  it('a cell border beats a table-level inside border (rule #1)', async () => {
+    // Table insideV = thick 4pt; the left cell explicitly sets its right edge to a
+    // single 1pt. A CELL border always beats a TABLE border (rule #1), so the
+    // single wins — the right cell contributes no own edge (falls to table insideV
+    // = thick), and cell-vs-table ⇒ cell.
+    const strokes = await render(tableOf(
+      [rowOf([
+        cell('a', { right: bs({ style: 'single', width: 1, color: '00ff00' }) }),
+        cell('b'),
+      ])],
+      { insideV: bs({ style: 'thick', width: 4, color: 'ff0000' }) },
+    ));
+    const shared = verticalAt(strokes, 60);
+    const colors = shared.map((s) => s.color.toLowerCase());
+    expect(colors.some((c) => c.includes('00ff00'))).toBe(true); // cell single wins
+    expect(colors.some((c) => c.includes('ff0000'))).toBe(false); // table thick loses
+  });
+
+  it('nil on one side leaves the OTHER side visible (rule #0)', async () => {
+    // Left cell right = nil (suppress); right cell left = single 1pt. The opposing
+    // real border is displayed.
+    const strokes = await render(tableOf([
+      rowOf([
+        cell('a', { right: bs({ style: 'nil' }) }),
+        cell('b', { left: bs({ style: 'single', width: 1, color: '112233' }) }),
+      ]),
+    ]));
+    const shared = verticalAt(strokes, 60);
+    expect(shared).toHaveLength(1);
+    expect(shared[0].color.toLowerCase()).toContain('112233');
+  });
+
+  it('nil on BOTH sides suppresses the shared gridline entirely', async () => {
+    const strokes = await render(tableOf([
+      rowOf([
+        cell('a', { right: bs({ style: 'nil' }) }),
+        cell('b', { left: bs({ style: 'nil' }) }),
+      ]),
+    ]));
+    expect(verticalAt(strokes, 60)).toHaveLength(0);
+  });
+
+  it('shared HORIZONTAL gridline resolves between stacked rows (dashed beats thick)', async () => {
+    // Row0 cell bottom = thick 4pt; row1 cell top = dashed 1pt. Weight: thick
+    // 1×2=2 vs dashed 1×5=5 ⇒ dashed wins. Rows are 20pt tall ⇒ shared line at y=20.
+    const strokes = await render(tableOf([
+      rowOf([cell('a', { bottom: bs({ style: 'thick', width: 4, color: 'ff0000' }) })]),
+      rowOf([cell('b', { top: bs({ style: 'dashed', width: 1, color: '00ff00' }) })]),
+    ]));
+    const shared = horizontalAt(strokes, 20);
+    expect(shared.length).toBeGreaterThanOrEqual(1);
+    const colors = shared.map((s) => s.color.toLowerCase());
+    expect(colors.some((c) => c.includes('00ff00'))).toBe(true);  // dashed wins
+    expect(colors.some((c) => c.includes('ff0000'))).toBe(false); // thick loses
+  });
+
+  it('bidiVisual: shared vertical gridline still drawn once with the winner', async () => {
+    // Under <w:bidiVisual> logical column 0 is at the PHYSICAL right. Two cells,
+    // logical [a, b]: a is physically RIGHT (x=60..120), b physically LEFT
+    // (x=0..60), so the shared line is at x=60. a.right = single 1pt (green),
+    // b.left = single 1pt (green) — same spec ⇒ drawn once.
+    const t = tableOf([
+      rowOf([
+        cell('a', { right: bs({ width: 1, color: '00aa00' }) }),
+        cell('b', { left: bs({ width: 1, color: '00aa00' }) }),
+      ]),
+    ]);
+    (t as unknown as { bidiVisual: boolean }).bidiVisual = true;
+    const strokes = await render(t);
+    // Exactly one shared interior vertical line at x=60 (not two, not zero).
+    expect(verticalAt(strokes, 60)).toHaveLength(1);
+    // Outer verticals at x=0 (b's physical left) and x=120 (a's physical right)
+    // are each drawn once too.
+    expect(verticalAt(strokes, 0).length + verticalAt(strokes, 120).length).toBe(0);
+  });
+
+  it('outer table edges are unaffected (non-regression: still drawn once)', async () => {
+    // A single-cell table with an outer border on all sides. Each outer edge is
+    // drawn once by the sole cell.
+    const strokes = await render(tableOf([
+      rowOf([cell('x', { top: bs({ width: 1 }), bottom: bs({ width: 1 }), left: bs({ width: 1 }), right: bs({ width: 1 }) })]),
+    ]));
+    // 4 edges (cell 60 wide, 20 tall): left x=0, right x=60, top y=0, bottom y=20.
+    expect(verticalAt(strokes, 0)).toHaveLength(1);
+    expect(verticalAt(strokes, 60)).toHaveLength(1);
+    expect(horizontalAt(strokes, 0)).toHaveLength(1);
+    expect(horizontalAt(strokes, 20)).toHaveLength(1);
+  });
+});
