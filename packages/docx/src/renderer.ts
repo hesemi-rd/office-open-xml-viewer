@@ -54,6 +54,7 @@ import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberForma
 import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
+import { resolveBorderConflict } from './cell-border-conflict.js';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
@@ -7701,7 +7702,20 @@ function drawTableRows(
     h: number;
     edges: CellEdgeFlags;
     clipExact: boolean;
+    /** ECMA-376 §17.4.66 — this cell's grid footprint, so the border pass can find
+     *  the cells that share each interior gridline (its right/bottom neighbours).
+     *  `ci`/`ri` are the logical top-left grid slot; `span` the column span; `lastRi`
+     *  the last row the cell occupies (vMerge-span aware). */
+    ci: number;
+    ri: number;
+    span: number;
+    lastRi: number;
   }> = [];
+  // ECMA-376 §17.4.66 — grid-slot → job index occupancy, so an interior edge can
+  // look up the adjacent cell. A vMerge/colSpan cell fills every slot it covers
+  // (its restart job index), so a neighbour query on any slot resolves to the
+  // owning job. Continue (vMerge=false) cells are covered by their restart job.
+  const occupancy: number[][] = table.rows.map(() => new Array<number>(colWidths.length).fill(-1));
 
   let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
@@ -7734,7 +7748,7 @@ function drawTableRows(
         }
         // ECMA-376 §17.4.38/§17.4.39: classify which physical edges of this cell
         // are the table's OUTER edges (vs. interior gridlines) from its grid
-        // position so drawCellBorders can pick table.top/bottom/left/right vs.
+        // position so resolveCellEdges can pick table.top/bottom/left/right vs.
         // table.insideH/insideV. `leftCol`/`rightCol` are the LOGICAL columns
         // (gridSpan-aware); the renderer flips them for bidiVisual via `mirror`.
         const edges: CellEdgeFlags = {
@@ -7750,7 +7764,18 @@ function drawTableRows(
         // exact height — only single-row cells clip.
         const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
         if (dryRun) measureCellContent(cell, table, cellW, scale, state);
-        else jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact });
+        else {
+          const jobIndex = jobs.length;
+          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell });
+          // ECMA-376 §17.4.66 — record this cell's grid footprint so interior-edge
+          // neighbour lookups resolve to it. A vMerge=restart cell owns every row it
+          // spans; a colSpan cell owns every column in its span.
+          for (let rj = ri; rj <= lastRowOfCell && rj < occupancy.length; rj++) {
+            for (let cj = ci; cj < ci + span && cj < colWidths.length; cj++) {
+              occupancy[rj][cj] = jobIndex;
+            }
+          }
+        }
       }
 
       x += cellW;
@@ -7767,13 +7792,146 @@ function drawTableRows(
   for (const j of jobs) {
     renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact);
   }
+
+  // ECMA-376 §17.4.66 — adjacent-cell border conflict resolution. Each SHARED
+  // interior gridline is drawn ONCE with the §17.4.66 winner (weight → precedence
+  // → luminance → reading order), instead of both neighbours painting it and the
+  // later one winning. Ownership convention so every line is drawn exactly once:
+  //   • outer table edges → the single bordering cell draws its own resolved spec;
+  //   • interior VERTICAL line → the LEFT cell owns it (drawn as its right edge),
+  //     resolved against the RIGHT neighbour's left edge;
+  //   • interior HORIZONTAL line → the ABOVE cell owns it (drawn as its bottom
+  //     edge), resolved against the BELOW neighbour's top edge.
+  // A cell's own top/left INTERIOR edges are therefore not drawn by the cell — the
+  // neighbour that owns that gridline consults this cell's spec as the opponent.
+  const ctx = state.ctx;
+  const dpr = state.dpr;
   for (const j of jobs) {
-    drawCellBorders(
-      state.ctx, j.x, j.y, j.w, j.h, j.cell.borders, table.borders,
-      scale, j.edges, mirror, state.dpr,
-    );
+    const { x, y, w, h } = j;
+    const own = resolveCellEdges(j.cell.borders, table.borders, j.edges, mirror);
+    // `own.left`/`own.right` are already PHYSICAL (resolveCellEdges folded the
+    // bidiVisual swap into the spec). The OUTER-vs-interior GATE must be physical
+    // too: under mirror a cell's physical-left edge is the logical RIGHT edge, so
+    // the physical outer-left flag is `edges.rightCol` (and vice versa). The
+    // physical-right NEIGHBOUR sits at the grid slot on that physical side —
+    // logical `ci + span` in LTR, logical `ci - 1` under mirror.
+    const physLeftOuter = mirror ? j.edges.rightCol : j.edges.leftCol;
+    const physRightOuter = mirror ? j.edges.leftCol : j.edges.rightCol;
+    const physRightCi = mirror ? j.ci - 1 : j.ci + j.span;
+
+    // TOP: only the outer top row draws its own top; interior tops are owned by
+    // the cell above (its bottom). (Vertical direction is unaffected by mirror.)
+    if (j.edges.topRow) {
+      const spec = paintable(own.top?.spec ?? null);
+      if (spec) drawBorderLine(ctx, x, y, x + w, y, spec, scale, dpr);
+    }
+    // PHYSICAL LEFT: only the outer-left column draws its own left; interior lefts
+    // are owned by the physically-left neighbour (its right edge).
+    if (physLeftOuter) {
+      const spec = paintable(own.left?.spec ?? null);
+      if (spec) drawBorderLine(ctx, x, y, x, y + h, spec, scale, dpr);
+    }
+    // BOTTOM: outer bottom → own spec; interior → resolve vs the below neighbour's
+    // top and draw the winner (this ABOVE cell owns the shared horizontal line).
+    {
+      let spec: BorderSpec | null;
+      if (j.edges.bottomRow) {
+        spec = paintable(own.bottom?.spec ?? null);
+      } else {
+        const below = neighbourEdges(jobs, occupancy, j.lastRi + 1, j.ci, mirror, table.borders);
+        spec = resolveSharedEdge(own.bottom, below?.top ?? null);
+      }
+      if (spec) drawBorderLine(ctx, x, y + h, x + w, y + h, spec, scale, dpr);
+    }
+    // PHYSICAL RIGHT: outer-right → own spec; interior → resolve vs the physically-
+    // right neighbour's left and draw the winner (this cell owns the shared
+    // vertical line as its physical right edge — so each line is drawn once).
+    {
+      let spec: BorderSpec | null;
+      if (physRightOuter) {
+        spec = paintable(own.right?.spec ?? null);
+      } else {
+        const right = neighbourEdges(jobs, occupancy, j.ri, physRightCi, mirror, table.borders);
+        spec = resolveSharedEdge(own.right, right?.left ?? null);
+      }
+      if (spec) drawBorderLine(ctx, x + w, y, x + w, y + h, spec, scale, dpr);
+    }
   }
   return y;
+}
+
+/** ECMA-376 §17.4.66 — the resolved physical edge specs of one cell (top / bottom
+ *  / left / right), each folding the cell's own edge → cell inside → table
+ *  inside/outer precedence (§17.4.38/§17.4.39), with `mirror` swapping the logical
+ *  left/right onto physical sides for a bidiVisual table. `null` = the edge paints
+ *  nothing at the cell level (before the neighbour conflict is considered).
+ *  A `source` tag ('cell' | 'table') travels with each spec for §17.4.66 rule #1. */
+interface ResolvedCellEdges {
+  top: { spec: BorderSpec; source: 'cell' | 'table' } | null;
+  bottom: { spec: BorderSpec; source: 'cell' | 'table' } | null;
+  left: { spec: BorderSpec; source: 'cell' | 'table' } | null;
+  right: { spec: BorderSpec; source: 'cell' | 'table' } | null;
+}
+
+function resolveCellEdges(
+  cell: CellBorders,
+  table: TableBorders,
+  edges: CellEdgeFlags,
+  mirror: boolean,
+): ResolvedCellEdges {
+  // Per-edge cascade: the cell's own explicit edge (source 'cell') wins; else an
+  // interior edge falls to the cell's insideH/insideV then the table inside spec;
+  // an outer edge falls to the table outer spec (all source 'table').
+  const horiz = (own: BorderSpec | null, outer: boolean, tableOuter: BorderSpec | null) => {
+    if (own) return { spec: own, source: 'cell' as const };
+    const t = outer ? tableOuter : (cell.insideH ?? table.insideH);
+    return t ? { spec: t, source: 'table' as const } : null;
+  };
+  const vert = (own: BorderSpec | null, outer: boolean, tableOuter: BorderSpec | null) => {
+    if (own) return { spec: own, source: 'cell' as const };
+    const t = outer ? tableOuter : (cell.insideV ?? table.insideV);
+    return t ? { spec: t, source: 'table' as const } : null;
+  };
+  const top = horiz(cell.top, edges.topRow, table.top);
+  const bottom = horiz(cell.bottom, edges.bottomRow, table.bottom);
+  // bidiVisual mirrors which logical edge maps to each physical side (§17.4.1).
+  const left = mirror
+    ? vert(cell.right, edges.rightCol, table.right)
+    : vert(cell.left, edges.leftCol, table.left);
+  const right = mirror
+    ? vert(cell.left, edges.leftCol, table.left)
+    : vert(cell.right, edges.rightCol, table.right);
+  return { top, bottom, left, right };
+}
+
+/** Resolve the neighbour cell at grid slot (ri, ci) and return its resolved
+ *  edges, or `null` when the slot is empty/out of range. */
+function neighbourEdges(
+  jobs: ReadonlyArray<{ cell: DocTableCell; edges: CellEdgeFlags }>,
+  occupancy: number[][],
+  ri: number,
+  ci: number,
+  mirror: boolean,
+  table: TableBorders,
+): ResolvedCellEdges | null {
+  if (ri < 0 || ri >= occupancy.length) return null;
+  if (ci < 0 || ci >= occupancy[ri].length) return null;
+  const idx = occupancy[ri][ci];
+  if (idx < 0) return null;
+  const nb = jobs[idx];
+  return resolveCellEdges(nb.cell.borders, table, nb.edges, mirror);
+}
+
+/** ECMA-376 §17.4.66 — pick the winning border for a shared interior edge from
+ *  the two neighbouring cells' resolved edges, then reduce it to a paintable
+ *  {@link BorderSpec} (nil/none ⇒ null). `a` is the owning (reading-order-first)
+ *  side. */
+function resolveSharedEdge(
+  a: { spec: BorderSpec; source: 'cell' | 'table' } | null,
+  b: { spec: BorderSpec; source: 'cell' | 'table' } | null,
+): BorderSpec | null {
+  const winner = resolveBorderConflict(a, b);
+  return winner ? paintable(winner.spec) : null;
 }
 
 /**
@@ -8203,7 +8361,7 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
   }
 }
 
-/** Which grid edges of the table this cell touches, so {@link drawCellBorders}
+/** Which grid edges of the table this cell touches, so {@link resolveCellEdges}
  *  can pick the OUTER (table.top/bottom/left/right) vs the INNER
  *  (table.insideH/insideV) spec per physical edge (ECMA-376 §17.4.38/§17.4.39). */
 interface CellEdgeFlags {
@@ -8219,73 +8377,6 @@ function paintable(b: BorderSpec | null): BorderSpec | null {
   if (!b) return null;
   if (b.style === 'none' || b.style === 'nil') return null;
   return b;
-}
-
-function drawCellBorders(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number,
-  cell: CellBorders,
-  table: TableBorders,
-  scale: number,
-  edges: CellEdgeFlags,
-  mirror = false,
-  dpr = 1,
-): void {
-  // ECMA-376 §17.4.38/§17.4.39: a cell's TOP/BOTTOM use the table OUTER border
-  // (top/bottom) only on the table's outermost rows; an interior horizontal
-  // gridline uses table.insideH. Likewise LEFT/RIGHT use the outer left/right
-  // only on the outermost columns, interior verticals use table.insideV.
-  // Per-edge precedence (§17.4.38/§17.4.39, the tblBorders presence cascade):
-  // the cell's own explicit edge (which already folds the conditional
-  // firstRow/lastRow/band tcBorders at parse time) wins; for an interior edge
-  // the cell's insideH/insideV is consulted before the table inside spec; the
-  // table outer spec is the last resort on outer edges.
-  //
-  // TODO(border-conflict §17.4.66): true adjacent-cell border conflict
-  // resolution is NOT implemented. Per §17.4.66 (tcBorders), when cell spacing
-  // is zero and the two cells sharing an interior gridline disagree, Word picks
-  // the winner by border WEIGHT, not by sz/width:
-  //   weight = (number of lines in the border) × (border style's number)
-  // where "border style's number" is the spec's CT_Border style rank table
-  // (single=1, thick=2, double=3, dotted=4, dashed=5, …, inset=25). The larger
-  // weight wins. Ties are broken, in order:
-  //   1. a style precedence list (single > thick > double > dotted > … > inset);
-  //   2. luminance, darker wins, via three formulas applied in sequence —
-  //      R+B+2G, then B+2G, then G (smaller value wins);
-  //   3. reading order: the first border in reading order is displayed.
-  // (There is no "top-then-left ownership" rule — that was a CSS-ism, not spec.)
-  // Today each cell paints its own four edges, so an interior gridline is drawn
-  // once by each of the two adjacent cells; for matching specs this is visually
-  // identical, and `nil` on either side still suppresses that side's stroke.
-  // When the two sides disagree the later-painted cell currently wins rather
-  // than the §17.4.66 weight rule above.
-  const horiz = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
-    paintable(own ?? (outer ? table.top : (cell.insideH ?? table.insideH)));
-  const horizB = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
-    paintable(own ?? (outer ? table.bottom : (cell.insideH ?? table.insideH)));
-  const vert = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
-    paintable(own ?? (outer ? table.left : (cell.insideV ?? table.insideV)));
-  const vertR = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
-    paintable(own ?? (outer ? table.right : (cell.insideV ?? table.insideV)));
-
-  const top = horiz(cell.top, edges.topRow);
-  const bottom = horizB(cell.bottom, edges.bottomRow);
-  // ECMA-376 §17.4.1: under bidiVisual the columns are visually reversed, so a
-  // cell's logical left (start) border is drawn on its physical right edge and
-  // vice versa. Borders are owned by the cell, so swap which spec each side uses,
-  // AND swap which outer edge / inside-fallback applies (the start column's outer
-  // edge is the physical right under bidiVisual).
-  const left = mirror
-    ? vertR(cell.right, edges.rightCol)
-    : vert(cell.left, edges.leftCol);
-  const right = mirror
-    ? vert(cell.left, edges.leftCol)
-    : vertR(cell.right, edges.rightCol);
-
-  if (top) drawBorderLine(ctx, x, y, x + w, y, top, scale, dpr);
-  if (bottom) drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale, dpr);
-  if (left) drawBorderLine(ctx, x, y, x, y + h, left, scale, dpr);
-  if (right) drawBorderLine(ctx, x + w, y, x + w, y + h, right, scale, dpr);
 }
 
 /** Stroke one crisp axis-aligned segment. `perp` shifts the whole line
