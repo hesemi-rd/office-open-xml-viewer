@@ -775,6 +775,24 @@ pub(crate) enum PathCmd {
     Close,
 }
 
+/// `<a:bodyPr><a:prstTxWarp prst="…">` — WordArt text warp (ECMA-376
+/// §20.1.9.19, `ST_TextShapeType`). The preset name (e.g. `"textArchUp"`,
+/// `"textWave1"`) selects one of the 40 `presetTextWarpDefinitions.xml`
+/// envelopes; `adj` carries the `<a:avLst>` guide values (thousandths of a
+/// percent, OOXML convention) in `adj1`, `adj2`, … order. An empty `adj` means
+/// the preset's declared defaults apply. Absent (`None`) → no warp.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextWarp {
+    /// The `prst` attribute, e.g. `"textArchUp"`. Renderer lower-cases it to key
+    /// the shared warp-preset table.
+    pub(crate) preset: String,
+    /// `<a:avLst>` adjust values in declaration order (adj1, adj2, …). Empty when
+    /// the author supplied no `<a:gd>` overrides, so the preset defaults apply.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) adj: Vec<i64>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TextBody {
@@ -822,6 +840,13 @@ pub(crate) struct TextBody {
     #[serde(skip_serializing_if = "is_false")]
     #[serde(default)]
     pub(crate) rtl_col: bool,
+    /// `<a:bodyPr><a:prstTxWarp>` — WordArt text warp (ECMA-376 §20.1.9.19).
+    /// None when the body has no warp (the common case), so existing text bodies
+    /// serialize byte-identically. When present the renderer maps each glyph
+    /// through the preset's envelope instead of laying the text out flat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub(crate) text_warp: Option<TextWarp>,
 }
 
 pub(crate) fn one_u32() -> u32 {

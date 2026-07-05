@@ -266,6 +266,7 @@ pub(crate) fn emit_smartart_fallback(
             num_col: 1,
             spc_col: 0,
             rtl_col: false,
+            text_warp: None,
         },
     )));
     true
@@ -361,6 +362,7 @@ fn emit_placeholder(gf_xfrm: &Transform, out: &mut Vec<SlideElement>) -> bool {
         num_col: 1,
         spc_col: 0,
         rtl_col: false,
+        text_warp: None,
     };
     let mut shape = text_list_shape(gf_xfrm, body);
     // A visible 1px grey border marks the diagram's extent.
