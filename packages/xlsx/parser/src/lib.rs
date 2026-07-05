@@ -937,10 +937,13 @@ fn parse_worksheet(
     let mut tab_color: Option<String> = None;
     let mut auto_filter: Option<CellRange> = None;
     let mut hyperlink_rids: HyperlinkRids = Vec::new();
-    // ECMA-376 §18.3.1.73: `@r` on `<row>` is optional. When omitted, the row
-    // number is the previous row's + 1 (the first row is 1); an explicit `@r`
-    // re-anchors this counter. `prev_row_idx == 0` means "no row yet", so the
-    // first implicit row lands at index 1.
+    // ECMA-376 §18.3.1.73 (CT_Row, sml.xsd) makes `@r` on `<row>` optional with
+    // no default; the spec does not spell out how an omitted value is resolved.
+    // We follow the de-facto consumer convention (Excel, LibreOffice, SheetJS
+    // agree; no competing interpretation exists): an r-less row is the previous
+    // row's number + 1 (the first row is 1), and an explicit `@r` re-anchors
+    // this counter. `prev_row_idx == 0` means "no row yet", so the first
+    // implicit row lands at index 1.
     let mut prev_row_idx: u32 = 0;
 
     // Pre-scan worksheet-level extLst for x14:dataBar extension attributes.
@@ -1236,8 +1239,10 @@ fn parse_worksheet(
                 }
             }
             "row" if is_x_ns(node.tag_name().namespace()) => {
-                // §18.3.1.73: honor an explicit `@r`; otherwise take the running
-                // previous row + 1 (implicit sequential numbering). An explicit
+                // §18.3.1.73 makes `@r` optional; honor an explicit value when
+                // present. When omitted, take the running previous row + 1
+                // (implicit sequential numbering — the de-facto consumer
+                // convention; the spec only grants the optionality). An explicit
                 // value also re-anchors the counter for following implicit rows.
                 let row_idx: u32 = match node.attribute("r").and_then(|s| s.parse::<u32>().ok()) {
                     Some(r) => r,
@@ -2303,7 +2308,8 @@ fn load_sheet_sparklines(
 fn parse_row_cells(
     row_node: &roxmltree::Node,
     // The resolved 1-based row number of the containing `<row>`. Used as the row
-    // coordinate for any `<c>` that omits its own `@r` (ECMA-376 §18.3.1.4).
+    // coordinate for any `<c>` that omits its own `@r` (optional per ECMA-376
+    // §18.3.1.4 / CT_Cell in sml.xsd).
     row_index: u32,
     // Shared-string cells now ship an `si` reference (resolved consumer-side),
     // so this table is no longer read here. Kept in the signature for symmetry
@@ -2312,11 +2318,14 @@ fn parse_row_cells(
     theme_colors: &[String],
 ) -> Vec<Cell> {
     let mut cells = Vec::new();
-    // ECMA-376 §18.3.1.4: `@r` on `<c>` is optional. When omitted, the cell's
-    // column is the one after the previous cell in this row (the first cell
-    // starts at column A / 1); an explicit `@r` re-anchors this running column
-    // so subsequent omitted cells continue from it. `prev_col == 0` means "no
-    // cell yet", so the first implicit cell lands at column 1.
+    // ECMA-376 §18.3.1.4 (CT_Cell, sml.xsd) makes `@r` on `<c>` optional with no
+    // default; the spec does not spell out how an omitted value is resolved. We
+    // follow the de-facto consumer convention (Excel, LibreOffice, SheetJS
+    // agree; no competing interpretation exists): an r-less cell takes the
+    // column after the previous cell in this row (the first cell starts at
+    // column A / 1), and an explicit `@r` re-anchors this running column so
+    // subsequent omitted cells continue from it. `prev_col == 0` means "no cell
+    // yet", so the first implicit cell lands at column 1.
     let mut prev_col: u32 = 0;
     for c_node in row_node.children() {
         if c_node.tag_name().name() != "c" || !is_x_ns(c_node.tag_name().namespace()) {
@@ -4253,8 +4262,10 @@ mod rb7_partial_degradation_tests {
 
 /// Implicit (omitted) cell/row references — ECMA-376 §18.3.1.4 (`c`) and
 /// §18.3.1.73 (`row`). Both `@r` attributes are `use="optional"` in the schema
-/// (CT_Cell / CT_Row, sml.xsd) with no default. When omitted, position is
-/// determined by ordinal document order:
+/// (CT_Cell / CT_Row, sml.xsd) with no default; that optionality is all the
+/// spec mandates — it does not spell out how an omitted reference is resolved.
+/// The resolution below is the de-facto consumer convention, on which Excel,
+/// LibreOffice, and SheetJS agree (no competing interpretation exists):
 ///
 ///   * `<c>` without `@r` → the next column after the previous cell in the same
 ///     row (the first cell in a row starts at column A / 1); an explicit `@r`
@@ -4340,9 +4351,10 @@ mod implicit_reference_tests {
         );
     }
 
-    /// Mixed: some cells carry an explicit `@r`, some don't. Per §18.3.1.4 an
-    /// explicit reference re-anchors the running column, so omitted cells after
-    /// it continue from that column, not from the ordinal count.
+    /// Mixed: some cells carry an explicit `@r`, some don't. Under the de-facto
+    /// convention (the spec grants only the optionality), an explicit reference
+    /// re-anchors the running column, so omitted cells after it continue from
+    /// that column, not from the ordinal count.
     #[test]
     fn explicit_r_reanchors_running_column() {
         // A1 (implicit) → col 1; then jump to D1 (explicit) → col 4; the next
