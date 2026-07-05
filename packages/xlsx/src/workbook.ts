@@ -12,7 +12,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
-import { renderWorksheetViewport } from './render-orchestrator.js';
+import { renderWorksheetViewport, closeAndClearImageCache } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
 import { resolveSharedStrings } from './shared-strings.js';
@@ -417,10 +417,12 @@ export class XlsxWorkbook {
     this.bridge.terminate();
     this.parsedWorkbook = null;
     this.sheetCache.clear();
-    this.imageCache.clear();
+    // Closes each cached ImageBitmap's GPU backing before dropping the map —
+    // see closeAndClearImageCache for why a bare `.clear()` would leak.
+    closeAndClearImageCache(this.imageCache);
     this.imageBlobCache.clear();
     // Revoke this workbook's decoded-SVG object URLs (raster sources live in the
-    // per-instance imageCache cleared above).
+    // per-instance imageCache closed above).
     dropSvgImageCache(this._fetchImage);
     this.rawData = null;
   }

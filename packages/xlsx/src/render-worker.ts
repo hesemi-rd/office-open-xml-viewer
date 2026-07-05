@@ -11,7 +11,7 @@
  */
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
-import { renderWorksheetViewport } from './render-orchestrator.js';
+import { renderWorksheetViewport, closeAndClearImageCache } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
@@ -95,9 +95,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     await host.ensureReady();
     if (req.type === 'parse') {
       // A re-parse starts a fresh document: drop any cached sheets / images so
-      // we never serve stale data from a previous load.
+      // we never serve stale data from a previous load. closeAndClearImageCache
+      // closes each cached ImageBitmap's GPU backing first — a bare `.clear()`
+      // would leak it (same fix as XlsxWorkbook.destroy(); see there for why).
       sheetCache.clear();
-      imageCache.clear();
+      closeAndClearImageCache(imageCache);
       imageBlobCache.clear();
       const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0

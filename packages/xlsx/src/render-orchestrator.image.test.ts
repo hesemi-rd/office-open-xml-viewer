@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { prefetchImages, decodeImageSource } from './render-orchestrator';
+import { prefetchImages, decodeImageSource, closeAndClearImageCache } from './render-orchestrator';
 import type { Worksheet } from './types';
 
 /**
@@ -248,5 +248,44 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     const callsAfterFirst = fetchImage.mock.calls.length;
     await prefetchImages(ws, cache, fetchImage);
     expect(fetchImage.mock.calls.length).toBe(callsAfterFirst);
+  });
+});
+
+describe('closeAndClearImageCache (teardown GPU-bitmap leak guard)', () => {
+  it('closes every cached ImageBitmap before clearing the map', () => {
+    const closeA = vi.fn();
+    const closeB = vi.fn();
+    const bmpA = { close: closeA } as unknown as ImageBitmap;
+    const bmpB = { close: closeB } as unknown as ImageBitmap;
+    const cache = new Map<string, CanvasImageSource | null>([
+      ['xl/media/image1.png', bmpA],
+      ['xl/media/image2.png', bmpB],
+    ]);
+
+    closeAndClearImageCache(cache);
+
+    expect(closeA).toHaveBeenCalledTimes(1);
+    expect(closeB).toHaveBeenCalledTimes(1);
+    expect(cache.size).toBe(0);
+  });
+
+  it('skips a cached null (unsupported metafile) without throwing', () => {
+    const cache = new Map<string, CanvasImageSource | null>([['xl/media/diagram.emf', null]]);
+    expect(() => closeAndClearImageCache(cache)).not.toThrow();
+    expect(cache.size).toBe(0);
+  });
+
+  it('skips a non-closeable CanvasImageSource (e.g. the SVG HTMLImageElement branch)', () => {
+    // The svgBlip vector branch decodes to an HTMLImageElement via
+    // getCachedSvgImageByPath, which has no `.close()` — must not throw.
+    const img = {} as unknown as HTMLImageElement;
+    const cache = new Map<string, CanvasImageSource | null>([['xl/media/image1.svg', img]]);
+    expect(() => closeAndClearImageCache(cache)).not.toThrow();
+    expect(cache.size).toBe(0);
+  });
+
+  it('is safe to call on an already-empty cache', () => {
+    const cache = new Map<string, CanvasImageSource | null>();
+    expect(() => closeAndClearImageCache(cache)).not.toThrow();
   });
 });

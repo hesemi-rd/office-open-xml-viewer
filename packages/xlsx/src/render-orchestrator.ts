@@ -97,6 +97,33 @@ export async function decodeImageSource(
   return decodeRaster(imagePath, mimeType);
 }
 
+/** Close every `ImageBitmap` held in a decoded-image cache, then clear it.
+ *
+ *  Unlike docx/pptx (which decode through core's path-keyed
+ *  `getCachedBitmapByPath`/`dropBitmapCacheByPath`, so eviction/teardown always
+ *  closes the GPU-backed bitmap), xlsx's `imageCache` is a plain per-instance
+ *  `Map<string, CanvasImageSource | null>` populated directly by
+ *  `decodeImageSource` (see {@link prefetchImages}). A bare `.clear()` on that
+ *  map drops the last reference to each decoded `ImageBitmap` WITHOUT calling
+ *  `.close()`, leaking its GPU backing until GC — worse, GC timing for
+ *  GPU-backed objects is not guaranteed, so repeated load/destroy or
+ *  reparse cycles can accumulate live bitmaps. `HTMLImageElement` (the SVG
+ *  vector-blip branch, via `getCachedSvgImageByPath`) and a cached `null`
+ *  (unsupported metafile) pass through untouched — only `ImageBitmap` values
+ *  own a `.close()` method.
+ *
+ *  Shared by {@link XlsxWorkbook.destroy} (main-thread cache) and the
+ *  render-worker's module-level cache (closed both on re-`parse` and, via the
+ *  realm tearing down, at worker termination). */
+export function closeAndClearImageCache(imageCache: Map<string, CanvasImageSource | null>): void {
+  for (const src of imageCache.values()) {
+    if (src && typeof (src as ImageBitmap).close === 'function') {
+      (src as ImageBitmap).close();
+    }
+  }
+  imageCache.clear();
+}
+
 /** Collect every embedded image referenced by a worksheet and decode the ones
  *  not already in `imageCache`, storing each decoded `CanvasImageSource` under
  *  its zip `imagePath` (the renderer's lookup key). Images appear either as a
