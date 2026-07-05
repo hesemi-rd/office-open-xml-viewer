@@ -1038,12 +1038,11 @@ pub fn extract_legend_manual_layout(legend_node: Node) -> Option<LegendManualLay
 }
 
 /// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis (labels, ticks
-/// and line) should be hidden. ECMA-376 §21.2.2.40.
+/// and line) should be hidden. ECMA-376 §21.2.2.40. `<c:delete>` is a
+/// `CT_Boolean` (dml-chart.xsd `val` default `true`), so a bare `<c:delete/>`
+/// means the axis IS deleted; an absent element leaves the axis shown.
 pub fn axis_is_deleted(axis_node: Node) -> bool {
-    child(axis_node, "delete")
-        .and_then(|n| n.attribute("val"))
-        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false)
+    bool_child(axis_node, "delete").unwrap_or(false)
 }
 
 /// `<c:catAx|valAx><c:majorTickMark val>` / `<c:minorTickMark val>`. Values
@@ -2705,10 +2704,9 @@ fn parse_leader_lines(
     d_lbls: Node,
     resolver: &dyn ColorResolver,
 ) -> (bool, Option<String>, Option<u32>) {
-    let show = child(d_lbls, "showLeaderLines")
-        .and_then(|c| c.attribute("val"))
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    // §21.2.2.183 `<c:showLeaderLines>` — CT_Boolean, so a bare element ⇒ true;
+    // absent ⇒ false (no leader lines by default).
+    let show = bool_child(d_lbls, "showLeaderLines").unwrap_or(false);
     let (color, width) = match child(d_lbls, "leaderLines")
         .and_then(|ll| child(ll, "spPr"))
         .and_then(|sp| child(sp, "ln"))
@@ -2734,12 +2732,10 @@ pub fn parse_series_data_labels(
         return (None, Vec::new());
     };
 
-    let bool_attr = |n: Node, name: &str| {
-        child(n, name)
-            .and_then(|c| c.attribute("val"))
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    };
+    // CT_Boolean show-flag: element present ⇒ true unless `val` explicitly
+    // disables it (§21.2.2, dml-chart.xsd `val` default `true`); element absent
+    // ⇒ false (the flag defaults off when the deck names no show-flag element).
+    let bool_attr = |n: Node, name: &str| bool_child(n, name).unwrap_or(false);
 
     let position = child(d_lbls, "dLblPos")
         .and_then(|n| n.attribute("val"))
@@ -2809,10 +2805,9 @@ pub fn parse_series_data_labels(
             .and_then(|n| n.attribute("val"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
-        let deleted = child(dl, "delete")
-            .and_then(|n| n.attribute("val"))
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // §21.2.2.43 per-point `<c:delete>` — CT_Boolean, so a bare
+        // `<c:delete/>` removes this point's label (val default true).
+        let deleted = bool_child(dl, "delete").unwrap_or(false);
         let pos = child(dl, "dLblPos")
             .and_then(|n| n.attribute("val"))
             .map(|s| s.to_string());
@@ -2852,11 +2847,8 @@ pub fn parse_series_data_labels(
         // Per-point show-flags (§21.2.2.47 CT_DLbl carries the same show-flag
         // group as CT_DLbls). Read as `Option` so an absent flag falls through
         // to the series default; a present flag overrides it for this point.
-        let opt_bool_flag = |name: &str| -> Option<bool> {
-            child(dl, name)
-                .and_then(|c| c.attribute("val"))
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        };
+        // CT_Boolean: a present-but-`val`-omitted flag is `Some(true)`.
+        let opt_bool_flag = |name: &str| -> Option<bool> { bool_child(dl, name) };
         overrides.push(ChartDataLabelOverride {
             idx,
             text,
@@ -2956,10 +2948,9 @@ pub fn parse_error_bars(
             .and_then(|n| n.attribute("val"))
             .unwrap_or("fixedVal")
             .to_string();
-        let no_end_cap = child(eb, "noEndCap")
-            .and_then(|n| n.attribute("val"))
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // §21.2.2.117 `<c:noEndCap>` — CT_Boolean, so a bare element ⇒ true (no
+        // I-beam end caps); absent ⇒ false (draw end caps by default).
+        let no_end_cap = bool_child(eb, "noEndCap").unwrap_or(false);
 
         let n_points = series_values.len();
         let mut plus: Vec<Option<f64>> = vec![None; n_points];
@@ -3732,12 +3723,12 @@ pub fn parse_chart_part(
             let is_pie_family = chart_type == "pie" || chart_type == "doughnut";
             let mut data_point_colors = data_point_colors;
             if is_pie_family {
+                // §21.2.2.203 `<c:varyColors>` — CT_Boolean (bare element ⇒ true).
+                // For the pie family the effective default is also "vary" when
+                // the element is ABSENT, so both the bare-present and absent cases
+                // resolve to true here.
                 let vary = group
-                    .and_then(|g| child(g, "varyColors"))
-                    .and_then(|n| attr(&n, "val"))
-                    // ECMA-376 default for the pie family is "vary" (true); the
-                    // `<c:varyColors>` element `val` attribute is xsd:boolean.
-                    .map(|v| v != "0" && v != "false")
+                    .and_then(|g| bool_child(g, "varyColors"))
                     .unwrap_or(true);
                 if vary {
                     for (i, slot) in data_point_colors.iter_mut().enumerate() {
@@ -3804,11 +3795,10 @@ pub fn parse_chart_part(
             // absent the chart-type-level `<c:lineChart><c:marker val>` default
             // (§21.2.2.33) governs visibility. Scatter defaults to visible
             // markers even without an explicit flag.
-            let chart_marker_default = group
-                .and_then(|g| child(g, "marker"))
-                .and_then(|m| m.attribute("val"))
-                .map(|v| v != "0")
-                .unwrap_or(false);
+            // §21.2.2.33 chart-type-level `<c:lineChart><c:marker>` — CT_Boolean,
+            // so a bare `<c:marker/>` enables markers (val default true); absent
+            // ⇒ false (line series draw no markers unless opted in).
+            let chart_marker_default = group.and_then(|g| bool_child(g, "marker")).unwrap_or(false);
             let marker_node = child(*ser, "marker");
             let (marker_symbol, marker_size, marker_fill, marker_line) =
                 parse_marker_block(marker_node, color_resolver);
@@ -3907,12 +3897,11 @@ pub fn parse_chart_part(
     // VERBATIM ("Production in 2017"). Making the title APPEAR is the goal; the
     // caps transform is a separate, tracked rendering-layer limitation.
     if title.is_none() {
+        // §21.2.2.7 `<c:autoTitleDeleted>` — CT_Boolean, so a bare element ⇒ true
+        // (the auto title is deleted, suppressing the single-series fallback
+        // title); absent ⇒ false (the auto title may still be shown).
         let auto_title_deleted = chart_node
-            .and_then(|c| child(c, "autoTitleDeleted"))
-            .and_then(|n| attr(&n, "val"))
-            // CT_Boolean: default false (auto title may be shown) when the
-            // element or its `val` is absent.
-            .map(|v| v == "1" || v == "true")
+            .and_then(|c| bool_child(c, "autoTitleDeleted"))
             .unwrap_or(false);
         if !auto_title_deleted && series.len() == 1 {
             let ser_name = series[0].name.trim();
@@ -3931,11 +3920,12 @@ pub fn parse_chart_part(
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
         .any(|d_lbls| {
-            d_lbls.children().any(|c| {
-                c.is_element()
-                    && matches!(c.tag_name().name(), "showVal" | "showPercent")
-                    && attr(&c, "val").as_deref() == Some("1")
-            })
+            // `<c:showVal>` / `<c:showPercent>` are CT_Boolean: a present element
+            // is ON unless `val` explicitly disables it (bare element ⇒ true), so
+            // a bare `<c:showVal/>` enables data labels while `val="0"` does not.
+            ["showVal", "showPercent"]
+                .iter()
+                .any(|name| bool_child(d_lbls, name).unwrap_or(false))
         });
 
     // Outer chartSpace spPr: we want the child of chartSpace (not plotArea).
@@ -5522,6 +5512,84 @@ mod tests {
         Document::parse(xml).expect("parse chartSpace fixture")
     }
 
+    #[test]
+    fn ct_boolean_auto_title_deleted_bare_suppresses_fallback_title() {
+        // §21.2.2.7 `<c:autoTitleDeleted/>` ⇒ true ⇒ the single-series name is
+        // NOT promoted to a fallback chart title. A bare element must read true;
+        // its absence (control) leaves the auto title, so the series name shows.
+        let with_bare = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart>
+                <c:autoTitleDeleted/>
+                <c:plotArea><c:lineChart>
+                  <c:ser><c:idx val="0"/><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>OnlySeries</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+                </c:lineChart></c:plotArea>
+              </c:chart></c:chartSpace>"#
+        );
+        let d = chart_space_of(&with_bare);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("chart");
+        assert_eq!(
+            m.title, None,
+            "bare <c:autoTitleDeleted/> ⇒ no fallback title"
+        );
+
+        let without = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart>
+                <c:plotArea><c:lineChart>
+                  <c:ser><c:idx val="0"/><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>OnlySeries</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+                </c:lineChart></c:plotArea>
+              </c:chart></c:chartSpace>"#
+        );
+        let d2 = chart_space_of(&without);
+        let m2 = parse_chart_part(d2.root_element(), &FixtureResolver).expect("chart");
+        assert_eq!(
+            m2.title.as_deref(),
+            Some("OnlySeries"),
+            "no autoTitleDeleted ⇒ series name is the fallback title"
+        );
+    }
+
+    #[test]
+    fn ct_boolean_chart_level_marker_bare_enables_markers() {
+        // §21.2.2.33 `<c:lineChart><c:marker/>` ⇒ true ⇒ line series show markers
+        // even without a per-series `<c:marker>`. A bare element must read true.
+        let bare = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart>
+                <c:plotArea><c:lineChart>
+                  <c:marker/>
+                  <c:ser><c:idx val="0"/>
+                    <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+                </c:lineChart></c:plotArea>
+              </c:chart></c:chartSpace>"#
+        );
+        let d = chart_space_of(&bare);
+        let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("chart");
+        assert_eq!(
+            m.series[0].show_marker,
+            Some(true),
+            "bare <c:marker/> ⇒ markers enabled"
+        );
+
+        // Control: `<c:marker val="0"/>` ⇒ markers off for a line series.
+        let off = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart>
+                <c:plotArea><c:lineChart>
+                  <c:marker val="0"/>
+                  <c:ser><c:idx val="0"/>
+                    <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+                </c:lineChart></c:plotArea>
+              </c:chart></c:chartSpace>"#
+        );
+        let d2 = chart_space_of(&off);
+        let m2 = parse_chart_part(d2.root_element(), &FixtureResolver).expect("chart");
+        assert_eq!(
+            m2.series[0].show_marker,
+            Some(false),
+            "<c:marker val=\"0\"/> ⇒ markers off"
+        );
+    }
+
     /// (a) Bar chart with the full decoration set: title (size/bold/color),
     /// legend, styled category + value axes, gap/overlap, chartSpace border,
     /// and value-axis major gridlines. Every field asserted here is a distinct
@@ -6113,6 +6181,146 @@ mod tests {
         assert_eq!(o.idx, 1);
         assert_eq!(o.text, "Custom");
         assert_eq!(o.position.as_deref(), Some("outEnd"));
+    }
+
+    // ── CT_Boolean bare-element defaults (issue #806) ───────────────────────
+    //
+    // dml-chart.xsd defines `CT_Boolean` with `val` `default="true"`. Every
+    // element typed `CT_Boolean` (delete / show* / showLeaderLines / marker /
+    // noEndCap / autoTitleDeleted / …) therefore means TRUE when the element is
+    // PRESENT but the `val` attribute is OMITTED. Office always writes an
+    // explicit `val="0|1"`, so these probes drive the bare form that only a
+    // hand-authored / third-party file emits — the latent divergence the issue
+    // flags. `val="0"` must still read false, and an ABSENT element keeps its
+    // own semantic default (off).
+
+    #[test]
+    fn ct_boolean_axis_delete_bare_element_is_true() {
+        // §21.2.2.40 `<c:delete/>` on an axis ⇒ axis deleted (val default true).
+        let bare_xml = format!(r#"<c:catAx xmlns:c="{C_NS}"><c:delete/></c:catAx>"#);
+        let bare = root_of(&bare_xml);
+        assert!(
+            axis_is_deleted(bare.root_element()),
+            "bare <c:delete/> ⇒ axis deleted"
+        );
+        let off_xml = format!(r#"<c:catAx xmlns:c="{C_NS}"><c:delete val="0"/></c:catAx>"#);
+        let off = root_of(&off_xml);
+        assert!(
+            !axis_is_deleted(off.root_element()),
+            "val=\"0\" ⇒ not deleted"
+        );
+        let absent_xml = format!(r#"<c:catAx xmlns:c="{C_NS}"/>"#);
+        let absent = root_of(&absent_xml);
+        assert!(
+            !axis_is_deleted(absent.root_element()),
+            "no <c:delete> ⇒ axis shown"
+        );
+    }
+
+    #[test]
+    fn ct_boolean_series_dlbl_show_flags_bare_are_true() {
+        // §21.2.2.187/.180/.185/.183 series-level show* flags. A bare
+        // <c:showVal/> etc. ⇒ true; the shared parser must not collapse it to
+        // false. `<c:showSerName val="0"/>` stays false (explicit override).
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:dLbls>
+                <c:showVal/>
+                <c:showCatName/>
+                <c:showSerName val="0"/>
+                <c:showPercent/>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (defaults, _) = parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let defaults = defaults.expect("dLbls present");
+        assert!(defaults.show_val, "bare <c:showVal/> ⇒ true");
+        assert!(defaults.show_cat_name, "bare <c:showCatName/> ⇒ true");
+        assert!(
+            !defaults.show_ser_name,
+            "<c:showSerName val=\"0\"/> ⇒ false"
+        );
+        assert!(defaults.show_percent, "bare <c:showPercent/> ⇒ true");
+    }
+
+    #[test]
+    fn ct_boolean_series_show_leader_lines_bare_is_true() {
+        // §21.2.2.183 `<c:showLeaderLines/>` ⇒ true (val default).
+        let cache = std::collections::HashMap::new();
+        let bare =
+            format!(r#"<c:ser xmlns:c="{C_NS}"><c:dLbls><c:showLeaderLines/></c:dLbls></c:ser>"#);
+        let d = root_of(&bare);
+        let (defaults, _) = parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        assert!(
+            defaults.expect("dLbls present").show_leader_lines,
+            "bare <c:showLeaderLines/> ⇒ true"
+        );
+    }
+
+    #[test]
+    fn ct_boolean_per_point_dlbl_bare_delete_and_flags_are_true() {
+        // §21.2.2.43 per-point `<c:delete/>` ⇒ that point's label removed.
+        // §21.2.2.47 per-point show* ⇒ Some(true) for a bare flag (overrides the
+        // series default for that point), Some(false) for val="0".
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:dLbls>
+                <c:dLbl>
+                  <c:idx val="0"/>
+                  <c:delete/>
+                </c:dLbl>
+                <c:dLbl>
+                  <c:idx val="2"/>
+                  <c:showPercent/>
+                  <c:showCatName val="0"/>
+                </c:dLbl>
+                <c:showVal val="1"/>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (_, overrides) = parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let del = overrides
+            .iter()
+            .find(|o| o.idx == 0)
+            .expect("idx 0 override");
+        assert_eq!(
+            del.deleted,
+            Some(true),
+            "bare per-point <c:delete/> ⇒ deleted"
+        );
+        let flags = overrides
+            .iter()
+            .find(|o| o.idx == 2)
+            .expect("idx 2 override");
+        assert_eq!(
+            flags.show_percent,
+            Some(true),
+            "bare <c:showPercent/> ⇒ Some(true)"
+        );
+        assert_eq!(flags.show_cat_name, Some(false), "val=\"0\" ⇒ Some(false)");
+    }
+
+    #[test]
+    fn ct_boolean_err_bars_no_end_cap_bare_is_true() {
+        // §21.2.2.117 `<c:noEndCap/>` ⇒ true (no I-beam end caps).
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:errBars>
+                <c:errBarType val="both"/>
+                <c:errValType val="fixedVal"/>
+                <c:noEndCap/>
+                <c:val val="1"/>
+              </c:errBars>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let bars = parse_error_bars(d.root_element(), &[Some(1.0)], &FixtureResolver);
+        assert_eq!(bars.len(), 1);
+        assert!(bars[0].no_end_cap, "bare <c:noEndCap/> ⇒ true");
     }
 
     #[test]

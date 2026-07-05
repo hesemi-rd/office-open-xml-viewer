@@ -1,5 +1,6 @@
 import type { DocxTextRunInfo } from './renderer';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
 /**
  * Build the transparent text-selection overlay for a rendered docx page: one
@@ -27,6 +28,14 @@ import type { HyperlinkTarget } from '@silurus/ooxml-core';
  *                         the browser's own navigation can never bypass the
  *                         caller's URL sanitisation. When omitted, link runs are
  *                         rendered exactly like plain runs (no click affordance).
+ * @param measureForFont   optional width-measurer factory (primed with a run's
+ *                         `font`), used ONLY to clamp a §17.3.2.10 縦中横
+ *                         (eastAsianVert) span to its drawn one-em cell (#836):
+ *                         the span composes a `scaleX(run.w / naturalWidth)` so
+ *                         its selection extent matches the compressed glyphs
+ *                         instead of the run's natural ~2× width. When omitted,
+ *                         a 縦中横 span keeps the bare rotate (no regression for
+ *                         callers that do not thread a measurer).
  */
 export function buildDocxTextLayer(
   layer: HTMLDivElement,
@@ -34,6 +43,7 @@ export function buildDocxTextLayer(
   canvasCssWidth: string,
   canvasCssHeight: string,
   onHyperlinkClick?: (target: HyperlinkTarget) => void,
+  measureForFont?: (font: string) => (s: string) => number,
 ): void {
   layer.innerHTML = '';
   layer.style.width = canvasCssWidth;
@@ -53,8 +63,20 @@ export function buildDocxTextLayer(
     // its top-left so the horizontal DOM text lies along the drawn (rotated) glyph
     // run. Horizontal pages carry no transform and place the span at `x`/`y`
     // untransformed (byte-identical to the pre-vertical overlay).
-    const transform = run.transform
-      ? `transform:${run.transform};transform-origin:top left;`
+    // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed
+    // into one em cell (`run.w`), so append a `scaleX(run.w / naturalWidth)` (when
+    // a measurer is available) so the span's selectable extent matches the drawn
+    // cell instead of the natural ~2× glyph width. Ordered AFTER the rotate so it
+    // compresses the span's horizontal (pre-rotation) axis — the along-column
+    // direction of the cell. A no-op factor of 1 for every ordinary run (see
+    // tate-chu-yoko-overlay.ts), so a non-縦中横 span's transform is unchanged.
+    let transformValue = run.transform ?? '';
+    if (measureForFont && run.eastAsianVert) {
+      const k = tateChuYokoOverlayScale(run, measureForFont(run.font));
+      if (k !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${k})`;
+    }
+    const transform = transformValue
+      ? `transform:${transformValue};transform-origin:top left;`
       : '';
     // IX1 — a run with a resolved hyperlink target becomes a clickable region.
     // Only the cursor changes to a pointer and a title tooltip is added; the
