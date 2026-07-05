@@ -635,6 +635,36 @@ impl StyleMap {
     }
 }
 
+/// ECMA-376 §17.3.1.37 tab-stop inheritance — MERGE a more-specific set (`src`,
+/// e.g. a paragraph's direct `<w:tabs>`) over an inherited one (`base`, e.g. the
+/// resolved style-chain stops) by POSITION, not wholesale replace. Word treats
+/// each `<w:tab>` as keyed on its `pos`: a more-specific stop at the same
+/// position OVERRIDES the inherited one (its alignment/leader win), a
+/// `val="clear"` stop REMOVES the inherited stop at that position, and stops at
+/// positions the inherited set lacks are ADDED. This is what lets a TOC entry's
+/// direct left tab coexist with the TOC style's right dot-/underscore-leader tab
+/// (the leader + page-number column). Positions compare within a 1/20-pt epsilon
+/// (twips round-trip). The result is sorted; `clear` markers are stripped (they
+/// only delete). A wholesale replace here silently dropped the style's leader
+/// tab whenever a paragraph added ANY direct tab (issue #820 TOC leaders).
+pub(crate) fn merge_tab_stops(
+    base: &[(f64, String, String)],
+    src: &[(f64, String, String)],
+) -> Vec<(f64, String, String)> {
+    const EPS: f64 = 0.05; // 1/20 pt — the twips grid
+    let mut out: Vec<(f64, String, String)> = base.to_vec();
+    for s in src {
+        // Remove any inherited stop at the same position (override or clear).
+        out.retain(|b| (b.0 - s.0).abs() > EPS);
+        if s.1 != "clear" {
+            out.push(s.clone());
+        }
+    }
+    out.retain(|t| t.1 != "clear");
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
 /// Layer the paragraph format `src` OVER `dst`: every property `src` explicitly
 /// sets replaces `dst`'s. Used both for the style cascade (basedOn parent →
 /// child) and — via parser.rs — for a paragraph's DIRECT pPr over its resolved
@@ -676,8 +706,12 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.num_level.is_some() {
         dst.num_level = src.num_level;
     }
-    if src.tab_stops.is_some() {
-        dst.tab_stops = src.tab_stops.clone();
+    if let Some(src_tabs) = &src.tab_stops {
+        // §17.3.1.37 — MERGE by position (see `merge_tab_stops`), not replace, so
+        // a direct/child tab set keeps the inherited style's other stops (e.g. a
+        // TOC leader tab). `dst` empty ⇒ merge is just the sorted src.
+        let base = dst.tab_stops.take().unwrap_or_default();
+        dst.tab_stops = Some(merge_tab_stops(&base, src_tabs));
     }
     if src.shading.is_some() {
         dst.shading = src.shading.clone();
@@ -970,15 +1004,18 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         let mut tabs: Vec<(f64, String, String)> = Vec::new();
         for t in children_w(tabs_node, "tab") {
             let val = attr_w(t, "val").unwrap_or_else(|| "left".to_string());
-            // val="clear" removes an inherited tab — MVP: skip (no tab to emit)
-            if val == "clear" {
-                continue;
-            }
             let pos = match attr_w(t, "pos").map(|s| twips_to_pt(&s)) {
                 Some(p) => p,
                 None => continue,
             };
             let leader = attr_w(t, "leader").unwrap_or_else(|| "none".to_string());
+            // `val="clear"` (§17.3.1.37 / §17.18.84) is preserved through the
+            // style-chain merge (`apply_para` → `merge_tab_stops`), where it
+            // REMOVES an inherited stop at this position; `merge_tab_stops` drops any
+            // remaining `clear` (and the final `TabStop` conversion never emits
+            // one). Keeping it here — rather than dropping at parse — is what
+            // lets a direct `<w:tab val="clear" pos="X">` cancel a style stop
+            // at X while other direct stops merge with the inherited set.
             tabs.push((pos, val, leader));
         }
         if !tabs.is_empty() {
@@ -1546,6 +1583,50 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
 mod tests {
     use super::*;
     use roxmltree::Document as XmlDoc;
+
+    fn stop(pos: f64, al: &str, ldr: &str) -> (f64, String, String) {
+        (pos, al.to_string(), ldr.to_string())
+    }
+
+    #[test]
+    fn merge_tab_stops_unions_by_position_keeping_inherited_leader() {
+        // §17.3.1.37 — a direct left tab must NOT drop the style's right leader
+        // tab (issue #820 TOC): the two coexist because they sit at different
+        // positions. Result is sorted by pos.
+        let style = vec![
+            stop(50.85, "left", "none"),
+            stop(467.5, "right", "underscore"),
+        ];
+        let direct = vec![stop(195.05, "left", "none")];
+        let merged = merge_tab_stops(&style, &direct);
+        assert_eq!(
+            merged,
+            vec![
+                stop(50.85, "left", "none"),
+                stop(195.05, "left", "none"),
+                stop(467.5, "right", "underscore"),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_tab_stops_direct_overrides_at_same_position() {
+        // A direct stop at (within epsilon of) an inherited position wins.
+        let style = vec![stop(100.0, "left", "dot")];
+        let direct = vec![stop(100.02, "right", "none")];
+        let merged = merge_tab_stops(&style, &direct);
+        assert_eq!(merged, vec![stop(100.02, "right", "none")]);
+    }
+
+    #[test]
+    fn merge_tab_stops_clear_removes_inherited_and_never_emits() {
+        // `val="clear"` at a position removes the inherited stop there and is
+        // itself dropped from the result (§17.18.84).
+        let style = vec![stop(100.0, "left", "none"), stop(200.0, "right", "dot")];
+        let direct = vec![stop(100.0, "clear", "none")];
+        let merged = merge_tab_stops(&style, &direct);
+        assert_eq!(merged, vec![stop(200.0, "right", "dot")]);
+    }
 
     fn run_fmt_from(rpr_xml: &str) -> RunFmt {
         let xml = format!(

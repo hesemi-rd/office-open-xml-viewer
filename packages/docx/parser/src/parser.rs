@@ -12,8 +12,8 @@ use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
 use crate::styles::{
-    apply_para, apply_run, merge_cond_layers, parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder,
-    RawTblBorders, RunFmt, StyleMap,
+    apply_para, apply_run, merge_cond_layers, merge_tab_stops, parse_para_fmt, parse_run_fmt,
+    CondFmt, EdgeBorder, RawTblBorders, RunFmt, StyleMap,
 };
 use crate::types::*;
 use crate::xml_util::*;
@@ -5212,18 +5212,21 @@ fn extract_simple_paragraph_text(
     // drift-prone re-implementation of an existing parse). Carried onto `ShapeText`
     // so the text box is laid out by the main line engine (kinsoku/bidi/justify/
     // tabs), which the old simplified wrapper never applied.
-    let tab_stops: Vec<TabStop> = direct_ind
-        .tab_stops
-        .clone()
-        .or_else(|| style_para.tab_stops.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(pos, alignment, leader)| TabStop {
-            pos,
-            alignment,
-            leader,
-        })
-        .collect();
+    // §17.3.1.37 — MERGE direct over style-resolved stops by position (not
+    // replace), the same rule the body-paragraph path uses via `apply_para`
+    // (styles.rs `merge_tab_stops`): a text box's direct tab keeps the style's
+    // leader tab rather than dropping it.
+    let tab_stops: Vec<TabStop> = merge_tab_stops(
+        style_para.tab_stops.as_deref().unwrap_or(&[]),
+        direct_ind.tab_stops.as_deref().unwrap_or(&[]),
+    )
+    .into_iter()
+    .map(|(pos, alignment, leader)| TabStop {
+        pos,
+        alignment,
+        leader,
+    })
+    .collect();
     let bidi = direct_ind.bidi.or(style_para.bidi);
 
     // Single block-level format fields come from the FIRST text run (kept for
