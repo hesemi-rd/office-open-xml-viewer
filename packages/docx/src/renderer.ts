@@ -6206,19 +6206,35 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // `ctx.letterSpacing` (so the canvas adds it WITHIN each piece) —
           // together glyph i lands at measure(prefix)+i·pitch (measure==paint).
           const gridPlusSpacing = drawGridDeltaPx + segCharSpacingPx;
+          // ECMA-376 §17.3.2.43 `<w:w>` (issue #816): the MEASURE pass scaled the
+          // natural glyph advance by `segCharScale` (segAdvanceWidth) but left the
+          // fixed per-cell pitches (grid delta, char spacing, justify slack)
+          // un-scaled — w:w stretches glyphs, not the cell gaps. When a run carries
+          // w:w, reproduce that at paint by drawing inside a horizontal
+          // `ctx.scale(segCharScale, 1)` translated to the pen `x`: the natural
+          // glyph widths (and the `measure(prefix)` prefixes inside each piece's
+          // `dx`) compress with the transform, while every FIXED pitch is divided
+          // by `segCharScale` so that after the ×scale it lands at its intended
+          // un-scaled magnitude. `segCharScale===1` (the overwhelmingly common
+          // path, and the ONLY one any current fixture hits) keeps the prior draw
+          // exactly: no transform, pieces at `x + dx`, pitch un-divided.
+          const scaled = segCharScale !== 1;
           const pieces = justifiedPiecePositions(
             cps,
             stretch?.splitBefore ?? [],
-            distPerGap,
+            distPerGap / segCharScale,
             measure,
-            gridPlusSpacing,
+            gridPlusSpacing / segCharScale,
           );
           const prevLetterSpacing = ctx.letterSpacing;
-          ctx.letterSpacing = `${gridPlusSpacing}px`;
+          if (scaled) { ctx.save(); ctx.translate(x, 0); ctx.scale(segCharScale, 1); }
+          const originX = scaled ? 0 : x;
+          ctx.letterSpacing = `${gridPlusSpacing / segCharScale}px`;
           for (const { text: piece, dx } of pieces) {
-            ctx.fillText(piece, x + dx, baseline + yOffset);
+            ctx.fillText(piece, originX + dx, baseline + yOffset);
           }
           ctx.letterSpacing = prevLetterSpacing;
+          if (scaled) ctx.restore();
         } else if (stretch && stretch.splitBefore.length > 0) {
           // ECMA-376 §17.18.44 `both`/`distribute` inter-CJK justification pitch.
           // Anchor each sliced piece to the WHOLE-string cumulative advance plus
@@ -6227,14 +6243,22 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // the next run over this segment's tail (most visible at a CJK→Latin
           // boundary). See `@silurus/ooxml-core` → text/justify-positions.ts.
           //
-          // KNOWN LATENT GAP (issue #816): §17.3.2.43 w:w (segCharScale) is NOT
-          // applied to the paint in this arm — the measure pass folded it into
-          // `s.measuredWidth` (segAdvanceWidth), so a scaled run that is also
-          // justify-distributed would draw its glyphs at full width inside a
-          // narrower box (ink overruns the measured span). Not reachable in any
-          // current fixture (w:w never co-occurs with distributed justify), but
-          // possible in a Japanese doc combining 均等割付 with compressed runs.
+          // ECMA-376 §17.3.2.43 `<w:w>` (issue #816): the MEASURE pass scaled the
+          // natural glyph advance by `segCharScale` (segAdvanceWidth) while leaving
+          // the justify slack un-scaled (w:w stretches glyphs, not the distributed
+          // gaps). When a run carries w:w, reproduce that by drawing inside a
+          // horizontal `ctx.scale(segCharScale, 1)` translated to the pen `x`: the
+          // natural glyph widths (and each piece's `measure(prefix)` prefix)
+          // compress with the transform, while the justify pitch (distPerGap) and
+          // §17.3.2.35 char spacing are divided by `segCharScale` so they land at
+          // their intended un-scaled magnitude. `segCharScale===1` (the common
+          // path, and the only one any current fixture hits) keeps the prior draw
+          // exactly: no transform, pieces at `x + dx`, pitch un-divided.
           const cps = [...s.text]; // code points (handles surrogate pairs)
+          const scaled = segCharScale !== 1;
+          const originX = scaled ? 0 : x;
+          const prevLetterSpacing = ctx.letterSpacing;
+          if (scaled) { ctx.save(); ctx.translate(x, 0); ctx.scale(segCharScale, 1); }
           if (stretch.splitBefore.length === cps.length - 1) {
             // FULLY distributed: a gap was opened at EVERY inter-glyph boundary
             // (pure-CJK justify), so the pitch is UNIFORM. Drawing one glyph per
@@ -6251,32 +6275,35 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // reaches measure(whole) + (n-1)·distPerGap = the segment box edge
             // (= internalStretch). Restore the prior letterSpacing afterwards; no
             // measureText runs inside the set/restore window.
-            const prevLetterSpacing = ctx.letterSpacing;
             // §17.3.2.35 char spacing is a per-glyph pitch on top of the justify
             // slack; both add uniformly, so combine them (the box measured
             // len·charSpacingPx separately from the justify slack — measure==paint).
-            ctx.letterSpacing = `${distPerGap + segCharSpacingPx}px`;
-            ctx.fillText(s.text, x, baseline + yOffset);
-            ctx.letterSpacing = prevLetterSpacing;
+            // Both fixed pitches are divided by `segCharScale` (see the arm header)
+            // so the ×scale frame reproduces their un-scaled magnitude (a no-op
+            // divide by 1 on the common non-w:w path).
+            ctx.letterSpacing = `${(distPerGap + segCharSpacingPx) / segCharScale}px`;
+            ctx.fillText(s.text, originX, baseline + yOffset);
           } else {
             const measure = (str: string): number => ctx.measureText(str).width;
-            const prevLetterSpacing = ctx.letterSpacing;
             // Partial justify split: pass the char-spacing pitch both as the
             // per-glyph letter-spacing term (so each piece's `dx` includes the
             // spacing of the glyphs before it) and as `ctx.letterSpacing` (so it
-            // is added WITHIN each piece) — measure==paint across the split.
+            // is added WITHIN each piece) — measure==paint across the split. Both
+            // the justify slack and the char spacing are divided by `segCharScale`
+            // so they survive the ×scale frame un-stretched (see the arm header).
             for (const { text: piece, dx } of justifiedPiecePositions(
               cps,
               stretch.splitBefore,
-              distPerGap,
+              distPerGap / segCharScale,
               measure,
-              segCharSpacingPx,
+              segCharSpacingPx / segCharScale,
             )) {
-              ctx.letterSpacing = `${segCharSpacingPx}px`;
-              ctx.fillText(piece, x + dx, baseline + yOffset);
+              ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
+              ctx.fillText(piece, originX + dx, baseline + yOffset);
             }
-            ctx.letterSpacing = prevLetterSpacing;
           }
+          ctx.letterSpacing = prevLetterSpacing;
+          if (scaled) ctx.restore();
         } else if (segCharScale !== 1) {
           // ECMA-376 §17.3.2.43 `<w:w>` — draw each glyph at `segCharScale`× its
           // normal width. Canvas has no per-glyph width scale, so paint under a
@@ -6284,14 +6311,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // and draw at local origin. Char spacing (if any) is applied in the
           // UNSCALED point space, so set `letterSpacing = charSpacing / scale`
           // inside the scaled frame to keep the fixed pitch un-stretched by w:w.
-          //
-          // KNOWN LATENT GAP (issue #816): this arm is only reached when the
-          // charSpace docGrid arm and the justify-distribution arm above did NOT
-          // claim the segment. When either is active, w:w is folded into the
-          // MEASURED box (segAdvanceWidth) but never applied at paint, so the ink
-          // would overrun the box (probe: box 55px vs ink 105px). No current
-          // fixture hits that combination; the fix (scaling those arms' draws)
-          // is tracked in #816, not patched here.
+          // (The docGrid and justify arms above compose the SAME transform when a
+          // grid / distributed run also carries w:w — issue #816.)
           ctx.save();
           ctx.translate(x, 0);
           ctx.scale(segCharScale, 1);

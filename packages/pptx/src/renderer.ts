@@ -78,6 +78,7 @@ import {
   hasTextWarp,
   buildWarpEnvelope,
   warpGlyphTransform,
+  followPathUScale,
 } from '@silurus/ooxml-core';
 import type { WarpEnvelope } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
@@ -1477,13 +1478,19 @@ function renderWarpedText(
     // "Follow Path" semantics place the text at its NATURAL width along the
     // arc without stretching the glyphs (vScale stays 1 inside
     // warpGlyphTransform); they keep the flat renderer's 0.8 ascent fallback
-    // for the baseline drop below the arc. Known gap (follow-up): we still
-    // distribute the text over the FULL arc length rather than only its
-    // natural-width span.
+    // for the baseline drop below the arc. The text also follows the path for
+    // only its natural arc-length span from the start (stAng): a glyph's `u`
+    // fraction is scaled by naturalWidth/arcLength via `followPathUScale`, so a
+    // word narrower than the arc occupies a LEADING segment of the path rather
+    // than being scattered over the whole ellipse. Paired-edge presets return
+    // scale 1 (they stretch the flat ink box to fill the envelope width).
     const inkH = maxA + maxD > 0 ? maxA + maxD : maxSize;
     const baselineFrac = env.singleEdge ? 0.8 : inkH > 0 ? maxA / inkH : 0.8;
     const hScale = env.singleEdge ? 1 : boxW / totalW;
     const warpBoxH = env.singleEdge ? boxH : inkH / (v1 - v0);
+    // Follow Path: fraction of the arc the natural-width text actually spans.
+    // 1 for paired-edge (no clamp); ≤1 for arch/circle.
+    const followScale = followPathUScale(env, totalW);
 
     // Walk glyphs left→right. `penW` accumulates the flat advance so each glyph's
     // CENTRE maps to its u fraction; the glyph is drawn at a per-glyph transform.
@@ -1500,8 +1507,11 @@ function renderWarpedText(
       const chars = [...seg.text];
       for (const ch of chars) {
         const chW = ctx.measureText(ch).width + ls;
-        // Horizontal fraction of THIS glyph's centre along the whole line.
-        const u = (penW + chW / 2) / totalW;
+        // Horizontal fraction of THIS glyph's centre along the whole line,
+        // scaled by the Follow Path factor so single-edge (arch/circle) text
+        // spans only its natural arc length from the start rather than the whole
+        // path. `followScale` is 1 for paired-edge presets (unchanged).
+        const u = ((penW + chW / 2) / totalW) * followScale;
         // Blend the per-line vertical band into the baseline fraction so line 2
         // sits below line 1 within the envelope.
         const bandFrac = v0 + baselineFrac * (v1 - v0);

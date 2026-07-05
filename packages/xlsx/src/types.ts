@@ -667,10 +667,13 @@ export interface Cell {
    *  so the cached `<v>` — frozen when the file was last saved — doesn't
    *  show a stale date. */
   formula?: string;
-  /** ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell displays its phonetic
-   *  hint (furigana). Omitted on the wire when false (the schema default), so
+  /** Whether this cell displays its phonetic hint (furigana). The parser
+   *  resolves it as `cell/@ph ?? row/@ph ?? false` — the per-cell `<c ph>`
+   *  (ECMA-376 §18.3.1.4) wins when present (an explicit `ph="0"` overrides an
+   *  enabled row), otherwise the row-level `<row ph>` (§18.3.1.73) is inherited,
+   *  otherwise the schema default (false). Omitted on the wire when false, so
    *  read as `showPhonetic ?? false`. A cell whose String Item carries `<rPh>`
-   *  runs still shows NO furigana unless it opts in with `ph="1"`. */
+   *  runs still shows NO furigana unless the resolved value is true. */
   showPhonetic?: boolean;
 }
 
