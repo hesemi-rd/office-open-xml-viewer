@@ -160,12 +160,14 @@ export interface LayoutImageSeg {
    *  box. `undefined` ⇒ draw the full bitmap. */
   srcRect?: { l: number; t: number; r: number; b: number };
   /** ECMA-376 §21.2 — when set, this "image" box is actually a DrawingML chart.
-   *  The box flows and is sized exactly like an inline picture (via
-   *  {@link LayoutImageSeg.widthPt}/{@link LayoutImageSeg.heightPt}), but the
-   *  draw site paints it with the shared `renderChart` instead of blitting a
-   *  bitmap. `imagePath`/`mimeType` are empty sentinels for a chart seg — no
-   *  blip is fetched (the bitmap-prefetch walk keys off `run.type === 'image'`
-   *  and never sees a chart run). */
+   *  The box is sized like a picture (via {@link LayoutImageSeg.widthPt}/
+   *  {@link LayoutImageSeg.heightPt}) and painted with the shared `renderChart`
+   *  instead of blitting a bitmap: an inline chart seg flows with the text and
+   *  is drawn at its flow position; an anchored chart seg (`anchor: true`,
+   *  §20.4.2.3) is zero-width in the flow and the chart is drawn at its
+   *  absolute page box by `renderAnchorImages`. `imagePath`/`mimeType` are
+   *  empty sentinels for a chart seg — no blip is fetched (the bitmap-prefetch
+   *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: ChartModel;
   measuredWidth: number;
 }

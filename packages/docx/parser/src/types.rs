@@ -1408,16 +1408,17 @@ fn is_zero_f64(v: &f64) -> bool {
 }
 
 /// A DrawingML chart embedded in the run flow (ECMA-376 §21.2). Positioned like
-/// an inline picture: the `<wp:inline><wp:extent cx/cy>` natural size in points
-/// governs the box the chart is drawn into. The `chart` payload is the shared
+/// a picture: the `<wp:extent cx/cy>` natural size in points governs the box
+/// the chart is drawn into. The `chart` payload is the shared
 /// [`ooxml_common::chart::ChartModel`] — identical to what pptx/xlsx pass to the
 /// core chart renderer — so the docx renderer draws charts at pptx/xlsx quality
 /// through the same `renderChart` entry point.
 ///
-/// Anchor (floating) charts are modeled with the same anchor fields the
-/// `ImageRun` carries; the current renderer path only draws `anchor == false`
-/// (inline) charts. The fields are present so a follow-up can position a
-/// floating `<wp:anchor>` chart without a wire-format change.
+/// Both placements are drawn: an inline chart (`anchor == false`) flows with the
+/// text like an inline picture, and an anchored (floating) chart
+/// (`anchor == true`, §20.4.2.3 `<wp:anchor>`) carries the same anchor fields an
+/// `ImageRun` does and is painted at its absolute page box by the renderer's
+/// anchor path (issue #752).
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRun {
@@ -1428,8 +1429,8 @@ pub struct ChartRun {
     pub width_pt: f64,
     /// Natural height from `<wp:extent cy>` (EMU → pt).
     pub height_pt: f64,
-    /// true = `<wp:anchor>` (absolute page position), false = `<wp:inline>`
-    /// (flows with text). Only inline charts are drawn today.
+    /// true = `<wp:anchor>` (absolute page position, drawn by the renderer's
+    /// anchor path), false = `<wp:inline>` (flows with text).
     pub anchor: bool,
     /// Anchor X offset (pt). Anchor-only; interpretation mirrors `ImageRun`.
     #[serde(skip_serializing_if = "is_zero_f64")]

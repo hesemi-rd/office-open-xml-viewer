@@ -608,18 +608,19 @@ export type DocRun =
   | { type: 'ptab' } & PTabRun;
 
 /** ECMA-376 §21.2 — a DrawingML chart embedded in the run flow via
- *  `<w:drawing><wp:inline>…<a:graphicData uri=".../chart"><c:chart r:id>`.
+ *  `<w:drawing><wp:inline|wp:anchor>…<a:graphicData uri=".../chart"><c:chart r:id>`.
  *  Mirrors the Rust `ChartRun`. `chart` is the shared {@link ChartModel} the
  *  core `renderChart` consumes (identical to what pptx/xlsx pass), so a docx
  *  chart draws at the same quality through the same code path. `widthPt`/
- *  `heightPt` are the `<wp:extent>` natural size; the renderer flows the chart
- *  as an inline box of that size and draws it with `renderChart`. */
+ *  `heightPt` are the `<wp:extent>` natural size. An inline chart flows as an
+ *  inline box of that size; an anchored chart (§20.4.2.3) is painted at its
+ *  absolute page box by `renderAnchorImages` — both via `renderChart`. */
 export interface ChartRun {
   chart: ChartModel;
   widthPt: number;
   heightPt: number;
-  /** true = `<wp:anchor>` (absolute); false = `<wp:inline>` (flows). Only
-   *  inline charts are drawn today. */
+  /** true = `<wp:anchor>` (absolute page position, drawn by the anchor path);
+   *  false = `<wp:inline>` (flows with text). */
   anchor: boolean;
   anchorXPt?: number;
   anchorYPt?: number;
