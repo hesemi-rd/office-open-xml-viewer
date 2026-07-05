@@ -2337,6 +2337,73 @@ describe('CH14 — pie callout data labels', () => {
     // No white callout boxes are drawn.
     expect(rec.rects.filter(r => r.fs === '#FFFFFF').length).toBe(0);
   });
+
+  // #767 — the bestFit de-overlap must keep every callout box INSIDE the chart
+  // rect even when many slivers stack in one column. The old separate() slid the
+  // column up for a bottom overflow, then unconditionally slid it back down for a
+  // top underflow, cancelling the up-slide so a 9+-label column spilled ~200px
+  // past the bottom edge. Stress with many same-side slivers and assert 0
+  // overflow + 0 overlap.
+  function pieStressModel(): ChartModel {
+    // 14 slices: 12 slivers swept early (clustered top→right→bottom, so most
+    // land in ONE column) + 2 large slices. Single-line percent labels keep each
+    // box short enough that a 9+-box column still fits within the plot band, so
+    // both invariants (0 overflow AND 0 overlap) can hold — the regime the old
+    // cancel-slide broke by spilling the column ~200px past the bottom edge.
+    const cats: string[] = [];
+    const values: number[] = [];
+    for (let i = 0; i < 12; i++) { cats.push(`Sliver ${i + 1}`); values.push(3); }
+    cats.push('Big A'); values.push(40);
+    cats.push('Big B'); values.push(40);
+    return baseModel({
+      chartType: 'pie',
+      title: 'Coffee Production',
+      categories: cats,
+      series: [series({
+        name: 'Prod',
+        values,
+        seriesDataLabels: {
+          showVal: false, showCatName: false, showSerName: false, showPercent: true,
+          position: 'bestFit',
+          labelBox: { fill: 'FFFFFF', borderColor: '4472C4', borderWidthEmu: 12700 },
+          showLeaderLines: true, leaderLineColor: 'A6A6A6', leaderLineWidthEmu: 9525,
+        },
+      })],
+    });
+  }
+
+  it('keeps every callout box inside the chart rect with no overlaps under many slivers (#767)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, pieStressModel(), RECT, 1);
+    const boxes = rec.rects.filter(r => r.fs === '#FFFFFF');
+    // All 14 slices are drawn (none dropped).
+    expect(boxes.length).toBe(14);
+
+    // (a) 0 overflow: every box lies fully within the chart rect [0..h] × [0..w].
+    for (const b of boxes) {
+      expect(b.y).toBeGreaterThanOrEqual(RECT.y - 0.5);
+      expect(b.y + b.h).toBeLessThanOrEqual(RECT.y + RECT.h + 0.5);
+      expect(b.x).toBeGreaterThanOrEqual(RECT.x - 0.5);
+      expect(b.x + b.w).toBeLessThanOrEqual(RECT.x + RECT.w + 0.5);
+    }
+
+    // The stress must actually pack 9+ boxes into a single vertical column — the
+    // regime that broke the old cancel-slide. Split by column via box centre x.
+    const midX = RECT.x + RECT.w / 2;
+    const rightCol = boxes.filter(b => b.x + b.w / 2 >= midX)
+      .sort((p, q) => p.y - q.y);
+    const leftCol = boxes.filter(b => b.x + b.w / 2 < midX)
+      .sort((p, q) => p.y - q.y);
+    expect(Math.max(rightCol.length, leftCol.length)).toBeGreaterThanOrEqual(9);
+
+    // (b) 0 overlap within each column: consecutive boxes never overlap
+    // vertically (boxes in different columns may share a y-band harmlessly).
+    for (const col of [rightCol, leftCol]) {
+      for (let k = 1; k < col.length; k++) {
+        expect(col[k].y).toBeGreaterThanOrEqual(col[k - 1].y + col[k - 1].h - 0.5);
+      }
+    }
+  });
 });
 
 // CH15 — chartEx box-and-whisker (MS 2014 chartex ext). Verify the derived

@@ -2620,7 +2620,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // slices. Only runs when a rich definition is present; the plain percent
   // labels above are byte-identical to the pre-CH8 pie.
   if (hasRichLabels) {
-    drawPieRichLabels(ctx, chart, richDef, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle, dLblFont, ptToPx, x, w, y, h);
+    drawPieRichLabels(ctx, chart, richDef, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle, dLblFont, ptToPx, plotLeft, plotTop, pw, ph);
   }
 
   if (pieLeg) {
@@ -2663,11 +2663,13 @@ function drawPieRichLabels(
   startAngle: number,
   font: string,
   ptToPx: number,
-  boundsX: number, boundsW: number, boundsY: number, boundsH: number,
+  plotX: number, plotY: number, plotW: number, plotH: number,
 ): void {
   // Callout mode: a `<c:spPr>` box shape on the dLbls (Word's boxed pie labels).
+  // Labels de-overlap and clamp inside the PLOT rect (not the full chart rect),
+  // so the topmost box cannot ride up into the title band above the plot.
   if (def.labelBox) {
-    drawPieCalloutLabels(ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, startAngle, font, ptToPx, boundsX, boundsW, boundsY, boundsH);
+    drawPieCalloutLabels(ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, startAngle, font, ptToPx, plotX, plotW, plotY, plotH);
     return;
   }
 
@@ -2833,10 +2835,44 @@ function drawPieCalloutLabels(
   //    sample-specific tuning). ──
   const topLimit = boundsY + 2;
   const bottomLimit = boundsY + boundsH - 2;
+  const band = bottomLimit - topLimit;
   const separate = (col: PieCalloutLabel[]): void => {
     if (col.length === 0) return;
     col.sort((a, b) => a.cyBox - b.cyBox);
-    // Push each box below the previous one by at least their combined half
+    // Total height the boxes need when stacked edge-to-edge with a 3px gap
+    // between them: the sum of box heights plus the inter-box gaps.
+    let stackH = 0;
+    for (const l of col) stackH += l.boxH;
+    stackH += (col.length - 1) * 3;
+
+    if (stackH > band) {
+      // More label than plot: the boxes cannot all fit with the full 3px gaps
+      // inside the plot rect. Distribute them so the FIRST box top sits at
+      // topLimit and the LAST box bottom sits at bottomLimit, spacing the
+      // in-between boxes by an equal step. This keeps the whole column WITHIN
+      // [topLimit, bottomLimit] — never spilling past the bottom — which is the
+      // overflow #767 guarded against. When the boxes are short enough to fit
+      // (sumBoxH ≤ band) the step is a positive gap (no overlap); only a genuine
+      // over-pack (sumBoxH > band, i.e. more labels than the plot can hold)
+      // forces the boxes to touch/slightly overlap rather than escape the frame.
+      const sumBoxH = col.reduce((a, l) => a + l.boxH, 0);
+      const n = col.length;
+      if (n === 1) {
+        col[0].cyBox = Math.min(Math.max(col[0].cyBox, topLimit + col[0].boxH / 2), bottomLimit - col[0].boxH / 2);
+        return;
+      }
+      // Equal gap so first-top = topLimit and last-bottom = bottomLimit:
+      //   topLimit + ΣboxH + (n−1)·gap = bottomLimit  ⇒  gap = (band − ΣboxH)/(n−1)
+      const gap = (band - sumBoxH) / (n - 1); // may be negative when over-packed
+      let cursor = topLimit;
+      for (const l of col) {
+        l.cyBox = cursor + l.boxH / 2;
+        cursor += l.boxH + gap;
+      }
+      return;
+    }
+
+    // Fits: push each box below the previous one by at least their combined half
     // heights (+ a small gap) so rectangles never overlap.
     for (let k = 1; k < col.length; k++) {
       const prev = col[k - 1];
@@ -2844,14 +2880,20 @@ function drawPieCalloutLabels(
       const minGap = (prev.boxH + cur.boxH) / 2 + 3;
       if (cur.cyBox - prev.cyBox < minGap) cur.cyBox = prev.cyBox + minGap;
     }
-    // If the stack now runs past the bottom bound, slide the whole column up
-    // (but not above the top bound) so it stays inside the chart area.
+    // If the stack now runs past the bottom bound, slide the whole column up.
     const last = col[col.length - 1];
     const overflow = (last.cyBox + last.boxH / 2) - bottomLimit;
     if (overflow > 0) for (const l of col) l.cyBox -= overflow;
+    // If it now runs above the top bound, slide back down — but CAP the shift so
+    // the bottom box does not re-cross bottomLimit (the fits-in-band case makes
+    // that cap a no-op; keeping it makes the invariant explicit).
     const first = col[0];
     const underflow = topLimit - (first.cyBox - first.boxH / 2);
-    if (underflow > 0) for (const l of col) l.cyBox += underflow;
+    if (underflow > 0) {
+      const room = bottomLimit - (last.cyBox + last.boxH / 2);
+      const shift = Math.min(underflow, Math.max(0, room));
+      if (shift > 0) for (const l of col) l.cyBox += shift;
+    }
   };
   separate(labels.filter(l => !l.leftSide));
   separate(labels.filter(l => l.leftSide));

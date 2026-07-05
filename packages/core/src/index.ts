@@ -30,6 +30,7 @@ export type {
   ChartDataLabelOverride,
   ChartDataPointOverride,
   ChartErrBars,
+  ChartLabelBox,
   ChartManualLayout,
   ChartModel,
   ChartRect,
