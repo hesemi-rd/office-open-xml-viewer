@@ -697,12 +697,11 @@ export class XlsxViewer {
     this.wrapper.appendChild(this.tabBar);
     container.appendChild(this.wrapper);
 
-    // Gutter click handling (XL4): +/- toggles, group brackets, and the numbered
-    // level buttons in the corner. Registered once; no-op when a sheet has no
-    // gutter (extents 0 ⇒ canvases hidden).
+    // Gutter click handling (XL4): +/- toggles and the numbered level banks
+    // (each in its own gutter's header strip; the corner is inert background).
+    // Registered once; no-op when a sheet has no gutter (extents 0 ⇒ hidden).
     this.rowGutter.addEventListener('pointerdown', (e) => this.onGutterPointerDown(e, 'row'));
     this.colGutter.addEventListener('pointerdown', (e) => this.onGutterPointerDown(e, 'col'));
-    this.cornerGutter.addEventListener('pointerdown', (e) => this.onCornerPointerDown(e));
 
     this.scrollHost.addEventListener('scroll', () => {
       // Any scroll cancels a deferred tap: the press that started it was a
@@ -1020,6 +1019,27 @@ export class XlsxViewer {
         }
       }
     }
+
+    // Numbered level buttons (1..maxLevel+1), one per lane, in this gutter's
+    // header strip: the row bank sits beside the column-letter header (the
+    // gutter's top HEADER_H band — no bracket ever draws there because band
+    // y-coordinates start at the header edge), the column bank above the
+    // row-number header (leftmost HEADER_W band). Placing each bank in its own
+    // gutter (Excel's layout) keeps the two banks from ever sharing a cell —
+    // the old corner placement collided at the shared bottom-right lane and
+    // made the row expand-all button unreachable.
+    const bankCross = isRow ? (HEADER_H * cs) / 2 : (HEADER_W * cs) / 2;
+    for (let l = 1; l <= layout.maxLevel + 1; l++) {
+      const laneCenter = (l - 0.5) * lanePx;
+      if (laneCenter + lanePx / 2 > (isRow ? cssW : cssH) + 0.5) break;
+      this.drawLevelButton(
+        ctx,
+        isRow ? laneCenter : bankCross,
+        isRow ? bankCross : laneCenter,
+        String(l),
+        cs,
+      );
+    }
   }
 
   /** Draw a small square +/- toggle centered at (cx, cy) in gutter-canvas CSS px. */
@@ -1053,9 +1073,37 @@ export class XlsxViewer {
     ctx.restore();
   }
 
-  /** Draw the numbered level buttons (1..maxLevel+1) in the corner gutter. */
+  /** Draw one numbered level button centered at (cx, cy) in gutter-canvas CSS
+   *  px. Shared by the row bank (in the row gutter's top strip) and the column
+   *  bank (in the column gutter's left strip). */
+  private drawLevelButton(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    label: string,
+    cs: number,
+  ): void {
+    const s = Math.round(11 * cs);
+    const x = Math.round(cx - s / 2);
+    const y = Math.round(cy - s / 2);
+    ctx.save();
+    ctx.font = `${Math.round(9 * cs)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#808080';
+    ctx.lineWidth = 1;
+    ctx.fillRect(x + 0.5, y + 0.5, s, s);
+    ctx.strokeRect(x + 0.5, y + 0.5, s, s);
+    ctx.fillStyle = '#404040';
+    ctx.fillText(label, cx, cy + 0.5);
+    ctx.restore();
+  }
+
+  /** Paint the corner (intersection of the two gutters) as plain background.
+   *  The numbered level banks live in each axis gutter's own header strip
+   *  (see paintAxisGutter), so the corner carries no interactive content. */
   private paintCornerGutter(): void {
-    const cs = this.opts.cellScale ?? 1;
     const dpr = window.devicePixelRatio ?? 1;
     const canvas = this.cornerGutter;
     const cssW = parseFloat(canvas.style.width) || 0;
@@ -1069,49 +1117,6 @@ export class XlsxViewer {
     ctx.clearRect(0, 0, cssW, cssH);
     ctx.fillStyle = '#f5f5f5';
     ctx.fillRect(0, 0, cssW, cssH);
-
-    // Level buttons for whichever axes are grouped. Row-level buttons stack in the
-    // row gutter's lanes (vertical column of the corner); col-level buttons run
-    // across the col gutter's lanes (horizontal row of the corner).
-    ctx.font = `${Math.round(9 * cs)}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const lanePx = OUTLINE_LANE_PX * cs;
-    const drawBtn = (cx: number, cy: number, label: string) => {
-      const s = Math.round(11 * cs);
-      const x = Math.round(cx - s / 2);
-      const y = Math.round(cy - s / 2);
-      ctx.fillStyle = '#ffffff';
-      ctx.strokeStyle = '#808080';
-      ctx.lineWidth = 1;
-      ctx.fillRect(x + 0.5, y + 0.5, s, s);
-      ctx.strokeRect(x + 0.5, y + 0.5, s, s);
-      ctx.fillStyle = '#404040';
-      ctx.fillText(label, cx, cy + 0.5);
-    };
-    // Column-level buttons occupy the rightmost row-gutter lane (a vertical bank
-    // at x = cssW - lanePx/2), aligned to the column gutter's horizontal lanes.
-    // Row-level buttons form a horizontal bank on the bottom corner row, one per
-    // row-gutter lane — but skip the rightmost lane when a column bank already
-    // owns it, so the two banks never overprint the same cell.
-    const colBankX = this.colOutline ? cssW - lanePx / 2 : null;
-    if (this.rowOutline) {
-      const cy = cssH - lanePx / 2;
-      for (let l = 1; l <= this.rowOutline.maxLevel + 1; l++) {
-        const cx = (l - 0.5) * lanePx;
-        if (cx > this.gutter.w) break;
-        // Don't draw over the column bank's lane.
-        if (colBankX != null && Math.abs(cx - colBankX) < 0.5) continue;
-        drawBtn(cx, cy, String(l));
-      }
-    }
-    if (this.colOutline && colBankX != null) {
-      for (let l = 1; l <= this.colOutline.maxLevel + 1; l++) {
-        const cy = (l - 0.5) * lanePx;
-        if (cy > this.gutter.h) break;
-        drawBtn(colBankX, cy, String(l));
-      }
-    }
   }
 
   /** Handle a click in a row/col gutter: hit-test the +/- toggles and toggle the
@@ -1128,7 +1133,26 @@ export class XlsxViewer {
     const py = e.clientY - rect.top;
     const cs = this.opts.cellScale ?? 1;
     const lanePx = OUTLINE_LANE_PX * cs;
-    const hitR = 7 * cs; // generous grab radius around the toggle center
+    const hitR = 7 * cs; // generous grab radius around a button center
+
+    // Numbered level bank first: it lives in this gutter's header strip (row
+    // bank beside the column-letter header, column bank above the row-number
+    // header — mirrors paintAxisGutter), where no +/- toggle can be.
+    const bankCross = isRow ? (HEADER_H * cs) / 2 : (HEADER_W * cs) / 2;
+    const inBankStrip = (isRow ? py : px) <= (isRow ? HEADER_H : HEADER_W) * cs;
+    if (inBankStrip) {
+      for (let l = 1; l <= layout.maxLevel + 1; l++) {
+        const laneCenter = (l - 0.5) * lanePx;
+        const cx = isRow ? laneCenter : bankCross;
+        const cy = isRow ? bankCross : laneCenter;
+        if (Math.abs(px - cx) <= hitR && Math.abs(py - cy) <= hitR) {
+          e.preventDefault();
+          this.applyLevelButton(l, axis);
+          return;
+        }
+      }
+      return; // header strip carries no toggles — don't fall through
+    }
 
     for (const g of layout.groups) {
       if (g.summary == null) continue;
@@ -1144,49 +1168,6 @@ export class XlsxViewer {
         e.preventDefault();
         this.applyGroupToggle(g, axis);
         return;
-      }
-    }
-  }
-
-  /** Handle a click on a numbered level button in the corner gutter. */
-  private onCornerPointerDown(e: PointerEvent): void {
-    const ws = this.currentWorksheet;
-    if (!ws) return;
-    const canvas = this.cornerGutter;
-    const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
-    const cs = this.opts.cellScale ?? 1;
-    const lanePx = OUTLINE_LANE_PX * cs;
-    const hitR = 7 * cs;
-    const cssW = parseFloat(canvas.style.width) || 0;
-    const cssH = parseFloat(canvas.style.height) || 0;
-
-    // Match the draw order in paintCornerGutter: the column bank owns the
-    // rightmost lane, so test it first and let the row bank skip that lane.
-    const colBankX = this.colOutline ? cssW - lanePx / 2 : null;
-    if (this.colOutline && colBankX != null) {
-      for (let l = 1; l <= this.colOutline.maxLevel + 1; l++) {
-        const cy = (l - 0.5) * lanePx;
-        if (cy > this.gutter.h) break;
-        if (Math.abs(px - colBankX) <= hitR && Math.abs(py - cy) <= hitR) {
-          e.preventDefault();
-          this.applyLevelButton(l, 'col');
-          return;
-        }
-      }
-    }
-    if (this.rowOutline) {
-      const cy = cssH - lanePx / 2;
-      for (let l = 1; l <= this.rowOutline.maxLevel + 1; l++) {
-        const cx = (l - 0.5) * lanePx;
-        if (cx > this.gutter.w) break;
-        if (colBankX != null && Math.abs(cx - colBankX) < 0.5) continue;
-        if (Math.abs(px - cx) <= hitR && Math.abs(py - cy) <= hitR) {
-          e.preventDefault();
-          this.applyLevelButton(l, 'row');
-          return;
-        }
       }
     }
   }
