@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
-import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, openExternalHyperlink } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -99,9 +99,20 @@ export interface XlsxViewerOptions extends LoadOptions {
    *  own zoom control). */
   showZoomSlider?: boolean;
   /** Lower/upper bounds for the zoom slider as scale factors. Default 0.1–4
-   *  (10%–400%, matching Excel's zoom range). */
+   *  (10%–400%, matching Excel's zoom range). Also the clamp range for the IX9
+   *  {@link ZoomableViewer} zoom contract ({@link XlsxViewer.setScale} etc.). */
   zoomMin?: number;
   zoomMax?: number;
+  /**
+   * IX9 — fires whenever the zoom factor actually changes (`1` = 100%), whatever
+   * the source: {@link XlsxViewer.setScale}, {@link XlsxViewer.zoomIn} /
+   * {@link XlsxViewer.zoomOut}, {@link XlsxViewer.fitWidth} /
+   * {@link XlsxViewer.fitPage}, the built-in zoom slider, the +/- buttons, or a
+   * Ctrl/⌘+wheel gesture. Named `onScaleChange` to match the docx/pptx viewers so
+   * all five share one notification shape. Not fired when a call resolves to the
+   * same (clamped/snapped) scale.
+   */
+  onScaleChange?: (scale: number) => void;
   onReady?: (sheetNames: string[]) => void;
   /**
    * Called when the active sheet changes, with the new sheet's zero-based
@@ -328,7 +339,7 @@ function getSheetAxes(ws: Worksheet, mdw: number): SheetAxes {
   return axes;
 }
 
-export class XlsxViewer {
+export class XlsxViewer implements ZoomableViewer {
   private wb: XlsxWorkbook | null = null;
   /** The single subtree root the constructor appended to the caller's
    *  container. destroy() removes it to return the container to its original
@@ -2500,9 +2511,13 @@ export class XlsxViewer {
       : 50 + ((clamped - 1) / (max - 1)) * 50;
   }
 
-  /** Set the cell/header scale and re-lay-out the current sheet. Clamped to the
-   *  zoom bounds; keeps the slider thumb, percentage label and the row-header-
-   *  aligned tab-nav width in sync. */
+  /**
+   * IX9 {@link ZoomableViewer} — set the cell/header scale (`1` = 100%; the
+   * viewer's `cellScale`) and re-lay-out the current sheet. Clamped to the zoom
+   * bounds and snapped to whole percent; keeps the slider thumb, percentage label
+   * and the row-header-aligned tab-nav width in sync, and fires `onScaleChange`
+   * when the resolved scale actually changes.
+   */
   setScale(scale: number): void {
     const zoomMin = this.opts.zoomMin ?? 0.1;
     const zoomMax = this.opts.zoomMax ?? 4;
@@ -2537,6 +2552,92 @@ export class XlsxViewer {
     this.updateSelectionOverlay();
     this.updateFindOverlay();
     this.updateNavButtons();
+    // IX9 change notification (fired last, after the view is consistent). Only
+    // reached when `next` differs from the prior scale (early-returned above).
+    this.opts.onScaleChange?.(next);
+  }
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor (`1` = 100%). This is
+   *  the viewer's `cellScale`; `1` before anything is set. */
+  getScale(): number {
+    return this.opts.cellScale ?? 1;
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder (clamped to `zoomMax` by {@link setScale}). */
+  zoomIn(): void {
+    this.setScale(nextZoomStep(this.getScale()));
+  }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  zoomOut(): void {
+    this.setScale(prevZoomStep(this.getScale()));
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the used data range's WIDTH to the canvas
+   * area. The "content" is the natural (100%) width of the row header plus the
+   * used columns; the container is `canvasArea.clientWidth`. A no-op (defers) when
+   * nothing is loaded or the container is unlaid-out. Routes through
+   * {@link setScale}, so the result is clamped/snapped and fires `onScaleChange`.
+   */
+  fitWidth(): void {
+    this._fit('width');
+  }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the used data range's WIDTH AND HEIGHT inside
+   * the canvas area (header + used columns/rows), so the whole used range is
+   * visible without scrolling. Takes the tighter of the width- and height-fit
+   * factors. Defers when unloaded / unlaid-out; routes through {@link setScale}.
+   */
+  fitPage(): void {
+    this._fit('page');
+  }
+
+  /** Shared fit implementation for {@link fitWidth} / {@link fitPage}: derive the
+   *  natural (cs=1) content extent of the used data range, ask core's pure
+   *  {@link fitScale} for the factor, and apply it via {@link setScale}. */
+  private _fit(mode: 'width' | 'page'): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const { width, height } = this._naturalContentExtent(ws);
+    const scale = fitScale(
+      {
+        contentWidth: width,
+        contentHeight: height,
+        containerWidth: this.canvasArea.clientWidth,
+        containerHeight: this.canvasArea.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out / empty — defer (fitScale's 0 sentinel)
+    this.setScale(scale);
+  }
+
+  /** Natural (unscaled, cs=1) CSS-px extent of a worksheet's used data range:
+   *  the row/column header plus every used column width / row height. Mirrors
+   *  {@link updateSpacerSize} at cs=1 (same used-range detection) so the fit
+   *  targets exactly the region the spacer/scroll extent covers. */
+  private _naturalContentExtent(ws: Worksheet): { width: number; height: number } {
+    const mdw = getMdwForWorksheet(ws);
+    let maxRow = Math.max(50, ws.freezeRows ?? 0);
+    let maxCol = Math.max(26, ws.freezeCols ?? 0);
+    for (const row of ws.rows) {
+      if (row.index > maxRow) maxRow = row.index;
+      for (const cell of row.cells) {
+        if (cell.col > maxCol) maxCol = cell.col;
+      }
+    }
+    let width = HEADER_W;
+    for (let c = 1; c <= maxCol; c++) {
+      width += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw);
+    }
+    let height = HEADER_H;
+    for (let r = 1; r <= maxRow; r++) {
+      height += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+    }
+    return { width, height };
   }
 
   private updateSpacerSize(ws: Worksheet): void {
