@@ -276,6 +276,43 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     // reports none, so the along-column correction is 0 (y = 0) too.
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
   });
+
+  it('does NOT ink-centre a substituted Tu comma even when ink metrics are present', () => {
+    // The comma/full stop vertical forms (︑ ︒) are DESIGNED with their ink in the
+    // cell's upper-right corner (JIS X 4051). Unlike a Tr bracket, they must NOT be
+    // pulled to the geometric cell centre by the along-column ink metric — doing so
+    // drops them LOW (the "、。 sit too low" defect, #771). So even with ink metrics
+    // reported, the punctuation draws at the em-box centre (y = 0), letting the
+    // font's designed corner offset stand.
+    const { ctx, ops } = mockCtx({
+      // Model ︑ ink hugging the top of the cell (as a real vertical comma does).
+      inkMiddle: { '︑': { asc: 21, desc: -9 } },
+    });
+    drawVerticalRun(ctx, '、', 0, 0, 12, 0);
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill?.text).toBe('︑');
+    // y stays 0 (em-box centred) — the ink metric is deliberately ignored here.
+    expect(fill?.y).toBe(0);
+    // Contrast: a Tr bracket WITH the same ink metric IS shifted (see the ︵/︶ test
+    // above), proving the skip is punctuation-specific, not a blanket disable.
+  });
+
+  it('draws ！ / ？ UPRIGHT without substitution (they stand centred, not corner-hung)', () => {
+    // ！ FF01 and ？ FF1F are vo=Tu but NOT substituted to FE15/FE16: those vertical
+    // forms are corner-designed in many fonts and would push the mark off the column
+    // centre (the sample-26 "！ shifted right" defect, #771). The original fullwidth
+    // mark drawn upright is already the correct, centred vertical appearance.
+    const { ctx, ops } = mockCtx();
+    drawVerticalRun(ctx, '！？', 0, 0, 12, 0);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    // Drawn as the ORIGINAL code points (no FE15/FE16 substitution), counter-rotated
+    // upright and centred on the cell (center/middle at x=0, y=0).
+    expect(fills.map((f) => f.text)).toEqual(['！', '？']);
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(2);
+    expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
+    expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
+  });
 });
 
 describe('drawUprightBox (§17.6.20 — keep images upright inside the rotated page)', () => {
