@@ -1374,14 +1374,16 @@ function renderWarpedText(
   defaultColor: string,
   rc: RenderContext,
 ): void {
-  const lPad = emuToPx(body.lIns, scale);
-  const rPad = emuToPx(body.rIns, scale);
-  const tPad = emuToPx(body.tIns, scale);
-  const bPad = emuToPx(body.bIns, scale);
-  const boxX = bx + lPad;
-  const boxY = by + tPad;
-  const boxW = Math.max(1, bw - lPad - rPad);
-  const boxH = Math.max(1, bh - tPad - bPad);
+  // The warp envelope spans the FULL shape bounding box, NOT the text rect
+  // inset by lIns/tIns/rIns/bIns. The preset guide formulas (ECMA-376
+  // §20.1.9.19 / presetTextWarpDefinitions.xml) are written against the
+  // shape's `w`/`h` built-ins, and PowerPoint's own PDF output of the warp
+  // fixture confirms it: paired-edge warp ink spans 6.04–6.18in of a 6.2in
+  // shape (insets would cap it at 6.0) and up to 1.48in of a 1.5in-tall one.
+  const boxX = bx;
+  const boxY = by;
+  const boxW = Math.max(1, bw);
+  const boxH = Math.max(1, bh);
 
   const env = buildWarpEnvelope(preset, adj, boxW, boxH);
   if (!env) return; // unknown preset — nothing to draw (caller already gated)
@@ -1428,29 +1430,60 @@ function renderWarpedText(
     const v0 = li / lineCount;
     const v1 = (li + 1) / lineCount;
 
-    // Measure the line: total advance width + max font size (for the box height
-    // of the band, and the baseline fraction within it).
+    // Measure the line: total advance width, max font size, and the line's INK
+    // extents (max actualBoundingBox ascent/descent over the segments). The ink
+    // box — not the em box — is what PowerPoint normalises onto the envelope.
     let totalW = 0;
     let maxSize = 0;
+    let maxA = 0; // ink ascent above the baseline
+    let maxD = 0; // ink descent below the baseline
     for (const seg of line.segments) {
       if (seg.math) {
         totalW += seg.math.width;
         maxSize = Math.max(maxSize, seg.sizePx);
+        maxA = Math.max(maxA, seg.math.ascent);
+        maxD = Math.max(maxD, seg.math.descent);
         continue;
       }
       ctx.font = seg.font;
       const ls = seg.letterSpacingPx ?? 0;
-      totalW += ctx.measureText(seg.text).width + ls * codePointCount(seg.text);
+      const m = ctx.measureText(seg.text);
+      totalW += m.width + ls * codePointCount(seg.text);
       maxSize = Math.max(maxSize, seg.sizePx);
+      if (m.actualBoundingBoxAscent > 0) maxA = Math.max(maxA, m.actualBoundingBoxAscent);
+      if (m.actualBoundingBoxDescent > 0) maxD = Math.max(maxD, m.actualBoundingBoxDescent);
     }
     if (totalW <= 0) continue;
 
-    // The band's nominal box height in the flat layout: the line's em box. The
-    // baseline sits at ~ascent/emBox from the top; use 0.8 (typical cap+ascent
-    // ratio) so warped glyphs hang consistently, matching the flat renderer's
-    // maxAscent≈0.8·lineHeight fallback.
-    const bandBoxH = boxH * (v1 - v0);
-    const baselineFrac = 0.8;
+    // PowerPoint's WordArt semantics for the envelope (paired-edge) presets:
+    // the FLAT text's INK RECTANGLE (totalW × ink height) is first STRETCHED to
+    // fill the shape box, and the warp then bends that stretched rectangle
+    // between the two edges. Measured against PowerPoint's own PDF of the warp
+    // fixture (calibrated print scale), paired-edge ink spans 6.04–6.18in of
+    // the 6.2in shape and up to 1.48in of the 1.5in one — i.e. the ink touches
+    // the envelope edges. Passing the body height here instead would collapse
+    // vScale = gap/boxH ≈ 1 and leave glyphs at their tiny natural size.
+    //
+    // - Vertical: the line's flat ink box (maxA+maxD px, measured — no 0.8em
+    //   heuristic) maps to this line's SHARE of the local gap.
+    //   warpGlyphTransform returns vScale = gap/boxHeight, so passing
+    //   `inkH / (v1 - v0)` yields gap·(v1−v0)/inkH, and a baseline fraction of
+    //   maxA/inkH pins the ink top to T(u) and the ink bottom to B(u).
+    // - Horizontal: the glyph itself is widened by boxW/totalW (not just the
+    //   spacing). Glyph centres sit Δu·boxW ≈ chW·hScale apart, so scaled
+    //   glyphs tile the envelope without gaps or overlaps.
+    //
+    // Single-edge (arch/circle) presets keep natural glyph size: PowerPoint's
+    // "Follow Path" semantics place the text at its NATURAL width along the
+    // arc without stretching the glyphs (vScale stays 1 inside
+    // warpGlyphTransform); they keep the flat renderer's 0.8 ascent fallback
+    // for the baseline drop below the arc. Known gap (follow-up): we still
+    // distribute the text over the FULL arc length rather than only its
+    // natural-width span.
+    const inkH = maxA + maxD > 0 ? maxA + maxD : maxSize;
+    const baselineFrac = env.singleEdge ? 0.8 : inkH > 0 ? maxA / inkH : 0.8;
+    const hScale = env.singleEdge ? 1 : boxW / totalW;
+    const warpBoxH = env.singleEdge ? boxH : inkH / (v1 - v0);
 
     // Walk glyphs left→right. `penW` accumulates the flat advance so each glyph's
     // CENTRE maps to its u fraction; the glyph is drawn at a per-glyph transform.
@@ -1472,11 +1505,11 @@ function renderWarpedText(
         // Blend the per-line vertical band into the baseline fraction so line 2
         // sits below line 1 within the envelope.
         const bandFrac = v0 + baselineFrac * (v1 - v0);
-        const g = warpGlyphTransform(env, u, boxH, bandFrac);
+        const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
         ctx.rotate(g.angle);
-        if (g.vScale !== 1) ctx.scale(1, g.vScale);
+        if (hScale !== 1 || g.vScale !== 1) ctx.scale(hScale, g.vScale);
         // Draw the glyph centred on the mapped point: shift left by half its
         // advance so its own centre lands on `u`.
         ctx.fillText(ch, -chW / 2 + ls / 2, 0);

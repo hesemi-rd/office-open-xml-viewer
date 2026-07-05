@@ -127,6 +127,7 @@ function buildSlide(preset: string): Presentation {
 
 async function renderInk(preset: string): Promise<{
   topRow: (col: number) => number | null;
+  bottomRow: (col: number) => number | null;
   width: number;
   height: number;
 }> {
@@ -143,19 +144,25 @@ async function renderInk(preset: string): Promise<{
   const data = img.data as unknown as Uint8ClampedArray;
   const W = width * dpr;
   const H = height * dpr;
+  const inked = (col: number, y: number): boolean => {
+    const i = (y * W + col) * 4;
+    // Dark ink on the default (transparent/white) background: low luminance
+    // AND non-transparent. skia clears to transparent; text is opaque black.
+    const a = data[i + 3];
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    return a > 40 && lum < 128;
+  };
   // For a given column, the first (topmost) row whose pixel is inked (dark).
   const topRow = (col: number): number | null => {
-    for (let y = 0; y < H; y++) {
-      const i = (y * W + col) * 4;
-      // Dark ink on the default (transparent/white) background: low luminance
-      // OR opaque black. skia clears to transparent; text is opaque black.
-      const a = data[i + 3];
-      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      if (a > 40 && lum < 128) return y;
-    }
+    for (let y = 0; y < H; y++) if (inked(col, y)) return y;
     return null;
   };
-  return { topRow, width: W, height: H };
+  // …and the last (bottommost) inked row.
+  const bottomRow = (col: number): number | null => {
+    for (let y = H - 1; y >= 0; y--) if (inked(col, y)) return y;
+    return null;
+  };
+  return { topRow, bottomRow, width: W, height: H };
 }
 
 /** Min top-inked row across a column band [c0, c1). */
@@ -201,5 +208,23 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
     // ascenders vary a little, but there is no arch rise).
     const spread = Math.max(leftTop!, centreTop!, rightTop!) - Math.min(leftTop!, centreTop!, rightTop!);
     expect(spread).toBeLessThan(12);
+  });
+
+  it('textInflate stretches glyph ink to fill the envelope gap (G1 guard)', async () => {
+    // PowerPoint stretches the flat text's ink rectangle to the shape box
+    // before warping — verified against PowerPoint's PDF of the warp fixture
+    // (ink height 1.48in in a 1.5in-tall shape). The shape here is 160px tall
+    // and textInflate's envelope spans the full box height at its centre, so
+    // the centre glyphs' ink must span well over half the box. Before the fix
+    // glyphs kept their natural ~38px size (vScale collapsed to ≈1).
+    const { topRow, bottomRow, width } = await renderInk('textInflate');
+    const boxHpx = 160; // shape height in px at this render scale
+    let maxSpan = 0;
+    for (let c = Math.floor(width * 0.35); c < Math.floor(width * 0.65); c++) {
+      const t = topRow(c);
+      const b = bottomRow(c);
+      if (t != null && b != null) maxSpan = Math.max(maxSpan, b - t + 1);
+    }
+    expect(maxSpan).toBeGreaterThan(boxHpx * 0.5);
   });
 });
