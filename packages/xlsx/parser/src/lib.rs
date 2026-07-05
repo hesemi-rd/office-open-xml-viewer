@@ -3815,6 +3815,85 @@ mod rb7_partial_degradation_tests {
         buf
     }
 
+    /// Build a synthetic workbook whose one shared string ("課長") carries a
+    /// `<phoneticPr>` + two `<rPh>` runs, and whose sheet has an A1 cell with
+    /// `ph="1"` (opts into the furigana) and a B1 cell with the same string but
+    /// no `ph` (furigana off). Mirrors the ph=true/ph=false split of the
+    /// private fixtures. Styles include a small phonetic font at index 2.
+    fn build_phonetic_workbook() -> Vec<u8> {
+        let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        let sheet = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData><row r="1"><c r="A1" t="s" ph="1"><v>0</v></c><c r="B1" t="s"><v>0</v></c></row></sheetData></worksheet>"#
+        );
+        let ss = format!(
+            r#"<sst xmlns="{ns}" count="2" uniqueCount="1"><si><t>課長</t><rPh sb="0" eb="1"><t>カ</t></rPh><rPh sb="1" eb="2"><t>チョウ</t></rPh><phoneticPr fontId="2" alignment="center"/></si></sst>"#
+        );
+        let workbook = format!(
+            r#"<workbook xmlns="{ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Alpha" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+        );
+        let wb_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let styles = format!(
+            r#"<styleSheet xmlns="{ns}"><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><name val="Calibri"/></font><font><sz val="6"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>"#
+        );
+        let entries: Vec<(String, String)> = vec![
+            ("xl/workbook.xml".into(), workbook),
+            ("xl/_rels/workbook.xml.rels".into(), wb_rels.into()),
+            ("xl/worksheets/sheet1.xml".into(), sheet),
+            ("xl/styles.xml".into(), styles),
+            ("xl/sharedStrings.xml".into(), ss),
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in &entries {
+                w.start_file(name.as_str(), o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    /// End-to-end (real zip → JSON): a `<si>` with `<rPh>`/`<phoneticPr>` surfaces
+    /// on the shared-string table, and the cell `ph` attribute flows onto the
+    /// per-cell `showPhonetic` flag. B1 (no `ph`) stays false even though it
+    /// references the SAME phonetic string — the reading is display-off there,
+    /// exactly like the private fixtures (rPh present, no cell opts in).
+    #[test]
+    fn phonetic_workbook_round_trips_rph_and_cell_ph() {
+        let data = build_phonetic_workbook();
+        // The full `ParsedWorkbook` (what `parse_xlsx` ships to TS) carries the
+        // phonetic shared string in its `sharedStrings` table.
+        let parsed = parse_xlsx_inner(&data).expect("workbook opens");
+        let wb_json = serde_json::to_string(&parsed).unwrap();
+        let wb: serde_json::Value = serde_json::from_str(&wb_json).unwrap();
+        let si0 = &wb["sharedStrings"][0];
+        assert_eq!(si0["text"].as_str(), Some("課長"), "base text only");
+        let rph = si0["phoneticRuns"]
+            .as_array()
+            .expect("phoneticRuns present");
+        assert_eq!(rph.len(), 2);
+        assert_eq!(rph[0]["sb"].as_u64(), Some(0));
+        assert_eq!(rph[0]["eb"].as_u64(), Some(1));
+        assert_eq!(rph[0]["text"].as_str(), Some("カ"));
+        assert_eq!(si0["phoneticPr"]["fontId"].as_u64(), Some(2));
+        assert_eq!(si0["phoneticPr"]["alignment"].as_str(), Some("center"));
+        // type absent → the consumer applies the fullwidthKatakana default.
+        assert!(si0["phoneticPr"].get("type").is_none());
+
+        // The sheet's A1 opts in (ph=1); B1 does not (schema default false).
+        let ws = parse_sheet_json(&data, 0, "Alpha");
+        let cells = ws["rows"][0]["cells"].as_array().unwrap();
+        let a1 = cells.iter().find(|c| c["col"].as_u64() == Some(1)).unwrap();
+        let b1 = cells.iter().find(|c| c["col"].as_u64() == Some(2)).unwrap();
+        assert_eq!(a1["showPhonetic"].as_bool(), Some(true), "A1 ph=1 → show");
+        assert!(
+            b1.get("showPhonetic").is_none() || b1["showPhonetic"].as_bool() == Some(false),
+            "B1 has no ph → showPhonetic omitted/false; got {b1}"
+        );
+    }
+
     /// #773: a PRESENT-but-corrupt `xl/sharedStrings.xml` (§18.4.9) silently
     /// blanked every string cell before this fix. Now the workbook still opens (no
     /// sheet is taken down) but the loss is SURFACED as a workbook-level,
