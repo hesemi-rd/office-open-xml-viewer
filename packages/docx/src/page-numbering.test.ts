@@ -94,9 +94,11 @@ describe('computePageNumbering — ECMA-376 §17.6.12', () => {
   });
 
   it('does NOT restart mid-page: a continuous section sharing a page keeps its number', () => {
-    // The paginator puts the continuous section's content on the SAME page as the
-    // preceding section, so the page's FIRST element still belongs to the preceding
-    // section — its stamped start is not observed at a page boundary.
+    // A continuous section starts mid-page, so the SHARED page's FIRST element
+    // still belongs to the preceding section and no restart fires THERE. (If the
+    // continuous section's content then SPILLS to the next page, that page's top
+    // IS owned by it and its start fires at the spillover boundary — see the
+    // module header in page-numbering.ts; this stub models only the shared page.)
     const s1 = {};
     const pages = [
       page(s1, null), // page 1: first element belongs to s1 (even if s2 continues below)
@@ -112,16 +114,22 @@ describe('computePageNumbering — ECMA-376 §17.6.12', () => {
     expect(computePageNumbering(pages).map((n) => n.displayNumber)).toEqual([3, 4, 5]);
   });
 
-  // Non-regression: sample-13's real shape. break[0] is nextPage with start=1
-  // (the FIRST section ⇒ physical page 1, identity), and a later continuous
-  // section carries start=2 but shares a page with the preceding section, so its
-  // restart is never observed at a page boundary. Word's PDF shows sequential
-  // 1,2,3,4,5; the numbering layer must reproduce that (not restart to 2 mid-doc).
-  // Here every physical page's TOP belongs to the first (nextPage) section — the
-  // continuous section's content lands BELOW it on the SAME pages — so all pages
-  // carry the start=1 section's identity and settings.
+  // Non-regression: a SIMPLIFIED sample-13-like shape — one section with start=1
+  // owning every page top. Word's PDF for sample-13 shows sequential 1,2,3,4,5 and
+  // this stub asserts the identity case (start=1 on physical page 1 ⇒ 1..N).
+  //
+  // NOTE — this stub is NOT how real sample-13 paginates. Measured on the real
+  // file, the start=2 continuous section's content SPILLS and owns the top of
+  // physical page 2, where computePageNumbering resets the counter to 2; the
+  // output is sequential only because start=2 coincides with the natural
+  // continuation (1+1). The real-file behaviour is covered end-to-end by
+  // tests/visual/page-number.spec.ts (renders sample-13 and asserts 1..5); this
+  // stub only pins the start=1-identity arithmetic. Whether Word fires a
+  // continuous section's restart at a spillover boundary when start does NOT
+  // coincide is unverified (no distinguishing fixture) — tracked as a follow-up
+  // issue; see the module header in page-numbering.ts.
   it('reproduces sample-13: nextPage start=1 + continuous start=2 stays sequential', () => {
-    const firstSection = {}; // owns every physical page top (start=1)
+    const firstSection = {};
     const num: PageNumType = { start: 1 };
     const pages = [
       page(firstSection, num),
@@ -130,8 +138,7 @@ describe('computePageNumbering — ECMA-376 §17.6.12', () => {
       page(firstSection, num),
       page(firstSection, num),
     ];
-    // start=1 on the first section (physical page 1) is the identity ⇒ 1..5, and
-    // the continuous start=2 never surfaces (not a page-top section).
+    // start=1 fires on physical page 1 (the identity) ⇒ 1..5.
     expect(computePageNumbering(pages).map((n) => n.displayNumber)).toEqual([1, 2, 3, 4, 5]);
   });
 });

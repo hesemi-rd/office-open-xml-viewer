@@ -20,12 +20,20 @@
 //     continuation clause, so each section's format is independent (absent ⇒
 //     decimal, NOT inherited from the previous section).
 //
-// A CONTINUOUS section break does not open a new physical page, so a continuous
-// section that declares `w:start` does not restart the number of the page it
-// SHARES with the preceding section — its content is not the FIRST element of a
-// new page, so we never observe its restart at a page boundary. This matches Word
-// (and preserves sample-13, whose `start="2"` continuous section shows no visible
-// restart because it never starts a fresh page).
+// A CONTINUOUS section break does not open a new physical page, so on the page it
+// SHARES with the preceding section the restart is not observed (that page's top
+// is still owned by the preceding section). The section-identity switch happens
+// MID-PAGE, however, and persists: when the continuous section's content SPILLS
+// onto the next physical page, THAT page's top is owned by the continuous section
+// and its `w:start` fires there — a mid-document restart at the spillover
+// boundary (probe: continuous start=50 spilling ⇒ display numbers [1, 50, 51]).
+// This is exactly what happens in real sample-13: its `start="2"` continuous
+// section owns the top of physical page 2, where the counter resets to 2 — the
+// output LOOKS sequential only because 2 coincides with the natural continuation
+// (1+1). Whether Word also fires a continuous section's restart at a spillover
+// boundary is UNVERIFIED — no distinguishing fixture exists (every real sample's
+// continuous `w:start` equals the natural continuation value); tracked as a
+// follow-up issue.
 
 import type { PaginatedBodyElement, PageNumType } from './types';
 import type { NumberFormat } from '@silurus/ooxml-core';

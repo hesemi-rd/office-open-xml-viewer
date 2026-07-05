@@ -5,10 +5,15 @@ import { existsSync } from 'node:fs';
 // carry `<w:pgNumType>` (sample-12: continuous start=1; sample-13: nextPage start=1
 // + a continuous start=2; sample-14: nextPage start=1) plus a footer PAGE field.
 // Word's PDF ground truth (measured with pdftotext) shows SEQUENTIAL footer numbers
-// — none of these restarts is visible because start=1 on the first section is the
-// identity and the continuous restarts share a page (never a page-top section). So
-// the DISPLAYED footer number must equal the physical page number, unchanged from
-// before this feature. Skips gracefully when the (gitignored) sample is absent.
+// — none of these restarts is VISIBLE because every start value coincides with the
+// natural continuation at the page where it fires: start=1 on the first section is
+// the identity, and sample-13's continuous start=2 section spills onto physical
+// page 2, where its restart fires but 2 equals the natural continuation (1+1)
+// anyway. (A continuous restart is thus observed at a spillover page top, not
+// suppressed — see page-numbering.ts; whether Word matches at a NON-coinciding
+// spillover start is unverified, tracked as a follow-up issue.) So the DISPLAYED
+// footer number must equal the physical page number, unchanged from before this
+// feature. Skips gracefully when the (gitignored) sample is absent.
 // sample-12 (continuous start=1, footer PAGE) and sample-13 (nextPage start=1 +
 // continuous start=2, footer PAGE) both isolate the footer number cleanly at the
 // page bottom, so their sequential numbering is a direct non-regression check.
