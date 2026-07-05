@@ -1,0 +1,191 @@
+import { describe, it, expect } from 'vitest';
+import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import type {
+  BodyElement,
+  DocParagraph,
+  DocxTextRun,
+  DocxDocumentModel,
+  SectionProps,
+} from './types';
+
+// WD4 end-to-end draw tests: a run carrying w:spacing / w:w / w:position / w:kern
+// must reach the glyph-draw with the corresponding ctx state (letterSpacing,
+// horizontal scale transform, baseline y-offset, fontKerning) so that paint
+// matches the widened / shifted layout the measure pass produced (measure==paint).
+
+const FONT_PX = 20;
+
+interface FillCall {
+  text: string;
+  x: number;
+  y: number;
+  letterSpacing: string;
+  fontKerning: string;
+  scaleX: number;
+  translateX: number;
+}
+
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] } {
+  let font = `${FONT_PX}px serif`;
+  let letterSpacing = '0px';
+  let fontKerning = 'auto';
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
+  const fills: FillCall[] = [];
+  // Track a simple x-only transform stack so w:w's ctx.scale/translate is visible.
+  let scaleX = 1;
+  let translateX = 0;
+  const stack: { scaleX: number; translateX: number }[] = [];
+  const ctx = {
+    get font() { return font; },
+    set font(v: string) { font = v; },
+    get letterSpacing() { return letterSpacing; },
+    set letterSpacing(v: string) { letterSpacing = v; },
+    get fontKerning() { return fontKerning; },
+    set fontKerning(v: string) { fontKerning = v; },
+    measureText: (s: string) => {
+      const p = px();
+      const w = [...s].length * p;
+      return {
+        width: w,
+        fontBoundingBoxAscent: p * 0.8,
+        fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8,
+        actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() { stack.push({ scaleX, translateX }); },
+    restore() { const s = stack.pop(); if (s) { scaleX = s.scaleX; translateX = s.translateX; } },
+    beginPath() {}, closePath() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {},
+    fillRect() {}, strokeRect() {}, clip() {}, rect() {}, setLineDash() {},
+    drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
+    createLinearGradient() { return { addColorStop() {} }; },
+    scale(sx: number) { scaleX *= sx; },
+    translate(tx: number) { translateX += tx; },
+    fillText(text: string, x: number, y: number) {
+      fills.push({ text, x, y, letterSpacing, fontKerning, scaleX, translateX });
+    },
+    strokeText() {},
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  return { canvas: canvas as unknown as HTMLCanvasElement, fills };
+}
+
+function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocxTextRun {
+  return {
+    text, bold: false, italic: false, underline: false, strikethrough: false,
+    fontSize: FONT_PX, color: null, fontFamily: 'NotInMetrics', isLink: false,
+    background: null, vertAlign: null, hyperlink: null, ...extra,
+  };
+}
+
+type DocRun = DocParagraph['runs'][number];
+
+function para(runs: DocxTextRun[]): BodyElement {
+  const p: DocParagraph = {
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    runs: runs.map((r) => ({ type: 'text', ...r }) as DocRun),
+    defaultFontSize: FONT_PX, defaultFontFamily: 'NotInMetrics', widowControl: false,
+  };
+  return { type: 'paragraph', ...p } as BodyElement;
+}
+
+function section(): SectionProps {
+  return {
+    pageWidth: 600, pageHeight: 400, marginTop: 0, marginRight: 0, marginBottom: 0,
+    marginLeft: 0, headerDistance: 0, footerDistance: 0, titlePage: false,
+    evenAndOddHeaders: false, docGridCharSpace: undefined,
+  } as SectionProps;
+}
+
+function doc(body: BodyElement[]): DocxDocumentModel {
+  return {
+    section: section(), body,
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+  } as unknown as DocxDocumentModel;
+}
+
+async function render(runs: DocxTextRun[]): Promise<{ runs: DocxTextRunInfo[]; fills: FillCall[] }> {
+  const { canvas, fills } = makeRecordingCanvas();
+  const info: DocxTextRunInfo[] = [];
+  await renderDocumentToCanvas(doc([para(runs)]), canvas, 0, {
+    dpr: 1, width: 600, onTextRun: (r) => info.push(r),
+  });
+  return { runs: info, fills };
+}
+
+/** The fillText call that drew a given text (first match). */
+function drawOf(fills: FillCall[], text: string): FillCall {
+  const f = fills.find((c) => c.text === text);
+  expect(f, `a fillText drew ${JSON.stringify(text)}`).toBeDefined();
+  return f as FillCall;
+}
+
+describe('WD4 run character metrics reach the glyph draw (measure==paint)', () => {
+  it('w:spacing (§17.3.2.35) draws the run with ctx.letterSpacing = charSpacing px', async () => {
+    // 1 pt char spacing at scale 1 (600px page over 600pt) = 1px per glyph.
+    const { fills } = await render([textRun('WORD', { charSpacing: 1 })]);
+    const d = drawOf(fills, 'WORD');
+    expect(d.letterSpacing).toBe('1px');
+    expect(d.scaleX).toBe(1); // no horizontal scale
+  });
+
+  it('a plain run (no w:spacing) draws with letterSpacing 0', async () => {
+    const { fills } = await render([textRun('WORD')]);
+    expect(drawOf(fills, 'WORD').letterSpacing).toBe('0px');
+  });
+
+  it('w:spacing widens the reported run box vs an identical run without it', async () => {
+    const withSpacing = await render([textRun('WORD', { charSpacing: 2 })]);
+    const without = await render([textRun('WORD')]);
+    const w1 = withSpacing.runs[0].w;
+    const w0 = without.runs[0].w;
+    // 4 glyphs × 2px = 8px wider.
+    expect(w1 - w0).toBeCloseTo(8, 5);
+  });
+
+  it('w:w (§17.3.2.43) draws under a horizontal ctx.scale and narrows the run box', async () => {
+    const { runs, fills } = await render([textRun('WORD', { charScale: 0.5 })]);
+    const d = drawOf(fills, 'WORD');
+    expect(d.scaleX).toBeCloseTo(0.5, 5); // drawn at 50% width
+    // Reported width is the natural width × 0.5 (4 × 20 × 0.5 = 40).
+    expect(runs[0].w).toBeCloseTo(40, 5);
+  });
+
+  it('w:position (§17.3.2.24) shifts the baseline up for a positive (raised) value', async () => {
+    const raised = await render([textRun('X', { position: 6 })]); // +6 pt raised
+    const plain = await render([textRun('X')]);
+    const yRaised = drawOf(raised.fills, 'X').y;
+    const yPlain = drawOf(plain.fills, 'X').y;
+    // Raised text sits HIGHER ⇒ smaller y (canvas y grows downward). 6 pt × scale 1.
+    expect(yPlain - yRaised).toBeCloseTo(6, 5);
+  });
+
+  it('w:position lowers the baseline for a negative value (mirrors raised)', async () => {
+    const lowered = await render([textRun('X', { position: -6 })]);
+    const plain = await render([textRun('X')]);
+    expect(drawOf(lowered.fills, 'X').y - drawOf(plain.fills, 'X').y).toBeCloseTo(6, 5);
+  });
+
+  it('w:kern (§17.3.2.19) enables ctx.fontKerning when the run size ≥ the threshold', async () => {
+    // fontSize FONT_PX=20pt, threshold 14pt ⇒ 20 ≥ 14 ⇒ kerning normal.
+    const { fills } = await render([textRun('WORD', { kerning: 14 })]);
+    expect(drawOf(fills, 'WORD').fontKerning).toBe('normal');
+  });
+
+  it('w:kern disables kerning when the run size is below the threshold', async () => {
+    // threshold 28pt > 20pt run ⇒ kerning none.
+    const { fills } = await render([textRun('WORD', { kerning: 28 })]);
+    expect(drawOf(fills, 'WORD').fontKerning).toBe('none');
+  });
+
+  it('a run without w:kern leaves fontKerning at the inherited value (not forced)', async () => {
+    const { fills } = await render([textRun('WORD')]);
+    // The recording ctx default is 'auto'; the renderer must not force it.
+    expect(drawOf(fills, 'WORD').fontKerning).toBe('auto');
+  });
+});

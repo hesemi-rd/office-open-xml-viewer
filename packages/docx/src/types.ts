@@ -997,6 +997,25 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
    *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
   langBidi?: string;
+  /** ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment in
+   *  POINTS (signed): the extra pitch added after each character before the next
+   *  is rendered. The renderer feeds it to `ctx.letterSpacing` on BOTH the
+   *  measure and paint passes so line breaking / pagination stay consistent.
+   *  Absent ⇒ no extra pitch. */
+  charSpacing?: number;
+  /** ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal text scale as a FRACTION of
+   *  normal character width (0.67 = 67%, 2.0 = 200%). Stretches each glyph's
+   *  width, not the gap between glyphs. Absent ⇒ 100%. */
+  charScale?: number;
+  /** ECMA-376 §17.3.2.24 `<w:position w:val>` — baseline raise (positive) /
+   *  lower (negative) in POINTS, without changing the font size or line box.
+   *  Absent ⇒ no shift. */
+  position?: number;
+  /** ECMA-376 §17.3.2.19 `<w:kern w:val>` — font-kerning threshold in POINTS
+   *  (the smallest font size that is kerned). Presence enables kerning subject
+   *  to the threshold; absent ⇒ kerning off (the hierarchy default). `0` = kern
+   *  at all sizes. */
+  kerning?: number;
   /** ECMA-376 §17.11.6/.7/.16/.17 — set when this run is a footnote/endnote
    *  reference marker (`<w:footnoteReference>` in the body, `<w:footnoteRef>` at
    *  the start of the note's content, and the endnote equivalents). `text` holds
