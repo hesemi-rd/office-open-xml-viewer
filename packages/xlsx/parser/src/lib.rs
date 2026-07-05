@@ -1276,7 +1276,12 @@ fn parse_worksheet(
                     .unwrap_or(0)
                     .min(7);
                 let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
-                let cells = parse_row_cells(&node, row_idx, shared_strings, theme_colors);
+                // ECMA-376 §18.3.1.73 `<row ph="1">` — the row-level furigana
+                // display toggle. Every cell in the row shows its phonetic hint
+                // unless the cell overrides with its own `@ph`. Threaded into
+                // `parse_row_cells` so each cell resolves the effective value.
+                let row_ph = attr_bool(&node, "ph").unwrap_or(false);
+                let cells = parse_row_cells(&node, row_idx, row_ph, shared_strings, theme_colors);
                 rows.push(Row {
                     index: row_idx,
                     height,
@@ -2311,6 +2316,10 @@ fn parse_row_cells(
     // coordinate for any `<c>` that omits its own `@r` (optional per ECMA-376
     // §18.3.1.4 / CT_Cell in sml.xsd).
     row_index: u32,
+    // ECMA-376 §18.3.1.73 `<row ph>` — the row-level furigana display toggle.
+    // A cell inherits this when it does not carry its own `<c ph>` (see the
+    // `show_phonetic` resolution below).
+    row_ph: bool,
     // Shared-string cells now ship an `si` reference (resolved consumer-side),
     // so this table is no longer read here. Kept in the signature for symmetry
     // with `parse_worksheet`'s threading; prefixed `_` to silence the warning.
@@ -2412,10 +2421,13 @@ fn parse_row_cells(
             }
         };
 
-        // ECMA-376 §18.3.1.4 `<c ph="1">` — per-cell furigana display toggle.
-        // Defaults to false (schema default), so a cell only shows its String
-        // Item's phonetic hint when it explicitly opts in.
-        let show_phonetic = attr_bool(&c_node, "ph").unwrap_or(false);
+        // Furigana display resolves as `cell/@ph ?? row/@ph ?? false`:
+        // - ECMA-376 §18.3.1.4 `<c ph>` — per-cell toggle, wins when present
+        //   (including an explicit `ph="0"` that overrides an enabled row).
+        // - ECMA-376 §18.3.1.73 `<row ph>` — inherited when the cell omits `@ph`.
+        // - otherwise the schema default (false): a cell whose String Item
+        //   carries `<rPh>` runs still shows NO furigana unless opted in.
+        let show_phonetic = attr_bool(&c_node, "ph").unwrap_or(row_ph);
 
         cells.push(Cell {
             col,
@@ -3587,6 +3599,87 @@ mod phonetic_tests {
         assert!(
             !cells[2].show_phonetic,
             "no ph → hide (schema default false)"
+        );
+    }
+
+    /// ECMA-376 §18.3.1.73 `<row ph="1">` turns on furigana display for every
+    /// cell in the row, resolved as `cell/@ph ?? row/@ph ?? false`: a cell
+    /// without its own `ph` inherits the row flag, while a cell that sets
+    /// `ph="0"` explicitly overrides the row back to hidden.
+    #[test]
+    fn row_ph_attribute_drives_show_phonetic_with_cell_override() {
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData><row r="1" ph="1">
+              <c r="A1" t="s"><v>0</v></c>
+              <c r="B1" t="s" ph="0"><v>0</v></c>
+              <c r="C1" t="s" ph="1"><v>0</v></c>
+            </row></sheetData></worksheet>"#,
+            ns = NS,
+        );
+        let shared = vec![SharedString {
+            text: "課長".to_string(),
+            ..Default::default()
+        }];
+        let (ws, _) = parse_worksheet(&xml, &shared, &[], "Sheet1").expect("parse");
+        let cells = &ws.rows[0].cells;
+        assert!(cells[0].show_phonetic, "no cell ph → inherits row ph=1");
+        assert!(
+            !cells[1].show_phonetic,
+            "cell ph=0 overrides row ph=1 → hide"
+        );
+        assert!(cells[2].show_phonetic, "cell ph=1 agrees with row ph=1");
+    }
+
+    /// A row WITHOUT `ph` keeps the schema default (false) for its cells, so a
+    /// non-Japanese sheet stays byte-identical. A cell may still opt in per-cell.
+    #[test]
+    fn row_without_ph_leaves_cells_at_schema_default() {
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData><row r="1">
+              <c r="A1" t="s"><v>0</v></c>
+              <c r="B1" t="s" ph="1"><v>0</v></c>
+            </row></sheetData></worksheet>"#,
+            ns = NS,
+        );
+        let shared = vec![SharedString {
+            text: "課長".to_string(),
+            ..Default::default()
+        }];
+        let (ws, _) = parse_worksheet(&xml, &shared, &[], "Sheet1").expect("parse");
+        let cells = &ws.rows[0].cells;
+        assert!(!cells[0].show_phonetic, "no row/cell ph → hide (default)");
+        assert!(cells[1].show_phonetic, "cell ph=1 still opts in");
+    }
+
+    /// Worker-boundary contract: the RESOLVED `show_phonetic` crosses the wire
+    /// as `showPhonetic` (camelCase). A row-inherited `true` serializes the field
+    /// so the TS renderer gate (`cell.showPhonetic`) sees it, while a cell that
+    /// resolved to `false` (the `ph="0"` override) is omitted (serde skips false)
+    /// and reads back as `showPhonetic ?? false`. No new row-level field is added
+    /// to the JSON — resolving at parse time keeps the boundary schema stable.
+    #[test]
+    fn resolved_show_phonetic_serializes_to_json_boundary() {
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData><row r="1" ph="1">
+              <c r="A1" t="s"><v>0</v></c>
+              <c r="B1" t="s" ph="0"><v>0</v></c>
+            </row></sheetData></worksheet>"#,
+            ns = NS,
+        );
+        let shared = vec![SharedString {
+            text: "課長".to_string(),
+            ..Default::default()
+        }];
+        let (ws, _) = parse_worksheet(&xml, &shared, &[], "Sheet1").expect("parse");
+        let json = serde_json::to_value(&ws.rows[0].cells).expect("serialize cells");
+        assert_eq!(
+            json[0].get("showPhonetic"),
+            Some(&serde_json::Value::Bool(true)),
+            "row-inherited cell serializes showPhonetic:true"
+        );
+        assert!(
+            json[1].get("showPhonetic").is_none(),
+            "override cell (resolved false) omits showPhonetic — reads back as ?? false"
         );
     }
 

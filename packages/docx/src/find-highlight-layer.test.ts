@@ -128,6 +128,61 @@ describe('buildDocxHighlightLayer', () => {
     expect(layer.children[0].style.transform).toBe('rotate(90deg)');
   });
 
+  // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed into
+  // ONE em cell (`run.w`), but the slice extent measures the run's NATURAL width
+  // (~2× for "２９"), so the highlight box overshoots into the following cell along
+  // the column. The overlay must clamp the extent to the drawn cell.
+  it('clamps an eastAsianVert (縦中横) run highlight to the one-em cell, not natural width', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    // "２９": natural width 2·W=14px (monospace stub), drawn cell run.w=7px (one em
+    // at fontSize 7). A whole-run match should span the 7px CELL, not 14px.
+    const runs = [
+      run({ text: '２９', x: 30, y: 40, w: 7, h: 16, fontSize: 7, eastAsianVert: true, transform: 'rotate(90deg)' }),
+    ];
+    const matches: DocxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },
+    ];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    expect(layer.children).toHaveLength(1);
+    const box = layer.children[0];
+    // Clamped: box starts at the run origin and spans exactly the one-em cell.
+    expect(box.style.left).toBe('30px');
+    expect(box.style.width).toBe('7px'); // the cell, NOT 14px natural
+    // The rotate transform (vertical page) is preserved.
+    expect(box.style.transform).toBe('rotate(90deg)');
+  });
+
+  it('scales a PARTIAL slice of a 縦中横 run proportionally within the cell', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    // "２９" natural 14px, cell 7px ⇒ scale 0.5. A slice of just "９" (the 2nd
+    // glyph) is natural [7,14) ⇒ clamped to [3.5, 7): left offset 3.5, width 3.5.
+    const runs = [
+      run({ text: '２９', x: 0, y: 0, w: 7, h: 16, fontSize: 7, eastAsianVert: true }),
+    ];
+    const matches: DocxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 1, end: 2 }], active: false },
+    ];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    const box = layer.children[0];
+    expect(box.style.left).toBe('3.5px');
+    expect(box.style.width).toBe('3.5px');
+  });
+
+  it('leaves a non-eastAsianVert run measured at natural width (unchanged)', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    // Same text/w but NOT flagged 縦中横 ⇒ natural 14px extent (byte-identical to
+    // the pre-#836 behaviour). w is irrelevant to the highlight here.
+    const runs = [run({ text: '２９', x: 0, w: 7, fontSize: 7 })];
+    const matches: DocxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },
+    ];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    expect(layer.children[0].style.width).toBe('14px');
+  });
+
   it('clears the layer and skips zero-width slices', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

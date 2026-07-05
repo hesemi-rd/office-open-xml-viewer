@@ -301,6 +301,40 @@ export function samplePolyline(
 }
 
 /**
+ * The baseline arc length (px) of a single-edge warp — the total flattened
+ * length of the one boundary curve the glyphs sit on. For paired-edge presets
+ * (which have no single baseline) this returns the top edge's length, but the
+ * value is only meaningful for {@link WarpEnvelope.singleEdge} presets, where it
+ * is the path length used by Follow Path distribution.
+ */
+export function warpArcLength(env: WarpEnvelope): number {
+  return env.topLen[env.topLen.length - 1] ?? 0;
+}
+
+/**
+ * Follow Path distribution factor for single-edge (arch/circle) warps
+ * (ECMA-376 §20.1.9.19). PowerPoint lays WordArt out along an arch/circle
+ * baseline using "Follow Path" semantics: the text keeps its NATURAL width and
+ * is placed from the path start (stAng) for only `naturalWidth` of arc length —
+ * it is NOT stretched to span the whole path. So a glyph at horizontal fraction
+ * `u ∈ [0,1]` of the flat text must map to arc parameter `u · (naturalWidth /
+ * arcLength)`, i.e. this factor scales the `[0,1]` glyph range down to the arc
+ * span the text actually fills.
+ *
+ * The factor is clamped to `[0,1]`: Follow Path only ever SHRINKS the span (text
+ * shorter than the path occupies a leading segment); text longer than the path
+ * is clamped to the full path rather than stretched or wrapped. Paired-edge
+ * presets return `1` (identity) — they deliberately stretch the flat ink box to
+ * fill the envelope width, so their glyph `u` already spans `[0,1]`.
+ */
+export function followPathUScale(env: WarpEnvelope, naturalWidth: number): number {
+  if (!env.singleEdge) return 1;
+  const arc = warpArcLength(env);
+  if (arc <= 0) return 1;
+  return Math.max(0, Math.min(1, naturalWidth / arc));
+}
+
+/**
  * A per-glyph placement in warped space. The renderer draws the glyph with
  * `ctx.translate(x, y); ctx.rotate(angle); ctx.scale(1, vScale)` and then paints
  * at the glyph's local baseline (`fillText(g, 0, 0)`), so the flat glyph em-box

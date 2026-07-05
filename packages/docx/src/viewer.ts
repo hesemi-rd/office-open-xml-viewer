@@ -591,6 +591,9 @@ export class DocxViewer implements ZoomableViewer {
       this._canvas.style.width || this._canvas.width + 'px',
       this._canvas.style.height || this._canvas.height + 'px',
       this._hyperlinkHandler(),
+      // §17.3.2.10 縦中横 (#836) — the same measurer the highlight overlay uses,
+      // so a tate-chu-yoko selection span is clamped to its drawn one-em cell.
+      (font) => this._measureForFont(font),
     );
   }
 

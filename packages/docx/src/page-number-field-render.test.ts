@@ -301,6 +301,24 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
     expect(await footerTexts(doc, 1)).toContain('III');
   });
 
+  it('routes an international section fmt end-to-end (chineseCounting §17.6.12/§17.18.59)', async () => {
+    // §17.18.59 chineseCounting: 1 → 一, 2 → 二. The core converter extension flows
+    // straight through the PAGE-field path (resolveFieldText → formatOrdinalNumber)
+    // with no renderer change — this pins that wiring for the CJK systems.
+    const doc = twoSectionDoc(null, { fmt: 'chineseCounting', start: 1 }, 1, 6);
+    // front page 0 = 1 (decimal, no fmt); body pages restart to 一, 二 (chineseCounting).
+    expect(await footerTexts(doc, 0)).toContain('1');
+    expect(await footerTexts(doc, 1)).toContain('一');
+    expect(await footerTexts(doc, 2)).toContain('二');
+  });
+
+  it('routes an international field \\* switch end-to-end (PAGE \\* HEBREW1 §17.16.4.3.1)', async () => {
+    // §17.16.4.3.1 HEBREW1 → hebrew1 gematria; §17.18.59: 1 → א. The field switch
+    // overrides the (absent) section fmt on the single body page.
+    const doc = twoSectionDoc(null, { start: 1 }, 1, 1, 'PAGE \\* HEBREW1');
+    expect(await footerTexts(doc, 0)).toContain('א'); // page 1 → א
+  });
+
   it('single-section document without pgNumType is unchanged (decimal 1..N)', async () => {
     const footer = footerWithPageField('PAGE');
     const section: SectionProps = {

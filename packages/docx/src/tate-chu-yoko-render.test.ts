@@ -294,6 +294,41 @@ describe('§17.3.2.10 縦中横 (horizontal-in-vertical) — sample-26 "9月29�
     expect(nichi.y - getsu.y).toBeCloseTo(2 * FONT_PX, 6);
   });
 
+  it('flags the 縦中横 run info with eastAsianVert so the overlays clamp it (#836)', async () => {
+    const { runs } = await render(
+      [
+        para([
+          textRun(NINE),
+          textRun(TCY, { charScale: 0.67, eastAsianVert: true, eastAsianVertCompress: true }),
+          textRun(NICHI),
+        ]),
+      ],
+      verticalSection(),
+    );
+    const tcy = runs.find((r) => r.text === TCY)!;
+    const nine = runs.find((r) => r.text === NINE)!;
+    // Only the 縦中横 run carries the flag; ordinary vertical cells do not.
+    expect(tcy.eastAsianVert).toBe(true);
+    expect(nine.eastAsianVert).toBeUndefined();
+    // The reported width IS the drawn one-em cell (what the overlay clamps to),
+    // not the natural 2·FONT_PX. On a vertical page onTextRun's `w` is the
+    // cross-column cell width = one em.
+    expect(tcy.w).toBeCloseTo(FONT_PX, 6);
+  });
+
+  it('does NOT flag eastAsianVert on a horizontal page (the run is not 縦中横 there)', async () => {
+    const { runs } = await render(
+      [
+        para([
+          textRun(TCY, { charScale: 0.67, eastAsianVert: true, eastAsianVertCompress: true }),
+        ]),
+      ],
+      horizontalSection(),
+    );
+    const tcy = runs.find((r) => r.text === TCY)!;
+    expect(tcy.eastAsianVert).toBeUndefined();
+  });
+
   it('leaves a horizontal page byte-identical (縦中横 flag inert without tbRl)', async () => {
     // The SAME runs on a HORIZONTAL page: eastAsianVert is meaningful only in
     // vertical text (§17.3.2.10), so buildSegments never sets the flag and the
