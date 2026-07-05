@@ -392,6 +392,16 @@ export interface RenderState {
     marginBottom: number;
     cssWidthPx: number;
   };
+  /** ECMA-376 §17.3.2.6 — the effective background (hex 6, no `#`) behind the text
+   *  from the ENCLOSING containers, most-specific first: a table cell's `<w:tcPr>
+   *  <w:shd w:fill>` (§17.4.33), overridden by a paragraph's `<w:pPr><w:shd w:fill>`
+   *  (§17.3.1.31). An automatic run color (`<w:color w:val="auto"/>`, no explicit
+   *  color) contrasts against this when the run has no closer background of its own
+   *  (its run-level `<w:shd>`). Threaded by `renderCell` (from the cell fill) and
+   *  `renderParagraph` (paragraph shading overrides); absent ⇒ the page background.
+   *  Only the auto-contrast decision reads it — it does NOT paint any rect (cell /
+   *  paragraph shading rects are painted by their own passes). */
+  containerShading?: string | null;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -6069,22 +6079,44 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         const revActive = state.showTrackChanges && !!s.revision;
         const revColor = revActive ? authorColor(s.revision!.author) : null;
         let glyphColor: string;
+        // ECMA-376 §17.3.2.6 — effective background behind the glyphs, most-
+        // specific first: the RUN shading (§17.3.2.32 `<w:shd>`, immediately
+        // behind the glyphs — inverse-video), else the paragraph shading
+        // (§17.3.1.31 `<w:pPr><w:shd>`), else the enclosing container background
+        // (`state.containerShading` — the table cell fill §17.4.33, threaded by
+        // renderCell). The parser filters `fill="auto"`/non-hex at every level,
+        // so a non-null value here is a real paint.
+        const effBg = s.background ?? para.shading ?? state.containerShading ?? null;
         if (revColor) {
           glyphColor = revColor;
         } else if (s.color) {
           glyphColor = `#${s.color}`;
-        } else if (s.colorAuto) {
-          // ECMA-376 §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39: automatic
-          // color picks black/white for contrast against the effective
-          // background. The black/white pick is implementation-defined (no
-          // normative algorithm) — delegated to core's autoContrastColor.
-          // TODO: the fully-conformant effective background also folds in
-          // paragraph-level shading (`<w:pPr><w:shd>`) and table cell shading.
-          // The draw loop currently only has the run shading at this point,
-          // which covers the inverse-video case (run `w:shd w:fill="000000"`).
-          // Paragraph/cell shading should be threaded into
-          // `LayoutTextSeg.background` when dark enough to flip auto text white.
-          glyphColor = autoContrastColor(s.background ?? null);
+        } else if (s.colorAuto || effBg != null) {
+          // §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39: the automatic color
+          // picks black/white for contrast against the effective background (the
+          // pick is implementation-defined — delegated to core's autoContrastColor).
+          // TWO states reach it:
+          //   • explicit `<w:color w:val="auto"/>` (s.colorAuto — the parser's
+          //     only colorAuto producer, styles.rs);
+          //   • color NEVER APPLIED in the style hierarchy: §17.3.2.6 "If this
+          //     element is never applied in the style hierarchy, then the
+          //     characters are set to allow the consumer to automatically choose
+          //     an appropriate color based on the background color behind the
+          //     run's content." The parser flattens docDefaults → styles → direct
+          //     rPr into the resolved `s.color`, so `s.color == null && !colorAuto`
+          //     here IS exactly that never-applied state (sample-28 p.17: the
+          //     `w:fill="0C0C0C"` header cells' runs carry no w:color at any
+          //     level — Word paints them white).
+          // The never-applied state is gated on a NON-NULL effective background:
+          // with no shading anywhere the "appropriate color against the page
+          // background" is the application default text color, i.e. the public
+          // `defaultTextColor` render option below — rerouting it through the
+          // hard black/white pick would silently break that option (and change
+          // nothing for the default black). This decision is deliberately made at
+          // PAINT time, not in the parser: marking every color-less run as auto
+          // there would lose the resolved-vs-defaulted distinction the option
+          // depends on, while the background composition only exists here.
+          glyphColor = autoContrastColor(effBg);
         } else {
           glyphColor = defaultColor;
         }
@@ -8872,6 +8904,13 @@ function renderCell(
     // never numbered. Clear any inherited line-numbering config/counter.
     lineNumbering: undefined,
     lineNumberCounter: undefined,
+    // ECMA-376 §17.3.2.6 — expose the cell fill (§17.4.33 `<w:tcPr><w:shd>`) as the
+    // effective background so an automatic run color inside the cell contrasts
+    // against it (sample-28 p.17: a near-black `w:fill="0C0C0C"` cell flips its
+    // color-less text to white). A cell with no fill inherits any outer container
+    // background (e.g. a nested table). renderParagraph narrows this to the
+    // paragraph shading when the paragraph declares its own.
+    containerShading: cell.background ?? state.containerShading,
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
