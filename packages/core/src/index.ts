@@ -331,6 +331,17 @@ export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-pos
 // Format-agnostic index navigation for hidden-item "skip" mode (pptx hidden
 // slides, xlsx hidden sheets): pure math over an isHidden(i) callback.
 export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visible-index';
+// Internal-hyperlink target resolution (IX-nav): OPC part-name normalization
+// (TS mirror of Rust resolve_target, so a pptx slide-rel target resolves to the
+// same part name the parser keys slides by) + the pptx relative slide-show jump
+// verbs (firstslide/lastslide/next/previous, ECMA-376 §21.1.2.3.5). Pure — the
+// docx bookmark→page and pptx slidePart→index maps live in each viewer.
+export {
+  resolveOpcPartName,
+  parseRelativeSlideJump,
+  resolveRelativeSlideJump,
+  type RelativeSlideJump,
+} from './nav/internal-target';
 // Virtualization range math for the continuous-scroll viewers (DocxScrollViewer /
 // PptxScrollViewer): pure prefix-sum + binary-search over per-item heights. No DOM.
 export { computeVisibleRange, type VisibleRange, type VisibleRangePad } from './layout/virtual-scroll';

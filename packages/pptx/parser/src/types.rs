@@ -51,6 +51,15 @@ pub(crate) struct Slide {
     pub(crate) index: usize,
     /// 1-based slide number (index + 1); used for slidenum field rendering
     pub(crate) slide_number: usize,
+    /// The slide's normalized OPC part name (e.g. `ppt/slides/slide3.xml`),
+    /// resolved through `presentation.xml.rels` in `sldIdLst` order. An internal
+    /// hyperlink slide jump (`<a:hlinkClick action="ppaction://hlinksldjump">`,
+    /// ECMA-376 §21.1.2.3.5) resolves its rel Target to this same part name, so
+    /// the TS side can build a `partName → index` map and turn the click into a
+    /// slide index. `None` (and omitted from JSON) only for a placeholder slide
+    /// whose part path wasn't recorded; every healthy slide carries it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) part_name: Option<String>,
     pub(crate) background: Option<Fill>,
     pub(crate) elements: Vec<SlideElement>,
     /// `ppt/notesSlides/notesSlideN.xml` plain text — the speaker-notes pane

@@ -416,6 +416,15 @@ export interface DocParagraph {
   numbering: NumberingInfo | null;
   tabStops: TabStop[];
   runs: DocRun[];
+  /**
+   * ECMA-376 §17.13.6.2 `<w:bookmarkStart w:name>` — names of the bookmarks that
+   * start within (or at the head of) this paragraph, in document order. A
+   * `<w:hyperlink w:anchor="X">` internal link (§17.16.23) targets the paragraph
+   * whose `bookmarks` contains `"X"`; {@link buildBookmarkPageMap} turns these
+   * into a `bookmarkName → pageIndex` map after pagination. Absent (`undefined`)
+   * for the common paragraph that anchors nothing.
+   */
+  bookmarks?: string[];
   /** Paragraph background hex color (w:shd fill) */
   shading?: string | null;
   /** Force a page break before this paragraph (w:pageBreakBefore) */

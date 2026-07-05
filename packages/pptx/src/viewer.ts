@@ -53,9 +53,10 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * hyperlink click (a text run whose `<a:rPr>` carried an `<a:hlinkClick>`;
    * requires {@link enableTextSelection} so the overlay spans exist). Default
    * when omitted: external → {@link openExternalHyperlink} (new tab, sanitised,
-   * noopener); internal slide-jump → {@link goToSlide}(target) once the slide
-   * part resolves to an index (currently a documented no-op — see below). When
-   * provided, the viewer calls this instead and takes NO default action.
+   * noopener); internal slide-jump → {@link goToSlide} once the action resolves
+   * to a slide index via {@link PptxPresentation.resolveInternalTarget} (a jump
+   * that resolves to no reachable slide is a safe no-op). When provided, the
+   * viewer calls this instead and takes NO default action.
    */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
 }
@@ -360,32 +361,41 @@ export class PptxViewer {
   }
 
   /**
-   * IX1 hyperlink click dispatch. When the integrator supplies
-   * `opts.onHyperlinkClick` it OWNS the click (no default action). Otherwise the
-   * viewer applies its default policy: an external link opens in a new tab via
-   * the shared, scheme-sanitised {@link openExternalHyperlink}; an internal
-   * slide jump navigates via {@link goToSlide} once the target part resolves to
-   * a slide index.
+   * IX1/IX-nav hyperlink click dispatch. An internal target is first *enriched*
+   * with its resolved 0-based `slideIndex` (via
+   * {@link PptxPresentation.resolveInternalTarget}, relative to the current
+   * slide) so a jump verb / slide-part ref arrives already mapped — this is the
+   * field that was previously always `undefined`. When the integrator supplies
+   * `opts.onHyperlinkClick` it OWNS the (enriched) click and takes NO default
+   * action. Otherwise the viewer's default policy applies: an external link
+   * opens in a new tab via the shared, scheme-sanitised
+   * {@link openExternalHyperlink}; an internal slide jump navigates via
+   * {@link goToSlide} to the resolved index (a target that resolves to no
+   * reachable slide is a safe no-op).
    */
   private _onHyperlinkClick(target: HyperlinkTarget): void {
+    const enriched = this._resolveInternalSlideIndex(target);
     if (this.opts.onHyperlinkClick) {
-      this.opts.onHyperlinkClick(target);
+      this.opts.onHyperlinkClick(enriched);
       return;
     }
-    if (target.kind === 'external') {
-      openExternalHyperlink(target.url);
+    if (enriched.kind === 'external') {
+      openExternalHyperlink(enriched.url);
       return;
     }
-    // Internal slide jump. `target.ref` is the resolved internal part name
-    // (e.g. "../slides/slide3.xml") or a raw "ppaction://…" verb. Mapping a
-    // slide part to its 0-based presentation index is NOT cheaply available:
-    // the parsed `Slide` model carries no part name, and matching by the file's
-    // numeric suffix (slide3.xml → index 2) is a heuristic that breaks whenever
-    // the slide file numbers don't match the presentation's <p:sldIdLst> order
-    // (CLAUDE.md forbids such heuristics). Left as a no-op until the parser
-    // surfaces each slide's part name.
-    // TODO IX1: resolve slide part -> index (needs Slide.partName from parser),
-    //   then `void this.goToSlide(idx);`.
+    if (enriched.slideIndex !== undefined) void this.goToSlide(enriched.slideIndex);
+  }
+
+  /** Populate an internal {@link HyperlinkTarget}'s `slideIndex` from its `ref`
+   *  (a `ppaction://hlinkshowjump?jump=…` verb resolved relative to the current
+   *  slide, or a `../slides/slideN.xml` part target resolved through the stamped
+   *  part-name map — no filename-suffix heuristic). Any already-set `slideIndex`
+   *  is kept; an external target and an unresolvable ref pass through unchanged so
+   *  the caller no-ops safely. */
+  private _resolveInternalSlideIndex(target: HyperlinkTarget): HyperlinkTarget {
+    if (target.kind !== 'internal' || target.slideIndex !== undefined) return target;
+    const idx = this.engine?.resolveInternalTarget(target.ref, this.currentSlide);
+    return idx === undefined ? target : { ...target, slideIndex: idx };
   }
 
   /** PD14 render-error contract: route a render failure to `onError`, or

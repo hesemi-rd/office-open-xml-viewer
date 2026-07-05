@@ -773,14 +773,15 @@ export class DocxScrollViewer {
   }
 
   /**
-   * IX1 — the click handler passed to the text-layer overlay. When the caller
-   * supplied `onHyperlinkClick`, it fully owns the behaviour (the default is
-   * suppressed). Otherwise the built-in default is: an external link opens in a
-   * new tab through core `openExternalHyperlink` (URL sanitised against the safe
-   * scheme allowlist, `noopener,noreferrer`); an internal `w:anchor` link is a
-   * no-op for now — jumping to a bookmark needs a bookmark→page/offset map that
-   * the docx pipeline does not yet expose, and faking it would scroll to the
-   * wrong place.
+   * IX1/IX-nav — the click handler passed to the text-layer overlay. When the
+   * caller supplied `onHyperlinkClick`, it fully owns the behaviour (the default
+   * is suppressed). Otherwise the built-in default is: an external link opens in
+   * a new tab through core `openExternalHyperlink` (URL sanitised against the
+   * safe scheme allowlist, `noopener,noreferrer`); an internal `<w:anchor>` link
+   * resolves its bookmark name to its destination page via
+   * {@link DocxDocument.getBookmarkPage} (ECMA-376 §17.16.23) and scrolls there
+   * with {@link scrollToPage}. An anchor naming no known bookmark is a safe no-op
+   * rather than a scroll to a guessed page.
    */
   private _hyperlinkHandler(): (target: HyperlinkTarget) => void {
     const custom = this._opts.onHyperlinkClick;
@@ -788,10 +789,12 @@ export class DocxScrollViewer {
     return (target: HyperlinkTarget): void => {
       if (target.kind === 'external') {
         openExternalHyperlink(target.url);
+        return;
       }
-      // TODO IX1: resolve bookmark -> page/offset (needs a bookmarkStart → page
-      // map from the paginator) and scroll to it; until then an internal anchor
-      // click is intentionally inert rather than scrolling to a guessed page.
+      // Internal anchor (IX-nav): map the bookmark name to its destination page
+      // and scroll to it. `undefined` ⇒ no bookmark of that name ⇒ inert.
+      const page = this._doc?.getBookmarkPage(target.ref);
+      if (page !== undefined) this.scrollToPage(page);
     };
   }
 

@@ -13,6 +13,12 @@ export interface DocumentMeta {
    *  `sectionGeom` so the main thread can lay out (e.g. a scroll viewer's spacer)
    *  without the full model. Genuinely per-page for a mixed-geometry document. */
   pageSizes: { widthPt: number; heightPt: number }[];
+  /** ECMA-376 §17.13.6.2 — `bookmarkName → 0-based page index` for internal
+   *  hyperlink anchors (`<w:hyperlink w:anchor>`, §17.16.23). Built worker-side
+   *  from the paginated pages (the same source `pageSizes` uses) so an internal
+   *  link can resolve its destination page in worker mode without the full model.
+   *  Serialized as `[name, pageIndex]` entries (a `Map` can't cross the wire). */
+  bookmarkPages: [string, number][];
 }
 
 /** Serializable subset of RenderPageOptions (callbacks cannot cross the wire). */

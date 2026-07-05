@@ -44,3 +44,32 @@ for (const slide of SLIDES) {
     expect(pct).toBeLessThanOrEqual(MAX_DIFF_PCT[slide]);
   });
 }
+
+// IX-nav (M2): the internal-navigation map is derived in BOTH modes — main from
+// the parsed slides, worker from the `partNames` that ride through the meta. A
+// serialization drop or an order mismatch would make an internal slide-jump land
+// on the wrong slide in worker mode only. Assert the resolved-index arrays for
+// every slide part name are identical across the two modes (and non-degenerate:
+// at least one part name resolved, so we are actually comparing a populated map).
+test('worker mode matches main mode › getSlideIndexByPartName map (IX-nav)', async ({ page }) => {
+  await page.goto('/tests/visual/worker-fixture.html?pptx=demo/sample-1&slide=0');
+  await page.waitForFunction(
+    () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+    { timeout: 60_000 },
+  );
+  const status = await page.evaluate(() => document.body.dataset.status);
+  if (status === 'error') {
+    throw new Error(await page.evaluate(() => document.body.dataset.errorMessage ?? ''));
+  }
+  const [main, worker] = await page.evaluate(() => [
+    document.body.dataset.navMain ?? '[]',
+    document.body.dataset.navWorker ?? '[]',
+  ]);
+  const mainIdx = JSON.parse(main) as number[];
+  const workerIdx = JSON.parse(worker) as number[];
+  console.log(`  nav map main=${main} worker=${worker}`);
+  // A populated map (at least one slide part resolved, not all -1).
+  expect(mainIdx.some((i) => i >= 0)).toBe(true);
+  // Byte-for-byte identical resolution in both modes.
+  expect(workerIdx).toEqual(mainIdx);
+});

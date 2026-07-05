@@ -31,10 +31,25 @@
 
       const main = await PptxPresentation.load(buf.slice(0), { useGoogleFonts: true });
       paint('main-canvas', await main.renderSlideToBitmap(slide, { width, dpr }));
-      main.destroy();
 
       const wk = await PptxPresentation.load(buf.slice(0), { mode: 'worker', useGoogleFonts: true });
       paint('worker-canvas', await wk.renderSlideToBitmap(slide, { width, dpr }));
+
+      // IX-nav: the slide part-name → index map must be identical in main and
+      // worker mode (worker rides `partNames` through the meta). Probe every
+      // slide's part name via getSlideIndexByPartName in BOTH modes and expose
+      // the two resolved-index arrays so the spec can assert they match.
+      const partNames = [];
+      for (let i = 0; i < main.slideCount; i++) {
+        // ../slides/slideN.xml is the canonical rel target; resolveInternalTarget
+        // normalizes it, but getSlideIndexByPartName takes the resolved part name.
+        partNames.push(`ppt/slides/slide${i + 1}.xml`);
+      }
+      const probe = (pres) => partNames.map((p) => pres.getSlideIndexByPartName(p) ?? -1);
+      document.body.dataset.navMain = JSON.stringify(probe(main));
+      document.body.dataset.navWorker = JSON.stringify(probe(wk));
+
+      main.destroy();
       wk.destroy();
 
       document.body.dataset.status = 'ready';

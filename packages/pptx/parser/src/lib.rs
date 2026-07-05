@@ -736,6 +736,8 @@ fn parse_slide(
     Ok(Slide {
         index,
         slide_number: index + 1,
+        // Stamped by the build loop, which owns the resolved slide part path.
+        part_name: None,
         background,
         elements,
         notes,
@@ -752,6 +754,9 @@ fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
     Slide {
         index,
         slide_number: index + 1,
+        // `part` IS the slide part path here (broken_slide is called with it), so
+        // the slide→index map still resolves an internal jump to a broken slide.
+        part_name: Some(part.to_string()),
         background: None,
         elements: Vec::new(),
         notes: None,
@@ -898,6 +903,9 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
         slides: vec![Slide {
             index: 0,
             slide_number: 1,
+            // A whole-container failure has no readable slide part, so there is
+            // nothing an internal slide jump could resolve to — no part name.
+            part_name: None,
             background: None,
             elements: Vec::new(),
             notes: None,
@@ -1315,6 +1323,13 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             Ok(slide) => slide,
             Err(e) => broken_slide(raw.index, &raw.slide_path, &e.to_string()),
         };
+        // Stamp the resolved slide part path (e.g. `ppt/slides/slide3.xml`) so
+        // the TS side can map an internal hyperlink slide jump to this index.
+        // The build loop owns `raw.slide_path`; keying by it here (rather than
+        // threading it through `parse_slide`) keeps that function's signature
+        // untouched. `broken_slide` already set it, so re-stamping is a no-op there.
+        let mut slide = slide;
+        slide.part_name = Some(raw.slide_path.clone());
         slides.push(slide);
     }
 
@@ -1374,6 +1389,53 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    // ECMA-376 §19.3.1.42 sldIdLst — each parsed slide is stamped with its
+    // resolved OPC part name in presentation order, so the TS side can map an
+    // internal hyperlink slide jump (§21.1.2.3.5) to a 0-based index. A minimal
+    // two-slide deck proves the ordering and the exact normalized part name.
+    #[test]
+    fn slide_part_name_stamped_in_sldidlst_order() {
+        let p_ns = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships";
+        let ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types";
+
+        let content_types = format!(
+            r#"<Types xmlns="{ct_ns}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#
+        );
+        let root_rels = format!(
+            r#"<Relationships xmlns="{rel_ns}"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#
+        );
+        // sldIdLst references the two slides via rId1/rId2 (presentation order).
+        let presentation = format!(
+            r#"<p:presentation xmlns:p="{p_ns}" xmlns:r="{r_ns}"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#
+        );
+        let pres_rels = format!(
+            r#"<Relationships xmlns="{rel_ns}"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#
+        );
+        let slide_xml = format!(r#"<p:sld xmlns:p="{p_ns}"><p:cSld><p:spTree/></p:cSld></p:sld>"#);
+
+        let bytes = zip_with_parts(&[
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("_rels/.rels", root_rels.as_bytes()),
+            ("ppt/presentation.xml", presentation.as_bytes()),
+            ("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+            ("ppt/slides/slide1.xml", slide_xml.as_bytes()),
+            ("ppt/slides/slide2.xml", slide_xml.as_bytes()),
+        ]);
+
+        let pres = parse_presentation_from_bytes(&bytes).expect("deck parses");
+        assert_eq!(pres.slides.len(), 2);
+        assert_eq!(
+            pres.slides[0].part_name.as_deref(),
+            Some("ppt/slides/slide1.xml")
+        );
+        assert_eq!(
+            pres.slides[1].part_name.as_deref(),
+            Some("ppt/slides/slide2.xml")
+        );
     }
 
     #[test]

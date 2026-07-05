@@ -362,6 +362,18 @@ export class FakePptxEngine {
   destroy(): void {
     this.destroyed = true;
   }
+  /** IX-nav: a `ref → slide index` table the test seeds so the viewer's internal
+   *  hyperlink dispatch resolves against a known map. A relative-jump ref (e.g.
+   *  `#next`) can be encoded as a function of `current` via `resolveFn`. Records
+   *  every call so a test can assert the current index passed for a relative jump. */
+  internalTargets = new Map<string, number>();
+  resolveFn?: (ref: string, current: number) => number | undefined;
+  resolveCalls: Array<{ ref: string; current: number }> = [];
+  resolveInternalTarget(ref: string, currentIndex = 0): number | undefined {
+    this.resolveCalls.push({ ref, current: currentIndex });
+    if (this.resolveFn) return this.resolveFn(ref, currentIndex);
+    return this.internalTargets.get(ref);
+  }
   asPres(): PptxPresentation {
     return this as unknown as PptxPresentation;
   }

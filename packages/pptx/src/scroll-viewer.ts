@@ -128,9 +128,10 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    * hyperlink click in any mounted slide's text overlay (requires
    * {@link enableTextSelection}). Default when omitted: external →
    * {@link openExternalHyperlink} (new tab, sanitised, noopener); internal
-   * slide-jump → {@link scrollToSlide}(target) once the slide part resolves to
-   * an index (currently a documented no-op). When provided, the viewer calls
-   * this instead and takes NO default action.
+   * slide-jump → {@link scrollToSlide} once the action resolves to a slide index
+   * via {@link PptxPresentation.resolveInternalTarget} (a jump that resolves to
+   * no reachable slide is a safe no-op). When provided, the viewer calls this
+   * instead and takes NO default action.
    */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
 }
@@ -1210,24 +1211,33 @@ export class PptxScrollViewer {
    * IX1 hyperlink click dispatch (mirrors {@link PptxViewer._onHyperlinkClick}).
    * When the integrator supplies `opts.onHyperlinkClick` it OWNS the click (no
    * default). Otherwise: an external link opens in a new tab via the shared,
-   * scheme-sanitised {@link openExternalHyperlink}; an internal slide jump would
-   * scroll to the target slide via {@link scrollToSlide} once the target part
-   * resolves to a slide index.
+   * scheme-sanitised {@link openExternalHyperlink}; an internal slide jump scrolls
+   * to the target slide via {@link scrollToSlide} once the action resolves to a
+   * slide index (a jump resolving to no reachable slide is a safe no-op).
    */
   private _onHyperlinkClick(target: HyperlinkTarget): void {
+    const enriched = this._resolveInternalSlideIndex(target);
     if (this._opts.onHyperlinkClick) {
-      this._opts.onHyperlinkClick(target);
+      this._opts.onHyperlinkClick(enriched);
       return;
     }
-    if (target.kind === 'external') {
-      openExternalHyperlink(target.url);
+    if (enriched.kind === 'external') {
+      openExternalHyperlink(enriched.url);
       return;
     }
-    // Internal slide jump. Mapping `target.ref` (e.g. "../slides/slide3.xml")
-    // to a 0-based index is NOT cheaply available: the parsed Slide model has no
-    // part name and file-number matching is a forbidden heuristic (see
-    // CLAUDE.md). No-op until the parser surfaces each slide's part name.
-    // TODO IX1: resolve slide part -> index, then `this.scrollToSlide(idx);`.
+    if (enriched.slideIndex !== undefined) this.scrollToSlide(enriched.slideIndex);
+  }
+
+  /** Populate an internal {@link HyperlinkTarget}'s `slideIndex` from its `ref`
+   *  via the engine's stamped part names. Relative `hlinkshowjump` verbs are
+   *  resolved against the slide currently at the viewport top
+   *  (`_range().topIndex`); a `../slides/slideN.xml` part target resolves through
+   *  the part-name map. An already-set index, an external target, and an
+   *  unresolvable ref all pass through unchanged (safe no-op). */
+  private _resolveInternalSlideIndex(target: HyperlinkTarget): HyperlinkTarget {
+    if (target.kind !== 'internal' || target.slideIndex !== undefined) return target;
+    const idx = this._pres?.resolveInternalTarget(target.ref, this._range().topIndex);
+    return idx === undefined ? target : { ...target, slideIndex: idx };
   }
 
   /**
