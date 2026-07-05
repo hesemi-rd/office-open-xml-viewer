@@ -73,6 +73,39 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
       expect(paginate(12).length).toBe(3);
     });
 
+    // Text of a paginated body element (paragraph runs / field fallbacks). Enough
+    // to locate a caption / heading paragraph by content; tables not needed here.
+    const elementText = (el: unknown): string => {
+      const out: string[] = [];
+      const runs = (el as { runs?: Array<Record<string, unknown>> }).runs;
+      for (const r of runs ?? []) {
+        if (r == null) continue;
+        if (typeof r.text === 'string') out.push(r.text);
+        else if (typeof r.fallbackText === 'string') out.push(r.fallbackText);
+      }
+      return out.join('');
+    };
+    const findParaPage = (pages: unknown[][], startsWith: string): number =>
+      pages.findIndex((p) =>
+        p.some((el) => elementText(el).replace(/\s+/g, ' ').trim().startsWith(startsWith)),
+      );
+
+    // ECMA-376 §17.3.1.29 + §20.4.2.17 (regression from #676): the
+    // figure on sample-12 p.2 is a wrapSquare anchor offset ~70pt into the column,
+    // so both side gaps are ~61–64pt — BELOW 1 inch. #676 replaced the empty
+    // paragraph-mark line-start threshold with the 1-inch CONTENT-line rule, which
+    // flowed the figure's nine trailing blank-line marks BELOW the float band and
+    // pushed the caption "Figure 1 …" + the 4. CONCLUSION heading onto page 3. An
+    // empty paragraph mark stays beside a float whenever the gap holds the pilcrow
+    // (paragraphMarkEmPx), dropping below only for a full-width band — so the
+    // caption and CONCLUSION belong on page 2 (0-indexed page 1), matching the
+    // Word-exported PDF (sample-12.pdf p.2).
+    it('sample-12 keeps the figure caption + CONCLUSION on page 2 (#676 regression)', () => {
+      const pages = paginate(12);
+      expect(findParaPage(pages, 'Figure 1 This is a Sample Figure')).toBe(1);
+      expect(findParaPage(pages, 'The other first headings can be Research')).toBe(1);
+    });
+
     // 5 pages, matching Word. The intro 2-col section opens with a "continuous"
     // section break, so it stays on the title page (§17.6.22: the break is
     // governed by the upcoming section's start type, not the title section's

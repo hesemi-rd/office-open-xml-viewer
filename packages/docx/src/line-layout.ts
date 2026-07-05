@@ -1609,21 +1609,28 @@ export function layoutLines(
   let lineXOffset = 0;
   let currentLineTopY = wrapCtx?.startPageY ?? 0;
 
-  // Minimum clear side-space (px) a line needs before it may START beside a
-  // float rather than flow below the band. Word's measured rule is 1 inch
-  // (wordMinLineStartPx(scale) — the 1-inch requirement less a half-twip rounding
-  // tolerance), INDEPENDENT of the line's content — the same threshold for an
-  // empty paragraph mark, a short-token line, and a long-word line (a first word
-  // that overruns the ≥1-inch gap is force-broken there by the over-long-word
-  // char-break below, matching Word's "AFTE"/"R-10" wrapping). This replaces two
-  // former implementation-defined branches — a per-line first-atomic-token width
-  // probe for text lines, and a 1-em-of-the-mark-font reservation
-  // (`wrapCtx.markEmPx`) for empty/trailing-break lines — both of which
-  // mis-placed lines relative to Word (they wedged short-token lines into
-  // sub-inch gaps and refused ≥1-inch gaps to long-word lines). See issue #676
-  // (fixtures private/sample-19/20/22, pdftotext bbox). Shared by the paint pass
-  // and the paginator's two mirror layouts (they call layoutLines with scale 1),
-  // so the flow/beside decision agrees across passes.
+  // Minimum clear side-space (px) a CONTENT line needs before it may START beside
+  // a float rather than flow below the band. Word's measured rule is 1 inch
+  // (wordMinLineStartPx(scale) — the 1-inch requirement less a one-twip rounding
+  // tolerance), INDEPENDENT of a content line's text — the same threshold for a
+  // short-token line and a long-word line (a first word that overruns the ≥1-inch
+  // gap is force-broken there by the over-long-word char-break below, matching
+  // Word's "AFTE"/"R-10" wrapping). This replaced a per-line first-atomic-token
+  // width probe that wedged short-token lines into sub-inch gaps and refused
+  // ≥1-inch gaps to long-word lines. See issue #676 (fixtures
+  // private/sample-19/20/22, pdftotext bbox). Shared by the paint pass and the
+  // paginator's two mirror layouts (they call layoutLines with scale 1), so the
+  // flow/beside decision agrees across passes.
+  //
+  // NOTE — this 1-inch rule is the CONTENT-line threshold. A literally-empty /
+  // anchor-only paragraph's pilcrow is placed by resolveEmptyMarkTop /
+  // flowMarkLine (renderer.ts) against the NARROWER pilcrow-em threshold
+  // (paragraphMarkEmPx): Word keeps such a mark beside a float down to a
+  // sub-inch gap and drops it below only for a full-width band. #676
+  // over-generalized 1 inch onto empty marks and pushed sample-12's caption
+  // to the next page. Lines routed through layoutLines carry inline content
+  // (or a content paragraph's trailing-break final line) and keep the 1-inch
+  // rule.
   const minLineStartWidth = (): number => wordMinLineStartPx(scale);
 
   // Compute wrap constraints for a new line about to start. Mutates

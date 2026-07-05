@@ -72,18 +72,34 @@ export const FLOAT_OVERLAP_EPS = 0.01;
 export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
 
 /** Minimum horizontal space (pt) a free side-gap must have before Word will
- *  START a line beside a float, rather than flowing it below the float band.
- *  Measured — NOT from ECMA-376, which mandates no side-gap minimum (§20.4.2.17
- *  only says text wraps around the rectangle; §17.18.3 `<w:br w:clear>` is the
- *  sole spec-mandated flow onto a float-free region). Word's rule is exactly
- *  1 inch (1440 twips): established from the fixture set private/sample-19/20/22,
- *  Word-exported PDF, pdftotext bbox — a gap of 70pt flows the line below, a gap
- *  of 72pt starts the line beside. The threshold is INDEPENDENT of the line's
- *  content (an empty paragraph mark and a text line switch at the same width),
- *  of font size (8/12/24pt all switch at 72pt), and of line spacing
- *  (single/1.5/double all switch at 72pt) — i.e. it is an absolute width, not
- *  an em- or line-height-proportional quantity. See issue #676. Callers convert
- *  to px with `WORD_MIN_LINE_START_PT * scale` (renderer scale is px/pt). */
+ *  START a CONTENT (text / inline-object) line beside a float, rather than
+ *  flowing it below the float band. Measured — NOT from ECMA-376, which mandates
+ *  no side-gap minimum (§20.4.2.17 only says text wraps around the rectangle;
+ *  §17.18.3 `<w:br w:clear>` is the sole spec-mandated flow onto a float-free
+ *  region). Word's rule is exactly 1 inch (1440 twips): established from the
+ *  fixture set private/sample-19/20/22, Word-exported PDF, pdftotext bbox — a gap
+ *  of 70pt flows the line below, a gap of 72pt starts the line beside. For a
+ *  content line the threshold is INDEPENDENT of the line's text, of font size
+ *  (8/12/24pt all switch at 72pt), and of line spacing (single/1.5/double all
+ *  switch at 72pt) — i.e. it is an absolute width, not an em- or
+ *  line-height-proportional quantity. See issue #676. Callers convert to px with
+ *  `WORD_MIN_LINE_START_PT * scale` (renderer scale is px/pt).
+ *
+ *  SCOPE — content lines only. An EMPTY paragraph-mark line (a literally-empty or
+ *  anchor-only paragraph's pilcrow, no width-bearing content) does NOT obey this
+ *  1-inch rule: Word keeps such a mark beside a float whenever the gap can hold
+ *  the pilcrow itself, dropping it below only when the gap is narrower than that
+ *  (effectively a full-width float band). Grounded from sample-9 p.4 (full-width
+ *  band → mark drops below, carrying its wrapNone anchor image) AND sample-12 p.2
+ *  (a ~62pt side-gap, below 1 inch, where the nine authoring blank-line marks
+ *  after the figure stay BESIDE the float — flowing them below at 1 inch (the
+ *  regression #676 introduced) pushed the caption + CONCLUSION onto the next
+ *  page). The empty-mark
+ *  threshold is `paragraphMarkEmPx` (renderer.ts); it governs the literally-empty
+ *  / anchor-only paragraph paths — the paint pass `resolveEmptyMarkTop` and the
+ *  paginator's mirror `flowMarkLine` — while every CONTENT line (including a
+ *  content paragraph's trailing-break empty final line inside `layoutLines`)
+ *  passes `wordMinLineStartPx` below. */
 export const WORD_MIN_LINE_START_PT = 72;
 
 /** Tolerance (pt) subtracted from the 1-inch requirement when testing a side
@@ -105,11 +121,14 @@ export const WORD_MIN_LINE_START_PT = 72;
  *  granularity it absorbs. */
 export const LINE_START_GAP_EPS_PT = 0.05; // one twip (1/20 pt)
 
-/** The `requiredWidth` (px) every docx caller passes to `resolveLineFloatWindow`
- *  for a line-start probe: Word's 1-inch minimum side-gap, minus the half-twip
- *  rounding tolerance, at the render scale (px/pt). Single source of truth so the
- *  paint pass and both paginator mirrors agree bit-for-bit on the flow/beside
- *  decision. See WORD_MIN_LINE_START_PT and LINE_START_GAP_EPS_PT (issue #676). */
+/** The `requiredWidth` (px) every CONTENT-line caller passes to
+ *  `resolveLineFloatWindow` for a line-start probe: Word's 1-inch minimum
+ *  side-gap, minus the one-twip rounding tolerance, at the render scale (px/pt).
+ *  Single source of truth so the paint pass and both paginator mirrors agree
+ *  bit-for-bit on the flow/beside decision. Empty paragraph-mark lines use the
+ *  narrower `paragraphMarkEmPx` threshold instead (see WORD_MIN_LINE_START_PT's
+ *  SCOPE note). See WORD_MIN_LINE_START_PT and LINE_START_GAP_EPS_PT (issue
+ *  #676). */
 export function wordMinLineStartPx(scale: number): number {
   return (WORD_MIN_LINE_START_PT - LINE_START_GAP_EPS_PT) * scale;
 }

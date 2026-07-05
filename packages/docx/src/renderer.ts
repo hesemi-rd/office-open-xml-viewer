@@ -67,7 +67,6 @@ import {
   isWrapFloat,
   resolveLineFloatWindow,
   skipPastTopAndBottom,
-  wordMinLineStartPx,
 } from './float-layout.js';
 import {
   distributeLineSlack,
@@ -3034,12 +3033,14 @@ function estimateParagraphHeight(
   if (hasFloats) cursor = skipPastTopAndBottom(cursor, state.floats);
   const flowMarkLine = (): void => {
     // Empty / anchor-only paragraph: one paragraph-mark line box, flowed below a
-    // full-width float band exactly like renderEmptyMarkParagraph. Uses Word's
-    // measured 1-inch minimum side-gap (wordMinLineStartPx; scale 1 here in the
-    // paginator's pt-space mirror), the SAME content-independent threshold as the
-    // paint pass — issue #676.
+    // full-width float band exactly like renderEmptyMarkParagraph. An empty mark
+    // uses the pilcrow-em threshold (paragraphMarkEmPx; scale 1 here in the
+    // paginator's pt-space mirror), NOT the 1-inch content-line rule — Word keeps
+    // the mark beside the float whenever the gap holds the pilcrow and drops it
+    // below only for a full-width band (sample-9 p.4 / sample-12 p.2, the #676 regression).
+    // Mirrors the paint pass's resolveEmptyMarkTop so the two agree.
     if (hasFloats) {
-      const win = resolveLineFloatWindow(cursor, wordMinLineStartPx(1), 10, paraX, paraW, state.floats);
+      const win = resolveLineFloatWindow(cursor, paragraphMarkEmPx(para, 1), 10, paraX, paraW, state.floats);
       if (win.topY > cursor) cursor = win.topY;
     }
     cursor += paragraphMarkLineHeight(para, 1, grid, paraHasRuby, state.docEastAsian, state.ctx, state.fontFamilyClasses);
@@ -4873,33 +4874,33 @@ function renderParagraph(
   // produces ONE paragraph-mark line box (ECMA-376 §17.3.1.29 regulates only the
   // existence of that line; the horizontal wrap geometry around a square float is
   // §20.4.2.17). The displacement below — flow the mark line below the float band
-  // when the side gap cannot hold a line start — has no dedicated §x.x.x: the
-  // only SPEC-mandated flow of a line onto a float-free region is the explicit
-  // `<w:br w:clear>` of §17.18.3, which is not what fires here. But the TRIGGER
-  // (how much clear side-space Word requires before it starts a line beside a
-  // float) is not implementation-free-choice — it is Word's measured behaviour:
-  // exactly 1 inch of horizontal gap (WORD_MIN_LINE_START_PT), independent of the
-  // line's content, font size, and line spacing. Grounded from Word-exported PDFs
-  // (fixtures private/sample-19/20/22, pdftotext bbox: 70pt gap → below, 72pt →
-  // beside), NOT fitted to a single sample — see issue #676, which this replaces
-  // (the prior code used a 1-em-of-the-mark-font width here as an admitted
-  // HEURISTIC; the 1-inch rule discriminated against it because at gap = 1.5em
-  // for a 24pt mark, i.e. 36pt < 1 inch, Word still refuses to start the line
-  // beside the band). Without this an empty paragraph mark wedges into a sub-inch
-  // sliver beside a full-width float band and the following paragraphs (and any
-  // wrapNone image they anchor) stay pinned inside the band. We resolve the mark
-  // line's flowed top here and use it for the mark advance, the shading/border
-  // rect, and the paragraph-relative base of any wrapNone anchor image drawn
-  // below.
+  // when the side gap cannot hold the pilcrow — has no dedicated §x.x.x: the only
+  // SPEC-mandated flow of a line onto a float-free region is the explicit
+  // `<w:br w:clear>` of §17.18.3, which is not what fires here. The TRIGGER for an
+  // EMPTY paragraph mark is Word's measured behaviour: the mark stays BESIDE the
+  // float as long as the free side-gap can hold the pilcrow itself (its em width),
+  // and drops below only when the gap is narrower than that — i.e. effectively a
+  // full-width float band. This is NARROWER than the 1-inch rule Word applies to
+  // CONTENT lines (issue #676, wordMinLineStartPx): an empty mark in a ~62pt gap
+  // (under 1 inch) still sits beside the float — flowing it below at 1 inch pushed
+  // sample-12's caption + CONCLUSION onto the next page (#676 over-generalized the
+  // content-line threshold onto empty marks; this restores the pilcrow threshold).
+  // Grounded from sample-9 p.4 (full-width band → drops below, carrying
+  // its wrapNone anchor image) and sample-12 p.2 (~62pt gap → beside). Without the
+  // drop-below an empty mark wedges into a sub-pilcrow sliver beside a full-width
+  // float band and the following paragraphs (and any wrapNone image they anchor)
+  // stay pinned inside the band. We resolve the mark line's flowed top here and
+  // use it for the mark advance, the shading/border rect, and the
+  // paragraph-relative base of any wrapNone anchor image drawn below.
   const resolveEmptyMarkTop = (): number => {
     if (state.floats.length === 0) return textAreaTopY;
-    // Required side-gap for the mark line: Word's measured 1 inch
-    // (wordMinLineStartPx), the SAME threshold used for text lines — the rule is
-    // content-independent (issue #676). A gap narrower than 1 inch cannot hold
-    // the line start, so the mark line flows below the band.
+    // Required side-gap for the mark line: the pilcrow's em width
+    // (paragraphMarkEmPx) — the empty-mark threshold, NOT the 1-inch content-line
+    // rule (issue #676). A gap narrower than the pilcrow cannot hold the
+    // mark, so it flows below the band.
     const probeH = 10 * scale;
     const win = resolveLineFloatWindow(
-      textAreaTopY, wordMinLineStartPx(scale), probeH, paraX, paraW, state.floats,
+      textAreaTopY, paragraphMarkEmPx(para, scale), probeH, paraX, paraW, state.floats,
     );
     return win.topY;
   };
@@ -8538,6 +8539,26 @@ function picBulletSizePt(num: NumberingInfo, para: DocParagraph): { w: number; h
     w: num.picBulletWidthPt ?? fallback,
     h: num.picBulletHeightPt ?? fallback,
   };
+}
+
+/** Minimum clear side-gap (px) an EMPTY paragraph-mark line needs before it may
+ *  START beside a float rather than flow below the float band — the pilcrow's own
+ *  em width (the paragraph-mark font size × scale). Distinct from the 1-inch
+ *  CONTENT-line rule (`wordMinLineStartPx`, issue #676): Word keeps an empty mark
+ *  beside a float whenever the gap can hold the pilcrow, and drops it below only
+ *  when the gap is narrower than that — i.e. effectively a full-width band. See
+ *  WORD_MIN_LINE_START_PT's SCOPE note. Grounded from sample-9 p.4 (a full-width
+ *  float band → the mark drops below, carrying its wrapNone anchor image, PR
+ *  b897bbf) AND sample-12 p.2 (a ~62pt side-gap under 1 inch where the figure's
+ *  nine trailing blank-line marks stay beside the float; flowing them below at
+ *  1 inch pushed the caption + CONCLUSION onto page 3 — the regression #676
+ *  introduced, which this restores). Single source of truth for the literally-empty /
+ *  anchor-only paragraph sites — the paint pass `resolveEmptyMarkTop` and the
+ *  paginator mirror `flowMarkLine` — so the two agree bit-for-bit. (A content
+ *  paragraph's trailing-break empty final line stays on the 1-inch content-line
+ *  rule inside `layoutLines`; see WORD_MIN_LINE_START_PT's SCOPE note.) */
+function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
+  return getDefaultFontSize(para) * scale;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
