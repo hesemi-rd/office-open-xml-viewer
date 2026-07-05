@@ -364,6 +364,15 @@ export class FakeDocxEngine {
   destroy(): void {
     this.destroyed = true;
   }
+  /** IX-nav: a `bookmarkName → page index` table the test seeds so the viewer's
+   *  internal `<w:anchor>` hyperlink dispatch resolves against a known map.
+   *  Records every lookup so a test can assert which anchor was queried. */
+  bookmarkPages = new Map<string, number>();
+  bookmarkCalls: string[] = [];
+  getBookmarkPage(name: string): number | undefined {
+    this.bookmarkCalls.push(name);
+    return this.bookmarkPages.get(name);
+  }
   asDoc(): DocxDocument {
     return this as unknown as DocxDocument;
   }
