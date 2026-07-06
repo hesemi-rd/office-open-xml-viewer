@@ -149,6 +149,66 @@ describe('docx lazy image bytes', () => {
     }
   });
 
+  it('decodeRaster applies a <a:duotone> recolour on the raster: base decode + one recolour, memoized', async () => {
+    stubOffscreen();
+    const fetchImage = vi.fn(
+      async (_path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    const duotone = { clr1: '000000', clr2: 'DAB6BA' };
+    try {
+      const a = await decodeRaster('word/media/duo.png', 'image/png', undefined, fetchImage, 0, 0, duotone);
+      // Base blob decode + the duotone OffscreenCanvas → 2 createImageBitmap calls.
+      expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
+      const b = await decodeRaster('word/media/duo.png', 'image/png', undefined, fetchImage, 0, 0, duotone);
+      // Repeat: memoized recolour reused, base fetched once, no further decode.
+      expect(b).toBe(a);
+      expect(fetchImage).toHaveBeenCalledTimes(1);
+      expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
+    } finally {
+      dropColorReplacedCache(fetchImage);
+      dropBitmapCacheByPath(fetchImage);
+    }
+  });
+
+  it('preloadImages keys a duotone picture separately from the raw blip (distinct map keys, shared base)', async () => {
+    stubOffscreen();
+    const fetchImage = vi.fn(
+      async (_path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    const path = 'word/media/duo2.png';
+    const doc = {
+      body: [
+        {
+          type: 'paragraph',
+          runs: [
+            { type: 'image', imagePath: path, mimeType: 'image/png', widthPt: 10, heightPt: 10 },
+            {
+              type: 'image',
+              imagePath: path,
+              mimeType: 'image/png',
+              widthPt: 10,
+              heightPt: 10,
+              duotone: { clr1: '000000', clr2: 'DAB6BA' },
+            },
+          ],
+        },
+      ],
+      headers: {},
+      footers: {},
+    } as unknown as DocxDocumentModel;
+    try {
+      const map = await preloadImages(doc, fetchImage);
+      // Two distinct keys: the raw path + the duotone-suffixed variant.
+      expect(map.has(path)).toBe(true);
+      expect(map.has(`${path}|duo:000000:DAB6BA`)).toBe(true);
+      // Shared base → ONE fetch for both refs.
+      expect(fetchImage).toHaveBeenCalledTimes(1);
+    } finally {
+      dropColorReplacedCache(fetchImage);
+      dropBitmapCacheByPath(fetchImage);
+    }
+  });
+
   it('preloadImages with no fetchImage yields an empty map (no byte source)', async () => {
     const doc = {
       body: [

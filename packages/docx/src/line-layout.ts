@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget } from '@silurus/ooxml-core';
+import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, Duotone } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -191,6 +191,13 @@ export interface LayoutImageSeg {
   anchorYFromPara: boolean;
   /** When set, pixels matching this hex color are replaced with alpha=0 before drawing. */
   colorReplaceFrom?: string;
+  /** ECMA-376 §20.1.8.23 `<a:duotone>` recolour (two endpoint colours). Part of
+   *  the image cache key so the recoloured raster is looked up (draws through
+   *  the same `imageKey(imagePath, colorReplaceFrom, duotone)` the prefetch used). */
+  duotone?: Duotone;
+  /** ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` opacity as 0..1. When < 1 the
+   *  inline draw multiplies `globalAlpha` by it. `undefined` ⇒ fully opaque. */
+  alpha?: number;
   /** ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop (fractions 0..1 of
    *  the decoded bitmap). When present the draw paths use the 9-arg
    *  `drawImage` to blit only `[l, t, 1−r, 1−b]` of the bitmap into the display
@@ -1784,6 +1791,8 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         anchorXFromMargin: img.anchorXFromMargin ?? false,
         anchorYFromPara: img.anchorYFromPara ?? false,
         colorReplaceFrom: img.colorReplaceFrom,
+        duotone: img.duotone,
+        alpha: img.alpha,
         srcRect: img.srcRect ?? undefined,
         measuredWidth: 0,
       });
