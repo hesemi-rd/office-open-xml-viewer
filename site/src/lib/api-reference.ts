@@ -27,7 +27,28 @@ const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', 
 const WORKER_TIMEOUT = { name: 'workerTimeoutMs', type: 'number', def: 'unlimited', desc: 'Reject the parse if the worker does not answer within this many ms — an opt-in safety net for a wedged / crashed worker that would otherwise leave load() pending forever. Unlimited by default (a large document with heavy media can legitimately take tens of seconds). A worker that throws or fails to load already rejects immediately regardless; this only covers the "silent, never-responds" case.' };
 const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped, and the engine is left out of your build. When passed, the engine ships as a standalone asset fetched lazily the first time a document contains an equation.' };
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' parses AND renders entirely inside the worker; the main thread only paints the ImageBitmap returned by the render*ToBitmap method via a `bitmaprenderer` context. Requires Worker + OffscreenCanvas. The canvas-target render methods are unavailable in 'worker' mode, and equations require 'main'. Trade-off: each frame is transferred from the worker as an ImageBitmap, so a single render can be marginally slower than 'main' — the win is that the main thread never blocks." };
-const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the whole viewer off the main thread — every frame is produced in a Web Worker and painted via a `bitmaprenderer` context — so document rendering never blocks the UI. Scroll, sheet tabs, zoom and (xlsx) cell selection are unchanged. Requires Worker + OffscreenCanvas. The pptx/docx text-selection overlay is unavailable in 'worker' mode (onTextRun can't cross the worker boundary), and equations require 'main'. Trade-off: each frame crosses the worker boundary as an ImageBitmap, so an individual render can be marginally slower than 'main' — the win is a responsive main thread, not raw render speed." };
+const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the whole viewer off the main thread — every frame is produced in a Web Worker and painted via a `bitmaprenderer` context — so document rendering never blocks the UI. Scroll, sheet tabs, zoom and (xlsx) cell selection are unchanged. Requires Worker + OffscreenCanvas. The pptx/docx text-selection overlay and in-document find work in 'worker' mode too (per-run geometry crosses the worker boundary); equations still require 'main'. Trade-off: each frame crosses the worker boundary as an ImageBitmap, so an individual render can be marginally slower than 'main' — the win is a responsive main thread, not raw render speed." };
+const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
+const ON_SCALE_CHANGE = { name: 'onScaleChange', type: '(scale: number) => void', desc: 'Called when the zoom factor changes (setScale / fitWidth / fitPage / zoomIn / zoomOut), with the clamped factor (1 = 100%).' };
+const ON_HYPERLINK_CLICK = { name: 'onHyperlinkClick', type: '(target: HyperlinkTarget) => void', desc: "Called when a hyperlink is clicked. `target` is `{ kind: 'external', url }` or `{ kind: 'internal', ref, slideIndex? }`. When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run). External URLs are scheme-sanitized (http / https / mailto / tel only); internal targets resolve to a docx bookmark / pptx slide jump / xlsx defined name or cell." };
+
+// Shared zoom methods (IX9) — same contract across all three viewers; the return
+// type differs (docx/pptx re-render asynchronously → Promise<void>; xlsx is sync).
+const zoomMethods = (asyncSet: boolean): ApiMethod[] => [
+  { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
+  { sig: `setScale(scale: number): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: 'Set the absolute zoom factor (1 = 100%), clamped to [zoomMin, zoomMax]; re-renders at the new size and fires onScaleChange when it changes. View-only.' },
+  { sig: `fitWidth(): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: "Fit the content WIDTH to the host container and re-render (routes through setScale). Defers when nothing is loaded or the container is unlaid-out." },
+  { sig: `fitPage(): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: 'Fit the WHOLE content (width and height) inside the container so it is visible without scrolling — takes the tighter of the two fits. Defers when unloaded / unlaid-out.' },
+];
+
+// Shared find methods (IX2) — identical shape across all three viewers; only the
+// match location type differs (docx page / pptx slide / xlsx sheet+cell).
+const findMethods = (loc: string): ApiMethod[] => [
+  { sig: `findText(query: string, opts?: { caseSensitive?: boolean }): Promise<FindMatch<${loc}>[]>`, desc: 'Full-text search across the whole document; highlights every hit and returns them in document order. Each match carries `matchIndex`, the matched `text`, and its `location`. Case-insensitive by default.' },
+  { sig: `findNext(): Promise<FindMatch<${loc}> | null>`, desc: 'Move to the next match (wrap-around), navigate to it if needed, and draw it in the active-match colour. Returns the now-active match, or null when there are none. Call findText first.' },
+  { sig: `findPrev(): Promise<FindMatch<${loc}> | null>`, desc: 'Move to the previous match (wrap-around from first to last).' },
+  { sig: 'clearFind(): void', desc: 'Clear all highlights and reset the find state.' },
+];
 
 export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
   pptx: [
@@ -46,6 +67,9 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ZIP,
         MATH,
         VIEWER_MODE,
+        ZOOM_MIN_MAX,
+        ON_SCALE_CHANGE,
+        ON_HYPERLINK_CLICK,
         { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -54,6 +78,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'goToSlide(index: number): Promise<void>', desc: 'Render a specific slide (0-indexed, clamped).' },
         { sig: 'nextSlide(): Promise<void>', desc: 'Advance one slide.' },
         { sig: 'prevSlide(): Promise<void>', desc: 'Go back one slide.' },
+        ...zoomMethods(true),
+        ...findMethods('PptxMatchLocation'),
         { sig: 'get slideIndex(): number', desc: 'Current slide index.' },
         { sig: 'get slideCount(): number', desc: 'Total slides (0 until loaded).' },
         { sig: 'get hiddenSlideMode(): "show" | "skip" | "dim"', desc: 'The current hidden-slide mode.' },
@@ -132,6 +158,9 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ZIP,
         MATH,
         VIEWER_MODE,
+        ZOOM_MIN_MAX,
+        ON_SCALE_CHANGE,
+        ON_HYPERLINK_CLICK,
         { name: 'onPageChange', type: '(index: number, total: number) => void', desc: 'Called after a page finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -140,6 +169,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'goToPage(index: number): Promise<void>', desc: 'Render a specific page (0-indexed, clamped).' },
         { sig: 'nextPage(): Promise<void>', desc: 'Advance one page.' },
         { sig: 'prevPage(): Promise<void>', desc: 'Go back one page.' },
+        ...zoomMethods(true),
+        ...findMethods('DocxMatchLocation'),
         { sig: 'get pageCount(): number', desc: 'Total pages (0 until loaded).' },
         { sig: 'get currentPage(): number', desc: 'Current page index.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
@@ -213,6 +244,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ZIP,
         MATH,
         VIEWER_MODE,
+        ON_SCALE_CHANGE,
+        ON_HYPERLINK_CLICK,
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
         { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
@@ -227,7 +260,11 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get sheetCount(): number', desc: 'Total sheets (0 until loaded).' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
         { sig: 'get selection(): CellRange | null', desc: 'The current selected range.' },
-        { sig: 'setScale(scale: number): void', desc: 'Set the zoom/scale factor at runtime (clamped to zoomMin/zoomMax, snapped to whole percent). View-only.' },
+        { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
+        { sig: 'setScale(scale: number): void', desc: 'Set the zoom factor (1 = 100%), clamped to [zoomMin, zoomMax] and snapped to whole percent; re-renders and fires onScaleChange when it changes. View-only.' },
+        { sig: 'fitWidth(): void', desc: 'Fit the used data range WIDTH (row header + used columns) to the canvas area (routes through setScale). Defers when unloaded / unlaid-out.' },
+        { sig: 'fitPage(): void', desc: 'Fit the used data range WIDTH and HEIGHT inside the canvas area so the whole used range is visible without scrolling — takes the tighter of the two fits. Defers when unloaded / unlaid-out.' },
+        ...findMethods('XlsxMatchLocation'),
         { sig: 'setSelectionColor(color: string): void', desc: 'Change the selection accent color at runtime (any CSS color).' },
         { sig: 'get hiddenSheetMode(): "show" | "skip" | "dim"', desc: 'The current hidden-sheet mode.' },
         { sig: 'setHiddenSheetMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-sheet mode at runtime: restyle the tabs and re-render. Entering `skip` while on a hidden sheet advances to the nearest visible sheet.' },
