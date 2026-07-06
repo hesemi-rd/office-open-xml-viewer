@@ -9004,6 +9004,20 @@ function renderCell(
     // background (e.g. a nested table). renderParagraph narrows this to the
     // paragraph shading when the paragraph declares its own.
     containerShading: cell.background ?? state.containerShading,
+    // ECMA-376 §17.4.57 / §20.4.2.x — a table cell is its own text container: the
+    // page's floating objects (anchor images, text frames, and floating TABLES)
+    // exclude MAIN-STORY text, NOT text inside a table cell. Word never flows cell
+    // content around a page float that happens to overlap the cell's box. Spreading
+    // `state.floats` into the cell made a cell paragraph's line layout skip past an
+    // OUTER float's wrap band (skipPastTopAndBottom / resolveLineFloatWindow read
+    // `state.floats`), pushing the cell's first line down — measured on sample-28
+    // p.17, where a vAlign="center" header cell's text was displaced ~17 px below
+    // its centred slot by the projects float's band overlapping the cell. Give the
+    // cell an isolated (empty) float set so its content lays out only against the
+    // cell box; an in-cell anchor float then also stays scoped to the cell instead
+    // of leaking onto the page. floatParaSeq restarts at 0 for the same isolation.
+    floats: [],
+    floatParaSeq: 0,
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
