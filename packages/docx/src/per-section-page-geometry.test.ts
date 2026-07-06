@@ -3,6 +3,7 @@ import { computePages, paginateDocument, renderDocumentToCanvas } from './render
 import type {
   BodyElement, DocParagraph, DocxTextRun, SectionProps, DocxDocumentModel,
   SectionGeom, PaginatedBodyElement, HeaderFooter,
+  DocTable, DocTableRow, DocTableCell,
 } from './types';
 
 // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — page geometry is
@@ -430,5 +431,84 @@ describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom'
     expect(workerish.mode).toBe('worker');
     const mainish = make({ _mode: 'main' });
     expect(mainish.mode).toBe('main');
+  });
+});
+
+// ECMA-376 §17.6.11 (pgMar) + §17.6.13 (pgSz) — a newspaper-column band's WIDTH
+// and x-origin derive from the OWNING section's page geometry, not the body-level
+// section. `computeColumns` is fed by `sectionColumnsFrom`; the paginator sizes a
+// table to the active column band (`colW()`), so the stamped `tableColWidthsPt`
+// is the observable proxy for the band width the fix corrects.
+function cellPara(text: string): DocParagraph {
+  return {
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    runs: [{
+      type: 'text', text,
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'NotInMetrics', isLink: false,
+      background: null, vertAlign: null, hyperlink: null,
+    }],
+    defaultFontSize: 10, defaultFontFamily: 'NotInMetrics', widowControl: false,
+  } as unknown as DocParagraph;
+}
+
+// A single-row, single-column FIXED-layout table whose `<w:tblGrid>` width is
+// `gridWidthPt`. Fixed layout uses the grid verbatim and only scales DOWN when the
+// grid overflows the available band (resolveColumnWidths §17.4.52), so the stamped
+// `tableColWidthsPt` equals `gridWidthPt` iff the band is ≥ that width.
+function fixedTable(gridWidthPt: number): DocTable {
+  const cell: DocTableCell = {
+    content: [{ type: 'paragraph', ...cellPara('x') }],
+    colSpan: 1, vMerge: null,
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    background: null, vAlign: 'top', widthPt: gridWidthPt,
+  } as unknown as DocTableCell;
+  const row: DocTableRow = {
+    cells: [cell], rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+  } as unknown as DocTableRow;
+  return {
+    colWidths: [gridWidthPt], rows: [row],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left', layout: 'fixed', widthPt: gridWidthPt,
+  } as unknown as DocTable;
+}
+
+describe('per-section newspaper-column band (§17.6.11/§17.6.13) — paginator', () => {
+  it('sizes a table to the OWNING section band width, not the body-level band', () => {
+    // First section (ended by the nextPage break): page 600 wide, margins L=10 R=40
+    // ⇒ content band 600−10−40 = 550. Its single fixed table has a tblGrid of 550,
+    // so it fits EXACTLY and its columns stay 550.
+    const sec1: SectionGeom = {
+      pageWidth: 600, pageHeight: 500,
+      marginTop: 20, marginRight: 40, marginBottom: 20, marginLeft: 10,
+      headerDistance: 0, footerDistance: 0,
+    };
+    // Body (final) section: page 600 wide, margins L=75 R=75 ⇒ content band 450.
+    // BEFORE the fix, `sectionColumnsFrom` builds the first section's band from THIS
+    // body-level width (450), so the 550-wide grid is clamped to 450.
+    const bodySection: SectionProps = {
+      pageWidth: 600, pageHeight: 500,
+      marginTop: 20, marginRight: 75, marginBottom: 20, marginLeft: 75,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const body: BodyElement[] = [
+      { type: 'table', ...fixedTable(550) } as BodyElement,
+      { type: 'sectionBreak', kind: 'nextPage', geom: sec1 } as BodyElement,
+      para('BODY_SECTION'),
+    ];
+    const doc = {
+      section: bodySection, body,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const pages = computePages(doc.body, doc.section, makeCtx());
+    const tbl = pages[0].find((e) => e.type === 'table') as PaginatedBodyElement;
+    const stampedTotal = (tbl.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0);
+    // The table belongs to the first section (band 550), so its columns sum to 550 —
+    // NOT the body-level band 450 the bug clamps them to.
+    expect(stampedTotal).toBeCloseTo(550, 5);
   });
 });

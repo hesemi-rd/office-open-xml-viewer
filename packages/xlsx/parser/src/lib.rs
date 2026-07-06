@@ -1244,11 +1244,12 @@ fn parse_worksheet(
                 // (implicit sequential numbering — the de-facto consumer
                 // convention; the spec only grants the optionality). An explicit
                 // value also re-anchors the counter for following implicit rows.
-                let row_idx: u32 = match node.attribute("r").and_then(|s| s.parse::<u32>().ok()) {
-                    Some(r) => r,
-                    None => prev_row_idx + 1,
-                };
-                prev_row_idx = row_idx;
+                // Routed through the shared primitive so this and the sparkline
+                // data path (`extract_range_values`) cannot drift.
+                let row_idx = resolve_implicit_ordinal(
+                    node.attribute("r").and_then(|s| s.parse::<u32>().ok()),
+                    &mut prev_row_idx,
+                );
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
                 // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
                 // Gating the value on `@customHeight="1"` (0.37.0) was too
@@ -2134,32 +2135,66 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
         return values;
     };
     let row_span = (range.right - range.left + 1) as usize;
-    for c in doc
+
+    // Walk `<row>` elements first so we can reconstruct implicit positions the
+    // same way the main cell path does (PR #851): `@r` is `use="optional"` on
+    // both `CT_Row` (§18.3.1.73) and `CT_Cell` (§18.3.1.4). A flat
+    // `doc.descendants()` scan over `<c>` cannot recover an omitted position
+    // because it has no row grouping and no running column, so an r-less cell
+    // would be silently dropped and the sparkline would render blank. Track an
+    // implicit row counter across rows and, within each row, an implicit column
+    // counter — both resolved through `resolve_implicit_ordinal` so this path
+    // stays in lockstep with `parse_worksheet` / `parse_row_cells`.
+    let mut prev_row: u32 = 0;
+    for row_node in doc
         .descendants()
-        .filter(|n| n.tag_name().name() == "c" && is_x_ns(n.tag_name().namespace()))
+        .filter(|n| n.tag_name().name() == "row" && is_x_ns(n.tag_name().namespace()))
     {
-        let Some(r_attr) = c.attribute("r") else {
-            continue;
-        };
-        let (col, row) = parse_cell_ref(r_attr);
-        if row < range.top || row > range.bottom || col < range.left || col > range.right {
-            continue;
-        }
-        // Only honor numeric / formula-numeric cells. `t` of "s" / "str" /
-        // "inlineStr" / "b" / "e" all map to None for sparkline values.
-        let t = c.attribute("t").unwrap_or("");
-        if matches!(t, "s" | "str" | "inlineStr" | "b" | "e") {
-            continue;
-        }
-        let v = c
+        let row = resolve_implicit_ordinal(
+            row_node.attribute("r").and_then(|s| s.parse::<u32>().ok()),
+            &mut prev_row,
+        );
+
+        let mut prev_col: u32 = 0;
+        for c in row_node
             .children()
-            .find(|n| n.tag_name().name() == "v" && is_x_ns(n.tag_name().namespace()))
-            .and_then(|n| n.text())
-            .and_then(|s| s.trim().parse::<f64>().ok());
-        if let Some(num) = v {
-            let idx = (row - range.top) as usize * row_span + (col - range.left) as usize;
-            if idx < values.len() {
-                values[idx] = Some(num);
+            .filter(|n| n.tag_name().name() == "c" && is_x_ns(n.tag_name().namespace()))
+        {
+            // An explicit `@r` re-anchors both the column and (authoritatively)
+            // the row; an omitted `@r` takes the previous cell's column + 1 and
+            // the running row.
+            let (col, cell_row) = match c.attribute("r") {
+                Some(r_attr) => {
+                    let (col, row) = parse_cell_ref(r_attr);
+                    prev_col = col;
+                    (col, row)
+                }
+                None => (resolve_implicit_ordinal(None, &mut prev_col), row),
+            };
+
+            if cell_row < range.top
+                || cell_row > range.bottom
+                || col < range.left
+                || col > range.right
+            {
+                continue;
+            }
+            // Only honor numeric / formula-numeric cells. `t` of "s" / "str" /
+            // "inlineStr" / "b" / "e" all map to None for sparkline values.
+            let t = c.attribute("t").unwrap_or("");
+            if matches!(t, "s" | "str" | "inlineStr" | "b" | "e") {
+                continue;
+            }
+            let v = c
+                .children()
+                .find(|n| n.tag_name().name() == "v" && is_x_ns(n.tag_name().namespace()))
+                .and_then(|n| n.text())
+                .and_then(|s| s.trim().parse::<f64>().ok());
+            if let Some(num) = v {
+                let idx = (cell_row - range.top) as usize * row_span + (col - range.left) as usize;
+                if idx < values.len() {
+                    values[idx] = Some(num);
+                }
             }
         }
     }
@@ -2340,11 +2375,18 @@ fn parse_row_cells(
         if c_node.tag_name().name() != "c" || !is_x_ns(c_node.tag_name().namespace()) {
             continue;
         }
+        // An explicit `@r` re-anchors the running column; an omitted one takes
+        // the previous cell's column + 1 and inherits the row's resolved index.
+        // Both cases update `prev_col` via the shared primitive so this and the
+        // sparkline data path (`extract_range_values`) cannot drift.
         let (col, row) = match c_node.attribute("r") {
-            Some(cell_ref) => parse_cell_ref(cell_ref),
-            None => (prev_col + 1, row_index),
+            Some(cell_ref) => {
+                let (col, row) = parse_cell_ref(cell_ref);
+                prev_col = col;
+                (col, row)
+            }
+            None => (resolve_implicit_ordinal(None, &mut prev_col), row_index),
         };
-        prev_col = col;
         let cell_type = c_node.attribute("t").unwrap_or("");
         let style_index: u32 = c_node
             .attribute("s")
@@ -2457,6 +2499,27 @@ pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
         .fold(0u32, |acc, c| acc * 26 + (c as u32 - 'A' as u32 + 1));
     let row = row_str.parse().unwrap_or(1);
     (col, row)
+}
+
+/// Resolve a 1-based ordinal (a `<row>`'s row number or a `<c>`'s column) that
+/// may omit its explicit position, tracking the running previous value in place.
+///
+/// ECMA-376 marks `@r` `use="optional"` on both `CT_Row` (§18.3.1.73) and
+/// `CT_Cell` (§18.3.1.4). The spec grants the optionality but does not spell out
+/// how an omitted value resolves; the de-facto consumer convention (Excel,
+/// LibreOffice, SheetJS all agree, and no competing interpretation exists) is
+/// ordinal document order: an omitted value is the previous sibling's + 1 (the
+/// first element, with `*prev == 0` meaning "none yet", lands at 1), and an
+/// explicit value re-anchors the running counter for later omitted siblings.
+///
+/// This is the single primitive shared by the three consumers that walk
+/// `<row>`/`<c>` sequences — `parse_worksheet` (row numbers), `parse_row_cells`
+/// (cell columns), and `extract_range_values` (sparkline data cells) — so their
+/// implicit-reference handling cannot drift apart.
+fn resolve_implicit_ordinal(explicit: Option<u32>, prev: &mut u32) -> u32 {
+    let resolved = explicit.unwrap_or(*prev + 1);
+    *prev = resolved;
+    resolved
 }
 
 // ===========================
@@ -3793,6 +3856,134 @@ mod sparkline_range_cap_tests {
         assert!(
             extract_range_values(empty_xml, &over_cap).is_empty(),
             "a range one cell over the cap must yield empty"
+        );
+    }
+
+    // ── #851 mirror: implicit cell/row references in sparkline data ranges ─────
+    //
+    // ECMA-376 marks `@r` `use="optional"` on both `CT_Cell` (§18.3.1.4) and
+    // `CT_Row` (§18.3.1.73). PR #851 taught the *main* cell path
+    // (`parse_worksheet` / `parse_row_cells`) to resolve omitted references by
+    // ordinal document order, but `extract_range_values` (the sparkline data
+    // path) still skipped any `<c>` without `@r`, so a sparkline whose source
+    // worksheet uses the minimal r-less form rendered blank. These tests pin the
+    // mirror resolution: r-less `<row>` = previous row + 1 (first = 1); r-less
+    // `<c>` = previous cell's column + 1 within that row (first = column A); an
+    // explicit `@r` on either re-anchors the running counter.
+
+    /// A worksheet whose `<row>` and `<c>` both omit `@r` entirely must still
+    /// resolve numeric values in row-major order — the counters supply A1, A2, …
+    #[test]
+    fn all_implicit_refs_resolve_row_major() {
+        // Column A, rows 1..=3 — all implicit. Range A1:A3.
+        let range = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 3,
+            right: 1,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c><v>10</v></c></row><row><c><v>20</v></c></row><row><c><v>30</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert_eq!(
+            values,
+            vec![Some(10.0), Some(20.0), Some(30.0)],
+            "all-implicit row/cell refs must resolve to A1,A2,A3 in row-major order"
+        );
+    }
+
+    /// A single implicit row with several implicit cells must fill columns
+    /// A,B,C,… left-to-right off the running per-row column counter.
+    #[test]
+    fn implicit_cells_fill_columns_left_to_right() {
+        // Row 1, columns A..=C — all implicit. Range A1:C1.
+        let range = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1,
+            right: 3,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c><v>1</v></c><c><v>2</v></c><c><v>3</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert_eq!(
+            values,
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            "consecutive implicit cells must land in A1,B1,C1"
+        );
+    }
+
+    /// An explicit `@r` on a `<c>` must re-anchor the running column so a
+    /// following implicit cell continues from the explicit anchor, and an
+    /// explicit `<row r>` must re-anchor the row counter for later implicit rows.
+    #[test]
+    fn explicit_ref_reanchors_running_counters() {
+        // Range spans A1:D2. Row 1: implicit A1=5, then explicit C1=7, then
+        // implicit D1=8 (continues from C). Row 2 is implicit (previous row 1 +
+        // 1 = 2): implicit A2=9.
+        let range = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 2,
+            right: 4,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c><v>5</v></c><c r="C1"><v>7</v></c><c><v>8</v></c></row><row><c><v>9</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        // Row-major over A1:D2, row_span = 4:
+        //   idx0 A1=5, idx1 B1=None, idx2 C1=7, idx3 D1=8,
+        //   idx4 A2=9, idx5..7 None
+        assert_eq!(
+            values,
+            vec![
+                Some(5.0),
+                None,
+                Some(7.0),
+                Some(8.0),
+                Some(9.0),
+                None,
+                None,
+                None,
+            ],
+            "explicit @r on a cell re-anchors the column; implicit row after r=1 is row 2"
+        );
+    }
+
+    /// An explicit `<row r>` re-anchors the implicit row counter: a later r-less
+    /// row is the explicit row + 1, not a naive +1 off document order.
+    #[test]
+    fn explicit_row_ref_reanchors_row_counter() {
+        // Explicit row 5, then an implicit row (→ row 6). Range A5:A6.
+        let range = CellRange {
+            top: 5,
+            left: 1,
+            bottom: 6,
+            right: 1,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="5"><c><v>50</v></c></row><row><c><v>60</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert_eq!(
+            values,
+            vec![Some(50.0), Some(60.0)],
+            "implicit row after explicit r=5 must resolve to row 6"
+        );
+    }
+
+    /// Implicit refs must coexist with the existing type filter: a string cell
+    /// (`t="s"`) in the running sequence still maps to None while numeric
+    /// neighbors resolve, and the column counter advances past it.
+    #[test]
+    fn implicit_cells_respect_type_filter() {
+        // Row 1, A1=1 (implicit), B1 t="s" (implicit, → None), C1=3 (implicit).
+        let range = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1,
+            right: 3,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c><v>1</v></c><c t="s"><v>0</v></c><c><v>3</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert_eq!(
+            values,
+            vec![Some(1.0), None, Some(3.0)],
+            "a t=s cell in an implicit run maps to None but still advances the column counter"
         );
     }
 }

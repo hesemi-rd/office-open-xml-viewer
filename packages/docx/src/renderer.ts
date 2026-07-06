@@ -1831,15 +1831,18 @@ export function computePages(
     for (let j = startIdx; j < body.length; j++) {
       const e = body[j];
       if (e.type === 'sectionBreak') {
-        // Resolve this section's cols by swapping in its ColumnsSpec. Page
-        // GEOMETRY is now per-section (`sectionGeomFrom`), but `computeColumns`
-        // here still receives the BODY-LEVEL width (`section.pageWidth`/margins) —
-        // a documented residual: a mid-body section with a different page WIDTH and
-        // multiple columns tiles against the body width, not its own. Single-column
-        // sections and uniform-width documents are unaffected. Aligning column
-        // widths to the per-section width is the width-residual follow-up in the
-        // design doc; do NOT change it here.
-        return computeColumns({ ...section, columns: e.columns ?? null });
+        // Resolve this section's cols by swapping in its ColumnsSpec AND its page
+        // GEOMETRY. `computeColumns` derives the text band from
+        // pageWidth/marginLeft/marginRight (ECMA-376 §17.6.13 pgSz + §17.6.11
+        // pgMar), which are PER-SECTION — the ending section's geometry lives on
+        // this same SectionBreak marker (`e.geom`, from `sectionGeomFrom`). Spread
+        // it over the body-level `section` so the band width and x-origin come from
+        // the owning section, not the body-level one. `SectionGeom`'s field names
+        // and semantics match `SectionProps` (see the SectionGeom warning comment),
+        // so this only overrides the page-box fields. A `geom`-less marker (an
+        // inheriting section) falls back to the body-level geometry, matching
+        // `sectionGeomFrom`'s `?? bodySectionGeom`.
+        return computeColumns({ ...section, ...(e.geom ?? {}), columns: e.columns ?? null });
       }
     }
     return computeColumns(section);
