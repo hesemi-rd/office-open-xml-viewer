@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #ffffff; }
+    canvas { display: block; margin: 4px; }
+  </style>
+</head>
+<body>
+  <!--
+    WordArt warp quality fixture: renders SYNTHETIC warped slides (no .pptx
+    fetch, no private fixtures) straight through renderSlide, one canvas per
+    preset, plus a flat (unwarped) control canvas for sharpness comparison.
+    Used by warp-strip-quality.spec.ts to measure stray-ink / sharpness /
+    contour-step metrics of the strip-subdivision draw path in a real browser.
+  -->
+  <script type="module">
+    import { renderSlide } from '/src/renderer.ts';
+
+    const EMU = 9525;
+    const px = (n) => Math.round(n * EMU);
+    const BOX_W = 6.2 * 96;
+    const BOX_H = 1.5 * 96;
+
+    function slideFor(preset, text, boxH) {
+      const para = {
+        alignment: 'ctr', marL: 0, marR: 0, indent: 0, spaceBefore: null, spaceAfter: null,
+        spaceLine: null, lvl: 0, bullet: { type: 'none' }, defFontSize: null, defColor: null,
+        defBold: null, defItalic: null, defFontFamily: null, tabStops: [], eaLnBrk: true,
+        runs: [{ type: 'text', text, bold: true, italic: null, underline: false,
+          strikethrough: false, fontSize: 40, color: '1F4E79', fontFamily: 'Arial' }],
+      };
+      const textBody = {
+        verticalAnchor: 'ctr', paragraphs: [para], defaultFontSize: 40,
+        defaultBold: null, defaultItalic: null, lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+        wrap: 'none', vert: 'horz', autoFit: 'none',
+        textWarp: preset ? { preset } : undefined,
+      };
+      return {
+        slide: {
+          index: 0, slideNumber: 1, background: null,
+          elements: [{
+            type: 'shape', x: px(20), y: px(20), width: px(BOX_W), height: px(boxH),
+            rotation: 0, flipH: false, flipV: false, geometry: 'rect',
+            fill: null, stroke: null, textBody, defaultTextColor: null, custGeom: null,
+            adj: null, adj2: null, adj3: null, adj4: null, adj5: null, adj6: null,
+            adj7: null, adj8: null, shadow: null,
+          }],
+        },
+        w: px(BOX_W + 40),
+        h: px(boxH + 40),
+      };
+    }
+
+    const CASES = [
+      // [id, preset (null = flat control), text, box height css px]
+      ['flat', null, 'Inflate', BOX_H],
+      ['inflate', 'textInflate', 'Inflate', BOX_H],
+      ['deflate', 'textDeflate', 'Deflate', BOX_H],
+      ['cascade', 'textCascadeUp', 'Cascade', BOX_H],
+      ['wave1', 'textWave1', 'Wave One', BOX_H],
+      ['circlepour', 'textCirclePour', 'Round', 3 * 96],
+    ];
+
+    try {
+      await document.fonts.ready;
+      const timings = {};
+      for (const [id, preset, text, boxH] of CASES) {
+        const { slide, w, h } = slideFor(preset, text, boxH);
+        const canvas = document.createElement('canvas');
+        canvas.id = id;
+        document.body.appendChild(canvas);
+        const t0 = performance.now();
+        await renderSlide(canvas, slide, w, h, {
+          width: BOX_W + 40,
+          defaultTextColor: null,
+          majorFont: null,
+          minorFont: null,
+          hlinkColor: null,
+          fetchMedia: async () => new Blob([]),
+          fetchImage: async () => new Blob([]),
+          skipMediaControls: true,
+        });
+        timings[id] = +(performance.now() - t0).toFixed(1);
+      }
+      document.body.dataset.timings = JSON.stringify(timings);
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = String(err);
+      console.error('[warp-fixture] fatal:', err);
+    }
+  </script>
+</body>
+</html>
