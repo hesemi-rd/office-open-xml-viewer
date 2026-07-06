@@ -18,7 +18,7 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel } from '@silurus/ooxml-core';
+import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel, Duotone } from '@silurus/ooxml-core';
 
 /**
  * Picture bullet — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip r:embed>`. The
@@ -533,6 +533,13 @@ export interface PictureElement {
   srcRect?: { l: number; t: number; r: number; b: number };
   /** a:blip > a:alphaModFix@amt as 0..1. Undefined = fully opaque. */
   alpha?: number;
+  /**
+   * ECMA-376 §20.1.8.23 `<a:duotone>` recolour, resolved to its two endpoint
+   * colours (through the slide theme). Undefined ⇒ no duotone. When present the
+   * renderer decodes the raster once, remaps it along the `clr1`→`clr2`
+   * luminance ramp, and caches the recoloured bitmap under a colour-suffixed key.
+   */
+  duotone?: Duotone;
   /**
    * `<p:spPr><a:custGeom>` clipping path. Same `PathCmd` model as
    * `ShapeElement.custGeom` (one entry per `<a:path>`; coords normalized
