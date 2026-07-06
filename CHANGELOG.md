@@ -4,6 +4,205 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.71.0 — 2026-07-06
+
+Minor. The 2026-07 second improvement cycle lands: in-document **find**
+(`findText`) and a unified **zoom contract** across all five viewers, clickable
+**hyperlinks** with internal-anchor navigation, a rebuilt xlsx number-format
+grammar, xlsx **outline grouping** and **furigana**, docx **vertical-text**
+(縦書き) fidelity (UAX#50 vertical forms + 縦中横 tate-chu-yoko), docx page
+decorations (page borders, line numbers, section vAlign), a large chart
+correctness + chartEx pass, WordArt text warps in pptx, and worker-mode parity
+for selection / find. New public surface: `findText` / `findNext` / `findPrev`
+/ `clearFind`, `getScale` / `setScale` / `fitWidth` / `fitPage`, and
+`onHyperlinkClick` on every viewer.
+
+**Viewers / interaction**
+
+- **In-document find:** `findText(query, opts?)` / `findNext()` / `findPrev()`
+  / `clearFind()` on `DocxViewer`, `PptxViewer` and `XlsxViewer` — searches the
+  whole document, highlights every hit, and tags each match with its natural
+  location (docx page / pptx slide / xlsx sheet+cell). Pure string/index math
+  lives in `@silurus/ooxml-core`. (#783, IX2)
+- **Unified zoom contract:** all five viewers share one zoom API — `getScale()` /
+  `setScale(scale)` plus `fitWidth()` / `fitPage()` (fit persists across
+  reflow), backed by `core/interaction/zoomable.ts`. Previously zoom was
+  inconsistent (single-canvas docx/pptx had no API, scroll viewers only had
+  absolute `setScale`, xlsx only had the slider). (#837, IX9 + PD12) The wheel /
+  pinch gesture now anchors on the raw pointer, so the point under the cursor
+  stays put across all viewers (the padding-scaled horizontal lead-in was
+  double-counted). (#882)
+- **Clickable hyperlinks + internal navigation:** links in all three formats are
+  now clickable via an overlay/hit-test layer (zero canvas repaint — file-specified
+  colour/underline are untouched), sanitized through a shared
+  `core/interaction/hyperlink.ts`, with an `onHyperlinkClick(target)` callback.
+  Internal anchor targets (bookmarks / slide jumps / defined names) resolve and
+  navigate. (#775, #778, IX1)
+- **Worker-mode selection / find parity:** in `mode: 'worker'`, docx/pptx text
+  selection (empty overlay + one-time warn) and `findText` (guard returning `[]`)
+  were silently dropped because per-run `onTextRun` geometry could not cross the
+  worker boundary. Run geometry now crosses the boundary, so selection and find
+  behave identically in main and worker mode. (#841, IX6)
+
+**docx**
+
+- **Vertical text (縦書き) fidelity:** UAX#50 vertical-form substitution provenance
+  corrected and dead entries dropped (#789); vertical-text glyphs centred on the
+  column by font metrics rather than ink (#792); vertical 、。 kept in the cell's
+  upper-right instead of ink-centred low (#793); 縦中横 (tate-chu-yoko) runs
+  (e.g. "9月29日") no longer overlap (#834); find/selection overlay over a
+  縦中横 run clamped to its one-em cell (§17.3.2.10, #861, #836); pinned by a
+  sample-26 regression test. (§17.3.2 vertical text family)
+- **International page-number formats (`w:pgNumType` + field switches):** the PAGE
+  field honours `<w:pgNumType>` (§17.6.12 restart / format) and `\*` format
+  switches — decimal / upperRoman / lowerRoman / upperLetter / lowerLetter native,
+  plus per-section restart. (#800, WD2) Extended with hex, numberInDash and
+  decimalZero, hebrew2 (appends a ת run, not the repeat-letter scheme), and
+  koreanLegal native-Korean numbering; locale-independent switches route through
+  core. (§17.18.59 ST_NumberFormat, #860, #795)
+- **TIME / DATE fields:** `TIME` / `DATE` fields evaluated against their `\@`
+  date-time picture. (§17.16.5.72 / .16, #828)
+- **Section decorations:** page borders (`w:pgBorders`, §17.6.10 — standard line
+  styles, offsetFrom/display/zOrder defaults; art borders documented as
+  unsupported), line numbering (`w:lnNumType`), and section vertical alignment
+  (`w:vAlign`) now parse and render — previously ignored. (#807, WD6)
+- **Multilevel heading numbering:** a `<w:lvlOverride>` now substitutes the full
+  overriding `<w:lvl>` definition (§17.9.7), and `lvl` / `pStyle` numbering-level
+  backlinks resolve so a heading chain picks up the right list level rather than
+  collapsing to level 0 (§17.9.23 / §17.9.8). (#870)
+- **Newspaper-column band geometry:** the multi-column band uses per-section page
+  geometry, so a section that changes page size / margins lays its columns out
+  against its own page rather than the document's first section. (#865)
+- **Hard break opening a paragraph:** a paragraph that BEGINS with a hard
+  `<w:br w:type="page"/>` / `column` break used to drop the break together with
+  its empty leading chunk, so it never advanced the page/column. The opening
+  break is now honoured. (§17.3.1.20, #871)
+- **Floating tables — cell isolation + band deferral:** table-cell content is
+  isolated from the page's floating objects (a float can no longer reflow text
+  inside an unrelated cell), and a page-anchored floating table whose band
+  intersects another float table defers a row at a time instead of overlapping.
+  (#867)
+- **Adjacent cell border conflicts (§17.4.66):** shared internal gridlines were
+  double-drawn and neighbour background fills could re-cover already-painted
+  borders; conflicts now resolve by border weight (not paint order). (#811, WD7)
+- **Table cell theme colour + auto contrast (§17.3.2.6):** runs whose colour is
+  never applied route through the auto-contrast pick, and table-cell shading folds
+  into the auto text-colour contrast decision. (#848)
+- **Table indent (`w:tblInd`, §17.4.50):** parsed and applied. (#827, #819)
+- **VML watermark / imagedata (`w:pict`):** bare `<v:imagedata r:id>` inline VML
+  images (§19.1.2.11) map to inline image runs; VML text watermarks
+  (`v:textpath`, §19.1.2.23) render. (#809, WD3)
+- **Run character metrics (`w:w` / `w:spacing` / `w:position` / `w:kern`):**
+  the four previously-unparsed run properties parse and apply; `w:w` character
+  scale now applies at **paint** under active docGrid / justify so measured and
+  painted widths agree (§17.3.2.43, measure == paint). (#813 WD4, #858, #816)
+- **Footnotes inside tables:** footnotes referenced from inside table cells are
+  drawn at the bottom of the page. (§17.11.10, #849)
+- **Paragraph border spacing (§17.3.1.7):** the bottom paragraph-border extent is
+  reserved in the vertical flow and mirrored in the cell content measurer. (#847)
+- **Textbox default text colour:** `wps:style` `fontRef` honoured as the textbox
+  default text colour. (#826, #821)
+- **RTL (bidi) tab stops:** tab stops mirror in RTL paragraphs and resolve in
+  reading order against the text margin. (#830, #835)
+- **RTL floating tables / header images / table width:** column-relative anchors
+  resolve against the text column (§20.4.3.4) and the measure pass seeds contentX
+  like the paint pass (#844); page/margin-anchored floating tables taller than the
+  text region split a row at a time (#845); a floating table's width caps at the
+  page, not the text-column band (#852).
+- **sample-12 caption pagination:** the 1-inch float line-start rule is scoped to
+  CONTENT lines; empty paragraph marks keep the pilcrow threshold (regression from
+  #676). (#791)
+- **Emphasis mark on fields:** `w:em` wired onto `FieldRun` (PAGE / NUMPAGES). (#758)
+- **Blip duotone + alphaModFix on images:** DrawingML `<a:duotone>` recolour
+  (§20.1.8.23) and `<a:alphaModFix>` opacity (§20.1.8.6) apply to inline / anchored
+  pictures, pinned by a node pixel-probe render test. (#888)
+
+**pptx**
+
+- **WordArt text warps (`a:prstTxWarp`, §20.1.9.19 ST_TextShapeType):** all 40
+  presets implemented — Canvas 2D cannot deform glyph outlines, so a per-glyph
+  approximation stretches each glyph onto the warp envelope (box-fit semantics).
+  (#838, PP4) Single-edge "Follow Path" warps follow the path at natural width
+  (followPathUScale, #856, #846); a local envelope-slope shear is applied to each
+  warped glyph so the strip edges stay parallel to the envelope (#866); high-curvature
+  envelopes subdivide into deviation-driven piecewise-affine strips (#872); and the
+  strips draw as clipped vector `fillText` rather than resampled bitmap slices, so
+  no seams appear between strips (#876).
+- **SmartArt fallback (S → M):** a `<p:graphicFrame>` DrawingML diagram (§21.4)
+  with no pre-baked drawing part previously drew nothing; a staged spec-compliant
+  fallback (frame → text list) now renders it. (#798, PP3)
+- **Table border single-draw:** shared table borders draw once (documented
+  span-vs-subdivided-neighbour limitation, #824). (#817)
+- **Blip duotone + alphaModFix on pictures:** `<a:duotone>` (§20.1.8.23) and
+  `<a:alphaModFix>` (§20.1.8.6) recolour / fade pictures, pinned by a node
+  pixel-probe test. (#888)
+
+**xlsx**
+
+- **Number-format grammar rebuild (§18.8.30 / §18.8.31):** the number-format engine
+  moves from a regex + `toFixed` approximation to a full tokenizer → AST → renderer.
+  New coverage: comma scaling (`#,##0,` = thousands, `0.0,,` = millions), fractions
+  (`# ??/??`, Stern-Brocot), conditional sections (`[>…]`), and condition-selected
+  negative sections format the magnitude. (#799, XL3)
+- **Outline grouping:** Excel row/column outline grouping in both main and worker
+  modes — gutter (group bracket + summary elbow), +/− collapse toggle, and numbered
+  level buttons. (`<row>` / `<col>` outlineLevel/collapsed/hidden §18.3.1.73 / .13,
+  `<sheetPr><outlinePr>`.) Non-shared gutter canvases attach only while an outline
+  exists. (#843, hotfix #853, XL4)
+- **Furigana (rPh / phoneticPr):** East-Asian furigana implemented — `<rPh sb/eb>`
+  (§18.4.6) + `<phoneticPr>` (§18.4.3) parse, drawn only when a cell opts in via
+  `ph="1"` (§18.3.1.4). Row-level `<row ph>` toggle inheritance added. (#810 XL5,
+  #859, #814)
+- **Sparkline implicit references:** `extract_range_values` reconstructs cells that
+  omit the optional `@r` attribute (§18.3.1.4 / §18.3.1.73) by tracking row groups
+  and a running column, so a sparkline over an r-less worksheet no longer renders
+  blank. (#864) Implicit reference fill order documented as convention (not
+  spec-mandated). (#851)
+- **Shape outline `lnRef idx=0`:** a `<a:lnRef idx="0">` on an xlsx drawing shape is
+  treated as "no outline" (§20.1.4.2.19), fixing a stray border around embedded
+  equation shapes. (#875)
+- **Blip duotone + alphaModFix on pictures:** `<a:duotone>` (§20.1.8.23) and
+  `<a:alphaModFix>` (§20.1.8.6) recolour / fade pictures. (#885)
+
+**charts**
+
+- **chartEx renderers (CH15):** funnel / histogram → treemap → sunburst →
+  boxWhisker recognised and rendered; chartEx parse centralised in
+  `ooxml-common::parse_chartex_part`; boxWhisker outlines stroked in
+  accent × lumMod 80%. (#750, #751, #764)
+- **3D flatten + stock + auto-title (CH13):** 3D charts flattened, stock charts and
+  a synthesized single-series auto-title added. (#753)
+- **docx inline charts (CH12):** embedded DrawingML charts render via the shared
+  core `renderChart` (new `DocxColorResolver`); line/area data labels honour
+  `dLblPos` (default right, §21.2.2.48). (#746, #745)
+- **Pie data-label radius:** solid-pie `ctr` data labels placed near the rim
+  (§21.2.2.48); series-line `noFill` and per-point `dLbl` overrides honoured. (#808,
+  #802)
+- **Scatter legend key:** markers-only scatter series draw a **marker** legend key
+  instead of a line swatch. (#857, #803)
+- **Combo primary value axis:** the primary value axis spans both the bar and line
+  series of a combo chart, so a line series no longer rescales the axis on its own. (#874)
+- **Gridline z-order + area minor gridlines:** the area renderer now strokes value /
+  category major gridlines UNDER the series fills (matching every other cartesian
+  renderer and PowerPoint, #881) and honours `<c:minorGridlines>` (§21.2.2.129),
+  which it previously ignored (#884).
+- **CT_Boolean default audit:** bare chart flag elements honour `val` default=true
+  across 10 sites (dml-chart.xsd). (#862, #806)
+- **Axis follow-ups:** ST_FixedAngle boundary corrected (open type, closed UI range),
+  plus the earlier axis/gridline/title-position work from the cycle. (#786)
+
+**core**
+
+- **Antiqua serif classification:** Antiqua faces classify as serif. (#825, #822)
+- **Decimal half-up rounding:** a shared `roundDecimalHalfUp` display formatter
+  fixes `toFixed`'s 2.675 → 2.67 problem (Office display rounding). (#863, #801)
+
+**tests / CI**
+
+- **VRT sample matrix:** sample-27..31 added to the VRT matrix with 71 reference
+  PNGs (#854); a docx sample-28 page-count regression test pins the hard-break
+  pagination fix (#869, #873).
+
 ## 0.70.2 — 2026-07-03
 
 Patch (hotfix on v0.70.1). Fixes the packaging of the parser WASM asset
