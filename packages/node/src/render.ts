@@ -105,7 +105,18 @@ export function installOffscreenCanvasShim(factory: NodeCanvasFactory): () => vo
 export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
   const g = globalThis as unknown as { createImageBitmap?: unknown };
   const prev = g.createImageBitmap;
-  g.createImageBitmap = async (source: Blob | ArrayBuffer | Uint8Array) => {
+  // The source may be raw bytes (the raster-decode path) OR a canvas-like
+  // surface with a 2D context (core's `applyDuotone`, §20.1.8.23, which bakes a
+  // recoloured offscreen surface back into an "ImageBitmap"). Widen the param so
+  // the canvas branch is a real member and needs no double-cast.
+  type CanvasLike = { getContext(id: '2d'): unknown };
+  g.createImageBitmap = async (source: Blob | ArrayBuffer | Uint8Array | CanvasLike) => {
+    // A canvas-like source is already a drawable image source in node-canvas —
+    // return it directly. The surface IS the skia Canvas the factory made, so no
+    // byte round-trip is needed (and skia has no `createImageBitmap(canvas)`).
+    if (source && typeof (source as CanvasLike).getContext === 'function') {
+      return source as CanvasLike;
+    }
     let buf: ArrayBuffer | Uint8Array | Buffer;
     if (source instanceof Uint8Array || source instanceof ArrayBuffer) {
       buf = source;

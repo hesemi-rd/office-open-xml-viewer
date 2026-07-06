@@ -79,6 +79,7 @@ export type {
   Sparkline,
   // Drawings / shapes (reachable via Worksheet drawings).
   ImageAnchor,
+  Duotone,
   ChartAnchor,
   ShapeAnchor,
   ShapeInfo,

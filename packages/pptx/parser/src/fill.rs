@@ -11,19 +11,12 @@ use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec};
 use ooxml_common::blip::mime_from_ext;
 use std::collections::HashMap;
 
-/// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node.
-/// Returns fraction (amt / 100000) when present and < 1.0; None otherwise.
-pub(crate) fn parse_blip_alpha(blip_fill: roxmltree::Node<'_, '_>) -> Option<f64> {
-    let blip = child(blip_fill, "blip")?;
-    let amf = child(blip, "alphaModFix")?;
-    let amt: f64 = attr(&amf, "amt")?.parse().ok()?;
-    let frac = amt / 100_000.0;
-    if frac >= 0.9999 {
-        None
-    } else {
-        Some(frac.max(0.0))
-    }
-}
+/// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node
+/// (ECMA-376 §20.1.8.6). Thin re-export of the shared
+/// [`ooxml_common::blip::parse_blip_alpha`] so the three formats read the blip
+/// alpha identically (previously a pptx-local copy). Returns the fraction
+/// `amt/100000` when present and < 1.0; `None` otherwise.
+pub(crate) use ooxml_common::blip::parse_blip_alpha;
 
 /// Parse `<a:stretch><a:fillRect l t r b>` (ECMA-376 §20.1.8.58 / §20.1.8.30).
 /// Edge attributes are ST_Percentage (1000ths of a percent → /100000 gives a

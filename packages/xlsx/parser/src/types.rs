@@ -712,6 +712,14 @@ pub enum ShapeGeom {
         /// the same as a `twoCellAnchor` picture.
         #[serde(skip_serializing_if = "Option::is_none")]
         src_rect: Option<SrcRect>,
+        /// ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` on the leaf pic (0.0–1.0).
+        /// `None` = opaque. Applied via `globalAlpha`, like the top-level anchor.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
+        /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour on the leaf pic. `None` =
+        /// no effect. Remaps the leaf image along the `clr1`→`clr2` ramp.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duotone: Option<Duotone>,
     },
 }
 
@@ -853,11 +861,25 @@ pub struct ImageAnchor {
     /// anchor rect. When set, the renderer draws only the visible sub-rectangle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub src_rect: Option<SrcRect>,
+    /// ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` — the blip's overall opacity as a
+    /// fraction (0.0–1.0). `None` = fully opaque. The renderer applies it via
+    /// `globalAlpha` so the picture composites over the cells beneath it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<f64>,
+    /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour effect, resolved to its two
+    /// endpoint colours. `None` = no duotone (the common case). When set, the
+    /// renderer remaps the image along the `clr1`→`clr2` luminance ramp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duotone: Option<Duotone>,
 }
 
 /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop, shared across the docx,
 /// pptx and xlsx parsers (see `ooxml_common::blip`).
 pub use ooxml_common::blip::SrcRect;
+
+/// ECMA-376 §20.1.8.23 `<a:duotone>` image effect, shared across the docx, pptx
+/// and xlsx parsers (see `ooxml_common::blip`).
+pub use ooxml_common::blip::Duotone;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

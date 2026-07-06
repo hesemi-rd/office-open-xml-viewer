@@ -252,7 +252,7 @@ fn parse_sheet_with(
     };
 
     // Attach any drawing-anchored images and charts for this sheet
-    ws.images = load_sheet_images(archive, &sheet_path);
+    ws.images = load_sheet_images(archive, &sheet_path, theme_colors);
     // Embedded OLE object previews (the `<oleObjects>` collection, §18.3.1.60)
     // draw through the same image
     // list; their preview parts are referenced from the worksheet XML + rels.

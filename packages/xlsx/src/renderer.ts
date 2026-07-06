@@ -3,7 +3,7 @@ import type {
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, GradientFillSpec, ShapeInfo, SlicerItem,
-  PhoneticRun, PhoneticProperties, PhoneticAlignment,
+  PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
@@ -12,6 +12,19 @@ import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { parseA1 } from './a1.js';
+
+/** Cache key for a decoded image in the shared `loadedImages` map. A plain
+ *  picture is keyed by its zip `imagePath`; a picture carrying a `<a:duotone>`
+ *  effect (ECMA-376 §20.1.8.23) is keyed by the path PLUS both resolved endpoint
+ *  colours, so a recoloured bitmap is cached and looked up separately from the
+ *  raw blip. The render-orchestrator's `prefetchImages` stores each decoded
+ *  source under this exact key, and the renderer computes it per anchor for the
+ *  synchronous lookup. Kept here (not in the orchestrator) so both the
+ *  synchronous renderer and the async orchestrator share one definition without
+ *  a circular import. */
+export function imageCacheKey(imagePath: string, duotone?: Duotone | null): string {
+  return duotone ? `${imagePath}|duo:${duotone.clr1}:${duotone.clr2}` : imagePath;
+}
 
 // Default font stack. Calibri is the workbook default font in Excel; on
 // systems without Office (macOS / Linux) the browser would otherwise fall
@@ -3321,7 +3334,9 @@ function renderImages(
   ctx.clip();
 
   for (const anchor of ws.images) {
-    const img = loadedImages.get(anchor.imagePath);
+    // A `<a:duotone>` picture was recoloured at decode time and cached under a
+    // colour-suffixed key (§20.1.8.23); look it up with the same key.
+    const img = loadedImages.get(imageCacheKey(anchor.imagePath, anchor.duotone));
     if (!img) continue;
 
     // xdr col/row are 0-indexed; our widths map is 1-indexed.
@@ -3364,7 +3379,17 @@ function renderImages(
     if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
     if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
-    drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+    // ECMA-376 §20.1.8.6 `<a:alphaModFix>`: scale the picture's opacity so it
+    // composites over the cells beneath it. Saved/restored so it never leaks
+    // into a later anchor's draw.
+    if (anchor.alpha != null && anchor.alpha < 1) {
+      ctx.save();
+      ctx.globalAlpha = anchor.alpha;
+      drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+      ctx.restore();
+    } else {
+      drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+    }
   }
 
   ctx.restore();
@@ -3560,11 +3585,20 @@ function drawShape(
     // so we should normally have it in `loadedImages` (keyed by imagePath).
     // If not, fall back to a silent skip — drawing an empty rect would look
     // worse.
-    const img = loadedImages?.get(shape.geom.imagePath);
+    const img = loadedImages?.get(imageCacheKey(shape.geom.imagePath, shape.geom.duotone));
     if (img) {
       // Honor an `<a:srcRect>` crop on the leaf pic (oneCellAnchor / grpSp leaf),
-      // same as the top-level anchor path (ECMA-376 §20.1.8.55).
-      drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+      // same as the top-level anchor path (ECMA-376 §20.1.8.55). Apply the leaf's
+      // `<a:alphaModFix>` opacity (§20.1.8.6) via globalAlpha, saved/restored.
+      const leafAlpha = shape.geom.alpha;
+      if (leafAlpha != null && leafAlpha < 1) {
+        ctx.save();
+        ctx.globalAlpha = leafAlpha;
+        drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+        ctx.restore();
+      } else {
+        drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+      }
     }
   }
   // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after

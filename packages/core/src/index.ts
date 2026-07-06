@@ -165,6 +165,22 @@ export {
   metafileRasterSize,
   type SrcRect,
 } from './image/crop';
+// Shared DrawingML duotone image effect (§20.1.8.23): recolour a decoded image
+// along a `clr1`→`clr2` luminance ramp. The pure pixel transform + a canvas
+// wrapper that returns a new ImageBitmap, cached by the renderers per (path +
+// colours). Consumed by all three formats (xlsx first; pptx/docx pictures can
+// carry duotone too).
+export {
+  applyDuotone,
+  duotoneImageData,
+  hex6ToRgb,
+  luminance601,
+  defaultOffscreenFactory,
+  type Duotone,
+  type RgbaBuffer,
+  type OffscreenFactory,
+  type OffscreenSurface,
+} from './image/duotone';
 // Shared vector-vs-raster blip gate: prefer the Microsoft asvg:svgBlip vector
 // original except when an <a:srcRect> crop is present (then the raster's native
 // pixel grid is required for the fractional crop math). Used by all three

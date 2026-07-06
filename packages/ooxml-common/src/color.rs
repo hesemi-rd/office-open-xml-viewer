@@ -456,7 +456,84 @@ pub fn parse_color_node<R: ThemeResolver + ?Sized>(
     resolver: &R,
     tint_mode: TintMode,
 ) -> Option<String> {
-    match extract_color_source(container)? {
+    resolve_color_source(extract_color_source(container)?, resolver, tint_mode)
+}
+
+/// Build a [`ColorSource`] from a node that IS itself a colour element
+/// (`<a:srgbClr>`, `<a:schemeClr>`, `<a:prstClr>`, …), rather than a container
+/// wrapping one. [`extract_color_source`] scans a container's *children*; this
+/// classifies the node directly. Needed where the color elements appear as a
+/// bare list — e.g. `<a:duotone>`'s two `EG_ColorChoice` children (§20.1.8.23),
+/// which are the colour elements themselves. Returns `None` for a non-colour
+/// element (or a `srgbClr`/`prstClr`/`schemeClr` missing its required `val`).
+pub fn color_source_from_element<'a, 'input>(
+    el: Node<'a, 'input>,
+) -> Option<ColorSource<'a, 'input>> {
+    match el.tag_name().name() {
+        "srgbClr" => Some(ColorSource::SrgbClr {
+            val: el.attribute("val")?.to_owned(),
+            node: el,
+        }),
+        "scrgbClr" => {
+            let pct = |name: &str| -> f64 {
+                el.attribute(name)
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0)
+                    / 100_000.0
+            };
+            Some(ColorSource::ScrgbClr {
+                r: pct("r"),
+                g: pct("g"),
+                b: pct("b"),
+                node: el,
+            })
+        }
+        "hslClr" => Some(ColorSource::HslClr {
+            hue: el
+                .attribute("hue")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0)
+                / 60_000.0
+                / 360.0,
+            sat: el
+                .attribute("sat")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0)
+                / 100_000.0,
+            lum: el
+                .attribute("lum")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0)
+                / 100_000.0,
+            node: el,
+        }),
+        "sysClr" => Some(ColorSource::SysClr {
+            last_clr: el.attribute("lastClr").map(str::to_owned),
+            val: el.attribute("val").map(str::to_owned),
+            node: el,
+        }),
+        "prstClr" => Some(ColorSource::PrstClr {
+            val: el.attribute("val")?.to_owned(),
+            node: el,
+        }),
+        "schemeClr" => Some(ColorSource::SchemeClr {
+            val: el.attribute("val")?.to_owned(),
+            node: el,
+        }),
+        _ => None,
+    }
+}
+
+/// Resolve a located [`ColorSource`] to a hex string (uppercase, no `#`),
+/// applying its EG_ColorTransform children. Split out of [`parse_color_node`] so
+/// callers that already hold a `ColorSource` (e.g. from
+/// [`color_source_from_element`]) can resolve it without re-scanning.
+pub fn resolve_color_source<R: ThemeResolver + ?Sized>(
+    source: ColorSource<'_, '_>,
+    resolver: &R,
+    tint_mode: TintMode,
+) -> Option<String> {
+    match source {
         ColorSource::SrgbClr { val, node } => Some(apply_color_transforms(&val, node, tint_mode)),
         ColorSource::ScrgbClr { r, g, b, node } => {
             // Linear-light r/g/b (0..1) → sRGB display hex, then transforms.

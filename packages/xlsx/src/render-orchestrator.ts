@@ -6,12 +6,20 @@ import {
   preferVectorBlip,
   decodeRasterOrMetafile,
   metafileRasterSize,
+  applyDuotone,
+  imageNaturalSize,
   EMU_PER_PT,
   type MathRenderer,
   type SrcRect,
+  type Duotone,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
-import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
+import {
+  renderViewport,
+  prepareWorksheetMath,
+  worksheetHasUncachedMath,
+  imageCacheKey,
+} from './renderer.js';
 
 /** What `prefetchImages` needs to decode one picture: the raster `imagePath`
  *  (also the cache key), its `mimeType`, the optional svgBlip vector path, and
@@ -28,6 +36,10 @@ interface ImageRef {
    *  metafile, scales the raster up to the full picture frame so the fractional
    *  crop lands correctly (see `metafileRasterSize`). */
   srcRect?: SrcRect | null;
+  /** The picture's `<a:duotone>` recolour (§20.1.8.23), when present. The base
+   *  bitmap is decoded, then recoloured along the `clr1`→`clr2` ramp; the result
+   *  is cached under {@link imageCacheKey}(imagePath, duotone). */
+  duotone?: Duotone | null;
 }
 
 /** Fetch one image's bytes by zip path and decode them to a drawable
@@ -137,14 +149,21 @@ export async function prefetchImages(
   ws: Worksheet,
   imageCache: Map<string, CanvasImageSource | null>,
   fetchImage: ((path: string, mime: string) => Promise<Blob>) | undefined,
+  // Optional offscreen-surface factory for the `<a:duotone>` pixel transform,
+  // injected in environments without a global `OffscreenCanvas` (or by tests).
+  // Defaults to the real `OffscreenCanvas` when the runtime provides one.
+  opts?: { offscreenFactory?: import('@silurus/ooxml-core').OffscreenFactory },
 ): Promise<void> {
   if (!fetchImage) return;
   const fetch = fetchImage;
   const uncached = new Map<string, ImageRef>();
   if (ws.images) {
     for (const img of ws.images) {
-      if (!imageCache.has(img.imagePath)) {
-        uncached.set(img.imagePath, {
+      // Key by (path + duotone colours) so a recoloured picture is cached and
+      // looked up separately from the raw blip (§20.1.8.23).
+      const key = imageCacheKey(img.imagePath, img.duotone);
+      if (!imageCache.has(key)) {
+        uncached.set(key, {
           imagePath: img.imagePath,
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
@@ -154,6 +173,7 @@ export async function prefetchImages(
           // An `<a:srcRect>` crop forces the raster decode (native pixel grid)
           // and, for a metafile, the full-frame raster size.
           srcRect: img.srcRect ?? null,
+          duotone: img.duotone ?? null,
         });
       }
     }
@@ -161,27 +181,31 @@ export async function prefetchImages(
   if (ws.shapeGroups) {
     for (const grp of ws.shapeGroups) {
       for (const shape of grp.shapes) {
-        if (shape.geom.type === 'image' && !imageCache.has(shape.geom.imagePath)) {
-          uncached.set(shape.geom.imagePath, {
-            imagePath: shape.geom.imagePath,
-            mimeType: shape.geom.mimeType,
-            svgImagePath: shape.geom.svgImagePath,
-            // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
-            widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
-            heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
-            // A crop forces the raster decode (native pixel grid for the crop)
-            // and, for a metafile, the full-frame raster size.
-            srcRect: shape.geom.srcRect ?? null,
-          });
+        if (shape.geom.type === 'image') {
+          const key = imageCacheKey(shape.geom.imagePath, shape.geom.duotone);
+          if (!imageCache.has(key)) {
+            uncached.set(key, {
+              imagePath: shape.geom.imagePath,
+              mimeType: shape.geom.mimeType,
+              svgImagePath: shape.geom.svgImagePath,
+              // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
+              widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
+              heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
+              // A crop forces the raster decode (native pixel grid for the crop)
+              // and, for a metafile, the full-frame raster size.
+              srcRect: shape.geom.srcRect ?? null,
+              duotone: shape.geom.duotone ?? null,
+            });
+          }
         }
       }
     }
   }
   if (uncached.size === 0) return;
   await Promise.all(
-    [...uncached.values()].map(async (ref) => {
+    [...uncached.entries()].map(async ([key, ref]) => {
       try {
-        const src = await decodeImageSource(
+        let src = await decodeImageSource(
           ref.imagePath,
           ref.mimeType,
           ref.svgImagePath,
@@ -190,13 +214,30 @@ export async function prefetchImages(
           ref.heightPt,
           ref.srcRect,
         );
-        // Cache the decode result keyed by path — INCLUDING a null for an
-        // unsupported metafile (true EMF / geometry-less WMF). Storing the null
-        // (matching pptx's getCachedBitmap) makes `imageCache.has(path)` short-
-        // circuit the per-render prefetch, so the blip is sniffed ONCE instead of
-        // re-fetched + re-sniffed every viewport frame. The renderer already
-        // skips a falsy source, so a cached null draws nothing.
-        imageCache.set(ref.imagePath, src);
+        // Apply a `<a:duotone>` recolour (§20.1.8.23) once, at decode time, so the
+        // per-frame draw stays synchronous. The transform returns a NEW
+        // ImageBitmap recoloured along the clr1→clr2 luminance ramp (or the source
+        // unchanged when the pixel pipeline is unavailable). Uses the decoded
+        // bitmap's native pixel size. Only raster/bitmap sources are recoloured —
+        // an SVG element (vector blip) has no readable pixel grid, so it is left
+        // as-is (a duotone on a vector picture is a rare edge case).
+        if (src && ref.duotone) {
+          const { w, h } = imageNaturalSize(src);
+          if (w > 0 && h > 0) {
+            src = await applyDuotone(src, ref.duotone, {
+              width: w,
+              height: h,
+              offscreenFactory: opts?.offscreenFactory,
+            });
+          }
+        }
+        // Cache the decode result keyed by (path + duotone colours) — INCLUDING a
+        // null for an unsupported metafile (true EMF / geometry-less WMF). Storing
+        // the null (matching pptx's getCachedBitmap) makes `imageCache.has(key)`
+        // short-circuit the per-render prefetch, so the blip is sniffed ONCE
+        // instead of re-fetched + re-sniffed every viewport frame. The renderer
+        // already skips a falsy source, so a cached null draws nothing.
+        imageCache.set(key, src);
       } catch {
         /* leave uncached; renderer skips a missing source */
       }

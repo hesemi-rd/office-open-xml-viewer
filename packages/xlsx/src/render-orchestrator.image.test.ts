@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { prefetchImages, decodeImageSource, closeAndClearImageCache } from './render-orchestrator';
 import type { Worksheet } from './types';
+import type { OffscreenFactory } from '@silurus/ooxml-core';
 
 /**
  * The render orchestrator decodes embedded images lazily by zip path:
@@ -287,5 +288,113 @@ describe('closeAndClearImageCache (teardown GPU-bitmap leak guard)', () => {
   it('is safe to call on an already-empty cache', () => {
     const cache = new Map<string, CanvasImageSource | null>();
     expect(() => closeAndClearImageCache(cache)).not.toThrow();
+  });
+});
+
+// ── <a:duotone> recolour at decode time (§20.1.8.23) ─────────────────────────
+// A picture carrying a duotone effect is decoded once, recoloured along the
+// clr1→clr2 luminance ramp, and cached under a colour-suffixed key so the raw
+// blip and its recoloured variant never collide. `applyDuotone` reads the base
+// bitmap's pixels via getImageData → transform → putImageData → a NEW bitmap, so
+// we inject an offscreen factory + stub createImageBitmap to exercise the path
+// without a real canvas.
+describe('render-orchestrator duotone (§20.1.8.23)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** An offscreen surface whose getImageData returns a fixed near-white pixel
+   *  grid, and whose putImageData records the mutated buffer so the test can
+   *  confirm the recolour ran. Cast to the core `OffscreenFactory` at the
+   *  boundary (a partial mock — the DOM `ImageBitmapSource` shape is irrelevant
+   *  to the transform under test). */
+  function recordingFactory(record: { out?: Uint8ClampedArray }): OffscreenFactory {
+    return ((w: number, h: number) => ({
+      width: w,
+      height: h,
+      getContext() {
+        return {
+          drawImage() {},
+          getImageData(_sx: number, _sy: number, sw: number, sh: number) {
+            // All near-white opaque pixels (t≈0.96) → should map toward clr2.
+            const data = new Uint8ClampedArray(sw * sh * 4).fill(246);
+            for (let i = 3; i < data.length; i += 4) data[i] = 255; // alpha
+            return { data, width: sw, height: sh } as unknown as ImageData;
+          },
+          putImageData(img: ImageData) {
+            record.out = img.data;
+          },
+        };
+      },
+    })) as unknown as OffscreenFactory;
+  }
+
+  it('recolours a duotone picture and caches it under a colour-suffixed key', async () => {
+    // A fake bitmap exposes width/height so imageNaturalSize sizes the surface.
+    const baseBitmap = { width: 4, height: 4, tag: 'base' } as unknown as ImageBitmap;
+    const recoloured = { width: 4, height: 4, tag: 'duo' } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async (src: unknown) => {
+      // The base decode passes a Blob; applyDuotone passes the offscreen surface.
+      return src instanceof Blob ? baseBitmap : recoloured;
+    }));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    ws.images = [
+      {
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/image1.png',
+        mimeType: 'image/png',
+        alpha: 0.7,
+        duotone: { clr1: '000000', clr2: 'FFF3F4' },
+      },
+    ];
+    ws.shapeGroups = [];
+    const record: { out?: Uint8ClampedArray } = {};
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await prefetchImages(ws, cache, fetchImage, {
+      offscreenFactory: recordingFactory(record),
+    });
+
+    // Cached under path + duotone colours (NOT the bare path).
+    const key = 'xl/media/image1.png|duo:000000:FFF3F4';
+    expect(cache.has(key)).toBe(true);
+    expect(cache.has('xl/media/image1.png')).toBe(false);
+    // The cached source is the recoloured bitmap, not the base.
+    expect(cache.get(key)).toBe(recoloured);
+    // putImageData saw the recoloured buffer: near-white (246) → toward FFF3F4
+    // (R=0xFF=255, G=0xF3=243, B=0xF4=244), so R>G and R>B and all high.
+    expect(record.out).toBeDefined();
+    const out = record.out as Uint8ClampedArray;
+    expect(out[0]).toBeGreaterThan(240); // R
+    expect(out[0]).toBeGreaterThanOrEqual(out[1]); // R>=G
+    expect(out[0]).toBeGreaterThanOrEqual(out[2]); // R>=B
+  });
+
+  it('keeps a duotone variant separate from the same path without duotone', async () => {
+    const baseBitmap = { width: 2, height: 2 } as unknown as ImageBitmap;
+    const recoloured = { width: 2, height: 2, tag: 'duo' } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async (src: unknown) =>
+      src instanceof Blob ? baseBitmap : recoloured,
+    ));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    ws.images = [
+      { fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0, toCol: 1, toColOff: 0, toRow: 1, toRowOff: 0, nativeExtCx: 0, nativeExtCy: 0, imagePath: 'xl/media/image1.png', mimeType: 'image/png' },
+      { fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0, toCol: 1, toColOff: 0, toRow: 1, toRowOff: 0, nativeExtCx: 0, nativeExtCy: 0, imagePath: 'xl/media/image1.png', mimeType: 'image/png', duotone: { clr1: '000000', clr2: 'FFF3F4' } },
+    ];
+    ws.shapeGroups = [];
+    const record: { out?: Uint8ClampedArray } = {};
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await prefetchImages(ws, cache, fetchImage, { offscreenFactory: recordingFactory(record) });
+
+    expect(cache.has('xl/media/image1.png')).toBe(true); // plain
+    expect(cache.has('xl/media/image1.png|duo:000000:FFF3F4')).toBe(true); // recoloured
+    expect(cache.size).toBe(2);
   });
 });
