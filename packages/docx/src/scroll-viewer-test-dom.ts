@@ -28,8 +28,13 @@ export interface FakeEl {
   height: number;
   // scrollHost-only (settable by the test to drive the virtualization loop)
   scrollTop: number;
+  scrollLeft: number;
   clientHeight: number;
   clientWidth: number;
+  /** Spacer-only: laid-out width. The real DOM derives it from style.width; the
+   *  fake keeps it a settable number (default 0) so a horizontal-zoom test can
+   *  give the scroll extent a concrete size. */
+  offsetWidth: number;
   _listeners: Map<string, Array<(e: unknown) => void>>;
   _bitmapCtx?: { transferFromImageBitmap: (b: unknown) => void; lastBitmap: unknown };
   /** Records every DEVICE-BUFFER resize (a `canvas.width`/`canvas.height`
@@ -64,8 +69,10 @@ export function makeEl(tag: string): FakeEl {
     width: 0,
     height: 0,
     scrollTop: 0,
+    scrollLeft: 0,
     clientHeight: 0,
     clientWidth: 0,
+    offsetWidth: 0,
     children: [],
     parentElement: null,
     // Placeholders for the interface; replaced by computed getters below

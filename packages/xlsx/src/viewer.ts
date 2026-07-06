@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
-import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -485,6 +485,16 @@ export class XlsxViewer implements ZoomableViewer {
    * strand the view at the sheet's far end once the host gains its real size.
    */
   private effectiveH = 0;
+
+  /** Gesture-only pointer anchor for the NEXT `setScale`, in canvasArea-viewport
+   *  px (`{ x, y }` from the wheel event, relative to the grid's top-left). Set by
+   *  the Ctrl/⌘+wheel handler right before it calls `setScale` so the zoom pivots
+   *  on the cursor ("zoom toward the pointer") in BOTH axes, past the fixed
+   *  header + frozen-pane lead-in; consumed and cleared by `setScale`. `null` for
+   *  every non-gesture source (the public `setScale`, the +/- steppers, the zoom
+   *  slider, `fitWidth`/`fitPage`), which keep the historical START-anchored
+   *  (top-left) preservation so their behaviour is unchanged. */
+  private _pendingZoomAnchor: { x: number; y: number } | null = null;
 
   // Selection state
   private anchorCell: CellAddress | null = null;
@@ -2838,6 +2848,17 @@ export class XlsxViewer implements ZoomableViewer {
         if (!(e.ctrlKey || e.metaKey)) return;
         e.preventDefault();
         if (e.deltaY === 0) return;
+        // Pointer-anchored zoom: pivot on the cursor, not the top-left corner.
+        // Record the pointer relative to the grid's top-left (canvasArea rect,
+        // which the scrollHost overlays with inset:0) so `setScale` keeps the
+        // cell under the cursor fixed. `scrollHost` and `canvasArea` share a rect.
+        // A malformed event (no clientX/Y) yields a non-finite anchor; drop it so
+        // `setScale` falls back to the historical START-anchored preservation.
+        const rect = this.canvasArea.getBoundingClientRect();
+        const ax = e.clientX - rect.left;
+        const ay = e.clientY - rect.top;
+        this._pendingZoomAnchor =
+          Number.isFinite(ax) && Number.isFinite(ay) ? { x: ax, y: ay } : null;
         this.setScale(zoomStepScale(this.opts.cellScale ?? 1, e.deltaY));
       },
       { passive: false },
@@ -3094,7 +3115,17 @@ export class XlsxViewer implements ZoomableViewer {
       Math.max(Math.round(zoomMin * 100), Math.round(scale * 100)),
     );
     const next = pct / 100;
-    if (next === (this.opts.cellScale ?? 1)) return;
+    const prevScale = this.opts.cellScale ?? 1;
+    // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above)
+    // FIRST — before the no-op early return — so a gesture whose setScale ends
+    // up a NO-OP (pinned at zoomMin/zoomMax, or a small deltaY swallowed by the
+    // whole-percent snap) can never leak a stale anchor into a later non-gesture
+    // setScale (slider, steppers, fitWidth/fitPage, public API), which must keep
+    // the historical START-anchored (top-left) preservation. `null` for every
+    // non-gesture source.
+    const gestureAnchor = this._pendingZoomAnchor;
+    this._pendingZoomAnchor = null;
+    if (next === prevScale) return;
     this.opts.cellScale = next;
 
     if (this.zoomSlider) this.zoomSlider.value = String(this.zoomScaleToPos(next, zoomMin, zoomMax));
@@ -3109,13 +3140,49 @@ export class XlsxViewer implements ZoomableViewer {
       // so we must re-derive scrollLeft from the preserved effective value or
       // the view would jump toward the start on every zoom step.
       const prevEffective = this.effectiveScrollLeft;
+      const prevScrollTop = this.scrollHost.scrollTop;
       // Gutter extents scale with cellScale (XL4); re-lay them out before the
       // spacer/scroll math reads canvasArea's new inset size.
       this.layoutGutters();
       this.updateSpacerSize(this.currentWorksheet);
-      this.effectiveH = prevEffective;
-      if (this.isRtl) {
-        this.scrollHost.scrollLeft = Math.max(0, this.maxScrollLeft - prevEffective);
+
+      if (gestureAnchor) {
+        // POINTER-ANCHORED zoom (both axes). The header + frozen band are drawn
+        // at a FIXED screen position and do NOT scroll (see getCellAt), but their
+        // on-screen size is the UNSCALED extent K × cs — a SCALING lead-in. From
+        // getCellAt, the logical row under screen-y `py` is
+        //   (py + scrollTop)/cs − K            (K = HEADER_H + frozenH)
+        // and requiring that to be invariant across cs makes the K·cs terms
+        // cancel exactly:
+        //   scrollTop' = ratio·(scrollTop + py) − py
+        // — i.e. the RAW pointer is the anchor and the clamp is the native
+        // [0, maxScroll] (see anchoredZoomOffset's LEAD-INS note; routing through
+        // a lead-in-shifted virtual scroll would distort the low clamp and floor
+        // scrollTop at K·cs near the sheet start).
+
+        // Vertical: native scrollTop is start-anchored in both LTR/RTL.
+        const maxTop = Math.max(0, this.scrollHost.scrollHeight - this.scrollHost.clientHeight);
+        this.scrollHost.scrollTop = anchoredZoomOffset(prevScrollTop, gestureAnchor.y, prevScale, next, {
+          maxScroll: maxTop,
+        });
+
+        // Horizontal: anchor in the logical-LTR space the grid math uses (the
+        // same cancellation holds for K = HEADER_W + frozenW), so RTL is handled
+        // by translating the pointer through screenX (an involution) and
+        // re-deriving the native scrollLeft from the effective (start-anchored)
+        // position, exactly as the START-anchored branch does.
+        const anchorLogicalX = this.screenX(gestureAnchor.x, 0);
+        const maxLeftV = this.maxScrollLeft;
+        const newEffective = anchoredZoomOffset(prevEffective, anchorLogicalX, prevScale, next, {
+          maxScroll: maxLeftV,
+        });
+        this.effectiveH = newEffective;
+        this.scrollHost.scrollLeft = this.isRtl ? Math.max(0, maxLeftV - newEffective) : newEffective;
+      } else {
+        this.effectiveH = prevEffective;
+        if (this.isRtl) {
+          this.scrollHost.scrollLeft = Math.max(0, this.maxScrollLeft - prevEffective);
+        }
       }
     }
     void this.renderCurrentSheet();

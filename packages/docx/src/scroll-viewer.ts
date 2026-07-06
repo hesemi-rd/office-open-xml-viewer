@@ -1,4 +1,4 @@
-import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
+import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
 import type { HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
@@ -257,6 +257,14 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  is host-agnostic. */
   private _settleTimer: ReturnType<typeof setTimeout> | null = null;
   private _wheelListener: ((e: WheelEvent) => void) | null = null;
+  /** Gesture-only pointer anchor for the NEXT `setScale`, in scrollHost-viewport
+   *  px (`{ x, y }` from the wheel event, relative to the scroll host's top-left).
+   *  Set by the Ctrl/⌘+wheel handler right before it calls `setScale` so the zoom
+   *  pivots on the cursor ("zoom toward the pointer") in BOTH axes; consumed and
+   *  cleared by `setScale`. `null` for every non-gesture source (the public
+   *  `setScale`, the +/- steppers, `fitWidth`/`fitPage`, the resize re-fit), which
+   *  keep the historical viewport-TOP re-anchor so their behaviour is unchanged. */
+  private _pendingZoomAnchor: { x: number; y: number } | null = null;
   /** Observes the container so a width change re-fits the base scale. Disconnected
    *  in `destroy()`. */
   private _resizeObserver: ResizeObserver | null = null;
@@ -338,6 +346,16 @@ export class DocxScrollViewer implements ZoomableViewer {
         if (!(e.ctrlKey || e.metaKey)) return; // bare wheel scrolls natively
         e.preventDefault();
         if (e.deltaY === 0) return;
+        // Pointer-anchored zoom: pivot on the cursor, not the viewport top. Record
+        // the pointer in scrollHost-viewport px (subtract the host's on-screen
+        // origin) so `setScale` can keep the content point under the cursor fixed.
+        // A malformed event (no clientX/Y) yields a non-finite anchor; drop it so
+        // `setScale` falls back to the historical viewport-top re-anchor.
+        const rect = this._scrollHost.getBoundingClientRect();
+        const ax = e.clientX - rect.left;
+        const ay = e.clientY - rect.top;
+        this._pendingZoomAnchor =
+          Number.isFinite(ax) && Number.isFinite(ay) ? { x: ax, y: ay } : null;
         this.setScale(zoomStepScale(this._scale, e.deltaY));
       };
       this._scrollHost.addEventListener('wheel', this._wheelListener as EventListener, {
@@ -550,6 +568,28 @@ export class DocxScrollViewer implements ZoomableViewer {
   private _padH(): { left: number; right: number } {
     const gap = this._gap();
     return { left: this._opts.paddingLeft ?? gap, right: this._opts.paddingRight ?? gap };
+  }
+
+  /** Index of the page whose slot spans content-offset `y` (largest `i` with
+   *  `offsets[i] <= y`), for the pointer-anchored zoom re-anchor. Mirrors the
+   *  `topIndex` search `computeVisibleRange` runs for the scrollTop, but for an
+   *  ARBITRARY content-y (the pointer, not the viewport top). Clamped into
+   *  `[0, n-1]`; a `y` below the first page (inside the leading pad) yields 0. */
+  private _pageIndexAtOffset(r: VisibleRange, y: number): number {
+    const { offsets } = r;
+    let lo = 0;
+    let hi = offsets.length - 1;
+    let idx = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (offsets[mid] <= y) {
+        idx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return idx;
   }
 
   private _range(): VisibleRange {
@@ -1024,6 +1064,14 @@ export class DocxScrollViewer implements ZoomableViewer {
     const zoomMin = this._opts.zoomMin ?? 0.1;
     const zoomMax = this._opts.zoomMax ?? 4;
     const next = Math.min(zoomMax, Math.max(zoomMin, scale));
+    // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above)
+    // FIRST — before every early return — so a gesture whose setScale ends up a
+    // NO-OP (already pinned at zoomMin/zoomMax) or latches pre-establishment can
+    // never leak a stale anchor into a later non-gesture setScale (slider,
+    // steppers, fitWidth/fitPage, resize re-fit, public API), which must keep
+    // the historical viewport-TOP anchoring. `null` for every non-gesture source.
+    const gestureAnchor = this._pendingZoomAnchor;
+    this._pendingZoomAnchor = null;
     if (!this._doc || this._doc.pageCount === 0 || !this._scaleEstablished) {
       // IX9 F1 (family-unified pre-load semantics): a setScale before the doc is
       // loaded / before the base fit is established is LATCHED, not dropped —
@@ -1034,17 +1082,34 @@ export class DocxScrollViewer implements ZoomableViewer {
       return;
     }
     if (next === this._scale) return;
+    const prevScale = this._scale;
+    const anchorY = gestureAnchor ? gestureAnchor.y : 0;
 
-    // Capture the anchor from the CURRENT layout, before rescale.
+    // Capture the VERTICAL anchor from the CURRENT layout, before rescale, as a
+    // (page index, intra-page fraction) pair. Anchoring on a page — not on the raw
+    // scrollTop — is what keeps the re-anchor exact despite the scale-INVARIANT
+    // desk padding and inter-page gaps (only the page heights scale, so a whole-
+    // scroll linear rescale would drift by the padding). The point we pin is the
+    // content under the pointer: content-y = scrollTop + anchorY (anchorY 0 ⇒ the
+    // viewport top, the historical behaviour).
     const r0 = this._range();
-    const top = r0.topIndex;
+    const anchorContentY = this._scrollHost.scrollTop + anchorY;
+    // Which page does that content-y fall in? `computeVisibleRange` attributes a
+    // point in the trailing gap to the page ABOVE it, so clamp the fraction to
+    // [0,1] to pin the page rather than drift into the gap.
+    const top = this._pageIndexAtOffset(r0, anchorContentY);
     const h0 = this._heights[top] || 0;
-    // intraFrac: the fraction of page `top` that has scrolled above the viewport
-    // top. Clamp to [0,1] — a scrollTop inside the trailing gap after page `top`
-    // is attributed to `top` by computeVisibleRange and would push intraFrac past
-    // 1, which would drift the re-anchor into the gap; pin the page instead.
-    let intraFrac = h0 > 0 ? (this._scrollHost.scrollTop - r0.offsets[top]) / h0 : 0;
+    let intraFrac = h0 > 0 ? (anchorContentY - r0.offsets[top]) / h0 : 0;
     intraFrac = Math.min(1, Math.max(0, intraFrac));
+
+    // HORIZONTAL anchor (gesture only — a non-gesture setScale leaves scrollLeft
+    // untouched, matching the historical behaviour). The page's left edge sits at
+    // the scale-INVARIANT left gutter `padL` when it overflows the viewport (see
+    // `_positionSlot`): screen-x of content pixel c is `padL + c − scrollLeft`,
+    // so the pointer's offset INTO the scaling region is `x − padL` and the
+    // scroll offset itself already lives in the region's own px.
+    const padL = this._padH().left;
+    const scrollLeft0 = this._scrollHost.scrollLeft || 0;
 
     // Bump the render epoch BEFORE recycling/re-dispatching so any in-flight
     // render dispatched at the old scale is recognised as stale on resolution.
@@ -1065,10 +1130,31 @@ export class DocxScrollViewer implements ZoomableViewer {
     // The page px width changed with the scale, so the horizontal extent moves too.
     this._syncSpacerWidth();
 
-    // Pin the same fractional position of the same page under the viewport top.
+    // Pin the same fractional position of the same page under the pointer (or the
+    // viewport top for a non-gesture zoom): the on-screen y of that content point
+    // must stay at `anchorY`, so newScrollTop = newContentY − anchorY.
     const maxTop = Math.max(0, r1.totalHeight - this._scrollHost.clientHeight);
-    const wantTop = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
-    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, wantTop));
+    const newContentY = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
+    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, newContentY - anchorY));
+
+    // Re-anchor horizontally for a gesture zoom. `padL` is a FIXED (non-scaling)
+    // gutter, so it is subtracted from the ANCHOR only — the scroll offset stays
+    // in NATIVE space with the browser's own [0, maxLeft] clamp. (Shifting the
+    // scroll by ±padL as well would run the fixed gutter through the zoom ratio
+    // and over-compensate by padL·(ratio−1) per step: with `screen = padL + c −
+    // scrollLeft`, pinning c·ratio under the pointer x gives exactly
+    // `scrollLeft' = ratio·(scrollLeft + (x−padL)) − (x−padL)`.) Skipped entirely
+    // for a non-gesture setScale so slider/stepper/API/resize is unchanged.
+    if (gestureAnchor) {
+      const maxLeft = Math.max(0, (this._spacer.offsetWidth || 0) - this._scrollHost.clientWidth);
+      this._scrollHost.scrollLeft = anchoredZoomOffset(
+        scrollLeft0,
+        gestureAnchor.x - padL,
+        prevScale,
+        next,
+        { maxScroll: maxLeft },
+      );
+    }
 
     // FLICKER-FREE ZOOM (design §7). Do NOT recycle + re-render in-window slots
     // (that blanks each visible page to white every tick). Instead:
@@ -1470,6 +1556,28 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  via the constructor's ResizeObserver). */
   resizeForTest(): void {
     this._onResize();
+  }
+
+  /** @internal test hook: the content point (page index + intra-page fraction)
+   *  currently under viewport-y `y` (px from the scroll host top). Lets a test
+   *  capture "what is under the cursor" before a zoom and re-query its on-screen
+   *  y afterwards to assert the pointer-anchored invariant. */
+  contentAtViewportYForTest(y: number): { page: number; frac: number } {
+    const r = this._range();
+    const contentY = this._scrollHost.scrollTop + y;
+    const page = this._pageIndexAtOffset(r, contentY);
+    const h = this._heights[page] || 0;
+    const frac = h > 0 ? Math.min(1, Math.max(0, (contentY - r.offsets[page]) / h)) : 0;
+    return { page, frac };
+  }
+
+  /** @internal test hook: inverse of {@link contentAtViewportYForTest} — the
+   *  current viewport-y (px from the scroll host top) of the content point at
+   *  (`page`, intra-page `frac`). */
+  viewportYOfForTest(page: number, frac: number): number {
+    const r = this._range();
+    const contentY = (r.offsets[page] ?? 0) + frac * (this._heights[page] || 0);
+    return contentY - this._scrollHost.scrollTop;
   }
 
   /**

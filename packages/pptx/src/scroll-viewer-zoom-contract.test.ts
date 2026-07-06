@@ -160,4 +160,106 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
     expect(v.getScale()).toBe(3); // latched pre-clamped
     v.destroy();
   });
+
+  // Pointer-anchored ("zoom toward the cursor") Ctrl/⌘+wheel zoom: the content
+  // point under the pointer before the zoom must be under the SAME viewport-y
+  // after. getBoundingClientRect().top = 0 in the fake DOM, so clientY == the
+  // scrollHost-viewport y.
+  it('a Ctrl+wheel zoom keeps the content under the pointer fixed (zoom in)', () => {
+    const { v, scrollHost } = setup();
+    scrollHost.scrollTop = 600;
+    const pointerY = 250;
+    const before = v.contentAtViewportYForTest(pointerY);
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -60,
+      clientX: 100,
+      clientY: pointerY,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBeGreaterThan(1);
+    expect(v.viewportYOfForTest(before.slide, before.frac)).toBeCloseTo(pointerY, 4);
+    v.destroy();
+  });
+
+  it('a Ctrl+wheel zoom keeps the content under the pointer fixed (zoom out)', () => {
+    const { v, scrollHost } = setup();
+    v.setScale(3);
+    scrollHost.scrollTop = 500;
+    const pointerY = 140;
+    const before = v.contentAtViewportYForTest(pointerY);
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: 60,
+      clientX: 80,
+      clientY: pointerY,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBeLessThan(3);
+    expect(v.viewportYOfForTest(before.slide, before.frac)).toBeCloseTo(pointerY, 4);
+    v.destroy();
+  });
+
+  it('a non-gesture setScale still anchors on the viewport top (unchanged)', () => {
+    const { v, scrollHost } = setup();
+    scrollHost.scrollTop = 600;
+    const topContent = v.contentAtViewportYForTest(0);
+    v.setScale(3);
+    expect(v.viewportYOfForTest(topContent.slide, topContent.frac)).toBeCloseTo(0, 4);
+    v.destroy();
+  });
+
+  // HORIZONTAL pointer anchor with a non-zero left gutter. The gutter `padL` is
+  // FIXED (does not scale), so the invariant is on the LOGICAL content-x under
+  // the pointer: screen-x of content pixel c is `padL + c − scrollLeft`, hence
+  // logicalX = (scrollLeft + x − padL) / scale must not move across the zoom.
+  // Regression pin: subtracting/adding padL around the SCROLL as well (instead of
+  // subtracting it from the anchor only) over-compensates by padL·(ratio−1).
+  it('a Ctrl+wheel zoom keeps the content under the pointer fixed horizontally (padL > 0)', () => {
+    const padL = 24;
+    const { v, scrollHost } = setup({ paddingLeft: padL, paddingRight: padL });
+    v.setScale(3); // slide 200 × 3 = 600px wide > the 200px viewport ⇒ h-scrollable
+    // The fake DOM derives no layout from style; give the spacer a generous
+    // laid-out width so the [0, maxLeft] clamp does not bind.
+    const spacer = scrollHost.children[0] as FakeEl;
+    spacer.offsetWidth = 100_000;
+    scrollHost.scrollLeft = 120;
+    const ax = 130; // pointer x in viewport px (over the slide, right of the gutter)
+    const scaleBefore = v.getScale();
+    const logicalXBefore = (scrollHost.scrollLeft + ax - padL) / scaleBefore;
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -20, // ratio e^0.2 ≈ 1.221 ⇒ 3 → ≈3.66, inside zoomMax 4 (unclamped)
+      clientX: ax,
+      clientY: 200,
+      preventDefault() {},
+    });
+    const scaleAfter = v.getScale();
+    expect(scaleAfter).toBeGreaterThan(scaleBefore);
+    const logicalXAfter = (scrollHost.scrollLeft + ax - padL) / scaleAfter;
+    expect(logicalXAfter).toBeCloseTo(logicalXBefore, 6);
+    v.destroy();
+  });
+
+  // A wheel gesture whose setScale is a NO-OP (already clamped at zoomMax) must
+  // NOT leak its pointer anchor into the next non-gesture setScale: the stepper
+  // right after it still anchors on the viewport TOP.
+  it('a no-op gesture (clamped at zoomMax) does not leak its anchor into the next setScale', () => {
+    const { v, scrollHost } = setup();
+    v.setScale(4); // pinned at zoomMax
+    scrollHost.scrollTop = 600;
+    // Ctrl+wheel zoom-IN at zoomMax ⇒ clamped to 4 ⇒ no-op; its anchor must be dropped.
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -60,
+      clientX: 100,
+      clientY: 250,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBe(4); // confirmed no-op
+    const topContent = v.contentAtViewportYForTest(0);
+    v.zoomOut(); // non-gesture stepper — must keep the viewport-TOP anchor
+    expect(v.viewportYOfForTest(topContent.slide, topContent.frac)).toBeCloseTo(0, 4);
+    v.destroy();
+  });
 });

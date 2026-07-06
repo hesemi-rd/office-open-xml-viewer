@@ -382,7 +382,10 @@ export {
 export { computeVisibleRange, type VisibleRange, type VisibleRangePad } from './layout/virtual-scroll';
 // Shared exponential wheel/pinch zoom step (Ctrl/⌘+wheel). Pure — the caller
 // clamps to its own [zoomMin, zoomMax]. Used by XlsxViewer + the scroll viewers.
-export { zoomStepScale } from './interaction/zoom';
+// `anchoredZoomOffset` is the companion pointer-anchored ("zoom toward the
+// cursor") scroll correction: given the pointer position it returns the new
+// scroll offset that keeps the content point under the cursor fixed across a zoom.
+export { zoomStepScale, anchoredZoomOffset, type ScrollClamp } from './interaction/zoom';
 // IX9 — the shared zoom API contract for all five viewers: the ZoomableViewer
 // interface (getScale/setScale/zoomIn/zoomOut/fitWidth/fitPage) plus its pure
 // support logic (the discrete zoom-step ladder, fit-to-content scale math, clamp).
