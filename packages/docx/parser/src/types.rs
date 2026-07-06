@@ -1524,7 +1524,7 @@ pub struct ShapeText {
 
 /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop, shared across the docx,
 /// pptx and xlsx parsers (see `ooxml_common::blip`).
-pub use ooxml_common::blip::SrcRect;
+pub use ooxml_common::blip::{Duotone, SrcRect};
 
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1566,6 +1566,13 @@ pub struct ImageRun {
     /// When set, the renderer should replace all pixels of this hex color (e.g. "FFFFFF") with
     /// full transparency. Used to implement a:clrChange (make-background-transparent).
     pub color_replace_from: Option<String>,
+    /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour effect, resolved to its two
+    /// endpoint colours through the document theme. `None` = no duotone (the
+    /// common case). When set, the renderer remaps the decoded raster along the
+    /// `clr1`→`clr2` luminance ramp at decode time (shared core `applyDuotone`),
+    /// matching Word's picture recolour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duotone: Option<Duotone>,
     /// Wrap mode for anchor images. One of:
     ///   "square" | "topAndBottom" | "none" | "tight" | "through"
     /// Inline images and anchors without an explicit wrap element use "none".
