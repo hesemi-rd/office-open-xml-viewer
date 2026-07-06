@@ -643,6 +643,63 @@ impl StyleMap {
         }
     }
 
+    /// ECMA-376 §17.9.23 (`<w:lvl><w:pStyle>`) — resolve each style's
+    /// paragraph-style ↔ numbering-level ASSOCIATION into that style's own
+    /// `num_level`.
+    ///
+    /// Word's "Define Multilevel List → Link level to style" authoring stores
+    /// the level on the NUMBERING side: the style's `numPr` carries only a
+    /// `<w:numId>` (no `<w:ilvl>`), and the abstractNum's `<w:lvl>` names the
+    /// style back via `<w:pStyle>` (sample-28's KPMGHeading1/2/3 →
+    /// abstractNum 67 levels 0/1/2). §17.9.23: paragraphs of that style "shall
+    /// automatically utilize this numbering level", and "any numbering level
+    /// defined by the numPr element [of the style] shall be ignored" — so the
+    /// association also overrides an explicit (redundant or stale) ilvl written
+    /// in the style's own numPr.
+    ///
+    /// Rewriting the level AT THE STYLE LAYER (rather than per paragraph) keeps
+    /// every downstream rule intact for free: `basedOn` children inherit the
+    /// corrected level through the normal cascade (`apply_para`), and a
+    /// paragraph's DIRECT `<w:ilvl>` (Word's Tab-demotion) still outranks it as
+    /// direct-over-style formatting (§17.7.2).
+    ///
+    /// The lookup uses the style's EFFECTIVE numId (its own `numPr` numId or
+    /// the nearest `basedOn` ancestor's, §17.7.4.17) so a derived style that
+    /// only inherits its list still finds its own association. A style whose
+    /// chain carries no numbering never fires — which also discharges
+    /// §17.9.23's "not a paragraph style → can be ignored" clause, since only
+    /// styles with (inherited) paragraph numbering are affected.
+    ///
+    /// Call once after BOTH `styles.xml` and `numbering.xml` are parsed.
+    pub fn resolve_numbering_level_backlinks(&mut self, num_map: &crate::numbering::NumberingMap) {
+        let ids: Vec<String> = self.styles.keys().cloned().collect();
+        for id in ids {
+            let Some(num_id) = self.effective_num_id(&id) else {
+                continue;
+            };
+            if let Some(level) = num_map.level_for_style(num_id, &id) {
+                if let Some(def) = self.styles.get_mut(&id) {
+                    def.para.num_level = Some(level);
+                }
+            }
+        }
+    }
+
+    /// The style's EFFECTIVE numId: its own `pPr/numPr/numId` or the nearest
+    /// `basedOn` ancestor's (§17.7.4.17 style inheritance). Hop-capped so a
+    /// malformed `basedOn` cycle terminates.
+    fn effective_num_id(&self, id: &str) -> Option<u32> {
+        let mut cur = id;
+        for _ in 0..=self.styles.len() {
+            let def = self.styles.get(cur)?;
+            if def.para.num_id.is_some() {
+                return def.para.num_id;
+            }
+            cur = def.based_on.as_deref()?;
+        }
+        None
+    }
+
     /// Resolve a character style (rStyle, §17.3.2.29) chain WITHOUT prepending
     /// docDefaults or the default paragraph style. ECMA-376 §17.7.2 (Style
     /// Hierarchy) layers character styles ON TOP of the paragraph's

@@ -132,7 +132,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/styles.xml".to_string());
-    let style_map = read_zip_string(zip, &styles_path)
+    let mut style_map = read_zip_string(zip, &styles_path)
         .map(|s| StyleMap::parse(&s))
         .unwrap_or_else(|_| StyleMap::parse(""));
 
@@ -168,6 +168,9 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let mut num_map = read_zip_string(zip, &numbering_path)
         .map(|s| NumberingMap::parse(&s, &numbering_media_map))
         .unwrap_or_default();
+    // §17.9.23 — fold each `<w:lvl><w:pStyle>` backlink into its style's
+    // numbering level, now that both parts exist (see the method doc).
+    style_map.resolve_numbering_level_backlinks(&num_map);
 
     // Theme is referenced by a relationship with Type ending in "/theme" — resolve
     // to word/<target> and parse the clrScheme.
@@ -9714,12 +9717,14 @@ mod footnote_tests {
             .descendants()
             .find(|n| n.tag_name().name() == "body")
             .unwrap();
-        let style_map = StyleMap::parse(styles_xml);
+        let mut style_map = StyleMap::parse(styles_xml);
         let mut num_map = if numbering_xml.is_empty() {
             NumberingMap::default()
         } else {
             NumberingMap::parse(numbering_xml, &HashMap::new())
         };
+        // Mirror production `parse`: §17.9.23 backlinks resolve after both parts.
+        style_map.resolve_numbering_level_backlinks(&num_map);
         let elems = parse_body_elements(
             body_node,
             &style_map,
@@ -9758,12 +9763,14 @@ mod footnote_tests {
             .descendants()
             .find(|n| n.tag_name().name() == "body")
             .unwrap();
-        let style_map = StyleMap::parse(styles_xml);
+        let mut style_map = StyleMap::parse(styles_xml);
         let mut num_map = if numbering_xml.is_empty() {
             NumberingMap::default()
         } else {
             NumberingMap::parse(numbering_xml, &HashMap::new())
         };
+        // Mirror production `parse`: §17.9.23 backlinks resolve after both parts.
+        style_map.resolve_numbering_level_backlinks(&num_map);
         parse_body_elements(
             body_node,
             &style_map,
@@ -15399,6 +15406,169 @@ mod embedded_font_tests {
             garbage_err.matches("zip container").count(),
             1,
             "the container tag must not be doubled; got {garbage_err:?}"
+        );
+    }
+}
+
+// ===== ECMA-376 §17.9.23: <w:lvl><w:pStyle> paragraph-style ↔ level association =====
+//
+// End-to-end (zip → parse_from_bytes) tests for the lvl/pStyle BACKLINK: an
+// abstractNum level names a paragraph style, and paragraphs of that style must
+// use THAT level — even when the style's own numPr carries no <w:ilvl> (the
+// authoring Word's "Define Multilevel List → Link level to style" UI emits,
+// e.g. sample-28's KPMGHeading1/2/3 → abstractNum 67 levels 0/1/2).
+#[cfg(test)]
+mod lvl_pstyle_backlink_tests {
+    use super::*;
+    use crate::types::BodyElement;
+    use crate::xml_util::W_NS;
+
+    /// Build a docx zip carrying document + styles + numbering parts. The rels
+    /// part is empty: the production parser falls back to `word/styles.xml` /
+    /// `word/numbering.xml` when the relationships omit them, so this exercises
+    /// the REAL `parse` wiring (StyleMap + NumberingMap construction order and
+    /// any cross-map resolution), not a test-local reimplementation.
+    fn build_docx_with_parts(body_inner: &str, styles_xml: &str, numbering_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let document = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{body_inner}</w:body></w:document>"#,
+            ns = W_NS,
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(document.as_bytes()).unwrap();
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(rels_xml.as_bytes()).unwrap();
+            zw.start_file("word/styles.xml", opts).unwrap();
+            zw.write_all(styles_xml.as_bytes()).unwrap();
+            zw.start_file("word/numbering.xml", opts).unwrap();
+            zw.write_all(numbering_xml.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Parse and collect every body paragraph's resolved (level, marker text).
+    fn heading_markers(data: &[u8]) -> Vec<(u32, String)> {
+        let doc = parse_from_bytes(data).expect("synthetic docx parses");
+        doc.body
+            .iter()
+            .filter_map(|e| match e {
+                BodyElement::Paragraph(p) => {
+                    let n = p.numbering.as_ref().expect("heading is numbered");
+                    Some((n.level, n.text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// sample-28's authoring shape: the heading styles carry ONLY
+    /// `<w:numPr><w:numId/></w:numPr>` (no <w:ilvl>), and the level ↔ style
+    /// association lives in the abstractNum's `<w:lvl><w:pStyle>` (§17.9.23).
+    fn styles_numid_only() -> String {
+        format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="H1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H3"><w:name w:val="heading 3"/><w:basedOn w:val="H2"/></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        )
+    }
+
+    /// abstractNum 67 shape (sample-28): every level backlinks its style via
+    /// `<w:pStyle>` and composes ancestors with `%1.%2` (§17.9.11). H3 has NO
+    /// numPr of its own anywhere — its numId arrives via basedOn=H2 and its
+    /// LEVEL arrives purely from the backlink.
+    fn numbering_with_backlinks() -> String {
+        format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="67">
+                <w:multiLevelType w:val="multilevel"/>
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H1"/><w:lvlText w:val="%1"/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H2"/><w:lvlText w:val="%1.%2"/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H3"/><w:lvlText w:val="%1.%2.%3"/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="19"><w:abstractNumId w:val="67"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        )
+    }
+
+    /// §17.9.23 — the reported sample-28 failure: heading styles whose numPr has
+    /// numId but NO ilvl must still land on their pStyle-linked levels. A
+    /// regression flattens the outline to "1 / 2 / 3 / 4 / 5 / 6" (every heading
+    /// advancing level 0) — exactly the user-visible "2, 3, 4" bug.
+    #[test]
+    fn lvl_pstyle_backlink_resolves_style_linked_levels() {
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>C</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H3"/></w:pPr><w:r><w:t>D</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>E</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>F</w:t></w:r></w:p>"#;
+        let data = build_docx_with_parts(body, &styles_numid_only(), &numbering_with_backlinks());
+        assert_eq!(
+            heading_markers(&data),
+            vec![
+                (0, "1".to_string()),
+                (1, "1.1".to_string()),
+                (1, "1.2".to_string()),
+                (2, "1.2.1".to_string()),
+                (0, "2".to_string()),
+                (1, "2.1".to_string()),
+            ],
+            "styles with numId-only numPr must use their §17.9.23 pStyle-linked levels"
+        );
+    }
+
+    /// §17.7.2 — a DIRECT `<w:ilvl>` on the paragraph itself (what Word writes
+    /// when the user Tab-demotes a heading) is the most specific layer and wins
+    /// over the style's §17.9.23 association.
+    #[test]
+    fn direct_ilvl_overrides_lvl_pstyle_backlink() {
+        // An H1 paragraph (backlinked to level 0) demoted to level 1 directly.
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H1"/><w:numPr><w:ilvl w:val="1"/></w:numPr></w:pPr><w:r><w:t>B</w:t></w:r></w:p>"#;
+        let data = build_docx_with_parts(body, &styles_numid_only(), &numbering_with_backlinks());
+        assert_eq!(
+            heading_markers(&data),
+            vec![(0, "1".to_string()), (1, "1.1".to_string())],
+            "a direct <w:ilvl> outranks the style's pStyle-linked level"
+        );
+    }
+
+    /// §17.9.23 sentence 2: "any numbering level defined by the numPr element
+    /// shall be ignored" — a style whose numPr carries a WRONG explicit ilvl
+    /// still lands on its pStyle-linked level.
+    #[test]
+    fn style_explicit_ilvl_is_ignored_when_backlink_exists() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="H1"><w:name w:val="heading 1"/><w:pPr><w:numPr><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="heading 2"/><w:pPr><w:numPr><w:ilvl w:val="5"/><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>"#;
+        let data = build_docx_with_parts(body, &styles, &numbering_with_backlinks());
+        assert_eq!(
+            heading_markers(&data),
+            vec![(0, "1".to_string()), (1, "1.1".to_string())],
+            "the style's own explicit ilvl is ignored in favor of the §17.9.23 association"
         );
     }
 }

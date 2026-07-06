@@ -74,6 +74,14 @@ pub struct LevelDef {
     /// parse time to the bullet image's zip path (+ MIME + pt size from the
     /// `<v:shape style>`). `None` ⇒ ordinary text/glyph marker.
     pub pic_bullet: Option<PicBullet>,
+    /// ECMA-376 §17.9.23 `<w:lvl><w:pStyle w:val>` — the styleId of the
+    /// paragraph style ASSOCIATED with this level. Paragraphs of that style
+    /// "shall automatically utilize this numbering level", and the ilvl carried
+    /// by the STYLE's own `numPr` "shall be ignored" in its favor. Resolved via
+    /// [`NumberingMap::level_for_style`] into each style's numbering level after
+    /// both parts are parsed (see `StyleMap::resolve_numbering_level_backlinks`).
+    /// `None` ⇒ no style association on this level.
+    pub p_style: Option<String>,
 }
 
 /// ECMA-376 §17.9.20 `<w:numPicBullet>` — an image used as a list marker. The
@@ -112,6 +120,7 @@ impl Default for LevelDef {
             start: 1,
             rpr: RunFmt::default(),
             pic_bullet: None,
+            p_style: None,
         }
     }
 }
@@ -289,6 +298,8 @@ impl NumberingMap {
                     .and_then(|n| attr_w(n, "val"))
                     .and_then(|v| v.parse::<u32>().ok())
                     .and_then(|id| pic_bullets.get(&id).cloned());
+                // §17.9.23 — the paragraph style this level is associated with.
+                let p_style = child_w(lvl_node, "pStyle").and_then(|n| attr_w(n, "val"));
                 levels.push(LevelDef {
                     format,
                     text,
@@ -301,6 +312,7 @@ impl NumberingMap {
                     start,
                     rpr,
                     pic_bullet,
+                    p_style,
                 });
             }
             map.abstract_nums.insert(abs_id, levels);
@@ -341,6 +353,21 @@ impl NumberingMap {
         let abs_id = self.num_to_abstract.get(&num_id)?;
         let levels = self.abstract_nums.get(abs_id)?;
         levels.get(level as usize)
+    }
+
+    /// ECMA-376 §17.9.23 — the numbering level ASSOCIATED with a paragraph
+    /// style inside the numbering definition that `num_id` references: the
+    /// first `<w:lvl>` whose `<w:pStyle w:val>` equals `style_id`. Paragraphs
+    /// of that style "shall automatically utilize this numbering level"; the
+    /// ilvl in the STYLE's own `numPr` "shall be ignored" in its favor. `None`
+    /// ⇒ the list has no association for this style (or the numId dangles).
+    pub fn level_for_style(&self, num_id: u32, style_id: &str) -> Option<u32> {
+        let abs_id = self.num_to_abstract.get(&num_id)?;
+        let levels = self.abstract_nums.get(abs_id)?;
+        levels
+            .iter()
+            .position(|l| l.p_style.as_deref() == Some(style_id))
+            .map(|i| i as u32)
     }
 
     pub fn get_start(&self, num_id: u32, level: u32) -> u32 {
