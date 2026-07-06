@@ -1334,18 +1334,28 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     };
 
     let mut out: Vec<ParaPiece> = Vec::new();
-    let mut emitted_para = false;
     for (i, runs) in chunks.into_iter().enumerate() {
         // Drop the leading chunk when it carries no visible content — this
         // happens when the paragraph starts with <w:lastRenderedPageBreak/>
         // (Word's hint duplicating a paragraph-level break that the
-        // surrounding section break already covers).
+        // surrounding section break already covers), OR with a HARD
+        // `<w:br w:type="page"/>` (ECMA-376 §17.3.1.20): "this paragraph begins
+        // on a new page". The empty chunk carries no runs, but its trailing
+        // separator (seps[0], emitted below for chunk 1) is the hard break that
+        // MUST still advance the page — dropping it silently would let the
+        // paragraph's text overprint whatever ends this page (private/sample-28
+        // p.15: an "Annex 4" heading that opens with a page break, followed by a
+        // page-anchored floating table, was drawn on the preceding list's page).
+        // RenderedPage hints never reach `seps` (they are filtered above), so this
+        // never re-honors the ignored hint.
         if i == 0 && !has_visible(&runs) {
             continue;
         }
-        if emitted_para {
-            // seps[i-1] separates chunk[i-1] from chunk[i]; emit its kind
-            // (page vs column) so the boundary type is preserved.
+        // seps[i-1] separates chunk[i-1] from chunk[i]; emit its kind (page vs
+        // column) so the boundary type is preserved. Every chunk after the first
+        // is preceded by a real hard break — including chunk 1 when chunk 0 was an
+        // empty leading chunk (a paragraph that opens with a hard break).
+        if i > 0 {
             out.push(match seps.get(i - 1) {
                 Some(ParaPiece::ColumnBreak) => ParaPiece::ColumnBreak,
                 _ => ParaPiece::PageBreak,
@@ -1354,7 +1364,6 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         let mut chunk = para.clone();
         chunk.runs = runs;
         out.push(ParaPiece::Para(chunk));
-        emitted_para = true;
     }
     if out.is_empty() {
         out.push(ParaPiece::Para(para));
@@ -12272,6 +12281,65 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
+    }
+
+    /// ECMA-376 §17.3.1.20 — a `<w:br w:type="page"/>` that is the FIRST run of a
+    /// paragraph (before any visible content) means "this paragraph begins on a new
+    /// page". The leading empty chunk (nothing precedes the break) must NOT swallow
+    /// the break: the body must be PageBreak, Para("annex"), so the paragraph is
+    /// pushed to the next page. Regression from private/sample-28 p.15, where an
+    /// "Annex 4" heading that starts with a page break — followed by a page-anchored
+    /// floating table — was drawn on the SAME page as the preceding list, letting the
+    /// list text overprint the table.
+    #[test]
+    fn leading_page_break_in_paragraph_still_advances_page() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:p>
+                 <w:r><w:br w:type="page"/></w:r>
+                 <w:r><w:t>annex</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para(before), PageBreak, Para(annex).
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    /// The leading-break rule preserves the break KIND: a paragraph that opens with a
+    /// `<w:br w:type="column"/>` yields ColumnBreak, Para(...) — not PageBreak.
+    #[test]
+    fn leading_column_break_in_paragraph_emits_column_break() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:br w:type="column"/></w:r>
+                 <w:r><w:t>next-col</w:t></w:r>
+               </w:p>"#,
+        );
+        // ColumnBreak, Para(next-col).
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::ColumnBreak));
+        assert!(matches!(body[1], BodyElement::Paragraph(_)));
+    }
+
+    /// A leading `<w:lastRenderedPageBreak/>` (Word's ignored layout hint, not a hard
+    /// break) must still be stripped WITHOUT injecting a body-level break — only a
+    /// hard `<w:br w:type="page"/>` advances the page. Guards the leading-break fix
+    /// against re-honoring the hint (package CLAUDE.md: never mix honoring/ignoring
+    /// `<w:lastRenderedPageBreak/>`).
+    #[test]
+    fn leading_rendered_page_break_hint_does_not_advance_page() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:p>
+                 <w:r><w:lastRenderedPageBreak/><w:t>heading</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para(before), Para(heading) — the rendered-page hint is dropped, no break.
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.5.2 — a "Cover Pages" building block (sdt with
