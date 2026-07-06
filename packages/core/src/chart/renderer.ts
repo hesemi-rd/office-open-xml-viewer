@@ -2473,9 +2473,37 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const { color: catLineColor, width: catLineW } = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
   const { color: valLineColor, width: valLineW } = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
 
-  // Draw the translucent series fills FIRST, then lay gridlines, axis rules,
-  // tick marks and labels on top so they stay visible across the filled
-  // region (PowerPoint keeps the gridlines legible under the 55%-alpha area).
+  // Value-axis MAJOR gridlines are drawn UNDER the series (before the fills), so
+  // an opaque/translucent area occludes the gridlines inside its region —
+  // matching PowerPoint (verified against private/sample-14.pdf slide-6, where
+  // every gridline inside the teal ARR fill reads solid teal and only the
+  // gridlines above the fill top stay visible). This mirrors the bar/line/stock/
+  // scatter/waterfall/box renderers, which already stroke gridlines first. The
+  // axis rules, tick marks and value/category labels stay AFTER the series (drawn
+  // further below) so they sit atop the plot. `<c:valAx><c:majorGridlines>` is on
+  // by default (`drawValMajorGridlines`); `<c:minorGridlines>` only when declared.
+  if (!chart.valAxisHidden && drawValMajorGridlines(chart)) {
+    const grid = valGridStroke(chart, ptToPx);
+    const steps = Math.round(axMax / step);
+    for (let si = 0; si <= steps; si++) {
+      const v = si * step;
+      strokeValueGridlineH(ctx, px0, pw, toY(v), si === 0, grid);
+    }
+  }
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
+  // vertical lines at the category ticks, also under the fills. Off by default
+  // (byte-stable when the file omits them).
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      const gx = px0 + frac * pw;
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+    }
+  }
+
+  // Draw the series area fills ON TOP of the gridlines laid down above.
   const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
   for (let si = chart.series.length - 1; si >= 0; si--) {
     const s = chart.series[si];
@@ -2598,29 +2626,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     }
   }
 
+  // Value-axis tick marks + labels. The gridlines themselves were already laid
+  // down UNDER the series (above the fill loop); here we only add the tick marks
+  // and the value labels, which belong ON TOP of the plot.
   if (!chart.valAxisHidden) {
     ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
-    const grid = valGridStroke(chart, ptToPx);
     const steps = Math.round(axMax / step);
     for (let si = 0; si <= steps; si++) {
       const v = si * step; const gy = toY(v);
-      strokeValueGridlineH(ctx, px0, pw, gy, si === 0, grid);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
-    }
-  }
-  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
-  // vertical lines at the category ticks. Off by default (byte-stable).
-  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
-    const cg = catGridStroke(chart, ptToPx);
-    ctx.strokeStyle = cg.color;
-    ctx.lineWidth = cg.width;
-    for (const frac of catGridlineFractions(chart, n)) {
-      const gx = px0 + frac * pw;
-      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
   }
   // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`
