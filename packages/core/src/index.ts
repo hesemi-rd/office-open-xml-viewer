@@ -181,6 +181,15 @@ export {
   type OffscreenFactory,
   type OffscreenSurface,
 } from './image/duotone';
+// Second-layer path-keyed cache that decodes a blip (shared base cache) then
+// applies its `<a:duotone>` recolour once per (path + colours). Shared by the
+// docx and pptx renderers so a duotone picture decodes + recolours once and is
+// reused across page/slide revisits. xlsx keeps its own worksheet-scoped map.
+export {
+  getCachedDuotoneBitmapByPath,
+  duotoneCacheKey,
+  dropDuotoneBitmapCache,
+} from './image/duotone-bitmap-by-path';
 // Shared vector-vs-raster blip gate: prefer the Microsoft asvg:svgBlip vector
 // original except when an <a:srcRect> crop is present (then the raster's native
 // pixel grid is required for the fractional crop math). Used by all three

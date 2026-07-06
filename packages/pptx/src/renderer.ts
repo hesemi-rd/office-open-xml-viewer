@@ -64,6 +64,7 @@ import {
   isCjkBreakChar,
   getCachedSvgImageByPath,
   getCachedBitmapByPath,
+  getCachedDuotoneBitmapByPath,
   peekCachedBitmapByPath,
   dropBitmapCacheByPath,
   preferVectorBlip,
@@ -3452,6 +3453,9 @@ export {
   getCachedBitmapByPath as getCachedBitmap,
   peekCachedBitmapByPath as peekCachedBitmap,
   dropBitmapCacheByPath as dropImageBitmapCache,
+  // Second-layer duotone (§20.1.8.23) recolour cache; dropped alongside the base
+  // bitmap cache on deck teardown.
+  dropDuotoneBitmapCache,
 } from '@silurus/ooxml-core';
 
 
@@ -3882,17 +3886,23 @@ async function renderPicture(
       try {
         bitmap = await getCachedSvgImageByPath(el.svgImagePath, fetchImage);
       } catch {
+        // §20.1.8.23 duotone recolour applies only to the raster fallback — an
+        // SVG vector original has no readable pixel grid (matches xlsx).
         bitmap = dataIsSvg
           ? await getCachedSvgImageByPath(el.imagePath, fetchImage)
-          : await getCachedBitmapByPath(el.imagePath, el.mimeType, fetchImage, { widthPt, heightPt });
+          : await getCachedDuotoneBitmapByPath(el.imagePath, el.mimeType, el.duotone, fetchImage, { widthPt, heightPt });
       }
     } else if (dataIsSvg) {
       // SVG-only picture (here either because it has a crop, or — defensively —
       // because no svgImagePath was surfaced): decode through the SVG path since
-      // createImageBitmap can't.
+      // createImageBitmap can't. A duotone on a vector picture is a rare edge
+      // case left un-recoloured (no readable pixel grid), matching xlsx.
       bitmap = await getCachedSvgImageByPath(el.imagePath, fetchImage);
     } else {
-      bitmap = await getCachedBitmapByPath(el.imagePath, el.mimeType, fetchImage, { widthPt, heightPt });
+      // §20.1.8.23 duotone recolour on the raster blip (once, at decode time,
+      // cached under a colour-suffixed key). No duotone ⇒ this is exactly the
+      // former `getCachedBitmapByPath` decode.
+      bitmap = await getCachedDuotoneBitmapByPath(el.imagePath, el.mimeType, el.duotone, fetchImage, { widthPt, heightPt });
     }
     // Skip a picture whose blip is an unsupported metafile (null bitmap), the
     // same way an SVG-decode failure that also fails its raster fallback would
@@ -4959,7 +4969,10 @@ export async function renderSlide(
           p.width / PT_TO_EMU,
           p.height / PT_TO_EMU,
         );
-        void getCachedBitmapByPath(p.imagePath, p.mimeType, opts.fetchImage, {
+        // Warm through the duotone cache so a §20.1.8.23 recolour picture warms
+        // its recoloured variant (keyed by path + colours); no duotone ⇒ this is
+        // the plain base-bitmap warm, byte-identical to before.
+        void getCachedDuotoneBitmapByPath(p.imagePath, p.mimeType, p.duotone, opts.fetchImage, {
           widthPt: warm.widthPt,
           heightPt: warm.heightPt,
         }).catch(() => undefined);

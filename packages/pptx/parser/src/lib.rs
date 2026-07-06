@@ -1744,6 +1744,7 @@ mod tests {
             prst_adjust: None,
             src_rect: None,
             alpha: None,
+            duotone: None,
             cust_geom: None,
             shadow: None,
             inner_shadow: None,
@@ -4957,6 +4958,86 @@ mod tests {
             pic.svg_image_path.is_none(),
             "svg_image_path must be None without an svgBlip extension"
         );
+    }
+
+    /// ECMA-376 §20.1.8.23 — a `<p:pic>` whose `<a:blip>` carries a
+    /// `<a:duotone>` (a CT_Blip effect child, per the XSD sequence) parses its
+    /// two `EG_ColorChoice` endpoints through the slide theme, resolving a
+    /// `<a:schemeClr>` against the theme palette. `clr1` is the dark endpoint,
+    /// `clr2` the light endpoint.
+    #[test]
+    fn picture_duotone_resolves_two_colours_through_theme() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        // <a:blip> holds the duotone (CT_Blip effect); clr1 = black prstClr,
+        // clr2 = accent1 schemeClr (resolved from the theme map).
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="DuoPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill>
+    <a:blip r:embed="rIdPng">
+      <a:duotone>
+        <a:prstClr val="black"/>
+        <a:schemeClr val="accent1"/>
+      </a:duotone>
+    </a:blip>
+    <a:stretch><a:fillRect/></a:stretch>
+  </p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let mut theme = HashMap::new();
+        theme.insert("accent1".to_string(), "4472C4".to_string());
+        let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
+        let cursor = Cursor::new(data.clone());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed for a duotone picture");
+        let duo = pic.duotone.expect("duotone must be surfaced");
+        assert_eq!(duo.clr1, "000000", "clr1 = black prstClr");
+        assert_eq!(duo.clr2, "4472C4", "clr2 = accent1 resolved from theme");
+    }
+
+    /// A `<p:pic>` without a `<a:duotone>` leaves `duotone` None — guards the new
+    /// branch from firing spuriously, so non-duotone pictures stay byte-identical.
+    #[test]
+    fn picture_without_duotone_is_none() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="PngPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let theme = HashMap::new();
+        let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
+        let cursor = Cursor::new(data.clone());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed");
+        assert!(pic.duotone.is_none(), "duotone must be None when absent");
     }
 
     /// A `<p:pic>` whose `<a:blip>` carries ONLY the `asvg:svgBlip` extension —

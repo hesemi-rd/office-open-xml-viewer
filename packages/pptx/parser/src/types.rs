@@ -2,7 +2,7 @@
 //! helpers and pure transform types. Extracted verbatim from `lib.rs`; `lib.rs`
 //! re-exports these via `pub use types::*`.
 
-use ooxml_common::blip::SrcRect;
+use ooxml_common::blip::{Duotone, SrcRect};
 use ooxml_common::math::MathNode;
 use ooxml_common::text::SpaceLine;
 use serde::{Deserialize, Serialize};
@@ -477,6 +477,13 @@ pub(crate) struct PictureElement {
     /// a:blip > a:alphaModFix@amt (0.0–1.0). None = fully opaque.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) alpha: Option<f64>,
+    /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour effect, resolved to its two
+    /// endpoint colours (through the slide's theme palette). `None` = no duotone
+    /// (the common case). When set, the renderer remaps the decoded raster along
+    /// the `clr1`→`clr2` luminance ramp at decode time (see the shared core
+    /// `applyDuotone`), matching PowerPoint's recolour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duotone: Option<Duotone>,
     /// `<p:spPr><a:custGeom>` — custom geometry path used as a clip on the
     /// blitted image. Same shape model as `ShapeElement.cust_geom` (one or more
     /// `<a:path>` whose coordinates are normalized into [0,1] of the bbox).

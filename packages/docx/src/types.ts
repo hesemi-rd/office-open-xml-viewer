@@ -1,6 +1,6 @@
 // ===== Output JSON model (mirrors Rust types) =====
 
-import type { MathNode, ChartModel } from '@silurus/ooxml-core';
+import type { MathNode, ChartModel, Duotone } from '@silurus/ooxml-core';
 
 export interface DocxDocumentModel {
   section: SectionProps;
@@ -1220,6 +1220,19 @@ export interface ImageRun {
    * transparency. Implements a:clrChange (make-background-transparent).
    */
   colorReplaceFrom?: string;
+  /**
+   * ECMA-376 §20.1.8.23 `<a:duotone>` recolour, resolved to its two endpoint
+   * colours (through the document theme). Absent ⇒ no duotone. When present the
+   * renderer decodes the raster once, remaps it along the `clr1`→`clr2`
+   * luminance ramp, and caches the recoloured bitmap under a colour-suffixed key.
+   */
+  duotone?: Duotone;
+  /**
+   * ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` opacity as 0..1. Absent ⇒ fully
+   * opaque. When present the renderer multiplies the picture's `globalAlpha` by
+   * this fraction.
+   */
+  alpha?: number;
   /**
    * Wrap mode for anchor images:
    *   "square" | "topAndBottom" | "none" | "tight" | "through"

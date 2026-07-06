@@ -14,12 +14,13 @@ use crate::master::LayoutPlaceholders;
 use crate::text::{
     empty_level_bullets, parse_text_body, LevelBullets, LevelFontSizes, LevelIndents, ShapeKind,
 };
+use crate::theme::PptxSchemeResolver;
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_str, resolve_path,
     table_style_presets, PptxZip, TableStyleDef,
 };
-use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::units::EMU_PER_PX_96DPI;
@@ -776,6 +777,13 @@ pub(crate) fn parse_picture(
         prst_adjust,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
+        // §20.1.8.23 `<a:duotone>` recolour, resolved through the slide's theme
+        // palette with PowerPoint's linear tint. `None` ⇒ no effect.
+        duotone: parse_blip_duotone(
+            blip_fill,
+            &PptxSchemeResolver { theme },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
         cust_geom,
         shadow,
         inner_shadow,
@@ -798,7 +806,7 @@ pub(crate) fn parse_ole_preview_picture(
     gf: &Transform,
     slide_dir: &str,
     rels: &HashMap<String, String>,
-    _theme: &HashMap<String, String>,
+    theme: &HashMap<String, String>,
     zip: &mut PptxZip,
 ) -> Option<PictureElement> {
     if gf.cx == 0 || gf.cy == 0 {
@@ -833,6 +841,11 @@ pub(crate) fn parse_ole_preview_picture(
         prst_adjust: None,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
+        duotone: parse_blip_duotone(
+            blip_fill,
+            &PptxSchemeResolver { theme },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
         cust_geom: None,
         shadow: None,
         inner_shadow: None,
@@ -1614,6 +1627,13 @@ pub(crate) fn parse_sp_tree_node(
                                     prst_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
+                                    duotone: blip_fill_node.and_then(|bf| {
+                                        parse_blip_duotone(
+                                            bf,
+                                            &PptxSchemeResolver { theme },
+                                            ooxml_common::color::TintMode::PowerPointLinear,
+                                        )
+                                    }),
                                     cust_geom,
                                     shadow,
                                     inner_shadow,
@@ -1678,6 +1698,13 @@ pub(crate) fn parse_sp_tree_node(
                                     prst_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
+                                    // An inherited layout-placeholder blipFill
+                                    // (LayoutPlaceholders::lookup_blip_fill) does not
+                                    // yet carry a `<a:duotone>`; picture placeholders
+                                    // with a duotone are rare, so None matches prior
+                                    // behaviour (thread it through BlipFill if a
+                                    // sample needs it, alongside svg_image_path above).
+                                    duotone: None,
                                     cust_geom: None,
                                     shadow: None,
                                     inner_shadow: None,
@@ -1756,6 +1783,13 @@ pub(crate) fn parse_sp_tree_node(
                                         prst_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
+                                        duotone: blip_fill.and_then(|bf| {
+                                            parse_blip_duotone(
+                                                bf,
+                                                &PptxSchemeResolver { theme },
+                                                ooxml_common::color::TintMode::PowerPointLinear,
+                                            )
+                                        }),
                                         cust_geom: None,
                                         shadow: None,
                                         inner_shadow: None,

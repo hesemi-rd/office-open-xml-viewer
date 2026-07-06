@@ -1,4 +1,7 @@
-use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::blip::{
+    blip_embed_rid, mime_from_ext, parse_blip_alpha, parse_blip_duotone, parse_src_rect,
+    svg_blip_rid, Duotone,
+};
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
@@ -3551,6 +3554,12 @@ struct InlineBlip {
     svg_image_path: Option<String>,
     /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (fractions 0..1), or `None`.
     src_rect: Option<SrcRect>,
+    /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour resolved through the theme,
+    /// or `None`.
+    duotone: Option<Duotone>,
+    /// ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` opacity fraction (0.0–1.0), or
+    /// `None` when opaque.
+    alpha: Option<f64>,
     width_pt: f64,
     height_pt: f64,
 }
@@ -3574,11 +3583,17 @@ struct InlineBlip {
 fn resolve_inline_blip(
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    theme: &ThemeColors,
 ) -> Option<InlineBlip> {
     let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
-    // The shared parser takes the `<*:blipFill>` (the blip's parent).
-    let src_rect = blip.parent().and_then(parse_src_rect);
+    // The shared parsers take the `<*:blipFill>` (the blip's parent).
+    let blip_fill = blip.parent();
+    let src_rect = blip_fill.and_then(parse_src_rect);
+    // §20.1.8.23 duotone recolour, resolved through the document theme.
+    let duotone = blip_fill.and_then(|bf| parse_blip_duotone_docx(bf, theme));
+    // §20.1.8.6 alphaModFix opacity (fraction, or None when opaque).
+    let alpha = blip_fill.and_then(parse_blip_alpha);
     let extent = node
         .descendants()
         .find(|n| n.tag_name().name() == "extent")?;
@@ -3589,6 +3604,8 @@ fn resolve_inline_blip(
         mime_type,
         svg_image_path,
         src_rect,
+        duotone,
+        alpha,
         width_pt: cx / 12700.0,
         height_pt: cy / 12700.0,
     })
@@ -3808,9 +3825,11 @@ fn parse_inline_drawing(
             mime_type,
             svg_image_path,
             src_rect,
+            duotone,
+            alpha,
             width_pt,
             height_pt,
-        } = match resolve_inline_blip(container, media_map) {
+        } = match resolve_inline_blip(container, media_map, theme) {
             Some(b) => b,
             None => return vec![],
         };
@@ -3827,6 +3846,8 @@ fn parse_inline_drawing(
             anchor_x_from_margin: false,
             anchor_y_from_para: false,
             color_replace_from: None,
+            duotone,
+            alpha,
             wrap_mode: None,
             dist_top: 0.0,
             dist_bottom: 0.0,
@@ -3962,6 +3983,7 @@ fn parse_inline_drawing(
         for img in parse_wgp_images(
             wgp,
             media_map,
+            theme,
             pos_x,
             x_from_margin,
             pos_y,
@@ -4024,9 +4046,11 @@ fn parse_inline_drawing(
         mime_type,
         svg_image_path,
         src_rect,
+        duotone,
+        alpha,
         width_pt,
         height_pt,
-    } = match resolve_inline_blip(container, media_map) {
+    } = match resolve_inline_blip(container, media_map, theme) {
         Some(b) => b,
         None => return vec![],
     };
@@ -4043,6 +4067,8 @@ fn parse_inline_drawing(
         anchor_x_from_margin: x_from_margin,
         anchor_y_from_para: y_from_para,
         color_replace_from: None,
+        duotone,
+        alpha,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         dist_top: anchor_meta.dist_top,
         dist_bottom: anchor_meta.dist_bottom,
@@ -4302,9 +4328,11 @@ fn parse_anchor_size_rel(
 
 /// Expand a wp:wgp group into individual ImageRun entries.
 /// Each pic child gets page-relative coordinates: group anchor origin + child offset within group.
+#[allow(clippy::too_many_arguments)]
 fn parse_wgp_images(
     wgp: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    theme: &ThemeColors,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -4328,6 +4356,7 @@ fn parse_wgp_images(
         wgp,
         base,
         media_map,
+        theme,
         anchor_pos_x,
         x_from_margin,
         anchor_pos_y,
@@ -4348,6 +4377,7 @@ fn walk_group_images(
     group: roxmltree::Node,
     xform: GroupTransform,
     media_map: &HashMap<String, String>,
+    theme: &ThemeColors,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -4366,6 +4396,7 @@ fn walk_group_images(
                     child,
                     xform,
                     media_map,
+                    theme,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -4384,6 +4415,7 @@ fn walk_group_images(
                     child,
                     child_xform,
                     media_map,
+                    theme,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -4408,6 +4440,7 @@ fn parse_group_pic(
     pic: roxmltree::Node,
     xform: GroupTransform,
     media_map: &HashMap<String, String>,
+    theme: &ThemeColors,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -4448,8 +4481,14 @@ fn parse_group_pic(
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
     // ECMA-376 §20.1.8.55 — source-rectangle crop (sibling of <a:blip> under
     // <pic:blipFill>), shared with the inline/anchor paths.
-    // The shared parser takes the `<*:blipFill>` (the blip's parent).
+    // The shared parsers take the `<*:blipFill>` (the blip's parent).
     let src_rect = blip.parent().and_then(parse_src_rect);
+    // §20.1.8.23 duotone recolour, resolved through the document theme.
+    let duotone = blip
+        .parent()
+        .and_then(|bf| parse_blip_duotone_docx(bf, theme));
+    // §20.1.8.6 alphaModFix opacity (fraction, or None when opaque).
+    let alpha = blip.parent().and_then(parse_blip_alpha);
 
     // Parse a:clrChange if present — used to make a specific color transparent.
     // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
@@ -4475,6 +4514,8 @@ fn parse_group_pic(
         anchor_x_from_margin: x_from_margin,
         anchor_y_from_para: y_from_para,
         color_replace_from,
+        duotone,
+        alpha,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         dist_top: anchor_meta.dist_top,
         dist_bottom: anchor_meta.dist_bottom,
@@ -5182,7 +5223,7 @@ fn extract_simple_paragraph_text(
     // parseable extent are present, which simply leaves this an image-less
     // paragraph (the drop-if-no-text-and-no-image check below still applies).
     let (image_path, mime_type, svg_image_path, image_width_pt, image_height_pt) =
-        match resolve_inline_blip(p, media_map) {
+        match resolve_inline_blip(p, media_map, theme) {
             Some(b) => (
                 Some(b.image_path),
                 Some(b.mime_type),
@@ -5711,6 +5752,8 @@ fn parse_vml_pict_image(
         anchor_x_from_margin: false,
         anchor_y_from_para: false,
         color_replace_from: None,
+        duotone: None,
+        alpha: None,
         wrap_mode: None,
         dist_top: 0.0,
         dist_bottom: 0.0,
@@ -5797,6 +5840,8 @@ fn parse_object_ole_image(
         anchor_x_from_margin: false,
         anchor_y_from_para: false,
         color_replace_from: None,
+        duotone: None,
+        alpha: None,
         wrap_mode: None,
         dist_top: 0.0,
         dist_bottom: 0.0,
@@ -6111,6 +6156,20 @@ fn resolve_color_element_with_phclr(
     ooxml_common::color::parse_color_node(
         container,
         &DocxSchemeResolver { theme, ph_clr },
+        ooxml_common::color::TintMode::WordLiteral,
+    )
+}
+
+/// Parse a `<*:blipFill>`'s ECMA-376 §20.1.8.23 `<a:duotone>` effect, resolving
+/// its two `EG_ColorChoice` endpoints through the shared parser with Word's
+/// theme-slot lookup ([`DocxSchemeResolver`], no phClr substitution) and Word's
+/// literal tint — the SAME colour grammar every other docx path uses. `None`
+/// when there is no duotone (the common case). Shared across the inline/anchor
+/// and group picture paths.
+fn parse_blip_duotone_docx(blip_fill: roxmltree::Node, theme: &ThemeColors) -> Option<Duotone> {
+    parse_blip_duotone(
+        blip_fill,
+        &DocxSchemeResolver { theme, ph_clr: "" },
         ooxml_common::color::TintMode::WordLiteral,
     )
 }
@@ -8192,6 +8251,8 @@ mod tests {
             anchor_x_from_margin: false,
             anchor_y_from_para: false,
             color_replace_from: None,
+            duotone: None,
+            alpha: None,
             wrap_mode: None,
             dist_top: 0.0,
             dist_bottom: 0.0,
@@ -8289,9 +8350,11 @@ mod wgp_image_tests {
         let mut media = HashMap::new();
         media.insert("rId1".to_string(), "word/media/image1.png".to_string());
         let meta = AnchorMeta::default();
+        let theme = ThemeColors::default();
         let imgs = parse_wgp_images(
             doc.root_element(),
             &media,
+            &theme,
             0.0,   // anchor_pos_x
             false, // x_from_margin
             0.0,   // anchor_pos_y
@@ -10340,6 +10403,8 @@ mod svg_blip_tests {
             anchor_x_from_margin: false,
             anchor_y_from_para: false,
             color_replace_from: None,
+            duotone: None,
+            alpha: None,
             wrap_mode: None,
             dist_top: 0.0,
             dist_bottom: 0.0,
@@ -10678,6 +10743,124 @@ mod svg_blip_tests {
                 img.src_rect.is_none(),
                 "srcRect={srcrect:?} must yield None, got {:?}",
                 img.src_rect
+            );
+        }
+    }
+
+    /// ECMA-376 §20.1.8.23 — an inline picture whose `<a:blip>` carries a
+    /// `<a:duotone>` (a CT_Blip effect child, per the XSD sequence) populates
+    /// `ImageRun.duotone` with the two resolved endpoints. `clr1` is the dark
+    /// endpoint, `clr2` the light endpoint; both resolve through the shared
+    /// DrawingML colour grammar (here plain srgbClr, so no theme is needed).
+    #[test]
+    fn inline_drawing_duotone_populates_endpoints() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill>
+          <a:blip r:embed="rIdPng">
+            <a:duotone>
+              <a:prstClr val="black"/>
+              <a:srgbClr val="DAB6BA"/>
+            </a:duotone>
+          </a:blip>
+          <a:stretch><a:fillRect/></a:stretch>
+        </pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx_with_media(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        let img = only_image(&doc);
+        let duo = img
+            .duotone
+            .as_ref()
+            .expect("a <a:duotone> must populate the duotone field");
+        assert_eq!(duo.clr1, "000000", "clr1 = black prstClr (dark endpoint)");
+        assert_eq!(duo.clr2, "DAB6BA", "clr2 = srgbClr (light endpoint)");
+    }
+
+    /// A picture without a `<a:duotone>` leaves `duotone` None — guards the new
+    /// branch from firing spuriously, so non-duotone pictures stay unchanged.
+    #[test]
+    fn inline_drawing_no_duotone_is_none() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/><a:stretch/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx_with_media(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        let img = only_image(&doc);
+        assert!(img.duotone.is_none(), "duotone must be None when absent");
+    }
+
+    /// ECMA-376 §20.1.8.6 — an inline picture whose `<a:blip>` carries an
+    /// `<a:alphaModFix amt="…">` populates `ImageRun.alpha` with the fraction
+    /// `amt/100000`. `amt=60000` ⇒ 0.60. An opaque (or absent) blip leaves it
+    /// None so the renderer keeps its full-opacity fast path.
+    #[test]
+    fn inline_drawing_alpha_mod_fix_populates_alpha() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill>
+          <a:blip r:embed="rIdPng"><a:alphaModFix amt="60000"/></a:blip>
+          <a:stretch><a:fillRect/></a:stretch>
+        </pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx_with_media(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        let img = only_image(&doc);
+        let a = img.alpha.expect("alphaModFix must populate alpha");
+        assert!((a - 0.60).abs() < 1e-9, "alpha={a}");
+    }
+
+    /// A picture without an `<a:alphaModFix>` (and one at 100%) leaves `alpha`
+    /// None — the opaque fast path stays unchanged.
+    #[test]
+    fn inline_drawing_no_or_opaque_alpha_is_none() {
+        for amf in ["", r#"<a:alphaModFix amt="100000"/>"#] {
+            let body = format!(
+                r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng">{amf}</a:blip><a:stretch/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#
+            );
+            let data = build_docx_with_media(&body);
+            let doc = parse_from_bytes(&data).expect("parse must succeed");
+            let img = only_image(&doc);
+            assert!(
+                img.alpha.is_none(),
+                "amf={amf:?} must yield None, got {:?}",
+                img.alpha
             );
         }
     }

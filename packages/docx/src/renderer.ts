@@ -40,6 +40,8 @@ import {
   isComplexScriptCodePoint,
   getCachedBitmapByPath,
   dropBitmapCacheByPath,
+  applyDuotone,
+  imageNaturalSize,
   drawImageCropped,
   metafileRasterSize,
   symbolFontToUnicode,
@@ -50,7 +52,7 @@ import {
   drawUnderline,
   renderChart,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone } from '@silurus/ooxml-core';
 import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -499,6 +501,11 @@ interface ImagePair {
    */
   svgImagePath?: string;
   colorReplaceFrom?: string;
+  /** ECMA-376 §20.1.8.23 `<a:duotone>` recolour, resolved to its two endpoint
+   *  colours. When set, the decode remaps the raster along the `clr1`→`clr2`
+   *  luminance ramp; the map key includes both colours so a duotone picture is
+   *  cached separately from the raw blip. */
+  duotone?: Duotone;
   /**
    * Largest intended draw size (pt) over every reference to this key. Only used
    * to pick a raster target resolution for vector metafiles (WMF/EMF), which
@@ -521,25 +528,34 @@ function resolveCurrentDateMs(currentDate: Date | number | undefined): number {
   return typeof currentDate === 'number' ? currentDate : currentDate.getTime();
 }
 
-/** Returns a stable map key for an (imagePath, colorReplaceFrom) pair. */
-function imageKey(imagePath: string, colorReplaceFrom?: string): string {
-  return colorReplaceFrom ? `${imagePath}|clr:${colorReplaceFrom}` : imagePath;
+/** Returns a stable map key for an (imagePath, colorReplaceFrom, duotone)
+ *  triple. A plain picture is keyed by its zip path; an `a:clrChange`
+ *  (colorReplaceFrom) and/or a `<a:duotone>` each append a suffix, so a
+ *  recoloured variant is cached and looked up separately from the raw blip and
+ *  from any other recolour combination. */
+function imageKey(imagePath: string, colorReplaceFrom?: string, duotone?: Duotone): string {
+  let key = imagePath;
+  if (colorReplaceFrom) key += `|clr:${colorReplaceFrom}`;
+  if (duotone) key += `|duo:${duotone.clr1}:${duotone.clr2}`;
+  return key;
 }
 
 type DocxFetchImage = (path: string, mime: string) => Promise<Blob>;
 
-// Second-layer cache for the `a:clrChange` (colorReplaceFrom) result. The core
-// path-keyed cache (getCachedBitmapByPath) holds the color-replacement-FREE
-// bitmap — shared across every reference to a path and reclaimed with the
-// document. The make-transparent pass (getImageData + putImageData, expensive)
-// then runs once per (imagePath, colorReplaceFrom) pair and its ImageBitmap is
-// kept here, so revisiting a page re-runs neither the decode NOR the recolor.
+// Second-layer cache for a picture's RECOLOUR result — the `a:clrChange`
+// (colorReplaceFrom, §20.1.8.11) make-transparent pass and/or the `<a:duotone>`
+// (§20.1.8.23) luminance ramp. The core path-keyed cache (getCachedBitmapByPath)
+// holds the recolour-FREE bitmap — shared across every reference to a path and
+// reclaimed with the document. The recolour pass (getImageData + putImageData,
+// expensive) then runs once per (imagePath, colorReplaceFrom, duotone) triple
+// and its ImageBitmap is kept here, so revisiting a page re-runs neither the
+// decode NOR the recolour.
 //
 // Keyed FIRST by the document's `fetchImage` closure (one stable identity per
-// DocxDocument), then by imageKey(imagePath, colorReplaceFrom) — mirroring the
-// core cache's per-document namespacing so two documents sharing a zip path +
-// replace colour don't cross-contaminate, and the whole map is reclaimed with
-// the document. The stored value is an ImageBitmap (a fresh OffscreenCanvas
+// DocxDocument), then by imageKey(imagePath, colorReplaceFrom, duotone) —
+// mirroring the core cache's per-document namespacing so two documents sharing a
+// zip path + recolour don't cross-contaminate, and the whole map is reclaimed
+// with the document. The stored value is an ImageBitmap (a fresh OffscreenCanvas
 // raster), so on destroy it must be closed (see dropColorReplacedCache), the
 // same GPU-lifecycle discipline the core cache follows through its promise.
 const colorReplacedByFetch = new WeakMap<DocxFetchImage, Map<string, Promise<ImageBitmap>>>();
@@ -598,7 +614,7 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   // intended draw size so a vector metafile is rasterized sharply enough for its
   // largest occurrence — only meaningful for WMF/EMF).
   const record = (pair: ImagePair) => {
-    const key = imageKey(pair.imagePath, pair.colorReplaceFrom);
+    const key = imageKey(pair.imagePath, pair.colorReplaceFrom, pair.duotone);
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, pair);
@@ -639,6 +655,7 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
           colorReplaceFrom: img.colorReplaceFrom,
+          duotone: img.duotone,
           ...metafileRasterSize(img.mimeType, img.srcRect, img.widthPt ?? 0, img.heightPt ?? 0),
           hasCrop: img.srcRect != null,
         });
@@ -756,6 +773,7 @@ export async function decodeRaster(
   fetchImage: (path: string, mime: string) => Promise<Blob>,
   widthPt = 0,
   heightPt = 0,
+  duotone?: Duotone,
 ): Promise<ImageBitmap | null> {
   // Base bitmap (no colour replacement): shared, path-keyed, per-document cache.
   const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, {
@@ -769,15 +787,28 @@ export async function decodeRaster(
   // null rather than throw so this expected outcome never travels the exception
   // path (a transient fetch/decode failure still rejects and is caught upstream).
   if (!base) return null;
-  if (!colorReplaceFrom) return base;
-  // Second layer: memoize the make-transparent result per (path, colour). The
-  // recolor reads the SHARED base bitmap and produces a fresh independent raster,
+  if (!colorReplaceFrom && !duotone) return base;
+  // Second layer: memoize the recolour result per (path, colour, duotone). The
+  // recolour reads the SHARED base bitmap and produces a fresh independent raster,
   // so the base is never mutated and stays reusable for other references / draws.
+  // clrChange (§20.1.8.11 make-transparent) is applied BEFORE the duotone
+  // (§20.1.8.23 luminance ramp): the ramp leaves fully-transparent pixels
+  // untouched, so a colour keyed transparent stays transparent under the recolour.
   const cache = colorReplacedCacheFor(fetchImage);
-  const key = imageKey(imagePath, colorReplaceFrom);
+  const key = imageKey(imagePath, colorReplaceFrom, duotone);
   let hit = cache.get(key);
   if (!hit) {
-    hit = applyColorReplacement(base, colorReplaceFrom);
+    hit = (async () => {
+      let bmp: ImageBitmap = base;
+      if (colorReplaceFrom) bmp = await applyColorReplacement(bmp, colorReplaceFrom);
+      if (duotone) {
+        const { w, h } = imageNaturalSize(bmp);
+        if (w > 0 && h > 0) {
+          bmp = (await applyDuotone(bmp, duotone, { width: w, height: h })) as ImageBitmap;
+        }
+      }
+      return bmp;
+    })();
     // Don't poison the cache if the recolor pass rejects; let the next call retry.
     hit.catch(() => cache.delete(key));
     cache.set(key, hit);
@@ -827,9 +858,11 @@ export async function preloadImages(
           try {
             img = await getCachedSvgImageByPath(blip.svgImagePath, fetch);
           } catch {
+            // The raster fallback carries the §20.1.8.23 duotone recolour; an SVG
+            // vector original has no readable pixel grid, so it stays un-recoloured.
             img = dataIsSvg
               ? await getCachedSvgImageByPath(pair.imagePath, fetch)
-              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
+              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt, pair.duotone);
           }
         } else if (dataIsSvg) {
           // svg-only picture (no svgImagePath surfaced — e.g. a non-svgBlip
@@ -837,11 +870,11 @@ export async function preloadImages(
           // through the path-keyed <img>-based SVG path.
           img = await getCachedSvgImageByPath(pair.imagePath, fetch);
         } else {
-          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
+          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt, pair.duotone);
         }
         // Undrawable metafile → drop the entry (draw sites skip a missing key).
         if (!img) return null;
-        return [imageKey(pair.imagePath, pair.colorReplaceFrom), img];
+        return [imageKey(pair.imagePath, pair.colorReplaceFrom, pair.duotone), img];
       } catch {
         return null;
       }
@@ -6824,9 +6857,16 @@ function renderInlineImage(
     );
     return;
   }
-  const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom));
+  const bmp = images.get(imageKey(seg.imagePath, seg.colorReplaceFrom, seg.duotone));
   if (!bmp) return;
+  // §20.1.8.6 alphaModFix — multiply the picture's opacity for the draw.
+  const hasAlpha = seg.alpha != null && seg.alpha < 1;
+  if (hasAlpha) {
+    ctx.save();
+    ctx.globalAlpha *= seg.alpha as number;
+  }
   paint((dx, dy, dw, dh) => drawImageCropped(ctx, bmp, seg.srcRect, dx, dy, dw, dh));
+  if (hasAlpha) ctx.restore();
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -6916,7 +6956,7 @@ function renderAnchorImages(
     const img = run as unknown as ImageRun;
     if (!img.anchor) continue;
     if (isWrapFloat(img.wrapMode)) continue;  // drawn as a float
-    const bmp = state.images.get(imageKey(img.imagePath, img.colorReplaceFrom));
+    const bmp = state.images.get(imageKey(img.imagePath, img.colorReplaceFrom, img.duotone));
     if (!bmp) continue;
 
     // wrapNone images anchor against the paragraph's pre-spaceBefore top
@@ -6928,6 +6968,12 @@ function renderAnchorImages(
     // does not displace text and is not displaced by other floats), so dist* is
     // unused here.
     const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
+    // §20.1.8.6 alphaModFix — multiply the picture's opacity.
+    const hasAlpha = img.alpha != null && img.alpha < 1;
+    if (hasAlpha) {
+      state.ctx.save();
+      state.ctx.globalAlpha *= img.alpha as number;
+    }
     if (state.verticalCJK) {
       // §17.6.20 (tbRl) — an anchored image is not text: keep it UPRIGHT inside
       // the +90°-rotated page by counter-rotating about its box centre.
@@ -6937,6 +6983,7 @@ function renderAnchorImages(
     } else {
       drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
     }
+    if (hasAlpha) state.ctx.restore();
   }
 }
 
@@ -8183,7 +8230,7 @@ function registerImageFloat(
   // gate under allowOverlap=true, and the right-then-down re-seat using dist
   // padding as the float-to-float gap. See resolveFloatOverlap header.
   const allowOverlap = img.allowOverlap ?? true;
-  const key = imageKey(img.imagePath, img.colorReplaceFrom);
+  const key = imageKey(img.imagePath, img.colorReplaceFrom, img.duotone);
   const rect = pushFloatRect(state, {
     x: box.x,
     y: box.y,
@@ -8201,6 +8248,12 @@ function registerImageFloat(
   if (!state.dryRun) {
     const bmp = state.images.get(key);
     if (bmp) {
+      // §20.1.8.6 alphaModFix — multiply the picture's opacity.
+      const hasAlpha = img.alpha != null && img.alpha < 1;
+      if (hasAlpha) {
+        state.ctx.save();
+        state.ctx.globalAlpha *= img.alpha as number;
+      }
       if (state.verticalCJK) {
         // §17.6.20 (tbRl) — keep the floated image UPRIGHT inside the rotated page.
         drawUprightBox(state.ctx, rect.imageX, rect.imageY, rect.imageW, rect.imageH, (dx, dy, dw, dh) =>
@@ -8209,6 +8262,7 @@ function registerImageFloat(
       } else {
         drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
       }
+      if (hasAlpha) state.ctx.restore();
     }
     rect.drawn = true;
   }

@@ -1,5 +1,5 @@
 import type { DimOptions, MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
-import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
+import { renderSlide, dropImageBitmapCache, dropDuotoneBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import { selectNotes } from './notes';
 import { selectHidden } from './hidden';
@@ -587,9 +587,11 @@ export class PptxPresentation {
       unloadGoogleFonts(this._googleFontFaces);
       this._googleFontFaces = [];
     }
-    // Release this deck's decoded raster bitmaps (GPU-backed) and SVG object
-    // URLs promptly; both caches are keyed by `_fetchImage`.
+    // Release this deck's decoded raster bitmaps (GPU-backed), duotone-recoloured
+    // rasters, and SVG object URLs promptly; all three caches are keyed by
+    // `_fetchImage`.
     dropImageBitmapCache(this._fetchImage);
+    dropDuotoneBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
   }
 }
