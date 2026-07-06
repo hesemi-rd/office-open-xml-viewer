@@ -3014,3 +3014,111 @@ describe('canvas state leak (#766) — renderChart restores ctx state', () => {
     expect(after.baseline).toBe('alphabetic');
   });
 });
+
+describe('CH — combo bar+line primary value axis spans BOTH the bars and the primary-axis line (§21.2.2.16 / §21.2.2.76)', () => {
+  // A stacked-column + line combo (bar + line series sharing ONE `<c:valAx>`,
+  // e.g. xlsx sample-9 "MONTHLY OVERVIEW"). The bars stack to a per-category
+  // maximum well BELOW the line's tallest point. Excel scales the shared
+  // primary value axis to encompass every series plotted on it, regardless of
+  // chart type — so the axis top must cover the line, not just the bar stack.
+  //
+  // Recreates sample-9's data: 3 stacked bar series (max category sum 150) plus
+  // one primary-axis line "Amount Spent" whose tallest point is 180. Excel draws
+  // the axis $0..$200; before the fix the renderer sized the axis to the bar sum
+  // alone (150 → 160) and the 180 line point overshot the top gridline into the
+  // chart title.
+  const numericValLabels = (rec: Recorded): number[] =>
+    rec.texts
+      .map(t => Number(String(t.text).replace(/[^0-9.\-]/g, '')))
+      .filter(v => Number.isFinite(v));
+
+  it('the primary-axis line pushes the axis maximum above the stacked-bar sum', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBar',
+      categories: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'],
+      series: [
+        series({ name: 'Birthday',  seriesType: 'bar',  values: [20, 0, 0, 0, 0, 50, 0] }),
+        series({ name: 'Holiday',   seriesType: 'bar',  values: [0, 0, 0, 0, 0, 0, 50] }),
+        series({ name: 'Other',     seriesType: 'bar',  values: [0, 0, 0, 20, 0, 100, 0] }),
+        // Primary-axis line: NOT on a secondary axis. Tallest point 180 > the
+        // stacked bar's per-category max sum of 150.
+        series({ name: 'Amount Spent', seriesType: 'line', values: [30, 0, 0, 20, 0, 180, 70] }),
+      ],
+    }), RECT, 1);
+    const nums = numericValLabels(rec);
+    const axisMax = Math.max(...nums);
+    // Excel draws $0..$200 for this data. The axis top must at minimum cover the
+    // line's 180 (the bug capped it at 160, hiding the tallest line point).
+    expect(axisMax).toBeGreaterThanOrEqual(180);
+    // And it must be the next nice unit above 180 — 200 — not an over-scaled
+    // value. (niceAxisMax(180, step=50) with headroom = 200.)
+    expect(axisMax).toBe(200);
+  });
+
+  it('WITHOUT the line, the same bars alone scale the axis to just cover 150 (isolates the line contribution)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBar',
+      categories: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'],
+      series: [
+        series({ name: 'Birthday', seriesType: 'bar', values: [20, 0, 0, 0, 0, 50, 0] }),
+        series({ name: 'Holiday',  seriesType: 'bar', values: [0, 0, 0, 0, 0, 0, 50] }),
+        series({ name: 'Other',    seriesType: 'bar', values: [0, 0, 0, 20, 0, 100, 0] }),
+      ],
+    }), RECT, 1);
+    const axisMax = Math.max(...numericValLabels(rec));
+    // Bars alone: max category sum 150 → axis top 160 (unchanged by the fix).
+    expect(axisMax).toBe(160);
+    // The line contribution is what lifts the previous case from 160 to 200.
+  });
+
+  it('a negative primary-axis line pulls the axis minimum below the bars', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBar',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'Bar',  seriesType: 'bar',  values: [40, 40] }),
+        // Positive-only bars would anchor the axis at 0; the line dips to -30.
+        series({ name: 'Line', seriesType: 'line', values: [10, -30] }),
+      ],
+    }), RECT, 1);
+    const nums = numericValLabels(rec);
+    // Some negative tick label appears (axis min < 0), covering the -30 line point.
+    expect(nums.some(v => v <= -30)).toBe(true);
+  });
+
+  it('a SECONDARY-axis line does NOT inflate the primary axis (guards over-scaling)', () => {
+    // When a line rides its own right-hand `<c:valAx>` (secondaryValAxis +
+    // useSecondaryAxis), its large values live on the secondary scale and must
+    // NOT stretch the primary (bar) axis — the two axes are independent. We prove
+    // this by the invariant: the primary bar geometry is byte-identical whether
+    // the secondary line is present or absent. If the 950 line leaked onto the
+    // primary axis, the primary scale would jump ~24× and the bars would shrink.
+    const bars = (secondaryLine: boolean): RectCall[] => {
+      const rec = recordingCtx();
+      const s: ChartSeries[] = [series({ name: 'Bar', seriesType: 'bar', values: [40, 40] })];
+      if (secondaryLine) {
+        s.push(series({ name: 'Line', seriesType: 'line', values: [900, 950], useSecondaryAxis: true }));
+      }
+      renderChart(rec.ctx, baseModel({
+        chartType: 'stackedBar',
+        categories: ['A', 'B'],
+        series: s,
+        secondaryValAxis: secondaryLine ? {
+          min: null, max: null, title: null, hidden: false,
+          lineHidden: false, majorTickMark: 'out', majorUnit: null,
+        } : null,
+      }), RECT, 1);
+      return rec.rects;
+    };
+    const withLine = bars(true);
+    const withoutLine = bars(false);
+    // Same two bars, same heights — the secondary line did not touch the primary.
+    expect(withLine.length).toBe(2);
+    expect(withoutLine.length).toBe(2);
+    expect(withLine[0].h).toBeCloseTo(withoutLine[0].h, 4);
+    expect(withLine[1].h).toBeCloseTo(withoutLine[1].h, 4);
+  });
+});

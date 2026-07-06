@@ -1145,6 +1145,28 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       dataMin = Math.min(dataMin, negSum);
     }
   }
+  // Combo line series plotted on the PRIMARY value axis (a bar+line chart whose
+  // line rides the same `<c:valAx>` as the bars — no secondary axis, or one the
+  // line doesn't opt into) must expand the primary axis extent just like the
+  // bars do. Excel scales a shared value axis to encompass EVERY series on it,
+  // regardless of chart type; a tall line point can exceed the bar stack (xlsx
+  // sample-9 "MONTHLY OVERVIEW": bars sum to 150 but the line reaches 180, so
+  // Excel draws $0..$200 — sizing to the bars alone would clip the line into the
+  // title). The line is an unstacked overlay, so each raw datum widens the range
+  // directly. Secondary-axis line series are excluded (they own an independent
+  // scale, mirrored by the `yOf` split below). Skipped for percentStacked, whose
+  // axis is definitionally ±100% (§21.2.2.76). `sec` matches the draw-time gate.
+  if (!pct) {
+    for (const s of lineSeries) {
+      if (sec && s.useSecondaryAxis === true) continue;
+      for (let ci = 0; ci < n; ci++) {
+        const v = s.values[ci];
+        if (v == null) continue;
+        dataMax = Math.max(dataMax, v);
+        dataMin = Math.min(dataMin, v);
+      }
+    }
+  }
   if (pct) {
     // percentStacked normalizes each category to Σ|v|; the axis spans the
     // side(s) the data actually reaches (100% up if any positives, -100% down
