@@ -267,4 +267,79 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
     }
     expect(maxSpan).toBeGreaterThan(boxHpx * 0.5);
   });
+
+  it('textWave1 shears glyphs along the wave slope, not a rigid rotation', async () => {
+    // ECMA-376 §20.1.9.19: the envelope map's local Jacobian is a rotate+shear,
+    // not a plain rotate+scale — on the wave's rising/falling flanks the glyph
+    // em-box skews into a parallelogram (vertical strokes track the vertical
+    // edge-gap while the baseline follows the slope). PowerPoint's own PDF of the
+    // warp fixture shows the "Wave One" glyphs leaning italic-forward.
+    //
+    // Pixel signature of a SHEAR (as opposed to a rigid rotation): within a
+    // narrow vertical slab, the ink's horizontal CENTROID shifts between the
+    // upper and lower parts of the glyph band — the top slides forward on an
+    // upslope and back on a downslope. A rigid rotation keeps the slab's ink
+    // vertically aligned (top and bottom centroids agree). We sample several
+    // slabs across the word and require a MEANINGFUL top↔bottom shift that also
+    // CHANGES SIGN across the wave (proof the skew tracks the local slope rather
+    // than being a single global tilt).
+    const width = 400;
+    const height = 240;
+    const canvas = new Canvas(width, height);
+    await renderSlideNode(
+      canvas as unknown as Parameters<typeof renderSlideNode>[0],
+      buildSlide('textWave1'),
+      0,
+      { width, dpr: 1 },
+    );
+    const ctx = canvas.getContext('2d');
+    const data = ctx.getImageData(0, 0, width, height).data as unknown as Uint8ClampedArray;
+    const inked = (x: number, y: number): boolean => {
+      const i = (y * width + x) * 4;
+      const a = data[i + 3];
+      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      return a > 40 && lum < 128;
+    };
+    // Ink bbox of the whole warped word.
+    let minX = width, maxX = -1, minY = height, maxY = -1;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        if (inked(x, y)) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+    expect(maxX).toBeGreaterThan(minX);
+    expect(maxY).toBeGreaterThan(minY);
+
+    // For a vertical slab [xc-6, xc+6], the mean-x of ink in the TOP third vs the
+    // BOTTOM third of the glyph band. Positive shift = top sits right of bottom.
+    const slabShift = (xc: number): number | null => {
+      const bandTop = minY + (maxY - minY) * 0.15;
+      const bandBot = minY + (maxY - minY) * 0.85;
+      const third = (bandBot - bandTop) / 3;
+      let txSum = 0, tN = 0, bxSum = 0, bN = 0;
+      for (let x = Math.max(0, xc - 6); x <= Math.min(width - 1, xc + 6); x++) {
+        for (let y = Math.floor(bandTop); y < bandTop + third; y++) if (inked(x, y)) { txSum += x; tN++; }
+        for (let y = Math.floor(bandBot - third); y < bandBot; y++) if (inked(x, y)) { bxSum += x; bN++; }
+      }
+      if (tN < 4 || bN < 4) return null;
+      return txSum / tN - bxSum / bN;
+    };
+    const shifts: number[] = [];
+    for (let f = 0.15; f <= 0.85; f += 0.05) {
+      const s = slabShift(Math.round(minX + (maxX - minX) * f));
+      if (s != null) shifts.push(s);
+    }
+    expect(shifts.length).toBeGreaterThan(4);
+    // The lean is substantial somewhere (a rigid rotate keeps |shift| small since
+    // the whole glyph turns together; the shear slides the top several px).
+    const maxAbs = Math.max(...shifts.map((s) => Math.abs(s)));
+    expect(maxAbs).toBeGreaterThan(4);
+    // …and it reverses across the wave (upslope vs downslope) — a single global
+    // tilt could not do that.
+    expect(Math.max(...shifts)).toBeGreaterThan(2);
+    expect(Math.min(...shifts)).toBeLessThan(-2);
+  });
 });

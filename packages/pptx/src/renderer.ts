@@ -1519,6 +1519,13 @@ function renderWarpedText(
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
         ctx.rotate(g.angle);
+        // Local envelope shear (§20.1.9.19): on a sloped paired edge the em-height
+        // axis (gap vector B−T) is not perpendicular to the advance axis, so the
+        // glyph must skew — vertical strokes track the gap while the baseline
+        // follows the slope. `g.shear` is the horizontal skew in the rotated
+        // frame; 0 for flat points and single-edge (arch/circle) presets, so this
+        // is a no-op there and leaves Follow Path glyphs rigidly rotated.
+        if (g.shear !== 0) ctx.transform(1, 0, g.shear, 1, 0, 0);
         if (hScale !== 1 || g.vScale !== 1) ctx.scale(hScale, g.vScale);
         // Draw the glyph centred on the mapped point: shift left by half its
         // advance so its own centre lands on `u`.
