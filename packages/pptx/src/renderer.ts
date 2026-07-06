@@ -1341,6 +1341,152 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
+// ── WordArt paired-edge warp: piecewise-affine strip subdivision ─────────────
+//
+// A single glyph is drawn once to this reusable offscreen canvas (at device
+// resolution, so it stays crisp on HiDPI), then blitted onto the envelope one
+// vertical STRIP at a time. Reused across glyphs so a warped title does not
+// churn one canvas allocation per character. `null` in headless test envs with
+// no OffscreenCanvas/document (createAuxCanvas returns null); the caller then
+// falls back to the single-affine per-glyph draw.
+let warpGlyphAux: ReturnType<typeof createAuxCanvas> = null;
+function warpGlyphOffscreen(w: number, h: number): ReturnType<typeof createAuxCanvas> {
+  const cw = Math.max(1, Math.ceil(w));
+  const ch = Math.max(1, Math.ceil(h));
+  const cur = warpGlyphAux;
+  if (!cur || cur.width < cw || cur.height < ch) {
+    // Grow-only: allocate the max seen so far so we rarely reallocate. A fresh
+    // canvas starts transparent; we clear the used sub-rect before each glyph.
+    warpGlyphAux = createAuxCanvas(Math.max(cw, cur?.width ?? 0), Math.max(ch, cur?.height ?? 0));
+  }
+  return warpGlyphAux;
+}
+
+// Target strip width in DEVICE px. The per-strip affine (the #866 Jacobian
+// evaluated at the strip's centre-u) approximates the true envelope map with an
+// edge error that grows as the SQUARE of the strip's u-span, so bounding the
+// device-px width bounds the error independent of shape/glyph size. Measured on
+// the warp fixture's presets (320×160 shape), an 8-device-px strip keeps the
+// worst-case edge misplacement under 0.3 px for every paired-edge preset
+// (Inflate/Deflate ≈0.1 px, the higher-curvature Wave1 ≈0.28 px) — sub-pixel, so
+// the piecewise approximation is invisible. Cascade/Chevron envelopes are
+// piecewise-LINEAR (`m l l`), so their per-strip affine is exact at any width;
+// they ride the same path for a single, preset-agnostic code path (no preset
+// branch, no empirical constant — §20.1.9.19's envelope map is the sole basis).
+const WARP_STRIP_DEVICE_PX = 8;
+// Overlap each strip by ~1 device px on each side so the sub-pixel seam gap
+// between adjacent strips (≈0.8 shape px, measured) is covered with no visible
+// hairline. The overlap is symmetric, so it does not bias the mapping.
+const WARP_STRIP_OVERLAP_DEVICE_PX = 1;
+
+/**
+ * Draw one glyph across a PAIRED-EDGE warp envelope as a stack of vertical
+ * strips (piecewise-affine approximation of the envelope map, ECMA-376
+ * §20.1.9.19).
+ *
+ * The #866 per-glyph transform samples the envelope's local Jacobian at a SINGLE
+ * u (the glyph centre) and applies one affine (rotate + shear + non-uniform
+ * scale) to the whole glyph. That is exact only where the map is locally affine;
+ * on Inflate/Deflate the vertical stretch `vScale` varies WITHIN a glyph (the
+ * top/bottom edges are mirror-symmetric so the gap stays vertical — shear 0,
+ * angle 0 — but the gap MAGNITUDE peaks at the centre and shrinks toward the
+ * ends), which a single affine cannot represent: it leaves the glyph uniformly
+ * scaled instead of stretched more where the envelope is taller. PowerPoint maps
+ * the glyph OUTLINE continuously through `P(u,v) = (1−v)·T(u) + v·B(u)`, so a
+ * wide glyph leans/stretches asymmetrically across its own width.
+ *
+ * Subdividing the glyph into narrow strips and mapping each strip by the Jacobian
+ * at ITS centre-u converges to that continuous map as the strip count grows (the
+ * general solution — no preset special-casing). Each strip is a vertical slice of
+ * the pre-rendered glyph bitmap, drawn with the strip's own affine; the shared
+ * strip edges land within a sub-pixel of each other, and a ~1px overlap hides the
+ * seam.
+ *
+ * The reusable offscreen `gAux` already carries THIS glyph, rendered at
+ * `devScale` with the glyph pen-origin at device-x `padDev` and the baseline at
+ * device-y `blY`; the offscreen is `auxDevH` device px tall (ascent above the
+ * baseline + descent below). `chW` is the glyph's flat advance (css px, incl.
+ * letter-spacing). `flatX0` is the glyph's flat left edge along the whole line
+ * (css px). The remaining args mirror the per-glyph draw: `hScale` stretches flat
+ * ink to the box width, `warpBoxH`/`bandFrac` drive `warpGlyphTransform`,
+ * `boxX`/`boxY` are the shape origin, `totalW`/`followScale` map flat-x to the
+ * envelope fraction u.
+ */
+function drawWarpedGlyphStrips(
+  ctx: CanvasRenderingContext2D,
+  gAux: NonNullable<ReturnType<typeof createAuxCanvas>>,
+  devScale: number,
+  padDev: number,
+  blY: number,
+  auxDevH: number,
+  env: WarpEnvelope,
+  chW: number,
+  flatX0: number,
+  totalW: number,
+  followScale: number,
+  hScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+  boxX: number,
+  boxY: number,
+): void {
+  if (chW <= 0) return;
+  // Strip count: one strip per WARP_STRIP_DEVICE_PX of the glyph's WARPED advance
+  // (chW·hScale is the on-envelope width). ≥1; the error bound is per-strip so a
+  // wide "W" gets more strips than a thin "l".
+  const warpedAdvDev = chW * hScale * devScale;
+  const k = Math.max(1, Math.round(warpedAdvDev / WARP_STRIP_DEVICE_PX));
+  // The offscreen ink top row is `blY` device px above the baseline; the whole
+  // offscreen (auxDevH tall) maps to a css slab of height auxDevH/devScale whose
+  // baseline (row blY) sits at local y = 0.
+  const dstH = auxDevH / devScale;
+  const dstY = -blY / devScale;
+  for (let j = 0; j < k; j++) {
+    // Strip's flat sub-range within the glyph advance, [s0, s1] in css px from
+    // the glyph's flat left edge (pen origin).
+    const s0 = (j / k) * chW;
+    const s1 = ((j + 1) / k) * chW;
+    const stripCenterFlat = flatX0 + (s0 + s1) / 2;
+    const u = (stripCenterFlat / totalW) * followScale;
+    const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
+
+    // Source rect on the offscreen (device px): the glyph pen origin is at
+    // device-x `padDev`, so flat-x `s` maps to device-x `padDev + s·devScale`.
+    // Grow by the overlap on each side (clamped to the offscreen) so neighbours
+    // share a hair of pixels and no seam shows.
+    const srcX0 = Math.max(0, padDev + s0 * devScale - WARP_STRIP_OVERLAP_DEVICE_PX);
+    const srcX1 = Math.min(gAux.width, padDev + s1 * devScale + WARP_STRIP_OVERLAP_DEVICE_PX);
+    const srcW = srcX1 - srcX0;
+    if (srcW <= 0) continue;
+
+    ctx.save();
+    // Same transform chain as the single-affine per-glyph draw, but anchored at
+    // the STRIP centre so vScale/shear/angle track this slice's u.
+    ctx.translate(boxX + g.x, boxY + g.y);
+    ctx.rotate(g.angle);
+    if (g.shear !== 0) ctx.transform(1, 0, g.shear, 1, 0, 0);
+    if (hScale !== 1 || g.vScale !== 1) ctx.scale(hScale, g.vScale);
+    // Map the offscreen slice into this strip's local frame: a source pixel at
+    // device-x `sx` sits at flat-x `(sx − padDev)/devScale` from the pen origin,
+    // so its local x (relative to the strip centre `(s0+s1)/2`) is
+    // `(sx − padDev)/devScale − (s0+s1)/2`.
+    const dstX = (srcX0 - padDev) / devScale - (s0 + s1) / 2;
+    const dstW = srcW / devScale;
+    ctx.drawImage(
+      gAux as CanvasImageSource,
+      srcX0,
+      0,
+      srcW,
+      auxDevH,
+      dstX,
+      dstY,
+      dstW,
+      dstH,
+    );
+    ctx.restore();
+  }
+}
+
 /**
  * Render a WordArt text body through its `<a:prstTxWarp>` envelope (ECMA-376
  * §20.1.9.19). Canvas 2D cannot deform glyph outlines, so this is the standard
@@ -1422,6 +1568,22 @@ function renderWarpedText(
   ctx.save();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
+
+  // Device scale folded into the live transform (dpr · slide scale), so glyph
+  // bitmaps for the paired-edge strip path are rasterised at the same pixel
+  // density as the canvas — no HiDPI blur. sqrt(|det|) of the transform's linear
+  // part is dpr regardless of rotation/flip (same idiom as the scene3d/effect
+  // offscreens). Computed LAZILY on the first paired-edge glyph only: single-edge
+  // (Follow Path) warps never allocate an offscreen, and some unit tests drive a
+  // mock ctx without getTransform, so the single-edge path must never touch it.
+  let devScaleCache = -1;
+  const getDevScale = (): number => {
+    if (devScaleCache >= 0) return devScaleCache;
+    const tf = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+    const det = tf ? Math.abs(tf.a * tf.d - tf.b * tf.c) : 1;
+    devScaleCache = det > 0 ? Math.sqrt(det) : 1;
+    return devScaleCache;
+  };
 
   const lineCount = lines.length;
   for (let li = 0; li < lineCount; li++) {
@@ -1507,14 +1669,51 @@ function renderWarpedText(
       const chars = [...seg.text];
       for (const ch of chars) {
         const chW = ctx.measureText(ch).width + ls;
+        // Blend the per-line vertical band into the baseline fraction so line 2
+        // sits below line 1 within the envelope.
+        const bandFrac = v0 + baselineFrac * (v1 - v0);
+
+        // Paired-edge (envelope) presets: the envelope map is NON-affine within a
+        // glyph (on Inflate/Deflate the vertical stretch varies across the glyph's
+        // own width; on waves the slope does), so a single per-glyph affine loses
+        // that intra-glyph deformation. Draw the glyph via piecewise-affine STRIPS
+        // (each strip's affine sampled at its own centre-u) so the mapping
+        // converges to PowerPoint's continuous outline warp (§20.1.9.19). The
+        // single-edge (Follow Path) branch below is UNCHANGED (byte-identical):
+        // its glyphs are rigidly rotated onto a baseline, already exact per glyph.
+        if (!env.singleEdge && chW > 0) {
+          const drawn = drawWarpedGlyphViaStrips(
+            ctx,
+            ch,
+            seg.font,
+            seg.color,
+            ls,
+            chW,
+            getDevScale(),
+            env,
+            penW,
+            totalW,
+            followScale,
+            hScale,
+            warpBoxH,
+            bandFrac,
+            boxX,
+            boxY,
+          );
+          if (drawn) {
+            penW += chW;
+            continue;
+          }
+          // Offscreen unavailable (headless env) → fall through to single-affine.
+          ctx.font = seg.font;
+          ctx.fillStyle = seg.color;
+        }
+
         // Horizontal fraction of THIS glyph's centre along the whole line,
         // scaled by the Follow Path factor so single-edge (arch/circle) text
         // spans only its natural arc length from the start rather than the whole
         // path. `followScale` is 1 for paired-edge presets (unchanged).
         const u = ((penW + chW / 2) / totalW) * followScale;
-        // Blend the per-line vertical band into the baseline fraction so line 2
-        // sits below line 1 within the envelope.
-        const bandFrac = v0 + baselineFrac * (v1 - v0);
         const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
@@ -1536,6 +1735,92 @@ function renderWarpedText(
     }
   }
   ctx.restore();
+}
+
+/**
+ * Render one glyph to the reusable offscreen and blit it across a paired-edge
+ * warp via {@link drawWarpedGlyphStrips}. Returns `false` when no offscreen
+ * canvas is available (headless test env with neither OffscreenCanvas nor
+ * document), so the caller can fall back to the single-affine per-glyph draw.
+ *
+ * The offscreen is sized to the glyph's measured ink (ascent above baseline +
+ * descent below, plus the left side-bearing) at `devScale`, with a small pad so
+ * strokes that overhang the pen advance (italic tails, wide accents) are not
+ * clipped. `penW` is the flat advance consumed BEFORE this glyph on the line.
+ */
+function drawWarpedGlyphViaStrips(
+  ctx: CanvasRenderingContext2D,
+  ch: string,
+  font: string,
+  color: string,
+  ls: number,
+  chW: number,
+  devScale: number,
+  env: WarpEnvelope,
+  penW: number,
+  totalW: number,
+  followScale: number,
+  hScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+  boxX: number,
+  boxY: number,
+): boolean {
+  ctx.font = font;
+  const m = ctx.measureText(ch);
+  // Ink extents around the baseline (fallbacks keep degenerate metrics safe).
+  const asc = m.actualBoundingBoxAscent > 0 ? m.actualBoundingBoxAscent : chW;
+  const desc = m.actualBoundingBoxDescent > 0 ? m.actualBoundingBoxDescent : chW * 0.25;
+  // Left side-bearing: ink may start left of the pen origin (e.g. italic 'f').
+  const lsb = m.actualBoundingBoxLeft > 0 ? m.actualBoundingBoxLeft : 0;
+  const rsb = m.actualBoundingBoxRight > chW ? m.actualBoundingBoxRight - chW : 0;
+  // css pad on each side so overhang and the strip overlap have room.
+  const padCss = Math.max(lsb, rsb, 2);
+  const padDev = Math.ceil(padCss * devScale);
+  const ascDev = Math.ceil(asc * devScale);
+  const descDev = Math.ceil(desc * devScale);
+  const auxDevW = padDev + Math.ceil((chW + padCss) * devScale);
+  const auxDevH = ascDev + descDev;
+  const gAux = warpGlyphOffscreen(auxDevW, auxDevH);
+  if (!gAux) return false;
+  const gctx = gAux.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!gctx) return false;
+
+  // Paint the glyph: baseline at device row `ascDev`, pen origin at device-x
+  // `padDev`. Clear only the used sub-rect (grow-only offscreen may be larger).
+  gctx.save();
+  gctx.setTransform(1, 0, 0, 1, 0, 0);
+  gctx.clearRect(0, 0, auxDevW, auxDevH);
+  gctx.scale(devScale, devScale);
+  gctx.textAlign = 'left';
+  gctx.textBaseline = 'alphabetic';
+  gctx.font = font;
+  gctx.fillStyle = color;
+  // Shift right by half the letter-spacing so the ink is centred in its advance,
+  // matching the single-affine draw's `-chW/2 + ls/2` origin convention.
+  gctx.fillText(ch, padCss + ls / 2, asc);
+  gctx.restore();
+
+  const flatX0 = penW;
+  drawWarpedGlyphStrips(
+    ctx,
+    gAux,
+    devScale,
+    padDev,
+    ascDev,
+    auxDevH,
+    env,
+    chW,
+    flatX0,
+    totalW,
+    followScale,
+    hScale,
+    warpBoxH,
+    bandFrac,
+    boxX,
+    boxY,
+  );
+  return true;
 }
 
 /**
