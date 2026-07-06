@@ -144,6 +144,41 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstGridline).toBeLessThan(firstSeriesFill);
   });
 
+  it('an area chart honors <c:minorGridlines> with the same count as line, all before the fill', () => {
+    // Regression for #883: renderAreaChart silently ignored `<c:minorGridlines>`
+    // (§21.2.2.129) while bar/line/stock honored it. With an identical value-axis
+    // config the area renderer must stroke the same number of gridlines as the
+    // line renderer (major + minor), and every gridline must precede the series
+    // fill (same z-order as the major pass moved by #881).
+    const cfg: Partial<ChartModel> = {
+      categories: ['Jan', 'Feb', 'Mar', 'Apr'],
+      series: [series({ name: 'ARR', values: [37, 40, 44, 48] })],
+      valMax: 50,
+      valAxisMajorUnit: 5,
+      valAxisMinorGridlines: true,
+      valAxisMinorUnit: 2.5,
+    };
+
+    const areaRec = orderedRecordingCtx();
+    renderChart(areaRec.ctx, baseModel({ chartType: 'area', ...cfg }), RECT, 1);
+    const lineRec = orderedRecordingCtx();
+    renderChart(lineRec.ctx, baseModel({ chartType: 'line', ...cfg }), RECT, 1);
+
+    const areaGrid = areaRec.events.filter(isGridlineStroke).length;
+    const lineGrid = lineRec.events.filter(isGridlineStroke).length;
+    // Line = 10 major + minor; area must match now that #883 is fixed.
+    expect(lineGrid).toBeGreaterThan(0);
+    expect(areaGrid).toBe(lineGrid);
+
+    // Every gridline (major AND minor) sits before the first series fill.
+    const firstFill = areaRec.events.findIndex(isSeriesFill);
+    const lastGridline =
+      areaRec.events.length - 1 -
+      [...areaRec.events].reverse().findIndex(isGridlineStroke);
+    expect(firstFill).toBeGreaterThanOrEqual(0);
+    expect(lastGridline).toBeLessThan(firstFill);
+  });
+
   it('a plain line/area combo keeps gridlines below the area fill', () => {
     // Guard the line renderer (which draws area-like fills? no — line strokes).
     // Line chart already gridlines-first; assert it does not regress by pinning a

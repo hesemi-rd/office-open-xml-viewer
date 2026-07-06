@@ -2482,12 +2482,28 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // axis rules, tick marks and value/category labels stay AFTER the series (drawn
   // further below) so they sit atop the plot. `<c:valAx><c:majorGridlines>` is on
   // by default (`drawValMajorGridlines`); `<c:minorGridlines>` only when declared.
-  if (!chart.valAxisHidden && drawValMajorGridlines(chart)) {
+  if (!chart.valAxisHidden) {
     const grid = valGridStroke(chart, ptToPx);
-    const steps = Math.round(axMax / step);
-    for (let si = 0; si <= steps; si++) {
-      const v = si * step;
-      strokeValueGridlineH(ctx, px0, pw, toY(v), si === 0, grid);
+    // Minor gridlines (`<c:valAx><c:minorGridlines>`, §21.2.2.129) drawn first,
+    // UNDER the majors and the series, only when the file declares them AND a
+    // positive `<c:minorUnit>` smaller than the major step. Interior multiples of
+    // the minor unit that don't coincide with a major line — same computation as
+    // planValueAxis (renderer.ts ~686-696) used by bar/line/stock, with the area
+    // axis anchored at min = 0. Fixes #883 (area previously ignored minor lines).
+    const mu = chart.valAxisMinorUnit;
+    if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
+      for (let v = mu; v < axMax - 1e-9; v += mu) {
+        if (Math.abs(v / step - Math.round(v / step)) > 1e-6) {
+          strokeValueGridlineH(ctx, px0, pw, toY(v), false, grid);
+        }
+      }
+    }
+    if (drawValMajorGridlines(chart)) {
+      const steps = Math.round(axMax / step);
+      for (let si = 0; si <= steps; si++) {
+        const v = si * step;
+        strokeValueGridlineH(ctx, px0, pw, toY(v), si === 0, grid);
+      }
     }
   }
   // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
