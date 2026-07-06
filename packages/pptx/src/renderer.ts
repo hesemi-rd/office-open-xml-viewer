@@ -80,7 +80,7 @@ import {
   warpGlyphTransform,
   followPathUScale,
 } from '@silurus/ooxml-core';
-import type { WarpEnvelope } from '@silurus/ooxml-core';
+import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
@@ -1362,22 +1362,49 @@ function warpGlyphOffscreen(w: number, h: number): ReturnType<typeof createAuxCa
   return warpGlyphAux;
 }
 
-// Target strip width in DEVICE px. The per-strip affine (the #866 Jacobian
-// evaluated at the strip's centre-u) approximates the true envelope map with an
-// edge error that grows as the SQUARE of the strip's u-span, so bounding the
-// device-px width bounds the error independent of shape/glyph size. Measured on
-// the warp fixture's presets (320×160 shape), an 8-device-px strip keeps the
-// worst-case edge misplacement under 0.3 px for every paired-edge preset
-// (Inflate/Deflate ≈0.1 px, the higher-curvature Wave1 ≈0.28 px) — sub-pixel, so
-// the piecewise approximation is invisible. Cascade/Chevron envelopes are
-// piecewise-LINEAR (`m l l`), so their per-strip affine is exact at any width;
-// they ride the same path for a single, preset-agnostic code path (no preset
-// branch, no empirical constant — §20.1.9.19's envelope map is the sole basis).
+// BASE strip width in DEVICE px — the coarse first guess only; the adaptive
+// deviation loop below is what actually guarantees accuracy. Width alone bounds
+// just the chord-vs-curve error of the BASELINE curve (∝ width², sub-pixel at
+// 8 px for every preset), but NOT the error away from the baseline: a slab
+// corner at distance d from the baseline anchor is additionally misplaced by
+// the angle/vScale mismatch across the strip (≈ d·Δangle + |y|·ΔvScale), which
+// at 8 px width is measured at ~0.7 px (Inflate) to ~0.2 px (Wave1/Chevron) at
+// the baseline but grows to several px at the em-box extremes (Wave1 ≈2.4,
+// Button ≈5.9) and tens of px on high-curvature ring/pour families
+// (CirclePour ≈11, CanUp ≈44 at em-box edges) — the strips fan apart into
+// radial slivers. Hence the width criterion is only the starting k; the
+// deviation-driven refinement below subdivides until every painted corner is
+// within WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX of the exact envelope map.
 const WARP_STRIP_DEVICE_PX = 8;
-// Overlap each strip by ~1 device px on each side so the sub-pixel seam gap
-// between adjacent strips (≈0.8 shape px, measured) is covered with no visible
-// hairline. The overlap is symmetric, so it does not bias the mapping.
+// Overlap each strip by 1 device px on each side, so adjacent strips share
+// 2 device px of source. Combined with the deviation budget below (each strip's
+// painted corners within 1 px of the exact map ⇒ adjacent strips diverge by at
+// most 2 px at a shared boundary), the overlap fully covers the worst seam and
+// no hairline can show. The overlap is symmetric, so it does not bias the map.
 const WARP_STRIP_OVERLAP_DEVICE_PX = 1;
+// Max deviation (device px) of any painted slab corner from the EXACT envelope
+// map, enforced by the adaptive loop. Derivation: the true map places the
+// glyph's vertical ruling at flat-x b onto Q(b, y) = A(u_b)·(0, y), where A(u)
+// is the envelope's local frame at u (anchor T(u)+bandFrac·gap, advance-axis
+// angle, gap shear/scale — exactly what warpGlyphTransform returns). A strip
+// centred at c paints that same ruling at S(b, y) = A(u_c)·(b−c, y). The
+// deviation |S−Q| at the slab's four corners (both strip edges × slab
+// top/bottom) is the exact per-strip error of the piecewise-affine map — it
+// contains ALL mismatch components at once: rotational fan-out d·Δangle
+// (dominant on rings/pours, whose tangent sweeps up to ~345°), vertical-scale
+// slide |y|·ΔvScale (dominant on textButton, whose mean-tangent angle is
+// constant 0 so a pure angle criterion would miss it), and the baseline chord
+// error. Two adjacent strips each deviate ≤ budget from the SAME true ruling at
+// their shared boundary, so their mutual crack is ≤ 2·budget = the 2 device px
+// of shared overlap — i.e. budget 1 is the largest value the overlap provably
+// covers. Every quantity is geometric; no preset branch.
+const WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX = 1;
+// Hard cap on strips per glyph, bounding draw cost for extreme geometry (one
+// glyph sweeping a large arc of a ring at high em-height). At the cap the
+// residual deviation is reported by the loop's last measurement and the seam
+// stays proportional (a full-ring glyph at ~250 device px em-height measures a
+// few px — degraded but bounded, and localized to that pathological glyph).
+const WARP_STRIP_MAX_PER_GLYPH = 256;
 
 /**
  * Draw one glyph across a PAIRED-EDGE warp envelope as a stack of vertical
@@ -1397,10 +1424,14 @@ const WARP_STRIP_OVERLAP_DEVICE_PX = 1;
  *
  * Subdividing the glyph into narrow strips and mapping each strip by the Jacobian
  * at ITS centre-u converges to that continuous map as the strip count grows (the
- * general solution — no preset special-casing). Each strip is a vertical slice of
- * the pre-rendered glyph bitmap, drawn with the strip's own affine; the shared
- * strip edges land within a sub-pixel of each other, and a ~1px overlap hides the
- * seam.
+ * general solution — no preset special-casing). The count is chosen ADAPTIVELY:
+ * from a base width criterion, strips double until every painted corner deviates
+ * from the exact envelope map by at most 1 device px (see
+ * WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX), so high-curvature envelopes (rings,
+ * pours — tangent sweep up to ~345°) subdivide as finely as they need while flat
+ * ones stay coarse. Each strip is a vertical slice of the pre-rendered glyph
+ * bitmap, drawn with the strip's own affine; adjacent strips then diverge ≤ 2
+ * device px at their shared boundary, which the ±1 px overlap covers.
  *
  * The reusable offscreen `gAux` already carries THIS glyph, rendered at
  * `devScale` with the glyph pen-origin at device-x `padDev` and the baseline at
@@ -1431,25 +1462,56 @@ function drawWarpedGlyphStrips(
   boxY: number,
 ): void {
   if (chW <= 0) return;
-  // Strip count: one strip per WARP_STRIP_DEVICE_PX of the glyph's WARPED advance
-  // (chW·hScale is the on-envelope width). ≥1; the error bound is per-strip so a
-  // wide "W" gets more strips than a thin "l".
-  const warpedAdvDev = chW * hScale * devScale;
-  const k = Math.max(1, Math.round(warpedAdvDev / WARP_STRIP_DEVICE_PX));
   // The offscreen ink top row is `blY` device px above the baseline; the whole
   // offscreen (auxDevH tall) maps to a css slab of height auxDevH/devScale whose
   // baseline (row blY) sits at local y = 0.
   const dstH = auxDevH / devScale;
   const dstY = -blY / devScale;
-  for (let j = 0; j < k; j++) {
-    // Strip's flat sub-range within the glyph advance, [s0, s1] in css px from
-    // the glyph's flat left edge (pen origin).
-    const s0 = (j / k) * chW;
-    const s1 = ((j + 1) / k) * chW;
-    const stripCenterFlat = flatX0 + (s0 + s1) / 2;
-    const u = (stripCenterFlat / totalW) * followScale;
-    const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
 
+  // ── Adaptive strip count ──────────────────────────────────────────────────
+  // Start from the width criterion (one strip per WARP_STRIP_DEVICE_PX of the
+  // glyph's WARPED advance, chW·hScale·devScale), then DOUBLE the count until
+  // every painted slab corner is within the deviation budget of the exact
+  // envelope map (see WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX for the formula and
+  // why the budget ties to the overlap). Deviation from the smooth part of the
+  // envelope halves with each doubling (it is ∝ the strip's u-span to first
+  // order), so the loop converges in a few steps for arcs of any curvature —
+  // this is what keeps high-curvature ring/pour envelopes (tangent sweep up to
+  // ~345°) contiguous instead of fanning into radial slivers. If a doubling
+  // fails to reduce the deviation by ≥ 25 %, the residual sits at a C0 corner of
+  // the envelope itself (e.g. the chevron apex): the true map genuinely creases
+  // there, refinement can only narrow the affected band — keep the finer
+  // partition and stop rather than spinning to the cap.
+  const warpedAdvDev = chW * hScale * devScale;
+  let k = Math.min(
+    WARP_STRIP_MAX_PER_GLYPH,
+    Math.max(1, Math.round(warpedAdvDev / WARP_STRIP_DEVICE_PX)),
+  );
+  const build = (count: number): WarpStrip[] =>
+    buildWarpStrips(count, env, chW, flatX0, totalW, followScale, warpBoxH, bandFrac);
+  let strips = build(k);
+  let dev = maxWarpStripDeviationDev(
+    strips, env, flatX0, totalW, followScale, warpBoxH, bandFrac, hScale, devScale, dstY, dstY + dstH,
+  );
+  while (dev > WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX && k < WARP_STRIP_MAX_PER_GLYPH) {
+    const k2 = Math.min(WARP_STRIP_MAX_PER_GLYPH, k * 2);
+    const strips2 = build(k2);
+    const dev2 = maxWarpStripDeviationDev(
+      strips2, env, flatX0, totalW, followScale, warpBoxH, bandFrac, hScale, devScale, dstY, dstY + dstH,
+    );
+    if (dev2 >= dev * 0.75) {
+      // Not converging: C0 crease in the envelope (see above). The finer
+      // partition still localizes the crease to a narrower strip — keep it.
+      strips = strips2;
+      break;
+    }
+    k = k2;
+    strips = strips2;
+    dev = dev2;
+  }
+
+  for (const strip of strips) {
+    const { s0, s1, g } = strip;
     // Source rect on the offscreen (device px): the glyph pen origin is at
     // device-x `padDev`, so flat-x `s` maps to device-x `padDev + s·devScale`.
     // Grow by the overlap on each side (clamped to the offscreen) so neighbours
@@ -1485,6 +1547,94 @@ function drawWarpedGlyphStrips(
     );
     ctx.restore();
   }
+}
+
+/** One strip of a glyph: flat sub-range `[s0, s1]` (css px from the glyph's flat
+ *  left edge / pen origin) and the envelope frame sampled at its centre-u. */
+interface WarpStrip {
+  s0: number;
+  s1: number;
+  g: WarpGlyphTransform;
+}
+
+/** Uniform-in-u partition of a glyph's advance into `k` strips, each carrying
+ *  the envelope frame at its own centre-u. */
+function buildWarpStrips(
+  k: number,
+  env: WarpEnvelope,
+  chW: number,
+  flatX0: number,
+  totalW: number,
+  followScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+): WarpStrip[] {
+  const strips: WarpStrip[] = new Array(k);
+  for (let j = 0; j < k; j++) {
+    const s0 = (j / k) * chW;
+    const s1 = ((j + 1) / k) * chW;
+    const u = ((flatX0 + (s0 + s1) / 2) / totalW) * followScale;
+    strips[j] = { s0, s1, g: warpGlyphTransform(env, u, warpBoxH, bandFrac) };
+  }
+  return strips;
+}
+
+/** Apply a strip's affine (scale → shear → rotate → translate, the same chain
+ *  the draw path pushes onto the canvas) to a strip-local css point. */
+function mapWarpLocalPoint(
+  g: WarpGlyphTransform,
+  hScale: number,
+  x: number,
+  y: number,
+): { x: number; y: number } {
+  const sx = x * hScale;
+  const sy = y * g.vScale;
+  const hx = sx + g.shear * sy;
+  const c = Math.cos(g.angle);
+  const s = Math.sin(g.angle);
+  return { x: g.x + c * hx - s * sy, y: g.y + s * hx + c * sy };
+}
+
+/**
+ * Worst-case deviation (device px) of the strips' painted slab corners from the
+ * EXACT envelope map — the quantity the adaptive loop drives under the budget.
+ *
+ * For each strip edge b (a boundary of the flat sub-range), the exact map
+ * places the glyph ruling at `Q(b, y) = A(u_b)·(0, y)` — the envelope frame
+ * sampled AT the boundary — while the strip paints it at
+ * `S(b, y) = A(u_centre)·(b − centre, y)`. `|S − Q|` is evaluated at the slab's
+ * top and bottom (`yTop`/`yBot`, css, baseline-relative) for both edges of
+ * every strip; the max over all of them bounds every painted pixel's error
+ * (corners are the extreme points of an affine image of a rectangle).
+ */
+function maxWarpStripDeviationDev(
+  strips: WarpStrip[],
+  env: WarpEnvelope,
+  flatX0: number,
+  totalW: number,
+  followScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+  hScale: number,
+  devScale: number,
+  yTop: number,
+  yBot: number,
+): number {
+  let max = 0;
+  for (const strip of strips) {
+    const centre = (strip.s0 + strip.s1) / 2;
+    for (const b of [strip.s0, strip.s1]) {
+      const uB = ((flatX0 + b) / totalW) * followScale;
+      const gB = warpGlyphTransform(env, uB, warpBoxH, bandFrac);
+      for (const y of [yTop, yBot]) {
+        const q = mapWarpLocalPoint(gB, hScale, 0, y);
+        const p = mapWarpLocalPoint(strip.g, hScale, b - centre, y);
+        const d = Math.hypot(p.x - q.x, p.y - q.y) * devScale;
+        if (d > max) max = d;
+      }
+    }
+  }
+  return max;
 }
 
 /**

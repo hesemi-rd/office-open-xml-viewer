@@ -421,4 +421,63 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
     // Measured: single-affine ≈1.00 (fails), strips ≈1.30 (passes).
     expect(rightH / leftH).toBeGreaterThan(1.12);
   });
+
+  it('high-curvature envelopes (rings/pours) stay contiguous — no radial slivers', async () => {
+    // Regression guard for the ADAPTIVE strip count. On ring/pour envelopes the
+    // edge tangent sweeps up to ~345° across the width, so with a fixed
+    // width-only strip count adjacent strips rotate apart faster than the ±1px
+    // overlap can bridge: each glyph shatters into a fan of disconnected radial
+    // slivers (measured: "WARP" in textRingOutside split into dozens of
+    // 8-connected ink components; a contiguous render has one component per
+    // detached glyph part). The deviation-driven subdivision keeps every strip
+    // within 1 device px of the exact envelope map, so the ink stays connected.
+    // "WARP" is four single-piece letters — allow a small margin for warped
+    // letters splitting at hairline joins, but a sliver fan (>>8) must fail.
+    for (const preset of ['textCirclePour', 'textRingOutside', 'textCanUp']) {
+      const width = 400;
+      const height = 240;
+      const canvas = new Canvas(width, height);
+      await renderSlideNode(
+        canvas as unknown as Parameters<typeof renderSlideNode>[0],
+        buildSlide(preset),
+        0,
+        { width, dpr: 1, factory: warpFactory },
+      );
+      const ctx = canvas.getContext('2d');
+      const data = ctx.getImageData(0, 0, width, height).data as unknown as Uint8ClampedArray;
+      const grid = new Uint8Array(width * height);
+      let inkPx = 0;
+      for (let p = 0; p < width * height; p++) {
+        const i = p * 4;
+        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        if (data[i + 3] > 40 && lum < 128) { grid[p] = 1; inkPx++; }
+      }
+      expect(inkPx).toBeGreaterThan(100);
+      // 8-connected component count over the ink mask.
+      const seen = new Uint8Array(width * height);
+      const stack: number[] = [];
+      let comps = 0;
+      for (let start = 0; start < width * height; start++) {
+        if (!grid[start] || seen[start]) continue;
+        comps++;
+        stack.length = 0;
+        stack.push(start);
+        seen[start] = 1;
+        while (stack.length) {
+          const p = stack.pop() as number;
+          const x = p % width, y = (p / width) | 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            const np = ny * width + nx;
+            if (grid[np] && !seen[np]) { seen[np] = 1; stack.push(np); }
+          }
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.log(`${preset}: inkPx=${inkPx} components=${comps}`);
+      expect(comps).toBeLessThanOrEqual(8);
+    }
+  });
 });
