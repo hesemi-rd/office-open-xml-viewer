@@ -80,7 +80,7 @@ import {
   warpGlyphTransform,
   followPathUScale,
 } from '@silurus/ooxml-core';
-import type { WarpEnvelope } from '@silurus/ooxml-core';
+import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
@@ -1341,6 +1341,302 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
+// ── WordArt paired-edge warp: piecewise-affine strip subdivision ─────────────
+//
+// A single glyph is drawn once to this reusable offscreen canvas (at device
+// resolution, so it stays crisp on HiDPI), then blitted onto the envelope one
+// vertical STRIP at a time. Reused across glyphs so a warped title does not
+// churn one canvas allocation per character. `null` in headless test envs with
+// no OffscreenCanvas/document (createAuxCanvas returns null); the caller then
+// falls back to the single-affine per-glyph draw.
+let warpGlyphAux: ReturnType<typeof createAuxCanvas> = null;
+function warpGlyphOffscreen(w: number, h: number): ReturnType<typeof createAuxCanvas> {
+  const cw = Math.max(1, Math.ceil(w));
+  const ch = Math.max(1, Math.ceil(h));
+  const cur = warpGlyphAux;
+  if (!cur || cur.width < cw || cur.height < ch) {
+    // Grow-only: allocate the max seen so far so we rarely reallocate. A fresh
+    // canvas starts transparent; we clear the used sub-rect before each glyph.
+    warpGlyphAux = createAuxCanvas(Math.max(cw, cur?.width ?? 0), Math.max(ch, cur?.height ?? 0));
+  }
+  return warpGlyphAux;
+}
+
+// BASE strip width in DEVICE px — the coarse first guess only; the adaptive
+// deviation loop below is what actually guarantees accuracy. Width alone bounds
+// just the chord-vs-curve error of the BASELINE curve (∝ width², sub-pixel at
+// 8 px for every preset), but NOT the error away from the baseline: a slab
+// corner at distance d from the baseline anchor is additionally misplaced by
+// the angle/vScale mismatch across the strip (≈ d·Δangle + |y|·ΔvScale), which
+// at 8 px width is measured at ~0.7 px (Inflate) to ~0.2 px (Wave1/Chevron) at
+// the baseline but grows to several px at the em-box extremes (Wave1 ≈2.4,
+// Button ≈5.9) and tens of px on high-curvature ring/pour families
+// (CirclePour ≈11, CanUp ≈44 at em-box edges) — the strips fan apart into
+// radial slivers. Hence the width criterion is only the starting k; the
+// deviation-driven refinement below subdivides until every painted corner is
+// within WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX of the exact envelope map.
+const WARP_STRIP_DEVICE_PX = 8;
+// Overlap each strip by 1 device px on each side, so adjacent strips share
+// 2 device px of source. Combined with the deviation budget below (each strip's
+// painted corners within 1 px of the exact map ⇒ adjacent strips diverge by at
+// most 2 px at a shared boundary), the overlap fully covers the worst seam and
+// no hairline can show. The overlap is symmetric, so it does not bias the map.
+const WARP_STRIP_OVERLAP_DEVICE_PX = 1;
+// Max deviation (device px) of any painted slab corner from the EXACT envelope
+// map, enforced by the adaptive loop. Derivation: the true map places the
+// glyph's vertical ruling at flat-x b onto Q(b, y) = A(u_b)·(0, y), where A(u)
+// is the envelope's local frame at u (anchor T(u)+bandFrac·gap, advance-axis
+// angle, gap shear/scale — exactly what warpGlyphTransform returns). A strip
+// centred at c paints that same ruling at S(b, y) = A(u_c)·(b−c, y). The
+// deviation |S−Q| at the slab's four corners (both strip edges × slab
+// top/bottom) is the exact per-strip error of the piecewise-affine map — it
+// contains ALL mismatch components at once: rotational fan-out d·Δangle
+// (dominant on rings/pours, whose tangent sweeps up to ~345°), vertical-scale
+// slide |y|·ΔvScale (dominant on textButton, whose mean-tangent angle is
+// constant 0 so a pure angle criterion would miss it), and the baseline chord
+// error. Two adjacent strips each deviate ≤ budget from the SAME true ruling at
+// their shared boundary, so their mutual crack is ≤ 2·budget = the 2 device px
+// of shared overlap — i.e. budget 1 is the largest value the overlap provably
+// covers. Every quantity is geometric; no preset branch.
+const WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX = 1;
+// Hard cap on strips per glyph, bounding draw cost for extreme geometry (one
+// glyph sweeping a large arc of a ring at high em-height). At the cap the
+// residual deviation is reported by the loop's last measurement and the seam
+// stays proportional (a full-ring glyph at ~250 device px em-height measures a
+// few px — degraded but bounded, and localized to that pathological glyph).
+const WARP_STRIP_MAX_PER_GLYPH = 256;
+
+/**
+ * Draw one glyph across a PAIRED-EDGE warp envelope as a stack of vertical
+ * strips (piecewise-affine approximation of the envelope map, ECMA-376
+ * §20.1.9.19).
+ *
+ * The #866 per-glyph transform samples the envelope's local Jacobian at a SINGLE
+ * u (the glyph centre) and applies one affine (rotate + shear + non-uniform
+ * scale) to the whole glyph. That is exact only where the map is locally affine;
+ * on Inflate/Deflate the vertical stretch `vScale` varies WITHIN a glyph (the
+ * top/bottom edges are mirror-symmetric so the gap stays vertical — shear 0,
+ * angle 0 — but the gap MAGNITUDE peaks at the centre and shrinks toward the
+ * ends), which a single affine cannot represent: it leaves the glyph uniformly
+ * scaled instead of stretched more where the envelope is taller. PowerPoint maps
+ * the glyph OUTLINE continuously through `P(u,v) = (1−v)·T(u) + v·B(u)`, so a
+ * wide glyph leans/stretches asymmetrically across its own width.
+ *
+ * Subdividing the glyph into narrow strips and mapping each strip by the Jacobian
+ * at ITS centre-u converges to that continuous map as the strip count grows (the
+ * general solution — no preset special-casing). The count is chosen ADAPTIVELY:
+ * from a base width criterion, strips double until every painted corner deviates
+ * from the exact envelope map by at most 1 device px (see
+ * WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX), so high-curvature envelopes (rings,
+ * pours — tangent sweep up to ~345°) subdivide as finely as they need while flat
+ * ones stay coarse. Each strip is a vertical slice of the pre-rendered glyph
+ * bitmap, drawn with the strip's own affine; adjacent strips then diverge ≤ 2
+ * device px at their shared boundary, which the ±1 px overlap covers.
+ *
+ * The reusable offscreen `gAux` already carries THIS glyph, rendered at
+ * `devScale` with the glyph pen-origin at device-x `padDev` and the baseline at
+ * device-y `blY`; the offscreen is `auxDevH` device px tall (ascent above the
+ * baseline + descent below). `chW` is the glyph's flat advance (css px, incl.
+ * letter-spacing). `flatX0` is the glyph's flat left edge along the whole line
+ * (css px). The remaining args mirror the per-glyph draw: `hScale` stretches flat
+ * ink to the box width, `warpBoxH`/`bandFrac` drive `warpGlyphTransform`,
+ * `boxX`/`boxY` are the shape origin, `totalW`/`followScale` map flat-x to the
+ * envelope fraction u.
+ */
+function drawWarpedGlyphStrips(
+  ctx: CanvasRenderingContext2D,
+  gAux: NonNullable<ReturnType<typeof createAuxCanvas>>,
+  devScale: number,
+  padDev: number,
+  blY: number,
+  auxDevH: number,
+  env: WarpEnvelope,
+  chW: number,
+  flatX0: number,
+  totalW: number,
+  followScale: number,
+  hScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+  boxX: number,
+  boxY: number,
+): void {
+  if (chW <= 0) return;
+  // The offscreen ink top row is `blY` device px above the baseline; the whole
+  // offscreen (auxDevH tall) maps to a css slab of height auxDevH/devScale whose
+  // baseline (row blY) sits at local y = 0.
+  const dstH = auxDevH / devScale;
+  const dstY = -blY / devScale;
+
+  // ── Adaptive strip count ──────────────────────────────────────────────────
+  // Start from the width criterion (one strip per WARP_STRIP_DEVICE_PX of the
+  // glyph's WARPED advance, chW·hScale·devScale), then DOUBLE the count until
+  // every painted slab corner is within the deviation budget of the exact
+  // envelope map (see WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX for the formula and
+  // why the budget ties to the overlap). Deviation from the smooth part of the
+  // envelope halves with each doubling (it is ∝ the strip's u-span to first
+  // order), so the loop converges in a few steps for arcs of any curvature —
+  // this is what keeps high-curvature ring/pour envelopes (tangent sweep up to
+  // ~345°) contiguous instead of fanning into radial slivers. If a doubling
+  // fails to reduce the deviation by ≥ 25 %, the residual sits at a C0 corner of
+  // the envelope itself (e.g. the chevron apex): the true map genuinely creases
+  // there, refinement can only narrow the affected band — keep the finer
+  // partition and stop rather than spinning to the cap.
+  const warpedAdvDev = chW * hScale * devScale;
+  let k = Math.min(
+    WARP_STRIP_MAX_PER_GLYPH,
+    Math.max(1, Math.round(warpedAdvDev / WARP_STRIP_DEVICE_PX)),
+  );
+  const build = (count: number): WarpStrip[] =>
+    buildWarpStrips(count, env, chW, flatX0, totalW, followScale, warpBoxH, bandFrac);
+  let strips = build(k);
+  let dev = maxWarpStripDeviationDev(
+    strips, env, flatX0, totalW, followScale, warpBoxH, bandFrac, hScale, devScale, dstY, dstY + dstH,
+  );
+  while (dev > WARP_STRIP_DEVIATION_BUDGET_DEVICE_PX && k < WARP_STRIP_MAX_PER_GLYPH) {
+    const k2 = Math.min(WARP_STRIP_MAX_PER_GLYPH, k * 2);
+    const strips2 = build(k2);
+    const dev2 = maxWarpStripDeviationDev(
+      strips2, env, flatX0, totalW, followScale, warpBoxH, bandFrac, hScale, devScale, dstY, dstY + dstH,
+    );
+    if (dev2 >= dev * 0.75) {
+      // Not converging: C0 crease in the envelope (see above). The finer
+      // partition still localizes the crease to a narrower strip — keep it.
+      strips = strips2;
+      break;
+    }
+    k = k2;
+    strips = strips2;
+    dev = dev2;
+  }
+
+  for (const strip of strips) {
+    const { s0, s1, g } = strip;
+    // Source rect on the offscreen (device px): the glyph pen origin is at
+    // device-x `padDev`, so flat-x `s` maps to device-x `padDev + s·devScale`.
+    // Grow by the overlap on each side (clamped to the offscreen) so neighbours
+    // share a hair of pixels and no seam shows.
+    const srcX0 = Math.max(0, padDev + s0 * devScale - WARP_STRIP_OVERLAP_DEVICE_PX);
+    const srcX1 = Math.min(gAux.width, padDev + s1 * devScale + WARP_STRIP_OVERLAP_DEVICE_PX);
+    const srcW = srcX1 - srcX0;
+    if (srcW <= 0) continue;
+
+    ctx.save();
+    // Same transform chain as the single-affine per-glyph draw, but anchored at
+    // the STRIP centre so vScale/shear/angle track this slice's u.
+    ctx.translate(boxX + g.x, boxY + g.y);
+    ctx.rotate(g.angle);
+    if (g.shear !== 0) ctx.transform(1, 0, g.shear, 1, 0, 0);
+    if (hScale !== 1 || g.vScale !== 1) ctx.scale(hScale, g.vScale);
+    // Map the offscreen slice into this strip's local frame: a source pixel at
+    // device-x `sx` sits at flat-x `(sx − padDev)/devScale` from the pen origin,
+    // so its local x (relative to the strip centre `(s0+s1)/2`) is
+    // `(sx − padDev)/devScale − (s0+s1)/2`.
+    const dstX = (srcX0 - padDev) / devScale - (s0 + s1) / 2;
+    const dstW = srcW / devScale;
+    ctx.drawImage(
+      gAux as CanvasImageSource,
+      srcX0,
+      0,
+      srcW,
+      auxDevH,
+      dstX,
+      dstY,
+      dstW,
+      dstH,
+    );
+    ctx.restore();
+  }
+}
+
+/** One strip of a glyph: flat sub-range `[s0, s1]` (css px from the glyph's flat
+ *  left edge / pen origin) and the envelope frame sampled at its centre-u. */
+interface WarpStrip {
+  s0: number;
+  s1: number;
+  g: WarpGlyphTransform;
+}
+
+/** Uniform-in-u partition of a glyph's advance into `k` strips, each carrying
+ *  the envelope frame at its own centre-u. */
+function buildWarpStrips(
+  k: number,
+  env: WarpEnvelope,
+  chW: number,
+  flatX0: number,
+  totalW: number,
+  followScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+): WarpStrip[] {
+  const strips: WarpStrip[] = new Array(k);
+  for (let j = 0; j < k; j++) {
+    const s0 = (j / k) * chW;
+    const s1 = ((j + 1) / k) * chW;
+    const u = ((flatX0 + (s0 + s1) / 2) / totalW) * followScale;
+    strips[j] = { s0, s1, g: warpGlyphTransform(env, u, warpBoxH, bandFrac) };
+  }
+  return strips;
+}
+
+/** Apply a strip's affine (scale → shear → rotate → translate, the same chain
+ *  the draw path pushes onto the canvas) to a strip-local css point. */
+function mapWarpLocalPoint(
+  g: WarpGlyphTransform,
+  hScale: number,
+  x: number,
+  y: number,
+): { x: number; y: number } {
+  const sx = x * hScale;
+  const sy = y * g.vScale;
+  const hx = sx + g.shear * sy;
+  const c = Math.cos(g.angle);
+  const s = Math.sin(g.angle);
+  return { x: g.x + c * hx - s * sy, y: g.y + s * hx + c * sy };
+}
+
+/**
+ * Worst-case deviation (device px) of the strips' painted slab corners from the
+ * EXACT envelope map — the quantity the adaptive loop drives under the budget.
+ *
+ * For each strip edge b (a boundary of the flat sub-range), the exact map
+ * places the glyph ruling at `Q(b, y) = A(u_b)·(0, y)` — the envelope frame
+ * sampled AT the boundary — while the strip paints it at
+ * `S(b, y) = A(u_centre)·(b − centre, y)`. `|S − Q|` is evaluated at the slab's
+ * top and bottom (`yTop`/`yBot`, css, baseline-relative) for both edges of
+ * every strip; the max over all of them bounds every painted pixel's error
+ * (corners are the extreme points of an affine image of a rectangle).
+ */
+function maxWarpStripDeviationDev(
+  strips: WarpStrip[],
+  env: WarpEnvelope,
+  flatX0: number,
+  totalW: number,
+  followScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+  hScale: number,
+  devScale: number,
+  yTop: number,
+  yBot: number,
+): number {
+  let max = 0;
+  for (const strip of strips) {
+    const centre = (strip.s0 + strip.s1) / 2;
+    for (const b of [strip.s0, strip.s1]) {
+      const uB = ((flatX0 + b) / totalW) * followScale;
+      const gB = warpGlyphTransform(env, uB, warpBoxH, bandFrac);
+      for (const y of [yTop, yBot]) {
+        const q = mapWarpLocalPoint(gB, hScale, 0, y);
+        const p = mapWarpLocalPoint(strip.g, hScale, b - centre, y);
+        const d = Math.hypot(p.x - q.x, p.y - q.y) * devScale;
+        if (d > max) max = d;
+      }
+    }
+  }
+  return max;
+}
+
 /**
  * Render a WordArt text body through its `<a:prstTxWarp>` envelope (ECMA-376
  * §20.1.9.19). Canvas 2D cannot deform glyph outlines, so this is the standard
@@ -1422,6 +1718,22 @@ function renderWarpedText(
   ctx.save();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
+
+  // Device scale folded into the live transform (dpr · slide scale), so glyph
+  // bitmaps for the paired-edge strip path are rasterised at the same pixel
+  // density as the canvas — no HiDPI blur. sqrt(|det|) of the transform's linear
+  // part is dpr regardless of rotation/flip (same idiom as the scene3d/effect
+  // offscreens). Computed LAZILY on the first paired-edge glyph only: single-edge
+  // (Follow Path) warps never allocate an offscreen, and some unit tests drive a
+  // mock ctx without getTransform, so the single-edge path must never touch it.
+  let devScaleCache = -1;
+  const getDevScale = (): number => {
+    if (devScaleCache >= 0) return devScaleCache;
+    const tf = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+    const det = tf ? Math.abs(tf.a * tf.d - tf.b * tf.c) : 1;
+    devScaleCache = det > 0 ? Math.sqrt(det) : 1;
+    return devScaleCache;
+  };
 
   const lineCount = lines.length;
   for (let li = 0; li < lineCount; li++) {
@@ -1507,14 +1819,51 @@ function renderWarpedText(
       const chars = [...seg.text];
       for (const ch of chars) {
         const chW = ctx.measureText(ch).width + ls;
+        // Blend the per-line vertical band into the baseline fraction so line 2
+        // sits below line 1 within the envelope.
+        const bandFrac = v0 + baselineFrac * (v1 - v0);
+
+        // Paired-edge (envelope) presets: the envelope map is NON-affine within a
+        // glyph (on Inflate/Deflate the vertical stretch varies across the glyph's
+        // own width; on waves the slope does), so a single per-glyph affine loses
+        // that intra-glyph deformation. Draw the glyph via piecewise-affine STRIPS
+        // (each strip's affine sampled at its own centre-u) so the mapping
+        // converges to PowerPoint's continuous outline warp (§20.1.9.19). The
+        // single-edge (Follow Path) branch below is UNCHANGED (byte-identical):
+        // its glyphs are rigidly rotated onto a baseline, already exact per glyph.
+        if (!env.singleEdge && chW > 0) {
+          const drawn = drawWarpedGlyphViaStrips(
+            ctx,
+            ch,
+            seg.font,
+            seg.color,
+            ls,
+            chW,
+            getDevScale(),
+            env,
+            penW,
+            totalW,
+            followScale,
+            hScale,
+            warpBoxH,
+            bandFrac,
+            boxX,
+            boxY,
+          );
+          if (drawn) {
+            penW += chW;
+            continue;
+          }
+          // Offscreen unavailable (headless env) → fall through to single-affine.
+          ctx.font = seg.font;
+          ctx.fillStyle = seg.color;
+        }
+
         // Horizontal fraction of THIS glyph's centre along the whole line,
         // scaled by the Follow Path factor so single-edge (arch/circle) text
         // spans only its natural arc length from the start rather than the whole
         // path. `followScale` is 1 for paired-edge presets (unchanged).
         const u = ((penW + chW / 2) / totalW) * followScale;
-        // Blend the per-line vertical band into the baseline fraction so line 2
-        // sits below line 1 within the envelope.
-        const bandFrac = v0 + baselineFrac * (v1 - v0);
         const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
@@ -1536,6 +1885,92 @@ function renderWarpedText(
     }
   }
   ctx.restore();
+}
+
+/**
+ * Render one glyph to the reusable offscreen and blit it across a paired-edge
+ * warp via {@link drawWarpedGlyphStrips}. Returns `false` when no offscreen
+ * canvas is available (headless test env with neither OffscreenCanvas nor
+ * document), so the caller can fall back to the single-affine per-glyph draw.
+ *
+ * The offscreen is sized to the glyph's measured ink (ascent above baseline +
+ * descent below, plus the left side-bearing) at `devScale`, with a small pad so
+ * strokes that overhang the pen advance (italic tails, wide accents) are not
+ * clipped. `penW` is the flat advance consumed BEFORE this glyph on the line.
+ */
+function drawWarpedGlyphViaStrips(
+  ctx: CanvasRenderingContext2D,
+  ch: string,
+  font: string,
+  color: string,
+  ls: number,
+  chW: number,
+  devScale: number,
+  env: WarpEnvelope,
+  penW: number,
+  totalW: number,
+  followScale: number,
+  hScale: number,
+  warpBoxH: number,
+  bandFrac: number,
+  boxX: number,
+  boxY: number,
+): boolean {
+  ctx.font = font;
+  const m = ctx.measureText(ch);
+  // Ink extents around the baseline (fallbacks keep degenerate metrics safe).
+  const asc = m.actualBoundingBoxAscent > 0 ? m.actualBoundingBoxAscent : chW;
+  const desc = m.actualBoundingBoxDescent > 0 ? m.actualBoundingBoxDescent : chW * 0.25;
+  // Left side-bearing: ink may start left of the pen origin (e.g. italic 'f').
+  const lsb = m.actualBoundingBoxLeft > 0 ? m.actualBoundingBoxLeft : 0;
+  const rsb = m.actualBoundingBoxRight > chW ? m.actualBoundingBoxRight - chW : 0;
+  // css pad on each side so overhang and the strip overlap have room.
+  const padCss = Math.max(lsb, rsb, 2);
+  const padDev = Math.ceil(padCss * devScale);
+  const ascDev = Math.ceil(asc * devScale);
+  const descDev = Math.ceil(desc * devScale);
+  const auxDevW = padDev + Math.ceil((chW + padCss) * devScale);
+  const auxDevH = ascDev + descDev;
+  const gAux = warpGlyphOffscreen(auxDevW, auxDevH);
+  if (!gAux) return false;
+  const gctx = gAux.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!gctx) return false;
+
+  // Paint the glyph: baseline at device row `ascDev`, pen origin at device-x
+  // `padDev`. Clear only the used sub-rect (grow-only offscreen may be larger).
+  gctx.save();
+  gctx.setTransform(1, 0, 0, 1, 0, 0);
+  gctx.clearRect(0, 0, auxDevW, auxDevH);
+  gctx.scale(devScale, devScale);
+  gctx.textAlign = 'left';
+  gctx.textBaseline = 'alphabetic';
+  gctx.font = font;
+  gctx.fillStyle = color;
+  // Shift right by half the letter-spacing so the ink is centred in its advance,
+  // matching the single-affine draw's `-chW/2 + ls/2` origin convention.
+  gctx.fillText(ch, padCss + ls / 2, asc);
+  gctx.restore();
+
+  const flatX0 = penW;
+  drawWarpedGlyphStrips(
+    ctx,
+    gAux,
+    devScale,
+    padDev,
+    ascDev,
+    auxDevH,
+    env,
+    chW,
+    flatX0,
+    totalW,
+    followScale,
+    hScale,
+    warpBoxH,
+    bandFrac,
+    boxX,
+    boxY,
+  );
+  return true;
 }
 
 /**
