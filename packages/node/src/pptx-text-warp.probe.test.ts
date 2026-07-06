@@ -32,10 +32,23 @@ import { importForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
-const { Canvas } = (skia ?? {}) as Skia;
+const { Canvas, loadImage } = (skia ?? {}) as Skia;
 
 const renderMod = await importForTests(() => import('./render.ts'), './render.ts');
 const { renderSlideNode } = (renderMod ?? {}) as typeof import('./render.ts');
+type NodeCanvasFactory = import('./render.ts').NodeCanvasFactory;
+// A canvas factory so renderSlideNode installs the OffscreenCanvas shim: the
+// paired-edge warp path renders each glyph to an auxiliary canvas and blits it in
+// strips (piecewise-affine envelope), which needs `createAuxCanvas` to succeed.
+// Without the factory that allocation returns null and the renderer falls back to
+// the single-affine per-glyph draw — so passing it here is what exercises the
+// real strip code in CI.
+const warpFactory: NodeCanvasFactory | undefined = skia
+  ? {
+      createCanvas: (w, h) => new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
+      loadImage: (b) => loadImage(b as Buffer) as unknown as ReturnType<NodeCanvasFactory['loadImage']>,
+    }
+  : undefined;
 
 const EMU_PER_PX = 9525; // 96 dpi
 const px = (n: number) => Math.round(n * EMU_PER_PX);
@@ -144,6 +157,7 @@ async function renderInk(preset: string): Promise<{
   await renderSlideNode(canvas as unknown as Parameters<typeof renderSlideNode>[0], buildSlide(preset), 0, {
     width,
     dpr,
+    factory: warpFactory,
   });
   const ctx = canvas.getContext('2d');
   const img = ctx.getImageData(0, 0, width * dpr, height * dpr);
@@ -290,7 +304,7 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
       canvas as unknown as Parameters<typeof renderSlideNode>[0],
       buildSlide('textWave1'),
       0,
-      { width, dpr: 1 },
+      { width, dpr: 1, factory: warpFactory },
     );
     const ctx = canvas.getContext('2d');
     const data = ctx.getImageData(0, 0, width, height).data as unknown as Uint8ClampedArray;
@@ -341,5 +355,129 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
     // tilt could not do that.
     expect(Math.max(...shifts)).toBeGreaterThan(2);
     expect(Math.min(...shifts)).toBeLessThan(-2);
+  });
+
+  it('textInflate stretches a single glyph MORE on its centre-facing edge (piecewise-affine strips)', async () => {
+    // The definitive strip-subdivision invariant. On Inflate the envelope gap
+    // (top→bottom) is TALLEST at the box centre and shrinks toward the ends, and
+    // the gap stays VERTICAL everywhere (top/bottom mirror-symmetric) — so shear
+    // and angle are ~0 and the only warp is a vertical stretch that VARIES with x.
+    // A single per-glyph affine (#866) samples that stretch at ONE u (the glyph
+    // centre) and applies it uniformly, leaving a wide glyph the SAME height on
+    // its left and right edges. Mapping the glyph outline continuously (as
+    // PowerPoint does) makes the edge nearer the box centre taller. We render a
+    // single wide glyph sitting in the LEFT half of the box and require its RIGHT
+    // (centre-facing) edge to be meaningfully taller than its LEFT edge. Strips
+    // reproduce this; the single affine cannot (ratio ≈ 1).
+    const width = 400;
+    const height = 240;
+    const canvas = new Canvas(width, height);
+    // A wide glyph then filler so the measured glyph lands left-of-centre.
+    const slide = buildSlide('textInflate');
+    // Swap the run text to "W....." (wide W, dotted filler pushes it left).
+    (slide.slides[0].elements[0] as ShapeElement).textBody!.paragraphs[0].runs[0] = {
+      type: 'text', text: 'W.....', bold: true, italic: null, underline: false,
+      strikethrough: false, fontSize: 40, color: '000000', fontFamily: 'Arial',
+    } as Paragraph['runs'][number];
+    await renderSlideNode(
+      canvas as unknown as Parameters<typeof renderSlideNode>[0],
+      slide,
+      0,
+      { width, dpr: 1, factory: warpFactory },
+    );
+    const ctx = canvas.getContext('2d');
+    const data = ctx.getImageData(0, 0, width, height).data as unknown as Uint8ClampedArray;
+    const inked = (x: number, y: number): boolean => {
+      const i = (y * width + x) * 4;
+      const a = data[i + 3];
+      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      return a > 40 && lum < 128;
+    };
+    const span = (x: number): number | null => {
+      let t = -1, b = -1;
+      for (let y = 0; y < height; y++) if (inked(x, y)) { if (t < 0) t = y; b = y; }
+      return t < 0 ? null : b - t + 1;
+    };
+    // Leftmost inked column, then the first glyph block (until an >8px empty gap).
+    let minX = width;
+    for (let x = 0; x < width; x++) if (span(x) != null) { minX = x; break; }
+    let gx1 = minX, gap = 0;
+    for (let x = minX; x < width; x++) {
+      if (span(x) != null) { gx1 = x; gap = 0; }
+      else { gap++; if (gap > 8 && gx1 > minX + 4) break; }
+    }
+    const gw = gx1 - minX;
+    expect(gw).toBeGreaterThan(10);
+    const edgeH = (f: number): number => {
+      const c = Math.round(minX + gw * f);
+      let s = 0, n = 0;
+      for (let x = c - 1; x <= c + 1; x++) { const v = span(x); if (v != null) { s += v; n++; } }
+      return n ? s / n : 0;
+    };
+    const leftH = edgeH(0.15);
+    const rightH = edgeH(0.85);
+    expect(leftH).toBeGreaterThan(0);
+    // Centre-facing (right) edge is at least 12% taller than the outer (left) edge.
+    // Measured: single-affine ≈1.00 (fails), strips ≈1.30 (passes).
+    expect(rightH / leftH).toBeGreaterThan(1.12);
+  });
+
+  it('high-curvature envelopes (rings/pours) stay contiguous — no radial slivers', async () => {
+    // Regression guard for the ADAPTIVE strip count. On ring/pour envelopes the
+    // edge tangent sweeps up to ~345° across the width, so with a fixed
+    // width-only strip count adjacent strips rotate apart faster than the ±1px
+    // overlap can bridge: each glyph shatters into a fan of disconnected radial
+    // slivers (measured: "WARP" in textRingOutside split into dozens of
+    // 8-connected ink components; a contiguous render has one component per
+    // detached glyph part). The deviation-driven subdivision keeps every strip
+    // within 1 device px of the exact envelope map, so the ink stays connected.
+    // "WARP" is four single-piece letters — allow a small margin for warped
+    // letters splitting at hairline joins, but a sliver fan (>>8) must fail.
+    for (const preset of ['textCirclePour', 'textRingOutside', 'textCanUp']) {
+      const width = 400;
+      const height = 240;
+      const canvas = new Canvas(width, height);
+      await renderSlideNode(
+        canvas as unknown as Parameters<typeof renderSlideNode>[0],
+        buildSlide(preset),
+        0,
+        { width, dpr: 1, factory: warpFactory },
+      );
+      const ctx = canvas.getContext('2d');
+      const data = ctx.getImageData(0, 0, width, height).data as unknown as Uint8ClampedArray;
+      const grid = new Uint8Array(width * height);
+      let inkPx = 0;
+      for (let p = 0; p < width * height; p++) {
+        const i = p * 4;
+        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        if (data[i + 3] > 40 && lum < 128) { grid[p] = 1; inkPx++; }
+      }
+      expect(inkPx).toBeGreaterThan(100);
+      // 8-connected component count over the ink mask.
+      const seen = new Uint8Array(width * height);
+      const stack: number[] = [];
+      let comps = 0;
+      for (let start = 0; start < width * height; start++) {
+        if (!grid[start] || seen[start]) continue;
+        comps++;
+        stack.length = 0;
+        stack.push(start);
+        seen[start] = 1;
+        while (stack.length) {
+          const p = stack.pop() as number;
+          const x = p % width, y = (p / width) | 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            const np = ny * width + nx;
+            if (grid[np] && !seen[np]) { seen[np] = 1; stack.push(np); }
+          }
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.log(`${preset}: inkPx=${inkPx} components=${comps}`);
+      expect(comps).toBeLessThanOrEqual(8);
+    }
   });
 });
