@@ -460,6 +460,6 @@ export {
   type TextMatch,
   type FindMatchesOptions,
 } from './search/text-index';
-export { sliceHorizontalExtent } from './search/highlight-rect';
+export { sliceHorizontalExtent, overlayPercent } from './search/highlight-rect';
 export { nextActive, prevActive, clampActive } from './search/find-cursor';
 export type { FindMatch } from './search/find-match';

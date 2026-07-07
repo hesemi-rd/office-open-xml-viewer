@@ -34,3 +34,30 @@ export function sliceHorizontalExtent(
   const endX = end >= runText.length ? measure(runText) : measure(runText.slice(0, end));
   return { x, width: Math.max(0, endX - x) };
 }
+
+/**
+ * Express an overlay coordinate as a CSS **percentage** of the content box it is
+ * measured against, e.g. `overlayPercent(480, 960) === '50%'`.
+ *
+ * The find-highlight / text-selection / hyperlink overlays (docx + pptx) place
+ * their boxes over a `<canvas>` that a consumer may scale down with external CSS
+ * (`width:100%!important; height:auto`). If the overlay's coordinates were literal
+ * px (the slide's *intended* size) while the canvas rendered smaller, the boxes
+ * would overshoot the wrapper and push a scrollbar onto an ancestor's scroll area
+ * (the reported bug). Positioning every box as a `%` of the intended CSS box
+ * (`cssWidth`/`cssHeight`) instead makes it resolve against the container's
+ * ACTUAL rendered size — the wrapper is `display:inline-block`, so it tracks the
+ * scaled canvas, and each `%`-placed child scales with it. At 1× (no external
+ * scaling) the box lands on exactly the same pixels as the old px placement.
+ *
+ * A `0`/negative denominator (nothing laid out yet) yields `'0%'` so the caller
+ * never emits `NaN%`.
+ *
+ * @param value  the coordinate/length in the intended CSS-px space.
+ * @param basis  the intended CSS-px extent it is a fraction of (`cssWidth` for the
+ *               x axis, `cssHeight` for the y axis).
+ */
+export function overlayPercent(value: number, basis: number): string {
+  if (!(basis > 0)) return '0%';
+  return `${(value / basis) * 100}%`;
+}
