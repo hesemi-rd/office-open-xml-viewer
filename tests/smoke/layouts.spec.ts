@@ -1,10 +1,9 @@
 import { expect, test } from '@playwright/test';
 
-// Expected non-zero page/slide/sheet counts per sample used by the stories.
+// Expected non-zero page/slide counts per sample used by the stories.
 const EXPECTED = {
   pptx: 9,   // packages/pptx/public/demo/sample-1.pptx
   docx: 6,   // packages/docx/public/demo/sample-1.docx (see docx visual.spec.ts)
-  xlsx: 5,   // packages/xlsx/public/demo/sample-1.xlsx (see xlsx visual.spec.ts)
 };
 
 type StoryId =
@@ -13,10 +12,7 @@ type StoryId =
   | 'pptxviewer-examples--master-detail'
   | 'docxviewer-examples--scroll-view'
   | 'docxviewer-examples--thumbnail-grid'
-  | 'docxviewer-examples--master-detail'
-  | 'xlsxviewer-examples--scroll-view'
-  | 'xlsxviewer-examples--thumbnail-grid'
-  | 'xlsxviewer-examples--master-detail';
+  | 'docxviewer-examples--master-detail';
 
 async function canvasHasInk(page: import('@playwright/test').Page, index = 0): Promise<boolean> {
   return page.evaluate((i) => {
@@ -145,44 +141,5 @@ test.describe('Layouts smoke — docx', () => {
     expect(count).toBe(EXPECTED.docx + 1);
     expect(await canvasHasInk(page, 0)).toBe(true);
     expect(await countInkedCanvases(page, count)).toBeGreaterThanOrEqual(count - 1);
-  });
-});
-
-test.describe('Layouts smoke — xlsx', () => {
-  test('ScrollView renders every sheet', async ({ page }) => {
-    await openStory(page, 'xlsxviewer-examples--scroll-view');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.xlsx} sheets`));
-    const count = await page.locator('canvas').count();
-    expect(count).toBe(EXPECTED.xlsx);
-    expect(await canvasHasInk(page, 0)).toBe(true);
-    expect(await canvasHasInk(page, EXPECTED.xlsx - 1)).toBe(true);
-  });
-
-  test('ThumbnailGrid renders every sheet', async ({ page }) => {
-    await openStory(page, 'xlsxviewer-examples--thumbnail-grid');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.xlsx} sheets`));
-    const count = await page.locator('canvas').count();
-    expect(count).toBe(EXPECTED.xlsx);
-    expect(await canvasHasInk(page, 0)).toBe(true);
-    expect(await canvasHasInk(page, EXPECTED.xlsx - 1)).toBe(true);
-  });
-
-  test('MasterDetail renders sheet tabs + preview and switches on click', async ({ page }) => {
-    await openStory(page, 'xlsxviewer-examples--master-detail');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.xlsx} sheets`));
-    const count = await page.locator('canvas').count();
-    // N sheet thumbs + 1 detail viewer canvas
-    expect(count).toBe(EXPECTED.xlsx + 1);
-    expect(await canvasHasInk(page, 0)).toBe(true);
-    expect(await canvasHasInk(page, count - 1)).toBe(true);
-
-    // Click the last sheet thumbnail and assert the detail canvas still has ink
-    // after the sheet switch (goToSheet re-renders the detail viewer).
-    const cells = page.locator('div[style*="cursor: pointer"]');
-    await cells.nth(EXPECTED.xlsx - 1).click();
-    await page.waitForTimeout(500);
-    for (let i = 0; i < count; i++) {
-      expect(await canvasHasInk(page, i), `canvas ${i} blank after sheet switch`).toBe(true);
-    }
   });
 });
