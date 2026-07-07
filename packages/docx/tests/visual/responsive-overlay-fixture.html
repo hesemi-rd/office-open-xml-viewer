@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* A scrollable stage with a fixed max-height, holding a viewer whose canvas
+       is scaled DOWN by external CSS (the recommended responsive pattern). The
+       `!important` overrides mimic a consumer's responsive stylesheet. */
+    #stage {
+      max-width: 480px;
+      max-height: 600px;
+      overflow: auto;      /* the ancestor whose scroll{Width,Height} we assert */
+      border: 1px solid #ccc;
+      padding: 11px 22px;  /* asymmetric padding */
+    }
+    #stage canvas {
+      display: block !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      height: auto !important;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <!-- Regression twin of the pptx responsive-overlay fixture: the docx
+       find-highlight + text-selection overlays must track the canvas's ACTUAL
+       (externally scaled) CSS size, so they never overflow the wrapper and push a
+       scrollbar onto the #stage scroll area. -->
+  <div id="stage"></div>
+  <script type="module">
+    import { DocxViewer } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('docx') ?? 'demo/sample-1';
+    const query = params.get('q') ?? 'the';
+
+    try {
+      const stage = document.getElementById('stage');
+      const canvas = document.createElement('canvas');
+      stage.appendChild(canvas);
+
+      const resp = await fetch(`/${name}.docx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.docx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+
+      // width: 794 ≈ an A4 page at 96dpi (the intended CSS box). The external CSS
+      // scales the rendered canvas down to fit #stage.
+      const viewer = new DocxViewer(canvas, {
+        width: 794,
+        enableTextSelection: true,
+        useGoogleFonts: true,
+      });
+      await viewer.load(buf);
+      await viewer.findText(query);
+      await viewer.findNext();
+
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+      const wrapper = canvas.parentElement;
+      const overlayLayers = [...wrapper.children].filter((c) => c.tagName === 'DIV');
+      const overlayRects = overlayLayers.map((l) => {
+        const r = l.getBoundingClientRect();
+        return { w: Math.round(r.width), h: Math.round(r.height) };
+      });
+      const canvasRect = canvas.getBoundingClientRect();
+
+      document.body.dataset.result = JSON.stringify({
+        stageScrollWidth: stage.scrollWidth,
+        stageClientWidth: stage.clientWidth,
+        stageScrollHeight: stage.scrollHeight,
+        stageClientHeight: stage.clientHeight,
+        canvasCssWidth: Math.round(canvasRect.width),
+        canvasCssHeight: Math.round(canvasRect.height),
+        overlayRects,
+      });
+      viewer.destroy();
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[responsive-overlay-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>

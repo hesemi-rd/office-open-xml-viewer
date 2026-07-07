@@ -954,7 +954,7 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     v.destroy();
   });
 
-  it('main mode: sizes the overlay to the slot canvas CSS size', async () => {
+  it('leaves the overlay container at 100% so it tracks the slot box', async () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
@@ -970,15 +970,15 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     await Promise.resolve();
     await Promise.resolve();
     const wrapper = findSlotWrapper(scrollHost);
-    const canvas = wrapper.children.find((c) => c.tag === 'canvas') as FakeEl;
     const textLayer = findTextLayer(wrapper);
-    // buildDocxTextLayer sizes the layer to the canvas CSS width/height. The
-    // main renderPage owns the canvas so its CSS size falls back to
-    // `${canvas.width}px` — either way the overlay must match the canvas.
-    const expectW = canvas.style.width || `${canvas.width}px`;
-    const expectH = canvas.style.height || `${canvas.height}px`;
-    expect(textLayer.style.width).toBe(expectW);
-    expect(textLayer.style.height).toBe(expectH);
+    // buildDocxTextLayer no longer pins the overlay to a literal px size: the
+    // container keeps its creation `width:100%;height:100%` so it tracks the
+    // slot wrapper's actual box (which the slot sizes in px), and every
+    // %-placed span scales with a canvas a consumer shrinks via external CSS.
+    expect(textLayer.style.width).toBe('100%');
+    expect(textLayer.style.height).toBe('100%');
+    // The wrapper IS sized to the page CSS box, so `100%` resolves to it.
+    expect(wrapper.style.width).toBe('180px'); // 100pt × PT_TO_PX (1.8) — see _pageWidthPx
     v.destroy();
   });
 

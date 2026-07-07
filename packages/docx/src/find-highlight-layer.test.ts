@@ -71,18 +71,23 @@ describe('buildDocxHighlightLayer', () => {
       layer as unknown as HTMLDivElement,
       runs,
       matches,
-      '700px',
-      '900px',
+      700,
+      900,
       measureForFont,
     );
+    // The overlay container keeps its `width:100%;height:100%` so it tracks the
+    // canvas's actual rendered box; the build must not pin it to literal px.
+    expect(layer.style.width ?? '').toBe('');
+    expect(layer.style.height ?? '').toBe('');
     expect(layer.children).toHaveLength(1);
     const box = layer.children[0];
-    // left = run.x (100) + prefix "the " width (4*7=28) = 128.
-    expect(box.style.left).toBe('128px');
-    expect(box.style.top).toBe('50px');
-    // width = "quick" (5*7=35).
-    expect(box.style.width).toBe('35px');
-    expect(box.style.height).toBe('16px');
+    // Box positioned as a PERCENTAGE of cssWidth/cssHeight so it scales with the
+    // container: left = (run.x 100 + prefix "the " 28) / 700; top = 50 / 900;
+    // width = 35 / 700; height = 16 / 900.
+    expect(box.style.left).toBe(`${(128 / 700) * 100}%`);
+    expect(box.style.top).toBe(`${(50 / 900) * 100}%`);
+    expect(box.style.width).toBe(`${(35 / 700) * 100}%`);
+    expect(box.style.height).toBe(`${(16 / 900) * 100}%`);
     expect(box.style.background).toBe(DEFAULT_FIND_HIGHLIGHT);
     expect(box.style['pointer-events']).toBe('none');
   });
@@ -94,7 +99,7 @@ describe('buildDocxHighlightLayer', () => {
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 3 }], active: true },
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 1, 1, measureForFont);
     expect(layer.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
@@ -111,10 +116,11 @@ describe('buildDocxHighlightLayer', () => {
         active: false,
       },
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    // cssWidth = 100 so the percentage reads directly as the px value.
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
     expect(layer.children).toHaveLength(2);
-    expect(layer.children[0].style.left).toBe('0px'); // run 0 origin
-    expect(layer.children[1].style.left).toBe('21px'); // run 1 origin
+    expect(layer.children[0].style.left).toBe('0%'); // run 0 origin (0/100)
+    expect(layer.children[1].style.left).toBe(`${(21 / 100) * 100}%`); // run 1 origin
   });
 
   it('carries the run transform for a vertical (tbRl) page', () => {
@@ -124,7 +130,7 @@ describe('buildDocxHighlightLayer', () => {
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false },
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 1, 1, measureForFont);
     expect(layer.children[0].style.transform).toBe('rotate(90deg)');
   });
 
@@ -143,12 +149,13 @@ describe('buildDocxHighlightLayer', () => {
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    // cssWidth = 100 so a percentage reads directly as the px value.
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
     expect(layer.children).toHaveLength(1);
     const box = layer.children[0];
     // Clamped: box starts at the run origin and spans exactly the one-em cell.
-    expect(box.style.left).toBe('30px');
-    expect(box.style.width).toBe('7px'); // the cell, NOT 14px natural
+    expect(box.style.left).toBe(`${(30 / 100) * 100}%`);
+    expect(box.style.width).toBe(`${(7 / 100) * 100}%`); // the cell, NOT 14px natural
     // The rotate transform (vertical page) is preserved.
     expect(box.style.transform).toBe('rotate(90deg)');
   });
@@ -164,10 +171,11 @@ describe('buildDocxHighlightLayer', () => {
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 1, end: 2 }], active: false },
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    // cssWidth = 100 so a percentage reads directly as the px value.
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
     const box = layer.children[0];
-    expect(box.style.left).toBe('3.5px');
-    expect(box.style.width).toBe('3.5px');
+    expect(box.style.left).toBe(`${(3.5 / 100) * 100}%`);
+    expect(box.style.width).toBe(`${(3.5 / 100) * 100}%`);
   });
 
   it('leaves a non-eastAsianVert run measured at natural width (unchanged)', () => {
@@ -179,8 +187,9 @@ describe('buildDocxHighlightLayer', () => {
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
-    expect(layer.children[0].style.width).toBe('14px');
+    // cssWidth = 100 so the 14px natural extent reads as 14%.
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    expect(layer.children[0].style.width).toBe(`${(14 / 100) * 100}%`);
   });
 
   it('clears the layer and skips zero-width slices', () => {
@@ -191,7 +200,7 @@ describe('buildDocxHighlightLayer', () => {
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 1, end: 1 }], active: false }, // degenerate
     ];
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, '1px', '1px', measureForFont);
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 1, 1, measureForFont);
     expect(layer.innerHTML).toBe('');
     expect(layer.children).toHaveLength(0);
   });

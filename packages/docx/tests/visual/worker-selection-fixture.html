@@ -32,26 +32,43 @@
       const wrapper = host.querySelector('div'); // the viewer's positioned wrapper
       return wrapper ? [...wrapper.children].filter((c) => c.tagName === 'DIV') : [];
     };
+    // Read RESOLVED pixel geometry (getBoundingClientRect), relative to the
+    // wrapper's top-left, rather than parsing the inline `style.left` string.
+    // The overlay coordinates are CSS PERCENTAGES (so the overlay tracks a canvas
+    // a consumer scales down), and a percentage is scale-invariant — it would not
+    // follow the zoom if read verbatim. The laid-out px position DOES follow the
+    // zoom (page geometry px = pt × scale), which is what this spec asserts, and
+    // is identical whether the CSS is px or %.
+    const wrapperRect = (host) => host.querySelector('div').getBoundingClientRect();
     // Wrapper stacking order: [canvas, textLayer, highlightLayer].
     const serializeOverlay = (host) => {
       const layer = layersOf(host)[0];
       const spans = layer ? [...layer.querySelectorAll('span')] : [];
-      return spans.map((s) => ({
-        text: s.textContent,
-        left: Math.round(parseFloat(s.style.left) || 0),
-        top: Math.round(parseFloat(s.style.top) || 0),
-      }));
+      const wr = wrapperRect(host);
+      return spans.map((s) => {
+        const r = s.getBoundingClientRect();
+        return {
+          text: s.textContent,
+          left: Math.round(r.left - wr.left),
+          top: Math.round(r.top - wr.top),
+        };
+      });
     };
-    // IX2 highlight boxes (absolutely positioned divs in the LAST layer).
+    // IX2 highlight boxes (absolutely positioned divs in the LAST layer). Read
+    // resolved px relative to the wrapper.
     const serializeHighlights = (host) => {
       const layers = layersOf(host);
       const layer = layers[layers.length - 1];
       const boxes = layer ? [...layer.children] : [];
-      return boxes.map((b) => ({
-        left: Math.round(parseFloat(b.style.left) || 0),
-        top: Math.round(parseFloat(b.style.top) || 0),
-        width: Math.round(parseFloat(b.style.width) || 0),
-      }));
+      const wr = wrapperRect(host);
+      return boxes.map((b) => {
+        const r = b.getBoundingClientRect();
+        return {
+          left: Math.round(r.left - wr.left),
+          top: Math.round(r.top - wr.top),
+          width: Math.round(r.width),
+        };
+      });
     };
 
     const capture = (host, viewer, canvas) => ({

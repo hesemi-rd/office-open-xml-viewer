@@ -536,17 +536,26 @@ export class DocxViewer implements ZoomableViewer {
   private _buildHighlightLayer(runs: DocxTextRunInfo[]): void {
     const layer = this._highlightLayer;
     if (!layer) return;
-    const cssWidth = this._canvas.style.width || this._canvas.width + 'px';
-    const cssHeight = this._canvas.style.height || this._canvas.height + 'px';
+    const { width, height } = this._canvasCssPx();
     const highlights: DocxHighlightMatch[] = this._find.pageHighlights(this._currentPage);
     buildDocxHighlightLayer(
       layer,
       runs,
       highlights,
-      cssWidth,
-      cssHeight,
+      width,
+      height,
       (font) => this._measureForFont(font),
     );
+  }
+
+  /** The canvas's intended CSS box in px (the % denominators the overlay builders
+   *  expect). Reads the inline `style.width`/`height` set by the render path
+   *  (which mirror the render's logical size), falling back to the backing-store
+   *  dimensions when unset. Parsing tolerates the trailing `px`. */
+  private _canvasCssPx(): { width: number; height: number } {
+    const w = parseFloat(this._canvas.style.width) || this._canvas.width;
+    const h = parseFloat(this._canvas.style.height) || this._canvas.height;
+    return { width: w, height: h };
   }
 
   /** A width-measurer primed with `font`, backed by a private 1×1 canvas so it
@@ -585,11 +594,12 @@ export class DocxViewer implements ZoomableViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
+    const { width, height } = this._canvasCssPx();
     buildDocxTextLayer(
       layer,
       runs,
-      this._canvas.style.width || this._canvas.width + 'px',
-      this._canvas.style.height || this._canvas.height + 'px',
+      width,
+      height,
       this._hyperlinkHandler(),
       // §17.3.2.10 縦中横 (#836) — the same measurer the highlight overlay uses,
       // so a tate-chu-yoko selection span is clamped to its drawn one-em cell.

@@ -1,5 +1,5 @@
 import type { DocxTextRunInfo } from './renderer';
-import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
 /**
@@ -13,11 +13,21 @@ import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
  * the same `DocxTextRunInfo[]` off-thread and ships it back beside the bitmap, so
  * the overlay is built from identical geometry regardless of thread.
  *
- * @param layer            the overlay div (position:relative parent expected).
+ * Every span is positioned as a PERCENTAGE of `cssWidth`/`cssHeight` (the page's
+ * intended CSS-px box), never literal px, and the container's own width/height are
+ * left untouched (the caller sizes it `width:100%;height:100%`). This lets the
+ * overlay track the canvas's ACTUAL rendered box even when a consumer scales the
+ * canvas down with external CSS (`width:100%!important; height:auto`): the
+ * `display:inline-block` wrapper shrinks with the canvas, the `100%` container
+ * follows, and every `%`-placed span scales with it, so nothing overflows the
+ * wrapper into an ancestor's scroll area.
+ *
+ * @param layer            the overlay div (sized `width:100%;height:100%` by the caller).
  * @param runs             per-run geometry from `renderPage({ onTextRun })`.
- * @param canvasCssWidth   the rendered canvas's CSS width (e.g. `"700px"`), used
- *                         to size the overlay to match the canvas.
- * @param canvasCssHeight  the rendered canvas's CSS height.
+ * @param cssWidth         the page's intended CSS width (px, number) — the %
+ *                         denominator for the x axis.
+ * @param cssHeight        the page's intended CSS height (px, number) — the %
+ *                         denominator for the y axis.
  * @param onHyperlinkClick IX1 — invoked when a run carrying a resolved
  *                         {@link HyperlinkTarget} is clicked. A hyperlink run's
  *                         span keeps its transparent glyphs (the visible link
@@ -40,14 +50,12 @@ import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 export function buildDocxTextLayer(
   layer: HTMLDivElement,
   runs: DocxTextRunInfo[],
-  canvasCssWidth: string,
-  canvasCssHeight: string,
+  cssWidth: number,
+  cssHeight: number,
   onHyperlinkClick?: (target: HyperlinkTarget) => void,
   measureForFont?: (font: string) => (s: string) => number,
 ): void {
   layer.innerHTML = '';
-  layer.style.width = canvasCssWidth;
-  layer.style.height = canvasCssHeight;
 
   for (const run of runs) {
     const span = document.createElement('span');
@@ -85,9 +93,15 @@ export function buildDocxTextLayer(
     // identical to a plain run. A non-link run is byte-identical to before.
     const link = onHyperlinkClick ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
+    // Position the span as a % of the page's intended CSS box so it tracks the
+    // canvas's actual rendered size under external CSS scaling. `font` /
+    // `line-height` stay px (the glyph metrics of the transparent hit text laid
+    // out inside the box); the box position is what must track the canvas. A
+    // vertical (tbRl) run's rotate is about `top left`, so the %-placed origin
+    // rotates into the column exactly as before at 1× scale.
     span.style.cssText =
       `position:absolute;` +
-      `left:${run.x}px;top:${run.y}px;` +
+      `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
       `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;

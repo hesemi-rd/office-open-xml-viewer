@@ -89,8 +89,8 @@ describe('buildDocxTextLayer — IX1 clickable hyperlinks', () => {
     buildDocxTextLayer(
       layer as unknown as HTMLDivElement,
       runs,
-      '700px',
-      '900px',
+      700,
+      900,
       onHyperlinkClick,
     );
 
@@ -126,8 +126,8 @@ describe('buildDocxTextLayer — IX1 clickable hyperlinks', () => {
     buildDocxTextLayer(
       layer as unknown as HTMLDivElement,
       [run({ text: 'jump', hyperlink: internal })],
-      '700px',
-      '900px',
+      700,
+      900,
       onHyperlinkClick,
     );
 
@@ -145,8 +145,8 @@ describe('buildDocxTextLayer — IX1 clickable hyperlinks', () => {
     buildDocxTextLayer(
       layer as unknown as HTMLDivElement,
       [run({ text: 'link', hyperlink: EXTERNAL })],
-      '700px',
-      '900px',
+      700,
+      900,
     );
 
     const [span] = layer.children;

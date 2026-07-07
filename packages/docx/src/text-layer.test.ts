@@ -63,14 +63,17 @@ function run(partial: Partial<DocxTextRunInfo>): DocxTextRunInfo {
 }
 
 describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () => {
-  it('sizes the layer to the passed canvas dimensions and clears prior content', () => {
+  it('does not pin the layer to a literal px size and clears prior content', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
     layer.innerHTML = 'STALE';
-    buildDocxTextLayer(layer as unknown as HTMLDivElement, [], '640px', '480px');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [], 640, 480);
     expect(layer.innerHTML).toBe(''); // cleared
-    expect(layer.style.width).toBe('640px');
-    expect(layer.style.height).toBe('480px');
+    // The overlay container keeps its creation `width:100%;height:100%` so it
+    // tracks the canvas's ACTUAL rendered box (external CSS may scale the canvas
+    // responsively). The build must NOT overwrite it with a literal px size.
+    expect(layer.style.width ?? '').toBe('');
+    expect(layer.style.height ?? '').toBe('');
     expect(layer.children.length).toBe(0);
   });
 
@@ -81,17 +84,19 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
       run({ text: 'Hello', x: 12, y: 34, h: 16, font: 'bold 14px Arial' }),
       run({ text: 'World', x: 50, y: 34, h: 16, font: '14px Arial' }),
     ];
-    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '700px', '900px');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 700, 900);
 
     expect(layer.children.length).toBe(2);
     const [a, b] = layer.children;
     expect(a.tag).toBe('span');
     expect(a.textContent).toBe('Hello');
-    // Shipped style contract: absolute position from run.x/run.y, the CSS `font`
-    // shorthand BEFORE line-height, letter-spacing reset, transparent selectable text.
+    // Shipped style contract: absolute position from run.x/run.y expressed as a
+    // PERCENTAGE of cssWidth/cssHeight (so the span tracks the canvas's actual
+    // rendered size), the CSS `font` shorthand BEFORE line-height, letter-spacing
+    // reset, transparent selectable text.
     expect(a.style.position).toBe('absolute');
-    expect(a.style.left).toBe('12px');
-    expect(a.style.top).toBe('34px');
+    expect(a.style.left).toBe(`${(12 / 700) * 100}%`);
+    expect(a.style.top).toBe(`${(34 / 900) * 100}%`);
     expect(a.style.font).toBe('bold 14px Arial');
     expect(a.style['line-height']).toBe('16px');
     expect(a.style['letter-spacing']).toBe('0');
@@ -105,7 +110,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     // the raw string.
     expect(a.style.cssText).toMatch(/font:[^;]+;line-height:/);
     expect(b.textContent).toBe('World');
-    expect(b.style.left).toBe('50px');
+    expect(b.style.left).toBe(`${(50 / 700) * 100}%`);
   });
 
   // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed into
@@ -121,7 +126,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
       run({ text: '２９', x: 30, y: 40, w: 7, h: 16, fontSize: 7, font: '7px serif', eastAsianVert: true, transform: 'rotate(90deg)' }),
     ];
     const measureForFont = () => (s: string) => [...s].length * 7;
-    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '1px', '1px', undefined, measureForFont);
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 1, 1, undefined, measureForFont);
     const span = layer.children[0];
     // The rotate is preceded by scaleX(0.5) so the natural 14px width compresses to
     // the 7px cell BEFORE rotating into the column (transform-origin top-left).
@@ -135,7 +140,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     const runs = [
       run({ text: '２９', w: 7, fontSize: 7, eastAsianVert: true, transform: 'rotate(90deg)' }),
     ];
-    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '1px', '1px');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 1, 1);
     // No measurer ⇒ the scale cannot be computed; the span keeps the bare rotate
     // (byte-identical to the pre-#836 overlay — no regression when the caller
     // does not thread a measurer).
@@ -147,7 +152,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     const layer = makeEl('div');
     const runs = [run({ text: 'Hello', x: 12, font: '14px Arial' })];
     const measureForFont = () => (s: string) => s.length * 8;
-    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, '1px', '1px', undefined, measureForFont);
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 1, 1, undefined, measureForFont);
     // Ordinary run: no transform at all (horizontal page), so no scaleX sneaks in.
     expect(layer.children[0].style.transform ?? '').toBe('');
   });

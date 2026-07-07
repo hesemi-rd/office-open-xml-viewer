@@ -821,11 +821,12 @@ export class DocxScrollViewer implements ZoomableViewer {
         // so a subsequent zoom preview stretches from HERE.
         slot.renderedScale = scale;
         if (wantOverlay && slot.textLayer) {
+          const { width, height } = this._canvasCssPx(slot.canvas);
           buildDocxTextLayer(
             slot.textLayer,
             runs,
-            slot.canvas.style.width || `${slot.canvas.width}px`,
-            slot.canvas.style.height || `${slot.canvas.height}px`,
+            width,
+            height,
             this._hyperlinkHandler(),
             (font) => this._measureForFont(font),
           );
@@ -876,6 +877,16 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (!ctx) return (s) => s.length;
     ctx.font = font;
     return (s) => ctx.measureText(s).width;
+  }
+
+  /** A canvas's intended CSS box in px (the % denominators the overlay builders
+   *  expect). Reads the inline `style.width`/`height` set by the render path,
+   *  falling back to the backing-store size when unset; tolerates the `px` suffix. */
+  private _canvasCssPx(canvas: HTMLCanvasElement): { width: number; height: number } {
+    return {
+      width: parseFloat(canvas.style.width) || canvas.width,
+      height: parseFloat(canvas.style.height) || canvas.height,
+    };
   }
 
   /** Route an async render failure to `onError`, or `console.error` when none is
@@ -983,11 +994,12 @@ export class DocxScrollViewer implements ZoomableViewer {
         slot.textLayer.style.transform = '';
         slot.textLayer.style.transformOrigin = '';
         if (wantOverlay) {
+          const { width, height } = this._canvasCssPx(slot.canvas);
           buildDocxTextLayer(
             slot.textLayer,
             runs,
-            slot.canvas.style.width || `${slot.canvas.width}px`,
-            slot.canvas.style.height || `${slot.canvas.height}px`,
+            width,
+            height,
             this._hyperlinkHandler(),
             (font) => this._measureForFont(font),
           );
@@ -1394,11 +1406,12 @@ export class DocxScrollViewer implements ZoomableViewer {
           slot.textLayer.style.transform = '';
           slot.textLayer.style.transformOrigin = '';
           if (wantOverlay) {
+            const { width, height } = this._canvasCssPx(spare);
             buildDocxTextLayer(
               slot.textLayer,
               runs,
-              spare.style.width || `${spare.width}px`,
-              spare.style.height || `${spare.height}px`,
+              width,
+              height,
               this._hyperlinkHandler(),
               (font) => this._measureForFont(font),
             );

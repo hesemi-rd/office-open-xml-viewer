@@ -95,7 +95,11 @@ export const ScrollView: LayoutStory = {
 
           const runs: DocxTextRunInfo[] = [];
           await doc.renderPage(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
-          buildDocxTextLayer(textLayer, runs, '100%', '100%');
+          // Pass the page's intended CSS box (px) as the % denominators. The
+          // canvas is scaled responsively (width:100%;max-width:700px), and the
+          // overlay's %-placed spans track that actual rendered size.
+          const cssHeight = parseFloat(canvas.style.height) || canvas.height;
+          buildDocxTextLayer(textLayer, runs, widthPx, cssHeight);
         }
         status.textContent = `Loaded ${doc.pageCount} pages`;
       })

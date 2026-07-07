@@ -20,7 +20,7 @@
  * distinct emphasis colour so the user can tell it apart from the other hits,
  * matching a browser find bar's current-vs-other highlighting.
  */
-import { sliceHorizontalExtent, type MatchRunSlice } from '@silurus/ooxml-core';
+import { sliceHorizontalExtent, overlayPercent, type MatchRunSlice } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
@@ -47,11 +47,17 @@ export interface DocxHighlightColors {
 /**
  * Populate a highlight overlay layer with one box per matched run-slice.
  *
- * @param layer    the overlay div (cleared and re-sized to the canvas here).
+ * Every box is positioned as a PERCENTAGE of `cssWidth`/`cssHeight`, and the
+ * container's own size is left untouched (`width:100%;height:100%` from the
+ * caller), so the highlights track the canvas's ACTUAL rendered box even when a
+ * consumer scales the canvas down with external CSS — mirroring
+ * {@link buildDocxTextLayer}.
+ *
+ * @param layer    the overlay div (cleared here; sized `100%` by the caller).
  * @param runs     the page's runs (same array the page was rendered/text-layered from).
  * @param matches  the page's matches (run-slices + active flag).
- * @param canvasCssWidth  the rendered canvas's CSS width (e.g. `"700px"`).
- * @param canvasCssHeight the rendered canvas's CSS height.
+ * @param cssWidth  the page's intended CSS width (px, number) — the x-axis % denominator.
+ * @param cssHeight the page's intended CSS height (px, number) — the y-axis % denominator.
  * @param measureForFont  returns a width-measurer primed with a run's `font`
  *                        (the viewer closes over a canvas 2d context). Kept as a
  *                        factory so the font is set once per run, not per glyph.
@@ -61,14 +67,12 @@ export function buildDocxHighlightLayer(
   layer: HTMLDivElement,
   runs: DocxTextRunInfo[],
   matches: DocxHighlightMatch[],
-  canvasCssWidth: string,
-  canvasCssHeight: string,
+  cssWidth: number,
+  cssHeight: number,
   measureForFont: (font: string) => (s: string) => number,
   colors: DocxHighlightColors = {},
 ): void {
   layer.innerHTML = '';
-  layer.style.width = canvasCssWidth;
-  layer.style.height = canvasCssHeight;
 
   const matchColor = colors.match ?? DEFAULT_FIND_HIGHLIGHT;
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
@@ -98,10 +102,14 @@ export function buildDocxHighlightLayer(
       const transform = run.transform
         ? `transform:${run.transform};transform-origin:top left;`
         : '';
+      // Positioned as a % of the page's intended CSS box so the box scales with
+      // the container under external CSS scaling. A vertical (tbRl) run's
+      // transform is about `top left`, so the %-placed origin rotates into the
+      // column exactly as before at 1× scale.
       box.style.cssText =
         `position:absolute;` +
-        `left:${run.x + x}px;top:${run.y}px;` +
-        `width:${width}px;height:${run.h}px;` +
+        `left:${overlayPercent(run.x + x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
+        `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(run.h, cssHeight)};` +
         transform +
         `background:${fill};pointer-events:none;`;
       layer.appendChild(box);
