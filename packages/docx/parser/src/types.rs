@@ -119,6 +119,18 @@ pub struct DocumentSettings {
     /// twips (0.5" = 36pt), which the renderer applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_tab_stop: Option<f64>,
+    /// §17.15.1.18 `w:characterSpacingControl@w:val` — document-wide East Asian
+    /// punctuation compression / spacing control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character_spacing_control: Option<String>,
+    /// §17.15.3.1 `w:compat` / `w:useFELayout` — enable Far East layout
+    /// compatibility behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_fe_layout: Option<bool>,
+    /// §17.15.3.1 `w:compat` / `w:balanceSingleByteDoubleByteWidth` — balance
+    /// single-byte and double-byte character widths in East Asian layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_single_byte_double_byte_width: Option<bool>,
 }
 
 /// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.
@@ -584,6 +596,12 @@ pub struct DocParagraph {
     /// résumé "bar" must reserve Meiryo's tall line box). None when unresolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_family: Option<String>,
+    /// Default East Asian font family resolved from the style chain + direct
+    /// pPr/rPr. The paragraph mark has run properties (§17.3.1.29), and in an
+    /// East Asian document its mark glyph must use the eastAsia axis rather than
+    /// the ASCII fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_family_east_asia: Option<String>,
     /// ECMA-376 §17.3.1.20 `<w:outlineLvl w:val="N">` (0–8). Resolved through
     /// the style chain: explicit pPr → linked paragraph style → docDefaults.
     /// `None` for body paragraphs that don't appear in the document outline.
@@ -944,8 +962,9 @@ pub struct ShapeRun {
     /// should draw background shapes BEFORE body text.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub behind_doc: bool,
-    /// Document order within the wp:anchor (for correct z-ordering among shapes
-    /// sharing the same behindDoc value). Lower value = drawn first.
+    /// ECMA-376 §20.4.2.3 `wp:anchor/@relativeHeight`: stacking order among
+    /// anchors sharing the same behindDoc value. Lower value = drawn first.
+    /// Group children add their document-order index to the anchor value.
     pub z_order: u32,
     /// normalized [0,1] custom path commands (one or more sub-paths). Empty
     /// when `preset_geometry` is set; the renderer chooses between
@@ -953,12 +972,13 @@ pub struct ShapeRun {
     pub subpaths: Vec<Vec<PathCmd>>,
     /// OOXML <a:prstGeom prst="..."> name (e.g. "rect", "ellipse",
     /// "roundRect", "rtTriangle"). Empty when the shape is custGeom.
-    /// `adj_values` carries up to four <a:gd name="adj{n}"> values (0–100000
-    /// scale) for shapes that support adjustment handles (trapezoid, callouts).
+    /// `adj_values` carries <a:gd name="adj{n}"> values in adj1..adj8 order
+    /// (0–100000 scale), preserving omitted named guides as `None` so the shared
+    /// preset engine can fall back to the preset's declared default per index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset_geometry: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub adj_values: Vec<f64>,
+    pub adj_values: Vec<Option<f64>>,
     /// Fill (solid or gradient). None = no fill.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill: Option<ShapeFill>,
@@ -1423,6 +1443,12 @@ pub struct ShapeTextRun {
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// ECMA-376 §17.3.3.25 w:ruby inside VML/text-box content. Carried through
+    /// the same shape rich-text path as normal run formatting so the renderer can
+    /// center the annotation above the base glyphs instead of flattening it into
+    /// the paragraph text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<RubyAnnotation>,
 }
 
 /// One paragraph of text rendered inside a shape (`<wps:txbx><w:txbxContent>`).
@@ -1450,6 +1476,12 @@ pub struct ShapeText {
     /// when non-empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<ShapeTextRun>,
+    /// ECMA-376 §17.9 numbering for text-box paragraphs. Word applies the same
+    /// paragraph numbering model inside `<w:txbxContent>` as in the body, so list
+    /// markers (for example sample-33's `※`) must travel separately from the run
+    /// text and render in the hanging margin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numbering: Option<Box<NumberingInfo>>,
     /// Paragraph alignment ("left" | "center" | "right" | "both").
     pub alignment: String,
     /// ECMA-376 §17.3.1.33 `<w:spacing w:before>` of this text-box paragraph, in
@@ -1823,6 +1855,9 @@ pub struct DocTableRow {
     /// renderer can branch without re-parsing.
     pub row_height_rule: String,
     pub is_header: bool,
+    /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
+    /// across page boundaries.
+    pub cant_split: bool,
 }
 
 /// One block-level entry inside a table cell. ECMA-376 §17.4.7 (w:tc) allows

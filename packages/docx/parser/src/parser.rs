@@ -206,8 +206,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
     if let Ok(settings_xml) = read_zip_string(zip, &settings_path) {
-        if let Some(lang) = parse_theme_font_bidi_lang(&settings_xml) {
-            theme.fill_default_cs_font(&lang);
+        if let Some(langs) = parse_theme_font_langs(&settings_xml) {
+            theme.apply_theme_font_langs(&langs);
         }
         document_settings = parse_document_settings(&settings_xml);
         even_and_odd_headers = parse_even_and_odd_headers(&settings_xml);
@@ -615,6 +615,12 @@ pub struct ThemeColors {
     /// rFonts @asciiTheme / @hAnsiTheme / @eastAsiaTheme / @cstheme.
     /// Keys: "minor" + "major" crossed with "latin"/"ea"/"cs".
     fonts: HashMap<String, String>,
+    /// Supplemental language/script-specific theme fonts from
+    /// `<a:majorFont|minorFont><a:font script="Jpan" typeface="…"/>`.
+    /// Keys: "minor/Jpan", "major/Arab", etc. ECMA-376 §17.15.1.88 maps
+    /// w:themeFontLang languages to these script fonts for major/minor theme
+    /// references before falling back to the generic latin/ea/cs elements.
+    script_fonts: HashMap<String, String>,
     /// Raw theme XML, retained so wps:style/fillRef → fillStyleLst /
     /// bgFillStyleLst lookups (ECMA-376 §20.1.4.1.7) can be resolved on demand.
     /// Re-parsing per shape is fine — the cover usually has only a handful of
@@ -634,6 +640,7 @@ impl ThemeColors {
     fn parse(xml: &str) -> Self {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut fonts: HashMap<String, String> = HashMap::new();
+        let mut script_fonts: HashMap<String, String> = HashMap::new();
         let theme_xml = Some(xml.to_string());
 
         // Color slots: shared clrScheme parse; docx uppercases each hex and keys
@@ -659,9 +666,34 @@ impl ThemeColors {
             }
         }
 
+        if let Ok(doc) = parse_guarded(xml) {
+            for (group_name, prefix) in [("majorFont", "major"), ("minorFont", "minor")] {
+                if let Some(group) = doc
+                    .descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == group_name)
+                {
+                    for font in group
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "font")
+                    {
+                        let Some(script) = font.attribute("script").filter(|s| !s.is_empty())
+                        else {
+                            continue;
+                        };
+                        let Some(typeface) = font.attribute("typeface").filter(|s| !s.is_empty())
+                        else {
+                            continue;
+                        };
+                        script_fonts.insert(format!("{prefix}/{script}"), typeface.to_string());
+                    }
+                }
+            }
+        }
+
         Self {
             map,
             fonts,
+            script_fonts,
             theme_xml,
             ..Default::default()
         }
@@ -741,6 +773,33 @@ impl ThemeColors {
         }
     }
 
+    /// Apply §17.15.1.88 `w:themeFontLang`: a theme reference such as
+    /// `minorEastAsia` uses the theme `<a:font script="…">` matching the
+    /// configured East Asian language before falling back to `<a:ea>`.
+    pub fn apply_theme_font_langs(&mut self, langs: &ThemeFontLangs) {
+        if let Some(script) = langs.latin.as_deref().and_then(theme_script_for_lang) {
+            self.apply_script_font_to_axis(script, "latin");
+        }
+        if let Some(script) = langs.east_asia.as_deref().and_then(theme_script_for_lang) {
+            self.apply_script_font_to_axis(script, "ea");
+        }
+        if let Some(script) = langs.bidi.as_deref().and_then(theme_script_for_lang) {
+            self.apply_script_font_to_axis(script, "cs");
+        }
+        if let Some(bidi) = langs.bidi.as_deref() {
+            self.fill_default_cs_font(bidi);
+        }
+    }
+
+    fn apply_script_font_to_axis(&mut self, script: &str, axis: &str) {
+        for group in ["minor", "major"] {
+            if let Some(typeface) = self.script_fonts.get(&format!("{group}/{script}")) {
+                self.fonts
+                    .insert(format!("{group}/{axis}"), typeface.clone());
+            }
+        }
+    }
+
     /// Resolve an rFonts theme reference (e.g. "minorHAnsi" → minor.latin,
     /// "minorEastAsia" → minor.ea, "majorHAnsi" → major.latin). Returns None
     /// when the reference is unknown or the theme has no matching typeface.
@@ -758,14 +817,67 @@ impl ThemeColors {
     }
 }
 
-/// Extract `<w:themeFontLang w:bidi="…"/>` from word/settings.xml (§17.15.1.88).
-fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ThemeFontLangs {
+    latin: Option<String>,
+    east_asia: Option<String>,
+    bidi: Option<String>,
+}
+
+/// Extract `<w:themeFontLang …/>` from word/settings.xml (§17.15.1.88).
+fn parse_theme_font_langs(settings_xml: &str) -> Option<ThemeFontLangs> {
     let doc = parse_guarded(settings_xml).ok()?;
     let node = doc
         .root_element()
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "themeFontLang")?;
-    attr_w(node, "bidi").filter(|s| !s.is_empty())
+    Some(ThemeFontLangs {
+        latin: attr_w(node, "val").filter(|s| !s.is_empty()),
+        east_asia: attr_w(node, "eastAsia").filter(|s| !s.is_empty()),
+        bidi: attr_w(node, "bidi").filter(|s| !s.is_empty()),
+    })
+}
+
+/// Back-compat helper for older parser tests that only care about bidi.
+#[cfg(test)]
+fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
+    parse_theme_font_langs(settings_xml).and_then(|langs| langs.bidi)
+}
+
+fn theme_script_for_lang(lang: &str) -> Option<&'static str> {
+    let lower = lang.to_ascii_lowercase();
+    let primary = lower.split('-').next().unwrap_or("");
+    match primary {
+        "ja" => Some("Jpan"),
+        "ko" => Some("Hang"),
+        "zh" => {
+            let is_traditional = lower.contains("-hant")
+                || lower.ends_with("-tw")
+                || lower.ends_with("-hk")
+                || lower.ends_with("-mo");
+            Some(if is_traditional { "Hant" } else { "Hans" })
+        }
+        "ar" => Some("Arab"),
+        "he" => Some("Hebr"),
+        "th" => Some("Thai"),
+        "hi" | "mr" | "ne" | "sa" => Some("Deva"),
+        "bn" | "as" => Some("Beng"),
+        "gu" => Some("Gujr"),
+        "kn" => Some("Knda"),
+        "pa" => Some("Guru"),
+        "ta" => Some("Taml"),
+        "te" => Some("Telu"),
+        "ml" => Some("Mlym"),
+        "or" => Some("Orya"),
+        "km" => Some("Khmr"),
+        "lo" => Some("Laoo"),
+        "si" => Some("Sinh"),
+        "bo" => Some("Tibt"),
+        "mn" => Some("Mong"),
+        "ug" => Some("Uigh"),
+        "vi" => Some("Viet"),
+        _ => None,
+    }
 }
 
 /// ECMA-376 §17.10.1 `<w:evenAndOddHeaders/>` — a document-wide
@@ -832,6 +944,24 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         .and_then(|n| attr_w(n, "val"))
         .map(|s| twips_to_pt(&s));
 
+    // ECMA-376 §17.15.1.18 `<w:characterSpacingControl>` — document-wide
+    // East Asian punctuation / character-spacing mode.
+    let character_spacing_control = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "characterSpacingControl")
+        .and_then(|n| attr_w(n, "val").map(|s| s.to_string()));
+
+    // ECMA-376 §17.15.3.1 compatibility settings live under `<w:compat>`.
+    let compat = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "compat");
+    let compat_bool = |name: &str| -> Option<bool> {
+        bool_prop(compat?, name)
+    };
+    let use_fe_layout = compat_bool("useFELayout");
+    let balance_single_byte_double_byte_width =
+        compat_bool("balanceSingleByteDoubleByteWidth");
+
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
     // justification (math namespace, bare `val` fallback).
     let math_def_jc = root
@@ -850,6 +980,9 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && no_line_breaks_after.is_none()
         && math_def_jc.is_none()
         && default_tab_stop.is_none()
+        && character_spacing_control.is_none()
+        && use_fe_layout.is_none()
+        && balance_single_byte_double_byte_width.is_none()
     {
         return None;
     }
@@ -859,6 +992,9 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         no_line_breaks_after,
         math_def_jc,
         default_tab_stop,
+        character_spacing_control,
+        use_fe_layout,
+        balance_single_byte_double_byte_width,
     })
 }
 
@@ -1324,16 +1460,22 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let (chunks, seps): (Vec<Vec<DocRun>>, Vec<ParaPiece>) = {
+    let (chunks, seps, trailing_seps): (Vec<Vec<DocRun>>, Vec<ParaPiece>, Vec<ParaPiece>) = {
         let mut c = chunks;
         let mut s = seps;
+        let mut trailing = Vec::new();
         while c.last().map(|r| !has_visible(r)).unwrap_or(false) && c.len() > 1 {
             c.pop();
-            // Each pop also drops the break that produced this empty trailing
-            // chunk (seps[k] is the break BEFORE chunk[k+1]).
-            s.pop();
+            // Each pop removes the empty chunk produced AFTER a hard break at
+            // the paragraph end, but the break itself remains authoritative:
+            // Para(visible), PageBreak is exactly how Word authors anchored
+            // cover/photo callouts. Preserve the separator and emit it after the
+            // last visible chunk below.
+            if let Some(sep) = s.pop() {
+                trailing.push(sep);
+            }
         }
-        (c, s)
+        (c, s, trailing)
     };
 
     let mut out: Vec<ParaPiece> = Vec::new();
@@ -1367,6 +1509,12 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         let mut chunk = para.clone();
         chunk.runs = runs;
         out.push(ParaPiece::Para(chunk));
+    }
+    for sep in trailing_seps.into_iter().rev() {
+        out.push(match sep {
+            ParaPiece::ColumnBreak => ParaPiece::ColumnBreak,
+            _ => ParaPiece::PageBreak,
+        });
     }
     if out.is_empty() {
         out.push(ParaPiece::Para(para));
@@ -2253,7 +2401,8 @@ fn parse_paragraph_cond(
     // Parse runs
     let mut runs = vec![];
     parse_para_content(
-        node, &base_run, style_map, media_map, chart_map, rel_map, theme, &mut runs, None, field,
+        node, &base_run, style_map, num_map, media_map, chart_map, rel_map, theme, &mut runs, None,
+        field,
     );
 
     // ECMA-376 §17.13.6.2 — bookmark destinations that start inside this
@@ -2338,6 +2487,7 @@ fn parse_paragraph_cond(
         default_font_family: theme
             .resolve_font_ref(mark_run.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(mark_run.font_family_east_asia.clone())),
+        default_font_family_east_asia: theme.resolve_font_ref(mark_run.font_family_east_asia.clone()),
         outline_level: base_para.outline_level,
         // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
         // chain + direct pPr. The renderer reads it as the paragraph base
@@ -2407,6 +2557,7 @@ fn parse_para_content(
     node: roxmltree::Node,
     base_run: &RunFmt,
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     rel_map: &HashMap<String, String>,
@@ -2423,8 +2574,8 @@ fn parse_para_content(
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(
-                    child, base_run, style_map, media_map, chart_map, theme, runs, field, None,
-                    None, revision,
+                    child, base_run, style_map, num_map, media_map, chart_map, theme, runs, field,
+                    None, None, revision,
                 );
             }
             "hyperlink" => {
@@ -2450,6 +2601,7 @@ fn parse_para_content(
                         r,
                         base_run,
                         style_map,
+                        num_map,
                         media_map,
                         chart_map,
                         theme,
@@ -2480,6 +2632,7 @@ fn parse_para_content(
                     child,
                     base_run,
                     style_map,
+                    num_map,
                     media_map,
                     chart_map,
                     rel_map,
@@ -2491,8 +2644,8 @@ fn parse_para_content(
             }
             "smartTag" => {
                 parse_para_content(
-                    child, base_run, style_map, media_map, chart_map, rel_map, theme, runs,
-                    revision, field,
+                    child, base_run, style_map, num_map, media_map, chart_map, rel_map, theme,
+                    runs, revision, field,
                 );
             }
             "fldSimple" => {
@@ -2564,6 +2717,7 @@ fn handle_run_in_para(
     r_node: roxmltree::Node,
     base_run: &RunFmt,
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     theme: &ThemeColors,
@@ -2686,6 +2840,7 @@ fn handle_run_in_para(
         r_node,
         base_run,
         style_map,
+        num_map,
         media_map,
         chart_map,
         theme,
@@ -2822,6 +2977,7 @@ fn parse_run_inner(
     node: roxmltree::Node,
     base_run: &RunFmt,
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
     theme: &ThemeColors,
@@ -3343,6 +3499,7 @@ fn parse_run_inner(
                             inner,
                             &fmt,
                             style_map,
+                            num_map,
                             media_map,
                             chart_map,
                             theme,
@@ -3368,7 +3525,9 @@ fn parse_run_inner(
                 }
             }
             "drawing" => {
-                for r in parse_inline_drawing(style_map, child, media_map, chart_map, theme) {
+                for r in
+                    parse_inline_drawing(style_map, num_map, child, media_map, chart_map, theme)
+                {
                     runs.push(r);
                 }
             }
@@ -3455,9 +3614,9 @@ fn parse_run_inner(
                 {
                     for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
-                            for r in
-                                parse_inline_drawing(style_map, inner, media_map, chart_map, theme)
-                            {
+                            for r in parse_inline_drawing(
+                                style_map, num_map, inner, media_map, chart_map, theme,
+                            ) {
                                 runs.push(r);
                             }
                         }
@@ -3478,7 +3637,9 @@ fn parse_run_inner(
                 // mistaken for an (empty) text-box panel.
                 if let Some(img) = parse_vml_pict_image(child, media_map) {
                     runs.push(DocRun::Image(img));
-                } else if let Some(shp) = parse_vml_pict(style_map, child, theme, media_map) {
+                } else if let Some(shp) =
+                    parse_vml_pict(style_map, num_map, child, theme, media_map)
+                {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -3501,7 +3662,9 @@ fn parse_run_inner(
                     .children()
                     .find(|n| n.is_element() && n.tag_name().name() == "drawing");
                 if let Some(drawing) = drawing {
-                    for r in parse_inline_drawing(style_map, drawing, media_map, chart_map, theme) {
+                    for r in parse_inline_drawing(
+                        style_map, num_map, drawing, media_map, chart_map, theme,
+                    ) {
                         runs.push(r);
                     }
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
@@ -3730,6 +3893,7 @@ fn select_mce_alternate_content<'a, 'i>(
 
 fn parse_inline_drawing(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
@@ -3885,6 +4049,13 @@ fn parse_inline_drawing(
     let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
     let (size_w_pct, size_h_pct, size_w_rel, size_h_rel) = parse_anchor_size_rel(&container);
     let anchor_meta = parse_anchor_wrap(&container);
+    // ECMA-376 §20.4.2.3 wp:anchor/@relativeHeight — stacking order among
+    // floating drawings. Word emits large values here for front-layer shapes;
+    // lower values paint first, higher values paint on top.
+    let anchor_z_order = container
+        .attribute("relativeHeight")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
 
     // behindDoc="1" flag — renderer uses this to draw shapes before text
     let behind_doc = container
@@ -3994,6 +4165,7 @@ fn parse_inline_drawing(
         }
         for mut shp in parse_wgp_shapes(
             style_map,
+            num_map,
             wgp,
             theme,
             media_map,
@@ -4002,6 +4174,7 @@ fn parse_inline_drawing(
             pos_y,
             y_from_para,
             &anchor_meta,
+            anchor_z_order,
         ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
@@ -4017,6 +4190,7 @@ fn parse_inline_drawing(
     {
         if let Some(mut shp) = parse_wsp_shape(
             style_map,
+            num_map,
             wsp,
             theme,
             media_map,
@@ -4029,7 +4203,8 @@ fn parse_inline_drawing(
             1.0,
             0.0,
             0.0,
-            0,
+            false,
+            anchor_z_order,
         ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
@@ -4645,6 +4820,7 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
 #[allow(clippy::too_many_arguments)]
 fn parse_wgp_shapes(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     wgp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -4653,6 +4829,7 @@ fn parse_wgp_shapes(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
+    anchor_z_order: u32,
 ) -> Vec<ShapeRun> {
     // Base transform = the outermost wgp grpSpPr/xfrm (chOff/chExt → off/ext).
     let base = match group_xfrm(wgp) {
@@ -4680,6 +4857,7 @@ fn parse_wgp_shapes(
     let mut z_order: u32 = 0;
     walk_group_children(
         style_map,
+        num_map,
         wgp,
         base,
         theme,
@@ -4691,6 +4869,7 @@ fn parse_wgp_shapes(
         anchor_meta,
         group_w_pt,
         group_h_pt,
+        anchor_z_order,
         &mut z_order,
         &mut results,
     );
@@ -4705,6 +4884,7 @@ fn parse_wgp_shapes(
 #[allow(clippy::too_many_arguments)]
 fn walk_group_children(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     group: roxmltree::Node,
     xform: GroupTransform,
     theme: &ThemeColors,
@@ -4716,6 +4896,7 @@ fn walk_group_children(
     anchor_meta: &AnchorMeta,
     group_w_pt: f64,
     group_h_pt: f64,
+    anchor_z_order: u32,
     z_order: &mut u32,
     results: &mut Vec<ShapeRun>,
 ) {
@@ -4731,6 +4912,7 @@ fn walk_group_children(
                 *z_order += 1;
                 if let Some(mut shape) = parse_wsp_shape(
                     style_map,
+                    num_map,
                     child,
                     theme,
                     media_map,
@@ -4743,7 +4925,8 @@ fn walk_group_children(
                     xform.scale_y,
                     xform.off_x_emu / 12700.0,
                     xform.off_y_emu / 12700.0,
-                    idx,
+                    true,
+                    anchor_z_order.saturating_add(idx),
                 ) {
                     shape.group_width_pt = Some(group_w_pt);
                     shape.group_height_pt = Some(group_h_pt);
@@ -4758,6 +4941,7 @@ fn walk_group_children(
                 };
                 walk_group_children(
                     style_map,
+                    num_map,
                     child,
                     child_xform,
                     theme,
@@ -4769,6 +4953,7 @@ fn walk_group_children(
                     anchor_meta,
                     group_w_pt,
                     group_h_pt,
+                    anchor_z_order,
                     z_order,
                     results,
                 );
@@ -4781,13 +4966,17 @@ fn walk_group_children(
 /// Parse a single wps:wsp into ShapeRun. `sx,sy` scale the shape's spPr/xfrm
 /// from group child coord space to page EMU; `group_off_pt_*` are the group origin
 /// on the page (in pt) so the shape's off.x/off.y (in child coord space) can be
-/// translated to page-relative pt. For a standalone wsp (no wgp), pass sx=sy=1, group_off=0.
+/// translated to page-relative pt. For a standalone wsp (no wgp), pass sx=sy=1,
+/// group_off=0 and `include_xfrm_offset=false`: the enclosing wp:anchor
+/// positionH/V already places the DrawingML object, while the shape's
+/// a:xfrm/off is its local DrawingML transform.
 // Carries the accumulated anchor/group coordinate transform (offsets, scale,
 // relative-from flags, z-order) needed to place a wsp shape in page space;
 // these are interdependent transform parameters, not an arbitrary bag.
 #[allow(clippy::too_many_arguments)]
 fn parse_wsp_shape(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -4800,6 +4989,7 @@ fn parse_wsp_shape(
     sy: f64,
     group_off_pt_x: f64,
     group_off_pt_y: f64,
+    include_xfrm_offset: bool,
     z_order: u32,
 ) -> Option<ShapeRun> {
     let sp_pr = wsp
@@ -4855,8 +5045,10 @@ fn parse_wsp_shape(
 
     let width_pt = cx * sx / 12700.0;
     let height_pt = cy * sy / 12700.0;
-    let anchor_x_pt = anchor_pos_x + group_off_pt_x + ox * sx / 12700.0;
-    let anchor_y_pt = anchor_pos_y + group_off_pt_y + oy * sy / 12700.0;
+    let local_x_pt = if include_xfrm_offset { ox * sx / 12700.0 } else { 0.0 };
+    let local_y_pt = if include_xfrm_offset { oy * sy / 12700.0 } else { 0.0 };
+    let anchor_x_pt = anchor_pos_x + group_off_pt_x + local_x_pt;
+    let anchor_y_pt = anchor_pos_y + group_off_pt_y + local_y_pt;
 
     let cust_geom = sp_pr
         .children()
@@ -4877,22 +5069,7 @@ fn parse_wsp_shape(
             .and_then(|n| n.attribute("prst"))
             .unwrap_or("rect")
             .to_string();
-        let adj_values = prst_node
-            .and_then(|p| {
-                p.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "avLst")
-            })
-            .map(|av| {
-                av.children()
-                    .filter(|n| n.is_element() && n.tag_name().name() == "gd")
-                    .filter_map(|gd| {
-                        gd.attribute("fmla")
-                            .and_then(|f| f.strip_prefix("val "))
-                            .and_then(|s| s.parse::<f64>().ok())
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let adj_values = prst_node.map(parse_preset_adj).unwrap_or_default();
         (Vec::new(), Some(prst), adj_values)
     };
     if subpaths.is_empty() && preset_geometry.is_none() {
@@ -4905,40 +5082,66 @@ fn parse_wsp_shape(
     // recolored using the schemeClr embedded in the fillRef. But §20.1.8.44:
     // an explicit `<a:noFill/>` is itself a direct fill property and overrides
     // the style reference, so only fall back to fillRef when the fill is Absent.
+    let style_node = wsp
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "style");
+
     let fill = match parse_shape_fill(sp_pr, theme) {
         FillSpec::Explicit(f) => Some(f),
         FillSpec::NoFill => None,
-        FillSpec::Absent => wsp
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "style")
+        FillSpec::Absent => style_node
             .and_then(|st| {
                 st.children()
                     .find(|n| n.is_element() && n.tag_name().name() == "fillRef")
             })
             .and_then(|fr| resolve_fill_ref(fr, theme)),
     };
+    let style_stroke: Option<(String, f64)> = style_node
+        .and_then(|st| {
+            st.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "lnRef")
+        })
+        .and_then(|lr| {
+            let idx = lr.attribute("idx")?.parse::<usize>().ok()?;
+            if idx == 0 {
+                return None;
+            }
+            let color = resolve_color_element(lr, theme)?;
+            let width_emu = theme
+                .theme_xml
+                .as_deref()
+                .map(ooxml_common::theme::parse_ln_style_widths)
+                .and_then(|widths| widths.get(idx - 1).copied())
+                .unwrap_or(9525);
+            Some((color, width_emu as f64 / 12700.0))
+        });
     let ln_node = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "ln");
-    let (stroke, stroke_width) = ln_node
-        .map(|ln| {
+    let (stroke, stroke_width) = match ln_node {
+        Some(ln) => {
             let has_no_fill = ln
                 .children()
                 .any(|n| n.is_element() && n.tag_name().name() == "noFill");
             if has_no_fill {
-                return (None, 0.0);
+                (None, 0.0)
+            } else {
+                let color = ln
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                    .and_then(|sf| resolve_color_element(sf, theme));
+                let direct_w = ln.attribute("w").and_then(|v| v.parse::<f64>().ok());
+                match (color, style_stroke) {
+                    (Some(c), _) => (Some(c), direct_w.unwrap_or(9525.0) / 12700.0),
+                    (None, Some((c, style_w))) => {
+                        (Some(c), direct_w.map(|w| w / 12700.0).unwrap_or(style_w))
+                    }
+                    (None, None) => (None, 0.0),
+                }
             }
-            let color = ln
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-                .and_then(|sf| resolve_color_element(sf, theme));
-            let w_emu = ln
-                .attribute("w")
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(9525.0);
-            (color, w_emu / 12700.0)
-        })
-        .unwrap_or((None, 0.0));
+        }
+        None => style_stroke.map_or((None, 0.0), |(c, w)| (Some(c), w)),
+    };
     // ECMA-376 §20.1.8.48 prstDash and §20.1.8.3 head/tail line-end decorations.
     let stroke_dash = ln_node.and_then(|ln| {
         ln.children()
@@ -4978,9 +5181,7 @@ fn parse_wsp_shape(
     // tint), including any lumMod/lumOff/shade transforms on the inner color.
     // The `@idx` (major/minor/none) font-face selection is intentionally ignored
     // here — this axis carries only the color (fonts resolve via rFonts/docDefaults).
-    let default_text_color = wsp
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "style")
+    let default_text_color = style_node
         .and_then(|st| {
             st.children()
                 .find(|n| n.is_element() && n.tag_name().name() == "fontRef")
@@ -4997,7 +5198,7 @@ fn parse_wsp_shape(
         text_inset_t,
         text_inset_r,
         text_inset_b,
-    ) = parse_shape_text_body(style_map, wsp, theme, media_map);
+    ) = parse_shape_text_body(style_map, num_map, wsp, theme, media_map);
 
     Some(ShapeRun {
         width_pt,
@@ -5033,6 +5234,61 @@ fn parse_wsp_shape(
     })
 }
 
+/// Parse the adjust handles from a `<a:prstGeom>`'s `<a:avLst>` into an
+/// `adj1..adj8`-ordered vector. ECMA-376 §20.1.9.5: each
+/// `<a:gd name="adjN" fmla="val X"/>` supplies one handle. Matching is by name
+/// (`adj`/`adj1`, `adj2`, …) with a positional fallback for legacy unnamed
+/// lists, mirroring the pptx/xlsx parsers so the shared preset engine receives
+/// identical inputs. Trailing `None`s are trimmed.
+fn parse_preset_adj(prst_geom: roxmltree::Node) -> Vec<Option<f64>> {
+    let av = prst_geom
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "avLst");
+    let Some(av) = av else {
+        return Vec::new();
+    };
+    let gd_nodes: Vec<roxmltree::Node> = av
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+        .collect();
+    if gd_nodes.is_empty() {
+        return Vec::new();
+    }
+
+    let parse_val = |gd: &roxmltree::Node| -> Option<f64> {
+        gd.attribute("fmla")
+            .and_then(|f| f.strip_prefix("val "))
+            .and_then(|s| s.trim().parse::<f64>().ok())
+    };
+
+    let named = gd_nodes.iter().any(|n| n.attribute("name").is_some());
+    let mut out: Vec<Option<f64>> = (1..=8)
+        .map(|i| {
+            if named {
+                let key = format!("adj{i}");
+                gd_nodes
+                    .iter()
+                    .find(|n| {
+                        let name = n.attribute("name");
+                        if i == 1 {
+                            matches!(name, Some("adj") | Some("adj1"))
+                        } else {
+                            name == Some(key.as_str())
+                        }
+                    })
+                    .and_then(parse_val)
+            } else {
+                gd_nodes.get(i - 1).and_then(parse_val)
+            }
+        })
+        .collect();
+
+    while matches!(out.last(), Some(None)) {
+        out.pop();
+    }
+    out
+}
+
 /// Extract text blocks and bodyPr from a wsp shape.
 /// Returns (blocks, anchor, inset_l, inset_t, inset_r, inset_b).
 ///
@@ -5045,6 +5301,7 @@ fn parse_wsp_shape(
 /// tIns=bIns=45720 EMU (0.05in = 3.6pt).
 fn parse_shape_text_body(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -5109,7 +5366,9 @@ fn parse_shape_text_body(
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
+                .filter_map(|p| {
+                    extract_simple_paragraph_text(style_map, num_map, p, theme, media_map)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -5131,6 +5390,7 @@ fn parse_shape_text_body(
 /// paragraph (empty text) still yields a block so the picture is not dropped.
 fn extract_simple_paragraph_text(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     p: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -5184,10 +5444,90 @@ fn extract_simple_paragraph_text(
     // per-run ascii axis so the legacy single-`font_family` behaviour is
     // unchanged).
     let mut first_run_fmt: Option<RunFmt> = None;
-    for r in p
-        .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "r")
-    {
+    let mut push_text_run = |run_text: String, fmt: RunFmt, ruby: Option<RubyAnnotation>| {
+        if run_text.is_empty() {
+            return;
+        }
+        text.push_str(&run_text);
+        runs.push(ShapeTextRun {
+            text: run_text,
+            font_size_pt: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+            color: fmt.color.clone(),
+            font_family: resolve_ascii_axis(&fmt),
+            font_family_east_asia: resolve_east_asia_axis(&fmt),
+            bold: fmt.bold.unwrap_or(false),
+            italic: fmt.italic.unwrap_or(false),
+            ruby,
+        });
+        if first_run_fmt.is_none() {
+            first_run_fmt = Some(fmt);
+        }
+    };
+
+    let collect_run_node = |r: roxmltree::Node| -> Vec<(String, RunFmt, Option<RubyAnnotation>)> {
+        let mut out = Vec::new();
+        let ruby_nodes: Vec<_> = r
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "ruby")
+            .collect();
+        if !ruby_nodes.is_empty() {
+            for ruby_node in ruby_nodes {
+                let rt_text = child_w(ruby_node, "rt")
+                    .map(|rt| {
+                        rt.descendants()
+                            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                            .filter_map(|n| n.text())
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let Some(rb) = child_w(ruby_node, "rubyBase") else {
+                    continue;
+                };
+                let mut base_text = String::new();
+                let mut base_fmt: Option<RunFmt> = None;
+                for rb_run in rb
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "r")
+                {
+                    for t in rb_run
+                        .descendants()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                    {
+                        if let Some(text_node) = t.text() {
+                            base_text.push_str(text_node);
+                        }
+                    }
+                    if base_fmt.is_none() {
+                        base_fmt = Some(
+                            child_w(rb_run, "rPr")
+                                .map(parse_run_fmt)
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+                if base_text.is_empty() {
+                    continue;
+                }
+                let fmt = base_fmt.unwrap_or_default();
+                let ruby = if rt_text.is_empty() {
+                    None
+                } else {
+                    let font_size_pt = child_w(ruby_node, "rubyPr")
+                        .and_then(|rp| child_w(rp, "hps"))
+                        .and_then(|hps| attr_w(hps, "val"))
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map(|hp| hp / 2.0)
+                        .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
+                    Some(RubyAnnotation {
+                        text: rt_text,
+                        font_size_pt,
+                    })
+                };
+                out.push((base_text, fmt, ruby));
+            }
+            return out;
+        }
+
         let mut run_text = String::new();
         for t in r
             .descendants()
@@ -5197,22 +5537,35 @@ fn extract_simple_paragraph_text(
                 run_text.push_str(text_node);
             }
         }
-        if run_text.is_empty() {
-            continue;
-        }
-        text.push_str(&run_text);
         let fmt = child_w(r, "rPr").map(parse_run_fmt).unwrap_or_default();
-        runs.push(ShapeTextRun {
-            text: run_text,
-            font_size_pt: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
-            color: fmt.color.clone(),
-            font_family: resolve_ascii_axis(&fmt),
-            font_family_east_asia: resolve_east_asia_axis(&fmt),
-            bold: fmt.bold.unwrap_or(false),
-            italic: fmt.italic.unwrap_or(false),
-        });
-        if first_run_fmt.is_none() {
-            first_run_fmt = Some(fmt);
+        out.push((run_text, fmt, None));
+        out
+    };
+
+    for child in p.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "r" => {
+                for (run_text, fmt, ruby) in collect_run_node(child) {
+                    push_text_run(run_text, fmt, ruby);
+                }
+            }
+            "hyperlink" => {
+                for r in child
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "r")
+                {
+                    for (run_text, fmt, ruby) in collect_run_node(r) {
+                        push_text_run(run_text, fmt, ruby);
+                    }
+                }
+            }
+            "oMath" | "oMathPara" => {
+                let math_text = omml_plain_text(child);
+                if !math_text.is_empty() {
+                    push_text_run(math_text, RunFmt::default(), None);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5272,17 +5625,97 @@ fn extract_simple_paragraph_text(
     // list-independently), unlike the pptx/xlsx shape paths which clamp because
     // they have no list marker to hang.
     let direct_ind = child_w(p, "pPr").map(parse_para_fmt).unwrap_or_default();
-    let indent_left = direct_ind
-        .indent_left
-        .or(style_para.indent_left)
-        .unwrap_or(0.0);
+    let numbering = direct_ind.num_id.or(style_para.num_id).and_then(|num_id| {
+        if num_id == 0 {
+            return None;
+        }
+        let num_level = direct_ind.num_level.or(style_para.num_level).unwrap_or(0);
+        let first_fmt = first_run_fmt.clone().unwrap_or_default();
+        let (format, ind_left, tab, suff, lvl_jc, marker_ascii, marker_ea, pic_bullet) = num_map
+            .get_level(num_id, num_level)
+            .map(|l| {
+                let mut marker_fmt = first_fmt.clone();
+                apply_direct_run(&mut marker_fmt, &l.rpr);
+                (
+                    l.format.clone(),
+                    l.indent_left,
+                    l.tab,
+                    l.suff.clone(),
+                    l.lvl_jc.clone(),
+                    theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
+                    theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                    l.pic_bullet.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "decimal".to_string(),
+                    36.0,
+                    18.0,
+                    "tab".to_string(),
+                    "left".to_string(),
+                    theme.resolve_font_ref(first_fmt.font_family_ascii.clone()),
+                    theme.resolve_font_ref(first_fmt.font_family_east_asia.clone()),
+                    None,
+                )
+            });
+        let counter = num_map.advance(num_id, num_level);
+        let text = num_map.resolve_text(num_id, num_level, counter);
+        let (
+            pic_bullet_image_path,
+            pic_bullet_mime_type,
+            pic_bullet_width_pt,
+            pic_bullet_height_pt,
+        ) = match pic_bullet {
+            Some(pb) => (
+                Some(pb.image_path),
+                Some(pb.mime_type),
+                pb.width_pt,
+                pb.height_pt,
+            ),
+            None => (None, None, None, None),
+        };
+        Some(Box::new(NumberingInfo {
+            num_id,
+            level: num_level,
+            format,
+            text,
+            indent_left: ind_left,
+            tab,
+            suff,
+            jc: lvl_jc,
+            font_family: marker_ascii,
+            font_family_east_asia: marker_ea,
+            pic_bullet_image_path,
+            pic_bullet_mime_type,
+            pic_bullet_width_pt,
+            pic_bullet_height_pt,
+        }))
+    });
+    let level = numbering
+        .as_ref()
+        .and_then(|num| num_map.get_level(num.num_id, num.level));
+    let (indent_left, indent_first) = if let Some(l) = level {
+        (
+            direct_ind.indent_left.unwrap_or(l.indent_left),
+            direct_ind.indent_first.unwrap_or(l.indent_first),
+        )
+    } else {
+        (
+            direct_ind
+                .indent_left
+                .or(style_para.indent_left)
+                .unwrap_or(0.0),
+            direct_ind
+                .indent_first
+                .or(style_para.indent_first)
+                .unwrap_or(0.0),
+        )
+    };
     let indent_right = direct_ind
         .indent_right
+        .or_else(|| level.and_then(|l| l.indent_right))
         .or(style_para.indent_right)
-        .unwrap_or(0.0);
-    let indent_first = direct_ind
-        .indent_first
-        .or(style_para.indent_first)
         .unwrap_or(0.0);
 
     // ECMA-376 §17.3.1.33 — the txbxContent paragraph's own `<w:spacing>` is
@@ -5375,6 +5808,7 @@ fn extract_simple_paragraph_text(
         bold,
         italic,
         runs,
+        numbering,
         alignment: normalize_align(&alignment).to_string(),
         space_before,
         space_after,
@@ -5391,6 +5825,41 @@ fn extract_simple_paragraph_text(
         image_width_pt,
         image_height_pt,
     })
+}
+
+fn omml_plain_text(node: roxmltree::Node) -> String {
+    if !node.is_element() {
+        return String::new();
+    }
+    match node.tag_name().name() {
+        "t" => node.text().unwrap_or_default().to_string(),
+        "r" => {
+            let text: String = node.children().map(omml_plain_text).collect();
+            if omml_operator_takes_spacing(text.as_str()) {
+                format!(" {text} ")
+            } else {
+                text
+            }
+        }
+        "rad" => {
+            let radicand = node
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "e")
+                .map(omml_plain_text)
+                .unwrap_or_default();
+            if radicand.is_empty() {
+                String::new()
+            } else {
+                format!("√{radicand}")
+            }
+        }
+        "oMathParaPr" | "radPr" | "ctrlPr" | "deg" => String::new(),
+        _ => node.children().map(omml_plain_text).collect(),
+    }
+}
+
+fn omml_operator_takes_spacing(text: &str) -> bool {
+    matches!(text, "+" | "-" | "−" | "=" | "±" | "×" | "÷")
 }
 
 /// Parse a legacy VML `<w:pict>` text box (ECMA-376 Part 4 §14.1) into a
@@ -5413,6 +5882,7 @@ fn extract_simple_paragraph_text(
 /// handled separately; see `parse_object_ole_image`.
 fn parse_vml_pict(
     style_map: &StyleMap,
+    num_map: &mut NumberingMap,
     pict: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
@@ -5532,7 +6002,9 @@ fn parse_vml_pict(
             .map(|content| {
                 children_w_flat(content, "p")
                     .into_iter()
-                    .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
+                    .filter_map(|p| {
+                        extract_simple_paragraph_text(style_map, num_map, p, theme, media_map)
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -6800,6 +7272,7 @@ fn parse_table_row(
         .and_then(|h| attr_w(h, "hRule"))
         .unwrap_or_else(|| "auto".to_string());
     let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
+    let cant_split = tr_pr.and_then(|p| bool_prop(p, "cantSplit")).unwrap_or(false);
 
     let mut cells = vec![];
     for (i, tc_node) in children_w_flat(node, "tc").into_iter().enumerate() {
@@ -6824,6 +7297,7 @@ fn parse_table_row(
         row_height,
         row_height_rule,
         is_header,
+        cant_split,
     }
 }
 
@@ -7698,10 +8172,12 @@ mod tests {
         let theme = ThemeColors::default();
         let mut runs = Vec::new();
         let mut field = FieldState::default();
+        let mut num_map = NumberingMap::default();
         parse_para_content(
             doc.root_element(),
             base_run,
             styles,
+            &mut num_map,
             &media,
             &HashMap::new(),
             &rels,
@@ -8539,6 +9015,22 @@ mod math_jc_tests {
         assert_eq!(p.bookmarks, vec!["dup".to_string()]);
     }
 
+    // ECMA-376 §17.3.1.29 + §17.3.2.26 — the paragraph mark has run properties,
+    // including independent ASCII and East Asian font axes. Empty paragraphs
+    // need the eastAsia axis later when an East Asian document grid measures the
+    // mark line.
+    #[test]
+    fn paragraph_mark_default_east_asia_font_surfaces() {
+        let p = parse_p(
+            r#"<w:pPr><w:rPr><w:rFonts w:ascii="Century" w:eastAsia="ＭＳ 明朝"/></w:rPr></w:pPr>"#,
+        );
+        assert_eq!(p.default_font_family.as_deref(), Some("Century"));
+        assert_eq!(
+            p.default_font_family_east_asia.as_deref(),
+            Some("ＭＳ 明朝")
+        );
+    }
+
     // ECMA-376 §22.1.2.30 `m:defJc` — document-wide default math justification in
     // `word/settings.xml` `m:mathPr` surfaces as `math_def_jc`; absent ⇒ None.
     #[test]
@@ -8571,6 +9063,29 @@ mod math_jc_tests {
 
         let empty = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
         assert!(parse_document_settings(empty).is_none());
+    }
+
+    // ECMA-376 §17.15.1.18 / §17.15.3.1 — East Asian compatibility settings
+    // must surface to the renderer instead of being discarded at parse time.
+    #[test]
+    fn settings_east_asian_compat_flags_surface() {
+        let xml = format!(
+            r#"<w:settings xmlns:w="{w}">
+                 <w:characterSpacingControl w:val="compressPunctuation"/>
+                 <w:compat>
+                   <w:useFELayout/>
+                   <w:balanceSingleByteDoubleByteWidth w:val="0"/>
+                 </w:compat>
+               </w:settings>"#,
+            w = W_NS
+        );
+        let s = parse_document_settings(&xml).expect("settings present (EA compat)");
+        assert_eq!(
+            s.character_spacing_control.as_deref(),
+            Some("compressPunctuation")
+        );
+        assert_eq!(s.use_fe_layout, Some(true));
+        assert_eq!(s.balance_single_byte_double_byte_width, Some(false));
     }
 
     // ECMA-376 §22.1.2.88 + §17.3.1.13 `w:jc` — a display-math paragraph with no
@@ -9135,6 +9650,45 @@ mod theme_cs_tests {
         assert_eq!(theme.resolve_font("majorBidi").as_deref(), Some("Arial"));
         // Latin axes untouched
         assert_eq!(theme.resolve_font("minorHAnsi").as_deref(), Some("Calibri"));
+    }
+
+    #[test]
+    fn theme_font_lang_east_asia_uses_japanese_script_font_when_ea_is_empty() {
+        // ECMA-376 §17.15.1.88 maps minorEastAsia through the theme font element
+        // for themeFontLang@eastAsia. sample-33 has <a:ea typeface=""> plus
+        // <a:font script="Jpan" typeface="ＭＳ 明朝"/>, so docDefaults
+        // w:eastAsiaTheme="minorEastAsia" must resolve to ＭＳ 明朝 (then the
+        // renderer's name heuristic classifies it as serif).
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:themeElements><a:fontScheme name="Office">
+            <a:majorFont>
+              <a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/>
+              <a:font script="Jpan" typeface="ＭＳ ゴシック"/>
+            </a:majorFont>
+            <a:minorFont>
+              <a:latin typeface="Century"/><a:ea typeface=""/><a:cs typeface=""/>
+              <a:font script="Jpan" typeface="ＭＳ 明朝"/>
+            </a:minorFont>
+          </a:fontScheme></a:themeElements></a:theme>"#;
+        let settings = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:themeFontLang w:val="en-US" w:eastAsia="ja-JP"/></w:settings>"#;
+        let mut theme = ThemeColors::parse(theme_xml);
+        assert_eq!(theme.resolve_font("minorEastAsia"), None);
+        let langs = parse_theme_font_langs(settings).expect("themeFontLang");
+        theme.apply_theme_font_langs(&langs);
+        assert_eq!(
+            theme.resolve_font("minorEastAsia").as_deref(),
+            Some("ＭＳ 明朝")
+        );
+        assert_eq!(
+            theme.resolve_font("majorEastAsia").as_deref(),
+            Some("ＭＳ ゴシック")
+        );
+        assert_eq!(
+            theme.resolve_font("minorHAnsi").as_deref(),
+            Some("Century"),
+            "latin theme remains the default because w:val is en-US"
+        );
     }
 
     #[test]
@@ -10966,6 +11520,17 @@ mod anchor_image_relative_from_tests {
     use super::*;
     use std::io::Cursor;
 
+    fn parse_inline_drawing(
+        style_map: &StyleMap,
+        node: roxmltree::Node,
+        media_map: &HashMap<String, String>,
+        chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+        theme: &ThemeColors,
+    ) -> Vec<DocRun> {
+        let mut num_map = NumberingMap::default();
+        super::parse_inline_drawing(style_map, &mut num_map, node, media_map, chart_map, theme)
+    }
+
     // Tiny valid PNG (1x1) so resolve_inline_blip's extent+blip contract holds.
     const PNG_1X1: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
@@ -11012,6 +11577,19 @@ mod anchor_image_relative_from_tests {
                 _ => None,
             })
             .expect("expected one anchor image")
+    }
+
+    fn first_shape(doc: &Document) -> &ShapeRun {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Shape(s) => Some(s.as_ref()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one anchor shape")
     }
 
     /// Body XML for an anchor image with the given `<wp:positionH>` and
@@ -11090,6 +11668,74 @@ mod anchor_image_relative_from_tests {
         let img = first_image(&doc);
         assert_eq!(img.anchor_x_relative_from.as_deref(), Some("page"));
         assert_eq!(img.anchor_y_relative_from.as_deref(), Some("page"));
+    }
+
+    /// ECMA-376 §20.4.2.3 `wp:anchor/@relativeHeight` carries the drawing's
+    /// stacking order. sample-33's board-plan paragraph contains several
+    /// independent anchors where a later low-relativeHeight rectangle must paint
+    /// below earlier high-relativeHeight marks.
+    #[test]
+    fn anchor_relative_height_surfaces_as_shape_z_order() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+             behindDoc="0" relativeHeight="251651072">
+    <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+    <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+    <wp:extent cx="127000" cy="127000"/>
+    <wp:wrapNone/>
+    <wp:docPr id="1" name="shape"/>
+    <a:graphic><a:graphicData>
+      <wps:wsp>
+        <wps:spPr>
+          <a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm>
+          <a:prstGeom prst="rect"/>
+        </wps:spPr>
+      </wps:wsp>
+    </a:graphicData></a:graphic>
+  </wp:anchor>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        assert_eq!(first_shape(&doc).z_order, 251651072);
+    }
+
+    /// ECMA-376 §20.4.2.3/§20.4.3.5 — a standalone `wps:wsp` inside
+    /// `<wp:anchor>` is positioned by the anchor's `<wp:positionH/V>`. The
+    /// shape's own `<a:xfrm><a:off>` is its DrawingML transform, not an extra
+    /// paragraph-relative anchor offset. sample-33 callouts carry
+    /// `positionV relativeFrom="paragraph" posOffset="20320"` (1.6pt) and an
+    /// `a:xfrm/off@y` around 398pt; adding both drops the callout to the bottom
+    /// of the page instead of beside its anchor paragraph.
+    #[test]
+    fn standalone_wps_anchor_uses_wp_position_not_shape_xfrm_offset() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+             behindDoc="0" relativeHeight="1">
+    <wp:positionH relativeFrom="column"><wp:posOffset>25400</wp:posOffset></wp:positionH>
+    <wp:positionV relativeFrom="paragraph"><wp:posOffset>20320</wp:posOffset></wp:positionV>
+    <wp:extent cx="1270000" cy="635000"/>
+    <wp:wrapNone/>
+    <wp:docPr id="1" name="callout"/>
+    <a:graphic><a:graphicData>
+      <wps:wsp>
+        <wps:spPr>
+          <a:xfrm><a:off x="3171825" y="5057775"/><a:ext cx="1270000" cy="635000"/></a:xfrm>
+          <a:prstGeom prst="accentBorderCallout2"/>
+        </wps:spPr>
+      </wps:wsp>
+    </a:graphicData></a:graphic>
+  </wp:anchor>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        let shape = first_shape(&doc);
+        assert!((shape.anchor_x_pt - 2.0).abs() < 1e-6, "anchor_x_pt={}", shape.anchor_x_pt);
+        assert!((shape.anchor_y_pt - 1.6).abs() < 1e-6, "anchor_y_pt={}", shape.anchor_y_pt);
+        assert!(shape.anchor_y_from_para, "positionV relativeFrom=paragraph must survive");
     }
 
     /// Inline images carry no positionH/V at all — both relativeFrom fields
@@ -12490,6 +13136,26 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
+    /// ECMA-376 §17.3.1.20 — a hard page break at the END of a paragraph still
+    /// advances the following paragraph. sample-33 has a visible anchored shape
+    /// followed by `<w:br w:type="page"/>`; the trailing empty chunk must be
+    /// dropped without dropping the break itself.
+    #[test]
+    fn trailing_page_break_after_visible_run_still_advances_page() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:t>shape-anchor</w:t></w:r>
+                 <w:r><w:br w:type="page"/></w:r>
+               </w:p>
+               <w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
+        );
+        // Para(shape-anchor), PageBreak, Para(after).
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
     /// The leading-break rule preserves the break KIND: a paragraph that opens with a
     /// `<w:br w:type="column"/>` yields ColumnBreak, Para(...) — not PageBreak.
     #[test]
@@ -12944,6 +13610,34 @@ mod column_tests {
 #[cfg(test)]
 mod txbx_inline_image_tests {
     use super::*;
+
+    fn parse_shape_text_body(
+        style_map: &StyleMap,
+        wsp: roxmltree::Node,
+        theme: &ThemeColors,
+        media_map: &HashMap<String, String>,
+    ) -> (
+        Vec<ShapeText>,
+        Option<String>,
+        Option<String>,
+        f64,
+        f64,
+        f64,
+        f64,
+    ) {
+        let mut num_map = NumberingMap::default();
+        super::parse_shape_text_body(style_map, &mut num_map, wsp, theme, media_map)
+    }
+
+    fn extract_simple_paragraph_text(
+        style_map: &StyleMap,
+        p: roxmltree::Node,
+        theme: &ThemeColors,
+        media_map: &HashMap<String, String>,
+    ) -> Option<ShapeText> {
+        let mut num_map = NumberingMap::default();
+        super::extract_simple_paragraph_text(style_map, &mut num_map, p, theme, media_map)
+    }
 
     /// A `<wps:wsp>` whose `<w:txbx><w:txbxContent>` holds (a) a paragraph that
     /// is just an inline `<w:drawing>` (a WMF chart) and (b) a caption
@@ -13448,6 +14142,127 @@ mod txbx_inline_image_tests {
         assert!(!block.runs[1].bold);
     }
 
+    /// ECMA-376 §17.3.3.25 — ruby inside a legacy VML/text-box paragraph must
+    /// remain attached to the rubyBase run. Flattening all descendant `<w:t>`
+    /// nodes used to turn `rt` text into visible inline text ("こんごう根号..."),
+    /// which is exactly what sample-33 shows on the board-plan title.
+    #[test]
+    fn extract_simple_paragraph_text_preserves_ruby_runs() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:ruby>
+                <w:rubyPr><w:hps w:val="10"/></w:rubyPr>
+                <w:rt><w:r><w:t>こんごう</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t>根号</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>
+              <w:r><w:t>を含む式の</w:t></w:r>
+              <w:r><w:ruby>
+                <w:rubyPr><w:hps w:val="10"/></w:rubyPr>
+                <w:rt><w:r><w:t>か</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t>加</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>
+              <w:r><w:ruby>
+                <w:rubyPr><w:hps w:val="10"/></w:rubyPr>
+                <w:rt><w:r><w:t>げん</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t>減</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("ruby paragraph yields a text block");
+
+        assert_eq!(block.text, "根号を含む式の加減");
+        assert_eq!(block.runs[0].text, "根号");
+        assert_eq!(
+            block.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("こんごう")
+        );
+        assert_eq!(
+            block.runs[0].ruby.as_ref().map(|r| r.font_size_pt),
+            Some(5.0)
+        );
+        assert_eq!(block.runs[2].text, "加");
+        assert_eq!(
+            block.runs[2].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("か")
+        );
+        assert_eq!(block.runs[3].text, "減");
+        assert_eq!(
+            block.runs[3].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("げん")
+        );
+    }
+
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_numbering_marker() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr></w:pPr>
+              <w:r><w:t>加法、減法の言葉に合った数式を生徒に考えさせる。</w:t></w:r>
+            </w:p>"#;
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="※"/>
+                  <w:lvlJc w:val="left"/>
+                  <w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>
+                  <w:rPr><w:rFonts w:ascii="ＭＳ ゴシック" w:eastAsia="ＭＳ ゴシック" w:hAnsi="ＭＳ ゴシック"/></w:rPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+        let block = super::extract_simple_paragraph_text(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert_eq!(
+            block.text,
+            "加法、減法の言葉に合った数式を生徒に考えさせる。"
+        );
+        let numbering = block.numbering.expect("numbering is surfaced");
+        assert_eq!(numbering.text, "※");
+        assert_eq!(numbering.num_id, 5);
+        assert_eq!(numbering.level, 0);
+        assert!((block.indent_left - 36.0).abs() < 1e-6);
+        assert!((block.indent_first + 36.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_simple_paragraph_text_includes_inline_omml_radicals() {
+        let xml = r#"<w:p
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+              <m:oMath>
+                <m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e><m:r><m:t>9</m:t></m:r></m:e></m:rad>
+                <m:r><m:t>+</m:t></m:r>
+                <m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e><m:r><m:t>16</m:t></m:r></m:e></m:rad>
+              </m:oMath>
+              <w:r><w:t>の計算の仕方を考えよう</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("math text-box paragraph yields text");
+
+        assert_eq!(block.text, "√9 + √16の計算の仕方を考えよう");
+        assert_eq!(block.runs[0].text, "√9 + √16");
+    }
+
     /// A run carrying no text (e.g. a `<w:r>` holding only a `<w:tab/>`) is not
     /// emitted as a run, so an image-only paragraph keeps `runs` empty and the
     /// image path / single-field fallback is unchanged.
@@ -13612,6 +14427,150 @@ mod txbx_inline_image_tests {
     }
 }
 
+// ECMA-376 §20.1.9.18 `<a:prstGeom>` — DOCX shapes use the same DrawingML
+// preset geometry catalog as PPTX/XLSX. Adjustment guides must be carried in
+// adj1..adj8 order, with omitted named guides preserved as holes, so core's
+// shared preset renderer can apply the preset defaults per index.
+#[cfg(test)]
+mod shape_preset_geometry_tests {
+    use super::*;
+
+    fn shape_with_prst_geom(prst_geom: &str) -> ShapeRun {
+        shape_with_sppr_and_style(prst_geom, "", &ThemeColors::default())
+    }
+
+    fn theme_with_ln_styles() -> ThemeColors {
+        ThemeColors::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <a:themeElements>
+                   <a:clrScheme name="t">
+                     <a:dk1><a:srgbClr val="000000"/></a:dk1>
+                     <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                     <a:dk2><a:srgbClr val="111111"/></a:dk2>
+                     <a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+                     <a:accent1><a:srgbClr val="4472C4"/></a:accent1>
+                   </a:clrScheme>
+                   <a:fmtScheme name="s">
+                     <a:fillStyleLst/>
+                     <a:lnStyleLst>
+                       <a:ln w="9525"/>
+                       <a:ln w="25400"/>
+                     </a:lnStyleLst>
+                     <a:effectStyleLst/>
+                     <a:bgFillStyleLst/>
+                   </a:fmtScheme>
+                 </a:themeElements>
+               </a:theme>"#,
+        )
+    }
+
+    fn shape_with_sppr_and_style(sp_pr_body: &str, style: &str, theme: &ThemeColors) -> ShapeRun {
+        let xml = format!(
+            r#"<wps:wsp
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/></a:xfrm>
+                   {sp_pr_body}</wps:spPr>
+                 {style}
+               </wps:wsp>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        parse_wsp_shape(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            theme,
+            &HashMap::new(),
+            0.0,
+            true,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            false,
+            0,
+        )
+        .expect("shape parses")
+    }
+
+    #[test]
+    fn callout_adjust_values_keep_adj1_to_adj6() {
+        let shape = shape_with_prst_geom(
+            r#"<a:prstGeom prst="accentBorderCallout2"><a:avLst>
+                 <a:gd name="adj1" fmla="val 18750"/>
+                 <a:gd name="adj2" fmla="val -2129"/>
+                 <a:gd name="adj3" fmla="val 47825"/>
+                 <a:gd name="adj4" fmla="val -10565"/>
+                 <a:gd name="adj5" fmla="val 117684"/>
+                 <a:gd name="adj6" fmla="val -34190"/>
+               </a:avLst></a:prstGeom>"#,
+        );
+
+        assert_eq!(
+            shape.preset_geometry.as_deref(),
+            Some("accentBorderCallout2")
+        );
+        assert_eq!(
+            shape.adj_values,
+            vec![
+                Some(18750.0),
+                Some(-2129.0),
+                Some(47825.0),
+                Some(-10565.0),
+                Some(117684.0),
+                Some(-34190.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn named_adjust_values_preserve_missing_guides_as_none() {
+        let shape = shape_with_prst_geom(
+            r#"<a:prstGeom prst="wedgeRectCallout"><a:avLst>
+                 <a:gd name="adj1" fmla="val 25000"/>
+                 <a:gd name="adj3" fmla="val 16667"/>
+               </a:avLst></a:prstGeom>"#,
+        );
+
+        assert_eq!(shape.adj_values, vec![Some(25000.0), None, Some(16667.0)]);
+    }
+
+    #[test]
+    fn direct_line_without_fill_inherits_lnref_color_and_keeps_arrow() {
+        let theme = theme_with_ln_styles();
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="accentBorderCallout2"><a:avLst/></a:prstGeom>
+               <a:ln w="19050"><a:tailEnd type="triangle" w="med" len="med"/></a:ln>"#,
+            r#"<wps:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></wps:style>"#,
+            &theme,
+        );
+
+        assert_eq!(shape.stroke.as_deref(), Some("4472C4"));
+        assert!((shape.stroke_width - 1.5).abs() < 1e-6);
+        assert_eq!(
+            shape.tail_end.as_ref().map(|e| e.r#type.as_str()),
+            Some("triangle")
+        );
+    }
+
+    #[test]
+    fn lnref_without_direct_line_supplies_theme_width() {
+        let theme = theme_with_ln_styles();
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+            r#"<wps:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></wps:style>"#,
+            &theme,
+        );
+
+        assert_eq!(shape.stroke.as_deref(), Some("4472C4"));
+        assert!((shape.stroke_width - 2.0).abs() < 1e-6);
+    }
+}
+
 // ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` — the shape's DEFAULT text
 // color. A `<wps:txbx>` run that sets no `<w:color>` of its own inherits this
 // (sample-28's white Arabic cover banner: the runs carry no color, so Word draws
@@ -13652,8 +14611,10 @@ mod shape_fontref_color_tests {
                </wps:wsp>"#
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
         parse_wsp_shape(
             &StyleMap::default(),
+            &mut num_map,
             doc.root_element(),
             &theme(),
             &HashMap::new(),
@@ -13666,6 +14627,7 @@ mod shape_fontref_color_tests {
             1.0,
             0.0,
             0.0,
+            false,
             0,
         )
         .expect("shape parses")

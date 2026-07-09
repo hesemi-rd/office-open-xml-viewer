@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { computePages, computeColumns } from './renderer.js';
 import type {
-  BodyElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
+  BodyElement, CellElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
 } from './types';
 
 // Unit tests for computePages pagination behaviour that the renderer-path VRT
@@ -56,12 +56,20 @@ function textRun(text: string, fontSize: number): DocRun {
 type DocRun = DocParagraph['runs'][number];
 
 function para(
-  opts: { text?: string; fontSize?: number; widowControl?: boolean; keepLines?: boolean; keepNext?: boolean } = {},
+  opts: {
+    text?: string;
+    fontSize?: number;
+    widowControl?: boolean;
+    keepLines?: boolean;
+    keepNext?: boolean;
+    spaceBefore?: number;
+    spaceAfter?: number;
+  } = {},
 ): BodyElement {
   const fontSize = opts.fontSize ?? 20;
   const p: DocParagraph = {
     alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
-    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    spaceBefore: opts.spaceBefore ?? 0, spaceAfter: opts.spaceAfter ?? 0, lineSpacing: null, numbering: null, tabStops: [],
     runs: opts.text ? [textRun(opts.text, fontSize)] : [],
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
     widowControl: opts.widowControl,
@@ -121,6 +129,17 @@ function paraWith(runs: DocRun[], opts: { fontSize?: number } = {}): BodyElement
   return { type: 'paragraph', ...p } as BodyElement;
 }
 
+function inlineImageRun(widthPt: number, heightPt: number): DocRun {
+  return {
+    type: 'image',
+    imagePath: 'word/media/image.png',
+    mimeType: 'image/png',
+    widthPt,
+    heightPt,
+    anchor: false,
+  } as DocRun;
+}
+
 /** A single-column block table whose rows each have a fixed `exact` height (pt),
  *  so its measured height is deterministic and independent of cell-content
  *  measurement (resolveTableRowHeights short-circuits on rowHeightRule="exact"). */
@@ -151,6 +170,109 @@ function fixedTable(rowHeightsPt: number[]): BodyElement {
   return { type: 'table', ...t } as BodyElement;
 }
 
+function autoTableWithTallRow(blockCount: number, rowOverrides: Partial<DocTableRow> = {}): BodyElement {
+  const content = Array.from({ length: blockCount }, (_, i) =>
+    para({ text: `row ${i}`, fontSize: 20 }) as CellElement,
+  );
+  const row: DocTableRow = {
+    cells: [
+      {
+        content,
+        colSpan: 1,
+        vMerge: null,
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        background: null,
+        vAlign: 'top',
+        widthPt: null,
+      },
+    ],
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    isHeader: false,
+    ...rowOverrides,
+  };
+  const t: DocTable = {
+    colWidths: [160],
+    rows: [row],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  };
+  return { type: 'table', ...t } as BodyElement;
+}
+
+function autoTableWithSingleWrappedParagraph(charCount: number, rowOverrides: Partial<DocTableRow> = {}): BodyElement {
+  const row: DocTableRow = {
+    cells: [
+      {
+        content: [para({ text: 'あ'.repeat(charCount), fontSize: 20 }) as CellElement],
+        colSpan: 1,
+        vMerge: null,
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        background: null,
+        vAlign: 'top',
+        widthPt: null,
+      },
+    ],
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    isHeader: false,
+    ...rowOverrides,
+  };
+  const t: DocTable = {
+    colWidths: [160],
+    rows: [row],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  };
+  return { type: 'table', ...t } as BodyElement;
+}
+
+function autoTableWithIntroRowThenSingleWrappedParagraph(charCount: number): BodyElement {
+  const first = (fixedTable([40]) as unknown as DocTable).rows[0];
+  const second = (autoTableWithSingleWrappedParagraph(charCount) as unknown as DocTable).rows[0];
+  const t: DocTable = {
+    colWidths: [160],
+    rows: [first, second],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  };
+  return { type: 'table', ...t } as BodyElement;
+}
+
+function autoTableWithIntroRowThenSpacedWrappedParagraph(): BodyElement {
+  const first = (fixedTable([45]) as unknown as DocTable).rows[0];
+  const second: DocTableRow = {
+    cells: [
+      {
+        content: [
+          para({ text: 'first', fontSize: 20, spaceAfter: 10 }) as CellElement,
+          para({ text: 'あ'.repeat(32), fontSize: 20, spaceBefore: 8 }) as CellElement,
+        ],
+        colSpan: 1,
+        vMerge: null,
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        background: null,
+        vAlign: 'top',
+        widthPt: null,
+      },
+    ],
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    isHeader: false,
+  };
+  const t: DocTable = {
+    colWidths: [160],
+    rows: [first, second],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  };
+  return { type: 'table', ...t } as BodyElement;
+}
+
 const sliceOf = (el: PaginatedBodyElement) =>
   (el as { lineSlice?: { start: number; end: number } }).lineSlice;
 
@@ -158,6 +280,7 @@ const colOf = (el: PaginatedBodyElement) => el.colIndex;
 
 /** A body-level column break (ECMA-376 §17.3.1.20, hoisted by the parser). */
 const colBreak = (): BodyElement => ({ type: 'columnBreak' } as BodyElement);
+const pageBreak = (): BodyElement => ({ type: 'pageBreak' } as BodyElement);
 
 /** A body-level section break (ECMA-376 §17.6.x). `columns` is the ENDING
  *  section's `<w:cols>` (null/undefined ⇒ single full-width column). */
@@ -208,6 +331,87 @@ describe('computePages — tall header/footer reserve indexing (§17.6.11)', () 
     // the body genuinely spans several pages where the clamp matters.
     expect(short[0].length).toBe(4);
     expect(short.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('computePages — over-tall table row splitting (§17.4 table pagination)', () => {
+  it('splits an auto-height row by cell block boundaries instead of overflowing the footer band', () => {
+    const pages = computePages([autoTableWithTallRow(8)], section(), makeCtx());
+    const tables = pages.flatMap((page) => page.filter((el) => el.type === 'table'));
+
+    expect(tables.length).toBeGreaterThan(1);
+    expect(tables.flatMap((t) => (t as unknown as DocTable).rows).length).toBe(2);
+    for (const table of tables) {
+      const h = (table.tableRowHeightsPt ?? []).reduce((sum, rowH) => sum + rowH, 0);
+      expect(h).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it('splits a splittable auto-height row into the remaining page band before continuing', () => {
+    const pages = computePages([para(), para(), autoTableWithTallRow(4)], section(), makeCtx());
+    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+
+    expect(firstPageTable).toBeDefined();
+    expect(secondPageTable).toBeDefined();
+
+    const firstSliceBlocks = firstPageTable?.rows[0]?.cells[0]?.content.length ?? 0;
+    const secondSliceBlocks = secondPageTable?.rows[0]?.cells[0]?.content.length ?? 0;
+    expect(firstSliceBlocks).toBeGreaterThan(0);
+    expect(firstSliceBlocks).toBeLessThan(4);
+    expect(firstSliceBlocks + secondSliceBlocks).toBe(4);
+  });
+
+  it('keeps a cantSplit row intact when it does not fit the remaining page band', () => {
+    const pages = computePages([para(), para(), autoTableWithTallRow(4, { cantSplit: true })], section(), makeCtx());
+
+    expect(pages[0].some((el) => el.type === 'table')).toBe(false);
+    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    expect(secondPageTable?.rows[0]?.cells[0]?.content.length).toBe(4);
+  });
+
+  it('splits a single cell paragraph in a splittable row at line boundaries', () => {
+    const pages = computePages([para(), para(), autoTableWithSingleWrappedParagraph(32)], section(), makeCtx());
+    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+
+    expect(firstPageTable).toBeDefined();
+    expect(secondPageTable).toBeDefined();
+
+    const firstPara = firstPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
+    const secondPara = secondPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
+    expect(firstPara?.lineSlice).toEqual({ start: 0, end: 3 });
+    expect(secondPara?.lineSlice).toEqual({ start: 3, end: 4 });
+  });
+
+  it('splits the next row when it overflows after earlier rows filled part of the page', () => {
+    const pages = computePages([autoTableWithIntroRowThenSingleWrappedParagraph(32)], section(), makeCtx());
+    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+
+    expect(firstPageTable?.rows.length).toBe(2);
+    expect(secondPageTable?.rows.length).toBe(1);
+
+    const splitPara = firstPageTable?.rows[1]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
+    const restPara = secondPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
+    expect(splitPara?.lineSlice).toEqual({ start: 0, end: 3 });
+    expect(restPara?.lineSlice).toEqual({ start: 3, end: 4 });
+  });
+
+  it('uses collapsed paragraph spacing when fitting a cell paragraph line into a split row', () => {
+    const pages = computePages([autoTableWithIntroRowThenSpacedWrappedParagraph()], section(), makeCtx());
+    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+
+    expect(firstPageTable?.rows.length).toBe(2);
+    expect(firstPageTable?.rows[1]?.cells[0]?.content.map((el) => el.type === 'paragraph' ? textOf(el as unknown as PaginatedBodyElement) : el.type)).toEqual(['first', 'あ'.repeat(32)]);
+
+    const splitPara = firstPageTable?.rows[1]?.cells[0]?.content[1] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
+    const restSlices = secondPageTable?.rows
+      .map((row) => row.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)
+      .map((el) => el?.lineSlice);
+    expect(splitPara?.lineSlice).toEqual({ start: 0, end: 1 });
+    expect(restSlices).toEqual([{ start: 1, end: 3 }, { start: 3, end: 4 }]);
   });
 });
 
@@ -270,6 +474,152 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
     ];
     const pages = computePages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
+  });
+
+  it('does not reserve flow height for a front non-callout wrapNone shape before a following inline image', () => {
+    const imagePara = paraWith([inlineImageRun(80, 30)]);
+    const body = [
+      paraWith([shapeRun({ widthPt: 160, heightPt: 80, wrapMode: 'none' })]),
+      imagePara,
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(1);
+    expect(pages[0].some((el) =>
+      el.type === 'paragraph' &&
+      (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
+    )).toBe(true);
+  });
+
+  it('does not let a wrapNone callout shape force a page break', () => {
+    const imagePara = paraWith([inlineImageRun(80, 30)]);
+    const callout = {
+      ...shapeRun({ widthPt: 160, heightPt: 80, wrapMode: 'none' }),
+      presetGeometry: 'accentBorderCallout2',
+    } as DocRun;
+    const body = [
+      paraWith([callout]),
+      imagePara,
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(1);
+  });
+
+  it('does not move an anchor-only wrapNone callout to the next page to fit its box', () => {
+    const calloutAnchor = paraWith([
+      {
+        ...shapeRun({ widthPt: 160, heightPt: 50, wrapMode: 'none', anchorYFromPara: true }),
+        presetGeometry: 'accentBorderCallout2',
+      } as DocRun,
+    ]);
+    const body = [
+      ...Array.from({ length: 4 }, () => para()),
+      calloutAnchor,
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toContain(calloutAnchor as PaginatedBodyElement);
+  });
+
+  it('does not count a front wrapNone shape as flow height when grouping following inline images', () => {
+    const smallImage = paraWith([inlineImageRun(80, 10)]);
+    const photo = paraWith([inlineImageRun(80, 30)]);
+    const body = [
+      paraWith([shapeRun({ widthPt: 160, heightPt: 60, wrapMode: 'none' })]),
+      smallImage,
+      para(),
+      photo,
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toContain(smallImage as PaginatedBodyElement);
+    expect(pages[0].some((el) =>
+      el.type === 'paragraph' &&
+      (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
+    )).toBe(true);
+  });
+
+  it('moves an inline-image paragraph to a fresh page when it no longer fits', () => {
+    const photo = paraWith([inlineImageRun(80, 30)]);
+    const body = [
+      ...Array.from({ length: 4 }, () => para()),
+      photo,
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).not.toContain(photo as PaginatedBodyElement);
+    expect(pages[1].some((el) =>
+      el.type === 'paragraph' &&
+      (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
+    )).toBe(true);
+  });
+});
+
+describe('computePages — paragraph anchor before explicit page break (§20.4.3.5 + §17.3.1.20)', () => {
+  it('keeps a paragraph-anchored wrapNone shape on the pre-break page when a hard page break follows', () => {
+    // Four empty paragraphs consume 80pt of the 100pt body. The following
+    // wrapNone callout is 50pt tall from its paragraph top, so the generic
+    // keep-on-page float rule would normally relocate it to a fresh page. But
+    // the source immediately follows this anchor paragraph with a hard page
+    // break: Word keeps the pre-break anchor on the pre-break page, then starts
+    // the next paragraph after the authored break. sample-33 has this exact
+    // shape after the "当日の板書" photo.
+    const anchorPara = paraWith([
+      shapeRun({ widthPt: 80, heightPt: 50, wrapMode: 'none', anchorYFromPara: true }),
+    ]);
+    const body = [
+      ...Array.from({ length: 4 }, () => para()),
+      anchorPara,
+      pageBreak(),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).toContain(anchorPara as PaginatedBodyElement);
+    expect(textOf(pages[1][0])).toBe('after');
+  });
+
+  it('does not push an anchor-only pre-break paragraph to a new page just for its empty mark', () => {
+    const anchorPara = paraWith([
+      shapeRun({ widthPt: 80, heightPt: 50, wrapMode: 'none', anchorYFromPara: true }),
+    ]);
+    const body = [
+      ...Array.from({ length: 5 }, () => para()),
+      anchorPara,
+      pageBreak(),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).toContain(anchorPara as PaginatedBodyElement);
+    expect(textOf(pages[1][0])).toBe('after');
+  });
+
+  it('moves a preceding image with its pre-break callout when the pair only fits fresh', () => {
+    const imagePara = paraWith([inlineImageRun(80, 40)]);
+    const anchorPara = paraWith([
+      shapeRun({ widthPt: 80, heightPt: 50, wrapMode: 'none', anchorYFromPara: true }),
+    ]);
+    const body = [
+      ...Array.from({ length: 3 }, () => para()),
+      imagePara,
+      anchorPara,
+      pageBreak(),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages).toHaveLength(3);
+    expect(pages[0]).not.toContain(imagePara as PaginatedBodyElement);
+    expect(pages[1]).toContain(imagePara as PaginatedBodyElement);
+    expect(pages[1]).toContain(anchorPara as PaginatedBodyElement);
+    expect(textOf(pages[2][0])).toBe('after');
   });
 });
 
@@ -431,6 +781,21 @@ describe('computePages — explicit column break (§17.3.1.20)', () => {
     expect(colOf(pages[0].filter((e) => e.type === 'paragraph')[1])).toBe(1); // b
     expect(textOf(pages[1][0])).toBe('c');
     expect(colOf(pages[1][0])).toBe(0); // c on page 2, column 0
+  });
+
+  it('ignores a trailing column break when no following content exists', () => {
+    const body = [
+      para({ text: 'a', fontSize: 20 }),
+      colBreak(),
+      para({ text: 'b', fontSize: 20 }),
+      colBreak(),
+    ];
+    const pages = computePages(body, twoCol(), makeCtx());
+    expect(pages.length).toBe(1);
+    const paras = pages[0].filter((e) => e.type === 'paragraph');
+    expect(paras.map(textOf)).toEqual(['a', 'b']);
+    expect(colOf(paras[0])).toBe(0);
+    expect(colOf(paras[1])).toBe(1);
   });
 });
 

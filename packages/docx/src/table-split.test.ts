@@ -72,6 +72,19 @@ describe('splitTableAcrossPages', () => {
     expect(pages.reduce((s, p) => s + rowsOf(p[0]).length, 0)).toBe(6);
   });
 
+  it('moves a row to the next page when it cannot fit in the remaining band', () => {
+    const t = table(Array.from({ length: 4 }, () => row()));
+    const rowHs = Array(4).fill(100);
+    // Only 50pt remains on the current page. A 100pt row fits on a fresh page, so
+    // it must not be emitted into the footer/page-number band of the current one.
+    const { pages } = run(t, rowHs, 300, 350);
+
+    expect(pages[0]).toHaveLength(0);
+    expect(pages[1]).toHaveLength(1);
+    expect(rowsOf(pages[1][0]).length).toBe(3);
+    expect(rowsOf(pages[2][0]).length).toBe(1);
+  });
+
   it('repeats leading tblHeader rows at the top of every continuation page', () => {
     const header = row({ isHeader: true });
     const body = Array.from({ length: 8 }, () => row());

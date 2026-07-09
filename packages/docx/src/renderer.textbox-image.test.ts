@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { preloadImages, renderShapeText } from './renderer';
+import { measureShapeTextAutoFitHeight, preloadImages, renderShapeText } from './renderer';
 import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 /**
@@ -220,6 +220,34 @@ describe('textbox inline images — rendering', () => {
     const ink = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
     expect(ink).toBe('aaaabbbbccccddddeeee');
   });
+
+  it('spAutoFit text boxes keep Word default horizontal margins when wrapping', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const shape = {
+      type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textBlocks: [{ text: 'aaaaaaaaa bbbbbbbb', fontSizePt: 10, alignment: 'left' }],
+      textAnchor: 't', textInsetL: 7.2, textInsetT: 0, textInsetR: 7.2, textInsetB: 0,
+      textAutofit: 'sp',
+    } as unknown as ShapeRun;
+
+    renderShapeText(shape, 0, 0, 200, 400, ctx, 1, {}, new Map());
+
+    expect(fillTextCalls.map((c) => c.text)).toEqual(['aaaaaaaaa ', 'bbbbbbbb']);
+  });
+
+  it('measureShapeTextAutoFitHeight returns content height plus bodyPr insets', () => {
+    const { ctx } = makeRecordingCtx();
+    const shape = {
+      type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textBlocks: [{ text: 'fit', fontSizePt: 10, alignment: 'left' }],
+      textAnchor: 't', textInsetL: 2, textInsetT: 3, textInsetR: 2, textInsetB: 4,
+      textAutofit: 'sp',
+    } as unknown as ShapeRun;
+
+    const measured = measureShapeTextAutoFitHeight(shape, 200, ctx, 1, {}, new Map());
+
+    expect(measured).toBeCloseTo(17, 5);
+  });
 });
 
 describe('textbox rich text — per-run formatting', () => {
@@ -259,6 +287,72 @@ describe('textbox rich text — per-run formatting', () => {
     expect(bodyToks.length).toBeGreaterThan(0);
     for (const t of labelToks) expect(isBoldFont(t.font)).toBe(true);
     for (const t of bodyToks) expect(isBoldFont(t.font)).toBe(false);
+  });
+
+  it('draws ruby annotations above text-box base glyphs', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const shape = richTextbox([
+      {
+        text: '根号',
+        fontSizePt: 22,
+        fontFamily: 'MS Mincho',
+        fontFamilyEastAsia: 'MS Mincho',
+        ruby: { text: 'こんごう', fontSizePt: 5 },
+      },
+      { text: 'を含む式の', fontSizePt: 22 },
+      { text: '加', fontSizePt: 22, ruby: { text: 'か', fontSizePt: 5 } },
+      { text: '減', fontSizePt: 22, ruby: { text: 'げん', fontSizePt: 5 } },
+    ]);
+
+    renderShapeText(shape, 0, 0, 500, 120, ctx, 1, {}, new Map());
+
+    const root = fillTextCalls.find((c) => c.text === '根号');
+    const rootRuby = fillTextCalls.find((c) => c.text === 'こんごう');
+    const add = fillTextCalls.find((c) => c.text === '加');
+    const addRuby = fillTextCalls.find((c) => c.text === 'か');
+    const sub = fillTextCalls.find((c) => c.text === '減');
+    const subRuby = fillTextCalls.find((c) => c.text === 'げん');
+
+    expect(root).toBeDefined();
+    expect(rootRuby).toBeDefined();
+    expect(add).toBeDefined();
+    expect(addRuby).toBeDefined();
+    expect(sub).toBeDefined();
+    expect(subRuby).toBeDefined();
+    expect(rootRuby!.y).toBeLessThan(root!.y);
+    expect(addRuby!.y).toBeLessThan(add!.y);
+    expect(subRuby!.y).toBeLessThan(sub!.y);
+    expect(fillTextCalls.map((c) => c.text).join('')).toBe('根号こんごうを含む式の加か減げん');
+  });
+
+  it('draws a numbered marker for text-box paragraphs', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const shape = richTextbox([{ text: '加法、減法の言葉に合った数式を生徒に考えさせる。', fontSizePt: 10, color: '000000' }]);
+    shape.defaultTextColor = 'FFFFFF';
+    shape.textBlocks![0].indentLeft = 36;
+    shape.textBlocks![0].indentFirst = -36;
+    shape.textBlocks![0].numbering = {
+      numId: 5,
+      level: 0,
+      format: 'bullet',
+      text: '※',
+      indentLeft: 36,
+      tab: 36,
+      suff: 'tab',
+      jc: 'left',
+      fontFamily: 'MS Gothic',
+      fontFamilyEastAsia: 'MS Gothic',
+    };
+
+    renderShapeText(shape, 0, 0, 260, 120, ctx, 1, {}, new Map());
+
+    const marker = fillTextCalls.find((c) => c.text === '※');
+    const body = fillTextCalls.find((c) => c.text.includes('加法'));
+    expect(marker).toBeDefined();
+    expect(body).toBeDefined();
+    expect(marker!.fillStyle).toBe('#000000');
+    expect(marker!.x).toBeLessThan(body!.x);
+    expect(marker!.y).toBe(body!.y);
   });
 
   it('keeps each run its own font when mixed-run text wraps across lines', () => {

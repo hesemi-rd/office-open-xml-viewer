@@ -222,6 +222,8 @@ export interface LayoutMathSeg {
   display: boolean;
   fontSize: number;  // pt
   color: string | null;
+  /** Plain-text fallback used when the async math renderer has not prepared an image. */
+  fallbackText: string;
   measuredWidth: number;
   /** px ascent/descent of the laid-out box at scale, cached during measurement. */
   mathAscent: number;
@@ -597,11 +599,12 @@ export function getDefaultFontSize(para: DocParagraph): number {
  *  Empty paragraphs (no runs) fall back to the paragraph's style-resolved
  *  default font so e.g. an empty Meiryo cell that forms a résumé "bar" reserves
  *  Meiryo's tall line box rather than the generic fallback's. */
-export function getDefaultFontFamily(para: DocParagraph): string | null {
+export function getDefaultFontFamily(para: DocParagraph, eastAsian = false): string | null {
   for (const run of para.runs) {
     if (run.type === 'text') return (run as unknown as DocxTextRun).fontFamily;
     if (run.type === 'field') return (run as unknown as FieldRun).fontFamily;
   }
+  if (eastAsian && para.defaultFontFamilyEastAsia) return para.defaultFontFamilyEastAsia;
   return para.defaultFontFamily ?? null;
 }
 
@@ -609,6 +612,12 @@ export function getDefaultFontFamily(para: DocParagraph): string | null {
  *  font's win line-height ratio. 0 when the font is not in the metrics table. */
 export function emptyIntendedSinglePx(para: DocParagraph, scale: number): number {
   return intendedSingleLinePx(getDefaultFontFamily(para), getDefaultFontSize(para) * scale);
+}
+
+/** Intended single-line height (px) for an empty paragraph in the script axis
+ *  used to draw its paragraph mark. */
+function emptyIntendedSingleForScriptPx(para: DocParagraph, scale: number, eastAsian: boolean): number {
+  return intendedSingleLinePx(getDefaultFontFamily(para, eastAsian), getDefaultFontSize(para) * scale);
 }
 
 /** Code points whose presence marks a line as East Asian for docGrid line-cell
@@ -873,7 +882,7 @@ export function paragraphMarkLineHeight(
   fontFamilyClasses: Record<string, string> = {},
 ): number {
   const fs = getDefaultFontSize(para);
-  const family = getDefaultFontFamily(para);
+  const family = getDefaultFontFamily(para, eastAsian);
   let asc: number;
   let desc: number;
   if (ctx) {
@@ -904,7 +913,7 @@ export function paragraphMarkLineHeight(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), eastAsian);
+  return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian);
 }
 
 /**
@@ -1001,6 +1010,56 @@ export function resolveFieldText(f: FieldRun, state: RenderState): string {
     return f.fallbackText;
   }
   return f.fallbackText;
+}
+
+const MATH_SPACED_OPERATORS = new Set(['+', '-', '−', '=', '±', '×', '÷']);
+
+function mathRunPlainText(text: string): string {
+  return MATH_SPACED_OPERATORS.has(text) ? ` ${text} ` : text;
+}
+
+export function mathPlainText(nodes: MathNode[]): string {
+  const renderNode = (node: MathNode): string => {
+    switch (node.kind) {
+      case 'run':
+        return mathRunPlainText(node.text);
+      case 'fraction':
+        return `${mathPlainText(node.num)}/${mathPlainText(node.den)}`;
+      case 'sup':
+        return `${mathPlainText(node.base)}^${mathPlainText(node.sup ?? [])}`;
+      case 'sub':
+        return `${mathPlainText(node.base)}_${mathPlainText(node.sub ?? [])}`;
+      case 'subSup':
+        return `${mathPlainText(node.base)}_${mathPlainText(node.sub ?? [])}^${mathPlainText(node.sup ?? [])}`;
+      case 'nary':
+        return `${node.op}${mathPlainText(node.sub ?? [])}${mathPlainText(node.sup ?? [])}${mathPlainText(node.body)}`;
+      case 'delimiter':
+        return `${node.begChar}${node.items.map(mathPlainText).join(',')}${node.endChar}`;
+      case 'radical':
+        return `${node.index && node.index.length > 0 ? mathPlainText(node.index) : ''}√${mathPlainText(node.radicand)}`;
+      case 'limit':
+        return `${mathPlainText(node.base)}${mathPlainText(node.lower ?? [])}${mathPlainText(node.upper ?? [])}`;
+      case 'array':
+        return node.rows.map((row) => row.map(mathPlainText).join(' ')).join(' ');
+      case 'groupChr':
+        return `${node.char}${mathPlainText(node.base)}`;
+      case 'bar':
+      case 'box':
+      case 'borderBox':
+        return mathPlainText(node.base);
+      case 'accent':
+        return `${node.char}${mathPlainText(node.base)}`;
+      case 'func':
+        return `${mathPlainText(node.name)}(${mathPlainText(node.arg)})`;
+      case 'group':
+        return mathPlainText(node.items);
+      case 'phant':
+        return node.show ? mathPlainText(node.base) : '';
+      case 'sPre':
+        return `${mathPlainText(node.sub)}${mathPlainText(node.sup)}${mathPlainText(node.base)}`;
+    }
+  };
+  return nodes.map(renderNode).join('').replace(/[ \t]{2,}/g, ' ');
 }
 
 /** Returns true when any code point of `text` permits a line break between
@@ -1841,6 +1900,7 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         display: run.display,
         fontSize,
         color: null,
+        fallbackText: mathPlainText(run.nodes),
         measuredWidth: 0,
         mathAscent: 0,
         mathDescent: 0,
@@ -2413,7 +2473,20 @@ export function layoutLines(
     // ── Math segment ─────────────────────────────────────
     if ('mathNodes' in seg) {
       const render = mathRenders.get(seg.mathNodes);
-      if (!render) { seg.measuredWidth = 0; continue; }
+      if (!render) {
+        const emPx = seg.fontSize * scale;
+        setMeasureFont(buildFont(false, false, emPx, null, fontFamilyClasses));
+        const m = ctx.measureText(seg.fallbackText);
+        const w = m.width;
+        const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? emPx * 0.8;
+        const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? emPx * 0.2;
+        seg.measuredWidth = w;
+        seg.mathAscent = asc;
+        seg.mathDescent = desc;
+        if (currentLine.length > 0 && currentWidth + w > availW()) flush();
+        addToLine(seg, w, seg.fontSize, Math.max(asc, emPx * 0.8), Math.max(desc, emPx * 0.2));
+        continue;
+      }
       const emPx = seg.fontSize * scale;
       const w = render.widthEm * emPx;
       const asc = render.ascentEm * emPx;
@@ -2814,8 +2887,8 @@ export function rescaleLayoutLines(
  *  {@link layoutLines}) — giving them kinsoku (§17.15.1.58–.60), UAX#9 bidi,
  *  §17.18.44 justification and §17.3.1.37 tab stops. A `ShapeTextRun` carries a
  *  strict SUBSET of `DocxTextRun`'s formatting (text, size, colour, the ascii +
- *  eastAsia font axes §17.3.2.26, bold, italic); every field the shape model
- *  lacks (underline/strike/highlight/border/ruby/rtl/cs/…) takes its neutral
+ *  eastAsia font axes §17.3.2.26, bold, italic, ruby); every field the shape model
+ *  lacks (underline/strike/highlight/border/rtl/cs/…) takes its neutral
  *  default, so the run behaves exactly like a plain body text run. */
 export function shapeRunToDocRun(run: ShapeTextRun): DocRun {
   return {
@@ -2836,6 +2909,7 @@ export function shapeRunToDocRun(run: ShapeTextRun): DocRun {
     background: null,
     vertAlign: null,
     hyperlink: null,
+    ruby: run.ruby ?? undefined,
   } as unknown as DocRun;
 }
 

@@ -90,9 +90,13 @@ export function yContainer(
 }
 
 /** Resolve the page X for an anchor or anchor-group child. `offsetPx` carries
- *  the shape's offset (within the group for wgp children, 0 for standalone
- *  anchors). `alignWidthPx` is the width used when aligning — the GROUP's
- *  width for wgp children, the shape's own width for standalone anchors. */
+ *  the shape's offset for explicit posOffset anchors, or the within-group child
+ *  offset when `alignWidthPt` is set. For standalone `<wp:align>` anchors it is
+ *  ignored: ECMA-376 §20.4.3.1 uses `<wp:align>` / `<wp:posOffset>` as a choice,
+ *  and Word commonly leaves a duplicate a:xfrm/simplePos fallback that must not
+ *  be added to the aligned position. `alignWidthPt` is the width used when
+ *  aligning — the GROUP's width for wgp children, the shape's own width for
+ *  standalone anchors. */
 export function resolveAnchorX(
   align: string | null | undefined,
   fromMargin: boolean,
@@ -114,13 +118,14 @@ export function resolveAnchorX(
   }
   const containerW = c.end - c.start;
   const aw = alignWidthPt != null ? alignWidthPt * scale : widthPx;
+  const alignOffsetPx = alignWidthPt != null ? offsetPx : 0;
   switch (align) {
-    case 'center': return c.start + (containerW - aw) / 2 + offsetPx;
+    case 'center': return c.start + (containerW - aw) / 2 + alignOffsetPx;
     case 'right':
-    case 'outside': return c.end - aw + offsetPx;
+    case 'outside': return c.end - aw + alignOffsetPx;
     case 'inside':
     case 'left':
-    default:        return c.start + offsetPx;
+    default:        return c.start + alignOffsetPx;
   }
 }
 
@@ -146,8 +151,9 @@ export function resolveAnchorY(
   }
   const containerH = c.end - c.start;
   const ah = alignHeightPt != null ? alignHeightPt * scale : heightPx;
+  const alignOffsetPx = alignHeightPt != null ? offsetPx : 0;
   switch (align) {
-    case 'center': return c.start + (containerH - ah) / 2 + offsetPx;
+    case 'center': return c.start + (containerH - ah) / 2 + alignOffsetPx;
     // ECMA-376 §20.4.3.1 ST_AlignV: "inside"/"outside" are page-binding-
     // relative. Mirroring resolveAnchorX (and the insideMargin/outsideMargin
     // approximation in yContainer/xContainer): on an odd page the binding edge
@@ -156,9 +162,9 @@ export function resolveAnchorY(
     // pages mirror the binding edge) is not implemented. Update this when that
     // approximation is removed.
     case 'bottom':
-    case 'outside': return c.end - ah + offsetPx;
+    case 'outside': return c.end - ah + alignOffsetPx;
     case 'top':
     case 'inside':
-    default:        return c.start + offsetPx;
+    default:        return c.start + alignOffsetPx;
   }
 }

@@ -297,6 +297,12 @@ export interface RenderState {
    *  the DRAW pass; falls back to {@link DEFAULT_TAB_PT} (720 twips = 36pt) when
    *  the document omits the element. */
   defaultTabPt: number;
+  /** ECMA-376 §17.15.1.18 — East Asian punctuation / character-spacing mode. */
+  characterSpacingControl?: string;
+  /** ECMA-376 §17.15.3.1 `w:compat/w:useFELayout`. */
+  useFeLayout?: boolean;
+  /** ECMA-376 §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth`. */
+  balanceSingleByteDoubleByteWidth?: boolean;
   /** ECMA-376 §22.1.2.30 `m:mathPr/m:defJc` — document-wide default math
    *  justification (ST_Jc math). `undefined` ⇒ spec default `centerGroup`.
    *  Threaded from `doc.settings.mathDefJc` like `kinsoku`; consumed by the
@@ -1231,6 +1237,9 @@ export async function renderDocumentToCanvas(
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
     defaultTabPt: resolveDefaultTabPt(doc.settings),
+    characterSpacingControl: doc.settings?.characterSpacingControl,
+    useFeLayout: doc.settings?.useFeLayout,
+    balanceSingleByteDoubleByteWidth: doc.settings?.balanceSingleByteDoubleByteWidth,
     mathDefJc: doc.settings?.mathDefJc,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
@@ -1435,8 +1444,9 @@ function measureNoteBlockForDraw(
   docEastAsian: boolean,
   // §17.15.1.25 — keep the note measure pass on the same automatic tab interval.
   defaultTabPt: number = DEFAULT_TAB_PT,
+  settings?: DocSettings,
 ): { total: number; trailingSpaceAfter: number } {
-  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku, docEastAsian, defaultTabPt);
+  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku, docEastAsian, defaultTabPt, settings);
   const contentWPt = sec.pageWidth - sec.marginLeft - sec.marginRight;
   return measureFootnoteBlockPt(note, measure, contentWPt);
 }
@@ -1478,7 +1488,7 @@ function drawPageFootnotes(
   for (const id of ids) {
     const note = noteById.get(id);
     if (!note) continue;
-    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku, baseState.docEastAsian, baseState.defaultTabPt);
+    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku, baseState.docEastAsian, baseState.defaultTabPt, doc.settings);
     totalPt += m.total;
     lastTrailingPt = m.trailingSpaceAfter;
   }
@@ -1832,6 +1842,8 @@ export function computePages(
    *  pagination measure pass advances tabs identically to the draw pass; defaults
    *  to the spec absent value when a caller has no document settings. */
   defaultTabPt: number = DEFAULT_TAB_PT,
+  /** ECMA-376 §17.15.1.* — document-wide layout settings. */
+  settings?: DocSettings,
 ): PaginatedBodyElement[][] {
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
@@ -1846,7 +1858,7 @@ export function computePages(
   const bodyTopPt = () => bodyMarginInsetPt(currentSectionGeom.marginTop);
   const bodyBottomPt = () => bodyMarginInsetPt(currentSectionGeom.marginBottom);
   const fullContentH = () => currentSectionGeom.pageHeight - bodyTopPt() - bodyBottomPt();
-  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body), defaultTabPt);
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body), defaultTabPt, settings);
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -2313,6 +2325,8 @@ export function computePages(
         // so sizeRelV / wgp-group scaling is honored. measureState is scale 1 (pt),
         // so box.h is already in pt.
         const shp = run as unknown as ShapeRun;
+        const preset = (shp.presetGeometry ?? '').toLowerCase();
+        if (preset.includes('callout') && shp.wrapMode === 'none') continue;
         if (!shp.anchorYFromPara) continue;
         const box = resolveShapeBox(shp, measureState, measureState.y);
         if (box.h <= 0) continue;
@@ -2345,6 +2359,25 @@ export function computePages(
     return 0;
   };
 
+  const estimateFollowingInlineImageClusterHeight = (startIdx: number): number => {
+    let total = 0;
+    for (let j = startIdx; j < body.length; j++) {
+      const nxt = body[j];
+      if (!nxt || nxt.type === 'pageBreak' || nxt.type === 'sectionBreak' || nxt.type === 'columnBreak') return 0;
+      if (nxt.type !== 'paragraph') return 0;
+      const p = nxt as unknown as DocParagraph;
+      if (isInklessParagraph(p)) {
+        total += estimateParagraphHeight(measureState, p, colW(), false);
+        continue;
+      }
+      if (hasInlineImage(p)) {
+        return total + estimateParagraphHeight(measureState, p, colW(), false);
+      }
+      return 0;
+    }
+    return 0;
+  };
+
   // Stamp the active newspaper column (index + this section's geometry) on an
   // element and push it onto the current page. For single-column sections
   // colIndex is always 0 (the renderer treats 0/absent identically) and colGeom
@@ -2367,6 +2400,14 @@ export function computePages(
   // the common single-section document.
   setupBalancing(0);
 
+  const hasFollowingFlowContent = (startIdx: number): boolean => {
+    for (let j = startIdx; j < body.length; j++) {
+      const nxt = body[j];
+      if (nxt.type === 'paragraph' || nxt.type === 'table') return true;
+    }
+    return false;
+  };
+
   for (let i = 0; i < body.length; i++) {
     const el = body[i];
     if (el.type === 'columnBreak') {
@@ -2375,6 +2416,7 @@ export function computePages(
       // on an empty page, so a column break in the last column of an as-yet-empty
       // page simply stays put). Page-start index = the body element AFTER the
       // break (i + 1) since the break itself emits no content on the new page.
+      if (!hasFollowingFlowContent(i + 1)) continue;
       nextColumnOrPage(i + 1);
       continue;
     }
@@ -2678,7 +2720,35 @@ export function computePages(
       const floatBottomOff = anchoredFloatBottomOffset(para);
       const floatOverflowsHere = floatBottomOff > 0 && y + floatBottomOff > effContentH();
       const floatFitsFresh = floatBottomOff > 0 && floatBottomOff <= effContentH();
-      const breakForFloat = y > 0 && floatOverflowsHere && floatFitsFresh;
+      // If the author placed a hard page break immediately after this paragraph,
+      // the paragraph-anchored drawing belongs to the pre-break page. Do not move
+      // the anchor paragraph to the post-break page solely to satisfy the generic
+      // keep-on-page float rule; the following pageBreak is the source boundary.
+      const followedByHardPageBreak = nextEl?.type === 'pageBreak';
+      const breakForFloat = !followedByHardPageBreak && y > 0 && floatOverflowsHere && floatFitsFresh;
+      const nextAnchorBeforeHardBreak =
+        hasInlineImage(para) &&
+        nextEl?.type === 'paragraph' &&
+        body[i + 2]?.type === 'pageBreak' &&
+        isAnchorOnlyParagraph(nextEl as unknown as DocParagraph)
+          ? (nextEl as unknown as DocParagraph)
+          : null;
+      const nextAnchorBottomOff = nextAnchorBeforeHardBreak
+        ? anchoredFloatBottomOffset(nextAnchorBeforeHardBreak)
+        : 0;
+      const breakForTrailingAnchor =
+        nextAnchorBottomOff > 0 &&
+        y > 0 &&
+        y + fitHeight + nextAnchorBottomOff > effContentH() &&
+        fitHeight + nextAnchorBottomOff <= effContentH();
+      const followingImageClusterH = hasInlineImage(para)
+        ? estimateFollowingInlineImageClusterHeight(i + 1)
+        : 0;
+      const breakForFollowingImageCluster =
+        followingImageClusterH > 0 &&
+        y > 0 &&
+        y + fitHeight + followingImageClusterH > effContentH() &&
+        fitHeight + followingImageClusterH <= effContentH();
       // Does the content (+ keepNext look-ahead + newly-referenced footnote
       // bodies) overflow the space left on this page? spaceAfter is trailing
       // whitespace allowed to spill past the bottom margin, so it is excluded.
@@ -2727,7 +2797,7 @@ export function computePages(
         wantsBalanceBreak(fitHeight + needNext) &&
         fitHeight + needNext <= balanceColH;
       const balanceBreak = balanceBreakKeepLines || balanceBreakKeepNext;
-      if (breakForFloat || balanceBreak || (overflowsHere && keepIntact && needed <= effContentH())) {
+      if (breakForFloat || breakForTrailingAnchor || breakForFollowingImageCluster || balanceBreak || (overflowsHere && keepIntact && needed <= effContentH())) {
         const pagesBeforeRelocate = pages.length;
         // Relocating THIS paragraph to a fresh page: pre-scan from `i` so the
         // new page starts with THIS paragraph's own page-level floats counted.
@@ -2752,6 +2822,18 @@ export function computePages(
           measureState.floatParaSeq = floatSeqBefore;
           registerAnchorFloats(para, measureState, measureState.y);
         }
+      }
+      if (followedByHardPageBreak && isAnchorOnlyParagraph(para)) {
+        // A shape-only anchor paragraph immediately before a hard page break is a
+        // drawing attachment point for the pre-break page, not a visible empty
+        // line that should be pushed to the post-break page when the body is full
+        // (sample-33's photo callout). The break element following this paragraph
+        // will advance to the next page; keep this anchor on the current one and
+        // avoid adding paragraph-mark height.
+        pushTagged(el as PaginatedBodyElement);
+        prevPara = para;
+        prevSpaceAfter = 0;
+        continue;
       }
 
       // ECMA-376 places no "a paragraph must fit on one page" requirement — Word
@@ -2816,7 +2898,6 @@ export function computePages(
         y += h;
         measureState.y += h;
       }
-
       // Commit the footnote reserve onto the page the paragraph landed on.
       if (haveFootnotes && newRefIds.length > 0) {
         const idx = pages.length - 1;
@@ -3072,9 +3153,8 @@ export function computePages(
       // full content band. Resolve columns + row heights together (one min-content
       // scan) so both can be stamped for the paint pass (B2 table stage 1b).
       const tblContentWPt = colW();
-      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: rowHs } =
+      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
         computeTablePtLayout(measureState, tbl, tblContentWPt);
-      const h = rowHs.reduce((s, x) => s + x, 0);
       // ECMA-376 §17.11.10 — a footnote referenced from inside a table cell is
       // drawn at the bottom of the page holding the table, so the body area must
       // shrink by the note height just as it does for a body-paragraph reference
@@ -3098,6 +3178,17 @@ export function computePages(
       // table's own footnote reserve is subtracted on top so the note clears the
       // table content.
       const tableContentH = effContentH() - tblReservePt;
+      const splitRows = splitRowsTallerThanPage(
+        tbl,
+        measuredRowHs,
+        tblColWidthsPt,
+        tableContentH,
+        measureState,
+      );
+      const pageTable = splitRows?.table ?? tbl;
+      const rowHs = splitRows?.rowHs ?? measuredRowHs;
+      const tableEl = (splitRows ? { ...pageTable, type: 'table' } : el) as PaginatedBodyElement;
+      const h = rowHs.reduce((s, x) => s + x, 0);
       const commitTableReserve = () => {
         if (!haveFootnotes || tblNewRefIds.length === 0) return;
         // Re-filter against the landing page (a split may have advanced pages, so
@@ -3108,12 +3199,15 @@ export function computePages(
         footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
         for (const id of tblNewRefIds) pageNoteIds.add(id);
       };
-      if (h > tableContentH) {
-        // Taller than a full column: split row-by-row so the overflow continues
-        // into the next column / page instead of being clipped (ECMA-376 table
-        // pagination). Tables that fit keep the simple place-whole path below.
+      const overflowsCurrentColumn = y + h > tableContentH;
+      if (h > tableContentH || (!wantsBalanceBreak(h) && overflowsCurrentColumn)) {
+        // Split row-by-row so overflow continues into the next column / page
+        // instead of leaving the current page under-filled. If the first
+        // overflowing row is auto-height and splittable (no w:cantSplit), the
+        // splitter may also divide that row by cell block boundaries, matching
+        // Word's default table-row pagination.
         const endY = splitTableAcrossPages(
-          tbl, rowHs, y, tableContentH, pages,
+          pageTable, rowHs, y, tableContentH, pages,
           // Table slices belong to THIS table element, so the new page's
           // pre-scan starts at `i` (this table's body index). The just-filled
           // column bottom folds into `maxColBottomY` so a following continuous
@@ -3130,6 +3224,7 @@ export function computePages(
           // paint pass reuses it. Each slice records ITS rows' heights; the column
           // widths + contentWPt are constant across the split.
           { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
+          { colWidthsPt: tblColWidthsPt, state: measureState },
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -3139,8 +3234,8 @@ export function computePages(
         // the rest of this column ⇒ advance to the next column / page.
         if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
         // B2 table stage 1b — stamp the whole-table scale-1 layout for paint reuse.
-        stampTableLayout(el as PaginatedBodyElement, tblColWidthsPt, rowHs, tblContentWPt);
-        pushTagged(el as PaginatedBodyElement);
+        stampTableLayout(tableEl, tblColWidthsPt, rowHs, tblContentWPt);
+        pushTagged(tableEl);
         y += h;
         measureState.y += h;
         commitTableReserve();
@@ -3342,8 +3437,8 @@ function paginateWithHeaderFooterReserve(
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
   const defaultTabPt = resolveDefaultTabPt(doc.settings);
-  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, [], defaultTabPt);
-  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body), defaultTabPt);
+  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, [], defaultTabPt, doc.settings);
+  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body), defaultTabPt, doc.settings);
   const footerReserves = computeFooterReserves(pass1, doc, measure);
   const headerReserves = computeHeaderReserves(pass1, doc, measure);
   const overflows = (rs: number[]): boolean => rs.some((r) => r > MIN_MARGIN_OVERFLOW_PT);
@@ -3352,7 +3447,7 @@ function paginateWithHeaderFooterReserve(
     top: headerReserves[i] ?? 0,
     bottom: footerReserves[i] ?? 0,
   }));
-  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves, defaultTabPt);
+  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves, defaultTabPt, doc.settings);
 }
 
 /** Paginate with a throwaway measure context (a fresh OffscreenCanvas, scale 1).
@@ -3402,6 +3497,7 @@ function buildMeasureState(
   // §17.15.1.25 — threaded so the measure pass uses the SAME automatic tab
   // interval as the draw pass; defaults to the spec absent value when no doc.
   defaultTabPt: number = DEFAULT_TAB_PT,
+  settings?: DocSettings,
 ): RenderState {
   return {
     ctx,
@@ -3447,6 +3543,9 @@ function buildMeasureState(
     fontFamilyClasses,
     kinsoku,
     defaultTabPt,
+    characterSpacingControl: settings?.characterSpacingControl,
+    useFeLayout: settings?.useFeLayout,
+    balanceSingleByteDoubleByteWidth: settings?.balanceSingleByteDoubleByteWidth,
     showTrackChanges: false,
   };
 }
@@ -4246,6 +4345,396 @@ function stampTableLayout(
   el.tableLayoutInputs = { scale: 1, contentWPt };
 }
 
+function measureSingleTableRowPt(
+  row: DocTableRow,
+  table: DocTable,
+  colWidthsPt: number[],
+  state: RenderState,
+): number {
+  return resolveSingleRowHeight(row, colWidthsPt, 1, (cell, cellW) =>
+    measureCellContentHeightPx(cell, table, cellW, 1, state),
+  );
+}
+
+function rowSliceByCellContent(row: DocTableRow, start: number, end: number): DocTableRow {
+  return {
+    ...row,
+    cells: row.cells.map((cell) => ({
+      ...cell,
+      content: cell.content.slice(start, end),
+    })),
+  };
+}
+
+function splitRowByCellBlocks(
+  table: DocTable,
+  row: DocTableRow,
+  colWidthsPt: number[],
+  maxHeightPt: number,
+  state: RenderState,
+): { rows: DocTableRow[]; heights: number[] } | null {
+  if (row.isHeader || row.cantSplit || row.rowHeightRule === 'exact') return null;
+  if (row.cells.some((cell) => cell.vMerge !== null)) return null;
+  const blockCount = Math.max(0, ...row.cells.map((cell) => cell.content.length));
+  if (blockCount <= 1) return null;
+
+  const rows: DocTableRow[] = [];
+  const heights: number[] = [];
+  let start = 0;
+  while (start < blockCount) {
+    let bestEnd = start + 1;
+    let bestHeight = Number.POSITIVE_INFINITY;
+    for (let end = start + 1; end <= blockCount; end++) {
+      const candidate = rowSliceByCellContent(row, start, end);
+      const h = measureSingleTableRowPt(candidate, table, colWidthsPt, state);
+      if (h <= maxHeightPt || bestHeight === Number.POSITIVE_INFINITY) {
+        bestEnd = end;
+        bestHeight = h;
+      }
+      if (h > maxHeightPt) break;
+    }
+    const slice = rowSliceByCellContent(row, start, bestEnd);
+    rows.push(slice);
+    heights.push(Number.isFinite(bestHeight) ? bestHeight : measureSingleTableRowPt(slice, table, colWidthsPt, state));
+    start = bestEnd;
+  }
+  return rows.length > 1 ? { rows, heights } : null;
+}
+
+function layoutCellParagraphForRowSplit(
+  para: DocParagraph,
+  innerWPt: number,
+  state: RenderState,
+): { lines: LayoutLine[]; lineHeights: number[]; inputs: Parameters<typeof stampParagraphLines>[2] } | null {
+  const segs = buildSegments(para.runs, state);
+  if (segs.length === 0) return null;
+  const grid = paraGrid(para, state);
+  const paraHasRuby = paragraphHasRuby(para);
+  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
+  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
+  const paraW = Math.max(1, innerWPt - indLeft - indRight);
+  const gridDeltaPx = gridCharDeltaPx(grid, 1);
+  const lines = layoutLines(
+    state.ctx,
+    segs,
+    paraW,
+    para.indentFirst,
+    1,
+    para.tabStops,
+    undefined,
+    state.fontFamilyClasses,
+    indLeft,
+    state.kinsoku,
+    gridDeltaPx,
+    state.defaultTabPt,
+    para.bidi === true ? paraW + indRight : paraW,
+    para.bidi === true,
+  );
+  if (lines.length === 0) return null;
+  const perLineH = (l: LayoutLine) =>
+    lineBoxHeight(
+      para.lineSpacing,
+      l.ascent,
+      l.descent,
+      1,
+      grid,
+      paraHasRuby,
+      l.intendedSingle,
+      paragraphIsEastAsian(para),
+    );
+  const uniformH = paraHasRuby
+    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), grid, 1)
+    : 0;
+  return {
+    lines,
+    lineHeights: lines.map((l) => (paraHasRuby ? uniformH : perLineH(l))),
+    inputs: {
+      paraW,
+      firstIndent: para.indentFirst,
+      tabOriginPx: indLeft,
+      gridDeltaPx,
+      hasFloats: false,
+      kinsoku: state.kinsoku,
+    },
+  };
+}
+
+function paragraphLineSliceHeight(
+  para: DocParagraph,
+  lineHeights: number[],
+  start: number,
+  end: number,
+): number {
+  let h = 0;
+  for (let i = start; i < end; i++) h += lineHeights[i] ?? 0;
+  if (start === 0) h += para.spaceBefore;
+  if (end >= lineHeights.length) h += Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders));
+  return h;
+}
+
+function paragraphLineSliceElement(
+  para: DocParagraph,
+  layout: NonNullable<ReturnType<typeof layoutCellParagraphForRowSplit>>,
+  start: number,
+  end: number,
+): CellElement {
+  const slice = {
+    ...(para as object),
+    type: 'paragraph',
+    lineSlice: { start, end },
+  } as unknown as CellElement;
+  if (!paragraphSegsStateSensitive(para)) {
+    stampParagraphLines(slice as unknown as PaginatedElementWithLines, layout.lines, layout.inputs);
+  }
+  return slice;
+}
+
+function splitCellContentByHeight(
+  content: CellElement[],
+  innerWPt: number,
+  maxContentHeightPt: number,
+  state: RenderState,
+): { before: CellElement[]; after: CellElement[]; beforeHeight: number; afterHeight: number } | null {
+  const before: CellElement[] = [];
+  let beforeHeight = 0;
+  let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
+  type LineSlice = { start: number; end: number };
+  const cellLineSlice = (ce: CellElement): LineSlice | undefined =>
+    (ce as CellElement & { lineSlice?: LineSlice }).lineSlice;
+
+  const additionHeight = (ce: CellElement, rawHeight: number, slice = cellLineSlice(ce)): number => {
+    if (ce.type !== 'paragraph') return rawHeight;
+    const para = ce as unknown as DocParagraph;
+    const continuationSlice = !!slice && slice.start > 0;
+    const rawBefore = continuationSlice ? 0 : para.spaceBefore;
+    const suppress = !continuationSlice && contextualSuppressed(prevPara, para);
+    const effBefore = suppress ? 0 : rawBefore;
+    const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+    return rawHeight
+      - (suppress ? rawBefore : 0)
+      - overlap;
+  };
+  const appendBefore = (ce: CellElement, rawHeight: number, slice = cellLineSlice(ce), totalLines?: number): void => {
+    before.push(ce);
+    beforeHeight += additionHeight(ce, rawHeight, slice);
+    if (ce.type === 'paragraph') {
+      const para = ce as unknown as DocParagraph;
+      prevPara = para;
+      prevSpaceAfter = !slice || totalLines == null || slice.end >= totalLines
+        ? para.spaceAfter
+        : 0;
+    } else {
+      prevPara = null;
+      prevSpaceAfter = 0;
+    }
+  };
+  const measureSplitElement = (ce: CellElement): { rawHeight: number; slice?: LineSlice; totalLines?: number } => {
+    if (ce.type !== 'paragraph') {
+      return { rawHeight: measureCellElementHeight(state, ce, innerWPt, 1) };
+    }
+    const para = ce as unknown as DocParagraph;
+    const layout = layoutCellParagraphForRowSplit(para, innerWPt, state);
+    if (!layout) return { rawHeight: measureCellElementHeight(state, ce, innerWPt, 1) };
+    const existingSlice = cellLineSlice(ce);
+    const slice = {
+      start: Math.max(0, existingSlice?.start ?? 0),
+      end: Math.min(layout.lines.length, existingSlice?.end ?? layout.lines.length),
+    };
+    return {
+      rawHeight: paragraphLineSliceHeight(para, layout.lineHeights, slice.start, slice.end),
+      slice,
+      totalLines: layout.lines.length,
+    };
+  };
+  const sumContentHeightForSplit = (items: CellElement[]): number => {
+    let h = 0;
+    let localPrevPara: DocParagraph | null = null;
+    let localPrevSpaceAfter = 0;
+    for (const item of items) {
+      const measured = measureSplitElement(item);
+      if (item.type !== 'paragraph') {
+        h += measured.rawHeight;
+        localPrevPara = null;
+        localPrevSpaceAfter = 0;
+        continue;
+      }
+      const para = item as unknown as DocParagraph;
+      const continuationSlice = !!measured.slice && measured.slice.start > 0;
+      const rawBefore = continuationSlice ? 0 : para.spaceBefore;
+      const suppress = !continuationSlice && contextualSuppressed(localPrevPara, para);
+      const effBefore = suppress ? 0 : rawBefore;
+      const overlap = suppress ? localPrevSpaceAfter : Math.min(localPrevSpaceAfter, effBefore);
+      h += measured.rawHeight - (suppress ? rawBefore : 0) - overlap;
+      localPrevPara = para;
+      localPrevSpaceAfter = !measured.slice || measured.totalLines == null || measured.slice.end >= measured.totalLines
+        ? para.spaceAfter
+        : 0;
+    }
+    return h;
+  };
+
+  for (let i = 0; i < content.length; i++) {
+    const ce = content[i];
+    const para = ce.type === 'paragraph' ? ce as unknown as DocParagraph : null;
+    const layout = para ? layoutCellParagraphForRowSplit(para, innerWPt, state) : null;
+    const existingSlice = cellLineSlice(ce);
+    const currentSlice = layout
+      ? {
+        start: Math.max(0, existingSlice?.start ?? 0),
+        end: Math.min(layout.lines.length, existingSlice?.end ?? layout.lines.length),
+      }
+      : existingSlice;
+    const fullH = para && layout
+      ? paragraphLineSliceHeight(para, layout.lineHeights, currentSlice?.start ?? 0, currentSlice?.end ?? layout.lines.length)
+      : measureCellElementHeight(state, ce, innerWPt, 1);
+    const fullAddH = additionHeight(ce, fullH, currentSlice);
+    if (beforeHeight + fullAddH <= maxContentHeightPt) {
+      appendBefore(ce, fullH, currentSlice, layout?.lines.length);
+      continue;
+    }
+
+    if (ce.type !== 'paragraph') {
+      const after = content.slice(i);
+      const afterHeight = sumContentHeightForSplit(after);
+      return before.length > 0 ? { before, after, beforeHeight, afterHeight } : null;
+    }
+
+    if (!layout) {
+      const after = content.slice(i);
+      const afterHeight = sumContentHeightForSplit(after);
+      return before.length > 0 ? { before, after, beforeHeight, afterHeight } : null;
+    }
+
+    const splitPara = para ?? ce as unknown as DocParagraph;
+    let endLine = 0;
+    let sliceH = 0;
+    let sliceAddH = 0;
+    const sliceStart = currentSlice?.start ?? 0;
+    const sliceEnd = currentSlice?.end ?? layout.lines.length;
+    for (let end = sliceStart + 1; end <= sliceEnd; end++) {
+      const h = paragraphLineSliceHeight(splitPara, layout.lineHeights, sliceStart, end);
+      const addH = additionHeight(ce, h, { start: sliceStart, end });
+      if (beforeHeight + addH > maxContentHeightPt) break;
+      endLine = end;
+      sliceH = h;
+      sliceAddH = addH;
+    }
+    if (endLine === 0) {
+      const after = content.slice(i);
+      const afterHeight = sumContentHeightForSplit(after);
+      return before.length > 0 ? { before, after, beforeHeight, afterHeight } : null;
+    }
+    if (endLine >= sliceEnd) {
+      appendBefore(ce, fullH, currentSlice, layout.lines.length);
+      continue;
+    }
+
+    before.push(paragraphLineSliceElement(splitPara, layout, sliceStart, endLine));
+    beforeHeight += sliceAddH;
+    const afterPara = paragraphLineSliceElement(splitPara, layout, endLine, sliceEnd);
+    const after = [afterPara, ...content.slice(i + 1)];
+    const afterHeight = sumContentHeightForSplit(after);
+    return { before, after, beforeHeight, afterHeight };
+  }
+
+  return { before, after: [], beforeHeight, afterHeight: 0 };
+}
+
+function splitRowByCellLines(
+  table: DocTable,
+  row: DocTableRow,
+  colWidthsPt: number[],
+  maxHeightPt: number,
+  state: RenderState,
+): { rows: DocTableRow[]; heights: number[] } | null {
+  if (row.isHeader || row.cantSplit || row.rowHeightRule === 'exact') return null;
+  if (row.cells.some((cell) => cell.vMerge !== null)) return null;
+
+  const beforeCells: DocTableCell[] = [];
+  const afterCells: DocTableCell[] = [];
+  const beforeCellHeights: number[] = [];
+  const afterCellHeights: number[] = [];
+  let madeProgress = false;
+  let hasRemainder = false;
+  let ci = 0;
+
+  for (const cell of row.cells) {
+    const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
+    const cellWPt = colWidthsPt.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+    ci += span;
+    const margins = effCellMargins(cell, table);
+    const maxContentH = Math.max(0, maxHeightPt - margins.top - margins.bottom);
+    const split = splitCellContentByHeight(
+      trimTrailingStructuralMarker(cell.content),
+      cellWPt - margins.left - margins.right,
+      maxContentH,
+      state,
+    );
+    if (!split) return null;
+    beforeCells.push({ ...cell, content: split.before });
+    afterCells.push({ ...cell, content: split.after });
+    beforeCellHeights.push(margins.top + margins.bottom + split.beforeHeight);
+    afterCellHeights.push(margins.top + margins.bottom + split.afterHeight);
+    madeProgress ||= split.before.length > 0;
+    hasRemainder ||= split.after.length > 0;
+  }
+
+  if (!madeProgress || !hasRemainder) return null;
+  const floor = row.rowHeight != null && (row.rowHeightRule === 'atLeast' || row.rowHeightRule === 'auto')
+    ? row.rowHeight
+    : 0;
+  return {
+    rows: [
+      { ...row, cells: beforeCells, rowHeight: null, rowHeightRule: 'auto' },
+      { ...row, cells: afterCells, rowHeight: null, rowHeightRule: 'auto' },
+    ],
+    heights: [
+      Math.max(floor, ...beforeCellHeights),
+      Math.max(0, ...afterCellHeights),
+    ],
+  };
+}
+
+function splitRowForHeight(
+  table: DocTable,
+  row: DocTableRow,
+  colWidthsPt: number[],
+  maxHeightPt: number,
+  state: RenderState,
+): { rows: DocTableRow[]; heights: number[] } | null {
+  return splitRowByCellLines(table, row, colWidthsPt, maxHeightPt, state)
+    ?? splitRowByCellBlocks(table, row, colWidthsPt, maxHeightPt, state);
+}
+
+function splitRowsTallerThanPage(
+  table: DocTable,
+  rowHeightsPt: number[],
+  colWidthsPt: number[],
+  pageContentHeightPt: number,
+  state: RenderState,
+): { table: DocTable; rowHs: number[] } | null {
+  let changed = false;
+  const rows: DocTableRow[] = [];
+  const heights: number[] = [];
+  for (let ri = 0; ri < table.rows.length; ri++) {
+    const row = table.rows[ri];
+    const rowH = rowHeightsPt[ri];
+    if (rowH > pageContentHeightPt) {
+      const split = splitRowForHeight(table, row, colWidthsPt, pageContentHeightPt, state);
+      if (split) {
+        rows.push(...split.rows);
+        heights.push(...split.heights);
+        changed = true;
+        continue;
+      }
+    }
+    rows.push(row);
+    heights.push(rowH);
+  }
+  return changed ? { table: { ...table, rows }, rowHs: heights } : null;
+}
+
 /**
  * Split a table that is taller than one page across page boundaries, row by
  * row (ECMA-376 table pagination). Each page receives a {@link DocTable} slice
@@ -4299,15 +4788,21 @@ export function splitTableAcrossPages(
    *  prepended on continuations so the stamp aligns 1:1 with the slice's rows).
    *  Omitted (direct unit tests) ⇒ slices carry no table stamp and paint recomputes. */
   tableStamp?: { colWidthsPt: number[]; contentWPt: number },
+  /** Optional row-block splitter used by computePages. Direct unit tests can omit
+   *  this and exercise only row-boundary splitting. */
+  rowSplit?: { colWidthsPt: number[]; state: RenderState },
 ): number {
   const colTop = columnTop ?? (() => 0);
-  const n = table.rows.length;
+  let workTable = table;
+  let workRows = table.rows;
+  let workRowHs = rowHs;
+  let n = workRows.length;
   // Leading tblHeader rows repeat on each continuation page.
   let headerCount = 0;
-  while (headerCount < n && table.rows[headerCount].isHeader) headerCount++;
-  const headerRows = table.rows.slice(0, headerCount);
-  const headerH = rowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
-  const headerHeightsPt = rowHs.slice(0, headerCount);
+  while (headerCount < n && workRows[headerCount].isHeader) headerCount++;
+  const headerRows = workRows.slice(0, headerCount);
+  const headerH = workRowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
+  const headerHeightsPt = workRowHs.slice(0, headerCount);
 
   let y = startY;
   let start = 0;
@@ -4316,19 +4811,73 @@ export function splitTableAcrossPages(
   while (start < n) {
     const isContinuation = !firstSlice && headerCount > 0 && start >= headerCount;
     const avail = contentH - y;
+    const firstRowH = (isContinuation ? headerH : 0) + workRowHs[start];
+    const freshAvail = contentH - colTop();
+    const rowAvail = avail - (isContinuation ? headerH : 0);
+    if (rowSplit && firstRowH > avail && rowAvail > 0 && start >= headerCount) {
+      const split = splitRowForHeight(workTable, workRows[start], rowSplit.colWidthsPt, rowAvail, rowSplit.state);
+      if (split && split.heights[0] <= rowAvail) {
+        workRows = [
+          ...workRows.slice(0, start),
+          ...split.rows,
+          ...workRows.slice(start + 1),
+        ];
+        workRowHs = [
+          ...workRowHs.slice(0, start),
+          ...split.heights,
+          ...workRowHs.slice(start + 1),
+        ];
+        workTable = { ...workTable, rows: workRows };
+        n = workRows.length;
+        continue;
+      }
+    }
+    if (firstRowH > avail && y > colTop() && firstRowH <= freshAvail) {
+      newPage(y);
+      y = colTop();
+      firstSlice = false;
+      continue;
+    }
     let used = isContinuation ? headerH : 0;
     let end = start;
     // Always place at least one row to guarantee forward progress.
     while (end < n) {
-      const h = rowHs[end];
-      if (end > start && used + h > avail && tableBreakAllowedBefore(table, end)) break;
+      const h = workRowHs[end];
+      if (end > start && used + h > avail && tableBreakAllowedBefore(workTable, end)) {
+        const remainingForNextRow = avail - used;
+        if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
+          const split = splitRowForHeight(
+            workTable,
+            workRows[end],
+            rowSplit.colWidthsPt,
+            remainingForNextRow,
+            rowSplit.state,
+          );
+          if (split && split.heights[0] <= remainingForNextRow) {
+            workRows = [
+              ...workRows.slice(0, end),
+              ...split.rows,
+              ...workRows.slice(end + 1),
+            ];
+            workRowHs = [
+              ...workRowHs.slice(0, end),
+              ...split.heights,
+              ...workRowHs.slice(end + 1),
+            ];
+            workTable = { ...workTable, rows: workRows };
+            n = workRows.length;
+            continue;
+          }
+        }
+        break;
+      }
       used += h;
       end++;
     }
 
-    const bodyRows = table.rows.slice(start, end);
+    const bodyRows = workRows.slice(start, end);
     const sliceRows = isContinuation ? [...headerRows, ...bodyRows] : bodyRows;
-    const sliceEl = { ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement;
+    const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
     if (colGeom) sliceEl.colGeom = colGeom;
     // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
@@ -4342,8 +4891,8 @@ export function splitTableAcrossPages(
     // them 1:1 instead of re-measuring the slice.
     if (tableStamp) {
       const sliceHeightsPt = isContinuation
-        ? [...headerHeightsPt, ...rowHs.slice(start, end)]
-        : rowHs.slice(start, end);
+        ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
+        : workRowHs.slice(start, end);
       stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
     }
     pages[pages.length - 1].push(sliceEl);
@@ -4584,6 +5133,31 @@ function isInklessParagraph(p: DocParagraph): boolean {
     if (run.type === 'text') return (run.text ?? '').length > 0;
     return true; // image / shape / math / break runs are visible content
   });
+}
+
+function isAnchorOnlyParagraph(p: DocParagraph): boolean {
+  let hasAnchor = false;
+  for (const r of p.runs ?? []) {
+    if (r.type === 'text' && ((r as DocxTextRun).text ?? '').length === 0) continue;
+    if (r.type === 'shape') {
+      hasAnchor = true;
+      continue;
+    }
+    if (r.type === 'image' && !!(r as unknown as ImageRun).anchor) {
+      hasAnchor = true;
+      continue;
+    }
+    if (r.type === 'chart' && !!(r as unknown as ChartRun).anchor) {
+      hasAnchor = true;
+      continue;
+    }
+    return false;
+  }
+  return hasAnchor;
+}
+
+function hasInlineImage(p: DocParagraph): boolean {
+  return (p.runs ?? []).some((r) => r.type === 'image' && !(r as unknown as ImageRun).anchor);
 }
 
 /**
@@ -6061,6 +6635,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const h = (render.ascentEm + render.descentEm) * emPx;
           const top = baseline - render.ascentEm * emPx;
           ctx.drawImage(render.img, x, top, w, h);
+        } else if (!dryRun && seg.fallbackText) {
+          ctx.font = buildFont(false, false, seg.fontSize * scale, null, fontFamilyClasses);
+          ctx.fillStyle = seg.color ?? defaultColor;
+          ctx.fillText(seg.fallbackText, x, baseline);
         }
         x += seg.measuredWidth;
         continue;
@@ -6875,7 +7453,9 @@ function renderInlineImage(
  * Wrap floats (square/topAndBottom/tight/through) are drawn by registerAnchorFloats.
  *
  * `phase` = 'behind' draws only shapes with behindDoc=true (sorted by zOrder asc);
- * `phase` = 'front' draws shapes without behindDoc + all anchor images. */
+ * `phase` = 'front' draws shapes without behindDoc + all anchor images. Front
+ * shapes are sorted by `wp:anchor/@relativeHeight` (lower first, higher on top)
+ * while non-shape anchors keep their legacy run-order fallback. */
 function renderAnchorImages(
   para: DocParagraph,
   state: RenderState,
@@ -6918,7 +7498,19 @@ function renderAnchorImages(
     });
     return;
   }
-  for (const run of para.runs) {
+  const frontRuns = para.runs
+    .map((run, index) => {
+      const shapeZ = run.type === 'shape'
+        ? (run as unknown as ShapeRun).zOrder
+        : null;
+      return {
+        run,
+        index,
+        z: typeof shapeZ === 'number' && Number.isFinite(shapeZ) ? shapeZ : index,
+      };
+    })
+    .sort((a, b) => a.z - b.z || a.index - b.index);
+  for (const { run } of frontRuns) {
     if (run.type === 'shape') {
       const s = run as unknown as ShapeRun;
       if (s.behindDoc) continue;
@@ -7147,7 +7739,7 @@ export function drawWatermarkTextPath(
 
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
   const { ctx, scale } = state;
-  const { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
+  let { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
   // Line/connector presets (ECMA-376 §20.1.9.18) are valid with a degenerate
   // bounding box — a horizontal line has h==0, a vertical line w==0. Stroking
   // such a path still draws a visible segment, so only bail when there is truly
@@ -7158,16 +7750,45 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     preset.startsWith('straightconnector') ||
     preset.startsWith('bentconnector') ||
     preset.startsWith('curvedconnector');
+  const isCalloutGeom =
+    preset === 'callout1' ||
+    preset === 'callout2' ||
+    preset === 'callout3' ||
+    preset === 'bordercallout1' ||
+    preset === 'bordercallout2' ||
+    preset === 'bordercallout3' ||
+    preset === 'accentcallout1' ||
+    preset === 'accentcallout2' ||
+    preset === 'accentcallout3' ||
+    preset === 'accentbordercallout1' ||
+    preset === 'accentbordercallout2' ||
+    preset === 'accentbordercallout3';
   // Straight / bent connectors whose leader we re-stroke retracted from filled
-  // line-end decorations (so the line stops at the arrow base). Curved
-  // connectors are excluded — their Bézier leader can't be retracted from a
-  // polyline vertex without straightening it, so they keep the preset leader.
+  // line-end decorations (so the line stops at the arrow base). Callout leader
+  // lines are emitted by the preset engine as their trailing path, so they can
+  // use the same retract/re-stroke path. Curved connectors are excluded — their
+  // Bézier leader can't be retracted from a polyline vertex without
+  // straightening it, so they keep the preset leader.
   const isRetractableLeader =
+    isCalloutGeom ||
     preset === 'line' ||
     preset.startsWith('straightconnector') ||
     preset.startsWith('bentconnector');
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
+
+  if (!isLineGeom && shape.textAutofit === 'sp' && shape.textBlocks && shape.textBlocks.length > 0) {
+    const fitH = measureShapeTextAutoFitHeight(
+      shape,
+      w,
+      ctx as CanvasRenderingContext2D,
+      scale,
+      state.fontFamilyClasses,
+      state.images,
+      state,
+    );
+    if (Number.isFinite(fitH) && fitH > 0) h = fitH;
+  }
 
   // ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt text watermark. It
   // draws stretched, rotated, semi-transparent text filling the shape box
@@ -7275,15 +7896,15 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     if (strokeCb) strokeCb();
   }
 
-  // Line-end decorations (ECMA-376 §20.1.8.3). Only connector/line presets
-  // expose head/tail tips with a well-defined tangent; for those we place the
-  // arrow heads at the path endpoints with the path's outgoing direction. The
-  // preset engine does not draw connector arrow heads, so this runs whether or
-  // not the body went through it. Gate on `isLineGeom` (mirroring the pptx
-  // renderer's CONNECTOR_GEOMS set): getConnectorAnchors resolves path[0] of
-  // *any* preset, so a filled shape carrying an <a:ln> head/tail end would
-  // otherwise get spurious arrow heads at its first subpath's endpoints.
-  if (coreStroke && (coreStroke.headEnd || coreStroke.tailEnd) && isLineGeom) {
+  // Line-end decorations (ECMA-376 §20.1.8.3). Connector/line presets and the
+  // callout family both expose head/tail tips with a well-defined tangent; for
+  // callouts these decorate the leader line (the geometry's trailing path), not
+  // the text rectangle or accent bar. The preset engine does not draw line ends,
+  // so this runs whether or not the body went through it. Gate on connector /
+  // callout presets only: getConnectorAnchors resolves the last path of any
+  // preset, so an arbitrary filled shape carrying an <a:ln> head/tail end would
+  // otherwise get spurious arrow heads.
+  if (coreStroke && (coreStroke.headEnd || coreStroke.tailEnd) && (isLineGeom || isCalloutGeom)) {
     const anchors = getConnectorAnchors(
       preset, x, y, w, h,
       shape.adjValues ?? [],
@@ -7348,6 +7969,146 @@ function fitShapeImage(
   return { w: innerW, h: natH * s };
 }
 
+const WORD_DEFAULT_TEXTBOX_INSET_PT = 7.2;
+
+function isWordDefaultTextboxInset(v: number | undefined): boolean {
+  return v != null && Math.abs(v - WORD_DEFAULT_TEXTBOX_INSET_PT) < 0.01;
+}
+
+function shapeTextHorizontalInsetsPx(shape: ShapeRun, scale: number): { lIns: number; rIns: number } {
+  const baseL = (shape.textInsetL ?? 0) * scale;
+  const baseR = (shape.textInsetR ?? 0) * scale;
+  // Word wraps spAutoFit text boxes with the serialized DrawingML default
+  // lIns/rIns (0.1in) plus the legacy text-box default margin. This only applies
+  // to the emitted default; zero/custom insets keep their literal OOXML width.
+  const extraL = shape.textAutofit === 'sp' && isWordDefaultTextboxInset(shape.textInsetL)
+    ? WORD_DEFAULT_TEXTBOX_INSET_PT * scale
+    : 0;
+  const extraR = shape.textAutofit === 'sp' && isWordDefaultTextboxInset(shape.textInsetR)
+    ? WORD_DEFAULT_TEXTBOX_INSET_PT * scale
+    : 0;
+  return { lIns: baseL + extraL, rIns: baseR + extraR };
+}
+
+/** Measure a shape text body's fitted height for `<a:spAutoFit/>`.
+ *  Returns px, including bodyPr top/bottom insets and paragraph spacing. */
+export function measureShapeTextAutoFitHeight(
+  shape: ShapeRun,
+  w: number,
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+  fontFamilyClasses: Record<string, string> = {},
+  images: Map<string, DecodedImage> = new Map(),
+  state?: RenderState,
+): number {
+  const effState = state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
+  const blocks = shape.textBlocks ?? [];
+  const { lIns, rIns } = shapeTextHorizontalInsetsPx(shape, scale);
+  const tIns = (shape.textInsetT ?? 0) * scale;
+  const bIns = (shape.textInsetB ?? 0) * scale;
+  const innerW = Math.max(0, w - lIns - rIns);
+
+  const indentOf = (b: ShapeText) => {
+    const leftPx = (b.indentLeft ?? 0) * scale;
+    const rightPx = (b.indentRight ?? 0) * scale;
+    const rawFirstPx = (b.indentFirst ?? 0) * scale;
+    const firstPx = b.numbering && rawFirstPx < 0 ? 0 : rawFirstPx;
+    const paraW = Math.max(0, innerW - leftPx - rightPx);
+    const firstLineW = Math.max(0, paraW - firstPx);
+    return { leftPx, firstPx, paraW, firstLineW };
+  };
+
+  const lineHeightFor = (b: ShapeText, line: LayoutLine): number => {
+    let tallest: LayoutTextSeg | null = null;
+    let floorPx = 0;
+    for (const seg of line.segments) {
+      if (!('text' in seg)) continue;
+      const ts = seg as LayoutTextSeg;
+      if (!tallest || ts.fontSize > tallest.fontSize) tallest = ts;
+      const segPx = ts.fontSize * scale;
+      floorPx = Math.max(
+        floorPx,
+        intendedSingleLinePx(ts.fontFamily ?? null, segPx),
+        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx),
+      );
+    }
+    const fontPt = tallest?.fontSize ?? b.fontSizePt;
+    const fontPx = fontPt * scale;
+    const family = tallest?.fontFamily ?? b.fontFamily ?? null;
+    const eaFamily = tallest?.eaFloorFamily ?? b.fontFamily ?? null;
+    const asciiIntended = intendedSingleLinePx(family, fontPx);
+    const eaIntended = intendedSingleLinePx(eaFamily, fontPx);
+    const measureFamily = eaIntended > asciiIntended ? eaFamily : family;
+    ctx.font = buildFont(
+      tallest?.bold ?? b.bold ?? false,
+      tallest?.italic ?? b.italic ?? false,
+      fontPx,
+      measureFamily,
+      fontFamilyClasses,
+    );
+    const m = ctx.measureText('Mg');
+    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
+    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
+    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc);
+    const ls: LineSpacing | null = b.lineSpacingRule
+      ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
+      : null;
+    return lineBoxHeight(ls, c.ascent, c.descent, scale, undefined, false, floorPx, false);
+  };
+
+  const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
+  const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
+  const gapBefore = (i: number): number =>
+    i > 0 ? Math.max(spBefore[i], spAfter[i - 1]) : spBefore[i];
+
+  ctx.save();
+  try {
+    let contentH = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      const ind = indentOf(b);
+      contentH += gapBefore(i);
+      if (b.imagePath) {
+        contentH += fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, ind.firstLineW, scale).h;
+        continue;
+      }
+      const runs: ShapeTextRun[] =
+        b.runs && b.runs.length > 0
+          ? b.runs
+          : [{
+              text: b.text,
+              fontSizePt: b.fontSizePt,
+              color: b.color,
+              fontFamily: b.fontFamily,
+              bold: b.bold,
+              italic: b.italic,
+            } as ShapeTextRun];
+      const segs = buildSegments(runs.map(shapeRunToDocRun), effState);
+      const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
+      const lines = layoutLines(
+        ctx,
+        segs,
+        ind.paraW,
+        ind.firstPx,
+        scale,
+        b.tabStops ?? [],
+        undefined,
+        fontFamilyClasses,
+        ind.leftPx,
+        effState.kinsoku,
+        0,
+        effState.defaultTabPt,
+        ind.paraW,
+        baseRtl,
+      );
+      contentH += lines.reduce((sum, line) => sum + lineHeightFor(b, line), 0);
+    }
+    return tIns + contentH + bIns;
+  } finally {
+    ctx.restore();
+  }
+}
+
 /** Render a shape's body text inside its bounding box, honoring lIns/tIns/
  *  rIns/bIns and the wps:bodyPr @anchor (t / ctr / b). Alignment within each
  *  line is read from the per-block paragraph alignment.
@@ -7400,9 +8161,8 @@ export function renderShapeText(
     ? `#${shape.defaultTextColor}`
     : documentDefaultColor;
   const blocks = shape.textBlocks ?? [];
-  const lIns = (shape.textInsetL ?? 0) * scale;
+  const { lIns, rIns } = shapeTextHorizontalInsetsPx(shape, scale);
   const tIns = (shape.textInsetT ?? 0) * scale;
-  const rIns = (shape.textInsetR ?? 0) * scale;
   const bIns = (shape.textInsetB ?? 0) * scale;
   const innerX = x + lIns;
   const innerW = Math.max(0, w - lIns - rIns);
@@ -7420,10 +8180,11 @@ export function renderShapeText(
   const indentOf = (b: ShapeText) => {
     const leftPx = (b.indentLeft ?? 0) * scale;
     const rightPx = (b.indentRight ?? 0) * scale;
-    const firstPx = (b.indentFirst ?? 0) * scale; // SIGNED
+    const rawFirstPx = (b.indentFirst ?? 0) * scale; // SIGNED
+    const firstPx = b.numbering && rawFirstPx < 0 ? 0 : rawFirstPx;
     const paraW = Math.max(0, innerW - leftPx - rightPx);
     const firstLineW = Math.max(0, paraW - firstPx);
-    return { leftPx, firstPx, paraW, firstLineW };
+    return { leftPx, firstPx, markerFirstPx: rawFirstPx, paraW, firstLineW };
   };
 
   // First pass: lay out each block. Text blocks WRAP to the inner width
@@ -7431,7 +8192,7 @@ export function renderShapeText(
   // breaks onto multiple lines instead of overflowing the page; image blocks
   // reserve their fitted height. The computed layout drives both vertical
   // anchoring (totalH) and the draw pass (no re-wrapping).
-  type BlockIndent = { leftPx: number; firstPx: number; paraW: number; firstLineW: number };
+  type BlockIndent = { leftPx: number; firstPx: number; markerFirstPx: number; paraW: number; firstLineW: number };
   // A text-box paragraph laid out by the MAIN engine: `lines` are the shared
   // LayoutLine[] (from buildSegments → layoutLines, so kinsoku / bidi / justify /
   // tabs all apply), `lineHeights`/`baselineOffsets` give each line its shape
@@ -7719,9 +8480,11 @@ export function renderShapeText(
       // line carries the signed first-line indent), reorder segments per UAX#9
       // (§17.18.44 bidi, base = block `<w:bidi>` / first-strong), distribute
       // §17.18.44 justification slack on `both`/`distribute` lines, and honor tab
-      // widths (already resolved onto each tab seg by layoutLines). Numbering /
-      // floats / decimal-auto-tab / run decorations (body-only) do not apply —
-      // ShapeTextRun carries no underline/border/highlight/ruby/revision.
+      // widths (already resolved onto each tab seg by layoutLines). Text-box
+      // paragraph numbering is drawn in the hanging margin; floats /
+      // decimal-auto-tab / body-only decorations do not apply, but ShapeTextRun
+      // ruby is carried through the shared line engine and painted above the base
+      // glyphs like body text ruby (§17.3.3.25).
       const { lines: lineList, baseRtl, ind } = layout;
       // 'distribute'/'thaiDistribute' spread every line; 'both'/'justify'/kashida
       // spread all but the logical-last; otherwise resolve the physical edge from
@@ -7813,6 +8576,18 @@ export function renderShapeText(
         }
         let x = regionLeft + alignOffset;
 
+        if (isFirstLine && block.numbering) {
+          const markerSize = block.fontSizePt * scale;
+          ctx.font = buildFont(false, false, markerSize, markerFontFamily(block.numbering), fontFamilyClasses);
+          const markerColor = block.color ?? block.runs?.find((r) => r.color)?.color ?? null;
+          ctx.fillStyle = markerColor ? `#${markerColor}` : defaultColor;
+          const markerText = markerDisplayText(block.numbering);
+          const markerW = ctx.measureText(markerText).width;
+          const lvlJc = block.numbering.jc || 'left';
+          const markerShift = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
+          ctx.fillText(markerText, innerX + ind.leftPx + ind.markerFirstPx + markerShift, baseline);
+        }
+
         if (applyJustify) {
           const minPerGap = -line.ascent * 0.25;
           const distSegs = line.segments.map((seg) =>
@@ -7885,6 +8660,18 @@ export function renderShapeText(
             }
           } else {
             ctx.fillText(s.text, x, baseline + yOffset);
+          }
+          if (s.ruby) {
+            const spanW = s.measuredWidth + internalStretch;
+            const rubySizePx = s.ruby.fontSizePt * scale;
+            const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses);
+            ctx.save();
+            ctx.font = rubyFont;
+            const rubyW = ctx.measureText(s.ruby.text).width;
+            const rubyX = x + (spanW - rubyW) / 2;
+            const rubyBaseline = baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
+            ctx.fillText(s.ruby.text, rubyX, rubyBaseline);
+            ctx.restore();
           }
           x += s.measuredWidth + internalStretch;
           // A trailing space this segment OWNS absorbs one inter-word gap on a
