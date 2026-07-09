@@ -80,6 +80,14 @@ export interface DocSettings {
    *  tab stops generated after all custom stops. `undefined` ⇒ the renderer
    *  uses the spec default of 720 twips (36pt). */
   defaultTabStop?: number;
+  /** §17.15.1.18 `w:characterSpacingControl@w:val` — East Asian punctuation /
+   *  character-spacing control. */
+  characterSpacingControl?: string;
+  /** §17.15.3.1 `w:compat/w:useFELayout` — Far East layout compatibility. */
+  useFeLayout?: boolean;
+  /** §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
+   *  single-byte and double-byte widths for East Asian layout. */
+  balanceSingleByteDoubleByteWidth?: boolean;
 }
 
 export interface DocRevision {
@@ -544,6 +552,10 @@ export interface DocParagraph {
   /** Default font family resolved from the style chain. Used to size empty
    *  paragraphs (no runs) with the intended font's line metrics. */
   defaultFontFamily?: string | null;
+  /** Default East Asian font family resolved from the style chain. Empty /
+   *  anchor-only paragraph marks in East Asian documents use this axis for line
+   *  metrics instead of the ASCII fallback. */
+  defaultFontFamilyEastAsia?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
    * `false` = explicitly LTR, absent = unspecified (inherit). The renderer uses
@@ -791,7 +803,7 @@ export interface ShapeRun {
   groupHeightPt?: number | null;
   /** Draw behind text when true (wp:anchor behindDoc="1"). */
   behindDoc?: boolean;
-  /** Document-order index within a group; lower values render first. */
+  /** ECMA-376 §20.4.2.3 `wp:anchor/@relativeHeight`: lower values render first. */
   zOrder: number;
   /** Normalized [0,1] custom-geometry sub-paths. Empty when `presetGeometry`
    *  is set; the renderer chooses between buildCustomPath and buildShapePath. */
@@ -799,8 +811,10 @@ export interface ShapeRun {
   /** OOXML <a:prstGeom prst> name (e.g. "rect", "ellipse", "rtTriangle").
    *  When set the renderer calls core's buildShapePath with `adjValues`. */
   presetGeometry?: string | null;
-  /** Up to four <a:gd name="adj{n}"> values from prstGeom/avLst (0–100000). */
-  adjValues?: number[];
+  /** <a:gd name="adj{n}"> values from prstGeom/avLst in adj1..adj8 order.
+   *  `null` preserves omitted named guides so the preset engine can use the
+   *  geometry's default for that index. */
+  adjValues?: Array<number | null>;
   fill: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
@@ -904,6 +918,8 @@ export interface ShapeTextRun {
   fontFamilyEastAsia?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** ECMA-376 §17.3.3.25 ruby annotation (furigana) for text-box runs. */
+  ruby?: RubyAnnotation | null;
 }
 
 export interface ShapeText {
@@ -919,6 +935,8 @@ export interface ShapeText {
    *  (image blocks / legacy single-format paragraphs). Absent for image-only
    *  paragraphs. */
   runs?: ShapeTextRun[];
+  /** ECMA-376 §17.9 paragraph numbering for text-box paragraphs. */
+  numbering?: NumberingInfo | null;
   alignment: string;
   /** ECMA-376 §17.3.1.33 `<w:spacing w:before>` of this text-box paragraph, in
    *  pt — reserved ABOVE the paragraph inside the box. Absent/0 ⇒ no offset. */
@@ -1385,6 +1403,9 @@ export interface DocTableRow {
    *  lower bound; "exact" = fixed clip. */
   rowHeightRule: 'auto' | 'atLeast' | 'exact' | string;
   isHeader: boolean;
+  /** ECMA-376 §17.4.6 `<w:cantSplit>` — when true, the row must not be split
+   *  across page boundaries. Omitted/false rows may split at page boundaries. */
+  cantSplit?: boolean;
 }
 
 /** ECMA-376 §17.4.7: a table cell may contain paragraphs AND nested tables. */

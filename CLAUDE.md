@@ -9,8 +9,10 @@ Claude/Claude Code conventions and overrides.
 After reading this file:
 
 1. Run `pwd` and identify the worktree role from the path.
-2. Read the package-level `CLAUDE.md` for any package you will edit.
-3. Follow the ownership limits below unless the user explicitly asks for a
+2. Ensure `spec` exists in the worktree as a symlink to the main checkout's
+   ignored OOXML specification directory, following `AGENTS.md`.
+3. Read the package-level `CLAUDE.md` for any package you will edit.
+4. Follow the ownership limits below unless the user explicitly asks for a
    cross-package change.
 
 ## Claude Worktree Roles
@@ -52,11 +54,13 @@ to `main`, or anything that conflicts with `AGENTS.md`.
 
 ## Commit Attribution
 
-When Claude/Fable authors a commit, include:
+When Claude authors a commit, include a co-author trailer with the actual model
+used for that task, for example:
 
 ```text
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Co-Authored-By: Claude <model-name> <noreply@anthropic.com>
 ```
 
 If Claude starts or directs Codex for the work, include both the Claude/Fable
-and Codex co-author trailers, as described in `AGENTS.md`.
+and Codex co-author trailers with the models actually used for that task, as
+described in `AGENTS.md`.

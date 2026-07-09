@@ -81,6 +81,39 @@ function shapePara(markerText: string): DocParagraph {
   } as unknown as DocParagraph;
 }
 
+function zShape(markerText: string, zOrder: number): ShapeRun {
+  return {
+    type: 'shape',
+    widthPt: 200, heightPt: 40,
+    anchorXPt: 0, anchorYPt: 0,
+    anchorXFromMargin: false, anchorYFromPara: true,
+    anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+    presetGeometry: 'rect',
+    wrapMode: 'none',
+    zOrder,
+    subpaths: [],
+    fill: { fillType: 'solid', color: 'FFFFFF' },
+    stroke: null,
+    textAnchor: 't',
+    textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+    textBlocks: [{ text: markerText, fontSizePt: 11, fontFamily: 'Times New Roman', alignment: 'left' }],
+  } as unknown as ShapeRun;
+}
+
+function twoShapePara(): DocParagraph {
+  return {
+    type: 'paragraph', alignment: 'left',
+    indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null, tabStops: [],
+    runs: [
+      zShape('HIGH_Z', 20) as unknown as DocParagraph['runs'][number],
+      zShape('LOW_Z', 10) as unknown as DocParagraph['runs'][number],
+    ],
+    defaultFontSize: 11, defaultFontFamily: 'Times New Roman', widowControl: false,
+  } as unknown as DocParagraph;
+}
+
 describe('front float z-order (§20.4.2.10)', () => {
   it('a front-anchored shape paints ON TOP of a following paragraph (after it)', async () => {
     const section: SectionProps = {
@@ -109,5 +142,27 @@ describe('front float z-order (§20.4.2.10)', () => {
     // The front shape, anchored to the FIRST paragraph, must be painted AFTER the
     // later body text so it lands on top (deferred to the page's front layer).
     expect(shapeIdx).toBeGreaterThan(bodyIdx);
+  });
+
+  it('orders front shapes by wp:anchor relativeHeight, not paragraph run order', async () => {
+    const section: SectionProps = {
+      pageWidth: 400, pageHeight: 600,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const doc = {
+      section,
+      body: [twoShapePara() as unknown as BodyElement],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: { 'Times New Roman': 'roman' },
+    } as unknown as DocxDocumentModel;
+
+    const { canvas, texts } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: 400 });
+
+    expect(texts.indexOf('LOW_Z')).toBeGreaterThanOrEqual(0);
+    expect(texts.indexOf('HIGH_Z')).toBeGreaterThanOrEqual(0);
+    expect(texts.indexOf('HIGH_Z')).toBeGreaterThan(texts.indexOf('LOW_Z'));
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
+import { paragraphMarkLineHeight } from './line-layout.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -131,5 +132,32 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     // empty mark line used a synthetic 1-em box while the text lines used the
     // 1.15-em stub box.
     expect(subjGap).toBeCloseTo(refGap, 2);
+  });
+
+  it('uses the paragraph mark eastAsia font axis in East Asian document-grid context', () => {
+    const p = {
+      ...para(''),
+      defaultFontFamily: 'Century',
+      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+    } as DocParagraph;
+    let font = '';
+    const ctx = {
+      get font() { return font; },
+      set font(v: string) { font = v; },
+      measureText: () => {
+        const ea = font.includes('ＭＳ 明朝');
+        const total = ea ? 30 : 10;
+        return {
+          width: 0,
+          fontBoundingBoxAscent: total * 0.8,
+          fontBoundingBoxDescent: total * 0.2,
+          actualBoundingBoxAscent: total * 0.8,
+          actualBoundingBoxDescent: total * 0.2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, false, ctx, {})).toBe(10);
+    expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(30);
   });
 });

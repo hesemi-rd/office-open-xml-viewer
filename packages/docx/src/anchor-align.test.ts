@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAnchorY } from './anchor-geometry.js';
+import { resolveAnchorX, resolveAnchorY } from './anchor-geometry.js';
 
 // resolveAnchorY reads only { scale, marginTop, marginBottom, pageH } of
 // RenderState (via yContainer); cast a minimal stand-in like the other geometry
@@ -7,11 +7,26 @@ import { resolveAnchorY } from './anchor-geometry.js';
 // container band is [72, 728], the "page" band is [0, 800].
 interface MinState {
   scale: number;
+  pageWidth: number;
+  marginLeft: number;
+  marginRight: number;
+  contentX: number;
+  contentW: number;
   marginTop: number;
   marginBottom: number;
   pageH: number;
 }
-const state: MinState = { scale: 1, marginTop: 72, marginBottom: 72, pageH: 800 };
+const state: MinState = {
+  scale: 1,
+  pageWidth: 600,
+  marginLeft: 60,
+  marginRight: 40,
+  contentX: 60,
+  contentW: 500,
+  marginTop: 72,
+  marginBottom: 72,
+  pageH: 800,
+};
 
 // resolveAnchorY(align, fromPara, offsetPt, heightPx, paragraphTopPx, state, relativeFrom)
 const y = (align: string, relativeFrom: string, h = 100): number =>
@@ -46,5 +61,19 @@ describe('resolveAnchorY — ST_AlignV inside/outside (ECMA-376 §20.4.3.1)', ()
     expect(y('top', 'page')).toBe(0);
     expect(y('bottom', 'page')).toBe(700);
     expect(y('center', 'page')).toBe((800 - 100) / 2);
+  });
+});
+
+describe('resolveAnchorX — wp:align choice ignores standalone posOffset', () => {
+  it('right-aligns a standalone shape without adding anchorXPt/simplePos fallback', () => {
+    const x = resolveAnchorX('right', true, 200, 100, state as never, 'margin', null, null);
+
+    expect(x).toBe(460);
+  });
+
+  it('still adds the child offset when aligning a grouped shape by group width', () => {
+    const x = resolveAnchorX('right', true, 20, 50, state as never, 'margin', null, 200);
+
+    expect(x).toBe(380);
   });
 });

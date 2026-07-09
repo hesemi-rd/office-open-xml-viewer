@@ -30,16 +30,26 @@ Use this flow for ordinary bug fixes and feature work:
    to another session.
 3. Create a feature branch. Use `codex/<topic>` for Codex work when possible;
    otherwise follow the repository's existing branch naming.
-4. Work with TDD for bug fixes:
+4. When creating or entering a Codex/Claude worktree, make the root checkout's
+   ignored `spec/` directory available from that worktree as a local symlink.
+   For the standard `.claude/worktrees/<name>` layout, run:
+
+   ```bash
+   ln -s ../../../spec spec
+   ```
+
+   If the worktree lives elsewhere, create `spec` as a symlink to the main local
+   checkout's `spec/` directory. Do not copy or commit the specification files.
+5. Work with TDD for bug fixes:
    - explore the failing sample or behavior,
    - add a focused failing test,
    - make it pass,
    - refactor only where it reduces real complexity.
-5. Verify with the narrowest meaningful tests first, then broader checks when the
+6. Verify with the narrowest meaningful tests first, then broader checks when the
    touched surface warrants it.
-6. Commit only the intended source/docs/test files. Do not commit private samples
+7. Commit only the intended source/docs/test files. Do not commit private samples
    or generated local artifacts.
-7. Push the feature branch, create a PR, wait for checks when practical, and merge
+8. Push the feature branch, create a PR, wait for checks when practical, and merge
    with a merge commit. Do not squash.
 
 ## Git and PR Rules
@@ -54,12 +64,15 @@ Use this flow for ordinary bug fixes and feature work:
   - subject: `fix(scope): ...`, `test(scope): ...`, `refactor(scope): ...`, etc.
   - body: explain the root cause, the fix, and verification.
   - include specification sections or observed Office behavior when relevant.
-- Agent-authored commits should include a matching co-author trailer:
-  - Codex: `Co-Authored-By: Codex <noreply@openai.com>`
-  - Claude/Fable: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
+- Agent-authored commits should include a matching co-author trailer. Include
+  the actual model used for that task; do not hard-code a model name across
+  tasks. Examples:
+  - Codex: `Co-Authored-By: Codex <model-name> <noreply@openai.com>`
+  - Claude/Fable: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
 - If Claude starts or delegates work to Codex, include both trailers in the
-  resulting commit. This preserves the human-readable provenance of the
-  orchestration layer (Claude) and the implementation agent (Codex).
+  resulting commit, including the model each agent actually used for that task.
+  This preserves the human-readable provenance of the orchestration layer and
+  the implementation agent.
 
 ## Verification
 
@@ -92,6 +105,13 @@ assuming the source change is broken.
 
 Be specification-first.
 
+- Before implementing OOXML behavior, consult the relevant documents under the
+  local `spec/` symlink. Prefer ECMA-376 / ISO-29500 for normative behavior, and
+  Microsoft extension notes such as `[MS-DOCX]`, `[MS-XLSX]`, `[MS-PPTX]`, and
+  `[MS-ODRAWXML]` when Office-specific behavior or extensions are involved.
+- Record the relevant specification section, schema element, or observed Office
+  behavior in the commit body or code comment when it materially explains the
+  implementation.
 - Prefer ECMA-376 / ISO-29500 behavior over sample-specific tuning.
 - Do not add heuristics only to improve one VRT/sample number, such as arbitrary
   thresholds, empirical scaling constants, or special-casing a sample path.
