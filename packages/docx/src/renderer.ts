@@ -8435,6 +8435,24 @@ function measureCellContentHeightPx(
  *  and floating paths. Honors bidiVisual, vMerge span heights, and exact-row
  *  clipping exactly as the original inline loop did. In dryRun, measures cell
  *  content instead of drawing. */
+interface TableCellPaintJob {
+  cell: DocTableCell;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  edges: CellEdgeFlags;
+  clipExact: boolean;
+  /** ECMA-376 §17.4.66 — this cell's grid footprint, so the border pass can find
+   *  the cells that share each interior gridline (its right/bottom neighbours).
+   *  `ci`/`ri` are the logical top-left grid slot; `span` the column span; `lastRi`
+   *  the last row the cell occupies (vMerge-span aware). */
+  ci: number;
+  ri: number;
+  span: number;
+  lastRi: number;
+}
+
 function drawTableRows(
   table: DocTable,
   colWidths: number[],
@@ -8462,23 +8480,7 @@ function drawTableRows(
   // this made a shared vertical rule look like its thickness changed row to row.
   // So walk the grid ONCE to collect every cell's paint box, then paint in TWO
   // passes: all backgrounds + content first, all borders second.
-  const jobs: Array<{
-    cell: DocTableCell;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    edges: CellEdgeFlags;
-    clipExact: boolean;
-    /** ECMA-376 §17.4.66 — this cell's grid footprint, so the border pass can find
-     *  the cells that share each interior gridline (its right/bottom neighbours).
-     *  `ci`/`ri` are the logical top-left grid slot; `span` the column span; `lastRi`
-     *  the last row the cell occupies (vMerge-span aware). */
-    ci: number;
-    ri: number;
-    span: number;
-    lastRi: number;
-  }> = [];
+  const jobs: TableCellPaintJob[] = [];
   // ECMA-376 §17.4.66 — grid-slot → job index occupancy, so an interior edge can
   // look up the adjacent cell. A vMerge/colSpan cell fills every slot it covers
   // (its restart job index), so a neighbour query on any slot resolves to the
@@ -8603,13 +8605,21 @@ function drawTableRows(
     // top and draw the winner (this ABOVE cell owns the shared horizontal line).
     {
       let spec: BorderSpec | null;
+      let x1 = x;
+      let x2 = x + w;
       if (j.edges.bottomRow) {
         spec = paintable(own.bottom?.spec ?? null);
       } else {
-        const below = neighbourEdges(jobs, occupancy, j.lastRi + 1, j.ci, mirror, table.borders);
-        spec = resolveSharedEdge(own.bottom, below?.top ?? null);
+        const below = neighbourJob(jobs, occupancy, j.lastRi + 1, j.ci);
+        const belowEdges = below ? resolveCellEdges(below.cell.borders, table.borders, below.edges, mirror) : null;
+        const winner = resolveBorderConflict(own.bottom, belowEdges?.top ?? null);
+        spec = winner ? paintable(winner.spec) : null;
+        if (winner && below && winner === belowEdges?.top) {
+          x1 = below.x;
+          x2 = below.x + below.w;
+        }
       }
-      if (spec) drawBorderLine(ctx, x, y + h, x + w, y + h, spec, scale, dpr);
+      if (spec) drawBorderLine(ctx, x1, y + h, x2, y + h, spec, scale, dpr);
     }
     // PHYSICAL RIGHT: outer-right → own spec; interior → resolve vs the physically-
     // right neighbour's left and draw the winner (this cell owns the shared
@@ -8675,19 +8685,28 @@ function resolveCellEdges(
 /** Resolve the neighbour cell at grid slot (ri, ci) and return its resolved
  *  edges, or `null` when the slot is empty/out of range. */
 function neighbourEdges(
-  jobs: ReadonlyArray<{ cell: DocTableCell; edges: CellEdgeFlags }>,
+  jobs: ReadonlyArray<TableCellPaintJob>,
   occupancy: number[][],
   ri: number,
   ci: number,
   mirror: boolean,
   table: TableBorders,
 ): ResolvedCellEdges | null {
+  const nb = neighbourJob(jobs, occupancy, ri, ci);
+  return nb ? resolveCellEdges(nb.cell.borders, table, nb.edges, mirror) : null;
+}
+
+function neighbourJob(
+  jobs: ReadonlyArray<TableCellPaintJob>,
+  occupancy: number[][],
+  ri: number,
+  ci: number,
+): TableCellPaintJob | null {
   if (ri < 0 || ri >= occupancy.length) return null;
   if (ci < 0 || ci >= occupancy[ri].length) return null;
   const idx = occupancy[ri][ci];
   if (idx < 0) return null;
-  const nb = jobs[idx];
-  return resolveCellEdges(nb.cell.borders, table, nb.edges, mirror);
+  return jobs[idx] ?? null;
 }
 
 /** ECMA-376 §17.4.66 — pick the winning border for a shared interior edge from

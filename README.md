@@ -1,4 +1,4 @@
-> **This entire codebase — Rust parsers, TypeScript renderers, tests, and tooling — was implemented by [Claude](https://claude.ai)** (Anthropic's AI assistant) through iterative prompting. No human-written application code exists in this repository.
+> **This entire codebase — Rust parsers, TypeScript renderers, tests, and tooling — is implemented by AI coding agents, primarily [Claude](https://claude.ai) and [Codex](https://openai.com/codex/)**, through iterative prompting. No human-written application code exists in this repository.
 
 <details>
 <summary><b>Why this project exists — a note from the author</b></summary>
@@ -11,7 +11,7 @@ In practice, it didn't happen. For more than a decade, no free, open-source libr
 
 Generative AI changed that. A viewer is an unusually good fit for AI-driven iterative development ("vibe coding"): there is a spec to read and a correct output to aim for, so the work comes down to interpreting the specification and refining the rendering until it matches. Limiting the scope to viewing also avoids the most serious risk an Office library can carry — corrupting a user's files.
 
-So I'm building this library with Claude, spec-first, and keeping it free to use. For some documents it already reproduces the desktop Office applications more faithfully than commercial libraries — and sometimes even the official Microsoft 365 web apps.
+So I'm building this library with AI coding agents, spec-first, and keeping it free to use. For some documents it already reproduces the desktop Office applications more faithfully than commercial libraries — and sometimes even the official Microsoft 365 web apps.
 
 </details>
 

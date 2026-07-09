@@ -100,7 +100,7 @@ function tableOf(rows: DocTableRow[], tableBorders: Partial<Edges> = {}): DocTab
   // Fixed 60 pt columns (one per logical column of the widest row). The page is
   // sized to the grid sum below so autofit never stretches the columns — the
   // shared interior vertical gridline then sits at a known x (60 for two cols).
-  const cols = Math.max(...rows.map((r) => r.cells.length));
+  const cols = Math.max(...rows.map((r) => r.cells.reduce((sum, c) => sum + c.colSpan, 0)));
   return {
     colWidths: new Array(cols).fill(60), rows,
     borders: { ...NO_BORDERS, ...tableBorders },
@@ -236,6 +236,21 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     const colors = shared.map((s) => s.color.toLowerCase());
     expect(colors.some((c) => c.includes('00ff00'))).toBe(true);  // dashed wins
     expect(colors.some((c) => c.includes('ff0000'))).toBe(false); // thick loses
+  });
+
+  it('uses the winning below-cell top edge extent when the above cell spans wider', async () => {
+    const title = cell('title');
+    title.colSpan = 2;
+    const strokes = await render(tableOf([
+      rowOf([title]),
+      rowOf([
+        cell('work', { top: bs({ width: 1, color: '123456' }) }),
+        cell('gap'),
+      ]),
+    ]));
+    const shared = horizontalAt(strokes, 20).filter((s) => s.color.toLowerCase().includes('123456'));
+    expect(shared).toHaveLength(1);
+    expect(Math.abs(shared[0].x2 - shared[0].x1)).toBeCloseTo(60, 5);
   });
 
   it('bidiVisual: shared vertical gridline still drawn once with the winner', async () => {
