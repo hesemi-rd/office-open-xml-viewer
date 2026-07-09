@@ -17,10 +17,11 @@
 //   - All values little-endian. COLORREF = u32 0x00BBGGRR (low byte = R).
 //
 // Implemented records: SETWINDOWORG, SETWINDOWEXT, SETPOLYFILLMODE,
-// CREATEPENINDIRECT, CREATEBRUSHINDIRECT, SELECTOBJECT, DELETEOBJECT,
-// POLYLINE, POLYGON, POLYPOLYGON, RECTANGLE, STRETCHDIBITS (embedded raster DIB
-// via the shared decoder in ./dib.ts), EOF.
-// Ignored (no-op, skipped by size): ESCAPE, SETROP2, SETBKMODE, SETTEXTALIGN,
+// SETTEXTCOLOR, SETTEXTALIGN, CREATEPENINDIRECT, CREATEBRUSHINDIRECT,
+// CREATEFONTINDIRECT, SELECTOBJECT, DELETEOBJECT, POLYLINE, POLYGON,
+// POLYPOLYGON, RECTANGLE, TEXTOUT, STRETCHDIBITS (embedded raster DIB via the
+// shared decoder in ./dib.ts), EOF.
+// Ignored (no-op, skipped by size): ESCAPE, SETROP2, SETBKMODE,
 // SETSTRETCHBLTMODE, SETMAPMODE, DIBBITBLT/DIBSTRETCHBLT (their exact param
 // layout is not decoded here — skipped rather than mis-parsed), and any
 // unrecognized record.
@@ -44,16 +45,21 @@ import { createAuxCanvas } from '../canvas/aux-canvas.js';
 // WMF record function codes (the subset we act on; others are skipped by size).
 const META = {
   EOF: 0x0000,
+  SETBKMODE: 0x0102,
+  SETTEXTALIGN: 0x012e,
+  SETTEXTCOLOR: 0x0209,
   SETPOLYFILLMODE: 0x0106,
   SETWINDOWORG: 0x020b,
   SETWINDOWEXT: 0x020c,
   SELECTOBJECT: 0x012d,
   DELETEOBJECT: 0x01f0,
+  TEXTOUT: 0x0521,
   POLYGON: 0x0324,
   POLYLINE: 0x0325,
   POLYPOLYGON: 0x0538,
   RECTANGLE: 0x041b,
   CREATEPENINDIRECT: 0x02fa,
+  CREATEFONTINDIRECT: 0x02fb,
   CREATEBRUSHINDIRECT: 0x02fc,
   DIBBITBLT: 0x0940,
   DIBSTRETCHBLT: 0x0b41,
@@ -134,7 +140,14 @@ interface Brush {
   kind: 'brush';
   fill: string | null; // null = BS_NULL / hollow (no fill)
 }
-type WmfObject = Pen | Brush;
+interface Font {
+  kind: 'font';
+  height: number; // |lfHeight|, logical units
+  weight: number; // lfWeight (400 normal, 700 bold)
+  italic: boolean;
+  face: string;
+}
+type WmfObject = Pen | Brush | Font;
 
 /** Inserts an object at the FIRST free slot (lowest index whose slot is empty
  *  or was deleted), mirroring the WMF object-table allocation rule. */
@@ -171,6 +184,9 @@ class Cursor {
     this.p += 2;
     return v;
   }
+  u8(): number {
+    return this.b[this.p++];
+  }
   u32(): number {
     const v =
       (this.b[this.p] |
@@ -180,6 +196,15 @@ class Cursor {
       0;
     this.p += 4;
     return v;
+  }
+  bytes(n: number): Uint8Array {
+    const end = Math.min(this.p + Math.max(0, n), this.end);
+    const out = this.b.subarray(this.p, end);
+    this.p = end;
+    return out;
+  }
+  skip(n: number): void {
+    this.p = Math.min(this.p + Math.max(0, n), this.end);
   }
 }
 
@@ -201,6 +226,9 @@ interface PlayState {
   objects: (WmfObject | null)[];
   curPen: Pen | null;
   curBrush: Brush | null;
+  curFont: Font | null;
+  textColor: string;
+  textAlign: number;
   fillRule: CanvasFillRule; // from SETPOLYFILLMODE
   drew: boolean;
   // When true, strokes whose edge lies on the window/device boundary are
@@ -430,6 +458,57 @@ function createBrush(c: Cursor): Brush {
   return { kind: 'brush', fill };
 }
 
+function decodeSingleByteText(bytes: Uint8Array): string {
+  const end = bytes.indexOf(0);
+  const body = end >= 0 ? bytes.subarray(0, end) : bytes;
+  if (body.length === 0) return '';
+  try {
+    return new TextDecoder('shift_jis').decode(body);
+  } catch {
+    return String.fromCharCode(...body);
+  }
+}
+
+function createFont(c: Cursor): Font {
+  const height = Math.abs(c.i16());
+  c.i16(); // lfWidth
+  c.i16(); // lfEscapement (rotation is not replayed by the WMF player yet)
+  c.i16(); // lfOrientation
+  const weight = c.i16();
+  const italic = c.u8() !== 0;
+  c.u8(); // lfUnderline
+  c.u8(); // lfStrikeOut
+  c.u8(); // lfCharSet
+  c.u8(); // lfOutPrecision
+  c.u8(); // lfClipPrecision
+  c.u8(); // lfQuality
+  c.u8(); // lfPitchAndFamily
+  const face = decodeSingleByteText(c.bytes(Math.min(32, c.remaining)));
+  return { kind: 'font', height, weight, italic, face };
+}
+
+function drawTextOut(s: PlayState, text: string, x: number, y: number): void {
+  if (text.length === 0) return;
+  const font = s.curFont;
+  const logicalHeight = font?.height || 12;
+  const px = Math.abs(mapY(s, s.orgY + logicalHeight) - mapY(s, s.orgY));
+  if (!Number.isFinite(px) || px < 1) return;
+  const { ctx } = s;
+  try {
+    ctx.fillStyle = s.textColor;
+    const weight = font && font.weight >= 700 ? 'bold ' : '';
+    const italic = font?.italic ? 'italic ' : '';
+    ctx.font = `${italic}${weight}${px}px ${font?.face || 'sans-serif'}`;
+    const horiz = s.textAlign & 0x6;
+    ctx.textAlign = horiz === 0x2 ? 'right' : horiz === 0x6 ? 'center' : 'left';
+    ctx.textBaseline = (s.textAlign & 0x18) === 0x18 ? 'alphabetic' : 'top';
+    ctx.fillText(text, mapX(s, x), mapY(s, y));
+    s.drew = true;
+  } catch {
+    // Some test or server-side contexts may not implement fillText.
+  }
+}
+
 // ── core record-replay loop (pure; testable with a mock ctx) ────────────────
 
 /**
@@ -474,6 +553,9 @@ export function playWmf(
     objects: [],
     curPen: null,
     curBrush: null,
+    curFont: null,
+    textColor: '#000000',
+    textAlign: 0,
     fillRule: 'nonzero',
     drew: false,
     suppressBoundaryFrame,
@@ -515,6 +597,14 @@ export function playWmf(
         s.fillRule = mode === 1 ? 'evenodd' : 'nonzero';
         break;
       }
+      case META.SETTEXTCOLOR: {
+        s.textColor = colorRefToCss(c.u32());
+        break;
+      }
+      case META.SETTEXTALIGN: {
+        s.textAlign = c.u16();
+        break;
+      }
       case META.CREATEPENINDIRECT: {
         insertObject(s.objects, createPen(c));
         break;
@@ -523,11 +613,16 @@ export function playWmf(
         insertObject(s.objects, createBrush(c));
         break;
       }
+      case META.CREATEFONTINDIRECT: {
+        insertObject(s.objects, createFont(c));
+        break;
+      }
       case META.SELECTOBJECT: {
         const idx = c.u16();
         const obj = s.objects[idx];
         if (obj?.kind === 'pen') s.curPen = obj;
         else if (obj?.kind === 'brush') s.curBrush = obj;
+        else if (obj?.kind === 'font') s.curFont = obj;
         break;
       }
       case META.DELETEOBJECT: {
@@ -536,6 +631,7 @@ export function playWmf(
         if (obj) {
           if (obj === s.curPen) s.curPen = null;
           if (obj === s.curBrush) s.curBrush = null;
+          if (obj === s.curFont) s.curFont = null;
           s.objects[idx] = null;
         }
         break;
@@ -566,6 +662,17 @@ export function playWmf(
           [mapX(s, right), mapY(s, bottom)],
           [mapX(s, left), mapY(s, bottom)],
         ]);
+        break;
+      }
+      case META.TEXTOUT: {
+        // META_TEXTOUT params: u16 StringLength, String bytes padded to a WORD
+        // boundary, then i16 yStart and i16 xStart.
+        const len = c.u16();
+        const text = decodeSingleByteText(c.bytes(len));
+        if (len % 2 !== 0) c.skip(1);
+        const y = c.i16();
+        const x = c.i16();
+        drawTextOut(s, text, x, y);
         break;
       }
       case META.STRETCHDIBITS: {
@@ -602,6 +709,7 @@ export function playWmf(
       }
       case META.DIBSTRETCHBLT:
       case META.DIBBITBLT:
+      case META.SETBKMODE:
         // META_DIBBITBLT / META_DIBSTRETCHBLT ([MS-WMF] 2.3.1.2 / 2.3.1.3) also
         // carry a packed DIB, but with a different (raster-op-dependent) preamble
         // whose exact layout we do not decode here. Skipping is safer than
