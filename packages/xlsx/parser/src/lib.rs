@@ -569,7 +569,7 @@ pub(crate) fn resolve_color_attrs(
     // rgb attribute (ARGB: 8 chars, drop alpha; or 6-char RGB)
     if let Some(rgb) = rgb {
         if rgb.len() == 8 {
-            return Some(format!("#{}", &rgb[2..].to_uppercase()));
+            return Some(format!("#{}", rgb[2..].to_uppercase()));
         }
         return Some(format!("#{}", rgb.to_uppercase()));
     }
