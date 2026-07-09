@@ -14,6 +14,7 @@
 !packages/docx/public/demo/
 !packages/docx/public/demo/*.docx
 # Office Open XML spec documents
+/spec
 spec/
 node_modules/
 .claude/
