@@ -64,6 +64,17 @@ Use this flow for ordinary bug fixes and feature work:
   - subject: `fix(scope): ...`, `test(scope): ...`, `refactor(scope): ...`, etc.
   - body: explain the root cause, the fix, and verification.
   - include specification sections or observed Office behavior when relevant.
+- PR titles, PR descriptions, commit messages, and public docs must be safe for
+  an OSS repository:
+  - do not include local absolute paths, usernames, home directories, machine
+    names, or other personal environment details;
+  - do not quote or summarize the concrete contents of private or copyrighted
+    samples;
+  - describe private-sample-driven work in terms of the implementation problem,
+    the OOXML/Office behavior mismatch, the general class of affected documents,
+    and the verification command or local-only comparison that was performed;
+  - keep local-only sample filenames and visual details out of public PR text
+    unless the user explicitly approves publishing that information.
 - Agent-authored commits should include a matching co-author trailer. Include
   the actual model used for that task; do not hard-code a model name across
   tasks. Examples:
