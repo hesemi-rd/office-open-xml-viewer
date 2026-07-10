@@ -294,6 +294,8 @@ export interface RenderState {
   layoutSettings: DocumentLayoutSettings;
   /** Active section geometry and grid policy normalized for this state. */
   sectionLayout: SectionLayoutContext;
+  /** Active WordprocessingML story and nested text-container stack. */
+  storyContext: StoryContext;
   /** True when the document body contains East Asian text. Gates docGrid line-
    *  cell rounding of empty / anchor-only paragraph marks (see
    *  paragraphMarkLineHeight), which carry no text to classify themselves. */
@@ -433,6 +435,15 @@ const BODY_STORY_CONTEXT: StoryContext = {
   lineNumberingEligible: true,
 };
 
+function tableCellStoryContext(state: Pick<RenderState, 'storyContext'>): StoryContext {
+  const parent = state.storyContext ?? BODY_STORY_CONTEXT;
+  return {
+    story: parent.story,
+    containers: [...parent.containers, { kind: 'tableCell' }],
+    lineNumberingEligible: false,
+  };
+}
+
 export function resolveBodyParagraphLayoutContext(
   state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>,
   paragraph: DocParagraph,
@@ -441,6 +452,30 @@ export function resolveBodyParagraphLayoutContext(
     state.layoutSettings,
     state.sectionLayout,
     BODY_STORY_CONTEXT,
+    paragraph,
+  );
+}
+
+function resolveStateParagraphLayoutContext(
+  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>,
+  paragraph: DocParagraph,
+): ParagraphLayoutContext {
+  return resolveParagraphLayoutContext(
+    state.layoutSettings,
+    state.sectionLayout,
+    state.storyContext ?? BODY_STORY_CONTEXT,
+    paragraph,
+  );
+}
+
+function resolveTableCellParagraphLayoutContext(
+  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>,
+  paragraph: DocParagraph,
+): ParagraphLayoutContext {
+  return resolveParagraphLayoutContext(
+    state.layoutSettings,
+    state.sectionLayout,
+    tableCellStoryContext(state),
     paragraph,
   );
 }
@@ -1268,6 +1303,7 @@ export async function renderDocumentToCanvas(
     docGrid: toLegacyDocGridContext(sectionLayout),
     layoutSettings,
     sectionLayout,
+    storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
@@ -3570,6 +3606,7 @@ function buildMeasureState(
     docGrid: toLegacyDocGridContext(sectionLayout),
     layoutSettings,
     sectionLayout,
+    storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     kinsoku: layoutSettings.kinsoku,
@@ -3711,7 +3748,22 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
 /** The docGrid that governs a paragraph's line heights. ECMA-376 §17.3.1.32:
  *  a paragraph with `w:snapToGrid` explicitly off ignores the section grid, so
  *  its lines use natural font metrics / the spacing multiplier directly. */
+function gridForParagraphContext(
+  state: Pick<RenderState, 'docGrid'>,
+  context: ParagraphLayoutContext,
+): DocGridCtx {
+  return {
+    type: state.docGrid.type,
+    linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
+    charSpacePt:
+      context.characterGrid.active ? context.characterGrid.deltaPt : null,
+  };
+}
+
 function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
+  if (state.storyContext?.containers.some((container) => container.kind === 'tableCell')) {
+    return gridForParagraphContext(state, resolveStateParagraphLayoutContext(state, para));
+  }
   return para.snapToGrid === false ? { type: null, linePitchPt: null } : state.docGrid;
 }
 
@@ -4403,8 +4455,8 @@ function layoutCellParagraphForRowSplit(
 ): { lines: LayoutLine[]; lineHeights: number[]; inputs: Parameters<typeof stampParagraphLines>[2] } | null {
   const segs = buildSegments(para.runs, state);
   if (segs.length === 0) return null;
-  const grid = paraGrid(para, state);
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paragraphContext = resolveTableCellParagraphLayoutContext(state, para);
+  const grid = gridForParagraphContext(state, paragraphContext);
   const paraHasRuby = paragraphContext.hasRuby;
   const indLeft = paragraphContext.physicalIndentLeftPt;
   const indRight = paragraphContext.physicalIndentRightPt;
@@ -5972,7 +6024,7 @@ function renderParagraph(
   borderMerge?: ParaBorderMerge,
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
   const paragraphStartY = state.y;
 
@@ -9697,9 +9749,9 @@ function measureParaHeight(
   scale: number,
 ): number {
   const segs = buildSegments(para.runs, state);
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paragraphContext = resolveTableCellParagraphLayoutContext(state, para);
   const paraHasRuby = paragraphContext.hasRuby;
-  const grid = paraGrid(para, state);
+  const grid = gridForParagraphContext(state, paragraphContext);
   if (segs.length === 0) {
     // ECMA-376 §17.3.1.29: an empty (or anchor-only) paragraph still produces one
     // paragraph-mark line box. Size it with the SAME `paragraphMarkLineHeight`
@@ -9923,6 +9975,7 @@ function renderCell(
     contentX: x + ml,
     contentW: w - ml - mr,
     y: y + mt,
+    storyContext: tableCellStoryContext(state),
     // ECMA-376 §17.6.8 numbers the MAIN document story only — table-cell lines are
     // never numbered. Clear any inherited line-numbering config/counter.
     lineNumbering: undefined,
