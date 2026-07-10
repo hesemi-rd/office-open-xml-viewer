@@ -948,8 +948,15 @@ export function layoutParagraph(
 
       // ── Tab character ────────────────────────────────────────────────────
       if (/^\t+$/.test(token)) {
-        // Find first tab stop whose position (from text area left) is beyond the current pen
-        const currentAbsW = marLPx + lineW; // current position from text area left
+        // Pen position from the LEADING text-inset edge, measured in READING
+        // order: an LTR paragraph advances rightward from the left inset (leading
+        // indent = marL); a BIDI (RTL) paragraph advances leftward from the right
+        // inset (leading indent = marR). Tab stops (§21.1.2.1.x) are logical
+        // distances from that leading edge, so the same "first stop past the pen"
+        // rule selects the stop in either frame (mirrors docx #830 nextTabStopRtl;
+        // the draw pass then mirrors the chosen stop into the RTL frame).
+        const leadIndentPx = para.rtl ? emuToPx(para.marR, scale) : marLPx;
+        const currentAbsW = leadIndentPx + lineW;
         const ts = (para.tabStops ?? []).find(
           (t: TabStop) => emuToPx(t.pos, scale) > currentAbsW
         );
@@ -3367,21 +3374,49 @@ export function renderTextBody(
 
     // ── Tab-stop segments (right-aligned or centred at tab stop position) ──
     if (line.tabStop && line.tabStop.segments.length > 0) {
-      const tabAbsX = bx + lPad + line.tabStop.px;
       let totalTabW = 0;
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
         const ls = seg.letterSpacingPx ?? 0;
         totalTabW += ctx.measureText(seg.text).width + ls * codePointCount(seg.text);
       }
+      // ECMA-376 §21.1.2.1.x tab stops are LOGICAL: `pos` is the distance from the
+      // LEADING text-inset edge. LTR base ⇒ leading edge = left inset
+      // (`bx + lPad`), pen advances rightward; BIDI (RTL) base ⇒ leading edge =
+      // right inset (`bx + bw − rPad`), pen advances LEFT, so the stop mirrors and
+      // the trailing cell flips visual side. The LTR-frame math below dropped an
+      // RTL cell on the wrong side (issue #831). This mirrors the docx fix (#830 /
+      // #835: `layoutBidiTabStops` / `nextTabStopRtl` resolve stops against the
+      // leading text margin in the reading frame). DrawingML tabs carry no leader,
+      // so — unlike docx — there is nothing to paint across the gap.
       let tabPenX: number;
-      if (line.tabStop.algn === 'r') {
-        tabPenX = tabAbsX - totalTabW;
-      } else if (line.tabStop.algn === 'ctr') {
-        tabPenX = tabAbsX - totalTabW / 2;
+      if (baseRtl) {
+        const tabAbsX = bx + bw - rPad - line.tabStop.px;
+        if (line.tabStop.algn === 'r') {
+          // end/trailing (§21.1.2.1: physical `r` = logical end under RTL): the
+          // cell's TRAILING (left) edge sits on the stop, cell extends rightward.
+          tabPenX = tabAbsX;
+        } else if (line.tabStop.algn === 'ctr') {
+          tabPenX = tabAbsX - totalTabW / 2;
+        } else {
+          // start/leading: the cell's LEADING (right) edge sits on the stop.
+          tabPenX = tabAbsX - totalTabW;
+        }
       } else {
-        tabPenX = tabAbsX;
+        const tabAbsX = bx + lPad + line.tabStop.px;
+        if (line.tabStop.algn === 'r') {
+          tabPenX = tabAbsX - totalTabW;
+        } else if (line.tabStop.algn === 'ctr') {
+          tabPenX = tabAbsX - totalTabW / 2;
+        } else {
+          tabPenX = tabAbsX;
+        }
       }
+      // Shape the cell's glyphs in reading order under an RTL base (Arabic
+      // joining, digit shaping). `ctx.textAlign` stays 'left' (set once for the
+      // whole body), so tabPenX remains the cell's left edge — only glyph shaping
+      // differs. Reset to 'ltr' after the cell so later lines are unaffected.
+      if (baseRtl) ctx.direction = 'rtl';
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
         ctx.fillStyle = seg.color;
@@ -3431,6 +3466,7 @@ export function renderTextBody(
         }
         tabPenX += tabSegW;
       }
+      if (baseRtl) ctx.direction = 'ltr';
     }
 
     cursorY += linePx;
