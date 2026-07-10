@@ -229,10 +229,14 @@ a transparent, selectable text layer per page/slide for native copy. In
 worker boundary) and the viewer logs one warning — use the default `mode: 'main'`
 for selectable text.
 
-**Hyperlinks.** Links are clickable by default: an external link opens in a new
-tab (scheme-sanitized to `http` / `https` / `mailto` / `tel`, `noopener`), and an
-internal target navigates within the document (docx bookmark, pptx slide jump,
-xlsx sheet). Pass `onHyperlinkClick(target)` to take over the click yourself.
+**Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
+overlay, so hyperlink interaction requires `enableTextSelection: true`; when that
+overlay is enabled, links are interactive by default. XLSX hit-tests cells
+directly, so links are interactive out of the box. An external link opens in a
+new tab (scheme-sanitized to `http` / `https` / `mailto` / `tel`, `noopener`),
+and an internal target navigates within the document (docx bookmark, pptx slide
+jump, xlsx sheet). Pass `onHyperlinkClick(target)` to take over the click
+yourself.
 Pass `enableHyperlinks: false` to disable hyperlink interactivity entirely — no
 hit-testing, no pointer cursor over links, no default navigation, and
 `onHyperlinkClick` is never called; links still render as authored but are inert.
