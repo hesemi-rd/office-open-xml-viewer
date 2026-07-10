@@ -52,7 +52,12 @@ const {
   initPptxFromBytes,
   initDocxFromBytes,
   initXlsxFromBytes,
-} = await import('../src/index.ts').catch(() => import('../src/index.js'));
+} = await import('../src/index.ts').catch(() => import('../dist/index.js'));
+// Dev (monorepo) runs the TS source directly via Node's type stripping; a
+// published install has no `src/` (it ships `dist/`), so the first import
+// rejects with a not-found / unknown-extension error and we fall back to the
+// compiled `dist/index.js`. Node refuses to strip types from `.ts` files under
+// node_modules, so the standalone package MUST expose compiled JS here.
 
 const buf = readFileSync(filePath);
 let md;
