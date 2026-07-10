@@ -1,29 +1,38 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas, paginateDocument, __test_setLineReuseEnabled } from './renderer.js';
+import {
+  renderDocumentToCanvas,
+  paginateDocument,
+  __test_setLineReuseEnabled,
+  __test_setFragmentPaintEnabled,
+} from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 4-1 B2 Stage 1 — pixel-identity of the compute-once line reuse.
+// Body paint byte-identity — the compute-once line reuse (Phase 4-1 B2 Stage 1)
+// AND the PR 5 body fragment paint.
 //
-// renderParagraph reuses the paginator's stamped scale-1 lines instead of
-// re-running layoutLines (see the reuse gate in renderer.ts). This suite pins
-// that the reuse is behaviour-PRESERVING: rendering the exact same page with
-// reuse ON and with reuse OFF must emit a byte-identical paint call stream
-// (every fillText / strokeText / drawImage with identical text, x, y and font).
+// A migrated body paragraph now paints from its stored measured fragment
+// (fragment-paint.ts → renderBodyParagraphLines): the fragment's scale-1 line
+// partition is rescaled to the paint scale and drawn, with NO re-run of layoutLines.
+// Marker / float / state-sensitive paragraphs stay on the legacy renderParagraph
+// acquisition (its own scale-1 reuse gate). This suite pins that both mechanisms are
+// behaviour-PRESERVING: rendering the exact same page three ways —
+//   (1) production      : fragment paint ON,  reuse ON
+//   (2) legacy reuse    : fragment paint OFF, reuse ON
+//   (3) legacy recompute: fragment paint OFF, reuse OFF
+// must emit a byte-identical paint call stream (every fillText / strokeText /
+// drawImage with identical text, x, y and font). It also pins NON-VACUITY: fragment
+// paint (or, for non-migrated paragraphs, the legacy reuse gate) actually avoided
+// re-laying-out the paragraph, so production makes FEWER measureText calls than the
+// legacy recompute — except where the paragraph is legitimately excluded from both
+// fast paths (a numbered list's firstLineIndent, a NUMPAGES field), where the counts
+// are equal.
 //
 // The pages are built with `paginateDocument` (a fresh OffscreenCanvas(1,1)) and
 // handed to `renderDocumentToCanvas` via `prebuiltPages` — the SAME cross-context
-// flow the public `DocxDocument.renderPage` uses, so the test exercises the real
-// production reuse path (paginate ctx ≠ paint ctx), not a same-ctx shortcut. The
-// render width equals the page width so the paint scale is exactly 1 and the
-// reuse gate actually fires.
-//
-// Coverage: a long single-column paragraph that splits across pages (reuse fires),
-// a justified paragraph (per-line slack distribution reads the reused segments),
-// a CJK paragraph (per-glyph wrap), and a NUMBERED list that splits (reuse must
-// NOT fire — the firstLineIndent gate rejects it — yet the recompute path is
-// still identical to itself). Also pins that painting the same page twice is
-// identical (the shared stamped array is never mutated by the draw path).
+// flow the public `DocxDocument.renderPage` uses. The render width equals the page
+// width so the paint scale is exactly 1 (fragment rescale is then a no-op → a
+// migrated paragraph paints with zero measureText calls).
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface Call { op: 'fill' | 'stroke' | 'img'; text: string; x: number; y: number; font: string; }
@@ -148,87 +157,111 @@ async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElem
   return { perPage, measures };
 }
 
-/** Assert reuse ON and reuse OFF paint an identical stream on every page, and
- *  report how many measureText calls each variant made so the caller can pin
- *  whether the reuse actually fired (fewer measures) or the gate rejected it
- *  (equal measures). */
-async function assertReuseIdentical(model: DocxDocumentModel): Promise<{ pages: number; drawn: number; split: boolean; measuresOn: number; measuresOff: number; streams: Call[][] }> {
-  const pages = paginateDocument(model);
-  // Sanity: this document actually split a paragraph, so stamped lines exist.
-  const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
-
-  const prev = __test_setLineReuseEnabled(false);
-  let off: { perPage: Call[][]; measures: number };
-  try { off = await renderAllPages(model, pages); } finally { __test_setLineReuseEnabled(prev); }
-
-  const on = await renderAllPages(model, pages);
-
-  expect(on.perPage.length).toBe(off.perPage.length);
-  let drawn = 0;
-  for (let p = 0; p < on.perPage.length; p++) {
-    // Exact stream identity — same ops, text, positions, fonts, in the same order.
-    expect(on.perPage[p]).toEqual(off.perPage[p]);
-    drawn += on.perPage[p].filter((c) => c.op !== 'img').length;
+/** Render every page under an explicit (fragmentPaint, reuse) configuration, then
+ *  restore the previous flags. */
+async function renderVariant(
+  model: DocxDocumentModel,
+  pages: PaginatedBodyElement[][],
+  cfg: { fragmentPaint: boolean; reuse: boolean },
+): Promise<{ perPage: Call[][]; measures: number }> {
+  const prevFragment = __test_setFragmentPaintEnabled(cfg.fragmentPaint);
+  const prevReuse = __test_setLineReuseEnabled(cfg.reuse);
+  try {
+    return await renderAllPages(model, pages);
+  } finally {
+    __test_setLineReuseEnabled(prevReuse);
+    __test_setFragmentPaintEnabled(prevFragment);
   }
-  return { pages: pages.length, drawn, split, measuresOn: on.measures, measuresOff: off.measures, streams: on.perPage };
 }
 
-describe('compute-once line reuse — pixel identity (Phase 4-1 B2 Stage 1)', () => {
-  it('long single-column paragraph that splits across pages: reuse ON === reuse OFF', async () => {
+/** Assert the production paint (fragment ON, reuse ON) is byte-identical to the
+ *  legacy paint (fragment OFF) both with reuse ON and with reuse OFF, on every page.
+ *  Reports measureText counts so the caller can pin non-vacuity (a fast path really
+ *  fired, or was legitimately rejected). */
+async function assertPaintIdentical(model: DocxDocumentModel): Promise<{ pages: number; drawn: number; split: boolean; measuresProduction: number; measuresRecompute: number; streams: Call[][] }> {
+  const pages = paginateDocument(model);
+  // Sanity: this document actually split a paragraph, so continuation slices exist.
+  const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
+
+  const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
+  const legacyReuse = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
+  const legacyRecompute = await renderVariant(model, pages, { fragmentPaint: false, reuse: false });
+
+  expect(production.perPage.length).toBe(legacyReuse.perPage.length);
+  expect(production.perPage.length).toBe(legacyRecompute.perPage.length);
+  let drawn = 0;
+  for (let p = 0; p < production.perPage.length; p++) {
+    // Exact stream identity — same ops, text, positions, fonts, in the same order —
+    // across fragment paint AND both legacy variants.
+    expect(production.perPage[p]).toEqual(legacyReuse.perPage[p]);
+    expect(production.perPage[p]).toEqual(legacyRecompute.perPage[p]);
+    drawn += production.perPage[p].filter((c) => c.op !== 'img').length;
+  }
+  return {
+    pages: pages.length,
+    drawn,
+    split,
+    measuresProduction: production.measures,
+    measuresRecompute: legacyRecompute.measures,
+    streams: production.perPage,
+  };
+}
+
+describe('body paint byte-identity — fragment paint and compute-once line reuse', () => {
+  it('long single-column paragraph that splits across pages: fragment paint === legacy', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
-    const r = await assertReuseIdentical(doc([para(text) as unknown as BodyElement]));
+    const r = await assertPaintIdentical(doc([para(text) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1); // really split
-    expect(r.split).toBe(true);         // stamped lines present
+    expect(r.split).toBe(true);         // continuation slices present
     expect(r.drawn).toBeGreaterThan(0); // really painted
-    // The reuse actually fired: the paint pass skipped its own wrap-loop
-    // measureText calls, so ON made strictly fewer than OFF.
-    expect(r.measuresOn).toBeLessThan(r.measuresOff);
+    // Non-vacuity: fragment paint skipped the paragraph re-layout, so production
+    // made strictly fewer measureText calls than the legacy recompute.
+    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute);
   });
 
-  it('justified paragraph (both): slack distribution over reused segments is identical', async () => {
+  it('justified paragraph (both): slack distribution over fragment segments is identical', async () => {
     const text = Array.from({ length: 120 }, (_, i) => (i % 3 === 0 ? 'lorem' : 'ipsum')).join(' ');
-    const r = await assertReuseIdentical(doc([para(text, { alignment: 'both' }) as unknown as BodyElement]));
+    const r = await assertPaintIdentical(doc([para(text, { alignment: 'both' }) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.drawn).toBeGreaterThan(0);
-    expect(r.measuresOn).toBeLessThan(r.measuresOff); // reuse fired
+    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
   });
 
-  it('CJK paragraph (per-glyph wrap) that splits: reuse ON === reuse OFF', async () => {
+  it('CJK paragraph (per-glyph wrap) that splits: fragment paint === legacy', async () => {
     const text = 'あ'.repeat(200);
-    const r = await assertReuseIdentical(doc([para(text) as unknown as BodyElement]));
+    const r = await assertPaintIdentical(doc([para(text) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.drawn).toBeGreaterThan(0);
-    expect(r.measuresOn).toBeLessThan(r.measuresOff); // reuse fired
+    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
   });
 
-  it('numbered list that splits: reuse gate rejects it (firstLineIndent) yet paint is identical', async () => {
-    // A numbered paragraph: measure lays out with para.indentFirst, paint with
-    // numBodyOffset — the gate's firstIndent check fails, so reuse does NOT fire.
-    // The recompute path must still be self-identical (this is the control that
-    // proves the gate's rejection is safe and that toggling reuse is a no-op here).
+  it('numbered list that splits: excluded from fragment paint (firstLineIndent) yet paint is identical', async () => {
+    // A numbered paragraph: the placement-aware measurement lays out with
+    // para.indentFirst, but paint positions the body at numBodyOffset — so the
+    // fragment's scale-1 lines would NOT reproduce the paint. isFragmentPaintable
+    // excludes it (numbering != null) and the legacy reuse gate also rejects it, so
+    // production falls back to the recompute path — which must still be identical to
+    // itself. This is the control proving the exclusion is safe.
     const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.',
       indentLeft: 36, tab: 36, suff: 'tab', jc: 'left' } as unknown as DocParagraph['numbering'];
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const p = para(text, {
       numbering, indentLeft: 36, indentFirst: -18,
     });
-    const r = await assertReuseIdentical(doc([p as unknown as BodyElement]));
+    const r = await assertPaintIdentical(doc([p as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.drawn).toBeGreaterThan(0);
-    // The gate REJECTED reuse for the numbered list (firstLineIndent derivation
-    // differs between measure and paint), so ON and OFF recomputed identically —
-    // the measure counts are equal. This is what makes the gate non-vacuous: it
-    // proves the reuse did NOT silently fire on a paragraph whose measure lines
-    // would have painted wrong.
-    expect(r.measuresOn).toBe(r.measuresOff);
+    // Neither fast path fired (fragment paint excluded, reuse rejected), so
+    // production and the recompute path made the same number of measures.
+    expect(r.measuresProduction).toBe(r.measuresRecompute);
   });
 
-  it('NUMPAGES field in a splitting paragraph: never stamped — field text resolves against the real page context', async () => {
+  it('NUMPAGES field in a splitting paragraph: excluded from fragment paint — field text resolves against the real page context', async () => {
     // resolveFieldText is paint-state-dependent: numPages → state.totalPages,
     // which is 1 in the paginator's measure state but the real count at paint.
-    // Stamped measure-time lines would freeze the stale "1" into the drawn text,
-    // so paragraphSegsStateSensitive excludes such paragraphs from stamping —
-    // they stay on the recompute path (the pre-reuse behaviour).
+    // The fragment's line segments freeze the stale "1", so paragraphSegsStateSensitive
+    // excludes such paragraphs from BOTH the fragment path and the reuse stamp —
+    // they recompute their segments against the real page context.
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const p = para(text);
     (p.runs as unknown[]).push({
@@ -236,32 +269,31 @@ describe('compute-once line reuse — pixel identity (Phase 4-1 B2 Stage 1)', ()
       bold: false, italic: false, underline: false, strikethrough: false,
       fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
     });
-    const r = await assertReuseIdentical(doc([p as unknown as BodyElement]));
+    const r = await assertPaintIdentical(doc([p as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.split).toBe(true);
-    // No stamp → no reuse: ON and OFF recomputed identically.
-    expect(r.measuresOn).toBe(r.measuresOff);
+    // No fast path: production and recompute made the same number of measures.
+    expect(r.measuresProduction).toBe(r.measuresRecompute);
     // And the CURRENT total page count was drawn (not the measure-time "1" —
     // with pages > 1 the real count is distinguishable from the stale value).
     const drewTotal = r.streams.some((page) => page.some((c) => c.text === String(r.pages)));
     expect(drewTotal).toBe(true);
   });
 
-  it('custom kinsoku settings: fresh-but-value-equal rule objects still reuse (=== alone would reject)', async () => {
+  it('custom kinsoku settings: fragment paint stays identical across fresh-but-value-equal rule objects', async () => {
     // The prebuiltPages production path resolves resolveKinsokuRules(doc.settings)
-    // TWICE — once in paginateDocument, once in renderDocumentToCanvas — and the
-    // resolver builds fresh Set objects per call. With custom settings the rules
-    // are non-default on both sides yet reference-distinct; the gate's value
-    // equivalence must still let the reuse fire.
+    // TWICE — once in paginateDocument, once in renderDocumentToCanvas — building
+    // fresh Set objects per call. The fragment's lines were laid out under the
+    // paginate-time rules; the paint stays byte-identical.
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement], 60,
       { kinsoku: true, noLineBreaksBefore: '、。！' , noLineBreaksAfter: '（「' });
-    const r = await assertReuseIdentical(model);
+    const r = await assertPaintIdentical(model);
     expect(r.pages).toBeGreaterThan(1);
-    expect(r.measuresOn).toBeLessThan(r.measuresOff); // reuse fired across fresh rule objects
+    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
   });
 
-  it('same page rendered twice is identical (shared stamped array is never mutated)', async () => {
+  it('same page rendered twice is identical (the shared measured line array is never mutated by paint)', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement]);
     const pages = paginateDocument(model);

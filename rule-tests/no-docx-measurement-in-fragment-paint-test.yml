@@ -1,0 +1,22 @@
+id: no-docx-measurement-in-fragment-paint
+valid:
+  # Painting supplied geometry: scale the stored lines and draw them.
+  - "const lines = rescaleLayoutLines([...scale1Lines], scale, ctx, classes, delta);"
+  - "ctx.fillText(seg.text, x, baseline);"
+  - "ctx.drawImage(bmp, x, y, w, h);"
+  - "renderBodyParagraphLines(fragment.source, state, scale1Lines, suppress, slice, borderMerge);"
+  - "const advances = fragment.measured.lines.map((line) => line.layout);"
+invalid:
+  # Re-running line layout / segment construction / paragraph measurement.
+  - "const segs = buildSegments(para.runs, environment);"
+  - "const ls = layoutLines(ctx, segs, w, fi, scale, tabs, wrap, classes, il, k, d, dt, mr, rtl);"
+  - "const m = measureParagraph(para, context, placement, measurer, environment);"
+  # Measuring text at paint.
+  - "const w = ctx.measureText(seg.text).width;"
+  - "const w2 = measureText(seg.text).width;"
+  # Row measurement.
+  - "const rows = resolveTableRowHeights(table, cols, 1, measurer);"
+  - "const h = measureCellContentHeightPx(cell, table, cellW, scale, state);"
+  # Importing a forbidden symbol.
+  - "import { layoutLines } from './line-layout.js';"
+  - "import { measureParagraph } from './paragraph-measure.js';"

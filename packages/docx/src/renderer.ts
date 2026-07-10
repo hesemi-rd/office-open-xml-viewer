@@ -170,6 +170,10 @@ import {
   type ParagraphFragment,
   type PlacedFragment,
 } from './layout-fragments.js';
+// PR 5 — body fragment paint. renderer <-> fragment-paint is a deliberate import
+// cycle: both sides use the other only inside function bodies (never at module
+// evaluation), so ESM live bindings resolve them at call time.
+import { paintParagraphFragment } from './fragment-paint.js';
 import {
   drawVerticalRun,
   drawTateChuYokoRun,
@@ -5722,7 +5726,20 @@ function renderBodyElements(
               suppressBottom: parasShareBorderBox(para, nextFlowParaInColumn(elIdx)),
             }
           : undefined;
-      renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
+      // PR 5 — a migrated body paragraph paints from its stored fragment (no
+      // re-layout). Marker / float paragraphs (and any element the paginator did
+      // not fragment) fall through to the legacy `renderParagraph` acquisition.
+      // The fragment already carries this element's slice, so `slice` is not
+      // re-passed; suppression and border-merge are paint-adjacency inputs.
+      const placedFragment = bodyFragmentFor(el);
+      if (isFragmentPaintableParagraph(para, placedFragment, state)) {
+        paintParagraphFragment(placedFragment, state, {
+          suppressSpaceBefore: suppress || isContinuation,
+          borderMerge,
+        });
+      } else {
+        renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
+      }
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
@@ -6157,6 +6174,16 @@ function renderParagraph(
    *  renderParaList), which knows in-flow adjacency. Absent ⇒ draw the full box
    *  (a standalone bordered paragraph). */
   borderMerge?: ParaBorderMerge,
+  /** PR 5 — pre-measured scale-1 line partition supplied by body fragment paint
+   *  ({@link paintParagraphFragment}). When provided (even empty), the paragraph's
+   *  lines are the SUPPLIED partition rescaled to the paint scale — the reuse gate,
+   *  the scale-1 recompute, and the float re-layout are all bypassed. This makes
+   *  paint consume stored geometry without re-running {@link layoutLines}. The
+   *  paint pass is byte-identical to the legacy acquisition because the fragment
+   *  holds exactly the scale-1 lines the legacy non-float path would compute
+   *  (migration is gated to non-float, non-marker paragraphs). Empty ⇒ the
+   *  markOnly / anchor-only paragraph, handled by the existing empty-mark branch. */
+  suppliedScale1Lines?: readonly LayoutLine[],
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
   const paragraphContext = resolveStateParagraphLayoutContext(state, para);
@@ -6370,7 +6397,13 @@ function renderParagraph(
   const indRight1 = inFrame ? 0 : paragraphContext.physicalIndentRightPt;
   const marginRightPx = paraW + indRight;
   const marginRightPx1 = paraW1 + indRight1;
-  const lines = reuse
+  const lines = suppliedScale1Lines !== undefined
+    // Body fragment paint: use the fragment's scale-1 partition, rescaled to the
+    // paint scale via the same bridge the reuse gate uses. No re-layout, so paint
+    // scales stored geometry only (scale 1 returns the partition unchanged, so a
+    // scale-1 paint invokes no measureText).
+    ? rescaleLayoutLines([...suppliedScale1Lines], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
+    : reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
       ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl)
@@ -6536,6 +6569,66 @@ function renderParagraph(
   if (!lineSlice || lineSlice.start === 0) {
     renderAnchorImages(para, state, paragraphStartY);
   }
+}
+
+/** Master switch for body fragment paint (PR 5). Always ON in production; the
+ *  byte-identity characterization test (layout-lines-reuse-identity.test.ts) flips
+ *  it OFF to paint the migrated paragraphs through the legacy `renderParagraph`
+ *  acquisition and assert an IDENTICAL paint stream. Module-local. */
+let fragmentPaintEnabled = true;
+
+/** PR 5 — true when a body paragraph may be painted from its stored fragment. It
+ *  excludes the two cases where the fragment's scale-1 line partition would NOT
+ *  reproduce the legacy paint byte-for-byte:
+ *   - numbering markers: paint derives the first-line indent from `numBodyOffset`,
+ *     which differs from the placement-aware measurement's `para.indentFirst`;
+ *   - floating-wrap context: float paragraphs are laid out at the PAINT scale
+ *     against page-absolute float rectangles (renderParagraph case 3), which a
+ *     scale-1 fragment cannot reproduce (its measurement carries a wrap oracle).
+ *  It also excludes state-sensitive paragraphs (a NUMPAGES/page-ref field whose
+ *  resolved TEXT depends on the paint page context): the fragment's line segments
+ *  bake in the pagination-time field text, so those must recompute their segments at
+ *  paint — the same exclusion the legacy reuse stamp applies (`stampLines`).
+ *  Finally it excludes vertical (tbRl) text: the paginator's measure state has no
+ *  `verticalCJK`, so its fragment is laid out HORIZONTALLY (no 縦中横 grouping,
+ *  §17.3.2.10), whereas paint recomputes the lines vertically. Vertical text is
+ *  migrated with the vertical-text follow-up.
+ *  Excluded paragraphs stay on the legacy `renderParagraph` path; they are migrated
+ *  with markers / floats / table cells in later work. */
+function isFragmentPaintableParagraph(
+  para: DocParagraph,
+  placed: PlacedFragment | undefined,
+  state: RenderState,
+): placed is PlacedFragment {
+  return (
+    fragmentPaintEnabled &&
+    placed !== undefined &&
+    para.numbering == null &&
+    state.floats.length === 0 &&
+    !state.verticalCJK &&
+    placed.fragment.measured.placement.wrap === undefined &&
+    !paragraphSegsStateSensitive(para)
+  );
+}
+
+/**
+ * PR 5 — render a body paragraph from its fragment's stored scale-1 line partition,
+ * WITHOUT re-running line layout. Shares the exact draw path of
+ * {@link renderParagraph} (via its supplied-lines parameter), so the paint stream is
+ * byte-identical to the legacy acquisition for the migrated (non-marker, non-float)
+ * class. Called by {@link paintParagraphFragment} in fragment-paint.ts, which owns
+ * the fragment boundary; the scale-1 → paint-scale rescale happens inside
+ * `renderParagraph` through the existing `rescaleLayoutLines` bridge.
+ */
+export function renderBodyParagraphLines(
+  source: DocParagraph,
+  state: RenderState,
+  scale1Lines: readonly LayoutLine[],
+  suppressSpaceBefore: boolean,
+  lineSlice: { start: number; end: number } | undefined,
+  borderMerge: ParaBorderMerge | undefined,
+): void {
+  renderParagraph(source, state, suppressSpaceBefore, lineSlice, false, borderMerge, scale1Lines);
 }
 
 /** Per-line draw context for {@link drawParagraphLine}. Bundles the read-only
@@ -8987,6 +9080,17 @@ export const __test_setLineReuseEnabled = (v: boolean): boolean => {
   return prev;
 };
 
+/** Exported for the body fragment-paint byte-identity test (PR 5). Toggles whether
+ *  migrated body paragraphs paint from their stored fragment or fall back to the
+ *  legacy `renderParagraph` acquisition, so the test can render the SAME page both
+ *  ways and assert the paint call streams are byte-identical. Returns the previous
+ *  value so the test can restore it. */
+export const __test_setFragmentPaintEnabled = (v: boolean): boolean => {
+  const prev = fragmentPaintEnabled;
+  fragmentPaintEnabled = v;
+  return prev;
+};
+
 /** Exported for the compute-once table-layout characterization test (B2 table
  *  stage 1b). Toggles the stamped column-width/row-height reuse in
  *  computeTableLayout so the test can resolve the SAME stamped table with reuse ON
@@ -10326,7 +10430,7 @@ function drawBorderLine(
  * `suppressBottom` when one follows. When `suppressTop` is set the `between`
  * edge (if defined) is drawn at the top join instead of the `top` edge.
  */
-interface ParaBorderMerge {
+export interface ParaBorderMerge {
   /** A same-border paragraph is adjacent above ⇒ don't draw this `top` edge
    *  (draw `between` at the top join instead, when defined). */
   suppressTop?: boolean;

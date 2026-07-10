@@ -1,0 +1,33 @@
+id: no-docx-measurement-in-fragment-paint
+language: TypeScript
+severity: error
+message: >-
+  fragment-paint.ts paints stored fragment geometry only — it must not measure or
+  re-lay-out. Do not call buildSegments / layoutLines / measureParagraph /
+  measureText / row measurement here (PR 5 body-paint boundary).
+note: |
+  A body paragraph fragment carries its measured scale-1 geometry; paint scales it
+  (rescaleLayoutLines) and draws it. Re-running line layout or measuring text at paint
+  would defeat the fragment model (double measurement, stale placement) — the exact
+  divergence the migration removes. Keep segment construction, line layout, paragraph
+  measurement, text measurement and row measurement out of this file; consume the
+  fragment's stored lines instead.
+rule:
+  any:
+    # Segment construction / line layout / paragraph measurement.
+    - pattern: buildSegments($$$ARGS)
+    - pattern: layoutLines($$$ARGS)
+    - pattern: measureParagraph($$$ARGS)
+    # Canvas text measurement (bare or method form).
+    - pattern: measureText($$$ARGS)
+    - pattern: $OBJ.measureText($$$ARGS)
+    # Table row measurement.
+    - pattern: resolveTableRowHeights($$$ARGS)
+    - pattern: measureCellContentHeightPx($$$ARGS)
+    # Importing any of the forbidden layout/measurement symbols.
+    - kind: import_specifier
+      has:
+        field: name
+        regex: "^(buildSegments|layoutLines|measureParagraph|resolveTableRowHeights|measureCellContentHeightPx)$"
+files:
+  - "**/fragment-paint.ts"
