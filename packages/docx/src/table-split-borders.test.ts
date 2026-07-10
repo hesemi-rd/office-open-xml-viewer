@@ -1,0 +1,185 @@
+import { describe, it, expect, beforeAll } from 'vitest';
+import { renderDocumentToCanvas, paginateDocument } from './renderer.js';
+import type {
+  BodyElement,
+  CellElement,
+  DocParagraph,
+  DocTable,
+  DocTableRow,
+  DocxDocumentModel,
+  PaginatedBodyElement,
+  SectionProps,
+  BorderSpec,
+} from './types';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Split-edge border semantics for a MID-ROW page cut (stage D of the row-split
+// series). When a row is split at a cell line boundary across a page break, the
+// page-1 piece's bottom edge is a PAGE CUT, not a row boundary: Word leaves it
+// OPEN (no bottom rule — the row visually continues), while the continuation
+// piece on the next page draws its top edge as usual. A ROW-BOUNDARY page cut
+// (whole rows per page) keeps its existing border behavior — only the mid-row
+// cut suppresses the bottom edge.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string }
+
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[] } {
+  let font = '10px serif';
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+  const strokes: StrokeSeg[] = [];
+  let cur = { x: 0, y: 0 };
+  let pending: { x1: number; y1: number; x2: number; y2: number } | null = null;
+  let lineWidth = 1;
+  let strokeStyle = '#000000';
+  let fillStyle = '#000000';
+  const ctx = {
+    get font() { return font; },
+    set font(v: string) { font = v; },
+    get lineWidth() { return lineWidth; },
+    set lineWidth(v: number) { lineWidth = v; },
+    get strokeStyle() { return strokeStyle; },
+    set strokeStyle(v: string) { strokeStyle = v; },
+    get fillStyle() { return fillStyle; },
+    set fillStyle(v: string) { fillStyle = v; },
+    textAlign: 'left' as CanvasTextAlign,
+    letterSpacing: '0px',
+    measureText: (s: string) => {
+      const p = px();
+      return {
+        width: [...s].length * p * 0.5,
+        fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, beginPath() { pending = null; }, closePath() {},
+    moveTo(x: number, y: number) { cur = { x, y }; },
+    lineTo(x: number, y: number) { pending = { x1: cur.x, y1: cur.y, x2: x, y2: y }; cur = { x, y }; },
+    stroke() {
+      if (pending) strokes.push({ ...pending, width: lineWidth, color: strokeStyle });
+    },
+    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
+    bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
+    fillText() {}, strokeText() {},
+    direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  (ctx as unknown as { canvas: unknown }).canvas = canvas;
+  return { canvas: canvas as unknown as HTMLCanvasElement, strokes };
+}
+
+beforeAll(() => {
+  (globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas = class {
+    getContext() { return makeRecordingCanvas().canvas.getContext('2d'); }
+  };
+});
+
+const bs = (): BorderSpec => ({ style: 'single', width: 1, color: null } as BorderSpec);
+const allEdges = () => ({ top: bs(), bottom: bs(), left: bs(), right: bs(), insideH: bs(), insideV: bs() });
+
+function para(text: string): DocParagraph {
+  return {
+    type: 'paragraph', alignment: 'left',
+    indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null, tabStops: [],
+    runs: [{
+      type: 'text', text, bold: false, italic: false, underline: false,
+      strikethrough: false, fontSize: 20, color: null, fontFamily: 'T',
+      fontFamilyEastAsia: '', isLink: false, background: null, vertAlign: null, hyperlink: null,
+    } as DocParagraph['runs'][number]],
+    defaultFontSize: 20, defaultFontFamily: 'T', widowControl: false,
+  } as unknown as DocParagraph;
+}
+
+/** One-row bordered table whose single cell wraps to 4 lines (64 glyphs at 16/line, 80pt) — page body
+ *  60pt tall, so the row splits mid-page at 3 lines. Grid 160pt == page width. */
+function splitDoc(rows: DocTableRow[], pageHeight: number): DocxDocumentModel {
+  const t: DocTable = {
+    colWidths: [160], rows, borders: allEdges(),
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left', layout: 'fixed',
+  } as unknown as DocTable;
+  return {
+    section: {
+      pageWidth: 160, pageHeight,
+      marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps,
+    body: [{ type: 'table', ...t } as BodyElement],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: { T: 'roman' },
+  } as unknown as DocxDocumentModel;
+}
+
+const wrappingRow = (): DocTableRow => ({
+  cells: [{
+    content: [{ type: 'paragraph', ...para('あ'.repeat(64)) } as unknown as CellElement],
+    colSpan: 1, vMerge: null, borders: allEdges(), background: null, vAlign: 'top', widthPt: null,
+  }],
+  rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+} as unknown as DocTableRow);
+
+const shortRow = (text: string): DocTableRow => ({
+  cells: [{
+    content: [{ type: 'paragraph', ...para(text) } as unknown as CellElement],
+    colSpan: 1, vMerge: null, borders: allEdges(), background: null, vAlign: 'top', widthPt: null,
+  }],
+  rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+} as unknown as DocTableRow);
+
+async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[][], pageIndex: number): Promise<StrokeSeg[]> {
+  const { canvas, strokes } = makeRecordingCanvas();
+  await renderDocumentToCanvas(model, canvas, pageIndex, { dpr: 1, width: 160, prebuiltPages: pages });
+  return strokes;
+}
+
+const horizontals = (strokes: StrokeSeg[]) =>
+  strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.x2 - s.x1) > 10);
+
+describe('mid-row page-cut border semantics (stage D)', () => {
+  it('leaves the page-1 piece bottom OPEN and draws the continuation top', async () => {
+    // 4-line cell (80pt) into a 60pt page body: p.1 piece = 3 lines, cut at y=60.
+    const model = splitDoc([wrappingRow()], 60);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+    // Fixture sanity: the split really is MID-ROW (a lineSlice exists on p.1).
+    const p1Table = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable);
+    const p1Cut = (p1Table.rows[0].cells[0].content[0] as CellElement & { lineSlice?: unknown }).lineSlice;
+    expect(p1Cut).toBeDefined();
+
+    const p1 = await renderPage(model, pages, 0);
+    const p2 = await renderPage(model, pages, 1);
+
+    const p1H = horizontals(p1);
+    // Top frame at y=0 present…
+    expect(p1H.some((s) => Math.abs(s.y1 - 0) <= 1)).toBe(true);
+    // …but NO horizontal rule at the page cut (y=60): the row continues.
+    expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(0);
+
+    // The continuation piece draws its top edge on page 2 (y=0).
+    const p2H = horizontals(p2);
+    expect(p2H.some((s) => Math.abs(s.y1 - 0) <= 1)).toBe(true);
+  });
+
+  it('keeps the row-boundary page cut borders unchanged', async () => {
+    // Three 20pt single-line rows in a 40pt page body: the cut falls BETWEEN
+    // rows (no mid-row slice) — the existing behavior (whatever the resolved
+    // row-boundary edges draw today) must not change. Pin: a horizontal rule IS
+    // drawn at the page-1 bottom (y=40) — the row's own boundary edge.
+    const model = splitDoc([shortRow('a'), shortRow('b'), shortRow('c')], 40);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+    const p1Table = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable);
+    const sliced = p1Table.rows.some((r) => r.cells.some((c) =>
+      c.content.some((ce) => (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined)));
+    expect(sliced).toBe(false);
+
+    const p1 = await renderPage(model, pages, 0);
+    const p1H = horizontals(p1);
+    expect(p1H.filter((s) => Math.abs(s.y1 - 40) <= 1).length).toBeGreaterThan(0);
+  });
+});

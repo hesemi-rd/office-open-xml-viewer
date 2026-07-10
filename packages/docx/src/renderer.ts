@@ -5127,6 +5127,13 @@ function splitRowByCellBlocks(
     heights.push(Number.isFinite(bestHeight) ? bestHeight : measureSingleTableRowPt(slice, table, colWidthsPt, state));
     start = bestEnd;
   }
+  if (rows.length > 1) {
+    // Runtime-only cut markers (see splitRowByCellLines): every piece except
+    // the LAST ends at an intra-row cut, whose edge Word leaves open.
+    for (let i = 0; i < rows.length - 1; i++) {
+      (rows[i] as DocTableRow & { pageCutBottom?: boolean }).pageCutBottom = true;
+    }
+  }
   return rows.length > 1 ? { rows, heights } : null;
 }
 
@@ -5480,7 +5487,10 @@ function splitRowByCellLines(
     : 0;
   return {
     rows: [
-      { ...row, cells: beforeCells, rowHeight: null, rowHeightRule: 'auto' },
+      // Runtime-only marker on the CLONE (never the parsed model): the leading
+      // piece's bottom edge is a PAGE CUT through the row, not a row boundary —
+      // Word leaves it open (stage D; drawTableRows suppresses the edge).
+      { ...row, cells: beforeCells, rowHeight: null, rowHeightRule: 'auto', pageCutBottom: true } as DocTableRow,
       { ...row, cells: afterCells, rowHeight: null, rowHeightRule: 'auto' },
     ],
     heights: [
@@ -10549,7 +10559,14 @@ function drawTableRows(
       let x1 = x;
       let x2 = x + w;
       if (j.edges.bottomRow) {
-        spec = paintable(own.bottom?.spec ?? null);
+        // Stage D — a row piece created by a MID-ROW page cut has no bottom
+        // boundary: the row visually continues on the next page (or in the next
+        // stacked piece), so the cut edge draws nothing. Word's ground truth for
+        // the split-form class shows the page-1 piece open at the cut while the
+        // continuation draws its own top edge. Row-boundary cuts are unaffected
+        // (their rows carry no marker).
+        const cutRow = table.rows[j.lastRi] as DocTableRow & { pageCutBottom?: boolean };
+        spec = cutRow?.pageCutBottom === true ? null : paintable(own.bottom?.spec ?? null);
       } else {
         const below = neighbourJob(jobs, occupancy, j.lastRi + 1, j.ci);
         const belowEdges = below ? resolveCellEdges(below.cell.borders, table.borders, below.edges, mirror) : null;
