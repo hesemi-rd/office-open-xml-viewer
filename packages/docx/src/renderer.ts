@@ -102,6 +102,7 @@ import {
 } from './table-geometry.js';
 import {
   computeSectionColumns as computeColumns,
+  enterTableCellStoryContext,
   resolveDocumentLayoutSettings,
   resolveParagraphLayoutContext,
   resolveSectionLayoutContext,
@@ -129,6 +130,7 @@ import {
   gridCharDeltaPx,
   gridSegDeltaPx,
   hasCJKBreakOpportunity,
+  isGridLineRule,
   kinsokuRulesEquivalent,
   layoutLines,
   lineBoxHeight,
@@ -139,6 +141,7 @@ import {
   rescaleLayoutLines,
   shapeRenderState,
   shapeRunToDocRun,
+  segmentCharacterGridDeltaPx,
   splitTextForLayout,
 } from './line-layout.js';
 import type {
@@ -294,6 +297,8 @@ export interface RenderState {
   layoutSettings: DocumentLayoutSettings;
   /** Active section geometry and grid policy normalized for this state. */
   sectionLayout: SectionLayoutContext;
+  /** Active WordprocessingML story and nested text-container stack. */
+  storyContext: StoryContext;
   /** True when the document body contains East Asian text. Gates docGrid line-
    *  cell rounding of empty / anchor-only paragraph marks (see
    *  paragraphMarkLineHeight), which carry no text to classify themselves. */
@@ -443,6 +448,27 @@ export function resolveBodyParagraphLayoutContext(
     BODY_STORY_CONTEXT,
     paragraph,
   );
+}
+
+function resolveStateParagraphLayoutContext(
+  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>,
+  paragraph: DocParagraph,
+): ParagraphLayoutContext {
+  return resolveParagraphLayoutContext(
+    state.layoutSettings,
+    state.sectionLayout,
+    state.storyContext ?? BODY_STORY_CONTEXT,
+    paragraph,
+  );
+}
+
+function withTableCellStory(state: RenderState): RenderState {
+  return {
+    ...state,
+    storyContext: enterTableCellStoryContext(
+      state.storyContext ?? BODY_STORY_CONTEXT,
+    ),
+  };
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1268,6 +1294,7 @@ export async function renderDocumentToCanvas(
     docGrid: toLegacyDocGridContext(sectionLayout),
     layoutSettings,
     sectionLayout,
+    storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
@@ -3570,6 +3597,7 @@ function buildMeasureState(
     docGrid: toLegacyDocGridContext(sectionLayout),
     layoutSettings,
     sectionLayout,
+    storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     kinsoku: layoutSettings.kinsoku,
@@ -3696,9 +3724,8 @@ function estimateParagraphHeight(
  *  the grid pitch widens to accommodate the tallest required line, and
  *  every line in the paragraph then uses that widened pitch. */
 function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: number): number {
-  if (!grid || !grid.linePitchPt || grid.linePitchPt <= 0) return h;
-  if (grid.type !== 'lines' && grid.type !== 'linesAndChars') return h;
-  const pitchPx = grid.linePitchPt * scale;
+  if (!isGridLineRule(grid)) return h;
+  const pitchPx = grid!.linePitchPt! * scale;
   if (pitchPx <= 0) return h;
   if (h <= pitchPx) return pitchPx;
   return Math.ceil(h / pitchPx) * pitchPx;
@@ -3711,8 +3738,23 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
 /** The docGrid that governs a paragraph's line heights. ECMA-376 §17.3.1.32:
  *  a paragraph with `w:snapToGrid` explicitly off ignores the section grid, so
  *  its lines use natural font metrics / the spacing multiplier directly. */
+function gridForParagraphContext(
+  state: Pick<RenderState, 'docGrid'>,
+  context: ParagraphLayoutContext,
+): DocGridCtx {
+  return {
+    type: state.docGrid.type,
+    linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
+    charSpacePt:
+      context.characterGrid.active ? context.characterGrid.deltaPt : null,
+  };
+}
+
 function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
-  return para.snapToGrid === false ? { type: null, linePitchPt: null } : state.docGrid;
+  return gridForParagraphContext(
+    state,
+    resolveStateParagraphLayoutContext(state, para),
+  );
 }
 
 /** Lay out a paragraph's lines, then walk the line list distributing them
@@ -3811,6 +3853,7 @@ function splitParagraphAcrossPages(
   // the paint pass (layoutBidiTabStops measures stops from the text margin)
   // and re-introduce a paginate/render disagreement.
   const paragraphContext = resolveBodyParagraphLayoutContext(measureState, para);
+  const grid = paraGrid(para, measureState);
   const indLeft = paragraphContext.physicalIndentLeftPt;
   const indRight = paragraphContext.physicalIndentRightPt;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
@@ -3840,10 +3883,10 @@ function splitParagraphAcrossPages(
     startPageY: measureState.y,
     paraX,
     floats: measureState.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphContext.hasRuby, is ?? 0, paragraphContext.hasEastAsianText),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paragraphContext.hasRuby, is ?? 0, paragraphContext.hasEastAsianText),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(grid, 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -3857,9 +3900,9 @@ function splitParagraphAcrossPages(
   // See paragraphSegsStateSensitive.
   const stampLines = !paragraphSegsStateSensitive(para);
 
-  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText);
+  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText);
   const uniformH = paraHasRuby
-    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
+    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), grid, 1)
     : 0;
   const lineHeights = lines.map(l => paraHasRuby ? uniformH : perLineH(l));
   const spaceBefore = suppressSpaceBefore ? 0 : para.spaceBefore;
@@ -4403,8 +4446,8 @@ function layoutCellParagraphForRowSplit(
 ): { lines: LayoutLine[]; lineHeights: number[]; inputs: Parameters<typeof stampParagraphLines>[2] } | null {
   const segs = buildSegments(para.runs, state);
   if (segs.length === 0) return null;
-  const grid = paraGrid(para, state);
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
+  const grid = gridForParagraphContext(state, paragraphContext);
   const paraHasRuby = paragraphContext.hasRuby;
   const indLeft = paragraphContext.physicalIndentLeftPt;
   const indRight = paragraphContext.physicalIndentRightPt;
@@ -4715,6 +4758,7 @@ function splitRowByCellLines(
   let ci = 0;
 
   for (const cell of row.cells) {
+    const cellState = withTableCellStory(state);
     const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
     const cellWPt = colWidthsPt.slice(ci, ci + span).reduce((s, w) => s + w, 0);
     ci += span;
@@ -4724,7 +4768,7 @@ function splitRowByCellLines(
       trimTrailingStructuralMarker(cell.content),
       cellWPt - margins.left - margins.right,
       maxContentH,
-      state,
+      cellState,
     );
     if (!split) return null;
     beforeCells.push({ ...cell, content: split.before });
@@ -5972,7 +6016,7 @@ function renderParagraph(
   borderMerge?: ParaBorderMerge,
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
   const paragraphStartY = state.y;
 
@@ -6888,7 +6932,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //   2. Justified inter-CJK pitch only (no grid): the existing
         //      `justifiedPiecePositions` slice-at-gaps path.
         //   3. Neither: a single fillText (the common path).
-        const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
+        const segmentGridDeltaPx = segmentCharacterGridDeltaPx(s, drawGridDeltaPx);
+        const segGridDelta = gridSegDeltaPx(s.text, segmentGridDeltaPx);
         if (state.verticalCJK && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
@@ -6921,7 +6966,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             x,
             baseline + yOffset,
             effSizePx,
-            segGridDelta !== 0 ? drawGridDeltaPx : 0,
+            segGridDelta !== 0 ? segmentGridDeltaPx : 0,
           );
         } else if (segGridDelta !== 0) {
           const cps = [...s.text]; // code points (handles surrogate pairs)
@@ -6951,7 +6996,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // includes the accumulated pitch of the glyphs before it) and as
           // `ctx.letterSpacing` (so the canvas adds it WITHIN each piece) —
           // together glyph i lands at measure(prefix)+i·pitch (measure==paint).
-          const gridPlusSpacing = drawGridDeltaPx + segCharSpacingPx;
+          const gridPlusSpacing = segmentGridDeltaPx + segCharSpacingPx;
           // ECMA-376 §17.3.2.43 `<w:w>` (issue #816): the MEASURE pass scaled the
           // natural glyph advance by `segCharScale` (segAdvanceWidth) but left the
           // fixed per-cell pitches (grid delta, char spacing, justify slack)
@@ -7125,7 +7170,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             stretch.splitBefore.length === [...s.text].length - 1;
           const markPitch =
             segGridDelta !== 0
-              ? drawGridDeltaPx
+              ? segmentGridDeltaPx
               : fullyDistributed
                 ? distPerGap
                 : 0;
@@ -7383,7 +7428,7 @@ type PaginatedElementWithLines = PaginatedBodyElement & {
  *  that produced them onto the paragraph object, so the paint pass can reuse the
  *  wrap partition instead of re-running {@link layoutLines} (compute-once). Used
  *  by both the BODY split path ({@link splitParagraphAcrossPages}, Stage 1) and
- *  the table-CELL measure path ({@link measureParaHeight}, T2). Only ever called
+ *  the table-CELL measure path ({@link measureCellParagraphHeight}, T2). Only ever called
  *  at scale 1 (the paginator's pt space), so every recorded number is already in
  *  pt and the paint gate compares against it without rescaling — see the
  *  self-verifying reuse gate in {@link renderParagraph}, which fires ONLY when its
@@ -9259,6 +9304,7 @@ function measureCellContentHeightPx(
   scale: number,
   state: RenderState,
 ): number {
+  const cellState = withTableCellStory(state);
   const cm = effCellMargins(cell, table);
   const contentW = cellW - (cm.left + cm.right) * scale;
   // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When the cell's
@@ -9278,7 +9324,7 @@ function measureCellContentHeightPx(
   // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
     measured,
-    (ce) => measureCellElementHeight(state, ce, contentW, scale),
+    (ce) => measureCellElementHeight(cellState, ce, contentW, scale),
     scale,
   );
 }
@@ -9690,16 +9736,16 @@ export function calculateRowHeight(
   );
 }
 
-function measureParaHeight(
+function measureCellParagraphHeight(
   state: RenderState,
   para: DocParagraph,
   maxWidth: number,
   scale: number,
 ): number {
   const segs = buildSegments(para.runs, state);
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
   const paraHasRuby = paragraphContext.hasRuby;
-  const grid = paraGrid(para, state);
+  const grid = gridForParagraphContext(state, paragraphContext);
   if (segs.length === 0) {
     // ECMA-376 §17.3.1.29: an empty (or anchor-only) paragraph still produces one
     // paragraph-mark line box. Size it with the SAME `paragraphMarkLineHeight`
@@ -9784,7 +9830,7 @@ function measureParaHeight(
   // as `contentW/scale − ind…`. The paint-scale calls of this function
   // (vAlign-centering measure in renderCell, and the dryRun measureCellContent
   // path) MUST NOT overwrite the scale-1 stamp with paint-scale lines, so they are
-  // skipped here. `hasFloats` is always false: measureParaHeight passes `undefined`
+  // skipped here. `hasFloats` is always false: measureCellParagraphHeight passes `undefined`
   // for the layoutLines wrap context (cell paragraphs are never wrapped around
   // floats in the measure), and when a cell is painted inside a live float band
   // renderParagraph takes its float path (case 3) and ignores this no-float stamp.
@@ -9800,7 +9846,7 @@ function measureParaHeight(
   // paragraphs (page/numPages fields, note refs) are excluded exactly as the body
   // stamp excludes them — their segment text resolves against the real paint page.
   // Nested tables recurse through the same path (measureCellElementHeight →
-  // estimateTableHeight → measureParaHeight at scale 1), so their inner cell
+  // estimateTableHeight → measureCellParagraphHeight at scale 1), so their inner cell
   // paragraphs get stamped and reused by the same mechanism.
   if (scale === 1 && !paragraphSegsStateSensitive(para)) {
     stampParagraphLines(para, lines, {
@@ -9852,12 +9898,13 @@ function measureCellContent(
   scale: number,
   state: RenderState,
 ): void {
+  const cellState = withTableCellStory(state);
   const cm = effCellMargins(cell, table);
   const ml = cm.left * scale;
   const mr = cm.right * scale;
   const innerW = cellW - ml - mr;
   for (const ce of cell.content) {
-    measureCellElementHeight(state, ce, innerW, scale);
+    measureCellElementHeight(cellState, ce, innerW, scale);
   }
 }
 
@@ -9876,7 +9923,7 @@ function measureCellElementHeight(
     // content clears a drawn bottom border. Mirror it here, or a bordered cell
     // paragraph paints taller than the cell measures (B2: single measurer).
     // renderCellContent never passes a borderMerge, so no suppression term.
-    return measureParaHeight(state, para, innerWPx, scale)
+    return measureCellParagraphHeight(state, para, innerWPx, scale)
       + (para.spaceBefore + Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))) * scale;
   }
   // Nested table — estimateTableHeight works in pt; convert to px.
@@ -9923,6 +9970,9 @@ function renderCell(
     contentX: x + ml,
     contentW: w - ml - mr,
     y: y + mt,
+    storyContext: enterTableCellStoryContext(
+      state.storyContext ?? BODY_STORY_CONTEXT,
+    ),
     // ECMA-376 §17.6.8 numbers the MAIN document story only — table-cell lines are
     // never numbered. Clear any inherited line-numbering config/counter.
     lineNumbering: undefined,

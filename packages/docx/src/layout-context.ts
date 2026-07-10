@@ -65,6 +65,14 @@ export interface StoryContext {
   readonly lineNumberingEligible: boolean;
 }
 
+export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
+  return {
+    story: parent.story,
+    containers: [...parent.containers, { kind: 'tableCell' }],
+    lineNumberingEligible: false,
+  };
+}
+
 export interface LineGridPolicy {
   readonly active: boolean;
   readonly pitchPt: number | null;

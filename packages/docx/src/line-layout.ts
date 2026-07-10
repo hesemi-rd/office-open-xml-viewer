@@ -115,6 +115,9 @@ export interface LayoutTextSeg {
    *  overlay can build a clickable region; it does NOT affect measurement, line
    *  breaking, or the drawn glyphs. Absent for a non-link run. */
   hyperlink?: HyperlinkTarget;
+  /** ECMA-376 §17.3.2.34 `<w:snapToGrid>` — false opts this run out of the
+   *  section character grid without changing paragraph line-grid policy. */
+  snapToCharacterGrid?: boolean;
   /** ECMA-376 §17.3.2.35 `<w:spacing>` — character-spacing pitch in POINTS
    *  (signed), added after every character of the run. Applied as a per-glyph
    *  `ctx.letterSpacing` delta on BOTH measure and paint (measure==paint), on top
@@ -667,6 +670,14 @@ export function gridWidth(naturalWidthPx: number, text: string, deltaPx: number)
   return naturalWidthPx + gridSegDeltaPx(text, deltaPx);
 }
 
+/** Resolve the per-glyph character-grid delta for one text segment. */
+export function segmentCharacterGridDeltaPx(
+  seg: LayoutTextSeg,
+  gridDeltaPx: number,
+): number {
+  return seg.snapToCharacterGrid === false ? 0 : gridDeltaPx;
+}
+
 /** ECMA-376 §17.3.2.35 `<w:spacing>` — the per-GLYPH character-spacing pitch in
  *  px for a segment (its authored points × the paint scale). Unlike the docGrid
  *  delta this applies to EVERY code point of the run, not just East-Asian ones
@@ -698,7 +709,8 @@ export function segLetterSpacingPx(
   gridDeltaPx: number,
   scale: number,
 ): number {
-  const grid = gridSegDeltaPx(seg.text, gridDeltaPx) === 0 ? 0 : gridDeltaPx;
+  const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
+  const grid = gridSegDeltaPx(seg.text, segmentDelta) === 0 ? 0 : segmentDelta;
   return grid + charSpacingDeltaPx(seg, scale);
 }
 
@@ -724,14 +736,17 @@ export function segAdvanceWidth(
   // logical-horizontal advance IS the vertical column advance after the page
   // rotation — see vertical-text.ts and renderer's page transform.)
   if (seg.tateChuYoko) return seg.fontSize * scale;
-  const scaled = naturalWidthPx * charScaleFactor(seg) + gridSegDeltaPx(seg.text, gridDeltaPx);
+  const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
+  const scaled = naturalWidthPx * charScaleFactor(seg) + gridSegDeltaPx(seg.text, segmentDelta);
   const cpCount = [...seg.text].length;
   return scaled + cpCount * charSpacingDeltaPx(seg, scale);
 }
 
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
   if (!ctx || !ctx.linePitchPt || ctx.linePitchPt <= 0) return false;
-  return ctx.type === 'lines' || ctx.type === 'linesAndChars';
+  return ctx.type === 'lines'
+    || ctx.type === 'linesAndChars'
+    || ctx.type === 'snapToChars';
 }
 
 /**
@@ -739,11 +754,11 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  * (fontBoundingBoxAscent + fontBoundingBoxDescent) per ECMA-376 §17.3.1.33.
  *
  *   auto    → natural × value ("single" = 1 natural line, "double" = 2).
- *             When docGrid type=lines|linesAndChars is active, the
+ *             When the docGrid line axis is active, the
  *             multiplier applies against the grid pitch instead, with a
  *             floor of the natural line height.
  *   exact   → value in pt, converted to px (ignores font and grid).
- *   atLeast → max(natural, value in pt × scale).
+ *   atLeast → max(natural, authored minimum, active grid minimum).
  *   null    → natural, or grid pitch if the section defines one.
  *
  * Exported for unit tests only — not part of the package API (not
@@ -830,7 +845,13 @@ export function lineBoxHeight(
     return natural * ls.value;
   }
   if (ls.rule === 'exact') return ls.value * scale;
-  if (ls.rule === 'atLeast') return Math.max(natural, ls.value * scale);
+  if (ls.rule === 'atLeast') {
+    return Math.max(
+      natural,
+      ls.value * scale,
+      hasGrid ? gridSingleCell() : 0,
+    );
+  }
   return natural;
 }
 
@@ -1715,6 +1736,7 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
         hyperlink,
+        snapToCharacterGrid: r.snapToGrid !== false,
         // WD4 — run character metrics (§17.3.2.35 spacing / §17.3.2.43 w /
         // §17.3.2.24 position / §17.3.2.19 kern). Uniform across the run, so
         // every emitted segment carries the same values; the measure and paint
@@ -2250,7 +2272,8 @@ export function layoutLines(
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
     restoreKerning(prevKern);
-    const scaled = natural * charScaleFactor(s) + gridSegDeltaPx(text, gridDeltaPx);
+    const segmentDelta = segmentCharacterGridDeltaPx(s, gridDeltaPx);
+    const scaled = natural * charScaleFactor(s) + gridSegDeltaPx(text, segmentDelta);
     return scaled + [...text].length * charSpacingDeltaPx(s, scale);
   };
 
@@ -2644,7 +2667,7 @@ export function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, gridDeltaPx, charScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -2722,7 +2745,7 @@ export function layoutLines(
       const available = availW();
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const allChars = [...s.text];
-      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, gridDeltaPx, charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
       if (split < 1) split = 1;
       if (split >= allChars.length) {
         // The visible glyphs actually fit (only a trailing space pushed it over the
@@ -2802,7 +2825,11 @@ export function rescaleLayoutLines(
     const effPx = calcEffectiveFontPx(s, scale);
     ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
     const m = ctx.measureText(s.text);
-    const advance = gridWidth(m.width, s.text, gridDeltaPx);
+    const advance = gridWidth(
+      m.width,
+      s.text,
+      segmentCharacterGridDeltaPx(s, gridDeltaPx),
+    );
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.

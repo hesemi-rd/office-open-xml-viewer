@@ -6,6 +6,7 @@ import type {
   SectionProps,
 } from './types.js';
 import {
+  enterTableCellStoryContext,
   resolveDocumentLayoutSettings,
   resolveParagraphLayoutContext,
   resolveRunLayoutContext,
@@ -81,6 +82,18 @@ const cellStory: StoryContext = {
 };
 
 describe('layout context resolvers', () => {
+  it('preserves nested table-cell container depth', () => {
+    const outerCell = enterTableCellStoryContext(bodyStory);
+    const innerCell = enterTableCellStoryContext(outerCell);
+
+    expect(outerCell.containers).toEqual([{ kind: 'tableCell' }]);
+    expect(innerCell.containers).toEqual([
+      { kind: 'tableCell' },
+      { kind: 'tableCell' },
+    ]);
+    expect(innerCell.lineNumberingEligible).toBe(false);
+  });
+
   it('normalizes document settings and detects East Asian body text once', () => {
     const run = textRun({ text: 'あ' });
     const settings = resolveDocumentLayoutSettings(documentModel({
