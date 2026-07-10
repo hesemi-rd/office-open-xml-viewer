@@ -10849,9 +10849,9 @@ function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
 // PURE-EA segment. `gridSegDeltaPx` returns the total delta a segment's box
 // gains (`len × Δpx` for a pure-EA segment, else 0 — mixed/Latin segments get
 // no grid effect, sidestepping any contextual-metric or justification drift),
-// and `gridWidth` adds it to the natural `measureText` width. BOTH the layout's
-// `measuredWidth` and every draw path derive the segment's advance from this
-// SAME quantity:
+// and `segAdvanceWidth` folds it into the run's complete advance together with
+// §17.3.2.43 `w:w` and §17.3.2.35 `w:spacing`. BOTH the layout's `measuredWidth`
+// and every draw path derive the segment's advance from this SAME quantity:
 //   • non-justified draw walks the glyphs via `justifiedPiecePositions(cps,
 //     [1..n-1], perGap=0, measure, letterSpacingPx=Δ)`, whose final glyph lands
 //     at `measure(whole) + n·Δ` = the box edge;

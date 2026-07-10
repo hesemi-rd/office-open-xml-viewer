@@ -701,14 +701,6 @@ export function gridSegDeltaPx(text: string, deltaPx: number): number {
   return eaGlyphCount(text) === cps.length ? cps.length * deltaPx : 0;
 }
 
-/** Single source of truth for a text segment's laid-out advance: the natural
- *  `measureText` width plus the character-grid delta (0 unless an active grid
- *  AND a pure-EA segment). EVERY line-break / advance measurement and every draw
- *  path must derive the segment advance from this, so they cannot diverge. */
-export function gridWidth(naturalWidthPx: number, text: string, deltaPx: number): number {
-  return naturalWidthPx + gridSegDeltaPx(text, deltaPx);
-}
-
 /** Resolve the per-glyph character-grid delta for one text segment. */
 export function segmentCharacterGridDeltaPx(
   seg: LayoutTextSeg,
@@ -731,6 +723,21 @@ export function charSpacingDeltaPx(seg: LayoutTextSeg, scale: number): number {
  *  natural `measureText` width; the paint pass reproduces it with `ctx.scale`. */
 export function charScaleFactor(seg: LayoutTextSeg): number {
   return seg.charScale ?? 1;
+}
+
+/** Canonical advance formula for a text string in a run: natural glyph width
+ *  scaled by ECMA-376 §17.3.2.43 `<w:w>`, plus the §17.6.5 character-grid
+ *  delta, plus one ECMA-376 §17.3.2.35 `<w:spacing>` pitch per code point. */
+function textAdvanceWidth(
+  naturalWidthPx: number,
+  text: string,
+  gridDeltaPx: number,
+  charScale: number,
+  charSpacingPx: number,
+): number {
+  return naturalWidthPx * charScale
+    + gridSegDeltaPx(text, gridDeltaPx)
+    + [...text].length * charSpacingPx;
 }
 
 /** Total per-code-point letter-spacing (px) a segment draws with: the docGrid
@@ -757,8 +764,7 @@ export function segLetterSpacingPx(
  *  and the §17.3.2.35 character spacing, on top of the docGrid delta. The
  *  natural width is scaled first (w:w stretches the glyphs), then the char-spacing
  *  pitch is added per code point (w:spacing adds fixed gaps that w:w does not
- *  stretch), matching Word's independent treatment of the two axes. Reduces to
- *  {@link gridWidth} when the run declares neither attribute. */
+ *  stretch), matching Word's independent treatment of the two axes. */
 export function segAdvanceWidth(
   seg: LayoutTextSeg,
   naturalWidthPx: number,
@@ -776,9 +782,13 @@ export function segAdvanceWidth(
   // rotation — see vertical-text.ts and renderer's page transform.)
   if (seg.tateChuYoko) return seg.fontSize * scale;
   const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
-  const scaled = naturalWidthPx * charScaleFactor(seg) + gridSegDeltaPx(seg.text, segmentDelta);
-  const cpCount = [...seg.text].length;
-  return scaled + cpCount * charSpacingDeltaPx(seg, scale);
+  return textAdvanceWidth(
+    naturalWidthPx,
+    seg.text,
+    segmentDelta,
+    charScaleFactor(seg),
+    charSpacingDeltaPx(seg, scale),
+  );
 }
 
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
@@ -1146,8 +1156,8 @@ export function fitCJKPrefix(
   text: string,
   maxWidth: number,
   // ECMA-376 §17.6.5 character-grid delta (px per EA glyph, 0 when inactive).
-  // The fit must compare CELL widths so the grid's char count lands per line —
-  // the same `gridWidth` the line box / draw uses, keeping the split consistent.
+  // The fit must compare the same advance model as the line box / draw so the
+  // grid's char count and run character metrics land on the same split.
   gridDeltaPx = 0,
   // WD4 — the run's §17.3.2.43 horizontal glyph scale (1 = 100%) and §17.3.2.35
   // per-code-point character-spacing pitch in px. Threaded so a CJK run that is
@@ -1161,10 +1171,13 @@ export function fitCJKPrefix(
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
     const prefix = chars.slice(0, mid).join('');
-    const advance =
-      ctx.measureText(prefix).width * charScale +
-      gridSegDeltaPx(prefix, gridDeltaPx) +
-      mid * charSpacingPx;
+    const advance = textAdvanceWidth(
+      ctx.measureText(prefix).width,
+      prefix,
+      gridDeltaPx,
+      charScale,
+      charSpacingPx,
+    );
     if (advance <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
@@ -2037,8 +2050,8 @@ export function layoutLines(
   // ON; the CJK overflow path retracts the break to a kinsoku-legal position.
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
   // ECMA-376 §17.6.5 docGrid CHARACTER grid: per-EA-glyph cell delta in px (0
-  // when inactive). Folded into every advance via `gridWidth` so line breaking
-  // packs the grid's char count per line; the draw paths add the SAME delta.
+  // when inactive). Folded into every text advance so line breaking packs the
+  // grid's char count per line; the draw paths add the SAME delta.
   gridDeltaPx = 0,
   // ECMA-376 §17.15.1.25 — automatic tab-stop interval (pt). The automatic-stop
   // grid (`nextTabStop`) multiplies this by `scale`; defaults to the spec absent
@@ -2331,9 +2344,7 @@ export function layoutLines(
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
     restoreKerning(prevKern);
-    const segmentDelta = segmentCharacterGridDeltaPx(s, gridDeltaPx);
-    const scaled = natural * charScaleFactor(s) + gridSegDeltaPx(text, segmentDelta);
-    return scaled + [...text].length * charSpacingDeltaPx(s, scale);
+    return segAdvanceWidth({ ...s, text }, natural, gridDeltaPx, scale);
   };
 
   // Width of a queued segment, for right/center tab look-ahead.
@@ -2848,7 +2859,7 @@ export function layoutLines(
  *  the baseline off by up to ~1px vertically, accumulating down the page (seen on
  *  demo/sample-1 p.4). So RE-MEASURE every text segment at the paint scale here —
  *  the exact same per-segment measurement `layoutLines` does (advance via
- *  gridWidth, box via correctedLineMetrics, the §17.3.2.33 small-caps full-size
+ *  segAdvanceWidth, box via correctedLineMetrics, the §17.3.2.33 small-caps full-size
  *  box, the §17.3.3.25 ruby ascent reserve, and the intended-single-line floor) —
  *  so measure == draw byte-for-byte, identical to a fresh paint-scale layout of
  *  the SAME partition. Only WHICH glyphs sit on WHICH line comes from the scale-1
@@ -2884,11 +2895,7 @@ export function rescaleLayoutLines(
     const effPx = calcEffectiveFontPx(s, scale);
     ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
     const m = ctx.measureText(s.text);
-    const advance = gridWidth(
-      m.width,
-      s.text,
-      segmentCharacterGridDeltaPx(s, gridDeltaPx),
-    );
+    const advance = segAdvanceWidth(s, m.width, gridDeltaPx, scale);
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.
