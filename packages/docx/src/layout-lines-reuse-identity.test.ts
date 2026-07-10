@@ -6,8 +6,17 @@ import {
   __test_setBodyFragment,
   __test_setLineReuseEnabled,
   __test_setFragmentPaintEnabled,
+  __test_tableRequiresLegacyPaint,
 } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
+import type {
+  BodyElement,
+  CellElement,
+  DocParagraph,
+  DocTable,
+  DocxDocumentModel,
+  SectionProps,
+  PaginatedBodyElement,
+} from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Body paint byte-identity — the compute-once line reuse (Phase 4-1 B2 Stage 1)
@@ -471,18 +480,99 @@ function cellOf(content: unknown[], widthPt: number): Record<string, unknown> {
   };
 }
 
-function tableOf(cellContent: unknown[]): BodyElement {
+function tableOf(
+  cellContent: unknown[],
+  overrides: {
+    colWidths?: number[];
+    widthPt?: number;
+    tblInd?: number;
+    jc?: string;
+    layout?: string;
+  } = {},
+): BodyElement {
+  const colWidths = overrides.colWidths ?? [180];
+  const widthPt = overrides.widthPt ?? colWidths[0] ?? 180;
   return {
     type: 'table',
-    colWidths: [180],
-    rows: [{ cells: [cellOf(cellContent, 180)], rowHeight: null, rowHeightRule: 'auto', isHeader: false }],
+    colWidths,
+    rows: [{ cells: [cellOf(cellContent, widthPt)], rowHeight: null, rowHeightRule: 'auto', isHeader: false }],
     borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
     cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
-    jc: 'left', layout: 'fixed',
+    jc: overrides.jc ?? 'left', layout: overrides.layout ?? 'fixed',
+    ...(overrides.tblInd == null ? {} : { tblInd: overrides.tblInd }),
   } as unknown as BodyElement;
 }
 
+describe('table fragment-paint legacy gate', () => {
+  it('excludes only negative leading tblInd tables, including nested tables', () => {
+    const negative = tableOf([para('negative')], { tblInd: -30 }) as unknown as DocTable;
+    const nestedNegative = tableOf([para('nested')], { tblInd: -12 }) as unknown as DocTable;
+    const outer = tableOf([nestedNegative]) as unknown as DocTable;
+    const positive = tableOf([para('positive')], { tblInd: 12 }) as unknown as DocTable;
+    const centeredNegative = tableOf([para('centered')], {
+      tblInd: -30,
+      jc: 'center',
+    }) as unknown as DocTable;
+
+    expect(__test_tableRequiresLegacyPaint(negative)).toBe(true);
+    expect(__test_tableRequiresLegacyPaint(outer)).toBe(true);
+    expect(__test_tableRequiresLegacyPaint(positive)).toBe(false);
+    expect(__test_tableRequiresLegacyPaint(centeredNegative)).toBe(false);
+  });
+
+  it('excludes a table containing a sliced cell paragraph', () => {
+    const sliced = {
+      ...para('sliced'),
+      lineSlice: { start: 0, end: 2 },
+    } as unknown as CellElement;
+    const table = tableOf([sliced]) as unknown as DocTable;
+
+    expect(__test_tableRequiresLegacyPaint(table)).toBe(true);
+  });
+
+  it('excludes production row slices emitted from a tall cell paragraph', () => {
+    const cellPara = para(Array.from({ length: 40 }, () => 'wrap').join(' '));
+    const pages = paginateDocument(doc([tableOf([cellPara])], 60));
+    const sliceTables = pages
+      .flatMap((page) => page)
+      .filter((el): el is PaginatedBodyElement & DocTable => el.type === 'table');
+    const slicedTables = sliceTables.filter((table) =>
+      table.rows.some((row) =>
+        row.cells.some((cell) =>
+          cell.content.some(
+            (ce) =>
+              ce.type === 'paragraph' &&
+              (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined,
+          ),
+        ),
+      ),
+    );
+
+    expect(sliceTables.length).toBeGreaterThan(1);
+    expect(slicedTables.length).toBeGreaterThan(0);
+    for (const table of slicedTables) {
+      expect(__test_tableRequiresLegacyPaint(table)).toBe(true);
+    }
+  });
+});
+
 describe('table-cell paint byte-identity — fragment table paint (PR 6)', () => {
+  it('negative leading tblInd table: fragment paint falls back to the page-width legacy budget', async () => {
+    const cellPara = para(Array.from({ length: 50 }, () => 'wide').join(' '));
+    const model = doc([
+      tableOf([cellPara], {
+        colWidths: [220],
+        widthPt: 220,
+        tblInd: -30,
+        jc: 'left',
+        layout: 'fixed',
+      }),
+    ], 400);
+
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
+  });
+
   it('numbered paragraph inside a table cell: fragment paint === legacy (marker indent)', async () => {
     // Legacy cell paint recomputes a NUMBERED paragraph with the marker-aware
     // numBodyOffset first-line indent (the stamp gate rejects it); the fragment's

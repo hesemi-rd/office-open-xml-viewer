@@ -4027,18 +4027,30 @@ function attachTableFragment(
 
 /** A table (or any table nested in its cells) stays on the LEGACY paint path when it
  *  needs re-measurement or an out-of-flow path the fragment paint does not yet cover:
+ *   - a negative leading `tblInd` (§17.4.50) on a left-justified table widens the
+ *     legacy layout budget from the column band to the page width;
  *   - a `vAlign` of center/bottom re-measures cell content to centre the inked block
  *     (ECMA-376 §17.4.84);
- *   - a nested floating table (§17.4.57 `<w:tblpPr>`) is drawn out of flow.
- *  Top-aligned in-flow tables — the common case — carry no re-measurement and paint
+ *   - a nested floating table (§17.4.57 `<w:tblpPr>`) is drawn out of flow;
+ *   - a sliced cell paragraph records `[lineStart, lineEnd)` in the fragment contract,
+ *     but current cell paint draws the full partition (as legacy does). Until range
+ *     painting lands, sliced tables stay on the byte-identical legacy path.
+ *  Eligible top-aligned, in-flow, unsliced tables carry no re-measurement and paint
  *  measure-free from their fragment. Recursion covers nested tables (painted from their
- *  own fragment). Tracked: migrate vAlign and nested-floating tables in a follow-up. */
+ *  own fragment). Tracked: migrate negative-indent layout, vAlign, nested-floating
+ *  tables, and sliced-range cell paint in follow-ups. */
 function tableRequiresLegacyPaint(table: DocTable): boolean {
+  if (table.tblInd != null && table.tblInd < 0 && table.jc === 'left') return true;
   for (const row of table.rows) {
     for (const cell of row.cells) {
       if (cell.vAlign === 'center' || cell.vAlign === 'bottom') return true;
       for (const ce of cell.content) {
-        if (ce.type === 'table') {
+        if (
+          ce.type === 'paragraph' &&
+          (ce as { lineSlice?: unknown }).lineSlice !== undefined
+        ) {
+          return true;
+        } else if (ce.type === 'table') {
           const nested = ce as unknown as DocTable;
           if (nested.tblpPr != null || tableRequiresLegacyPaint(nested)) return true;
         }
@@ -4050,9 +4062,10 @@ function tableRequiresLegacyPaint(table: DocTable): boolean {
 
 /** PR 6 — a block table paints from its {@link TableFragment} when the migration gate
  *  holds: the fragment is present, the table is in flow (not a §17.4.57 floating
- *  table), it has no vAlign-center/bottom re-measurement, the story is horizontal, and
- *  this paint's content band matches the band the fragment was resolved at. Otherwise
- *  the legacy `renderTable` recompute path runs (byte-identical). */
+ *  table), it has no negative leading indent, vAlign-center/bottom re-measurement, or
+ *  sliced cell paragraph, the story is horizontal, and this paint's content band
+ *  matches the band the fragment was resolved at. Otherwise the legacy `renderTable`
+ *  recompute path runs (byte-identical). */
 function isFragmentPaintableTable(
   table: DocTable,
   placed: PlacedFragment | undefined,
@@ -9519,6 +9532,10 @@ export const __test_setFragmentPaintEnabled = (v: boolean): boolean => {
   return prev;
 };
 
+/** Exported for focused fragment-paint migration-gate tests. */
+export const __test_tableRequiresLegacyPaint = (table: DocTable): boolean =>
+  tableRequiresLegacyPaint(table);
+
 /** Exported for the M-1 double-measurement non-vacuity test. Toggles whether a
  *  non-relocated body paragraph's fragment reuses the fit-decision measurement or
  *  measures again, so the test can paginate the SAME document both ways and assert the
@@ -10852,7 +10869,8 @@ function isFragmentPaintableCellBlock(
  * paint uses; measure-free at scale 1), nested-table blocks from their own
  * {@link TableFragment}, with the SAME §17.3.1.9 contextualSpacing / spaceBefore-after
  * overlap collapse. Cell paragraphs are drawn whole (no line slice), identically to
- * `renderCellContent`. A block the per-block gate excludes
+ * `renderCellContent`; sliced tables never reach this function because
+ * {@link tableRequiresLegacyPaint} excludes them. A block the per-block gate excludes
  * ({@link isFragmentPaintableCellBlock}) is drawn by the legacy `renderParagraph` —
  * the exact call `renderCellContent` makes — so marker / field / wrap divergences
  * paint byte-identically to the unmigrated path.
