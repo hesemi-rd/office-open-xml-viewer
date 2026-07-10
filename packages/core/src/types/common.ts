@@ -239,7 +239,10 @@ export type Bullet =
   | { type: 'autoNum'; numType: string; startAt: number | null };
 
 export interface TabStop {
-  /** Position in EMU from the left edge of the text area (after lIns) */
+  /** Position in EMU from the LEADING text-inset edge of the text area —
+   *  logical, not physical (ECMA-376 §21.1.2.1): the left edge (after lIns)
+   *  in an LTR paragraph, the right edge (before rIns) in an RTL
+   *  (`<a:pPr rtl="1">`) paragraph. */
   pos: number;
   /** Alignment: "l" | "r" | "ctr" | "dec" */
   algn: string;
