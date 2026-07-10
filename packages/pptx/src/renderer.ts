@@ -967,8 +967,16 @@ export function layoutParagraph(
             tabActive = true;
             currentLine.tabStop = { px: tabStopPx, algn: ts.algn, segments: [] };
           } else {
-            // Left-aligned tab: advance lineW to the tab stop
-            lineW = tabStopPx - marLPx;
+            // Start tab ('l'; 'dec' is treated as start — decimal alignment is
+            // unimplemented): advance the READING-order pen to the stop. The pen
+            // is the reading-frame distance from the leading indent, so the
+            // advance is `pos − leadIndentPx` under BOTH bases (LTR:
+            // leadIndentPx === marLPx, byte-identical). No cell group is opened
+            // for start tabs — the gap is not materialized as a drawn segment in
+            // either direction (pre-existing inline-advance model, see the
+            // LayoutLine.tabStop doc); the advance drives wrapping and later
+            // stop selection only.
+            lineW = tabStopPx - leadIndentPx;
           }
         } else {
           // No matching tab stop — treat as a single space
@@ -3392,15 +3400,16 @@ export function renderTextBody(
       let tabPenX: number;
       if (baseRtl) {
         const tabAbsX = bx + bw - rPad - line.tabStop.px;
-        if (line.tabStop.algn === 'r') {
+        // Only 'r'/'ctr' stops reach this block — layoutParagraph opens a tab
+        // cell solely for those two; a start ('l') or 'dec' tab advances the pen
+        // inline (reading frame) and never builds a cell (see the tab token
+        // branch in layoutParagraph).
+        if (line.tabStop.algn === 'ctr') {
+          tabPenX = tabAbsX - totalTabW / 2;
+        } else {
           // end/trailing (§21.1.2.1: physical `r` = logical end under RTL): the
           // cell's TRAILING (left) edge sits on the stop, cell extends rightward.
           tabPenX = tabAbsX;
-        } else if (line.tabStop.algn === 'ctr') {
-          tabPenX = tabAbsX - totalTabW / 2;
-        } else {
-          // start/leading: the cell's LEADING (right) edge sits on the stop.
-          tabPenX = tabAbsX - totalTabW;
         }
       } else {
         const tabAbsX = bx + lPad + line.tabStop.px;

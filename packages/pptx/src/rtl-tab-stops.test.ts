@@ -179,7 +179,31 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
     expect(cell.inShapeX).toBeCloseTo(RTL_STOP_X, 6);
   });
 
-  // (5) REGRESSION GUARD — the LTR path is byte-identical: an LTR right tab still
+  // (5) A start ('l') tab opens NO cell — it advances the PEN inline (the gap is
+  //     not rendered; pre-existing model, both directions). Under an RTL base the
+  //     advance must live in the READING frame (distance from the leading indent,
+  //     = marR), like the stop selection: mixing frames (selection from marR,
+  //     advance from marL) overshoots the pen when marR > marL and a later stop
+  //     becomes unreachable. Stops: start@100px, end@140px; marR=50px; 'A'=20px.
+  //     Reading frame: pen 50→(start tab)→100, +A→120 → the end stop at 140 is
+  //     still ahead ⇒ '\t12' opens the cell, trailing edge on 600−140=460.
+  //     Mixed-frame (the bug): lineW=100−marL(0)=100, +A→120 → selection pen
+  //     50+120=170 > 140 ⇒ no stop ⇒ the tab degrades to a space (no cell).
+  it('advances a start tab in the reading frame so a later end stop stays reachable', () => {
+    const stops: TabStop[] = [
+      { pos: 100 * 12700, algn: 'l' },
+      { pos: 140 * 12700, algn: 'r' },
+    ];
+    const { runs } = render(
+      bodyWithTab(stops, [run(`\tA\t${CELL}`)], { rtl: true, marR: 50 * 12700 }),
+      BOX_W,
+    );
+    const cell = runs.find((r) => r.text === CELL);
+    expect(cell, 'end-stop cell exists (start-tab advance did not overshoot)').toBeTruthy();
+    expect(cell!.inShapeX).toBeCloseTo(BOX_W - 140, 6); // 460
+  });
+
+  // (6) REGRESSION GUARD — the LTR path is byte-identical: an LTR right tab still
   //     anchors at the LTR stop with the cell's RIGHT edge on it (x = 400 − 40).
   it('leaves the LTR right-tab path unchanged (cell right edge on the LTR stop)', () => {
     const { texts, runs } = render(
