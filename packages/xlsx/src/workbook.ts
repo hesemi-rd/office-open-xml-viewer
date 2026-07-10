@@ -5,6 +5,8 @@ import {
   unloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
+  dropBitmapCacheByPath,
+  dropDuotoneBitmapCache,
   dropSvgImageCache,
   resolveOoxmlContainer,
   toArrayBuffer,
@@ -13,7 +15,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
-import { renderWorksheetViewport, closeAndClearImageCache } from './render-orchestrator.js';
+import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
 import { resolveSharedStrings } from './shared-strings.js';
@@ -377,6 +379,14 @@ export class XlsxWorkbook {
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
   }
 
+  /**
+   * Render a sheet viewport into `target`. Note: `opts.fetchImage` is ignored
+   * here — image bytes always come from this workbook's own archive through its
+   * stable per-instance loader, whose closure identity keys the shared decoded
+   * caches, the render-pass lease, and {@link destroy}'s cache drops. Callers
+   * needing a custom byte source should use the standalone
+   * `renderWorksheetViewport` orchestrator directly.
+   */
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,
     sheetIndex: number,
@@ -397,9 +407,15 @@ export class XlsxWorkbook {
       { ws, styles: this.parsedWorkbook.styles, imageCache: this.imageCache, math: this.math },
       target,
       viewport,
-      // Supply the lazy byte loader so the orchestrator can decode embedded
-      // images on demand; an explicit caller-provided fetchImage still wins.
-      { fetchImage: this._fetchImage, ...opts },
+      // Always render with THIS instance's stable `_fetchImage` closure (placed
+      // after the spread so it wins over a caller-supplied one, matching
+      // docx/pptx). The closure's identity is the namespace key for the shared
+      // per-document caches AND the render-pass lease counter, and destroy()
+      // drops exactly `_fetchImage`'s namespaces — a per-call closure would
+      // split the cache/lease namespace every render and leave its bitmaps
+      // undropped at destroy(). Callers who need a custom byte source use the
+      // orchestrator's renderWorksheetViewport directly.
+      { ...opts, fetchImage: this._fetchImage },
     );
   }
 
@@ -447,13 +463,19 @@ export class XlsxWorkbook {
       unloadGoogleFonts(this.googleFontFaces);
       this.googleFontFaces = [];
     }
-    // Closes each cached ImageBitmap's GPU backing before dropping the map —
-    // see closeAndClearImageCache for why a bare `.clear()` would leak.
-    closeAndClearImageCache(this.imageCache);
-    this.imageBlobCache.clear();
-    // Revoke this workbook's decoded-SVG object URLs (raster sources live in the
-    // per-instance imageCache closed above).
+    // The per-instance imageCache is a pure synchronous-lookup map into the
+    // shared, per-`_fetchImage` core caches (base raster via getCachedBitmapByPath,
+    // duotone recolour via getCachedDuotoneBitmapByPath, SVG via
+    // getCachedSvgImageByPath) — the same ownership split docx/pptx use. Clearing
+    // the map only drops lookup references; the GPU-backed ImageBitmaps and SVG
+    // object URLs are released by dropping the three shared caches keyed by
+    // `_fetchImage`, so a discarded workbook frees its GPU/URL handles promptly
+    // rather than waiting for GC.
+    this.imageCache.clear();
+    dropBitmapCacheByPath(this._fetchImage);
+    dropDuotoneBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
+    this.imageBlobCache.clear();
     this.rawData = null;
   }
 }

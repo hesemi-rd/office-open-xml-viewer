@@ -10,8 +10,15 @@
  * stale sheets / images.
  */
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
-import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
-import { renderWorksheetViewport, closeAndClearImageCache } from './render-orchestrator.js';
+import {
+  decodeDataUrl,
+  preloadGoogleFonts,
+  WasmParserHost,
+  dropBitmapCacheByPath,
+  dropDuotoneBitmapCache,
+  dropSvgImageCache,
+} from '@silurus/ooxml-core';
+import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
@@ -37,6 +44,10 @@ let workbook: ParsedWorkbook | null = null;
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
+// Synchronous-lookup map for the draw pass, keyed by imageCacheKey(path, duotone).
+// A pure lookup layer — the decoded bitmaps are owned by the shared, per-`getImage`
+// core caches; this is refreshed each frame by prefetchImages and dropped (along
+// with those shared caches) on re-parse.
 const imageCache = new Map<string, CanvasImageSource | null>();
 // Fetched image *bytes* (as Blobs) keyed by zip path. Twin of the docx render
 // worker's `imageCache`; kept separate from the decoded-source `imageCache`
@@ -100,11 +111,19 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     await host.ensureReady();
     if (req.type === 'parse') {
       // A re-parse starts a fresh document: drop any cached sheets / images so
-      // we never serve stale data from a previous load. closeAndClearImageCache
-      // closes each cached ImageBitmap's GPU backing first — a bare `.clear()`
-      // would leak it (same fix as XlsxWorkbook.destroy(); see there for why).
+      // we never serve stale data from a previous load. `imageCache` is now a
+      // pure lookup map into the shared, per-`getImage` core caches (base raster,
+      // duotone recolour, SVG); clearing it drops lookup references, and dropping
+      // the three shared caches keyed by the module-level `getImage` closure
+      // releases the GPU-backed ImageBitmaps and SVG object URLs AND prevents the
+      // next document from being served a stale bitmap for an identically-named
+      // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
+      // workers (issue #781).
       sheetCache.clear();
-      closeAndClearImageCache(imageCache);
+      imageCache.clear();
+      dropBitmapCacheByPath(getImage);
+      dropDuotoneBitmapCache(getImage);
+      dropSvgImageCache(getImage);
       imageBlobCache.clear();
       const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0

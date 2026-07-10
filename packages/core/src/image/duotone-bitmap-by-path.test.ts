@@ -4,7 +4,11 @@ import {
   duotoneCacheKey,
   dropDuotoneBitmapCache,
 } from './duotone-bitmap-by-path';
-import { dropBitmapCacheByPath } from './bitmap-image-by-path';
+import {
+  getCachedBitmapByPath,
+  dropBitmapCacheByPath,
+  acquireBitmapCacheLease,
+} from './bitmap-image-by-path';
 import type { OffscreenFactory } from './duotone';
 
 /**
@@ -125,5 +129,84 @@ describe('getCachedDuotoneBitmapByPath', () => {
     expect(duotoneCacheKey('word/media/image1.png', { clr1: '000000', clr2: 'DAB6BA' })).toBe(
       'word/media/image1.png|duo:000000:DAB6BA',
     );
+  });
+
+  // ── Second-layer × base-eviction interaction ────────────────────────────────
+  // A PASS-THROUGH entry (the pixel pipeline was unavailable, so the recolour
+  // resolved to the base bitmap itself) must not outlive the base: the base LRU
+  // protects itself by removing the entry at eviction so the next resolve
+  // re-decodes, but a lingering second-layer entry would bypass that re-decode
+  // and keep serving the (now closed) base bitmap.
+  it('a pass-through entry never outlives the base: after base LRU eviction, a re-resolve returns a live bitmap', async () => {
+    // No offscreenFactory and no OffscreenCanvas in this env → applyDuotone
+    // returns the base unchanged (pass-through).
+    const made: Array<{ closed: boolean }> = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      const bmp = { width: 2, height: 2, closed: false, close(): void { this.closed = true; } };
+      made.push(bmp);
+      return bmp as unknown as ImageBitmap;
+    }));
+    const fetchImage = vi.fn(
+      async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    const duotone = { clr1: '000000', clr2: 'DAB6BA' };
+    const path = 'ppt/media/duo-passthrough-evict.png';
+
+    const first = await getCachedDuotoneBitmapByPath(path, 'image/png', duotone, fetchImage, {});
+    expect(first).toBe(made[0] as unknown as ImageBitmap); // pass-through: the base itself
+
+    // Evict the base entry with LRU pressure (256 more distinct paths, no lease
+    // held) — the base bitmap is closed.
+    for (let i = 0; i < 256; i++) {
+      await getCachedBitmapByPath(`ppt/media/duo-pressure-${i}.png`, 'image/png', fetchImage);
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    expect(made[0].closed).toBe(true);
+
+    // The next render pass re-resolves the same (path, duotone): it must NOT be
+    // served the stale pass-through entry (a closed bitmap) — the base
+    // re-decodes and the pass-through re-derives from the live base.
+    const second = await getCachedDuotoneBitmapByPath(path, 'image/png', duotone, fetchImage, {});
+    expect(second).not.toBeNull();
+    expect((second as unknown as { closed: boolean }).closed).toBe(false);
+
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('dropping BOTH caches around an in-flight pass-through closes the shared bitmap exactly once', async () => {
+    // A pass-through entry still in flight at drop time resolves to the base
+    // bitmap, so both the duotone drop and the base drop would target the SAME
+    // bitmap. The funneled close dedupe (closeBitmapOnce) must close it exactly
+    // once — whichever interleaving occurs — with no reliance on
+    // ImageBitmap.close() idempotence.
+    const closes: number[] = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({
+      width: 2,
+      height: 2,
+      close: () => closes.push(1),
+    }) as unknown as ImageBitmap));
+    const fetchImage = vi.fn(
+      async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    const duotone = { clr1: '000000', clr2: 'DAB6BA' };
+    const path = 'ppt/media/duo-double-close.png';
+
+    const release = acquireBitmapCacheLease(fetchImage);
+    // Settle the base first so the duotone wrapper reaches its second-layer
+    // entry creation promptly.
+    await getCachedBitmapByPath(path, 'image/png', fetchImage);
+    const p = getCachedDuotoneBitmapByPath(path, 'image/png', duotone, fetchImage, {});
+    // Nudge one microtask so the second-layer entry may exist (created after the
+    // base await) but its pass-through self-evict may not have run, then drop
+    // BOTH caches while leased.
+    await Promise.resolve();
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+    await p;
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(closes.length).toBe(1);
   });
 });

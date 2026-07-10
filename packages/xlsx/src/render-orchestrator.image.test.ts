@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { prefetchImages, decodeImageSource, closeAndClearImageCache } from './render-orchestrator';
-import type { Worksheet } from './types';
-import type { OffscreenFactory } from '@silurus/ooxml-core';
+import { prefetchImages, decodeImageSource, renderWorksheetViewport } from './render-orchestrator';
+import type { Worksheet, ParsedWorkbook, ImageAnchor } from './types';
+import {
+  dropBitmapCacheByPath,
+  dropDuotoneBitmapCache,
+  dropSvgImageCache,
+  getCachedBitmapByPath,
+  type OffscreenFactory,
+} from '@silurus/ooxml-core';
 
 /**
  * The render orchestrator decodes embedded images lazily by zip path:
@@ -10,14 +16,23 @@ import type { OffscreenFactory } from '@silurus/ooxml-core';
  * HTMLImageElement for SVG via core's `getCachedSvgImageByPath`).
  * `prefetchImages` collects every image path from BOTH `ws.images` (top-level
  * `twoCellAnchor` pictures) AND the image leaves inside `ws.shapeGroups`,
- * fetches each once, and stores the decoded source in the shared cache keyed by
- * `imagePath`. Mirrors the pptx/docx renderer decode swap.
+ * resolves each against the SHARED, per-`fetchImage` core caches
+ * (`getCachedBitmapByPath` for raster/metafile, `getCachedDuotoneBitmapByPath`
+ * for a `<a:duotone>` recolour, `getCachedSvgImageByPath` for an SVG vector
+ * original), and records the drawable in the passed lookup map keyed by
+ * `imageCacheKey`. The map is a pure synchronous-lookup layer; ownership of the
+ * decoded bitmaps lives in the shared caches (dropped per document on
+ * destroy / re-parse), the same split docx/pptx use.
  */
 
 // A minimal stand-in for a decoded raster bitmap.
 class FakeBitmap {
   constructor(public readonly tag: string) {}
 }
+
+/** Flush pending microtasks so a drop's close-through-promise (`promise.then(b =>
+ *  b.close())`) has run before the assertion — mirrors core's own cache tests. */
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 /** Build a minimal standard (non-placeable) WMF that draws one polyline, so the
  *  shared core player produces non-empty geometry (→ a non-null bitmap). */
@@ -64,6 +79,32 @@ function stubOffscreenCanvas(): void {
       }
     },
   );
+}
+
+/** An offscreen surface whose getImageData returns a fixed near-white pixel grid
+ *  and whose putImageData records the mutated buffer, so a duotone recolour can
+ *  run (and be observed) without a real canvas. Cast to the core
+ *  `OffscreenFactory` at the boundary (a partial mock). Shared by the duotone
+ *  ownership and recolour tests. */
+function recordingFactory(record: { out?: Uint8ClampedArray }): OffscreenFactory {
+  return ((w: number, h: number) => ({
+    width: w,
+    height: h,
+    getContext() {
+      return {
+        drawImage() {},
+        getImageData(_sx: number, _sy: number, sw: number, sh: number) {
+          // All near-white opaque pixels (t≈0.96) → should map toward clr2.
+          const data = new Uint8ClampedArray(sw * sh * 4).fill(246);
+          for (let i = 3; i < data.length; i += 4) data[i] = 255; // alpha
+          return { data, width: sw, height: sh } as unknown as ImageData;
+        },
+        putImageData(img: ImageData) {
+          record.out = img.data;
+        },
+      };
+    },
+  })) as unknown as OffscreenFactory;
 }
 
 /** Build a Worksheet with one top-level image and one group-leaf image, each at
@@ -133,20 +174,25 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(fetchImage).toHaveBeenCalledWith('xl/media/image2.png', 'image/png');
   });
 
-  it('prefetchImages skips already-cached paths (no re-fetch)', async () => {
+  it('prefetchImages does not re-fetch an already-decoded path (shared cache hit, not a stale map entry)', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
     const fetchImage = vi.fn(async (path: string, mime: string) =>
       new Blob([new TextEncoder().encode(path)], { type: mime }),
     );
     const ws = worksheetWithImages();
     const cache = new Map<string, CanvasImageSource>();
-    cache.set('xl/media/image1.png', new FakeBitmap('preexisting') as unknown as CanvasImageSource);
 
+    // First pass warms the shared path-keyed cache (both images fetched once).
     await prefetchImages(ws, cache, fetchImage);
+    expect(fetchImage).toHaveBeenCalledTimes(2);
 
-    // image1 was already cached → only image2 is fetched.
-    expect(fetchImage).toHaveBeenCalledTimes(1);
-    expect(fetchImage).toHaveBeenCalledWith('xl/media/image2.png', 'image/png');
+    // Second pass re-resolves every referenced image (the way docx/pptx do, so an
+    // LRU eviction of a still-referenced path is re-decoded rather than served
+    // stale/closed) — but each hits the shared cache, so NO byte is re-fetched.
+    await prefetchImages(ws, cache, fetchImage);
+    expect(fetchImage).toHaveBeenCalledTimes(2);
+
+    dropBitmapCacheByPath(fetchImage);
   });
 
   it('prefetchImages is a no-op when fetchImage is absent (cache stays empty)', async () => {
@@ -252,42 +298,136 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
   });
 });
 
-describe('closeAndClearImageCache (teardown GPU-bitmap leak guard)', () => {
-  it('closes every cached ImageBitmap before clearing the map', () => {
-    const closeA = vi.fn();
-    const closeB = vi.fn();
-    const bmpA = { close: closeA } as unknown as ImageBitmap;
-    const bmpB = { close: closeB } as unknown as ImageBitmap;
-    const cache = new Map<string, CanvasImageSource | null>([
-      ['xl/media/image1.png', bmpA],
-      ['xl/media/image2.png', bmpB],
-    ]);
+// ── Teardown ownership: the shared caches own the bitmaps, not the map ────────
+// After #781, xlsx decodes through the SAME per-`fetchImage` core caches
+// docx/pptx use, so the passed lookup map only ever holds references; the
+// GPU-backed ImageBitmaps are released by dropping the shared caches keyed by
+// `fetchImage`. These tests pin that ownership (dropping the shared cache closes
+// the decoded bitmap — i.e. #779's teardown leak is not reintroduced) and that
+// the lookup map is a pure, non-owning layer (clearing it never closes).
+describe('shared-cache consolidation (teardown ownership / no leak)', () => {
+  afterEach(() => vi.unstubAllGlobals());
 
-    closeAndClearImageCache(cache);
-
-    expect(closeA).toHaveBeenCalledTimes(1);
-    expect(closeB).toHaveBeenCalledTimes(1);
-    expect(cache.size).toBe(0);
-  });
-
-  it('skips a cached null (unsupported metafile) without throwing', () => {
-    const cache = new Map<string, CanvasImageSource | null>([['xl/media/diagram.emf', null]]);
-    expect(() => closeAndClearImageCache(cache)).not.toThrow();
-    expect(cache.size).toBe(0);
-  });
-
-  it('skips a non-closeable CanvasImageSource (e.g. the SVG HTMLImageElement branch)', () => {
-    // The svgBlip vector branch decodes to an HTMLImageElement via
-    // getCachedSvgImageByPath, which has no `.close()` — must not throw.
-    const img = {} as unknown as HTMLImageElement;
-    const cache = new Map<string, CanvasImageSource | null>([['xl/media/image1.svg', img]]);
-    expect(() => closeAndClearImageCache(cache)).not.toThrow();
-    expect(cache.size).toBe(0);
-  });
-
-  it('is safe to call on an already-empty cache', () => {
+  it('prefetchImages decodes the base raster into the SHARED path-keyed cache; dropBitmapCacheByPath closes it', async () => {
+    const close = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 1, height: 1, close }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages(); // two distinct PNG paths
     const cache = new Map<string, CanvasImageSource | null>();
-    expect(() => closeAndClearImageCache(cache)).not.toThrow();
+
+    await prefetchImages(ws, cache, fetchImage);
+
+    // The lookup map exposes the drawable for the synchronous grid draw …
+    expect(cache.get('xl/media/image1.png')).toBeTruthy();
+    expect(cache.get('xl/media/image2.png')).toBeTruthy();
+    // … but ownership is the shared cache: no bitmap was closed yet.
+    expect(close).not.toHaveBeenCalled();
+
+    // Dropping the shared cache (destroy / re-parse) closes every GPU bitmap —
+    // proving the decode landed in getCachedBitmapByPath, not an orphaned map.
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it('the lookup map is non-owning: clearing it never closes a bitmap (no double close)', async () => {
+    const close = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 1, height: 1, close }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await prefetchImages(ws, cache, fetchImage);
+    cache.clear(); // dropping lookup references must NOT close the shared bitmap
+    await flush();
+    expect(close).not.toHaveBeenCalled();
+
+    // The shared cache still owns and closes them exactly once.
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it('a <a:duotone> recolour is owned by the shared duotone cache; dropDuotoneBitmapCache closes it', async () => {
+    const baseClose = vi.fn();
+    const duoClose = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (src: unknown) =>
+        (src instanceof Blob
+          ? { width: 4, height: 4, close: baseClose }
+          : { width: 4, height: 4, close: duoClose }) as unknown as ImageBitmap,
+      ),
+    );
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const record: { out?: Uint8ClampedArray } = {};
+    const ws = worksheetWithImages();
+    ws.images = [
+      {
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/image1.png',
+        mimeType: 'image/png',
+        duotone: { clr1: '000000', clr2: 'FFF3F4' },
+      },
+    ];
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await prefetchImages(ws, cache, fetchImage, { offscreenFactory: recordingFactory(record) });
+
+    // The recoloured variant is what the draw site looks up (colour-suffixed key).
+    expect(cache.get('xl/media/image1.png|duo:000000:FFF3F4')).toBeTruthy();
+
+    // The recolour raster is owned by the duotone cache …
+    dropDuotoneBitmapCache(fetchImage);
+    await flush();
+    expect(duoClose).toHaveBeenCalledTimes(1);
+    // … and the colour-free base by the base cache.
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    expect(baseClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('an SVG vector original is owned by the shared SVG cache (dropSvgImageCache clears it)', async () => {
+    // Route the picture through the SVG decoder: an svg mime with no separate
+    // raster blip. getCachedSvgImageByPath decodes via <img>, which node lacks,
+    // so the decode rejects and prefetchImages swallows it — the point here is
+    // that the SVG object-URL cache is keyed by `fetchImage` and released by
+    // dropSvgImageCache, not by the lookup map.
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    ws.images = [
+      {
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/image1.svg',
+        mimeType: 'image/svg+xml',
+      },
+    ];
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await expect(prefetchImages(ws, cache, fetchImage)).resolves.toBeUndefined();
+    // Releasing the SVG cache for this fetchImage must not throw (no leak of the
+    // per-document object URLs).
+    expect(() => dropSvgImageCache(fetchImage)).not.toThrow();
   });
 });
 
@@ -300,32 +440,6 @@ describe('closeAndClearImageCache (teardown GPU-bitmap leak guard)', () => {
 // without a real canvas.
 describe('render-orchestrator duotone (§20.1.8.23)', () => {
   afterEach(() => vi.unstubAllGlobals());
-
-  /** An offscreen surface whose getImageData returns a fixed near-white pixel
-   *  grid, and whose putImageData records the mutated buffer so the test can
-   *  confirm the recolour ran. Cast to the core `OffscreenFactory` at the
-   *  boundary (a partial mock — the DOM `ImageBitmapSource` shape is irrelevant
-   *  to the transform under test). */
-  function recordingFactory(record: { out?: Uint8ClampedArray }): OffscreenFactory {
-    return ((w: number, h: number) => ({
-      width: w,
-      height: h,
-      getContext() {
-        return {
-          drawImage() {},
-          getImageData(_sx: number, _sy: number, sw: number, sh: number) {
-            // All near-white opaque pixels (t≈0.96) → should map toward clr2.
-            const data = new Uint8ClampedArray(sw * sh * 4).fill(246);
-            for (let i = 3; i < data.length; i += 4) data[i] = 255; // alpha
-            return { data, width: sw, height: sh } as unknown as ImageData;
-          },
-          putImageData(img: ImageData) {
-            record.out = img.data;
-          },
-        };
-      },
-    })) as unknown as OffscreenFactory;
-  }
 
   it('recolours a duotone picture and caches it under a colour-suffixed key', async () => {
     // A fake bitmap exposes width/height so imageNaturalSize sizes the surface.
@@ -396,5 +510,197 @@ describe('render-orchestrator duotone (§20.1.8.23)', () => {
     expect(cache.has('xl/media/image1.png')).toBe(true); // plain
     expect(cache.has('xl/media/image1.png|duo:000000:FFF3F4')).toBe(true); // recoloured
     expect(cache.size).toBe(2);
+  });
+});
+
+// ── Render-pass liveness: LRU eviction must never hand the draw a closed bitmap ─
+// The shared base cache is LRU-bounded (256): a single prefetch pass resolving
+// MORE images than the cap evicts — and GPU-closes — bitmaps decoded earlier in
+// the SAME pass, while the lookup map still references them for the synchronous
+// draw. renderWorksheetViewport therefore holds a core render-pass lease
+// (acquireBitmapCacheLease) across prefetch→draw: evictions still remove cache
+// entries (bounded size), but their closes are deferred until the pass ends. The
+// failure path is pinned too: a re-resolve that fails must DELETE the stale
+// lookup entry (the prior bitmap may have been evicted+closed), because the
+// renderer skips only a missing/falsy source, not a closed one.
+describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A fake HTMLCanvas + proxy 2D context whose drawImage records the closed
+   *  state of every image it is handed AT DRAW TIME. All other context members
+   *  no-op (the resize-test pattern). */
+  function makeRecordingCanvas(drawn: { closedAtDraw: boolean[] }) {
+    const target: Record<string, unknown> = {
+      drawImage: (img: unknown) => {
+        drawn.closedAtDraw.push(Boolean((img as { closed?: boolean }).closed));
+      },
+      measureText: (s: string) => ({ width: [...String(s)].length * 7 }),
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createPattern: () => null,
+      getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+      setTransform: () => undefined,
+    };
+    const ctx = new Proxy(target, {
+      get(t, prop: string) {
+        if (prop in t) return t[prop];
+        return () => undefined;
+      },
+      set(t, prop: string, value: unknown) {
+        t[prop] = value;
+        return true;
+      },
+    });
+    const canvas = {
+      width: 0,
+      height: 0,
+      clientWidth: 800,
+      clientHeight: 600,
+      style: {} as Record<string, string>,
+      getContext: () => ctx as unknown as CanvasRenderingContext2D,
+    };
+    return canvas as unknown as HTMLCanvasElement;
+  }
+
+  const STYLES = {
+    fonts: [], fills: [], borders: [], cellXfs: [], numFmts: {},
+  } as unknown as ParsedWorkbook['styles'];
+
+  it('draws 300 images (cap 256) in one pass with every bitmap still open; evicted ones close after the pass', async () => {
+    // Each decode yields a bitmap with a live `closed` flag the recording
+    // drawImage reads at draw time.
+    const bitmaps: Array<{ closed: boolean }> = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      const bmp = {
+        width: 4,
+        height: 4,
+        closed: false,
+        close() { this.closed = true; },
+      };
+      bitmaps.push(bmp);
+      return bmp as unknown as ImageBitmap;
+    }));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+
+    const N = 300; // > IMAGE_BITMAP_CACHE_MAX (256) → forces mid-pass evictions
+    const images: ImageAnchor[] = [];
+    for (let i = 0; i < N; i++) {
+      images.push({
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: `xl/media/lease-${i}.png`,
+        mimeType: 'image/png',
+      } as ImageAnchor);
+    }
+    const ws = {
+      name: 'S', rows: [], colWidths: {}, rowHeights: {},
+      defaultColWidth: 64, defaultRowHeight: 20,
+      mergeCells: [], freezeRows: 0, freezeCols: 0,
+      conditionalFormats: [], charts: [], images, shapeGroups: [],
+    } as unknown as Worksheet;
+
+    const drawn = { closedAtDraw: [] as boolean[] };
+    const canvas = makeRecordingCanvas(drawn);
+    const imageCache = new Map<string, CanvasImageSource | null>();
+
+    await renderWorksheetViewport(
+      { ws, styles: STYLES, imageCache },
+      canvas,
+      { row: 1, col: 1, rows: 10, cols: 10 },
+      { fetchImage, width: 800, height: 600, dpr: 1 },
+    );
+
+    // Sanity: the pass really decoded past the cap and really drew the anchors.
+    expect(bitmaps.length).toBe(N);
+    expect(drawn.closedAtDraw.length).toBe(N);
+    // The pinned property: NO bitmap handed to drawImage was closed at draw time.
+    expect(drawn.closedAtDraw.every((c) => c === false)).toBe(true);
+
+    // After the pass (lease released), the mid-pass evictions' deferred closes
+    // run: exactly N − cap bitmaps close, proving eviction did happen and was
+    // deferred (not suppressed).
+    await flush();
+    const closedAfter = bitmaps.filter((b) => b.closed).length;
+    expect(closedAfter).toBe(N - 256);
+
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('prefetchImages deletes the stale lookup entry when a re-resolve fails', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({
+      width: 4, height: 4, close() {},
+    }) as unknown as ImageBitmap));
+    let fail = false;
+    const fetchImage = vi.fn(async (path: string, mime: string) => {
+      if (fail) throw new Error('byte source unavailable');
+      return new Blob([new TextEncoder().encode(path)], { type: mime });
+    });
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    // Pass 1: healthy decode lands in the lookup map.
+    await prefetchImages(ws, cache, fetchImage);
+    expect(cache.has('xl/media/image1.png')).toBe(true);
+
+    // The shared entry is evicted+closed (LRU pressure / drop) …
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    // … and the re-resolve on the next pass fails. The stale lookup entry MUST
+    // be deleted — its bitmap may be closed, and the renderer only skips a
+    // missing/falsy source.
+    fail = true;
+    await prefetchImages(ws, cache, fetchImage);
+    expect(cache.has('xl/media/image1.png')).toBe(false);
+  });
+
+  it('replaces a duotone pass-through bitmap after base-cache eviction between passes', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      const bmp = {
+        width: 4,
+        height: 4,
+        closed: false,
+        close(): void { this.closed = true; },
+      };
+      return bmp as unknown as ImageBitmap;
+    }));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    ws.images = [
+      {
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/image1.png',
+        mimeType: 'image/png',
+        duotone: { clr1: '000000', clr2: 'FFF3F4' },
+      },
+    ];
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+    const key = 'xl/media/image1.png|duo:000000:FFF3F4';
+
+    await prefetchImages(ws, cache, fetchImage);
+    const pass1 = cache.get(key) as ImageBitmap & { closed: boolean };
+    expect(pass1).toBeDefined();
+    expect(pass1.closed).toBe(false);
+
+    for (let i = 0; i < 256; i++) {
+      await getCachedBitmapByPath(`xl/media/pressure-${i}.png`, 'image/png', fetchImage);
+    }
+    await flush();
+    expect(pass1.closed).toBe(true);
+
+    await prefetchImages(ws, cache, fetchImage);
+    const pass2 = cache.get(key) as ImageBitmap & { closed: boolean };
+    expect(pass2).toBeDefined();
+    expect(pass2.closed).toBe(false);
+
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
   });
 });

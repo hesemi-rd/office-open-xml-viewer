@@ -65,6 +65,7 @@ import {
   getCachedSvgImageByPath,
   getCachedBitmapByPath,
   getCachedDuotoneBitmapByPath,
+  acquireBitmapCacheLease,
   peekCachedBitmapByPath,
   dropBitmapCacheByPath,
   preferVectorBlip,
@@ -4922,6 +4923,32 @@ function drawParseErrorPlaceholder(
  * Returns the canvas for convenience.
  */
 export async function renderSlide(
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  slide: Slide,
+  slideWidth: number,
+  slideHeight: number,
+  opts: SlideRenderOptions = {},
+  onTextRun?: TextRunCallback,
+): Promise<HTMLCanvasElement | OffscreenCanvas> {
+  // Render-pass lease (core acquireBitmapCacheLease): the warm pass below fires
+  // a decode for every picture on the slide and the draw loop then awaits each
+  // element's bitmap and draws it. The shared bitmap cache is LRU-bounded, so a
+  // slide referencing more images than the cap — or a concurrent render on the
+  // same deck — could evict AND GPU-close a bitmap between the draw loop's await
+  // and its drawImage. Under the lease the eviction still removes the cache
+  // entry (bounded size; a later resolve re-decodes), but the close is deferred
+  // until this pass ends, so no draw ever receives a closed bitmap.
+  const releaseLease = opts.fetchImage ? acquireBitmapCacheLease(opts.fetchImage) : undefined;
+  try {
+    return await renderSlideLeased(canvas, slide, slideWidth, slideHeight, opts, onTextRun);
+  } finally {
+    releaseLease?.();
+  }
+}
+
+/** {@link renderSlide}'s body, verbatim; runs under the caller's render-pass
+ *  lease. */
+async function renderSlideLeased(
   canvas: HTMLCanvasElement | OffscreenCanvas,
   slide: Slide,
   slideWidth: number,

@@ -8,9 +8,15 @@
  * Single-document contract: the proxy issues one `parse` and then renders.
  */
 import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
-import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
+import {
+  decodeDataUrl,
+  preloadGoogleFonts,
+  WasmParserHost,
+  dropBitmapCacheByPath,
+  dropSvgImageCache,
+} from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt, type DocxTextRunInfo } from './renderer';
+import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -62,6 +68,16 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
       imageCache.clear();
+      // A re-parse starts a fresh document: also drop the shared, per-`getImage`
+      // decoded caches (base raster, a:clrChange/duotone recolour, SVG object
+      // URLs), symmetric with DocxDocument.destroy(). The worker's `getImage`
+      // closure is a stable module-level identity, so without this a new document
+      // sharing a zip path (e.g. word/media/image1.png) would be served the
+      // previous file's decoded bitmap, and the GPU/URL handles would linger past
+      // the LRU cap. Symmetric across docx/pptx/xlsx render workers (issue #781).
+      dropBitmapCacheByPath(getImage);
+      dropColorReplacedCache(getImage);
+      dropSvgImageCache(getImage);
       const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)

@@ -1,6 +1,6 @@
 // Second-layer cache for the DrawingML `<a:duotone>` recolour (ECMA-376
-// §20.1.8.23) of a raster/metafile blip, shared by the docx and pptx renderers
-// (xlsx keeps its own worksheet-scoped `loadedImages` map with the same keying).
+// §20.1.8.23) of a raster/metafile blip, shared by the docx, pptx and xlsx
+// renderers (xlsx routes through it since the #781 consolidation).
 //
 // The base, colour-FREE bitmap comes from the path-keyed
 // `getCachedBitmapByPath` — shared across every reference to a path and
@@ -19,7 +19,11 @@
 // so on destroy it must be closed (see `dropDuotoneBitmapCache`), the same
 // GPU-lifecycle discipline the base cache follows through its promise.
 
-import { getCachedBitmapByPath, type CachedBitmapOptions } from './bitmap-image-by-path';
+import {
+  getCachedBitmapByPath,
+  deferBitmapCloseWhileLeased,
+  type CachedBitmapOptions,
+} from './bitmap-image-by-path';
 import { applyDuotone, type Duotone, type OffscreenFactory } from './duotone';
 import { imageNaturalSize } from './crop';
 
@@ -96,6 +100,23 @@ export async function getCachedDuotoneBitmapByPath(
     })();
     // Don't poison the cache if the recolour pass rejects; let the next call retry.
     hit.catch(() => cache.delete(key));
+    // A PASS-THROUGH result (degenerate size, or the pixel pipeline was
+    // unavailable so `applyDuotone` returned the base unchanged) must not be
+    // memoized beyond its in-flight window: the resolved value IS the base
+    // bitmap, whose lifetime the BASE cache owns — the base LRU may evict and
+    // GPU-close it later, and a lingering second-layer entry would keep serving
+    // the closed bitmap (the base layer protects itself by removing the entry
+    // at eviction so the next resolve re-decodes; a stale second-layer hit
+    // would bypass that re-decode). Drop the entry once it resolves to the
+    // base: the next pass re-resolves through the base cache and always sees a
+    // live bitmap, while concurrent callers inside the in-flight window still
+    // dedupe on this promise (the base is live for them — their pass holds it).
+    // A fresh recolour raster stays memoized: it is owned ONLY by this cache.
+    void hit
+      .then((bmp) => {
+        if (bmp === base) cache.delete(key);
+      })
+      .catch(() => {});
     cache.set(key, hit);
   }
   return hit;
@@ -107,18 +128,23 @@ export async function getCachedDuotoneBitmapByPath(
  * `dropBitmapCacheByPath` (base bitmaps) so both caches release their GPU
  * backing promptly. A no-op when the document decoded no duotone picture.
  *
- * Almost every stored value is a fresh recolour raster owned ONLY by this cache,
- * so it must be closed here. The rare exception is a pass-through (the pixel
- * pipeline was unavailable, so `applyDuotone` returned the unchanged base
- * bitmap): that bitmap is also owned by the base cache and closed by
- * `dropBitmapCacheByPath`, but `ImageBitmap.close()` is idempotent, so closing
- * it a second time here is harmless. Closing through the promise (never a raw
- * reference) means a still-in-flight recolour is closed only once it resolves.
+ * Every SETTLED entry here is a fresh recolour raster owned ONLY by this cache
+ * (a pass-through entry — one that resolved to the base bitmap — self-evicts on
+ * resolution; see getCachedDuotoneBitmapByPath), so it must be closed here. The
+ * one overlap left is an entry still IN FLIGHT at drop time that then resolves
+ * to the base: its close would target a bitmap the base cache also closes —
+ * `deferBitmapCloseWhileLeased` deduplicates closes per bitmap, so it closes
+ * exactly once with no reliance on `ImageBitmap.close()` idempotence. Closing
+ * through the promise (never a raw reference) means a still-in-flight recolour
+ * is closed only once it resolves. While a render pass holds a lease on this
+ * document (`acquireBitmapCacheLease`), the closes are deferred to the last
+ * release — same contract as the base cache — so a drop racing an in-flight
+ * render never closes a bitmap mid-draw.
  */
 export function dropDuotoneBitmapCache(fetchImage: FetchImage): void {
   const cache = duotoneByFetch.get(fetchImage);
   if (!cache) return;
-  for (const p of cache.values()) p.then((b) => b?.close()).catch(() => {});
+  for (const p of cache.values()) deferBitmapCloseWhileLeased(fetchImage, p);
   cache.clear();
   duotoneByFetch.delete(fetchImage);
 }

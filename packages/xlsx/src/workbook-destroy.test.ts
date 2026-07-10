@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { WorkerBridge, preloadGoogleFonts, type WorkerLike, type FontPreloadEntry } from '@silurus/ooxml-core';
+import {
+  WorkerBridge,
+  preloadGoogleFonts,
+  getCachedBitmapByPath,
+  getCachedDuotoneBitmapByPath,
+  type WorkerLike,
+  type FontPreloadEntry,
+  type OffscreenFactory,
+} from '@silurus/ooxml-core';
 import { XlsxWorkbook } from './workbook.js';
 
 /**
@@ -21,6 +29,9 @@ class SilentWorker implements WorkerLike {
     this.terminated = true;
   }
 }
+
+/** Flush pending microtasks so a drop's close-through-promise has run. */
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 interface DestroyProbe {
   destroy(): void;
@@ -109,65 +120,118 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 });
 
 /**
- * `destroy()` must close every cached `ImageBitmap` (GPU-backed) before
- * dropping `imageCache`, not just `.clear()` it — a bare `.clear()` drops the
- * last reference without releasing the GPU backing, leaking it until GC (which
- * is not guaranteed to run promptly for GPU-backed objects). See
- * `closeAndClearImageCache` in render-orchestrator.ts.
+ * After #781 the decoded bitmaps are owned by the shared, per-`_fetchImage` core
+ * caches (base raster via getCachedBitmapByPath, `<a:duotone>` recolour via
+ * getCachedDuotoneBitmapByPath), NOT by the per-instance `imageCache` lookup map.
+ * `destroy()` must therefore drop those shared caches — a bare `imageCache.clear()`
+ * would drop only lookup references and leak the GPU backing until GC (which is
+ * not guaranteed to run promptly for GPU-backed objects). This is the same
+ * teardown discipline #779 fixed, expressed through the shared cache the way
+ * docx/pptx do. Pins the wiring: after a decode has landed in the shared caches
+ * keyed by the instance's `_fetchImage`, destroy() closes those bitmaps.
  */
-describe('XlsxWorkbook.destroy() — closes cached ImageBitmaps (GPU-leak guard)', () => {
-  function makeWorkbookWithImageCache(imageCache: Map<string, CanvasImageSource | null>) {
+describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak guard)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function makeWorkbook(fetchImage: (path: string, mime: string) => Promise<Blob>) {
     const worker = new SilentWorker();
-    const bridge = new WorkerBridge<{ id?: number }>(worker, {
-      correlate: (r) => r.id,
-    });
+    const bridge = new WorkerBridge<{ id?: number }>(worker, { correlate: (r) => r.id });
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance.bridge = bridge;
     instance.sheetCache = new Map();
-    instance.imageCache = imageCache;
+    instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];
-    instance._fetchImage = () => Promise.resolve(new Blob());
-    return instance as unknown as DestroyProbe;
+    instance._fetchImage = fetchImage;
+    return instance as unknown as DestroyProbe & { imageCache: Map<string, unknown> };
   }
 
-  it('calls .close() on each cached ImageBitmap and empties the cache', () => {
-    const close1 = vi.fn();
-    const close2 = vi.fn();
-    const bmp1 = { close: close1 } as unknown as ImageBitmap;
-    const bmp2 = { close: close2 } as unknown as ImageBitmap;
-    const imageCache = new Map<string, CanvasImageSource | null>([
-      ['xl/media/image1.png', bmp1],
-      ['xl/media/image2.png', bmp2],
-    ]);
-    const wb = makeWorkbookWithImageCache(imageCache);
+  /** An offscreen surface for the duotone pixel pass in node (no OffscreenCanvas). */
+  function recordingFactory(): OffscreenFactory {
+    return ((w: number, h: number) => ({
+      width: w,
+      height: h,
+      getContext: () => ({
+        drawImage() {},
+        getImageData(_x: number, _y: number, sw: number, sh: number) {
+          const data = new Uint8ClampedArray(sw * sh * 4).fill(246);
+          for (let i = 3; i < data.length; i += 4) data[i] = 255;
+          return { data, width: sw, height: sh } as unknown as ImageData;
+        },
+        putImageData() {},
+      }),
+    })) as unknown as OffscreenFactory;
+  }
 
-    wb.destroy();
-
-    expect(close1).toHaveBeenCalledTimes(1);
-    expect(close2).toHaveBeenCalledTimes(1);
-    expect(imageCache.size).toBe(0);
-  });
-
-  it('skips a cached null (unsupported metafile) without throwing', () => {
-    const imageCache = new Map<string, CanvasImageSource | null>([
-      ['xl/media/diagram.emf', null],
-    ]);
-    const wb = makeWorkbookWithImageCache(imageCache);
-    expect(() => wb.destroy()).not.toThrow();
-    expect(imageCache.size).toBe(0);
-  });
-
-  it('is safe to destroy() twice — the second call does not re-close an already-closed bitmap', () => {
+  it('closes a base ImageBitmap decoded into the shared cache and empties the lookup map', async () => {
     const close = vi.fn();
-    const bmp = { close } as unknown as ImageBitmap;
-    const imageCache = new Map<string, CanvasImageSource | null>([['xl/media/image1.png', bmp]]);
-    const wb = makeWorkbookWithImageCache(imageCache);
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 1, height: 1, close }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const wb = makeWorkbook(fetchImage);
+    // Warm the shared cache the same way prefetchImages does — keyed by _fetchImage.
+    await getCachedBitmapByPath('xl/media/image1.png', 'image/png', fetchImage);
+    wb.imageCache.set('xl/media/image1.png', {});
+
+    wb.destroy();
+    await flush(); // the drop closes through the settled promise (a microtask)
+
+    expect(close).toHaveBeenCalledTimes(1); // dropBitmapCacheByPath closed it
+    expect(wb.imageCache.size).toBe(0);
+  });
+
+  it('closes a duotone recolour decoded into the shared duotone cache', async () => {
+    const baseClose = vi.fn();
+    const duoClose = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (src: unknown) =>
+        (src instanceof Blob
+          ? { width: 4, height: 4, close: baseClose }
+          : { width: 4, height: 4, close: duoClose }) as unknown as ImageBitmap,
+      ),
+    );
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const wb = makeWorkbook(fetchImage);
+    await getCachedDuotoneBitmapByPath(
+      'xl/media/image1.png',
+      'image/png',
+      { clr1: '000000', clr2: 'FFF3F4' },
+      fetchImage,
+      { offscreenFactory: recordingFactory() },
+    );
+
+    wb.destroy();
+    await flush();
+
+    // dropDuotoneBitmapCache closed the recolour; dropBitmapCacheByPath the base.
+    expect(duoClose).toHaveBeenCalledTimes(1);
+    expect(baseClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('is safe to destroy() twice (dropping an already-dropped shared cache is a no-op)', async () => {
+    const close = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 1, height: 1, close }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const wb = makeWorkbook(fetchImage);
+    await getCachedBitmapByPath('xl/media/image1.png', 'image/png', fetchImage);
 
     wb.destroy();
     expect(() => wb.destroy()).not.toThrow();
-    // The map is empty after the first destroy(), so the second pass has
-    // nothing to iterate — close() is called exactly once total.
+    await flush();
+    // The shared cache was forgotten on the first destroy(), so the second pass
+    // has nothing to close — close() runs exactly once total.
     expect(close).toHaveBeenCalledTimes(1);
   });
 });

@@ -3,15 +3,15 @@ import {
   isHTMLCanvas,
   clampCanvasSize,
   getCachedSvgImageByPath,
+  getCachedDuotoneBitmapByPath,
+  acquireBitmapCacheLease,
   preferVectorBlip,
-  decodeRasterOrMetafile,
   metafileRasterSize,
-  applyDuotone,
-  imageNaturalSize,
   EMU_PER_PT,
   type MathRenderer,
   type SrcRect,
   type Duotone,
+  type OffscreenFactory,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import {
@@ -42,7 +42,7 @@ interface ImageRef {
   duotone?: Duotone | null;
 }
 
-/** Fetch one image's bytes by zip path and decode them to a drawable
+/** Fetch one image's bytes by zip path and resolve them to a drawable
  *  `CanvasImageSource`, preferring the Microsoft svgBlip vector original
  *  (MS-ODRAWXML). Unified across the top-level twoCellAnchor picture
  *  (`ImageAnchor`) and the `<xdr:grpSp>` leaf (`ShapeGeom` image) — both carry a
@@ -52,19 +52,27 @@ interface ImageRef {
  *  because the renderer's crop math needs the decoded bitmap's native pixel grid
  *  (an SVG element has none).
  *
- *  Raster decodes to an `ImageBitmap` through core's
- *  {@link decodeRasterOrMetafile} (which content-sniffs the bytes: a WMF, which
- *  `createImageBitmap` can't decode, is rasterized by the shared minimal player
- *  at a size derived from `widthPt`/`heightPt`; a true EMF — or a WMF with no
- *  geometry — resolves to `null`, so the picture is skipped rather than
- *  crashing). The SVG vector original decodes to an `HTMLImageElement` via
- *  core's path-keyed `getCachedSvgImageByPath`, because `createImageBitmap`
- *  cannot rasterize SVG in every browser. Bytes are fetched lazily by zip path
- *  through `fetchImage` (twin of pptx/docx's `fetchImage`) instead of being
- *  inlined as base64.
+ *  All three decode paths go through the SAME per-`fetchImage` core caches that
+ *  docx and pptx use (issue #781), so xlsx no longer keeps its own owned bitmap
+ *  map:
+ *   - raster/metafile (+ any `<a:duotone>` recolour, §20.1.8.23) →
+ *     {@link getCachedDuotoneBitmapByPath}, a thin two-layer wrapper over the
+ *     path-keyed `getCachedBitmapByPath` (content-sniffs the bytes: a WMF, which
+ *     `createImageBitmap` can't decode, is rasterized by the shared minimal
+ *     player at a size derived from `widthPt`/`heightPt`; a true EMF — or a WMF
+ *     with no geometry — resolves to `null`, so the picture is skipped rather
+ *     than crashing). With no duotone this is exactly the base-bitmap decode.
+ *   - SVG vector original → `getCachedSvgImageByPath` (decodes to an
+ *     `HTMLImageElement`, because `createImageBitmap` cannot rasterize SVG in
+ *     every browser).
+ *  Bytes are fetched lazily by zip path through `fetchImage` (twin of
+ *  pptx/docx's `fetchImage`) instead of being inlined as base64; the decoded
+ *  bitmaps are owned by those shared caches (LRU-bounded, closed on eviction and
+ *  on the per-document `drop*` at destroy / re-parse) rather than by the caller's
+ *  lookup map.
  *
- *  Returns `null` for an unsupported metafile so the caller leaves the path
- *  uncached and the renderer skips a missing source. */
+ *  Returns `null` for an unsupported metafile so the renderer skips a missing
+ *  source. */
 export async function decodeImageSource(
   imagePath: string,
   mimeType: string,
@@ -73,18 +81,21 @@ export async function decodeImageSource(
   widthPt = 0,
   heightPt = 0,
   srcRect: SrcRect | null = null,
+  duotone: Duotone | null = null,
+  offscreenFactory?: OffscreenFactory,
 ): Promise<CanvasImageSource | null> {
-  const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource | null> => {
-    // A cropped metafile must rasterize at its FULL picture frame, not the
-    // visible sub-rect, so the fractional crop lands correctly; raster blips and
-    // uncropped metafiles pass the box through unchanged.
-    const sized = metafileRasterSize(mime, srcRect, widthPt, heightPt);
-    return decodeRasterOrMetafile(await fetchImage(path, mime), {
+  const dataIsSvg = mimeType === 'image/svg+xml';
+  // A cropped metafile must rasterize at its FULL picture frame, not the visible
+  // sub-rect, so the fractional crop lands correctly; raster blips and uncropped
+  // metafiles pass the box through unchanged. The shared base cache is path-keyed
+  // ("first size wins"), matching pptx/docx.
+  const sized = metafileRasterSize(mimeType, srcRect, widthPt, heightPt);
+  const decodeRaster = (): Promise<ImageBitmap | null> =>
+    getCachedDuotoneBitmapByPath(imagePath, mimeType, duotone, fetchImage, {
       widthPt: sized.widthPt,
       heightPt: sized.heightPt,
+      offscreenFactory,
     });
-  };
-  const dataIsSvg = mimeType === 'image/svg+xml';
   // Shared vector-vs-raster gate (see core preferVectorBlip). When it returns
   // true, `blip.svgImagePath` is narrowed to string.
   const blip = { svgImagePath, srcRect };
@@ -92,13 +103,13 @@ export async function decodeImageSource(
     // No crop: prefer the vector original; fall back to the raster on decode
     // failure (or, when `imagePath` is itself the SVG, the SVG decoder again).
     // A cropped picture skips this branch so the crop math (below, in the
-    // renderer) runs on the raster bitmap's native pixel dimensions.
+    // renderer) runs on the raster bitmap's native pixel dimensions. §20.1.8.23
+    // duotone applies only to the raster fallback — an SVG vector original has no
+    // readable pixel grid (matches docx/pptx).
     try {
       return await getCachedSvgImageByPath(blip.svgImagePath, fetchImage);
     } catch {
-      return dataIsSvg
-        ? getCachedSvgImageByPath(imagePath, fetchImage)
-        : decodeRaster(imagePath, mimeType);
+      return dataIsSvg ? getCachedSvgImageByPath(imagePath, fetchImage) : decodeRaster();
     }
   }
   if (dataIsSvg) {
@@ -106,43 +117,28 @@ export async function decodeImageSource(
     // raster decoder (createImageBitmap) can't rasterize SVG.
     return getCachedSvgImageByPath(imagePath, fetchImage);
   }
-  return decodeRaster(imagePath, mimeType);
+  return decodeRaster();
 }
 
-/** Close every `ImageBitmap` held in a decoded-image cache, then clear it.
+/** Collect every embedded image referenced by a worksheet, resolve each against
+ *  the shared per-`fetchImage` core caches, and record the drawable in
+ *  `imageCache` under {@link imageCacheKey}(path, duotone) — the renderer's
+ *  synchronous lookup key. Images appear either as a top-level twoCellAnchor
+ *  `<xdr:pic>` (in `ws.images`) or as a leaf inside an `<xdr:grpSp>` (a
+ *  `ShapeGeom` with `type: 'image'`); BOTH are collected so the renderer never
+ *  hits a missing source during the synchronous draw. De-duped by lookup key so a
+ *  path shared across anchors is resolved once per pass.
  *
- *  Unlike docx/pptx (which decode through core's path-keyed
- *  `getCachedBitmapByPath`/`dropBitmapCacheByPath`, so eviction/teardown always
- *  closes the GPU-backed bitmap), xlsx's `imageCache` is a plain per-instance
- *  `Map<string, CanvasImageSource | null>` populated directly by
- *  `decodeImageSource` (see {@link prefetchImages}). A bare `.clear()` on that
- *  map drops the last reference to each decoded `ImageBitmap` WITHOUT calling
- *  `.close()`, leaking its GPU backing until GC — worse, GC timing for
- *  GPU-backed objects is not guaranteed, so repeated load/destroy or
- *  reparse cycles can accumulate live bitmaps. `HTMLImageElement` (the SVG
- *  vector-blip branch, via `getCachedSvgImageByPath`) and a cached `null`
- *  (unsupported metafile) pass through untouched — only `ImageBitmap` values
- *  own a `.close()` method.
+ *  `imageCache` is a pure synchronous-lookup layer, NOT the owner of the decoded
+ *  bitmaps: every image is re-resolved through `decodeImageSource` on each pass
+ *  (the way docx/pptx do), so a still-referenced blip whose bitmap was
+ *  LRU-evicted (and closed) by the shared cache is transparently re-decoded
+ *  rather than served stale/closed — a resolved bitmap always comes from a live
+ *  shared-cache entry. A shared-cache hit re-fetches no bytes and re-runs no
+ *  decode, so a steady-state pass only awaits already-settled promises. Storing
+ *  `null` for an unsupported metafile (true EMF / geometry-less WMF) lets the
+ *  renderer skip a falsy source without a re-fetch.
  *
- *  Shared by {@link XlsxWorkbook.destroy} (main-thread cache) and the
- *  render-worker's module-level cache (closed both on re-`parse` and, via the
- *  realm tearing down, at worker termination). */
-export function closeAndClearImageCache(imageCache: Map<string, CanvasImageSource | null>): void {
-  for (const src of imageCache.values()) {
-    if (src && typeof (src as ImageBitmap).close === 'function') {
-      (src as ImageBitmap).close();
-    }
-  }
-  imageCache.clear();
-}
-
-/** Collect every embedded image referenced by a worksheet and decode the ones
- *  not already in `imageCache`, storing each decoded `CanvasImageSource` under
- *  its zip `imagePath` (the renderer's lookup key). Images appear either as a
- *  top-level twoCellAnchor `<xdr:pic>` (in `ws.images`) or as a leaf inside an
- *  `<xdr:grpSp>` (a `ShapeGeom` with `type: 'image'`); BOTH are collected so the
- *  renderer never hits a missing source during the synchronous draw. De-duped
- *  by `imagePath` so a path shared across anchors is fetched + decoded once.
  *  A no-op when `fetchImage` is absent (no byte source). Per-image failures are
  *  swallowed so one broken picture doesn't sink the grid. */
 export async function prefetchImages(
@@ -152,60 +148,58 @@ export async function prefetchImages(
   // Optional offscreen-surface factory for the `<a:duotone>` pixel transform,
   // injected in environments without a global `OffscreenCanvas` (or by tests).
   // Defaults to the real `OffscreenCanvas` when the runtime provides one.
-  opts?: { offscreenFactory?: import('@silurus/ooxml-core').OffscreenFactory },
+  opts?: { offscreenFactory?: OffscreenFactory },
 ): Promise<void> {
   if (!fetchImage) return;
   const fetch = fetchImage;
-  const uncached = new Map<string, ImageRef>();
+  const refs = new Map<string, ImageRef>();
   if (ws.images) {
     for (const img of ws.images) {
-      // Key by (path + duotone colours) so a recoloured picture is cached and
-      // looked up separately from the raw blip (§20.1.8.23).
-      const key = imageCacheKey(img.imagePath, img.duotone);
-      if (!imageCache.has(key)) {
-        uncached.set(key, {
-          imagePath: img.imagePath,
-          mimeType: img.mimeType,
-          svgImagePath: img.svgImagePath,
-          // Saved EMU extent → pt sizes a metafile raster (0 ⇒ decoder fallback).
-          widthPt: img.nativeExtCx > 0 ? img.nativeExtCx / EMU_PER_PT : 0,
-          heightPt: img.nativeExtCy > 0 ? img.nativeExtCy / EMU_PER_PT : 0,
-          // An `<a:srcRect>` crop forces the raster decode (native pixel grid)
-          // and, for a metafile, the full-frame raster size.
-          srcRect: img.srcRect ?? null,
-          duotone: img.duotone ?? null,
-        });
-      }
+      // Key by (path + duotone colours) so a recoloured picture is looked up
+      // separately from the raw blip (§20.1.8.23).
+      refs.set(imageCacheKey(img.imagePath, img.duotone), {
+        imagePath: img.imagePath,
+        mimeType: img.mimeType,
+        svgImagePath: img.svgImagePath,
+        // Saved EMU extent → pt sizes a metafile raster (0 ⇒ decoder fallback).
+        widthPt: img.nativeExtCx > 0 ? img.nativeExtCx / EMU_PER_PT : 0,
+        heightPt: img.nativeExtCy > 0 ? img.nativeExtCy / EMU_PER_PT : 0,
+        // An `<a:srcRect>` crop forces the raster decode (native pixel grid)
+        // and, for a metafile, the full-frame raster size.
+        srcRect: img.srcRect ?? null,
+        duotone: img.duotone ?? null,
+      });
     }
   }
   if (ws.shapeGroups) {
     for (const grp of ws.shapeGroups) {
       for (const shape of grp.shapes) {
         if (shape.geom.type === 'image') {
-          const key = imageCacheKey(shape.geom.imagePath, shape.geom.duotone);
-          if (!imageCache.has(key)) {
-            uncached.set(key, {
-              imagePath: shape.geom.imagePath,
-              mimeType: shape.geom.mimeType,
-              svgImagePath: shape.geom.svgImagePath,
-              // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
-              widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
-              heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
-              // A crop forces the raster decode (native pixel grid for the crop)
-              // and, for a metafile, the full-frame raster size.
-              srcRect: shape.geom.srcRect ?? null,
-              duotone: shape.geom.duotone ?? null,
-            });
-          }
+          refs.set(imageCacheKey(shape.geom.imagePath, shape.geom.duotone), {
+            imagePath: shape.geom.imagePath,
+            mimeType: shape.geom.mimeType,
+            svgImagePath: shape.geom.svgImagePath,
+            // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
+            widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
+            heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
+            // A crop forces the raster decode (native pixel grid for the crop)
+            // and, for a metafile, the full-frame raster size.
+            srcRect: shape.geom.srcRect ?? null,
+            duotone: shape.geom.duotone ?? null,
+          });
         }
       }
     }
   }
-  if (uncached.size === 0) return;
+  if (refs.size === 0) return;
   await Promise.all(
-    [...uncached.entries()].map(async ([key, ref]) => {
+    [...refs.entries()].map(async ([key, ref]) => {
       try {
-        let src = await decodeImageSource(
+        // The §20.1.8.23 duotone recolour is applied inside the shared decode
+        // (getCachedDuotoneBitmapByPath) and cached under a colour-suffixed key,
+        // so the per-frame draw stays synchronous. Only raster/bitmap sources are
+        // recoloured — an SVG element (vector blip) has no readable pixel grid.
+        const src = await decodeImageSource(
           ref.imagePath,
           ref.mimeType,
           ref.svgImagePath,
@@ -213,33 +207,19 @@ export async function prefetchImages(
           ref.widthPt,
           ref.heightPt,
           ref.srcRect,
+          ref.duotone,
+          opts?.offscreenFactory,
         );
-        // Apply a `<a:duotone>` recolour (§20.1.8.23) once, at decode time, so the
-        // per-frame draw stays synchronous. The transform returns a NEW
-        // ImageBitmap recoloured along the clr1→clr2 luminance ramp (or the source
-        // unchanged when the pixel pipeline is unavailable). Uses the decoded
-        // bitmap's native pixel size. Only raster/bitmap sources are recoloured —
-        // an SVG element (vector blip) has no readable pixel grid, so it is left
-        // as-is (a duotone on a vector picture is a rare edge case).
-        if (src && ref.duotone) {
-          const { w, h } = imageNaturalSize(src);
-          if (w > 0 && h > 0) {
-            src = await applyDuotone(src, ref.duotone, {
-              width: w,
-              height: h,
-              offscreenFactory: opts?.offscreenFactory,
-            });
-          }
-        }
-        // Cache the decode result keyed by (path + duotone colours) — INCLUDING a
-        // null for an unsupported metafile (true EMF / geometry-less WMF). Storing
-        // the null (matching pptx's getCachedBitmap) makes `imageCache.has(key)`
-        // short-circuit the per-render prefetch, so the blip is sniffed ONCE
-        // instead of re-fetched + re-sniffed every viewport frame. The renderer
-        // already skips a falsy source, so a cached null draws nothing.
+        // Record the resolved drawable (INCLUDING a null for an unsupported
+        // metafile, so the renderer skips a falsy source without a re-fetch).
         imageCache.set(key, src);
       } catch {
-        /* leave uncached; renderer skips a missing source */
+        // Transient failure: DELETE any prior lookup entry rather than leaving
+        // it. A prior entry is re-resolved precisely because its shared-cache
+        // backing may be gone (LRU-evicted and GPU-closed); when the re-resolve
+        // fails we cannot vouch for that bitmap's liveness, and the renderer
+        // skips only a missing/falsy source — it would draw a closed one.
+        imageCache.delete(key);
       }
     }),
   );
@@ -255,8 +235,33 @@ export interface RenderDeps {
 
 /** The full per-frame orchestration: preload uncached images, pre-rasterize
  *  equations, size the target, draw. Shared verbatim by the main-thread
- *  XlsxWorkbook and the render worker. */
+ *  XlsxWorkbook and the render worker.
+ *
+ *  The whole pass (prefetch → synchronous draw) runs under a core render-pass
+ *  lease ({@link acquireBitmapCacheLease}): the shared bitmap cache is
+ *  LRU-bounded, so a pass resolving more images than the cap — or a concurrent
+ *  pass on the same workbook — would otherwise evict AND GPU-close bitmaps this
+ *  pass's lookup map still references before the draw runs. Under the lease the
+ *  eviction still removes the cache entry (size stays bounded; the next pass
+ *  re-decodes), but the close is deferred until the lease is released after the
+ *  draw, so drawImage never receives a closed bitmap. */
 export async function renderWorksheetViewport(
+  deps: RenderDeps,
+  target: HTMLCanvasElement | OffscreenCanvas,
+  viewport: ViewportRange,
+  opts: RenderViewportOptions = {},
+): Promise<void> {
+  const releaseLease = opts.fetchImage ? acquireBitmapCacheLease(opts.fetchImage) : undefined;
+  try {
+    await renderWorksheetViewportLeased(deps, target, viewport, opts);
+  } finally {
+    releaseLease?.();
+  }
+}
+
+/** {@link renderWorksheetViewport}'s body, verbatim; runs under the caller's
+ *  render-pass lease. */
+async function renderWorksheetViewportLeased(
   deps: RenderDeps,
   target: HTMLCanvasElement | OffscreenCanvas,
   viewport: ViewportRange,

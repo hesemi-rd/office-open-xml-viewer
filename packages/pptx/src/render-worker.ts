@@ -15,7 +15,14 @@ import { renderSlide, type PptxTextRunInfo } from './renderer';
 import { selectNotes } from './notes';
 import { findMimeTypeForPath } from './media-mime';
 import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
-import { preloadGoogleFonts, decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import {
+  preloadGoogleFonts,
+  decodeDataUrl,
+  WasmParserHost,
+  dropBitmapCacheByPath,
+  dropDuotoneBitmapCache,
+  dropSvgImageCache,
+} from '@silurus/ooxml-core';
 import type { RenderWorkerRequest, RenderWorkerResponse, PresentationMeta } from './worker-protocol';
 
 // RB6: same self-poison + auto-respawn as the parse-only worker. A trap during
@@ -93,6 +100,16 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // re-parse would silently return the wrong file's media/image.
       mediaCache.clear();
       imageCache.clear();
+      // A re-parse starts a fresh document: also drop the shared, per-`getImage`
+      // decoded caches (base raster, a:duotone recolour, SVG object URLs),
+      // symmetric with PptxPresentation.destroy(). The worker's `getImage` closure
+      // is a stable module-level identity, so without this a new deck sharing a
+      // zip path (e.g. ppt/media/image1.png) would be served the previous file's
+      // decoded bitmap, and the GPU/URL handles would linger past the LRU cap.
+      // Symmetric across docx/pptx/xlsx render workers (issue #781).
+      dropBitmapCacheByPath(getImage);
+      dropDuotoneBitmapCache(getImage);
+      dropSvgImageCache(getImage);
       const max =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)

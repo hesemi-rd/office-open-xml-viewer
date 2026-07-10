@@ -3,6 +3,7 @@ import {
   getCachedBitmapByPath,
   peekCachedBitmapByPath,
   dropBitmapCacheByPath,
+  acquireBitmapCacheLease,
 } from './bitmap-image-by-path';
 
 /** Build a minimal standard (non-placeable) WMF that draws one polyline, so the
@@ -189,5 +190,134 @@ describe('getCachedBitmapByPath', () => {
     expect(closes.length).toBe(2);
     await getCachedBitmapByPath('word/media/drop-a.png', 'image/png', fetchImage);
     expect(fetchImage).toHaveBeenCalledTimes(3); // cache cleared → fresh decode
+  });
+});
+
+/**
+ * Render-pass lease (`acquireBitmapCacheLease`): a renderer resolves EVERY image
+ * a page/sheet/slide references and then draws from those references. Without a
+ * lease, resolving more images than the LRU cap in one pass evicts — and
+ * GPU-closes — bitmaps the pass still holds, so the draw would paint a closed
+ * bitmap. While a lease is active, evictions/drops still remove the cache entry
+ * (size stays bounded) but the close is deferred to the LAST release.
+ */
+describe('acquireBitmapCacheLease (render-pass liveness)', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (_blob: Blob) => ({ width: 1, height: 1, close: () => {} }) as unknown as ImageBitmap),
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** Flush the close-through-promise microtasks. */
+  const flush = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  it('defers an LRU-eviction close past the cap until the lease is released', async () => {
+    const closed: string[] = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => {
+      const tag = new Uint8Array(await blob.arrayBuffer())[0];
+      return { width: 1, height: 1, close: () => closed.push(`b${tag}`) } as unknown as ImageBitmap;
+    }));
+    const fetchImage = vi.fn(async (path: string, mime: string) => {
+      // Tag the blob with the path's index so each bitmap is identifiable.
+      const i = Number(/lease-(\d+)/.exec(path)?.[1] ?? 0);
+      return new Blob([new Uint8Array([i % 256])], { type: mime });
+    });
+
+    const release = acquireBitmapCacheLease(fetchImage);
+    // Resolve one more than the cap (257) in a single leased pass, the way a
+    // render pass over a 257-image document would.
+    for (let i = 0; i <= 256; i++) {
+      await getCachedBitmapByPath(`word/media/lease-${i}.png`, 'image/png', fetchImage);
+    }
+    await flush();
+    // The eviction happened (entry removed → a re-resolve would re-fetch), but
+    // the GPU close is deferred: the pass's reference is still drawable.
+    expect(closed).toEqual([]);
+
+    release();
+    await flush();
+    expect(closed).toEqual(['b0']); // the evicted oldest closes at release
+  });
+
+  it('defers a dropBitmapCacheByPath close while leased (drop racing an in-flight render)', async () => {
+    const closes: number[] = [];
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (_blob: Blob) => ({ width: 1, height: 1, close: () => closes.push(1) }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }));
+
+    const release = acquireBitmapCacheLease(fetchImage);
+    await getCachedBitmapByPath('word/media/leased-drop-a.png', 'image/png', fetchImage);
+    await getCachedBitmapByPath('word/media/leased-drop-b.png', 'image/png', fetchImage);
+    dropBitmapCacheByPath(fetchImage); // e.g. destroy()/re-parse mid-render
+    await flush();
+    expect(closes.length).toBe(0); // still drawable for the in-flight pass
+    // The cache itself was forgotten immediately: a re-resolve re-decodes.
+    await getCachedBitmapByPath('word/media/leased-drop-a.png', 'image/png', fetchImage);
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+
+    release();
+    await flush();
+    expect(closes.length).toBe(2); // the dropped bitmaps close at release
+  });
+
+  it('nested leases (concurrent passes): deferred closes run at the LAST release only', async () => {
+    const closes: number[] = [];
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (_blob: Blob) => ({ width: 1, height: 1, close: () => closes.push(1) }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }));
+
+    const releaseA = acquireBitmapCacheLease(fetchImage);
+    const releaseB = acquireBitmapCacheLease(fetchImage);
+    await getCachedBitmapByPath('word/media/nested.png', 'image/png', fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+    releaseA();
+    await flush();
+    expect(closes.length).toBe(0); // pass B still holds the document
+    releaseB();
+    await flush();
+    expect(closes.length).toBe(1);
+  });
+
+  it('release is idempotent — a double release neither double-closes nor steals a sibling lease', async () => {
+    const closes: number[] = [];
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (_blob: Blob) => ({ width: 1, height: 1, close: () => closes.push(1) }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }));
+
+    const releaseA = acquireBitmapCacheLease(fetchImage);
+    const releaseB = acquireBitmapCacheLease(fetchImage);
+    await getCachedBitmapByPath('word/media/idem.png', 'image/png', fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+    releaseA();
+    releaseA(); // double release must NOT decrement B's hold
+    await flush();
+    expect(closes.length).toBe(0);
+    releaseB();
+    await flush();
+    expect(closes.length).toBe(1);
+  });
+
+  it('with no lease active, eviction and drop close immediately (unchanged baseline)', async () => {
+    const closes: number[] = [];
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (_blob: Blob) => ({ width: 1, height: 1, close: () => closes.push(1) }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }));
+    await getCachedBitmapByPath('word/media/unleased.png', 'image/png', fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    expect(closes.length).toBe(1);
   });
 });

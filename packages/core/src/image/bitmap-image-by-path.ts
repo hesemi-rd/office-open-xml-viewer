@@ -64,6 +64,103 @@ function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
   return cache;
 }
 
+// ── Render-pass leases ────────────────────────────────────────────────────────
+// The renderers resolve every image a page/slide/sheet references through this
+// cache and then DRAW from those references — either synchronously from a
+// non-owning lookup map (docx `preloadImages`, xlsx `prefetchImages`) or right
+// after a per-element await (pptx). The LRU cap, however, is oblivious to that
+// pass: resolving MORE THAN the cap's worth of images in one pass (or a
+// concurrent pass on the same document) evicts — and GPU-closes — bitmaps the
+// in-flight pass still holds, so the draw would paint a closed bitmap.
+//
+// A lease makes the pass's liveness need explicit and structural: while at least
+// one lease is active for a document's `fetchImage`, any close this module (or a
+// sibling per-document cache, via {@link deferBitmapCloseWhileLeased}) would
+// perform — LRU eviction or an explicit drop — is DEFERRED and executed when the
+// last lease is released. Eviction still removes the cache ENTRY immediately
+// (the cache stays size-bounded and the next resolve re-decodes); only the GPU
+// release is deferred, so every reference a leased pass obtained stays drawable
+// for the duration of the pass. Callers MUST release in a `finally` — an
+// unreleased lease keeps its deferred bitmaps alive until the document itself is
+// reclaimed. The SVG cache needs no lease: its eviction revokes an object URL,
+// which does not invalidate an already-decoded HTMLImageElement.
+interface BitmapCacheLeaseState {
+  /** Active (unreleased) leases for this document. */
+  count: number;
+  /** Closes deferred while leased; executed at the last release. */
+  deferred: Array<Promise<ImageBitmap | null>>;
+}
+
+const leasesByFetch = new WeakMap<FetchImage, BitmapCacheLeaseState>();
+
+// Every GPU close this module (and the sibling per-document caches routing
+// through {@link deferBitmapCloseWhileLeased}) performs is funneled through
+// here. The WeakSet deduplicates closes PER BITMAP: two cache layers can
+// resolve to the same bitmap (a second-layer pass-through entry still in its
+// in-flight window when both caches are dropped resolves to the base bitmap
+// the base cache also closes), and the dedup removes any reliance on
+// `ImageBitmap.close()` idempotence across engines.
+const closedBitmaps = new WeakSet<ImageBitmap>();
+
+function closeBitmapOnce(bmp: ImageBitmap | null | undefined): void {
+  if (!bmp || closedBitmaps.has(bmp)) return;
+  closedBitmaps.add(bmp);
+  bmp.close();
+}
+
+/**
+ * Hold every decoded bitmap of one document (keyed by `fetchImage`) alive for
+ * the duration of a render pass: while the returned release function has not
+ * been called, LRU evictions and cache drops defer their GPU `.close()` until
+ * the last outstanding lease is released. Acquire before resolving the pass's
+ * images and release in a `finally` after the draw that uses them. Leases nest
+ * (concurrent passes over the same document each take one); the release
+ * function is idempotent.
+ */
+export function acquireBitmapCacheLease(fetchImage: FetchImage): () => void {
+  let state = leasesByFetch.get(fetchImage);
+  if (!state) {
+    state = { count: 0, deferred: [] };
+    leasesByFetch.set(fetchImage, state);
+  }
+  const s = state;
+  s.count++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    s.count--;
+    if (s.count > 0) return;
+    // Last lease out: run the deferred closes, through each promise (never a raw
+    // bitmap reference) so a still-in-flight decode closes only once it resolves.
+    for (const p of s.deferred) p.then((b) => closeBitmapOnce(b)).catch(() => {});
+    s.deferred = [];
+    leasesByFetch.delete(fetchImage);
+  };
+}
+
+/**
+ * Close a document-owned bitmap through its decode promise — or, when a render
+ * pass currently holds a lease on the document (see
+ * {@link acquireBitmapCacheLease}), defer the close to the last lease release so
+ * the pass never draws a closed bitmap. Shared by this module's LRU eviction and
+ * drop paths and by the sibling per-document caches (core duotone, docx
+ * clrChange) whose drops are the only closes they perform. Closes are
+ * deduplicated per bitmap (see {@link closeBitmapOnce}), so two layers that
+ * resolve to the same bitmap close it exactly once.
+ */
+export function deferBitmapCloseWhileLeased(
+  fetchImage: FetchImage,
+  promise: Promise<ImageBitmap | null>,
+): void {
+  const lease = leasesByFetch.get(fetchImage);
+  if (lease && lease.count > 0) {
+    lease.deferred.push(promise);
+    return;
+  }
+  promise.then((b) => closeBitmapOnce(b)).catch(() => {});
+}
+
 /** Options for {@link getCachedBitmapByPath}. `widthPt`/`heightPt` are the
  *  picture's intended draw size in points and only affect metafile raster
  *  sharpness (a raster blip ignores them), so the path alone keys the cache.
@@ -136,7 +233,10 @@ export function getCachedBitmapByPath(
     const oldestKey = cache.keys().next().value as string;
     const oldest = cache.get(oldestKey);
     cache.delete(oldestKey);
-    oldest?.promise.then((b) => b?.close()).catch(() => {});
+    // Close through the promise — deferred while a render-pass lease is active,
+    // so an in-flight pass that already recorded this bitmap never draws it
+    // closed (the entry is gone either way; the next resolve re-decodes).
+    if (oldest) deferBitmapCloseWhileLeased(fetchImage, oldest.promise);
   }
   return promise;
 }
@@ -159,12 +259,15 @@ export function peekCachedBitmapByPath(
  * Close every decoded bitmap for one document's `fetchImage` and forget the
  * document. Call from the owning viewer's `destroy()` so GPU-backed ImageBitmaps
  * are released promptly rather than waiting for GC. A no-op when the document
- * decoded no raster blips.
+ * decoded no raster blips. When a render pass currently holds a lease (see
+ * {@link acquireBitmapCacheLease} — e.g. a destroy or re-parse racing an
+ * in-flight render), the cache is forgotten immediately but the GPU closes are
+ * deferred to the last lease release, so the pass never draws a closed bitmap.
  */
 export function dropBitmapCacheByPath(fetchImage: FetchImage): void {
   const cache = bitmapCacheByFetch.get(fetchImage);
   if (!cache) return;
-  for (const entry of cache.values()) entry.promise.then((b) => b?.close()).catch(() => {});
+  for (const entry of cache.values()) deferBitmapCloseWhileLeased(fetchImage, entry.promise);
   cache.clear();
   bitmapCacheByFetch.delete(fetchImage);
 }
