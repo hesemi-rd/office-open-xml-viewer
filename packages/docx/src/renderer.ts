@@ -160,8 +160,20 @@ import {
 import {
   createFloatWrapOracle,
   measureParagraph,
+  type MeasuredParagraph,
   type ParagraphMeasurementEnvironment,
 } from './paragraph-measure.js';
+import {
+  paragraphFragmentAdvancePt,
+  type DocumentLayout,
+  type LayoutPage,
+  type ParagraphFragment,
+  type PlacedFragment,
+} from './layout-fragments.js';
+// PR 5 — body fragment paint. renderer <-> fragment-paint is a deliberate import
+// cycle: both sides use the other only inside function bodies (never at module
+// evaluation), so ESM live bindings resolve them at call time.
+import { paintParagraphFragment } from './fragment-paint.js';
 import {
   drawVerticalRun,
   drawTateChuYokoRun,
@@ -2729,7 +2741,11 @@ export function computePages(
       const nextEl = body[i + 1];
       const nextShares = nextEl?.type === 'paragraph'
         && parasShareBorderBox(para, nextEl);
-      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX(), nextShares);
+      // M-1 — take the fit-decision measurement ONCE and reuse it for the fragment
+      // when this paragraph is not relocated (attachBodyParagraphFragment re-checks
+      // placement equality before trusting it).
+      const fitMeasured = measureBodyParagraphAtCursor(measureState, para, colW(), suppressBefore, colX());
+      const h = paragraphHeightFromMeasured(fitMeasured, para, nextShares);
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
       // body must stop short of the footnote area. Measure the footnotes this
@@ -2941,6 +2957,16 @@ export function computePages(
           addReservePt = sumReserve(newRefIds);
         }
       } else {
+        // PR 5 — attach the placement-aware fragment for this non-split paragraph
+        // (measured at its FINAL placement, `measureState.y`, after any relocation).
+        // M-1: hand it the fit-decision measurement; it is reused only if the final
+        // placement still matches (no relocation), else remeasured.
+        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {
+          paragraphXPt: colX(),
+          availableWidthPt: colW(),
+          suppressSpaceBefore: suppressBefore,
+          columnIndex: colIndex,
+        }, fitMeasured);
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
@@ -3557,6 +3583,60 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   );
 }
 
+/**
+ * PR 5 — produce the immutable body {@link DocumentLayout}: pages of
+ * {@link PlacedFragment}s over body paragraphs. Pagination is the SAME engine
+ * `paginateDocument` runs (so page assignment, splitting, sections and columns are
+ * identical); this projects the fragments the paginator attached to each body
+ * paragraph element into a frozen result. Tables, headers/footers and floating
+ * content stay on the `PaginatedBodyElement[][]` path until PR 6, so a page's
+ * `fragments` cover its body PARAGRAPHS only (`FlowFragment` is paragraph-only in
+ * PR 5). The section context and page geometry come from each page's stamped section
+ * (a mid-document section break changes them), falling back to the body section.
+ */
+export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
+  if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
+  const layoutDoc = verticalLayoutDoc(doc);
+  const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
+  const pages = paginateWithHeaderFooterReserve(
+    layoutDoc,
+    ctx,
+    layoutDoc.fontFamilyClasses ?? {},
+    layoutSettings,
+    layoutDoc.footnotes ?? [],
+  );
+  const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
+    const geomOverride = (elements[0] as PaginatedBodyElement | undefined)?.sectionGeom;
+    const sectionProps: SectionProps = geomOverride
+      ? { ...layoutDoc.section, ...geomOverride }
+      : layoutDoc.section;
+    const section = resolveSectionLayoutContext(layoutSettings, sectionProps);
+    const geometry: SectionGeom = {
+      pageWidth: sectionProps.pageWidth,
+      pageHeight: sectionProps.pageHeight,
+      marginTop: sectionProps.marginTop,
+      marginRight: sectionProps.marginRight,
+      marginBottom: sectionProps.marginBottom,
+      marginLeft: sectionProps.marginLeft,
+      headerDistance: sectionProps.headerDistance,
+      footerDistance: sectionProps.footerDistance,
+    };
+    const fragments: PlacedFragment[] = [];
+    for (const el of elements) {
+      const placed = bodyParagraphFragments.get(el as object);
+      if (placed) fragments.push(placed);
+    }
+    return Object.freeze({
+      pageIndex,
+      section,
+      geometry,
+      fragments: Object.freeze(fragments) as readonly PlacedFragment[],
+    });
+  });
+  return Object.freeze({ pages: Object.freeze(layoutPages) as readonly LayoutPage[] });
+}
+
 function buildMeasureState(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   section: SectionProps,
@@ -3642,23 +3722,191 @@ function paragraphMeasurementEnvironment(
   };
 }
 
-function estimateParagraphHeight(
+// ===== Body layout fragments (PR 5) =====
+//
+// The paginator associates an immutable {@link PlacedFragment} with each body
+// paragraph element it emits, keyed by the element object in a side table (never a
+// field on the element, because a NON-split paragraph element IS the parsed
+// `DocParagraph` — writing a field would mutate the source model). {@link layoutDocument}
+// assembles those into a {@link DocumentLayout}; body paint (PR 5 Task 13) consumes
+// the fragment's stored scale-1 geometry without re-laying-out the paragraph. This
+// leaves the existing `PaginatedBodyElement[][]` shape byte-identical, so every
+// unmigrated caller (tables, headers/footers, the vertical-text prebuilt-pages swap)
+// is unaffected.
+
+/** Side table: emitted body element -> its placed paragraph fragment. WeakMap so an
+ *  element that is garbage collected drops its entry, and so the parsed `DocParagraph`
+ *  is never mutated (a non-split paragraph element is the source object itself). */
+const bodyParagraphFragments = new WeakMap<object, PlacedFragment>();
+
+/** Read the placed fragment the paginator associated with an emitted body element,
+ *  if any (paragraph elements the fragment migration covers). */
+export function bodyFragmentFor(el: PaginatedBodyElement): PlacedFragment | undefined {
+  return bodyParagraphFragments.get(el as object);
+}
+
+/** TEST ONLY — inject a placed fragment into the body-fragment side table for an
+ *  emitted element, isolating a MISMATCHED (stale-placement) fragment to exercise the
+ *  placement guard. Re-paginating the same paragraph cannot isolate this: it rewrites
+ *  the element's colGeom/section stamps too, so the paint width tracks the stale
+ *  fragment and no mismatch is observable. */
+export const __test_setBodyFragment = (
+  el: PaginatedBodyElement,
+  placed: PlacedFragment,
+): void => {
+  bodyParagraphFragments.set(el as object, placed);
+};
+
+/** Build an immutable body paragraph fragment. `source` is the PARSED paragraph
+ *  (never a slice clone); `measured` is its placement-aware measurement;
+ *  `[lineStart, lineEnd)` selects the painted lines. Leading spacing is charged only
+ *  on the first slice and trailing only on the final slice, so paragraph spacing is
+ *  owned by the fragment and counted exactly once (design §"Measured Fragment Model"). */
+function buildParagraphFragment(
+  source: DocParagraph,
+  measured: MeasuredParagraph,
+  lineStart: number,
+  lineEnd: number,
+  isFirstSlice: boolean,
+  isFinalSlice: boolean,
+  trailingExtentPt: number,
+): ParagraphFragment {
+  const leadingSpacePt = isFirstSlice
+    ? measured.contentStartYPt - measured.placement.startYPt
+    : 0;
+  const trailingSpacePt = isFinalSlice ? trailingExtentPt : 0;
+  return Object.freeze({
+    kind: 'paragraph',
+    source,
+    measured,
+    lineStart,
+    lineEnd,
+    leadingSpacePt,
+    trailingSpacePt,
+  });
+}
+
+/** Place a paragraph fragment at page-absolute scale-1 coordinates. `heightPt` is the
+ *  cursor advancement (leadingSpacePt + measured line advances + trailingSpacePt). */
+function placeParagraphFragment(
+  fragment: ParagraphFragment,
+  columnIndex: number,
+  xPt: number,
+  yPt: number,
+  widthPt: number,
+): PlacedFragment {
+  return Object.freeze({
+    fragment,
+    columnIndex,
+    xPt,
+    yPt,
+    widthPt,
+    heightPt: paragraphFragmentAdvancePt(fragment),
+  });
+}
+
+/** Master switch for the M-1 fit-check measurement reuse. Always ON in production; the
+ *  non-vacuity test flips it OFF to force a second measurement and assert the reuse
+ *  really avoided one (fewer measureText calls during pagination) with identical output.
+ *  Module-local. */
+let fitMeasureReuseEnabled = true;
+
+/** Measure a NON-split body paragraph at its final placement and attach its placed
+ *  fragment covering the whole line range.
+ *
+ *  M-1 — the fit decision already measured this paragraph at the cursor placement
+ *  ({@link measureBodyParagraphAtCursor}). When the paragraph was NOT relocated after
+ *  that estimate its final placement is identical, so `fitMeasured` is reused instead
+ *  of measuring a second time. The reuse is keyed on placement VALUE equality (start Y,
+ *  paragraph X, width, page limit, space-before suppression), never on paragraph
+ *  identity: a relocation to the next column/page changes `measureState.y` (and X), so
+ *  the gate rejects the stale estimate and remeasures at the new placement. Only the
+ *  float-free case is reused — a paragraph in a float context always remeasures, since
+ *  its wrap window depends on the live float set. */
+function attachBodyParagraphFragment(
+  el: PaginatedElementWithLines,
+  source: DocParagraph,
+  measureState: RenderState,
+  placement: {
+    paragraphXPt: number;
+    availableWidthPt: number;
+    suppressSpaceBefore: boolean;
+    columnIndex: number;
+  },
+  fitMeasured?: MeasuredParagraph,
+): void {
+  const paragraphContext = resolveBodyParagraphLayoutContext(measureState, source);
+  const measured =
+    fitMeasured !== undefined &&
+    fitMeasureReuseEnabled &&
+    measureState.floats.length === 0 &&
+    fitMeasured.placement.wrap === undefined &&
+    fitMeasured.placement.startYPt === measureState.y &&
+    fitMeasured.placement.paragraphXPt === placement.paragraphXPt &&
+    fitMeasured.placement.availableWidthPt === placement.availableWidthPt &&
+    fitMeasured.placement.maximumYPt === measureState.pageH &&
+    fitMeasured.placement.suppressSpaceBefore === placement.suppressSpaceBefore
+      ? fitMeasured
+      : measureParagraph(
+          source,
+          paragraphContext,
+          {
+            startYPt: measureState.y,
+            paragraphXPt: placement.paragraphXPt,
+            availableWidthPt: placement.availableWidthPt,
+            maximumYPt: measureState.pageH,
+            suppressSpaceBefore: placement.suppressSpaceBefore,
+            wrap: measureState.floats.length > 0
+              ? createFloatWrapOracle(measureState.floats)
+              : undefined,
+          },
+          {
+            context: measureState.ctx,
+            fontFamilyClasses: measureState.fontFamilyClasses,
+          },
+          paragraphMeasurementEnvironment(measureState),
+        );
+  const trailingExtentPt = Math.max(
+    measured.requestedSpaceAfterPt,
+    bottomBorderExtentPt(source.borders),
+  );
+  const lineEnd = measured.markOnly ? 0 : measured.lines.length;
+  const fragment = buildParagraphFragment(
+    source,
+    measured,
+    0,
+    lineEnd,
+    true,
+    true,
+    trailingExtentPt,
+  );
+  bodyParagraphFragments.set(el, placeParagraphFragment(
+    fragment,
+    placement.columnIndex,
+    placement.paragraphXPt,
+    measured.placement.startYPt,
+    placement.availableWidthPt,
+  ));
+}
+
+/** Measure a body paragraph at the CURRENT cursor placement (`state.y`, `paraXPt`,
+ *  `contentWPt`) — the placement the fit decision walks. Returns the placement-aware
+ *  {@link MeasuredParagraph} so a NON-relocated non-split paragraph can hand this same
+ *  measurement to its fragment instead of measuring a second time (M-1). Pure over the
+ *  measurer; does not mutate `state`. */
+function measureBodyParagraphAtCursor(
   state: RenderState,
   para: DocParagraph,
   contentWPt: number,
-  suppressSpaceBefore = false,
-  paraXPt = 0,
-  /** §17.3.1.7: the next in-flow paragraph shares this paragraph's border box, so
-   *  its bottom edge is suppressed (the box continues) and reserves no extent. */
-  nextSharesBottomBorder = false,
-): number {
+  suppressSpaceBefore: boolean,
+  paraXPt: number,
+): MeasuredParagraph {
   const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
-  const startYPt = state.y;
-  const measured = measureParagraph(
+  return measureParagraph(
     para,
     paragraphContext,
     {
-      startYPt,
+      startYPt: state.y,
       paragraphXPt: paraXPt,
       availableWidthPt: contentWPt,
       maximumYPt: state.pageH,
@@ -3673,9 +3921,38 @@ function estimateParagraphHeight(
     },
     paragraphMeasurementEnvironment(state),
   );
+}
+
+/** The estimated flow height of an already-measured body paragraph: its content span
+ *  from the measurement's recorded start, plus trailing space (spaceAfter or the
+ *  §17.3.1.7 bottom-border extent, unless the next in-flow paragraph shares the border
+ *  box). `measured.placement.startYPt` equals the `state.y` the measurement was taken
+ *  at, so this reproduces the original `contentEndYPt − startYPt + …` formula. */
+function paragraphHeightFromMeasured(
+  measured: MeasuredParagraph,
+  para: DocParagraph,
+  nextSharesBottomBorder: boolean,
+): number {
   const bottomExtent = nextSharesBottomBorder ? 0 : bottomBorderExtentPt(para.borders);
-  return measured.contentEndYPt - startYPt
+  return measured.contentEndYPt - measured.placement.startYPt
     + Math.max(measured.requestedSpaceAfterPt, bottomExtent);
+}
+
+function estimateParagraphHeight(
+  state: RenderState,
+  para: DocParagraph,
+  contentWPt: number,
+  suppressSpaceBefore = false,
+  paraXPt = 0,
+  /** §17.3.1.7: the next in-flow paragraph shares this paragraph's border box, so
+   *  its bottom edge is suppressed (the box continues) and reserves no extent. */
+  nextSharesBottomBorder = false,
+): number {
+  return paragraphHeightFromMeasured(
+    measureBodyParagraphAtCursor(state, para, contentWPt, suppressSpaceBefore, paraXPt),
+    para,
+    nextSharesBottomBorder,
+  );
 }
 
 /** Snap a paragraph's uniform line height up to an integer multiple of the
@@ -3925,6 +4202,32 @@ function splitParagraphAcrossPages(
           hasFloats: measured.placement.wrap !== undefined,
           kinsoku: measureState.kinsoku,
         });
+      }
+      // PR 5 — attach this slice's placement-aware fragment. All slices share the
+      // paragraph measurement; `[firstFitting, lastFitting)` selects the painted
+      // lines, leading spacing rides the first slice and trailing the last. The
+      // slice top is page-absolute: the section body inset plus the content-relative
+      // cursor (matching `stamp`'s `colTopPt` convention).
+      {
+        const topInset = tagSectionGeom
+          ? bodyMarginInsetPt(tagSectionGeom().marginTop)
+          : measureState.marginTop;
+        const fragment = buildParagraphFragment(
+          para,
+          measured,
+          firstFitting,
+          lastFitting,
+          firstFitting === 0,
+          isFinalSlice,
+          trailingExtent,
+        );
+        bodyParagraphFragments.set(sliceEl, placeParagraphFragment(
+          fragment,
+          tagColIndex ? tagColIndex() : 0,
+          paragraphXPt(),
+          topInset + cursorY,
+          contentWPt(),
+        ));
       }
       pages[pages.length - 1].push(stamp(sliceEl));
       lineIdx = lastFitting;
@@ -5498,7 +5801,20 @@ function renderBodyElements(
               suppressBottom: parasShareBorderBox(para, nextFlowParaInColumn(elIdx)),
             }
           : undefined;
-      renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
+      // PR 5 — a migrated body paragraph paints from its stored fragment (no
+      // re-layout). Marker / float paragraphs (and any element the paginator did
+      // not fragment) fall through to the legacy `renderParagraph` acquisition.
+      // The fragment already carries this element's slice, so `slice` is not
+      // re-passed; suppression and border-merge are paint-adjacency inputs.
+      const placedFragment = bodyFragmentFor(el);
+      if (isFragmentPaintableParagraph(para, placedFragment, state, slice === undefined)) {
+        paintParagraphFragment(placedFragment, state, {
+          suppressSpaceBefore: suppress || isContinuation,
+          borderMerge,
+        });
+      } else {
+        renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
+      }
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
@@ -5933,6 +6249,16 @@ function renderParagraph(
    *  renderParaList), which knows in-flow adjacency. Absent ⇒ draw the full box
    *  (a standalone bordered paragraph). */
   borderMerge?: ParaBorderMerge,
+  /** PR 5 — pre-measured scale-1 line partition supplied by body fragment paint
+   *  ({@link paintParagraphFragment}). When provided (even empty), the paragraph's
+   *  lines are the SUPPLIED partition rescaled to the paint scale — the reuse gate,
+   *  the scale-1 recompute, and the float re-layout are all bypassed. This makes
+   *  paint consume stored geometry without re-running {@link layoutLines}. The
+   *  paint pass is byte-identical to the legacy acquisition because the fragment
+   *  holds exactly the scale-1 lines the legacy non-float path would compute
+   *  (migration is gated to non-float, non-marker paragraphs). Empty ⇒ the
+   *  markOnly / anchor-only paragraph, handled by the existing empty-mark branch. */
+  suppliedScale1Lines?: readonly LayoutLine[],
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
   const paragraphContext = resolveStateParagraphLayoutContext(state, para);
@@ -6146,7 +6472,13 @@ function renderParagraph(
   const indRight1 = inFrame ? 0 : paragraphContext.physicalIndentRightPt;
   const marginRightPx = paraW + indRight;
   const marginRightPx1 = paraW1 + indRight1;
-  const lines = reuse
+  const lines = suppliedScale1Lines !== undefined
+    // Body fragment paint: use the fragment's scale-1 partition, rescaled to the
+    // paint scale via the same bridge the reuse gate uses. No re-layout, so paint
+    // scales stored geometry only (scale 1 returns the partition unchanged, so a
+    // scale-1 paint invokes no measureText).
+    ? rescaleLayoutLines([...suppliedScale1Lines], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
+    : reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
       ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl)
@@ -6312,6 +6644,92 @@ function renderParagraph(
   if (!lineSlice || lineSlice.start === 0) {
     renderAnchorImages(para, state, paragraphStartY);
   }
+}
+
+/** Master switch for body fragment paint (PR 5). Always ON in production; the
+ *  byte-identity characterization test (layout-lines-reuse-identity.test.ts) flips
+ *  it OFF to paint the migrated paragraphs through the legacy `renderParagraph`
+ *  acquisition and assert an IDENTICAL paint stream. Module-local. */
+let fragmentPaintEnabled = true;
+
+/** PR 5 — true when a body paragraph may be painted from its stored fragment. It
+ *  excludes the two cases where the fragment's scale-1 line partition would NOT
+ *  reproduce the legacy paint byte-for-byte:
+ *   - numbering markers: paint derives the first-line indent from `numBodyOffset`,
+ *     which differs from the placement-aware measurement's `para.indentFirst`;
+ *   - floating-wrap context: float paragraphs are laid out at the PAINT scale
+ *     against page-absolute float rectangles (renderParagraph case 3), which a
+ *     scale-1 fragment cannot reproduce (its measurement carries a wrap oracle).
+ *  It also excludes state-sensitive paragraphs (a NUMPAGES/page-ref field whose
+ *  resolved TEXT depends on the paint page context): the fragment's line segments
+ *  bake in the pagination-time field text, so those must recompute their segments at
+ *  paint — the same exclusion the legacy reuse stamp applies (`stampLines`).
+ *  Finally it excludes vertical (tbRl) text: the paginator's measure state has no
+ *  `verticalCJK`, so its fragment is laid out HORIZONTALLY (no 縦中横 grouping,
+ *  §17.3.2.10), whereas paint recomputes the lines vertically. Vertical text is
+ *  migrated with the vertical-text follow-up.
+ *  Excluded paragraphs stay on the legacy `renderParagraph` path; they are migrated
+ *  with markers / floats / table cells in later work.
+ *
+ *  PLACEMENT SANITY GUARD (design §"Placement-Aware Paragraph Measurement": "a
+ *  measurement is valid only for its recorded placement"). The fragment is associated
+ *  through a WeakMap keyed by the emitted element; the paint pass trusts that
+ *  association. As a cheap safety net against a STALE entry (e.g. a newer
+ *  re-pagination overwrote the side table while these older prebuiltPages are being
+ *  painted), verify the fragment still matches THIS paint's placement before trusting
+ *  it: its recorded `availableWidthPt` must equal the current paint column width
+ *  (state.contentW rescaled to scale-1 pt), and — for a NON-split paragraph, whose
+ *  emitted element IS the parsed paragraph — its `source` must be this very paragraph
+ *  (a split slice's source is intentionally the ORIGINAL paragraph, not the slice
+ *  element, so that identity is skipped for slices). On any mismatch we fall through
+ *  to the correct-but-slower legacy `renderParagraph` path; we never throw. */
+function isFragmentPaintableParagraph(
+  para: DocParagraph,
+  placed: PlacedFragment | undefined,
+  state: RenderState,
+  isNonSplitElement: boolean,
+): placed is PlacedFragment {
+  if (
+    !fragmentPaintEnabled ||
+    placed === undefined ||
+    para.numbering != null ||
+    state.floats.length !== 0 ||
+    state.verticalCJK ||
+    placed.fragment.measured.placement.wrap !== undefined ||
+    paragraphSegsStateSensitive(para)
+  ) {
+    return false;
+  }
+  // Placement guard: the fragment's recorded band width must equal this paint's
+  // column width (both in scale-1 pt; state.contentW = colW·scale). A magnitude-
+  // relative epsilon absorbs float round-off between the two derivations.
+  const paintAvailableWidthPt = state.contentW / state.scale;
+  const recordedWidthPt = placed.fragment.measured.placement.availableWidthPt;
+  const widthMatches =
+    Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
+    1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt));
+  const sourceMatches = !isNonSplitElement || placed.fragment.source === para;
+  return widthMatches && sourceMatches;
+}
+
+/**
+ * PR 5 — render a body paragraph from its fragment's stored scale-1 line partition,
+ * WITHOUT re-running line layout. Shares the exact draw path of
+ * {@link renderParagraph} (via its supplied-lines parameter), so the paint stream is
+ * byte-identical to the legacy acquisition for the migrated (non-marker, non-float)
+ * class. Called by {@link paintParagraphFragment} in fragment-paint.ts, which owns
+ * the fragment boundary; the scale-1 → paint-scale rescale happens inside
+ * `renderParagraph` through the existing `rescaleLayoutLines` bridge.
+ */
+export function renderBodyParagraphLines(
+  source: DocParagraph,
+  state: RenderState,
+  scale1Lines: readonly LayoutLine[],
+  suppressSpaceBefore: boolean,
+  lineSlice: { start: number; end: number } | undefined,
+  borderMerge: ParaBorderMerge | undefined,
+): void {
+  renderParagraph(source, state, suppressSpaceBefore, lineSlice, false, borderMerge, scale1Lines);
 }
 
 /** Per-line draw context for {@link drawParagraphLine}. Bundles the read-only
@@ -8763,6 +9181,28 @@ export const __test_setLineReuseEnabled = (v: boolean): boolean => {
   return prev;
 };
 
+/** Exported for the body fragment-paint byte-identity test (PR 5). Toggles whether
+ *  migrated body paragraphs paint from their stored fragment or fall back to the
+ *  legacy `renderParagraph` acquisition, so the test can render the SAME page both
+ *  ways and assert the paint call streams are byte-identical. Returns the previous
+ *  value so the test can restore it. */
+export const __test_setFragmentPaintEnabled = (v: boolean): boolean => {
+  const prev = fragmentPaintEnabled;
+  fragmentPaintEnabled = v;
+  return prev;
+};
+
+/** Exported for the M-1 double-measurement non-vacuity test. Toggles whether a
+ *  non-relocated body paragraph's fragment reuses the fit-decision measurement or
+ *  measures again, so the test can paginate the SAME document both ways and assert the
+ *  reuse path makes fewer measureText calls with identical fragments. Returns the
+ *  previous value so the test can restore it. */
+export const __test_setFitMeasureReuseEnabled = (v: boolean): boolean => {
+  const prev = fitMeasureReuseEnabled;
+  fitMeasureReuseEnabled = v;
+  return prev;
+};
+
 /** Exported for the compute-once table-layout characterization test (B2 table
  *  stage 1b). Toggles the stamped column-width/row-height reuse in
  *  computeTableLayout so the test can resolve the SAME stamped table with reuse ON
@@ -10102,7 +10542,7 @@ function drawBorderLine(
  * `suppressBottom` when one follows. When `suppressTop` is set the `between`
  * edge (if defined) is drawn at the top join instead of the `top` edge.
  */
-interface ParaBorderMerge {
+export interface ParaBorderMerge {
   /** A same-border paragraph is adjacent above ⇒ don't draw this `top` edge
    *  (draw `between` at the top join instead, when defined). */
   suppressTop?: boolean;
