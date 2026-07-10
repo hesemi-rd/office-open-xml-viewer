@@ -452,3 +452,104 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     expect(production.perPage[0].filter((c) => c.op !== 'img').length).toBeGreaterThan(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR 6 Task 16 — TABLE-CELL paint byte-identity. A migrated block table paints its
+// cell paragraphs from CellFragment blocks; the per-block gate must exclude the SAME
+// divergence classes the PR 5 body gate excludes (marker firstLineIndent /
+// state-sensitive fields / in-cell float wrap), falling back to the legacy
+// renderParagraph — otherwise the fragment paints a partition the legacy paint would
+// never draw. Pinned against sample class: numbered paragraph inside a table cell
+// (the §17.9.28 marker's numBodyOffset ≠ para.indentFirst).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function cellOf(content: unknown[], widthPt: number): Record<string, unknown> {
+  return {
+    content, colSpan: 1, vMerge: null,
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    background: null, vAlign: 'top', widthPt,
+  };
+}
+
+function tableOf(cellContent: unknown[]): BodyElement {
+  return {
+    type: 'table',
+    colWidths: [180],
+    rows: [{ cells: [cellOf(cellContent, 180)], rowHeight: null, rowHeightRule: 'auto', isHeader: false }],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left', layout: 'fixed',
+  } as unknown as BodyElement;
+}
+
+describe('table-cell paint byte-identity — fragment table paint (PR 6)', () => {
+  it('numbered paragraph inside a table cell: fragment paint === legacy (marker indent)', async () => {
+    // Legacy cell paint recomputes a NUMBERED paragraph with the marker-aware
+    // numBodyOffset first-line indent (the stamp gate rejects it); the fragment's
+    // stored lines were measured with para.indentFirst. The per-block gate must fall
+    // back to legacy renderParagraph for numbered cell paragraphs.
+    const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.',
+      indentLeft: 36, tab: 36, suff: 'tab', jc: 'left' } as unknown as DocParagraph['numbering'];
+    const cellPara = {
+      type: 'paragraph',
+      ...para(Array.from({ length: 30 }, () => 'w').join(' '), {
+        numbering, indentLeft: 36, indentFirst: -18,
+      }),
+    };
+    const model = doc([tableOf([cellPara])], 400);
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
+    // Non-vacuity: the marker itself was drawn.
+    expect(r.streams.some((page) => page.some((c) => c.text === '1.'))).toBe(true);
+  });
+
+  it('NUMPAGES field inside a table cell: fragment paint === legacy (state-sensitive)', async () => {
+    // The fragment's segments freeze the measure-time totalPages (1); legacy paint
+    // re-resolves the field against the real page context. The per-block gate must
+    // fall back for paragraphSegsStateSensitive cell paragraphs.
+    const fieldPara = {
+      type: 'paragraph',
+      ...para('total pages:'),
+    } as unknown as DocParagraph;
+    (fieldPara.runs as unknown[]).push({
+      type: 'field', fieldType: 'numPages', instruction: 'NUMPAGES', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    // A long body paragraph AFTER the table forces a second page, so the real
+    // totalPages (2) differs from the measure-time value (1).
+    const filler = para(Array.from({ length: 120 }, () => 'w').join(' '));
+    const model = doc([tableOf([fieldPara]), filler as unknown as BodyElement], 100);
+    const r = await assertPaintIdentical(model);
+    expect(r.pages).toBeGreaterThan(1);
+    // The REAL page count was drawn (not the frozen measure-time "1").
+    expect(r.streams.some((page) => page.some((c) => c.text === String(r.pages)))).toBe(true);
+  });
+
+  it('cell paragraph after an in-cell wrap float: fragment paint === legacy (wrap context)', async () => {
+    // Cell paragraph 1 carries an anchored square-wrap image (registered into the
+    // cell's isolated float set during paint); paragraph 2's legacy paint re-lays-out
+    // around it (wrap context), while its fragment lines were measured with no wrap
+    // oracle. The per-block gate must fall back when the cell's float set is non-empty.
+    const imgPara = {
+      type: 'paragraph',
+      ...para(''),
+    } as unknown as DocParagraph;
+    (imgPara.runs as unknown[]).push({
+      type: 'image',
+      imagePath: 'word/media/test1.png', mimeType: 'image/png',
+      widthPt: 80, heightPt: 40,
+      anchor: true, anchorXPt: 100, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: true,
+      wrapMode: 'square', wrapSide: 'bothSides',
+      anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+    });
+    const wrapPara = {
+      type: 'paragraph',
+      ...para(Array.from({ length: 40 }, () => 'w').join(' ')),
+    };
+    const model = doc([tableOf([imgPara, wrapPara])], 400);
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
+  });
+});

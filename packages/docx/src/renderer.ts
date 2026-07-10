@@ -9937,6 +9937,28 @@ function computeTableLayout(
   // both passes resolve kinsoku from the same immutable doc.settings.
   const stamped = table as PaginatedBodyElement;
   const contentWPt1 = contentWPx / scale;
+  // PR 6 — fragment-geometry reuse. A non-split block table is no longer stamped (the
+  // stamp mutated the PARSED DocTable); its paginator-resolved geometry lives on the
+  // attached TableFragment (side-table keyed, model untouched). When THIS paint is the
+  // legacy path for such a table (fragment-paint gate exclusions: vAlign centring,
+  // nested floating tables, band mismatch never reaches here since the band gate below
+  // re-verifies), reuse the fragment's scale-1 column widths / row heights exactly as
+  // the removed stamp reuse did — same source values, same `× scale`, byte-identical.
+  const placedFragment = bodyFlowFragments.get(table as object);
+  const fragmentBandPt = tableFragmentBandPt.get(table as object);
+  if (
+    tableReuseEnabled &&
+    placedFragment !== undefined &&
+    placedFragment.fragment.kind === 'table' &&
+    fragmentBandPt !== undefined &&
+    placedFragment.fragment.rows.length === table.rows.length &&
+    Math.abs(fragmentBandPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1))
+  ) {
+    const fragment = placedFragment.fragment;
+    const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
+    const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+  }
   const reuseInputs = stamped.tableLayoutInputs;
   const reuse =
     tableReuseEnabled &&
@@ -10787,13 +10809,53 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
 }
 
 /**
+ * PR 6 — the per-block twin of {@link isFragmentPaintableParagraph} for a table-cell
+ * paragraph block: a cell paragraph paints from its stored fragment lines only when the
+ * SAME divergence classes the PR 5 body gate excludes are absent —
+ *   - a numbered paragraph paints its body at the §17.9.28 marker-aware numBodyOffset
+ *     first-line indent, which differs from the measured para.indentFirst partition;
+ *   - a state-sensitive paragraph (PAGE / NUMPAGES / date fields) must re-resolve its
+ *     segment text against the real paint-time page context;
+ *   - a non-empty cell float set (an anchor registered by a PRECEDING block in this
+ *     cell — the cell's floats start empty, §17.4.57 isolation) puts the legacy paint
+ *     in a wrap context the no-oracle cell measurement never saw;
+ *   - a placement-width mismatch means the fragment belongs to another layout of this
+ *     cell (defensive; mirrors the PR 5 placement sanity guard).
+ * Excluded blocks fall back to the legacy `renderParagraph`, which recomputes exactly
+ * as `renderCellContent` would — byte-identical (pinned by
+ * layout-lines-reuse-identity.test.ts "table-cell paint byte-identity").
+ */
+function isFragmentPaintableCellBlock(
+  block: ParagraphFragment,
+  state: RenderState,
+): boolean {
+  const para = block.source;
+  if (
+    para.numbering != null ||
+    state.floats.length !== 0 ||
+    paragraphSegsStateSensitive(para)
+  ) {
+    return false;
+  }
+  const paintAvailableWidthPt = state.contentW / state.scale;
+  const recordedWidthPt = block.measured.placement.availableWidthPt;
+  return (
+    Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
+    1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt))
+  );
+}
+
+/**
  * PR 6 — paint a cell's content from its {@link CellFragment} blocks, WITHOUT
  * re-laying-out. Mirrors {@link renderCellContent} exactly: paragraph blocks draw from
  * their stored scale-1 line partition (rescaled through the same bridge body fragment
  * paint uses; measure-free at scale 1), nested-table blocks from their own
  * {@link TableFragment}, with the SAME §17.3.1.9 contextualSpacing / spaceBefore-after
  * overlap collapse. Cell paragraphs are drawn whole (no line slice), identically to
- * `renderCellContent`.
+ * `renderCellContent`. A block the per-block gate excludes
+ * ({@link isFragmentPaintableCellBlock}) is drawn by the legacy `renderParagraph` —
+ * the exact call `renderCellContent` makes — so marker / field / wrap divergences
+ * paint byte-identically to the unmigrated path.
  */
 function renderCellContentFragment(cellFragment: CellFragment, state: RenderState): void {
   let prevPara: DocParagraph | null = null;
@@ -10805,14 +10867,18 @@ function renderCellContentFragment(cellFragment: CellFragment, state: RenderStat
       const effBefore = suppress ? 0 : para.spaceBefore;
       const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
-      renderBodyParagraphLines(
-        para,
-        state,
-        block.measured.lines.map((line) => line.layout),
-        suppress,
-        undefined,
-        undefined,
-      );
+      if (isFragmentPaintableCellBlock(block, state)) {
+        renderBodyParagraphLines(
+          para,
+          state,
+          block.measured.lines.map((line) => line.layout),
+          suppress,
+          undefined,
+          undefined,
+        );
+      } else {
+        renderParagraph(para, state, suppress);
+      }
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else {

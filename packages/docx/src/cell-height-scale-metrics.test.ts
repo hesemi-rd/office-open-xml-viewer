@@ -284,4 +284,31 @@ describe('Finding 1 — cell content height uses real-scale (rescaled) Canvas me
       __test_setFragmentPaintEnabled(prevFrag);
     }
   });
+
+  it('PR 6 — a vAlign table (fragment-paint gate-excluded) still reuses the paginator scale-1 geometry in production', async () => {
+    // A vAlign=center cell excludes its table from fragment paint (the §17.4.84
+    // centring re-measures content), so it takes the LEGACY renderTable path — which,
+    // in production (table reuse ON), must draw the PAGINATOR's scale-1 row height
+    // × scale exactly as the pre-PR6 stamp reuse did. PR 6 removed the stamp from the
+    // non-split parsed table (model-mutation removal), so computeTableLayout must
+    // source the same geometry from the attached TableFragment instead; without that,
+    // the fallback recomputes at paint-scale metrics and the drawn row height shifts
+    // under non-linear metrics (observed as a raw-pixel VRT delta on a private
+    // multi-table document). Defaults untouched: fragment paint ON, table reuse ON.
+    const t = tableOf(row(
+      cell([paraOf('aa'), paraOf('bb'), paraOf('cc')], 'center', 'abcdef'),
+      null,
+      'auto',
+    ));
+    const { fillRectCalls } = await renderAndRead(t);
+    const bg = fillRectCalls.find((r) => r.fillStyle === '#abcdef');
+    expect(bg).toBeDefined();
+    // The paginator resolved the row at scale 1: 3 one-line paragraphs at 12pt with
+    // the mock's scale-1 glyph box (asc+desc at p=12), so the production-drawn row
+    // height is that scale-1 height × SCALE — NOT the paint-scale recompute (which
+    // under the non-linear mock is measurably shorter).
+    const { asc, desc } = glyphMetrics(12);
+    const scale1RowHeightPt = 3 * (asc + desc);
+    expect(bg!.h).toBeCloseTo(scale1RowHeightPt * SCALE, 1);
+  });
 });
