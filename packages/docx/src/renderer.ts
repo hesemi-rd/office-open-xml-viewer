@@ -6283,8 +6283,13 @@ function renderParagraph(
   // behindDoc shapes must render before text so they appear behind it.
   renderAnchorImages(para, state, paragraphStartY, 'behind');
 
-  // If any topAndBottom float already extends past state.y, skip past it before text starts.
-  state.y = skipPastTopAndBottom(state.y, state.floats);
+  // If any topAndBottom float already extends past state.y, skip past it before
+  // text starts. Scoped to this paragraph's column band (§20.4.2.20 / §17.6.4):
+  // a topAndBottom float anchored in another newspaper column must not push this
+  // column's text down — state.floats is page-scoped across columns, and
+  // state.contentX/contentW is this element's column band (set per column by the
+  // paint loop).
+  state.y = skipPastTopAndBottom(state.y, state.floats, contentX, contentX + contentW);
 
   const textAreaTopY = state.y;
 
@@ -6350,6 +6355,10 @@ function renderParagraph(
     const probeH = 10 * scale;
     const win = resolveLineFloatWindow(
       textAreaTopY, paragraphMarkEmPx(para, scale), probeH, paraX, paraW, state.floats,
+      // Raw COLUMN band for the topAndBottom gate (§20.4.2.20 / §17.6.4): an
+      // empty mark under a topAndBottom float in this column's indent margin
+      // still flows below it, matching the measure pass (measureMarkOnly).
+      contentX, contentX + contentW,
     );
     return win.topY;
   };
@@ -6367,6 +6376,13 @@ function renderParagraph(
   const wrapCtx: WrapLayoutCtx | undefined = state.floats.length > 0 ? {
     startPageY: state.y,
     paraX,
+    // Raw COLUMN band for the topAndBottom gate (§20.4.2.20 / §17.6.4). `paraX`
+    // above is the indented text band; the two diverge under a left indent, and
+    // a topAndBottom float in this column's indent margin must still push text
+    // below it. state.contentX/contentW is this element's column band (set per
+    // column by the paint loop), matching the measure pass.
+    columnXPt: contentX,
+    columnWidthPt: contentW,
     floats: state.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphContext.hasEastAsianText),
     pageH: state.pageH,

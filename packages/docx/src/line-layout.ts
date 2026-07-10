@@ -274,7 +274,14 @@ export interface LayoutLine {
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
 export interface WrapLayoutCtx {
   startPageY: number;   // absolute canvas Y where the first line should start
-  paraX: number;        // absolute canvas X of the paragraph's content left edge
+  paraX: number;        // absolute canvas X of the paragraph's INDENTED text left edge
+  /** Absolute canvas X of the paragraph's raw COLUMN left edge. Distinct from
+   *  `paraX` when the paragraph has a left indent: the topAndBottom wrap gate
+   *  (§20.4.2.20 full-column block) is scoped to the COLUMN band, while the
+   *  square side-gap math (§20.4.2.17) is scoped to the indented `paraX` band. */
+  columnXPt: number;
+  /** Absolute px width of the paragraph's raw COLUMN band. See columnXPt. */
+  columnWidthPt: number;
   floats: FloatRect[];  // legacy float geometry supplied directly by renderer paths
   /** Placement-aware wrap boundary used by paragraph measurement. */
   lineWindow?: (input: {
@@ -283,6 +290,11 @@ export interface WrapLayoutCtx {
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;
+    /** The paragraph's raw COLUMN band, scoping the topAndBottom gate
+     *  (§20.4.2.20 / §17.6.4). Distinct from paragraphXPt/maximumWidthPt (the
+     *  indented text band the square side-gap math uses). */
+    columnXPt: number;
+    columnWidthPt: number;
   }) => {
     topYPt: number;
     xOffsetPt: number;
@@ -2119,6 +2131,8 @@ export function layoutLines(
         probeHeightPt: probeH,
         paragraphXPt: wrapCtx.paraX,
         maximumWidthPt: maxWidth,
+        columnXPt: wrapCtx.columnXPt,
+        columnWidthPt: wrapCtx.columnWidthPt,
       });
       currentLineTopY = win.topYPt;
       lineXOffset = win.xOffsetPt;
@@ -2126,6 +2140,7 @@ export function layoutLines(
     } else {
       const win = resolveLineFloatWindow(
         currentLineTopY, minWidth, probeH, wrapCtx.paraX, maxWidth, wrapCtx.floats,
+        wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
       );
       currentLineTopY = win.topY;
       lineXOffset = win.xOffset;

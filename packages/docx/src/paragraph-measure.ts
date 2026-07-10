@@ -31,12 +31,24 @@ export interface WrapOracle {
     readonly probeHeightPt: number;
     readonly paragraphXPt: number;
     readonly maximumWidthPt: number;
+    /** The paragraph's COLUMN band, scoping the topAndBottom gate (§20.4.2.20 /
+     *  §17.6.4) to the column the float is anchored in — NOT the indented text
+     *  band `paragraphXPt`/`maximumWidthPt` the square side-gap math uses. */
+    readonly columnXPt: number;
+    readonly columnWidthPt: number;
   }): {
     readonly topYPt: number;
     readonly xOffsetPt: number;
     readonly maximumWidthPt: number;
   };
-  skipTopAndBottomBands(yPt: number): number;
+  skipTopAndBottomBands(input: {
+    readonly yPt: number;
+    /** The paragraph's COLUMN band (colX()/colW()), used to scope a topAndBottom
+     *  float to the column it is anchored in (§20.4.2.20 / §17.6.4) — NOT the
+     *  indented text band `lineWindow` uses. */
+    readonly columnXPt: number;
+    readonly columnWidthPt: number;
+  }): number;
 }
 
 /** Adapt registered scale-1 float rectangles to the placement-aware paragraph
@@ -51,6 +63,8 @@ export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle 
       probeHeightPt,
       paragraphXPt,
       maximumWidthPt,
+      columnXPt,
+      columnWidthPt,
     }) => {
       const window = resolveLineFloatWindow(
         topYPt,
@@ -59,6 +73,8 @@ export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle 
         paragraphXPt,
         maximumWidthPt,
         activeFloats,
+        columnXPt,
+        columnXPt + columnWidthPt,
       );
       return {
         topYPt: window.topY,
@@ -66,7 +82,8 @@ export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle 
         maximumWidthPt: window.maxWidth,
       };
     },
-    skipTopAndBottomBands: (yPt) => skipPastTopAndBottom(yPt, activeFloats),
+    skipTopAndBottomBands: ({ yPt, columnXPt, columnWidthPt }) =>
+      skipPastTopAndBottom(yPt, activeFloats, columnXPt, columnXPt + columnWidthPt),
   };
 }
 
@@ -142,7 +159,17 @@ export function measureParagraph(
   let cursorPt = placement.startYPt
     + (placement.suppressSpaceBefore ? 0 : requestedSpaceBeforePt);
   if (placement.wrap) {
-    cursorPt = placement.wrap.skipTopAndBottomBands(cursorPt);
+    // §20.4.2.20 / §17.6.4 column scope: pass this paragraph's COLUMN band
+    // (placement.paragraphXPt / availableWidthPt = colX()/colW()), NOT the
+    // indented text band, so measure agrees bit-for-bit with the paint pass,
+    // which scopes the same skip against state.contentX/contentW (the column
+    // band). A topAndBottom float anchored in another newspaper column is
+    // filtered out in both passes.
+    cursorPt = placement.wrap.skipTopAndBottomBands({
+      yPt: cursorPt,
+      columnXPt: placement.paragraphXPt,
+      columnWidthPt: placement.availableWidthPt,
+    });
   }
 
   const measureMarkOnly = (): MeasuredParagraph => {
@@ -154,6 +181,10 @@ export function measureParagraph(
         probeHeightPt: 10,
         paragraphXPt,
         maximumWidthPt: paragraphWidthPt,
+        // §20.4.2.20 / §17.6.4 column scope: the topAndBottom gate sees the raw
+        // COLUMN band, not the indented mark band above.
+        columnXPt: placement.paragraphXPt,
+        columnWidthPt: placement.availableWidthPt,
       }).topYPt;
     }
     const markAdvancePt = paragraphMarkLineHeight(
@@ -184,6 +215,11 @@ export function measureParagraph(
     ? {
         startPageY: cursorPt,
         paraX: paragraphXPt,
+        // Raw COLUMN band (placement) for the topAndBottom gate; paraX above is
+        // the indented text band for the square side-gap math (§20.4.2.20 vs
+        // §20.4.2.17). See WrapLayoutCtx.columnXPt.
+        columnXPt: placement.paragraphXPt,
+        columnWidthPt: placement.availableWidthPt,
         floats: [],
         lineWindow: (input) => placement.wrap!.lineWindow(input),
         lineBoxH: (ascent, descent, _hasRuby, intendedSingle) => lineBoxHeight(

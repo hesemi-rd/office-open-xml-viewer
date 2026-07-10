@@ -253,6 +253,8 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     const mkWrap = (s: number): WrapLayoutCtx => ({
       startPageY: 0 * s,
       paraX: 0 * s,
+      columnXPt: 0 * s,
+      columnWidthPt: 120 * s,
       floats: [{
         mode: 'square', side: 'bothSides',
         xLeft: 0 * s, xRight: 30 * s, yTop: 0 * s, yBottom: 24 * s,

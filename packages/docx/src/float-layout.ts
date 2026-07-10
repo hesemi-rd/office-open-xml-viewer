@@ -149,6 +149,26 @@ export function isWrapFloat(mode?: string | null): boolean {
   return mode === 'square' || mode === 'topAndBottom' || mode === 'tight' || mode === 'through';
 }
 
+/**
+ * Does float `f`'s horizontal extent overlap the paragraph/column text band
+ * [paraXLeft, paraXRight]? Touching edges (within FLOAT_OVERLAP_EPS) do not count.
+ *
+ * ECMA-376 §20.4.2.17 (wrapSquare) and §20.4.2.20 (wrapTopAndBottom) both exclude
+ * text only where the object is horizontally placed ("text shall wrap around …
+ * THIS OBJECT"). Floats are registered in ABSOLUTE page coordinates and the page
+ * float set is shared across a section's newspaper columns (§17.6.4), so a float
+ * anchored in one column must be filtered out for a line laid out in another
+ * column that it does not horizontally overlap. Both wrap modes route through
+ * this one predicate so they share identical column-scoping semantics.
+ */
+export function floatOverlapsColumnX(
+  f: FloatRect,
+  paraXLeft: number,
+  paraXRight: number,
+): boolean {
+  return f.xRight > paraXLeft + FLOAT_OVERLAP_EPS && f.xLeft < paraXRight - FLOAT_OVERLAP_EPS;
+}
+
 /** Two exclusion rects intersect (strict overlap, touching edges allowed). */
 export function rectsOverlap(
   aL: number, aR: number, aT: number, aB: number,
@@ -220,24 +240,47 @@ export function resolveLineFloatWindow(
   paraX: number,
   maxWidth: number,
   floats: FloatRect[],
+  // The paragraph's RAW COLUMN band, distinct from the indented text band
+  // [paraX, paraX + maxWidth]. Step 1 (topAndBottom) gates by the COLUMN band —
+  // §20.4.2.20 blocks the FULL column where the object sits, including the
+  // paragraph's indent margins — while step 2 (square side-gap) keeps gating by
+  // the narrower indented text band (§20.4.2.17). Defaults to the indented band
+  // so a direct unit caller that has no separate column band stays correct.
+  columnXLeftPt: number = paraX,
+  columnXRightPt: number = paraX + maxWidth,
 ): { topY: number; xOffset: number; maxWidth: number } {
+  const paraXLeft = paraX;
+  const paraXRight = paraX + maxWidth;
+
   // 1. Keep pushing past any topAndBottom block we sit inside.
+  //
+  // §20.4.2.20 (wrapTopAndBottom) excludes text only where THIS OBJECT is
+  // horizontally placed. A page-scoped float anchored in another newspaper
+  // column (§17.6.4) must not push this column's line below an unrelated
+  // vertical band, so it is gated by `floatOverlapsColumnX` against the RAW
+  // COLUMN band — NOT the indented text band step 2 uses. §20.4.2.20 blocks the
+  // whole column where the object sits ("text must wrap around neither side of
+  // this object"), so a topAndBottom float in this column's indent margin still
+  // pushes an indented paragraph's lines below it even though it does not overlap
+  // the narrower indented band. Within a column the object DOES overlap it blocks
+  // the full width (topY is advanced to the band bottom, no side gap is computed).
   //
   // ASSUMPTION (M3): step 1 runs ONCE, before the square sweep, and is not
   // re-checked after a square push in step 2. This relies on "no topAndBottom
   // float sits below a square float in the same column band." topAndBottom
-  // objects span the full content width (ECMA-376 §20.4.2.16) and are normally
-  // anchored above/below the square-wrapped region, so the square push in step 2
-  // lands in float-free space below the band. If a document ever places a
-  // topAndBottom strictly below a square the pushed line could clip into it; the
-  // spec-correct fix is to make steps 1+2 a single fixpoint loop. Left as a
-  // documented assumption here to preserve current behavior (no observed sample
+  // objects span the full column width where they sit (ECMA-376 §20.4.2.20) and
+  // are normally anchored above/below the square-wrapped region, so the square
+  // push in step 2 lands in float-free space below the band. If a document ever
+  // places a topAndBottom strictly below a square the pushed line could clip into
+  // it; the spec-correct fix is to make steps 1+2 a single fixpoint loop. Left as
+  // a documented assumption here to preserve current behavior (no observed sample
   // exercises the inverted ordering).
   for (let guard = 0; guard < 16; guard++) {
     const lineBot = topY + probeH;
     let skip: number | null = null;
     for (const f of floats) {
       if (f.mode !== 'topAndBottom') continue;
+      if (!floatOverlapsColumnX(f, columnXLeftPt, columnXRightPt)) continue;
       if (lineBot > f.yTop && topY < f.yBottom) {
         skip = skip === null ? f.yBottom : Math.max(skip, f.yBottom);
       }
@@ -247,8 +290,6 @@ export function resolveLineFloatWindow(
   }
 
   // 2. Horizontal constraint from square floats.
-  const paraXLeft = paraX;
-  const paraXRight = paraX + maxWidth;
   // A gap must be at least `requiredWidth` wide to host a line start. Every docx
   // caller passes Word's 1-inch rule already reduced by its rounding tolerance,
   // `wordMinLineStartPx(scale)` (= (WORD_MIN_LINE_START_PT − LINE_START_GAP_EPS_PT)
@@ -267,11 +308,11 @@ export function resolveLineFloatWindow(
       // §20.4.2.17 excludes text only where the square wrap rectangle overlaps
       // its line area. A page-scoped float in another newspaper column must not
       // turn this column's full width into a sub-inch "side gap" and push the
-      // line below an unrelated vertical band.
-      if (
-        f.xRight <= paraXLeft + FLOAT_OVERLAP_EPS ||
-        f.xLeft >= paraXRight - FLOAT_OVERLAP_EPS
-      ) continue;
+      // line below an unrelated vertical band. Unlike step 1 (which gates by the
+      // raw COLUMN band for a full-column block), the square side-gap math is
+      // relative to the actual text band, so it gates by the INDENTED band
+      // [paraXLeft, paraXRight].
+      if (!floatOverlapsColumnX(f, paraXLeft, paraXRight)) continue;
       intersecting.push(f);
       switch (f.side) {
         // Text may sit only on the LEFT of the float ⇒ everything from the
@@ -409,12 +450,25 @@ export function resolveFloatOverlap(
   return { x, y };
 }
 
-/** If y is inside a topAndBottom float, return the float bottom; otherwise return y. */
-export function skipPastTopAndBottom(y: number, floats: FloatRect[]): number {
+/**
+ * If y is inside a topAndBottom float that horizontally overlaps the paragraph's
+ * column band [paraXLeft, paraXRight], return that float's bottom; otherwise
+ * return y. Mirrors `resolveLineFloatWindow` step 1: §20.4.2.20 excludes text
+ * only where THIS OBJECT is placed, so a float anchored in another newspaper
+ * column (§17.6.4) — the page float set is shared across columns — is filtered
+ * out via the shared `floatOverlapsColumnX` predicate.
+ */
+export function skipPastTopAndBottom(
+  y: number,
+  floats: FloatRect[],
+  paraXLeft: number,
+  paraXRight: number,
+): number {
   for (let guard = 0; guard < 16; guard++) {
     let next = y;
     for (const f of floats) {
       if (f.mode !== 'topAndBottom') continue;
+      if (!floatOverlapsColumnX(f, paraXLeft, paraXRight)) continue;
       if (y >= f.yTop && y < f.yBottom) next = Math.max(next, f.yBottom);
     }
     if (next === y) return y;
