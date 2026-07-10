@@ -158,6 +158,23 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
     expect(page.geometry.marginLeft).toBe(10);
     // SectionLayoutContext carries the resolved grid policy (docGrid absent => none).
     expect(page.section.grid.kind).toBe('none');
+    // M-2 — a single-column section exposes one column spanning the content band.
+    expect(page.section.columns.length).toBe(1);
+    expect(page.section.columns[0].wPt).toBeCloseTo(180, 6);
+  });
+
+  it('M-2: exposes the §17.6.4 per-page column geometry the paginator resolved', () => {
+    const model = doc([para('x') as unknown as BodyElement, para('y') as unknown as BodyElement]);
+    (model.section as SectionProps).columns = {
+      count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [],
+    } as SectionProps['columns'];
+    const page = layoutDocument(model).pages[0];
+    // Two newspaper columns: content band 180pt minus 20pt gutter → 80pt each.
+    expect(page.section.columns.length).toBe(2);
+    expect(page.section.columns[0].wPt).toBeCloseTo(80, 6);
+    expect(page.section.columns[1].wPt).toBeCloseTo(80, 6);
+    // A fragment records which column it is placed in.
+    for (const f of page.fragments) expect([0, 1]).toContain(f.columnIndex);
   });
 
   it('splits a long paragraph into continuation fragments over one source', () => {

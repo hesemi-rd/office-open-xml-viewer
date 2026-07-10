@@ -168,15 +168,20 @@ import {
 } from './paragraph-measure.js';
 import {
   paragraphFragmentAdvancePt,
+  tableFragmentHeightPt,
   type DocumentLayout,
   type LayoutPage,
   type ParagraphFragment,
   type PlacedFragment,
+  type FlowFragment,
+  type TableFragment,
+  type CellFragment,
 } from './layout-fragments.js';
+import { buildTableFragment } from './table-fragments.js';
 // PR 5 — body fragment paint. renderer <-> fragment-paint is a deliberate import
 // cycle: both sides use the other only inside function bodies (never at module
 // evaluation), so ESM live bindings resolve them at call time.
-import { paintParagraphFragment } from './fragment-paint.js';
+import { paintParagraphFragment, paintTableFragment } from './fragment-paint.js';
 import {
   drawVerticalRun,
   drawTateChuYokoRun,
@@ -3307,7 +3312,8 @@ export function computePages(
       );
       const pageTable = splitRows?.table ?? tbl;
       const rowHs = splitRows?.rowHs ?? measuredRowHs;
-      const tableEl = (splitRows ? { ...pageTable, type: 'table' } : el) as PaginatedBodyElement;
+      const sourceRowIndexByRow = splitRows?.sourceRowIndexByRow;
+      const tableEl = { ...pageTable, type: 'table' } as PaginatedBodyElement;
       const h = rowHs.reduce((s, x) => s + x, 0);
       const commitTableReserve = () => {
         if (!haveFootnotes || tblNewRefIds.length === 0) return;
@@ -3345,6 +3351,28 @@ export function computePages(
           // widths + contentWPt are constant across the split.
           { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
           { colWidthsPt: tblColWidthsPt, state: measureState },
+          sourceRowIndexByRow,
+          // PR 6 — attach each slice's table fragment (byte-identical additive step:
+          // paint is unmigrated in Task 15). The slice IS the table (its rows are the
+          // slice's rows); column widths are constant across the split.
+          (sliceEl, meta) =>
+            attachTableFragment(
+              sliceEl,
+              sliceEl as unknown as DocTable,
+              tblColWidthsPt,
+              meta.heightsPt,
+              tblContentWPt,
+              measureState,
+              {
+                columnIndex: sliceEl.colIndex ?? 0,
+                xPt: columns[sliceEl.colIndex ?? 0]?.xPt ?? colX(),
+                yPt: sliceEl.colTopPt ?? measureState.y,
+                continuesFromPreviousPage: meta.continuesFromPreviousPage,
+                continuesOnNextPage: meta.continuesOnNextPage,
+                repeatedHeaderRowCount: meta.repeatedHeaderRowCount,
+                sourceRowIndexOf: meta.sourceRowIndexOf,
+              },
+            ),
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -3353,8 +3381,30 @@ export function computePages(
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
         if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
-        // B2 table stage 1b — stamp the whole-table scale-1 layout for paint reuse.
-        stampTableLayout(tableEl, tblColWidthsPt, rowHs, tblContentWPt);
+        // PR 6 — a whole block table paints from its fragment and is always emitted as
+        // a shallow clone. This gives each pagination run a unique side-table key and
+        // lets pushTagged add placement fields without mutating the parsed DocTable.
+        // A gate-rejected table (e.g. negative `tblInd`) recomputes through the legacy
+        // `computeTableLayout`, byte-identical to the removed reuse.
+        attachTableFragment(
+          tableEl,
+          tableEl as unknown as DocTable,
+          tblColWidthsPt,
+          rowHs,
+          tblContentWPt,
+          measureState,
+          {
+            columnIndex: colIndex,
+            xPt: colX(),
+            yPt: measureState.y,
+            continuesFromPreviousPage: false,
+            continuesOnNextPage: false,
+            repeatedHeaderRowCount: 0,
+            sourceRowIndexOf: sourceRowIndexByRow
+              ? (fragmentRowIndex) => sourceRowIndexByRow[fragmentRowIndex]
+              : undefined,
+          },
+        );
         pushTagged(tableEl);
         y += h;
         measureState.y += h;
@@ -3631,15 +3681,23 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
 }
 
 /**
- * PR 5 — produce the immutable body {@link DocumentLayout}: pages of
- * {@link PlacedFragment}s over body paragraphs. Pagination is the SAME engine
+ * Produce the immutable body {@link DocumentLayout}: pages of {@link PlacedFragment}s
+ * over body paragraphs (PR 5) and block tables (PR 6). Pagination is the SAME engine
  * `paginateDocument` runs (so page assignment, splitting, sections and columns are
- * identical); this projects the fragments the paginator attached to each body
- * paragraph element into a frozen result. Tables, headers/footers and floating
- * content stay on the `PaginatedBodyElement[][]` path until PR 6, so a page's
- * `fragments` cover its body PARAGRAPHS only (`FlowFragment` is paragraph-only in
- * PR 5). The section context and page geometry come from each page's stamped section
- * (a mid-document section break changes them), falling back to the body section.
+ * identical); this projects the fragments the paginator attached to each emitted body
+ * element into a frozen result. Headers/footers and floating content (floating tables,
+ * anchored drawings) stay on the `PaginatedBodyElement[][]` path, so a page's
+ * `fragments` cover its in-flow body paragraphs and block tables.
+ *
+ * Per page (M-2 — complete the DocumentLayout contract): the page geometry and section
+ * context come from the section the paginator stamped on the page's FIRST element
+ * (`sectionGeom` for page size + margins, `colGeom` for the §17.6.4 column geometry),
+ * falling back to the body section for an empty page. The DOCX model carries one
+ * body-level section geometry (#513), so only the per-region column set actually varies;
+ * a continuous section break that changes the column count MID-page is bounded by the
+ * one-section-per-`LayoutPage` contract — `LayoutPage.section` reflects the region at
+ * the page top, and each `PlacedFragment.columnIndex` locates its fragment within those
+ * columns.
  */
 export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
@@ -3654,11 +3712,19 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     layoutDoc.footnotes ?? [],
   );
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
-    const geomOverride = (elements[0] as PaginatedBodyElement | undefined)?.sectionGeom;
+    const firstEl = elements[0] as PaginatedBodyElement | undefined;
+    const geomOverride = firstEl?.sectionGeom;
     const sectionProps: SectionProps = geomOverride
       ? { ...layoutDoc.section, ...geomOverride }
       : layoutDoc.section;
-    const section = resolveSectionLayoutContext(layoutSettings, sectionProps);
+    const resolvedSection = resolveSectionLayoutContext(layoutSettings, sectionProps);
+    // M-2 — the paginator stamped the resolved §17.6.4 column geometry active at this
+    // page's top on `colGeom`; prefer it over the body section's columns so a page in a
+    // continuous multi-column region exposes its real column set (the body section
+    // resolves the body-level columns only).
+    const section: SectionLayoutContext = firstEl?.colGeom
+      ? { ...resolvedSection, columns: firstEl.colGeom }
+      : resolvedSection;
     const geometry: SectionGeom = {
       pageWidth: sectionProps.pageWidth,
       pageHeight: sectionProps.pageHeight,
@@ -3671,7 +3737,7 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     };
     const fragments: PlacedFragment[] = [];
     for (const el of elements) {
-      const placed = bodyParagraphFragments.get(el as object);
+      const placed = bodyFlowFragments.get(el as object);
       if (placed) fragments.push(placed);
     }
     return Object.freeze({
@@ -3781,15 +3847,16 @@ function paragraphMeasurementEnvironment(
 // unmigrated caller (tables, headers/footers, the vertical-text prebuilt-pages swap)
 // is unaffected.
 
-/** Side table: emitted body element -> its placed paragraph fragment. WeakMap so an
- *  element that is garbage collected drops its entry, and so the parsed `DocParagraph`
- *  is never mutated (a non-split paragraph element is the source object itself). */
-const bodyParagraphFragments = new WeakMap<object, PlacedFragment>();
+/** Side table: emitted body element -> its placed flow fragment (a paragraph fragment
+ *  in PR 5, or a table fragment in PR 6). WeakMap so an element that is garbage
+ *  collected drops its entry, and so the parsed `DocParagraph` / `DocTable` is never
+ *  mutated (a non-split paragraph element is the source object itself). */
+const bodyFlowFragments = new WeakMap<object, PlacedFragment>();
 
 /** Read the placed fragment the paginator associated with an emitted body element,
- *  if any (paragraph elements the fragment migration covers). */
+ *  if any (paragraph or table elements the fragment migration covers). */
 export function bodyFragmentFor(el: PaginatedBodyElement): PlacedFragment | undefined {
-  return bodyParagraphFragments.get(el as object);
+  return bodyFlowFragments.get(el as object);
 }
 
 /** TEST ONLY — inject a placed fragment into the body-fragment side table for an
@@ -3801,7 +3868,7 @@ export const __test_setBodyFragment = (
   el: PaginatedBodyElement,
   placed: PlacedFragment,
 ): void => {
-  bodyParagraphFragments.set(el as object, placed);
+  bodyFlowFragments.set(el as object, placed);
 };
 
 /** Build an immutable body paragraph fragment. `source` is the PARSED paragraph
@@ -3850,6 +3917,240 @@ function placeParagraphFragment(
     widthPt,
     heightPt: paragraphFragmentAdvancePt(fragment),
   });
+}
+
+// ===== Table layout fragments (PR 6) =====
+//
+// A body table emits a {@link TableFragment} at each of its placement points (the
+// whole-table push, or one slice per page from {@link splitTableAcrossPages}), attached
+// to the emitted table element in the SAME `bodyFlowFragments` side table body
+// paragraphs use — so {@link layoutDocument} collects paragraph AND table fragments from
+// one map, and the parsed `DocTable` is never mutated. Production paint is unchanged in
+// PR 6 Task 15 (fragments are produced, not yet consumed); Task 16 routes table paint
+// through them.
+
+/** Measure a table-cell paragraph at scale 1 in the cell story context, no page wrap
+ *  oracle (a cell is isolated from page floats, §17.4.57). Mirrors the scale-1
+ *  measurement {@link measureCellParagraphHeight} performs, but returns the
+ *  {@link MeasuredParagraph} so a {@link ParagraphFragment} can own the line partition
+ *  instead of stamping it onto the parsed paragraph. `contentWPt` is the cell's content
+ *  width (spanned columns minus the cell margins). */
+function measureCellParagraphScale1(
+  cellState: RenderState,
+  para: DocParagraph,
+  contentWPt: number,
+): MeasuredParagraph {
+  const paragraphContext = resolveStateParagraphLayoutContext(cellState, para);
+  return measureParagraph(
+    para,
+    paragraphContext,
+    {
+      startYPt: 0,
+      paragraphXPt: 0,
+      availableWidthPt: contentWPt,
+      maximumYPt: cellState.pageH,
+      suppressSpaceBefore: true,
+    },
+    {
+      context: cellState.ctx,
+      fontFamilyClasses: cellState.fontFamilyClasses,
+    },
+    paragraphMeasurementEnvironment(cellState),
+  );
+}
+
+/** Build the recursive content fragments of one table cell (the {@link buildTableFragment}
+ *  {@link BuildCellBlocks} callback): a paragraph fragment per `<w:p>` and a nested-table
+ *  fragment per `<w:tbl>`, in document order, measured at scale 1 in the cell story.
+ *  `outerState` is the enclosing scale-1 measure state (body, or the parent cell for a
+ *  nested table); this enters THIS cell's story once. `cellTotalWidthPt` is the sum of
+ *  the grid columns the cell spans (before its own margins).
+ *
+ *  KNOWN COST (PR 6, review-acknowledged): this measures cell content a SECOND time —
+ *  the paginator already measured every cell through `computeTablePtLayout` /
+ *  `resolveTableRowHeights` for the row heights, and repeated header rows are re-built
+ *  per continuation slice. The duplication exists because the row-height path measures
+ *  HEIGHTS through `measureCellContentHeightPx` (which does not retain the line
+ *  partitions) while fragments need the full {@link MeasuredParagraph}. It is resolved
+ *  when the legacy measure path is retired and row heights are derived FROM the
+ *  fragments (tracked with the stamp-field removal follow-up); pagination-time only,
+ *  paint is unaffected. */
+function buildTableCellBlocks(
+  cell: DocTableCell,
+  table: DocTable,
+  cellTotalWidthPt: number,
+  outerState: RenderState,
+): FlowFragment[] {
+  const cellState = withTableCellStory(outerState);
+  const cm = effCellMargins(cell, table);
+  const contentWPt = Math.max(0, cellTotalWidthPt - (cm.left + cm.right));
+  const blocks: FlowFragment[] = [];
+  for (const ce of cell.content) {
+    if (ce.type === 'paragraph') {
+      const para = ce as unknown as DocParagraph;
+      const measured = measureCellParagraphScale1(cellState, para, contentWPt);
+      const trailingExtentPt = Math.max(
+        measured.requestedSpaceAfterPt,
+        bottomBorderExtentPt(para.borders),
+      );
+      const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
+      // A row-split-by-lines slice element carries a `lineSlice`; the fragment paints
+      // that sub-range of the one measurement (the whole paragraph is measured at the
+      // cell width, so the slice indexes it directly). Absent ⇒ the whole paragraph.
+      const lineSlice = (ce as unknown as { lineSlice?: { start: number; end: number } }).lineSlice;
+      const lineStart = lineSlice ? lineSlice.start : 0;
+      const lineEnd = lineSlice ? Math.min(lineSlice.end, fullLineEnd) : fullLineEnd;
+      blocks.push(
+        buildParagraphFragment(
+          para,
+          measured,
+          lineStart,
+          lineEnd,
+          lineStart === 0,
+          lineEnd >= fullLineEnd,
+          trailingExtentPt,
+        ),
+      );
+    } else if (ce.type === 'table') {
+      const inner = ce as unknown as DocTable;
+      const nestedSlice = ce as CellElement & {
+        nestedSliceContinuesFromPrevious?: boolean;
+        nestedSliceContinuesOnNext?: boolean;
+      };
+      const innerCols = resolveColumnWidths(inner, contentWPt, cellState);
+      const innerRowHs = resolveTableRowHeights(inner, innerCols, 1, (c, w) =>
+        measureCellContentHeightPx(c, inner, w, 1, cellState),
+      );
+      blocks.push(
+        buildTableFragment({
+          table: inner,
+          columnWidthsPt: innerCols,
+          rowHeightsPt: innerRowHs,
+          continuesFromPreviousPage: nestedSlice.nestedSliceContinuesFromPrevious ?? false,
+          continuesOnNextPage: nestedSlice.nestedSliceContinuesOnNext ?? false,
+          repeatedHeaderRowCount: 0,
+          buildCellBlocks: (c, w) => buildTableCellBlocks(c, inner, w, cellState),
+        }),
+      );
+    }
+  }
+  return blocks;
+}
+
+/** Side table: emitted table element -> the scale-1 content-band width its fragment
+ *  was resolved at. The fragment-paint gate reuses the fragment only when this paint's
+ *  band matches (mirroring the removed `tableLayoutInputs.contentWPt` stamp gate — a
+ *  negative-`tblInd` table paints at the page-width budget, not the column band, so it
+ *  must recompute on the legacy path). Renderer-internal; not part of the public
+ *  {@link TableFragment}. */
+const tableFragmentBandPt = new WeakMap<object, number>();
+
+/** Build and attach the {@link TableFragment} for one placed table (whole table or one
+ *  page slice) to the emitted element's side-table entry. `table` is the emitted clone
+ *  whose rows should be fragmented; its rows retain parsed identity unless pagination
+ *  sliced their content. Never mutates the parsed model. */
+function attachTableFragment(
+  el: PaginatedBodyElement,
+  table: DocTable,
+  colWidthsPt: number[],
+  rowHeightsPt: number[],
+  contentWPt: number,
+  measureState: RenderState,
+  placement: {
+    columnIndex: number;
+    xPt: number;
+    yPt: number;
+    continuesFromPreviousPage: boolean;
+    continuesOnNextPage: boolean;
+    repeatedHeaderRowCount: number;
+    sourceRowIndexOf?: (fragmentRowIndex: number) => number;
+  },
+): void {
+  const fragment = buildTableFragment({
+    table,
+    columnWidthsPt: colWidthsPt,
+    rowHeightsPt,
+    continuesFromPreviousPage: placement.continuesFromPreviousPage,
+    continuesOnNextPage: placement.continuesOnNextPage,
+    repeatedHeaderRowCount: placement.repeatedHeaderRowCount,
+    sourceRowIndexOf: placement.sourceRowIndexOf,
+    buildCellBlocks: (cell, w) => buildTableCellBlocks(cell, table, w, measureState),
+  });
+  const widthPt = colWidthsPt.reduce((s, w) => s + w, 0);
+  bodyFlowFragments.set(
+    el,
+    Object.freeze({
+      fragment,
+      columnIndex: placement.columnIndex,
+      xPt: placement.xPt,
+      yPt: placement.yPt,
+      widthPt,
+      heightPt: tableFragmentHeightPt(fragment),
+    }),
+  );
+  tableFragmentBandPt.set(el as object, contentWPt);
+}
+
+/** A table (or any table nested in its cells) stays on the LEGACY paint path when it
+ *  needs re-measurement or an out-of-flow path the fragment paint does not yet cover:
+ *   - a negative leading `tblInd` (§17.4.50) on a left-justified table widens the
+ *     legacy layout budget from the column band to the page width;
+ *   - a `vAlign` of center/bottom re-measures cell content to centre the inked block
+ *     (ECMA-376 §17.4.84);
+ *   - a nested floating table (§17.4.57 `<w:tblpPr>`) is drawn out of flow;
+ *   - a sliced cell paragraph records `[lineStart, lineEnd)` in the fragment contract,
+ *     but current cell paint draws the full partition (as legacy does). Until range
+ *     painting lands, sliced tables stay on the byte-identical legacy path.
+ *  Eligible top-aligned, in-flow, unsliced tables carry no re-measurement and paint
+ *  measure-free from their fragment. Recursion covers nested tables (painted from their
+ *  own fragment). Tracked: migrate negative-indent layout, vAlign, nested-floating
+ *  tables, and sliced-range cell paint in follow-ups. */
+function tableRequiresLegacyPaint(table: DocTable): boolean {
+  if (table.tblInd != null && table.tblInd < 0 && table.jc === 'left') return true;
+  for (const row of table.rows) {
+    for (const cell of row.cells) {
+      if (cell.vAlign === 'center' || cell.vAlign === 'bottom') return true;
+      for (const ce of cell.content) {
+        if (
+          ce.type === 'paragraph' &&
+          (ce as { lineSlice?: unknown }).lineSlice !== undefined
+        ) {
+          return true;
+        } else if (ce.type === 'table') {
+          const nested = ce as unknown as DocTable;
+          if (nested.tblpPr != null || tableRequiresLegacyPaint(nested)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** PR 6 — a block table paints from its {@link TableFragment} when the migration gate
+ *  holds: the fragment is present, the table is in flow (not a §17.4.57 floating
+ *  table), it has no negative leading indent, vAlign-center/bottom re-measurement, or
+ *  sliced cell paragraph, the story is horizontal, and this paint's content band
+ *  matches the band the fragment was resolved at. Otherwise the legacy `renderTable`
+ *  recompute path runs (byte-identical). */
+function isFragmentPaintableTable(
+  table: DocTable,
+  placed: PlacedFragment | undefined,
+  state: RenderState,
+): placed is PlacedFragment {
+  if (
+    !fragmentPaintEnabled ||
+    placed === undefined ||
+    placed.fragment.kind !== 'table' ||
+    table.tblpPr != null ||
+    state.verticalCJK ||
+    tableRequiresLegacyPaint(table)
+  ) {
+    return false;
+  }
+  const bandPt = tableFragmentBandPt.get(table as object);
+  if (bandPt === undefined) return false;
+  const paintBandPt = state.contentW / state.scale;
+  return Math.abs(bandPt - paintBandPt) <= 1e-6 * Math.max(1, Math.abs(paintBandPt));
 }
 
 /** Master switch for the M-1 fit-check measurement reuse. Always ON in production; the
@@ -3927,7 +4228,7 @@ function attachBodyParagraphFragment(
     true,
     trailingExtentPt,
   );
-  bodyParagraphFragments.set(el, placeParagraphFragment(
+  bodyFlowFragments.set(el, placeParagraphFragment(
     fragment,
     placement.columnIndex,
     placement.paragraphXPt,
@@ -4268,7 +4569,7 @@ function splitParagraphAcrossPages(
           isFinalSlice,
           trailingExtent,
         );
-        bodyParagraphFragments.set(sliceEl, placeParagraphFragment(
+        bodyFlowFragments.set(sliceEl, placeParagraphFragment(
           fragment,
           tagColIndex ? tagColIndex() : 0,
           paragraphXPt(),
@@ -4802,6 +5103,10 @@ function tableCellElementSliceByRows(table: DocTable, start: number, end: number
     ...(table as object),
     type: 'table',
     rows: table.rows.slice(start, end),
+    // Renderer-runtime provenance for nested-table cell slices. These flags live
+    // only on emitted clones; they are not fields of the parsed DocTable model.
+    nestedSliceContinuesFromPrevious: start > 0,
+    nestedSliceContinuesOnNext: end < table.rows.length,
   } as unknown as CellElement;
 }
 
@@ -5081,10 +5386,11 @@ function splitRowsTallerThanPage(
   colWidthsPt: number[],
   pageContentHeightPt: number,
   state: RenderState,
-): { table: DocTable; rowHs: number[] } | null {
+): { table: DocTable; rowHs: number[]; sourceRowIndexByRow: number[] } | null {
   let changed = false;
   const rows: DocTableRow[] = [];
   const heights: number[] = [];
+  const sourceRowIndexByRow: number[] = [];
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     const rowH = rowHeightsPt[ri];
@@ -5093,14 +5399,18 @@ function splitRowsTallerThanPage(
       if (split) {
         rows.push(...split.rows);
         heights.push(...split.heights);
+        sourceRowIndexByRow.push(...split.rows.map(() => ri));
         changed = true;
         continue;
       }
     }
     rows.push(row);
     heights.push(rowH);
+    sourceRowIndexByRow.push(ri);
   }
-  return changed ? { table: { ...table, rows }, rowHs: heights } : null;
+  return changed
+    ? { table: { ...table, rows }, rowHs: heights, sourceRowIndexByRow }
+    : null;
 }
 
 /**
@@ -5159,16 +5469,37 @@ export function splitTableAcrossPages(
   /** Optional row-block splitter used by computePages. Direct unit tests can omit
    *  this and exercise only row-boundary splitting. */
   rowSplit?: { colWidthsPt: number[]; state: RenderState },
+  /** Original parsed-table row index for each incoming `table.rows` entry. Row
+   *  pieces created before this call share an index. Omitted ⇒ identity. */
+  sourceRowIndexByRow?: number[],
+  /** PR 6 — invoked once per emitted slice to attach its {@link TableFragment}. The
+   *  caller closes over the column widths / measure state and builds the fragment
+   *  (the slice element carries the rows + `colIndex`); `meta` supplies the slice's
+   *  per-row heights, page-continuation flags, repeated-header count, and the
+   *  fragment→source row-index map. Omitted (direct unit tests) ⇒ no fragment. */
+  emitTableFragment?: (
+    sliceEl: PaginatedBodyElement,
+    meta: {
+      heightsPt: number[];
+      continuesFromPreviousPage: boolean;
+      continuesOnNextPage: boolean;
+      repeatedHeaderRowCount: number;
+      sourceRowIndexOf: (fragmentRowIndex: number) => number;
+    },
+  ) => void,
 ): number {
   const colTop = columnTop ?? (() => 0);
   let workTable = table;
   let workRows = table.rows;
   let workRowHs = rowHs;
+  let workSourceRowIndices = sourceRowIndexByRow?.slice()
+    ?? workRows.map((_row, index) => index);
   let n = workRows.length;
   // Leading tblHeader rows repeat on each continuation page.
   let headerCount = 0;
   while (headerCount < n && workRows[headerCount].isHeader) headerCount++;
   const headerRows = workRows.slice(0, headerCount);
+  const headerSourceRowIndices = workSourceRowIndices.slice(0, headerCount);
   const headerH = workRowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
   const headerHeightsPt = workRowHs.slice(0, headerCount);
 
@@ -5185,6 +5516,7 @@ export function splitTableAcrossPages(
     if (rowSplit && firstRowH > avail && rowAvail > 0 && start >= headerCount) {
       const split = splitRowForHeight(workTable, workRows[start], rowSplit.colWidthsPt, rowAvail, rowSplit.state);
       if (split && split.heights[0] <= rowAvail) {
+        const sourceRowIndex = workSourceRowIndices[start];
         workRows = [
           ...workRows.slice(0, start),
           ...split.rows,
@@ -5194,6 +5526,11 @@ export function splitTableAcrossPages(
           ...workRowHs.slice(0, start),
           ...split.heights,
           ...workRowHs.slice(start + 1),
+        ];
+        workSourceRowIndices = [
+          ...workSourceRowIndices.slice(0, start),
+          ...split.rows.map(() => sourceRowIndex),
+          ...workSourceRowIndices.slice(start + 1),
         ];
         workTable = { ...workTable, rows: workRows };
         n = workRows.length;
@@ -5225,6 +5562,7 @@ export function splitTableAcrossPages(
               rowSplit.state,
             );
             if (split && split.heights[0] <= remainingForNextRow) {
+              const sourceRowIndex = workSourceRowIndices[end];
               workRows = [
                 ...workRows.slice(0, end),
                 ...split.rows,
@@ -5234,6 +5572,11 @@ export function splitTableAcrossPages(
                 ...workRowHs.slice(0, end),
                 ...split.heights,
                 ...workRowHs.slice(end + 1),
+              ];
+              workSourceRowIndices = [
+                ...workSourceRowIndices.slice(0, end),
+                ...split.rows.map(() => sourceRowIndex),
+                ...workSourceRowIndices.slice(end + 1),
               ];
               workTable = { ...workTable, rows: workRows };
               n = workRows.length;
@@ -5270,11 +5613,31 @@ export function splitTableAcrossPages(
     // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
     // prepended on continuations, matching `sliceRows`) so the paint pass reuses
     // them 1:1 instead of re-measuring the slice.
+    const sliceHeightsPt = isContinuation
+      ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
+      : workRowHs.slice(start, end);
     if (tableStamp) {
-      const sliceHeightsPt = isContinuation
-        ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
-        : workRowHs.slice(start, end);
       stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
+    }
+    if (emitTableFragment) {
+      // §17.4.78 — a continuation slice prepends the repeated header rows; the body
+      // rows begin at `start` in workRows. Map each fragment row back to its source
+      // index: repeated headers read their saved original indices; body rows read the
+      // parallel workRows provenance map, whose entries are duplicated whenever a row
+      // is split. Page continuation is derived from the slice window: it continues
+      // from a previous page whenever it does not start the table, and onto the next
+      // whenever rows remain.
+      const headerPrepend = isContinuation ? headerCount : 0;
+      emitTableFragment(sliceEl, {
+        heightsPt: sliceHeightsPt,
+        continuesFromPreviousPage: start > 0,
+        continuesOnNextPage: end < n,
+        repeatedHeaderRowCount: headerPrepend,
+        sourceRowIndexOf: (i) =>
+          i < headerPrepend
+            ? headerSourceRowIndices[i]
+            : workSourceRowIndices[start + (i - headerPrepend)],
+      });
     }
     pages[pages.length - 1].push(sliceEl);
 
@@ -5871,7 +6234,15 @@ function renderBodyElements(
       // prevPara/spaceAfter untouched (the following content spaces against the
       // paragraph BEFORE the table, exactly like a frame paragraph). A block
       // table resets them (it ends the previous spacing context).
-      renderTable(tbl, state);
+      // PR 6 — a migrated block table paints from its stored fragment (geometry +
+      // cell content, no re-layout). Floating / vAlign / band-mismatch tables fall
+      // through to the legacy `renderTable` recompute path.
+      const placedTable = bodyFragmentFor(el);
+      if (isFragmentPaintableTable(tbl, placedTable, state)) {
+        paintTableFragment(placedTable, state);
+      } else {
+        renderTable(tbl, state);
+      }
       if (!tbl.tblpPr) {
         prevPara = null;
         prevSpaceAfter = 0;
@@ -6755,6 +7126,7 @@ function isFragmentPaintableParagraph(
   if (
     !fragmentPaintEnabled ||
     placed === undefined ||
+    placed.fragment.kind !== 'paragraph' ||
     para.numbering != null ||
     state.floats.length !== 0 ||
     state.verticalCJK ||
@@ -9312,6 +9684,10 @@ export const __test_setFragmentPaintEnabled = (v: boolean): boolean => {
   return prev;
 };
 
+/** Exported for focused fragment-paint migration-gate tests. */
+export const __test_tableRequiresLegacyPaint = (table: DocTable): boolean =>
+  tableRequiresLegacyPaint(table);
+
 /** Exported for the M-1 double-measurement non-vacuity test. Toggles whether a
  *  non-relocated body paragraph's fragment reuses the fit-decision measurement or
  *  measures again, so the test can paginate the SAME document both ways and assert the
@@ -9730,6 +10106,28 @@ function computeTableLayout(
   // both passes resolve kinsoku from the same immutable doc.settings.
   const stamped = table as PaginatedBodyElement;
   const contentWPt1 = contentWPx / scale;
+  // PR 6 — fragment-geometry reuse. A non-split block table is no longer stamped (the
+  // stamp mutated the PARSED DocTable); its paginator-resolved geometry lives on the
+  // attached TableFragment (side-table keyed, model untouched). When THIS paint is the
+  // legacy path for such a table (fragment-paint gate exclusions: vAlign centring,
+  // nested floating tables, band mismatch never reaches here since the band gate below
+  // re-verifies), reuse the fragment's scale-1 column widths / row heights exactly as
+  // the removed stamp reuse did — same source values, same `× scale`, byte-identical.
+  const placedFragment = bodyFlowFragments.get(table as object);
+  const fragmentBandPt = tableFragmentBandPt.get(table as object);
+  if (
+    tableReuseEnabled &&
+    placedFragment !== undefined &&
+    placedFragment.fragment.kind === 'table' &&
+    fragmentBandPt !== undefined &&
+    placedFragment.fragment.rows.length === table.rows.length &&
+    Math.abs(fragmentBandPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1))
+  ) {
+    const fragment = placedFragment.fragment;
+    const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
+    const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+  }
   const reuseInputs = stamped.tableLayoutInputs;
   const reuse =
     tableReuseEnabled &&
@@ -9829,6 +10227,10 @@ interface TableCellPaintJob {
   ri: number;
   span: number;
   lastRi: number;
+  /** PR 6 — the measured cell fragment for this cell (when the table is painted from
+   *  its {@link TableFragment}); its content is drawn from stored fragments instead of
+   *  being re-laid-out. Absent on the legacy recompute path. */
+  cellFragment?: CellFragment;
 }
 
 function drawTableRows(
@@ -9839,6 +10241,10 @@ function drawTableRows(
   tableX: number,
   startY: number,
   state: RenderState,
+  /** PR 6 — when present, cell content is painted from the matching
+   *  {@link CellFragment}s (measure-free) instead of re-laid-out by {@link renderCell}.
+   *  Aligned 1:1 with `table.rows` / `row.cells`. */
+  fragment?: TableFragment,
 ): number {
   const { scale, dryRun } = state;
   // ECMA-376 §17.4.1 `<w:bidiVisual>`: lay the grid columns right-to-left, so
@@ -9868,11 +10274,15 @@ function drawTableRows(
   let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
+    const rowFragment = fragment?.rows[ri];
     const rowH = rowHeights[ri];
     let x = tableX;
     let ci = 0;
+    let cellIdx = 0;
 
     for (const cell of row.cells) {
+      const cellFragment = rowFragment?.cells[cellIdx];
+      cellIdx++;
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
       // Physical left edge of this cell. LTR: cumulative from the left (`x`).
@@ -9914,7 +10324,7 @@ function drawTableRows(
         if (dryRun) measureCellContent(cell, table, cellW, scale, state);
         else {
           const jobIndex = jobs.length;
-          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell });
+          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell, cellFragment });
           // ECMA-376 §17.4.66 — record this cell's grid footprint so interior-edge
           // neighbour lookups resolve to it. A vMerge=restart cell owns every row it
           // spans; a colSpan cell owns every column in its span.
@@ -9938,7 +10348,7 @@ function drawTableRows(
   // physical side a logical border maps to, so it is consulted in the border
   // pass alone.
   for (const j of jobs) {
-    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact);
+    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact, j.cellFragment);
   }
 
   // ECMA-376 §17.4.66 — adjacent-cell border conflict resolution. Each SHARED
@@ -10379,6 +10789,11 @@ function renderCell(
   h: number,
   state: RenderState,
   clipExact = false,
+  /** PR 6 — when present, this cell's content is painted from its stored
+   *  {@link CellFragment} blocks (measure-free) rather than re-laid-out. Only supplied
+   *  by the fragment paint path, which the migration gate limits to top-aligned tables,
+   *  so the vAlign centring branch below is not reached for a fragment cell. */
+  cellFragment?: CellFragment,
 ): void {
   const { ctx, scale } = state;
 
@@ -10511,10 +10926,12 @@ function renderCell(
     // fixture; when they are, tighten this to the logical content width.
     ctx.rect(0, y, ctx.canvas.width, h);
     ctx.clip();
-    renderCellContent(cell.content, cellState);
+    if (cellFragment) renderCellContentFragment(cellFragment, cellState);
+    else renderCellContent(cell.content, cellState);
     ctx.restore();
   } else {
-    renderCellContent(cell.content, cellState);
+    if (cellFragment) renderCellContentFragment(cellFragment, cellState);
+    else renderCellContent(cell.content, cellState);
   }
 }
 
@@ -10558,6 +10975,122 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
       prevSpaceAfter = 0;
     }
   }
+}
+
+/**
+ * PR 6 — the per-block twin of {@link isFragmentPaintableParagraph} for a table-cell
+ * paragraph block: a cell paragraph paints from its stored fragment lines only when the
+ * SAME divergence classes the PR 5 body gate excludes are absent —
+ *   - a numbered paragraph paints its body at the §17.9.28 marker-aware numBodyOffset
+ *     first-line indent, which differs from the measured para.indentFirst partition;
+ *   - a state-sensitive paragraph (PAGE / NUMPAGES / date fields) must re-resolve its
+ *     segment text against the real paint-time page context;
+ *   - a non-empty cell float set (an anchor registered by a PRECEDING block in this
+ *     cell — the cell's floats start empty, §17.4.57 isolation) puts the legacy paint
+ *     in a wrap context the no-oracle cell measurement never saw;
+ *   - a placement-width mismatch means the fragment belongs to another layout of this
+ *     cell (defensive; mirrors the PR 5 placement sanity guard).
+ * Excluded blocks fall back to the legacy `renderParagraph`, which recomputes exactly
+ * as `renderCellContent` would — byte-identical (pinned by
+ * layout-lines-reuse-identity.test.ts "table-cell paint byte-identity").
+ */
+function isFragmentPaintableCellBlock(
+  block: ParagraphFragment,
+  state: RenderState,
+): boolean {
+  const para = block.source;
+  if (
+    para.numbering != null ||
+    state.floats.length !== 0 ||
+    paragraphSegsStateSensitive(para)
+  ) {
+    return false;
+  }
+  const paintAvailableWidthPt = state.contentW / state.scale;
+  const recordedWidthPt = block.measured.placement.availableWidthPt;
+  return (
+    Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
+    1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt))
+  );
+}
+
+/**
+ * PR 6 — paint a cell's content from its {@link CellFragment} blocks, WITHOUT
+ * re-laying-out. Mirrors {@link renderCellContent} exactly: paragraph blocks draw from
+ * their stored scale-1 line partition (rescaled through the same bridge body fragment
+ * paint uses; measure-free at scale 1), nested-table blocks from their own
+ * {@link TableFragment}, with the SAME §17.3.1.9 contextualSpacing / spaceBefore-after
+ * overlap collapse. Cell paragraphs are drawn whole (no line slice), identically to
+ * `renderCellContent`; sliced tables never reach this function because
+ * {@link tableRequiresLegacyPaint} excludes them. A block the per-block gate excludes
+ * ({@link isFragmentPaintableCellBlock}) is drawn by the legacy `renderParagraph` —
+ * the exact call `renderCellContent` makes — so marker / field / wrap divergences
+ * paint byte-identically to the unmigrated path.
+ */
+function renderCellContentFragment(cellFragment: CellFragment, state: RenderState): void {
+  let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
+  for (const block of cellFragment.blocks) {
+    if (block.kind === 'paragraph') {
+      const para = block.source;
+      const suppress = contextualSuppressed(prevPara, para);
+      const effBefore = suppress ? 0 : para.spaceBefore;
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      state.y -= overlap * state.scale;
+      if (isFragmentPaintableCellBlock(block, state)) {
+        renderBodyParagraphLines(
+          para,
+          state,
+          block.measured.lines.map((line) => line.layout),
+          suppress,
+          undefined,
+          undefined,
+        );
+      } else {
+        renderParagraph(para, state, suppress);
+      }
+      prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
+    } else {
+      renderTableFragment(block, state);
+      prevPara = null;
+      prevSpaceAfter = 0;
+    }
+  }
+}
+
+/**
+ * PR 6 — paint a block table from its {@link TableFragment}: geometry from the stored
+ * scale-1 column widths + per-row heights (× scale), cell content from the cell
+ * fragments (measure-free at scale 1). Mirrors {@link renderTable}'s in-flow block path
+ * (ECMA-376 §17.4.63/§17.4.50 jc + positive `tblInd`, §17.4.1 bidiVisual origin);
+ * negative `tblInd` and floating tables are gate-excluded ({@link isFragmentPaintableTable})
+ * and stay on the legacy recompute path, so this handles only the fragment-migrated
+ * class. Advances `state.y` past the table exactly as `renderTable` does.
+ */
+export function renderTableFragment(fragment: TableFragment, state: RenderState): void {
+  const table = fragment.source;
+  const { contentX, contentW, scale } = state;
+  const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
+  const tableW = colWidths.reduce((s, w) => s + w, 0);
+  const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+
+  const applyInd = table.tblInd != null && table.jc === 'left';
+  let tableX =
+    table.jc === 'center'
+      ? contentX + Math.max(0, (contentW - tableW) / 2)
+      : table.jc === 'right'
+        ? contentX + Math.max(0, contentW - tableW)
+        : contentX;
+  if (applyInd) {
+    const indPx = (table.tblInd as number) * scale;
+    tableX =
+      table.bidiVisual === true
+        ? contentX + contentW - indPx - tableW
+        : contentX + indPx;
+  }
+
+  state.y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state, fragment);
 }
 
 /** Which grid edges of the table this cell touches, so {@link resolveCellEdges}

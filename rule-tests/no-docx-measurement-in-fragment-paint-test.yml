@@ -6,6 +6,7 @@ valid:
   - "ctx.drawImage(bmp, x, y, w, h);"
   - "renderBodyParagraphLines(fragment.source, state, scale1Lines, suppress, slice, borderMerge);"
   - "const advances = fragment.measured.lines.map((line) => line.layout);"
+  - "for (const row of fragment.rows) ctx.strokeRect(tableX, row.yPt, tableW, row.heightPt);"
 invalid:
   # Re-running line layout / segment construction / paragraph measurement.
   - "const segs = buildSegments(para.runs, environment);"
@@ -14,9 +15,22 @@ invalid:
   # Measuring text at paint.
   - "const w = ctx.measureText(seg.text).width;"
   - "const w2 = measureText(seg.text).width;"
-  # Row measurement.
+  # Table layout / measurement.
+  - "const cols = resolveColumnWidths(table, contentWPt, state);"
   - "const rows = resolveTableRowHeights(table, cols, 1, measurer);"
+  - "const row = resolveSingleRowHeight(tableRow, cols, 1, measurer);"
+  - "const layout = computeTableLayout(table, contentW, state);"
+  - "const rowHeight = calculateRowHeight(tableRow, table, cols, scale, state);"
   - "const h = measureCellContentHeightPx(cell, table, cellW, scale, state);"
+  # Namespace-member form (`import * as ns` evasion of the named-import regex).
+  - "const cols = geometry.resolveColumnWidths(table, contentWPt, state);"
+  - "const m = renderer.measureParagraph(para, context, placement, measurer, environment);"
   # Importing a forbidden symbol.
   - "import { layoutLines } from './line-layout.js';"
   - "import { measureParagraph } from './paragraph-measure.js';"
+  - "import { resolveColumnWidths } from './renderer.js';"
+  - "import { resolveTableRowHeights } from './table-geometry.js';"
+  - "import { resolveSingleRowHeight } from './table-geometry.js';"
+  - "import { computeTableLayout } from './renderer.js';"
+  - "import { calculateRowHeight } from './renderer.js';"
+  - "import { measureCellContentHeightPx } from './renderer.js';"

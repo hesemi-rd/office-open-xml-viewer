@@ -6,8 +6,17 @@ import {
   __test_setBodyFragment,
   __test_setLineReuseEnabled,
   __test_setFragmentPaintEnabled,
+  __test_tableRequiresLegacyPaint,
 } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
+import type {
+  BodyElement,
+  CellElement,
+  DocParagraph,
+  DocTable,
+  DocxDocumentModel,
+  SectionProps,
+  PaginatedBodyElement,
+} from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Body paint byte-identity — the compute-once line reuse (Phase 4-1 B2 Stage 1)
@@ -430,6 +439,7 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     paginateDocument(narrowModel);
     const stale = bodyFragmentFor(paginateDocument(narrowModel)[0][0]);
     if (!stale) throw new Error('expected a narrow fragment to capture');
+    if (stale.fragment.kind !== 'paragraph') throw new Error('expected a paragraph fragment');
     expect(stale.fragment.measured.placement.availableWidthPt).toBeCloseTo(100, 6);
     expect(stale.fragment.source).toBe(p); // same source paragraph, different placement
     // Re-paginate wide LAST so p's element stamps + prebuiltPages are the width-180 layout.
@@ -449,5 +459,187 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     // Non-vacuity: the paragraph wrapped (multiple painted lines), so the stale
     // width-100 fragment would have been a visible divergence had the guard not fired.
     expect(production.perPage[0].filter((c) => c.op !== 'img').length).toBeGreaterThan(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR 6 Task 16 — TABLE-CELL paint byte-identity. A migrated block table paints its
+// cell paragraphs from CellFragment blocks; the per-block gate must exclude the SAME
+// divergence classes the PR 5 body gate excludes (marker firstLineIndent /
+// state-sensitive fields / in-cell float wrap), falling back to the legacy
+// renderParagraph — otherwise the fragment paints a partition the legacy paint would
+// never draw. Pinned against sample class: numbered paragraph inside a table cell
+// (the §17.9.28 marker's numBodyOffset ≠ para.indentFirst).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function cellOf(content: unknown[], widthPt: number): Record<string, unknown> {
+  return {
+    content, colSpan: 1, vMerge: null,
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    background: null, vAlign: 'top', widthPt,
+  };
+}
+
+function tableOf(
+  cellContent: unknown[],
+  overrides: {
+    colWidths?: number[];
+    widthPt?: number;
+    tblInd?: number;
+    jc?: string;
+    layout?: string;
+  } = {},
+): BodyElement {
+  const colWidths = overrides.colWidths ?? [180];
+  const widthPt = overrides.widthPt ?? colWidths[0] ?? 180;
+  return {
+    type: 'table',
+    colWidths,
+    rows: [{ cells: [cellOf(cellContent, widthPt)], rowHeight: null, rowHeightRule: 'auto', isHeader: false }],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: overrides.jc ?? 'left', layout: overrides.layout ?? 'fixed',
+    ...(overrides.tblInd == null ? {} : { tblInd: overrides.tblInd }),
+  } as unknown as BodyElement;
+}
+
+describe('table fragment-paint legacy gate', () => {
+  it('excludes only negative leading tblInd tables, including nested tables', () => {
+    const negative = tableOf([para('negative')], { tblInd: -30 }) as unknown as DocTable;
+    const nestedNegative = tableOf([para('nested')], { tblInd: -12 }) as unknown as DocTable;
+    const outer = tableOf([nestedNegative]) as unknown as DocTable;
+    const positive = tableOf([para('positive')], { tblInd: 12 }) as unknown as DocTable;
+    const centeredNegative = tableOf([para('centered')], {
+      tblInd: -30,
+      jc: 'center',
+    }) as unknown as DocTable;
+
+    expect(__test_tableRequiresLegacyPaint(negative)).toBe(true);
+    expect(__test_tableRequiresLegacyPaint(outer)).toBe(true);
+    expect(__test_tableRequiresLegacyPaint(positive)).toBe(false);
+    expect(__test_tableRequiresLegacyPaint(centeredNegative)).toBe(false);
+  });
+
+  it('excludes a table containing a sliced cell paragraph', () => {
+    const sliced = {
+      ...para('sliced'),
+      lineSlice: { start: 0, end: 2 },
+    } as unknown as CellElement;
+    const table = tableOf([sliced]) as unknown as DocTable;
+
+    expect(__test_tableRequiresLegacyPaint(table)).toBe(true);
+  });
+
+  it('excludes production row slices emitted from a tall cell paragraph', () => {
+    const cellPara = para(Array.from({ length: 40 }, () => 'wrap').join(' '));
+    const pages = paginateDocument(doc([tableOf([cellPara])], 60));
+    const sliceTables = pages
+      .flatMap((page) => page)
+      .filter((el): el is PaginatedBodyElement & DocTable => el.type === 'table');
+    const slicedTables = sliceTables.filter((table) =>
+      table.rows.some((row) =>
+        row.cells.some((cell) =>
+          cell.content.some(
+            (ce) =>
+              ce.type === 'paragraph' &&
+              (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined,
+          ),
+        ),
+      ),
+    );
+
+    expect(sliceTables.length).toBeGreaterThan(1);
+    expect(slicedTables.length).toBeGreaterThan(0);
+    for (const table of slicedTables) {
+      expect(__test_tableRequiresLegacyPaint(table)).toBe(true);
+    }
+  });
+});
+
+describe('table-cell paint byte-identity — fragment table paint (PR 6)', () => {
+  it('negative leading tblInd table: fragment paint falls back to the page-width legacy budget', async () => {
+    const cellPara = para(Array.from({ length: 50 }, () => 'wide').join(' '));
+    const model = doc([
+      tableOf([cellPara], {
+        colWidths: [220],
+        widthPt: 220,
+        tblInd: -30,
+        jc: 'left',
+        layout: 'fixed',
+      }),
+    ], 400);
+
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
+  });
+
+  it('numbered paragraph inside a table cell: fragment paint === legacy (marker indent)', async () => {
+    // Legacy cell paint recomputes a NUMBERED paragraph with the marker-aware
+    // numBodyOffset first-line indent (the stamp gate rejects it); the fragment's
+    // stored lines were measured with para.indentFirst. The per-block gate must fall
+    // back to legacy renderParagraph for numbered cell paragraphs.
+    const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.',
+      indentLeft: 36, tab: 36, suff: 'tab', jc: 'left' } as unknown as DocParagraph['numbering'];
+    const cellPara = {
+      type: 'paragraph',
+      ...para(Array.from({ length: 30 }, () => 'w').join(' '), {
+        numbering, indentLeft: 36, indentFirst: -18,
+      }),
+    };
+    const model = doc([tableOf([cellPara])], 400);
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
+    // Non-vacuity: the marker itself was drawn.
+    expect(r.streams.some((page) => page.some((c) => c.text === '1.'))).toBe(true);
+  });
+
+  it('NUMPAGES field inside a table cell: fragment paint === legacy (state-sensitive)', async () => {
+    // The fragment's segments freeze the measure-time totalPages (1); legacy paint
+    // re-resolves the field against the real page context. The per-block gate must
+    // fall back for paragraphSegsStateSensitive cell paragraphs.
+    const fieldPara = {
+      type: 'paragraph',
+      ...para('total pages:'),
+    } as unknown as DocParagraph;
+    (fieldPara.runs as unknown[]).push({
+      type: 'field', fieldType: 'numPages', instruction: 'NUMPAGES', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    // A long body paragraph AFTER the table forces a second page, so the real
+    // totalPages (2) differs from the measure-time value (1).
+    const filler = para(Array.from({ length: 120 }, () => 'w').join(' '));
+    const model = doc([tableOf([fieldPara]), filler as unknown as BodyElement], 100);
+    const r = await assertPaintIdentical(model);
+    expect(r.pages).toBeGreaterThan(1);
+    // The REAL page count was drawn (not the frozen measure-time "1").
+    expect(r.streams.some((page) => page.some((c) => c.text === String(r.pages)))).toBe(true);
+  });
+
+  it('cell paragraph after an in-cell wrap float: fragment paint === legacy (wrap context)', async () => {
+    // Cell paragraph 1 carries an anchored square-wrap image (registered into the
+    // cell's isolated float set during paint); paragraph 2's legacy paint re-lays-out
+    // around it (wrap context), while its fragment lines were measured with no wrap
+    // oracle. The per-block gate must fall back when the cell's float set is non-empty.
+    const imgPara = {
+      type: 'paragraph',
+      ...para(''),
+    } as unknown as DocParagraph;
+    (imgPara.runs as unknown[]).push({
+      type: 'image',
+      imagePath: 'word/media/test1.png', mimeType: 'image/png',
+      widthPt: 80, heightPt: 40,
+      anchor: true, anchorXPt: 100, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: true,
+      wrapMode: 'square', wrapSide: 'bothSides',
+      anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+    });
+    const wrapPara = {
+      type: 'paragraph',
+      ...para(Array.from({ length: 40 }, () => 'w').join(' ')),
+    };
+    const model = doc([tableOf([imgPara, wrapPara])], 400);
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
   });
 });

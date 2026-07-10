@@ -25,7 +25,12 @@
  *
  * See docs/docx-layout-context-fragments-design.md §"Measured Fragment Model".
  */
-import { renderBodyParagraphLines, type ParaBorderMerge, type RenderState } from './renderer.js';
+import {
+  renderBodyParagraphLines,
+  renderTableFragment,
+  type ParaBorderMerge,
+  type RenderState,
+} from './renderer.js';
 import type { PlacedFragment } from './layout-fragments.js';
 
 /**
@@ -46,6 +51,10 @@ export function paintParagraphFragment(
   } = {},
 ): void {
   const fragment = placed.fragment;
+  // Body paragraph paint only. A table fragment is painted by the table-fragment
+  // path; the migration gate ({@link isFragmentPaintableParagraph}) never routes one
+  // here, so this narrow is defensive and a no-op in production.
+  if (fragment.kind !== 'paragraph') return;
   const measured = fragment.measured;
   // The stored scale-1 line partition for the whole paragraph. Empty for a markOnly
   // (empty / anchor-only) paragraph — the renderer's empty-mark branch handles it.
@@ -64,4 +73,22 @@ export function paintParagraphFragment(
     lineSlice,
     options.borderMerge,
   );
+}
+
+/**
+ * Paint a block-table {@link PlacedFragment} produced by {@link layoutDocument} / the
+ * paginator: the table's geometry (column widths, row heights) and cell content
+ * (paragraph + nested-table fragments) are drawn from the stored {@link TableFragment}
+ * WITHOUT re-laying-out or re-measuring. At the paint scale of 1 no `measureText` is
+ * called at all. Like {@link paintParagraphFragment}, this owns the fragment boundary
+ * and delegates the draw to the renderer's shared table paint through a supplied-geometry
+ * entry (`renderTableFragment`), so the paint stream is byte-identical to the legacy
+ * `renderTable` acquisition for the migrated (in-flow, top-aligned) table class.
+ */
+export function paintTableFragment(placed: PlacedFragment, state: RenderState): void {
+  const fragment = placed.fragment;
+  // Table fragment paint only; the migration gate never routes a paragraph fragment
+  // here, so this narrow is defensive and a no-op in production.
+  if (fragment.kind !== 'table') return;
+  renderTableFragment(fragment, state);
 }

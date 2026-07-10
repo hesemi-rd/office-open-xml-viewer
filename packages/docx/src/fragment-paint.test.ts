@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { renderDocumentToCanvas, paginateDocument } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, PaginatedBodyElement, SectionProps } from './types';
+import type {
+  BodyElement,
+  CellElement,
+  DocParagraph,
+  DocTable,
+  DocTableCell,
+  DocTableRow,
+  DocxDocumentModel,
+  PaginatedBodyElement,
+  SectionProps,
+} from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PR 5 Task 13 — body fragment paint purity.
@@ -112,6 +122,77 @@ function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
     footnotes: [],
   } as unknown as DocxDocumentModel;
 }
+
+// ---- Table builders (PR 6 Task 16) --------------------------------------------
+function eb() {
+  return { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
+}
+function tcell(content: CellElement[], over: Partial<DocTableCell> = {}): DocTableCell {
+  return {
+    content, colSpan: 1, vMerge: null, borders: eb(),
+    background: null, vAlign: 'top', widthPt: null, ...over,
+  } as unknown as DocTableCell;
+}
+function textCell(text: string, over: Partial<DocTableCell> = {}): DocTableCell {
+  return tcell([{ type: 'paragraph', ...para(text) } as unknown as CellElement], over);
+}
+function trow(cells: DocTableCell[], over: Partial<DocTableRow> = {}): DocTableRow {
+  return { cells, rowHeight: null, rowHeightRule: 'auto', isHeader: false, ...over } as unknown as DocTableRow;
+}
+function tbl(rows: DocTableRow[], colWidths: number[], over: Partial<DocTable> = {}): DocTable {
+  return {
+    type: 'table', colWidths, rows, borders: eb(),
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left', layout: 'fixed', ...over,
+  } as unknown as DocTable;
+}
+
+describe('table fragment paint purity (PR 6 Task 16)', () => {
+  it('paints a table with a NESTED table + vMerge at scale 1 without calling measureText', async () => {
+    // A nested table currently RECOMPUTES its layout at paint (computeTableLayout →
+    // resolveTableRowHeights → measureParagraph), so this is Red on the stamp path.
+    // After the fragment migration the nested table is painted from its stored
+    // TableFragment, measure-free.
+    const inner = tbl([trow([textCell('inner one'), textCell('inner two')])], [40, 40]);
+    const outer = tbl(
+      [
+        trow([textCell('a', { vMerge: true }), textCell('top')]),
+        trow([textCell('', { vMerge: false }), tcell([{ type: 'table', ...inner } as unknown as CellElement])]),
+      ],
+      [60, 100],
+    );
+    const model = doc([outer as unknown as BodyElement]);
+    const pages = paginateDocument(model);
+    const paint = makeThrowingPaintCanvas();
+    await expect(
+      renderDocumentToCanvas(model, paint.canvas, 0, { dpr: 1, width: 200, prebuiltPages: pages }),
+    ).resolves.not.toThrow();
+    expect(paint.measured()).toBe(0);
+    // Non-vacuity: outer + inner cell text were drawn.
+    expect(paint.calls.some((c) => c.text.includes('top'))).toBe(true);
+    expect(paint.calls.some((c) => c.text.includes('inner'))).toBe(true);
+  });
+
+  it('paints a page-split table with a repeated header at scale 1, measure-free', async () => {
+    const bodyRows = Array.from({ length: 12 }, (_v, i) => trow([textCell(`row ${i}`)]));
+    const rows = [trow([textCell('HEADER')], { isHeader: true }), ...bodyRows];
+    const model = doc([tbl(rows, [120]) as unknown as BodyElement], 120);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+    for (let p = 0; p < pages.length; p++) {
+      const paint = makeThrowingPaintCanvas();
+      await expect(
+        renderDocumentToCanvas(model, paint.canvas, p, { dpr: 1, width: 200, prebuiltPages: pages }),
+      ).resolves.not.toThrow();
+      expect(paint.measured()).toBe(0);
+      expect(paint.calls.length).toBeGreaterThan(0);
+    }
+    // The header text is repeated on the continuation page.
+    const paint2 = makeThrowingPaintCanvas();
+    await renderDocumentToCanvas(model, paint2.canvas, 1, { dpr: 1, width: 200, prebuiltPages: pages });
+    expect(paint2.calls.some((c) => c.text.includes('HEADER'))).toBe(true);
+  });
+});
 
 describe('fragment paint purity (PR 5 Task 13)', () => {
   it('paints a premeasured body paragraph at scale 1 without ever calling measureText', async () => {
