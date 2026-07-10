@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, Duotone } from '@silurus/ooxml-core';
+import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -275,7 +275,19 @@ export interface LayoutLine {
 export interface WrapLayoutCtx {
   startPageY: number;   // absolute canvas Y where the first line should start
   paraX: number;        // absolute canvas X of the paragraph's content left edge
-  floats: FloatRect[];  // floats active on the current page
+  floats: FloatRect[];  // legacy float geometry supplied directly by renderer paths
+  /** Placement-aware wrap boundary used by paragraph measurement. */
+  lineWindow?: (input: {
+    topYPt: number;
+    minimumStartWidthPt: number;
+    probeHeightPt: number;
+    paragraphXPt: number;
+    maximumWidthPt: number;
+  }) => {
+    topYPt: number;
+    xOffsetPt: number;
+    maximumWidthPt: number;
+  };
   /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
   lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
@@ -301,6 +313,21 @@ export interface DocGridCtx {
    *  charSpace; the character grid is then inactive even if `type` is
    *  linesAndChars/snapToChars. See {@link gridCharDeltaPx}. */
   charSpacePt?: number | null;
+}
+
+/** Page/document values that can change segment text or vertical-text behavior.
+ * Canvas/font measurement belongs to the caller's TextMeasurer instead. The
+ * document-level East Asian flag is used only for content-less paragraph-mark
+ * metrics; content lines use ParagraphLayoutContext.hasEastAsianText. */
+export interface LineLayoutEnvironment {
+  readonly pageIndex: number;
+  readonly totalPages: number;
+  readonly displayPageNumber?: number;
+  readonly pageNumberFormat?: NumberFormat;
+  readonly currentDateMs?: number;
+  readonly noteNumbers?: ReadonlyMap<string, number>;
+  readonly currentNoteNumber?: number;
+  readonly verticalCJK?: boolean;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -892,6 +919,8 @@ export function correctedLineMetrics(
  * suppress that paragraph-mark line. This is the height used both by the
  * literal empty-paragraph path and by paragraphs whose only segments are
  * wrap-float anchors (which `layoutLines` skips, yielding zero lines).
+ * `effectiveLineSpacing` lets resolved paragraph context override the source
+ * value; omitting it preserves the existing `para.lineSpacing` behavior.
  */
 export function paragraphMarkLineHeight(
   para: DocParagraph,
@@ -901,6 +930,7 @@ export function paragraphMarkLineHeight(
   eastAsian = false,
   ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string> = {},
+  effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
 ): number {
   const fs = getDefaultFontSize(para);
   const family = getDefaultFontFamily(para, eastAsian);
@@ -934,7 +964,7 @@ export function paragraphMarkLineHeight(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian);
+  return lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian);
 }
 
 /**
@@ -993,16 +1023,16 @@ export function findNearbyFontSize(runs: DocRun[], idx: number): number {
   return 10; // pt fallback
 }
 
-export function resolveFieldText(f: FieldRun, state: RenderState): string {
+export function resolveFieldText(f: FieldRun, environment: LineLayoutEnvironment): string {
   if (f.fieldType === 'page') {
     // ECMA-376 §17.16.5.44 PAGE — "the number of the current page". Use the
     // per-section DISPLAY number (§17.6.12 `w:start` restart), falling back to the
     // raw physical index for a single-section document without `<w:pgNumType>`.
-    const n = state.displayPageNumber ?? state.pageIndex + 1;
+    const n = environment.displayPageNumber ?? environment.pageIndex + 1;
     // §17.16.4.3.1 — the field's own general-formatting switch (`\* roman`, …)
     // OVERRIDES the section format (§17.6.12 `w:fmt`); it is authored ON the field.
     // No switch ⇒ the section format (or decimal for a single-section document).
-    const fmt = parseFieldFormatSwitch(f.instruction) ?? state.pageNumberFormat ?? 'decimal';
+    const fmt = parseFieldFormatSwitch(f.instruction) ?? environment.pageNumberFormat ?? 'decimal';
     return formatOrdinalNumber(n, fmt);
   }
   // ECMA-376 §17.16.5.42 NUMPAGES — "the number of pages in the current document".
@@ -1011,11 +1041,11 @@ export function resolveFieldText(f: FieldRun, state: RenderState): string {
   // subject to the field's own `\*` format switch.
   if (f.fieldType === 'numPages') {
     const fmt = parseFieldFormatSwitch(f.instruction) ?? 'decimal';
-    return formatOrdinalNumber(state.totalPages, fmt);
+    return formatOrdinalNumber(environment.totalPages, fmt);
   }
   // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — display the CURRENT date/time
   // filtered through the field's `\@` date-time picture (§17.16.4.1). The
-  // "current" instant is injected via `state.currentDateMs` (default = real time,
+  // "current" instant is injected via `environment.currentDateMs` (default = real time,
   // set at the render entry point) so the output is deterministic under test.
   // A field with NO `\@` picture, or one whose picture uses an unimplemented
   // token, falls back to the authored cached result (§17.16.4.1: with no picture
@@ -1024,7 +1054,7 @@ export function resolveFieldText(f: FieldRun, state: RenderState): string {
   if (f.fieldType === 'date' || f.fieldType === 'time') {
     const picture = parseDateTimePictureSwitch(f.instruction);
     if (picture) {
-      const now = new Date(state.currentDateMs ?? Date.now());
+      const now = new Date(environment.currentDateMs ?? Date.now());
       const formatted = formatDateTimePicture(picture, now);
       if (formatted !== null) return formatted;
     }
@@ -1594,10 +1624,10 @@ export function kinsokuRulesEquivalent(a: KinsokuRules, b: KinsokuRules): boolea
  *  the segment text depends on per-page render context rather than on the runs
  *  alone. Exactly two sources exist today:
  *    - `field` runs of type page / numPages: {@link resolveFieldText} returns
- *      `state.pageIndex + 1` / `state.totalPages`, and the measure state is
+ *      `environment.pageIndex + 1` / `environment.totalPages`, and the measure environment is
  *      frozen at pageIndex 0 / totalPages 1 (buildMeasureState);
- *    - `noteRef` text runs: the label resolves via `state.noteNumbers` /
- *      `state.currentNoteNumber`, which only the paint state carries
+ *    - `noteRef` text runs: the label resolves via `environment.noteNumbers` /
+ *      `environment.currentNoteNumber`, which only the paint environment carries
  *      (renderDocumentToCanvas builds the map; the measure state never does).
  *  Such a paragraph must NOT stamp its measured lines: the stamped segments
  *  would carry the measure-time text (a stale page number / note label) and the
@@ -1609,10 +1639,11 @@ export function paragraphSegsStateSensitive(para: DocParagraph): boolean {
   for (const run of para.runs) {
     if (run.type === 'field') {
       const ft = (run as unknown as FieldRun).fieldType;
-      // page / numPages depend on the per-page render context. date / time depend
-      // on the injected `state.currentDateMs`, which the measure state does not
-      // carry (buildMeasureState) — so these too must recompute rather than stamp
-      // a measure-time value (§17.16.4.1 DATE/TIME resolve at paint).
+      // page / numPages depend on the per-page render context. DATE / TIME can
+      // depend on `environment.currentDateMs`; although LineLayoutEnvironment
+      // permits that value, current pagination environments may omit it. Keep
+      // these fields on the paint-time recompute path so a pagination fallback
+      // instant is never stamped as the final field text (§17.16.4.1).
       if (ft === 'page' || ft === 'numPages' || ft === 'date' || ft === 'time') return true;
     } else if (run.type === 'text' && (run as unknown as DocxTextRun).noteRef) {
       return true;
@@ -1621,7 +1652,7 @@ export function paragraphSegsStateSensitive(para: DocParagraph): boolean {
   return false;
 }
 
-export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
+export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const pushTextPiece = (
     text: string,
@@ -1747,12 +1778,12 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         kerning: r.kerning,
         // ECMA-376 §17.3.2.10 eastAsianLayout — 縦中横 is meaningful ONLY in a
         // vertical (tbRl) page, so fold the vertical gate in HERE at build time
-        // (buildSegments has RenderState). Measure/paint then read a single
+        // (buildSegments receives it through LineLayoutEnvironment). Measure/paint then read a single
         // pre-gated flag. `vertCompress` rides only when `vert` is set (spec: it
         // is ignored otherwise).
-        tateChuYoko: state.verticalCJK && r.eastAsianVert === true ? true : undefined,
+        tateChuYoko: environment.verticalCJK && r.eastAsianVert === true ? true : undefined,
         tateChuYokoCompress:
-          state.verticalCJK && r.eastAsianVert === true && r.eastAsianVertCompress === true
+          environment.verticalCJK && r.eastAsianVert === true && r.eastAsianVertCompress === true
             ? true
             : undefined,
       });
@@ -1843,8 +1874,8 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       const noteText =
         t.noteRef
           ? (t.noteRef.id
-              ? state.noteNumbers?.get(`${t.noteRef.kind}:${t.noteRef.id}`)
-              : state.currentNoteNumber)
+              ? environment.noteNumbers?.get(`${t.noteRef.kind}:${t.noteRef.id}`)
+              : environment.currentNoteNumber)
           : undefined;
       if (t.noteRef) {
         const label = noteText != null ? String(noteText) : (t.text || '');
@@ -1911,7 +1942,7 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       // page/column breaks handled at the document level (splitPages)
     } else if (run.type === 'field') {
       const f = run as unknown as FieldRun & { type: 'field' };
-      const text = resolveFieldText(f, state);
+      const text = resolveFieldText(f, environment);
       if (text) pushTextPiece(text, f, f.vertAlign);
     } else if (run.type === 'math') {
       // The parser resolves the paragraph font size; fall back to a nearby run only
@@ -1959,7 +1990,7 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   // REPLACES the default East-Asian table for a language and so must NOT be able
   // to drop the ASCII non-starters and re-orphan a Latin comma). The document's
   // kinsoku settings still govern the separate per-character CJK retract paths
-  // (kinsokuAdjustedSplit / crossRunKinsokuRetract), which read `state.kinsoku`.
+  // (kinsokuAdjustedSplit / crossRunKinsokuRetract), which read the layout kinsoku argument.
   // The ASCII non-starters (!),.:;?]}) live in that default table (core
   // rules.ts), so one membership test covers Latin and (incidentally) CJK forms.
   for (let i = 1; i < segs.length; i++) {
@@ -2081,12 +2112,25 @@ export function layoutLines(
     // Small fixed probe height for float intersection (matches the historical
     // wrap behaviour for the topAndBottom skip and horizontal-gap scan).
     const probeH = 10 * scale;
-    const win = resolveLineFloatWindow(
-      currentLineTopY, minWidth, probeH, wrapCtx.paraX, maxWidth, wrapCtx.floats,
-    );
-    currentLineTopY = win.topY;
-    lineXOffset = win.xOffset;
-    lineMaxWidth = win.maxWidth;
+    if (wrapCtx.lineWindow) {
+      const win = wrapCtx.lineWindow({
+        topYPt: currentLineTopY,
+        minimumStartWidthPt: minWidth,
+        probeHeightPt: probeH,
+        paragraphXPt: wrapCtx.paraX,
+        maximumWidthPt: maxWidth,
+      });
+      currentLineTopY = win.topYPt;
+      lineXOffset = win.xOffsetPt;
+      lineMaxWidth = win.maximumWidthPt;
+    } else {
+      const win = resolveLineFloatWindow(
+        currentLineTopY, minWidth, probeH, wrapCtx.paraX, maxWidth, wrapCtx.floats,
+      );
+      currentLineTopY = win.topY;
+      lineXOffset = win.xOffset;
+      lineMaxWidth = win.maxWidth;
+    }
   };
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);

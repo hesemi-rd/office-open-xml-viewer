@@ -862,9 +862,13 @@ export interface LineLayoutEnvironment {
   readonly currentNoteNumber?: number;
   readonly verticalCJK?: boolean;
 }
+
+export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
+  readonly documentHasEastAsianText: boolean;
+}
 ```
 
-Change `buildSegments` and `resolveFieldText` to accept this interface. The current `buildSegments` implementation reads only `verticalCJK`, note numbering, and `resolveFieldText`'s page/date fields from state; keep font classes on `TextMeasurer` and grid, kinsoku, tabs, and spacing on `ParagraphLayoutContext`. Verify this boundary with a `state.` usage scan and typecheck. Because `verticalCJK` remains optional, existing `RenderState` is structurally compatible.
+Change `buildSegments` and `resolveFieldText` to accept `LineLayoutEnvironment`. The current `buildSegments` implementation reads only `verticalCJK`, note numbering, and `resolveFieldText`'s page/date fields from state; keep font classes on `TextMeasurer` and grid, kinsoku, tabs, and spacing on `ParagraphLayoutContext`. `ParagraphMeasurementEnvironment.documentHasEastAsianText` preserves the existing document-level font-axis choice for empty and anchor-only paragraph marks; content lines continue to use `ParagraphLayoutContext.hasEastAsianText`. Measurement callers must populate it from document layout settings. Verify this boundary with a `state.` usage scan and typecheck.
 
 Define the measurement boundary explicitly:
 
@@ -921,6 +925,7 @@ export function measureParagraph(
   context: ParagraphLayoutContext,
   placement: ParagraphPlacement,
   measurer: TextMeasurer,
+  environment: ParagraphMeasurementEnvironment,
 ): MeasuredParagraph;
 ```
 

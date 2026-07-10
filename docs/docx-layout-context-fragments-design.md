@@ -283,6 +283,21 @@ geometry can change line width and vertical origin, so the placement is an
 explicit part of the contract.
 
 ```ts
+export interface LineLayoutEnvironment {
+  readonly pageIndex: number;
+  readonly totalPages: number;
+  readonly displayPageNumber?: number;
+  readonly pageNumberFormat?: NumberFormat;
+  readonly currentDateMs?: number;
+  readonly noteNumbers?: ReadonlyMap<string, number>;
+  readonly currentNoteNumber?: number;
+  readonly verticalCJK?: boolean;
+}
+
+export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
+  readonly documentHasEastAsianText: boolean;
+}
+
 export interface WrapOracle {
   lineWindow(input: {
     readonly topYPt: number;
@@ -336,6 +351,7 @@ export function measureParagraph(
   context: ParagraphLayoutContext,
   placement: ParagraphPlacement,
   measurer: TextMeasurer,
+  environment: ParagraphMeasurementEnvironment,
 ): MeasuredParagraph;
 ```
 
@@ -349,10 +365,17 @@ measured geometry; it does not repeat text layout. A measurement is valid only
 for its recorded placement. Moving a paragraph to another page, column, or wrap
 context requires deterministic remeasurement.
 
-The existing float-layout pure functions implement `WrapOracle`. Floating
-drawing discovery and registration stay in the current anchor subsystem. A
-`wrapNone` object never appears in the oracle. Table-cell measurement receives
-no page-level wrap oracle.
+`documentHasEastAsianText` preserves the existing document-level font-axis
+choice for empty and anchor-only paragraph marks. Content-bearing lines continue
+to use `ParagraphLayoutContext.hasEastAsianText`; the two inputs are intentionally
+not interchangeable for an empty paragraph. Measurement callers populate this
+required field from document layout settings.
+
+`createFloatWrapOracle` in the paragraph-measurement module adapts the existing
+float-layout pure functions to `WrapOracle`. Floating drawing discovery and
+registration stay in the current anchor subsystem. A `wrapNone` object never
+appears in the oracle. Table-cell measurement receives no page-level wrap
+oracle.
 
 Inline drawings remain line segments and continue to affect line width and line
 height inside `measureParagraph`.
