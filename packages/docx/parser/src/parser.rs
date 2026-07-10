@@ -1233,8 +1233,9 @@ fn parse_body_elements(
                 // A lone page/column break paragraph collapses to the break marker.
                 // (Use a fall-through `match` rather than an early `continue` so the
                 // `cover_break_after` push at the loop tail is still reached when a
-                // cover's last child is itself a lone break — rare, but it must not
-                // silently drop the cover's standalone-page break.)
+                // cover's last child is itself a lone break. A final column break
+                // still needs the synthetic page break; a final hard page break is
+                // deduplicated by apply_cover_page_breaks.)
                 match lone_break {
                     Some(BreakType::Page) => body.push(BodyElement::PageBreak { parity: None }),
                     Some(BreakType::Column) => body.push(BodyElement::ColumnBreak),
@@ -1307,10 +1308,10 @@ fn parse_body_elements(
 }
 
 /// Drop a cover's synthetic page break (emitted at `cover_break_positions` by the
-/// `parse_body_elements` walk) when the cover's content is ALREADY followed by a
-/// construct that starts a new page — a hard `<w:br w:type="page"/>` (PageBreak)
-/// or a section boundary (SectionBreak). In that case the cover stands alone via
-/// that construct, and the extra page break would leave a spurious BLANK page
+/// `parse_body_elements` walk) when the cover's content ALREADY ends in a hard
+/// `<w:br w:type="page"/>`, or is immediately followed by a page-advancing
+/// construct — a PageBreak or section boundary. In either case the cover stands
+/// alone via that construct, and the extra page break would leave a spurious BLANK page
 /// between the cover and the body (the renderer's pageBreak / page-advancing
 /// sectionBreak handlers push a page unconditionally — only `newPage()` coalesces
 /// an empty page). The common case (cover followed by a content paragraph, e.g.
@@ -1335,10 +1336,15 @@ fn apply_cover_page_breaks(
     let drop: Vec<usize> = cover_break_positions
         .into_iter()
         .filter(|&pos| {
-            matches!(
-                body.get(pos + 1),
-                Some(BodyElement::PageBreak { .. }) | Some(BodyElement::SectionBreak { .. })
-            )
+            let cover_ends_with_hard_break = pos
+                .checked_sub(1)
+                .and_then(|index| body.get(index))
+                .is_some_and(|element| matches!(element, BodyElement::PageBreak { .. }));
+            cover_ends_with_hard_break
+                || matches!(
+                    body.get(pos + 1),
+                    Some(BodyElement::PageBreak { .. }) | Some(BodyElement::SectionBreak { .. })
+                )
         })
         .collect();
     if drop.is_empty() {
@@ -13340,6 +13346,29 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
+    /// A hard page break authored as the cover building block's LAST child also
+    /// makes the following body start on a new page. The synthetic cover break
+    /// must therefore be removed just as it is when the hard-break paragraph is
+    /// the next sibling outside the building block.
+    #[test]
+    fn cover_ending_in_hard_pagebreak_does_not_double_break() {
+        let body = body_from(
+            r#"<w:sdt>
+                 <w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
+                 <w:sdtContent>
+                   <w:p><w:r><w:t>cover</w:t></w:r></w:p>
+                   <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+                 </w:sdtContent>
+               </w:sdt>
+               <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
+        );
+        // Para(cover), PageBreak (the authored one only), Para(body).
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
     /// Likewise when the cover is immediately followed by a section boundary: the
     /// section break advances the page, so the synthetic cover break is dropped to
     /// avoid a blank page between the cover and the next section.
@@ -13361,11 +13390,10 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
-    /// Even when the cover's LAST content child is itself a lone break, the
-    /// standalone-page break is still emitted (the fall-through `match` reaches the
-    /// `cover_break_after` push). Here the cover ends with a column break; the
-    /// synthetic page break still follows, and is kept because real body content
-    /// (not another page/section break) comes next.
+    /// When the cover's LAST content child is a lone column break, the standalone
+    /// page break is still required (the fall-through `match` reaches the
+    /// `cover_break_after` push). Unlike a hard page break, a column break alone
+    /// does not guarantee that the following body starts on a new physical page.
     #[test]
     fn cover_ending_in_lone_break_still_emits_standalone_pagebreak() {
         let body = body_from(
