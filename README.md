@@ -416,7 +416,7 @@ const current = ref(0);
 const total   = ref(0);
 
 onMounted(async () => {
-  viewer = new PptxViewer(canvas.value!, {
+  viewer = new PptxViewer(canvas.value as HTMLCanvasElement, {
     onSlideChange: (i, t) => { current.value = i; total.value = t; },
   });
   await viewer.load(props.src);
