@@ -362,8 +362,15 @@ paragraph spacing. The paginator owns trailing spacing collapse and records the
 actual leading and trailing contributions on each fragment, preventing spacing
 from being counted once in measurement and again in placement. Paint scales
 measured geometry; it does not repeat text layout. A measurement is valid only
-for its recorded placement. Moving a paragraph to another page, column, or wrap
-context requires deterministic remeasurement.
+while its placement-DETERMINING inputs hold: the line partition and per-line
+geometry are a function of the available width, the wrap context, and the
+content — without a wrap oracle, the X/Y origin is a pure translation recorded
+on the placed fragment, not a layout input. Moving a paragraph to a placement
+with a different available width or a different wrap context therefore requires
+deterministic remeasurement (the §17.6.4 unequal-width continuation re-wrap);
+a same-width, wrap-free move to another page or column reuses the measurement
+with the new origin recorded on `PlacedFragment` — the shipped continuation
+contract in the fragment model section below.
 
 `documentHasEastAsianText` preserves the existing document-level font-axis
 choice for empty and anchor-only paragraph marks. Content-bearing lines continue
