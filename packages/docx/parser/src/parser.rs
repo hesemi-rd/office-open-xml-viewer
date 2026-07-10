@@ -2970,6 +2970,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.bold_cs == b.bold_cs
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
+        && a.snap_to_grid == b.snap_to_grid
 }
 
 // Same parse-context threading as handle_run_in_para.
@@ -3106,6 +3107,7 @@ fn parse_run_inner(
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
+    let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
     // §17.3.2.24 position / §17.3.2.19 kern), resolved through the style chain
     // into `fmt`. The renderer applies char_spacing via ctx.letterSpacing,
@@ -3177,6 +3179,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        snap_to_grid,
                         char_spacing,
                         char_scale,
                         position,
@@ -3254,6 +3257,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        snap_to_grid,
                         char_spacing,
                         char_scale,
                         position,
@@ -3301,6 +3305,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    snap_to_grid,
                     char_spacing,
                     char_scale,
                     position,
@@ -3393,6 +3398,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    snap_to_grid,
                     char_spacing,
                     char_scale,
                     position,
@@ -3587,6 +3593,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    snap_to_grid,
                     char_spacing,
                     char_scale,
                     position,
@@ -9581,6 +9588,27 @@ mod cs_toggle_tests {
             run_of(r#"<w:p><w:r><w:rPr><w:rFonts w:cs="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, None);
         assert_eq!(run.font_family_cs.as_deref(), Some("Arial"));
+    }
+
+    #[test]
+    fn run_snap_to_grid_false_surfaces() {
+        let run =
+            run_of(r#"<w:p><w:r><w:rPr><w:snapToGrid w:val="0"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        assert_eq!(run.snap_to_grid, Some(false));
+    }
+
+    #[test]
+    fn run_snap_to_grid_inherits_from_character_style() {
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="NoCharGrid">
+                <w:rPr><w:snapToGrid w:val="0"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="NoCharGrid"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.snap_to_grid, Some(false));
     }
 
     // run_of (above) covers only the DIRECT-rPr path (apply_direct_run). The two
