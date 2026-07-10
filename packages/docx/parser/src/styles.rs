@@ -110,6 +110,13 @@ pub struct RunFmt {
     /// measure and paint so wrapping/pagination stay measure==paint. `None` =
     /// inherit (no additional pitch when never set in the style hierarchy).
     pub char_spacing: Option<f64>,
+    /// ECMA-376 §17.3.2.14 `<w:fitText w:val>` — target manual run width.
+    /// Stored in TWIPS (ST_TwipsMeasure, 1/20 pt) so the layout layer can apply
+    /// its px-per-pt scale exactly once. `None` = no manual run width.
+    pub fit_text_val: Option<f64>,
+    /// ECMA-376 §17.3.2.14 `<w:fitText w:id>` — signed identifier linking
+    /// consecutive fitText runs into one region. `None` keeps the run standalone.
+    pub fit_text_id: Option<i64>,
     /// ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal Expanded/Compressed text
     /// scale. ST_TextScale is a percentage of the normal (100%) character width
     /// (1%–600%), stored here as a FRACTION (e.g. `w:val="67"` or `"67%"` →
@@ -970,12 +977,18 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
     }
-    // Run character-metric axes (§17.3.2.35 spacing / §17.3.2.43 w / §17.3.2.24
-    // position / §17.3.2.19 kern). Each carries the same "if omitted, inherit;
-    // if set, override" rule as the other run properties, so a level that names
-    // the attribute wins and absence inherits.
+    // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
+    // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
+    // same "if omitted, inherit; if set, override" rule as the other run
+    // properties, so a level that names the attribute wins and absence inherits.
     if src.char_spacing.is_some() {
         dst.char_spacing = src.char_spacing;
+    }
+    if src.fit_text_val.is_some() {
+        dst.fit_text_val = src.fit_text_val;
+    }
+    if src.fit_text_id.is_some() {
+        dst.fit_text_id = src.fit_text_id;
     }
     if src.char_scale.is_some() {
         dst.char_scale = src.char_scale;
@@ -1487,6 +1500,16 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         if let Some(v) = attr_w(sp, "val") {
             fmt.char_spacing = Some(twips_to_pt(&v));
         }
+    }
+
+    // Manual run width (ECMA-376 §17.3.2.14 `<w:fitText>`). Keep w:val in
+    // ST_TwipsMeasure units; unlike w:spacing it is not converted to points here.
+    // ST_DecimalNumber is signed, and Word uses large negative ids in practice.
+    if let Some(fit_text) = child_w(rpr, "fitText") {
+        fmt.fit_text_val = attr_w(fit_text, "val")
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value > 0.0);
+        fmt.fit_text_id = attr_w(fit_text, "id").and_then(|value| value.parse::<i64>().ok());
     }
 
     // Expanded/Compressed text scale (ECMA-376 §17.3.2.43 `<w:w w:val>`).
@@ -2300,6 +2323,15 @@ mod tests {
     }
 
     #[test]
+    fn fit_text_parses_twips_and_signed_id() {
+        // ECMA-376 §17.3.2.14: w:val is ST_TwipsMeasure and remains in twips;
+        // w:id is ST_DecimalNumber and may therefore be a large signed value.
+        let f = run_fmt_from(r#"<w:fitText w:val="2400" w:id="-1431456512"/>"#);
+        assert_eq!(f.fit_text_val, Some(2400.0));
+        assert_eq!(f.fit_text_id, Some(-1431456512));
+    }
+
+    #[test]
     fn run_spacing_does_not_collide_with_para_spacing() {
         // The paragraph `<w:spacing before/after/line>` (§17.3.1.33) must never
         // populate the run char_spacing, and the run `<w:spacing w:val>` must
@@ -2369,15 +2401,22 @@ mod tests {
         // The four axes follow the shared "set overrides, absent inherits" rule
         // in `apply_run` (used by both the style cascade and apply_direct_run).
         let mut base = run_fmt_from(
-            r#"<w:spacing w:val="200"/><w:w w:val="90"/><w:position w:val="4"/><w:kern w:val="24"/>"#,
+            r#"<w:fitText w:val="2400" w:id="-10"/><w:spacing w:val="200"/><w:w w:val="90"/><w:position w:val="4"/><w:kern w:val="24"/>"#,
         );
         // A later level that only re-sets spacing must keep the inherited w /
         // position / kern.
         let over = run_fmt_from(r#"<w:spacing w:val="-20"/>"#);
         apply_run(&mut base, &over);
         assert_eq!(base.char_spacing, Some(-1.0)); // overridden
+        assert_eq!(base.fit_text_val, Some(2400.0)); // inherited
+        assert_eq!(base.fit_text_id, Some(-10)); // inherited
         assert_eq!(base.char_scale, Some(0.90)); // inherited
         assert_eq!(base.position, Some(2.0)); // inherited (8 half-pt = 4 pt? no: val=4 → 2pt)
         assert_eq!(base.kerning, Some(12.0)); // inherited (24 half-pt = 12 pt)
+
+        let fit_override = run_fmt_from(r#"<w:fitText w:val="1200" w:id="-20"/>"#);
+        apply_run(&mut base, &fit_override);
+        assert_eq!(base.fit_text_val, Some(1200.0));
+        assert_eq!(base.fit_text_id, Some(-20));
     }
 }

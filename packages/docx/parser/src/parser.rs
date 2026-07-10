@@ -3120,6 +3120,8 @@ fn parse_run_inner(
     // char_scale as a horizontal glyph stretch, position as a baseline y-offset,
     // and kern as the ctx.fontKerning threshold (all measure==paint).
     let char_spacing = fmt.char_spacing;
+    let fit_text_val = fmt.fit_text_val;
+    let fit_text_id = fmt.fit_text_id;
     let char_scale = fmt.char_scale;
     let position = fmt.position;
     let kerning = fmt.kerning;
@@ -3187,6 +3189,8 @@ fn parse_run_inner(
                         lang_bidi: lang_bidi.clone(),
                         snap_to_grid,
                         char_spacing,
+                        fit_text_val,
+                        fit_text_id,
                         char_scale,
                         position,
                         kerning,
@@ -3265,6 +3269,8 @@ fn parse_run_inner(
                         lang_bidi: lang_bidi.clone(),
                         snap_to_grid,
                         char_spacing,
+                        fit_text_val,
+                        fit_text_id,
                         char_scale,
                         position,
                         kerning,
@@ -3313,6 +3319,8 @@ fn parse_run_inner(
                     lang_bidi: lang_bidi.clone(),
                     snap_to_grid,
                     char_spacing,
+                    fit_text_val,
+                    fit_text_id,
                     char_scale,
                     position,
                     kerning,
@@ -3406,6 +3414,8 @@ fn parse_run_inner(
                     lang_bidi: lang_bidi.clone(),
                     snap_to_grid,
                     char_spacing,
+                    fit_text_val,
+                    fit_text_id,
                     char_scale,
                     position,
                     kerning,
@@ -3601,6 +3611,8 @@ fn parse_run_inner(
                     lang_bidi: lang_bidi.clone(),
                     snap_to_grid,
                     char_spacing,
+                    fit_text_val,
+                    fit_text_id,
                     char_scale,
                     position,
                     kerning,
@@ -9467,6 +9479,19 @@ mod cs_toggle_tests {
         assert!((run.char_scale.unwrap() - 0.67).abs() < 1e-9); // 67%
         assert_eq!(run.position, Some(-5.0)); // -10 half-pt = -5 pt (lowered)
         assert_eq!(run.kerning, Some(14.0)); // 28 half-pt = 14 pt threshold
+    }
+
+    #[test]
+    fn fit_text_flows_to_text_run_model() {
+        // ECMA-376 §17.3.2.14: preserve twips and the signed link id all the way
+        // from direct rPr to the camelCase-serialized TextRun model.
+        let run = run_of(
+            r#"<w:p><w:r><w:rPr>
+                 <w:fitText w:val="2400" w:id="-1431456512"/>
+               </w:rPr><w:t>氏名</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.fit_text_val, Some(2400.0));
+        assert_eq!(run.fit_text_id, Some(-1431456512));
     }
 
     /// §17.3.2.40 `<w:u w:val>` → ST_Underline (§17.18.99). All 18 enum values
