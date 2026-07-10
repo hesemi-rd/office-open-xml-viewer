@@ -233,5 +233,9 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
     expect(Object.isFrozen(layout.pages[0])).toBe(true);
     expect(Object.isFrozen(layout.pages[0].fragments)).toBe(true);
     expect(Object.isFrozen(layout.pages[0].fragments[0])).toBe(true);
+    // The inner ParagraphFragment is frozen too — its measured lines, line range and
+    // spacing are immutable, so paint can never mutate the layout result (design
+    // §"Pagination and paint invariants" 4).
+    expect(Object.isFrozen(layout.pages[0].fragments[0].fragment)).toBe(true);
   });
 });
