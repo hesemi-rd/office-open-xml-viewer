@@ -112,6 +112,11 @@ git diff --check
 If a check fails because ignored/generated WASM is stale, rebuild WASM before
 assuming the source change is broken.
 
+Before running parser-backed integration tests, Storybook, or VRT, rebuild
+generated WASM (`pnpm build:wasm` or the per-package command) whenever parser
+(Rust) source has changed or `packages/*/src/wasm/` may be stale — stale
+generated WASM can both hide real parser defects and fabricate failures.
+
 ## OOXML Implementation Policy
 
 Be specification-first.
