@@ -88,6 +88,9 @@ export interface DocSettings {
   /** §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
    *  single-byte and double-byte widths for East Asian layout. */
   balanceSingleByteDoubleByteWidth?: boolean;
+  /** §17.15.3.1 `w:compat/w:adjustLineHeightInTable` — apply the section
+   *  document-grid line pitch to text in table cells. */
+  adjustLineHeightInTable?: boolean;
 }
 
 export interface DocRevision {
@@ -1113,6 +1116,9 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
    *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
   langBidi?: string;
+  /** ECMA-376 §17.3.2.34 `<w:snapToGrid>` — false opts this run out of the
+   *  section character grid; absent inherits participation. */
+  snapToGrid?: boolean;
   /** ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment in
    *  POINTS (signed): the extra pitch added after each character before the next
    *  is rendered. The renderer feeds it to `ctx.letterSpacing` on BOTH the

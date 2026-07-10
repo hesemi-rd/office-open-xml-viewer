@@ -73,6 +73,9 @@ pub struct RunFmt {
     /// renderer uses it to force complex-script shaping and feed the UAX#9
     /// reordering / `ctx.direction = 'rtl'` mirroring pass.
     pub rtl: Option<bool>,
+    /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — whether this run participates in
+    /// the section character grid. `None` inherits; explicit false opts out.
+    pub snap_to_grid: Option<bool>,
     /// ECMA-376 §17.3.2.7 `<w:cs/>` — treat the run as complex-script,
     /// applying the cs formatting axis to ALL its characters (§17.3.2.26).
     pub cs_toggle: Option<bool>,
@@ -946,6 +949,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.rtl.is_some() {
         dst.rtl = src.rtl;
     }
+    if src.snap_to_grid.is_some() {
+        dst.snap_to_grid = src.snap_to_grid;
+    }
     // §17.3.2.7 <w:cs/> — complex-script run toggle. Must mirror
     // apply_direct_run; without this arm a style-chain <w:cs/> (set in a
     // paragraph/character style rPr by parse_run_fmt) is silently dropped.
@@ -1464,6 +1470,8 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
     // Complex-script / RTL run (ECMA-376 §17.3.2.30 w:rtl). On-off toggle.
     fmt.rtl = bool_prop(rpr, "rtl");
+    // Character-grid participation (ECMA-376 §17.3.2.34 w:snapToGrid).
+    fmt.snap_to_grid = bool_prop(rpr, "snapToGrid");
     // §17.3.2.7 w:cs — complex-script run toggle (distinct from rFonts@cs,
     // which is only a font SLOT and must not force cs formatting).
     fmt.cs_toggle = bool_prop(rpr, "cs");

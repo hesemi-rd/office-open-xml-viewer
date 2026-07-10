@@ -958,6 +958,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let compat_bool = |name: &str| -> Option<bool> { bool_prop(compat?, name) };
     let use_fe_layout = compat_bool("useFELayout");
     let balance_single_byte_double_byte_width = compat_bool("balanceSingleByteDoubleByteWidth");
+    let adjust_line_height_in_table = compat_bool("adjustLineHeightInTable");
 
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
     // justification (math namespace, bare `val` fallback).
@@ -980,6 +981,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && character_spacing_control.is_none()
         && use_fe_layout.is_none()
         && balance_single_byte_double_byte_width.is_none()
+        && adjust_line_height_in_table.is_none()
     {
         return None;
     }
@@ -992,6 +994,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         character_spacing_control,
         use_fe_layout,
         balance_single_byte_double_byte_width,
+        adjust_line_height_in_table,
     })
 }
 
@@ -2967,6 +2970,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.bold_cs == b.bold_cs
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
+        && a.snap_to_grid == b.snap_to_grid
 }
 
 // Same parse-context threading as handle_run_in_para.
@@ -3103,6 +3107,7 @@ fn parse_run_inner(
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
+    let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
     // §17.3.2.24 position / §17.3.2.19 kern), resolved through the style chain
     // into `fmt`. The renderer applies char_spacing via ctx.letterSpacing,
@@ -3174,6 +3179,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        snap_to_grid,
                         char_spacing,
                         char_scale,
                         position,
@@ -3251,6 +3257,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        snap_to_grid,
                         char_spacing,
                         char_scale,
                         position,
@@ -3298,6 +3305,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    snap_to_grid,
                     char_spacing,
                     char_scale,
                     position,
@@ -3390,6 +3398,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    snap_to_grid,
                     char_spacing,
                     char_scale,
                     position,
@@ -3584,6 +3593,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    snap_to_grid,
                     char_spacing,
                     char_scale,
                     position,
@@ -9096,6 +9106,26 @@ mod math_jc_tests {
         assert_eq!(s.balance_single_byte_double_byte_width, Some(false));
     }
 
+    #[test]
+    fn settings_adjust_line_height_in_table_surfaces() {
+        let xml = format!(
+            r#"<w:settings xmlns:w="{w}"><w:compat><w:adjustLineHeightInTable/></w:compat></w:settings>"#,
+            w = W_NS,
+        );
+        let settings = parse_document_settings(&xml).expect("compat setting");
+        assert_eq!(settings.adjust_line_height_in_table, Some(true));
+    }
+
+    #[test]
+    fn settings_adjust_line_height_in_table_false_surfaces() {
+        let xml = format!(
+            r#"<w:settings xmlns:w="{w}"><w:compat><w:adjustLineHeightInTable w:val="0"/></w:compat></w:settings>"#,
+            w = W_NS,
+        );
+        let settings = parse_document_settings(&xml).expect("compat setting");
+        assert_eq!(settings.adjust_line_height_in_table, Some(false));
+    }
+
     // ECMA-376 §22.1.2.88 + §17.3.1.13 `w:jc` — a display-math paragraph with no
     // explicit text alignment must keep its natural text alignment ("left" for
     // a Tabletext-styled cell). The math block's own justification is handled by
@@ -9558,6 +9588,27 @@ mod cs_toggle_tests {
             run_of(r#"<w:p><w:r><w:rPr><w:rFonts w:cs="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, None);
         assert_eq!(run.font_family_cs.as_deref(), Some("Arial"));
+    }
+
+    #[test]
+    fn run_snap_to_grid_false_surfaces() {
+        let run =
+            run_of(r#"<w:p><w:r><w:rPr><w:snapToGrid w:val="0"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        assert_eq!(run.snap_to_grid, Some(false));
+    }
+
+    #[test]
+    fn run_snap_to_grid_inherits_from_character_style() {
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="NoCharGrid">
+                <w:rPr><w:snapToGrid w:val="0"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="NoCharGrid"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.snap_to_grid, Some(false));
     }
 
     // run_of (above) covers only the DIRECT-rPr path (apply_direct_run). The two

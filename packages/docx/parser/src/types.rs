@@ -131,6 +131,10 @@ pub struct DocumentSettings {
     /// single-byte and double-byte character widths in East Asian layout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance_single_byte_double_byte_width: Option<bool>,
+    /// §17.15.3.1 `w:compat` / `w:adjustLineHeightInTable` — apply the section
+    /// document-grid line pitch to text in table cells.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjust_line_height_in_table: Option<bool>,
 }
 
 /// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.
@@ -1327,6 +1331,10 @@ pub struct TextRun {
     /// Arabic/Hebrew digit ordering). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
+    /// character grid. `Some(false)` opts this run out; `None` inherits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment in
     /// POINTS (signed): the extra pitch added after each character before the
     /// next. The renderer feeds it to `ctx.letterSpacing` on BOTH the measure and
