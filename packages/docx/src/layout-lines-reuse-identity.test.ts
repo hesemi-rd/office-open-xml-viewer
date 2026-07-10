@@ -430,6 +430,7 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     paginateDocument(narrowModel);
     const stale = bodyFragmentFor(paginateDocument(narrowModel)[0][0]);
     if (!stale) throw new Error('expected a narrow fragment to capture');
+    if (stale.fragment.kind !== 'paragraph') throw new Error('expected a paragraph fragment');
     expect(stale.fragment.measured.placement.availableWidthPt).toBeCloseTo(100, 6);
     expect(stale.fragment.source).toBe(p); // same source paragraph, different placement
     // Re-paginate wide LAST so p's element stamps + prebuiltPages are the width-180 layout.

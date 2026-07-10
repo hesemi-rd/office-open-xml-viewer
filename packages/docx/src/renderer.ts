@@ -165,11 +165,15 @@ import {
 } from './paragraph-measure.js';
 import {
   paragraphFragmentAdvancePt,
+  tableFragmentHeightPt,
   type DocumentLayout,
   type LayoutPage,
   type ParagraphFragment,
   type PlacedFragment,
+  type FlowFragment,
+  type TableFragment,
 } from './layout-fragments.js';
+import { buildTableFragment } from './table-fragments.js';
 // PR 5 — body fragment paint. renderer <-> fragment-paint is a deliberate import
 // cycle: both sides use the other only inside function bodies (never at module
 // evaluation), so ESM live bindings resolve them at call time.
@@ -3298,6 +3302,26 @@ export function computePages(
           // widths + contentWPt are constant across the split.
           { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
           { colWidthsPt: tblColWidthsPt, state: measureState },
+          // PR 6 — attach each slice's table fragment (byte-identical additive step:
+          // paint is unmigrated in Task 15). The slice IS the table (its rows are the
+          // slice's rows); column widths are constant across the split.
+          (sliceEl, meta) =>
+            attachTableFragment(
+              sliceEl,
+              sliceEl as unknown as DocTable,
+              tblColWidthsPt,
+              meta.heightsPt,
+              measureState,
+              {
+                columnIndex: sliceEl.colIndex ?? 0,
+                xPt: columns[sliceEl.colIndex ?? 0]?.xPt ?? colX(),
+                yPt: sliceEl.colTopPt ?? measureState.y,
+                continuesFromPreviousPage: meta.continuesFromPreviousPage,
+                continuesOnNextPage: meta.continuesOnNextPage,
+                repeatedHeaderRowCount: meta.repeatedHeaderRowCount,
+                sourceRowIndexOf: meta.sourceRowIndexOf,
+              },
+            ),
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -3308,6 +3332,22 @@ export function computePages(
         if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
         // B2 table stage 1b — stamp the whole-table scale-1 layout for paint reuse.
         stampTableLayout(tableEl, tblColWidthsPt, rowHs, tblContentWPt);
+        // PR 6 — the fragment for the whole-table placement (no page continuation).
+        attachTableFragment(
+          tableEl,
+          tableEl as unknown as DocTable,
+          tblColWidthsPt,
+          rowHs,
+          measureState,
+          {
+            columnIndex: colIndex,
+            xPt: colX(),
+            yPt: measureState.y,
+            continuesFromPreviousPage: false,
+            continuesOnNextPage: false,
+            repeatedHeaderRowCount: 0,
+          },
+        );
         pushTagged(tableEl);
         y += h;
         measureState.y += h;
@@ -3584,15 +3624,23 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
 }
 
 /**
- * PR 5 — produce the immutable body {@link DocumentLayout}: pages of
- * {@link PlacedFragment}s over body paragraphs. Pagination is the SAME engine
+ * Produce the immutable body {@link DocumentLayout}: pages of {@link PlacedFragment}s
+ * over body paragraphs (PR 5) and block tables (PR 6). Pagination is the SAME engine
  * `paginateDocument` runs (so page assignment, splitting, sections and columns are
- * identical); this projects the fragments the paginator attached to each body
- * paragraph element into a frozen result. Tables, headers/footers and floating
- * content stay on the `PaginatedBodyElement[][]` path until PR 6, so a page's
- * `fragments` cover its body PARAGRAPHS only (`FlowFragment` is paragraph-only in
- * PR 5). The section context and page geometry come from each page's stamped section
- * (a mid-document section break changes them), falling back to the body section.
+ * identical); this projects the fragments the paginator attached to each emitted body
+ * element into a frozen result. Headers/footers and floating content (floating tables,
+ * anchored drawings) stay on the `PaginatedBodyElement[][]` path, so a page's
+ * `fragments` cover its in-flow body paragraphs and block tables.
+ *
+ * Per page (M-2 — complete the DocumentLayout contract): the page geometry and section
+ * context come from the section the paginator stamped on the page's FIRST element
+ * (`sectionGeom` for page size + margins, `colGeom` for the §17.6.4 column geometry),
+ * falling back to the body section for an empty page. The DOCX model carries one
+ * body-level section geometry (#513), so only the per-region column set actually varies;
+ * a continuous section break that changes the column count MID-page is bounded by the
+ * one-section-per-`LayoutPage` contract — `LayoutPage.section` reflects the region at
+ * the page top, and each `PlacedFragment.columnIndex` locates its fragment within those
+ * columns.
  */
 export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
@@ -3607,11 +3655,19 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     layoutDoc.footnotes ?? [],
   );
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
-    const geomOverride = (elements[0] as PaginatedBodyElement | undefined)?.sectionGeom;
+    const firstEl = elements[0] as PaginatedBodyElement | undefined;
+    const geomOverride = firstEl?.sectionGeom;
     const sectionProps: SectionProps = geomOverride
       ? { ...layoutDoc.section, ...geomOverride }
       : layoutDoc.section;
-    const section = resolveSectionLayoutContext(layoutSettings, sectionProps);
+    const resolvedSection = resolveSectionLayoutContext(layoutSettings, sectionProps);
+    // M-2 — the paginator stamped the resolved §17.6.4 column geometry active at this
+    // page's top on `colGeom`; prefer it over the body section's columns so a page in a
+    // continuous multi-column region exposes its real column set (the body section
+    // resolves the body-level columns only).
+    const section: SectionLayoutContext = firstEl?.colGeom
+      ? { ...resolvedSection, columns: firstEl.colGeom }
+      : resolvedSection;
     const geometry: SectionGeom = {
       pageWidth: sectionProps.pageWidth,
       pageHeight: sectionProps.pageHeight,
@@ -3624,7 +3680,7 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     };
     const fragments: PlacedFragment[] = [];
     for (const el of elements) {
-      const placed = bodyParagraphFragments.get(el as object);
+      const placed = bodyFlowFragments.get(el as object);
       if (placed) fragments.push(placed);
     }
     return Object.freeze({
@@ -3734,15 +3790,16 @@ function paragraphMeasurementEnvironment(
 // unmigrated caller (tables, headers/footers, the vertical-text prebuilt-pages swap)
 // is unaffected.
 
-/** Side table: emitted body element -> its placed paragraph fragment. WeakMap so an
- *  element that is garbage collected drops its entry, and so the parsed `DocParagraph`
- *  is never mutated (a non-split paragraph element is the source object itself). */
-const bodyParagraphFragments = new WeakMap<object, PlacedFragment>();
+/** Side table: emitted body element -> its placed flow fragment (a paragraph fragment
+ *  in PR 5, or a table fragment in PR 6). WeakMap so an element that is garbage
+ *  collected drops its entry, and so the parsed `DocParagraph` / `DocTable` is never
+ *  mutated (a non-split paragraph element is the source object itself). */
+const bodyFlowFragments = new WeakMap<object, PlacedFragment>();
 
 /** Read the placed fragment the paginator associated with an emitted body element,
- *  if any (paragraph elements the fragment migration covers). */
+ *  if any (paragraph or table elements the fragment migration covers). */
 export function bodyFragmentFor(el: PaginatedBodyElement): PlacedFragment | undefined {
-  return bodyParagraphFragments.get(el as object);
+  return bodyFlowFragments.get(el as object);
 }
 
 /** TEST ONLY — inject a placed fragment into the body-fragment side table for an
@@ -3754,7 +3811,7 @@ export const __test_setBodyFragment = (
   el: PaginatedBodyElement,
   placed: PlacedFragment,
 ): void => {
-  bodyParagraphFragments.set(el as object, placed);
+  bodyFlowFragments.set(el as object, placed);
 };
 
 /** Build an immutable body paragraph fragment. `source` is the PARSED paragraph
@@ -3803,6 +3860,154 @@ function placeParagraphFragment(
     widthPt,
     heightPt: paragraphFragmentAdvancePt(fragment),
   });
+}
+
+// ===== Table layout fragments (PR 6) =====
+//
+// A body table emits a {@link TableFragment} at each of its placement points (the
+// whole-table push, or one slice per page from {@link splitTableAcrossPages}), attached
+// to the emitted table element in the SAME `bodyFlowFragments` side table body
+// paragraphs use — so {@link layoutDocument} collects paragraph AND table fragments from
+// one map, and the parsed `DocTable` is never mutated. Production paint is unchanged in
+// PR 6 Task 15 (fragments are produced, not yet consumed); Task 16 routes table paint
+// through them.
+
+/** Measure a table-cell paragraph at scale 1 in the cell story context, no page wrap
+ *  oracle (a cell is isolated from page floats, §17.4.57). Mirrors the scale-1
+ *  measurement {@link measureCellParagraphHeight} performs, but returns the
+ *  {@link MeasuredParagraph} so a {@link ParagraphFragment} can own the line partition
+ *  instead of stamping it onto the parsed paragraph. `contentWPt` is the cell's content
+ *  width (spanned columns minus the cell margins). */
+function measureCellParagraphScale1(
+  cellState: RenderState,
+  para: DocParagraph,
+  contentWPt: number,
+): MeasuredParagraph {
+  const paragraphContext = resolveStateParagraphLayoutContext(cellState, para);
+  return measureParagraph(
+    para,
+    paragraphContext,
+    {
+      startYPt: 0,
+      paragraphXPt: 0,
+      availableWidthPt: contentWPt,
+      maximumYPt: cellState.pageH,
+      suppressSpaceBefore: true,
+    },
+    {
+      context: cellState.ctx,
+      fontFamilyClasses: cellState.fontFamilyClasses,
+    },
+    paragraphMeasurementEnvironment(cellState),
+  );
+}
+
+/** Build the recursive content fragments of one table cell (the {@link buildTableFragment}
+ *  {@link BuildCellBlocks} callback): a paragraph fragment per `<w:p>` and a nested-table
+ *  fragment per `<w:tbl>`, in document order, measured at scale 1 in the cell story.
+ *  `outerState` is the enclosing scale-1 measure state (body, or the parent cell for a
+ *  nested table); this enters THIS cell's story once. `cellTotalWidthPt` is the sum of
+ *  the grid columns the cell spans (before its own margins). */
+function buildTableCellBlocks(
+  cell: DocTableCell,
+  table: DocTable,
+  cellTotalWidthPt: number,
+  outerState: RenderState,
+): FlowFragment[] {
+  const cellState = withTableCellStory(outerState);
+  const cm = effCellMargins(cell, table);
+  const contentWPt = Math.max(0, cellTotalWidthPt - (cm.left + cm.right));
+  const blocks: FlowFragment[] = [];
+  for (const ce of cell.content) {
+    if (ce.type === 'paragraph') {
+      const para = ce as unknown as DocParagraph;
+      const measured = measureCellParagraphScale1(cellState, para, contentWPt);
+      const trailingExtentPt = Math.max(
+        measured.requestedSpaceAfterPt,
+        bottomBorderExtentPt(para.borders),
+      );
+      const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
+      // A row-split-by-lines slice element carries a `lineSlice`; the fragment paints
+      // that sub-range of the one measurement (the whole paragraph is measured at the
+      // cell width, so the slice indexes it directly). Absent ⇒ the whole paragraph.
+      const lineSlice = (ce as unknown as { lineSlice?: { start: number; end: number } }).lineSlice;
+      const lineStart = lineSlice ? lineSlice.start : 0;
+      const lineEnd = lineSlice ? Math.min(lineSlice.end, fullLineEnd) : fullLineEnd;
+      blocks.push(
+        buildParagraphFragment(
+          para,
+          measured,
+          lineStart,
+          lineEnd,
+          lineStart === 0,
+          lineEnd >= fullLineEnd,
+          trailingExtentPt,
+        ),
+      );
+    } else if (ce.type === 'table') {
+      const inner = ce as unknown as DocTable;
+      const innerCols = resolveColumnWidths(inner, contentWPt, cellState);
+      const innerRowHs = resolveTableRowHeights(inner, innerCols, 1, (c, w) =>
+        measureCellContentHeightPx(c, inner, w, 1, cellState),
+      );
+      blocks.push(
+        buildTableFragment({
+          table: inner,
+          columnWidthsPt: innerCols,
+          rowHeightsPt: innerRowHs,
+          continuesFromPreviousPage: false,
+          continuesOnNextPage: false,
+          repeatedHeaderRowCount: 0,
+          buildCellBlocks: (c, w) => buildTableCellBlocks(c, inner, w, cellState),
+        }),
+      );
+    }
+  }
+  return blocks;
+}
+
+/** Build and attach the {@link TableFragment} for one placed table (whole table or one
+ *  page slice) to the emitted element's side-table entry. `table` supplies the rows to
+ *  fragment (the SOURCE table for a whole-table push; the slice for a split). Never
+ *  mutates the parsed model. */
+function attachTableFragment(
+  el: PaginatedBodyElement,
+  table: DocTable,
+  colWidthsPt: number[],
+  rowHeightsPt: number[],
+  measureState: RenderState,
+  placement: {
+    columnIndex: number;
+    xPt: number;
+    yPt: number;
+    continuesFromPreviousPage: boolean;
+    continuesOnNextPage: boolean;
+    repeatedHeaderRowCount: number;
+    sourceRowIndexOf?: (fragmentRowIndex: number) => number;
+  },
+): void {
+  const fragment = buildTableFragment({
+    table,
+    columnWidthsPt: colWidthsPt,
+    rowHeightsPt,
+    continuesFromPreviousPage: placement.continuesFromPreviousPage,
+    continuesOnNextPage: placement.continuesOnNextPage,
+    repeatedHeaderRowCount: placement.repeatedHeaderRowCount,
+    sourceRowIndexOf: placement.sourceRowIndexOf,
+    buildCellBlocks: (cell, w) => buildTableCellBlocks(cell, table, w, measureState),
+  });
+  const widthPt = colWidthsPt.reduce((s, w) => s + w, 0);
+  bodyFlowFragments.set(
+    el,
+    Object.freeze({
+      fragment,
+      columnIndex: placement.columnIndex,
+      xPt: placement.xPt,
+      yPt: placement.yPt,
+      widthPt,
+      heightPt: tableFragmentHeightPt(fragment),
+    }),
+  );
 }
 
 /** Master switch for the M-1 fit-check measurement reuse. Always ON in production; the
@@ -3880,7 +4085,7 @@ function attachBodyParagraphFragment(
     true,
     trailingExtentPt,
   );
-  bodyParagraphFragments.set(el, placeParagraphFragment(
+  bodyFlowFragments.set(el, placeParagraphFragment(
     fragment,
     placement.columnIndex,
     placement.paragraphXPt,
@@ -4221,7 +4426,7 @@ function splitParagraphAcrossPages(
           isFinalSlice,
           trailingExtent,
         );
-        bodyParagraphFragments.set(sliceEl, placeParagraphFragment(
+        bodyFlowFragments.set(sliceEl, placeParagraphFragment(
           fragment,
           tagColIndex ? tagColIndex() : 0,
           paragraphXPt(),
@@ -5112,6 +5317,21 @@ export function splitTableAcrossPages(
   /** Optional row-block splitter used by computePages. Direct unit tests can omit
    *  this and exercise only row-boundary splitting. */
   rowSplit?: { colWidthsPt: number[]; state: RenderState },
+  /** PR 6 — invoked once per emitted slice to attach its {@link TableFragment}. The
+   *  caller closes over the column widths / measure state and builds the fragment
+   *  (the slice element carries the rows + `colIndex`); `meta` supplies the slice's
+   *  per-row heights, page-continuation flags, repeated-header count, and the
+   *  fragment→source row-index map. Omitted (direct unit tests) ⇒ no fragment. */
+  emitTableFragment?: (
+    sliceEl: PaginatedBodyElement,
+    meta: {
+      heightsPt: number[];
+      continuesFromPreviousPage: boolean;
+      continuesOnNextPage: boolean;
+      repeatedHeaderRowCount: number;
+      sourceRowIndexOf: (fragmentRowIndex: number) => number;
+    },
+  ) => void,
 ): number {
   const colTop = columnTop ?? (() => 0);
   let workTable = table;
@@ -5223,11 +5443,29 @@ export function splitTableAcrossPages(
     // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
     // prepended on continuations, matching `sliceRows`) so the paint pass reuses
     // them 1:1 instead of re-measuring the slice.
+    const sliceHeightsPt = isContinuation
+      ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
+      : workRowHs.slice(start, end);
     if (tableStamp) {
-      const sliceHeightsPt = isContinuation
-        ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
-        : workRowHs.slice(start, end);
       stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
+    }
+    if (emitTableFragment) {
+      // §17.4.78 — a continuation slice prepends the repeated header rows; the body
+      // rows begin at `start` in workRows. Map each fragment row back to its source
+      // index: a repeated header keeps its original 0-based header index; a body row
+      // is `start + (i − headerCount)` (workRows-relative, identity to the original
+      // table for a row-boundary split). Page continuation is derived from the slice
+      // window: it continues from a previous page whenever it does not start the
+      // table, and onto the next whenever rows remain.
+      const headerPrepend = isContinuation ? headerCount : 0;
+      emitTableFragment(sliceEl, {
+        heightsPt: sliceHeightsPt,
+        continuesFromPreviousPage: start > 0,
+        continuesOnNextPage: end < n,
+        repeatedHeaderRowCount: headerPrepend,
+        sourceRowIndexOf: (i) =>
+          i < headerPrepend ? i : start + (i - headerPrepend),
+      });
     }
     pages[pages.length - 1].push(sliceEl);
 
@@ -6708,6 +6946,7 @@ function isFragmentPaintableParagraph(
   if (
     !fragmentPaintEnabled ||
     placed === undefined ||
+    placed.fragment.kind !== 'paragraph' ||
     para.numbering != null ||
     state.floats.length !== 0 ||
     state.verticalCJK ||

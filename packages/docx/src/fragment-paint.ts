@@ -46,6 +46,10 @@ export function paintParagraphFragment(
   } = {},
 ): void {
   const fragment = placed.fragment;
+  // Body paragraph paint only. A table fragment is painted by the table-fragment
+  // path; the migration gate ({@link isFragmentPaintableParagraph}) never routes one
+  // here, so this narrow is defensive and a no-op in production.
+  if (fragment.kind !== 'paragraph') return;
   const measured = fragment.measured;
   // The stored scale-1 line partition for the whole paragraph. Empty for a markOnly
   // (empty / anchor-only) paragraph — the renderer's empty-mark branch handles it.
