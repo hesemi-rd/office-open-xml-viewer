@@ -7403,11 +7403,23 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // with §17.3.2.43 `w:w` exactly like the sibling arms: the fixed pitch
           // is divided by `segCharScale` so the ×scale frame reproduces its
           // un-scaled magnitude.
+          // ECMA-376 §17.3.2.14 (Manual Run Width) + UAX#9 rule L2: mirror the
+          // docx #830 RTL tab-stop leading-edge rule. A region's residual pad
+          // trails its LAST glyph in READING order — the physical right under an
+          // LTR base (the pen advance already leaves it there), but the physical
+          // LEFT under an RTL base. So when this region-end segment draws in the
+          // RTL visual frame, shift the glyph origin rightward by the pad so the
+          // glyph sits at the leading (right) edge and the pad falls to its left.
+          // (Non-end / multi-char segments carry trailingPad == 0 ⇒ no shift, and
+          // every LTR segment keeps a zero offset ⇒ byte-identical.)
+          const fitRtl = !!(visual && visual.rtl[si]);
+          const fitPad = s.fitTextTrailingPadPx ?? 0;
+          const fitDrawX = x + (fitRtl ? fitPad : 0);
           const scaled = segCharScale !== 1;
           const prevLetterSpacing = ctx.letterSpacing;
-          if (scaled) { ctx.save(); ctx.translate(x, 0); ctx.scale(segCharScale, 1); }
+          if (scaled) { ctx.save(); ctx.translate(fitDrawX, 0); ctx.scale(segCharScale, 1); }
           ctx.letterSpacing = `${s.fitTextPerGapPx / segCharScale}px`;
-          ctx.fillText(s.text, scaled ? 0 : x, baseline + yOffset);
+          ctx.fillText(s.text, scaled ? 0 : fitDrawX, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
           if (scaled) ctx.restore();
         } else if (segGridDelta !== 0) {
