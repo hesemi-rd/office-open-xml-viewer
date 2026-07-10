@@ -131,6 +131,7 @@ describe('measureParagraph', () => {
     expect(result.contentEndYPt).toBe(23);
     expect(result.requestedSpaceBeforePt).toBe(3);
     expect(result.requestedSpaceAfterPt).toBe(4);
+    expect(result.uniformRubyAdvancePt).toBe(0);
     expect(result.placement).toEqual(placement());
   });
 
@@ -245,6 +246,60 @@ describe('measureParagraph', () => {
 
     expect(result.lines.length).toBeGreaterThan(1);
     expect(new Set(result.lines.map((line) => line.advancePt))).toEqual(new Set([30]));
+  });
+
+  it('carries the paragraph-wide ruby advance through continuations', () => {
+    const doc = paragraph({
+      spaceBefore: 0,
+      runs: [
+        { type: 'text', ...textRun('aa', { ruby: { text: 'ruby', fontSizePt: 12 } }) },
+        { type: 'text', ...textRun(' bb cc dd ee ff gg') },
+      ],
+    });
+    const context = layoutContext({
+      lineGrid: { active: true, pitchPt: 10 },
+      spaceBeforePt: 0,
+      hasRuby: true,
+    });
+    const position = placement({ startYPt: 0, availableWidthPt: 18 });
+    const full = measureParagraph(doc, context, position, measurer, environment());
+    const uniformAdvancePt = full.lines[0].advancePt;
+
+    expect(full.lines.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(full.lines.map((line) => line.advancePt)))
+      .toEqual(new Set([uniformAdvancePt]));
+
+    const continuation = measureParagraph(
+      doc,
+      context,
+      position,
+      measurer,
+      environment(),
+      {
+        boundary: full.lines[0].layout.consumedEnd!,
+        uniformRubyAdvancePt: uniformAdvancePt,
+      },
+    );
+
+    expect(continuation.lines.every((line) => line.advancePt === uniformAdvancePt)).toBe(true);
+    expect(full.uniformRubyAdvancePt).toBe(uniformAdvancePt);
+    expect(continuation.uniformRubyAdvancePt).toBe(uniformAdvancePt);
+
+    const secondContinuation = measureParagraph(
+      doc,
+      context,
+      position,
+      measurer,
+      environment(),
+      {
+        boundary: continuation.lines[0].layout.consumedEnd!,
+        uniformRubyAdvancePt: continuation.uniformRubyAdvancePt,
+      },
+    );
+
+    expect(continuation.lines.length).toBeGreaterThan(1);
+    expect(secondContinuation.lines.every((line) => line.advancePt === uniformAdvancePt)).toBe(true);
+    expect(secondContinuation.uniformRubyAdvancePt).toBe(uniformAdvancePt);
   });
 
   it('passes bidi policy through to RTL tab layout', () => {

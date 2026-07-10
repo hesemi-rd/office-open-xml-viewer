@@ -56,7 +56,10 @@ interface Fixture {
   readonly segs: () => LayoutSeg[];
   readonly tabStops?: TabStop[];
   readonly kinsoku?: KinsokuRules;
+  readonly baseRtl?: boolean;
   readonly hasTrailingBreak?: boolean;
+  readonly expectedMidSegmentIndex?: number;
+  readonly fitTextRegion?: { readonly firstSegIndex: number; readonly lastSegIndex: number };
 }
 
 const crossRunKinsoku: KinsokuRules = {
@@ -75,6 +78,7 @@ const fixtures: Fixture[] = [
     name: 'CJK per-glyph split',
     width: 25,
     segs: () => [textSeg('あ'.repeat(18))],
+    expectedMidSegmentIndex: 0,
   },
   {
     name: 'kinsoku cross-run retraction',
@@ -106,6 +110,7 @@ const fixtures: Fixture[] = [
     name: 'over-long Latin overflow-wrap',
     width: 20,
     segs: () => [textSeg('abcdefghijklmnopqrst')],
+    expectedMidSegmentIndex: 0,
   },
   {
     name: 'small-caps glued group',
@@ -118,7 +123,69 @@ const fixtures: Fixture[] = [
       textSeg('words'),
     ],
   },
+  {
+    name: 'bidi RTL ordinary tab',
+    width: 70,
+    tabStops: [{ pos: 50, alignment: 'left', leader: 'dot' }],
+    baseRtl: true,
+    segs: () => [
+      textSeg('פתיחה', { rtl: true }),
+      lineBreak(),
+      textSeg('כותרת ', { rtl: true }),
+      { isTab: true, fontSize: 10, measuredWidth: 0 },
+      textSeg('12', { rtl: true }),
+      lineBreak(),
+      textSeg('סיום', { rtl: true }),
+    ],
+  },
+  {
+    name: 'atomic fitText region',
+    width: 30,
+    fitTextRegion: { firstSegIndex: 1, lastSegIndex: 2 },
+    segs: () => [
+      textSeg('lead '),
+      textSeg('ab', {
+        fitTextRegionIndex: 7,
+        fitTextRegionStart: true,
+      }),
+      textSeg('cd', {
+        fitTextRegionIndex: 7,
+        fitTextRegionEnd: true,
+      }),
+      textSeg(' tail tail tail'),
+    ],
+  },
+  {
+    name: 'ruby ascent reserve',
+    width: 30,
+    segs: () => [
+      textSeg('lead '),
+      textSeg('ruby', { ruby: { text: 'ルビ', fontSizePt: 8 } }),
+      textSeg(' tail tail tail'),
+    ],
+  },
+  {
+    name: 'astral CJK split',
+    width: 12,
+    segs: () => [textSeg('𠀋'.repeat(12))],
+    expectedMidSegmentIndex: 0,
+  },
+  {
+    name: 'Latin lead with glued breakable CJK follower',
+    width: 30,
+    segs: () => [
+      textSeg('intro'),
+      lineBreak(),
+      textSeg('Roman'),
+      textSeg('、あいうえお', { joinPrev: true }),
+      textSeg(' tail'),
+    ],
+    expectedMidSegmentIndex: 3,
+  },
 ];
+
+// Vertical text does not enter this horizontal breaking loop, and state-sensitive
+// fields are resolved before LayoutSegs exist, so neither belongs in this layer's corpus.
 
 function layoutFixture(fixture: Fixture, startBoundary?: LineBoundary): LayoutLine[] {
   const segs = fixture.segs().map((seg) => ({ ...seg })) as LayoutSeg[];
@@ -136,9 +203,39 @@ function layoutFixture(fixture: Fixture, startBoundary?: LineBoundary): LayoutLi
     0,
     36,
     fixture.width,
-    false,
+    fixture.baseRtl ?? false,
     startBoundary,
   );
+}
+
+function lineStructure(lines: LayoutLine[]) {
+  return lines.map((line) => ({
+    segments: line.segments.map((segment) => {
+      if ('text' in segment) {
+        return { kind: 'text' as const, text: segment.text, measuredWidth: segment.measuredWidth };
+      }
+      if ('isTab' in segment) {
+        return {
+          kind: 'tab' as const,
+          measuredWidth: segment.measuredWidth,
+          leader: segment.leader,
+        };
+      }
+      if ('imagePath' in segment) {
+        return { kind: 'image' as const, measuredWidth: segment.measuredWidth };
+      }
+      return { kind: 'math' as const, measuredWidth: segment.measuredWidth };
+    }),
+    height: line.height,
+    ascent: line.ascent,
+    descent: line.descent,
+    intendedSingle: line.intendedSingle,
+    xOffset: line.xOffset,
+    availWidth: line.availWidth,
+    hasRuby: line.hasRuby === true,
+    endsWithBreak: line.endsWithBreak === true,
+    consumedEnd: line.consumedEnd,
+  }));
 }
 
 function textSequence(lines: LayoutLine[]): string[] {
@@ -156,15 +253,45 @@ describe('layoutLines consumed-content boundaries', () => {
   for (const fixture of fixtures) {
     it(`reproduces every content-bearing suffix for ${fixture.name}`, () => {
       const lines = layoutFixture(fixture);
-      expect(lines.length).toBeGreaterThan(0);
+      expect(lines.length).toBeGreaterThanOrEqual(2);
+      if (fixture.expectedMidSegmentIndex !== undefined) {
+        const original = fixture.segs();
+        expect(lines.some((line) => {
+          const boundary = line.consumedEnd;
+          if (
+            !boundary
+            || boundary.segIndex !== fixture.expectedMidSegmentIndex
+            || boundary.charOffset <= 0
+          ) return false;
+          const segment = original[boundary.segIndex];
+          return segment !== undefined
+            && 'text' in segment
+            && boundary.charOffset < segment.text.length;
+        })).toBe(true);
+      }
+      if (fixture.fitTextRegion) {
+        const { firstSegIndex, lastSegIndex } = fixture.fitTextRegion;
+        expect(lines.every((line) => {
+          const segIndex = line.consumedEnd?.segIndex;
+          return segIndex === undefined || segIndex <= firstSegIndex || segIndex > lastSegIndex;
+        })).toBe(true);
+      }
+      if (fixture.baseRtl) {
+        expect(lines.some((line) => line.segments.some((segment) =>
+          'isTab' in segment && segment.measuredWidth > 0,
+        ))).toBe(true);
+      }
+      if (fixture.name === 'ruby ascent reserve') {
+        expect(lines.some((line) => line.hasRuby === true)).toBe(true);
+      }
 
       for (let i = 0; i < lines.length; i++) {
         const boundary = lines[i].consumedEnd;
         expect(boundary).toBeDefined();
         if (!boundary) continue;
 
-        const expected = textSequence(lines.slice(i + 1));
-        const suffix = textSequence(layoutFixture(fixture, boundary));
+        const expected = lineStructure(lines.slice(i + 1));
+        const suffix = lineStructure(layoutFixture(fixture, boundary));
 
         // A trailing manual break creates a final zero-content line. Its
         // predecessor and that empty line both necessarily end at the same
@@ -172,7 +299,7 @@ describe('layoutLines consumed-content boundaries', () => {
         // states. The mid-stream boundary below still proves that suffix layout
         // preserves and re-emits the trailing empty line.
         if (fixture.hasTrailingBreak && isEnd(boundary, fixture.segs().length) && expected.length > 0) {
-          expect(expected).toEqual(['']);
+          expect(expected[0].segments).toEqual([]);
           expect(suffix).toEqual([]);
           continue;
         }
@@ -203,6 +330,7 @@ describe('layoutLines consumed-content boundaries', () => {
   for (const fixture of fixtures) {
     it(`records monotonic boundaries ending at END for ${fixture.name}`, () => {
       const segCount = fixture.segs().length;
+      const original = fixture.segs();
       const boundaries = layoutFixture(fixture).map((line) => line.consumedEnd);
       expect(boundaries.every((boundary) => boundary !== undefined)).toBe(true);
 
@@ -213,6 +341,17 @@ describe('layoutLines consumed-content boundaries', () => {
           current.segIndex > previous.segIndex
             || (current.segIndex === previous.segIndex && current.charOffset >= previous.charOffset),
         ).toBe(true);
+      }
+      for (const boundary of boundaries) {
+        if (!boundary) continue;
+        const segment = original[boundary.segIndex];
+        if (!segment || !('text' in segment)) continue;
+        const offset = boundary.charOffset;
+        const previous = segment.text[offset - 1] ?? '';
+        const current = segment.text[offset] ?? '';
+        expect(
+          /[\uD800-\uDBFF]/.test(previous) && /[\uDC00-\uDFFF]/.test(current),
+        ).toBe(false);
       }
       expect(boundaries.at(-1)).toEqual({ segIndex: segCount, charOffset: 0 });
     });

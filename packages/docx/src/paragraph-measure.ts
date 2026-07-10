@@ -115,6 +115,9 @@ export interface MeasuredParagraph {
   readonly markOnly: boolean;
   readonly requestedSpaceBeforePt: number;
   readonly requestedSpaceAfterPt: number;
+  /** ECMA-376 §17.3.3.25 paragraph-wide uniform line advance in points, snapped
+   *  to the docGrid. Zero when the paragraph has no ruby. */
+  readonly uniformRubyAdvancePt: number;
   readonly contentStartYPt: number;
   readonly contentEndYPt: number;
   readonly placement: Readonly<ParagraphPlacement>;
@@ -143,7 +146,10 @@ export function measureParagraph(
   placement: ParagraphPlacement,
   measurer: TextMeasurer,
   environment: ParagraphMeasurementEnvironment,
-  continuation?: { readonly boundary: LineBoundary },
+  continuation?: {
+    readonly boundary: LineBoundary;
+    readonly uniformRubyAdvancePt?: number;
+  },
 ): MeasuredParagraph {
   const grid = paragraphGrid(context);
   const paragraphWidthPt = Math.max(
@@ -204,6 +210,7 @@ export function measureParagraph(
       markOnly: true,
       requestedSpaceBeforePt,
       requestedSpaceAfterPt,
+      uniformRubyAdvancePt: 0,
       contentStartYPt: markTopPt,
       contentEndYPt: markTopPt + markAdvancePt,
       placement: recordedPlacement,
@@ -258,7 +265,7 @@ export function measureParagraph(
   );
   if (lines.length === 0) return measureMarkOnly();
 
-  const uniformRubyAdvancePt = context.hasRuby
+  let uniformRubyAdvancePt = context.hasRuby
     ? snapParagraphLineToGrid(
         Math.max(0, ...lines.map((line) => lineBoxHeight(
           context.lineSpacing,
@@ -273,6 +280,12 @@ export function measureParagraph(
         grid,
       )
     : 0;
+  if (context.hasRuby && continuation?.uniformRubyAdvancePt !== undefined) {
+    uniformRubyAdvancePt = Math.max(
+      uniformRubyAdvancePt,
+      continuation.uniformRubyAdvancePt,
+    );
+  }
   const measuredLines: MeasuredLine[] = [];
   for (const line of lines) {
     const topYPt = line.topY !== undefined && line.topY > cursorPt
@@ -299,6 +312,7 @@ export function measureParagraph(
     markOnly: false,
     requestedSpaceBeforePt,
     requestedSpaceAfterPt,
+    uniformRubyAdvancePt,
     contentStartYPt: measuredLines[0].topYPt,
     contentEndYPt: cursorPt,
     placement: recordedPlacement,

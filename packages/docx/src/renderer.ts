@@ -4437,6 +4437,7 @@ function splitParagraphAcrossPages(
     const indRight = paragraphContext.physicalIndentRightPt;
     let paraW = Math.max(1, contentWPt() - indLeft - indRight);
     let remainderBoundary: LineBoundary | null = null;
+    let remainderUniformRubyPt: number | undefined;
     const measureAtCurrentPlacement = (suppressLeadingSpace: boolean) => measureParagraph(
       para,
       paragraphContext,
@@ -4455,7 +4456,9 @@ function splitParagraphAcrossPages(
         fontFamilyClasses: measureState.fontFamilyClasses,
       },
       paragraphMeasurementEnvironment(measureState),
-      remainderBoundary !== null ? { boundary: remainderBoundary } : undefined,
+      remainderBoundary !== null
+        ? { boundary: remainderBoundary, uniformRubyAdvancePt: remainderUniformRubyPt }
+        : undefined,
     );
     let measured = measureAtCurrentPlacement(suppressSpaceBefore);
     const placeMarkOnly = (): { endY: number } => {
@@ -4527,11 +4530,20 @@ function splitParagraphAcrossPages(
       if (Math.abs(measured.placement.availableWidthPt - destW) <= eps) return;
       const boundary = lines[lineIdx - 1].consumedEnd;
       if (!boundary) return;
-      const previous = { measured, lines, lineExtents, paraW, boundary: remainderBoundary };
+      const previous = {
+        measured,
+        lines,
+        lineExtents,
+        paraW,
+        boundary: remainderBoundary,
+        uniformRubyAdvancePt: remainderUniformRubyPt,
+      };
       remainderBoundary = boundary;
+      remainderUniformRubyPt = measured.uniformRubyAdvancePt;
       const next = measureAtCurrentPlacement(true);
       if (next.markOnly || next.lines.length === 0) {
         remainderBoundary = previous.boundary;
+        remainderUniformRubyPt = previous.uniformRubyAdvancePt;
         return;
       }
       measured = next;
