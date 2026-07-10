@@ -289,6 +289,10 @@ export interface LayoutLine {
   /** Set when at least one segment on this line carries a ruby annotation —
    *  enables docGrid pitch snapping in lineBoxHeight. */
   hasRuby?: boolean;
+  /** §17.6.5 — a text segment on this line contains an East Asian code point
+   *  (EAST_ASIAN_RE), enabling docGrid line-cell rounding. Undefined/false for
+   *  synthesized textless lines. */
+  eastAsian?: boolean;
   /** ECMA-376 §17.3.3.1 — this line is terminated by a MANUAL line break
    *  (`<w:br w:type="textWrapping"/>`). In a justified (`both`) paragraph it is
    *  the end of a logical line and must be left-aligned, not stretched — exactly
@@ -333,7 +337,7 @@ export interface WrapLayoutCtx {
     maximumWidthPt: number;
   };
   /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
-  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number) => number;
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, emPx?: number, eastAsian?: boolean) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -842,6 +846,30 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
 }
 
 /**
+ * ECMA-376 §17.6.5 docGrid line grid — number of whole grid CELLS a
+ * single-spaced East Asian line of em `emPx` occupies on a pitch of `pitchPx`.
+ *
+ * Measured in Word PDF output (`pdftotext -bbox`): 10.5pt and 12pt lines on an
+ * 18pt pitch occupy one cell (the sub-pitch region), while a 20pt line on a
+ * 20pt pitch occupies two (the em == pitch boundary). The k >= 2 region — for
+ * example an em of two pitches occupying three cells — extrapolates
+ * `floor(em / pitch) + 1` beyond the measured range because the boundary rule
+ * is scale-free: an em square that fills k pitches still needs inter-line
+ * leading and therefore spills into cell k+1. No Word measurement covers that
+ * region yet.
+ *
+ * For a mixed-size line, callers supply the tallest run's em. This conservative
+ * anti-clipping choice follows the tallest-run line-box rule (§17.3.1.33); it is
+ * not a Word-measured mixed-size grid behaviour.
+ * ECMA-376 defines `linePitch` as one single-spaced line; rounding taller lines
+ * to whole cells is Word runtime behaviour. Returns at least 1 for every finite
+ * `emPx >= 0`.
+ */
+export function docGridLineCells(emPx: number, pitchPx: number): number {
+  return pitchPx > 0 ? Math.floor(emPx / pitchPx) + 1 : 1;
+}
+
+/**
  * Compute the total line-box height in px from a line's natural font metrics
  * (fontBoundingBoxAscent + fontBoundingBoxDescent) per ECMA-376 §17.3.1.33.
  *
@@ -865,6 +893,7 @@ export function lineBoxHeight(
   hasRuby?: boolean,
   intendedSinglePx = 0,
   eastAsian = false,
+  emPx = 0,
 ): number {
   const glyphNatural = ascentPx + descentPx;
   // For `auto`/single spacing the multiplier applies to the intended font's
@@ -885,27 +914,22 @@ export function lineBoxHeight(
   // ESSAY (9 pt, no explicit line) at ~1 pitch (~18 pt) while a 1.33×
   // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
   //
-  // Note on ruby paragraphs: an earlier version of this function snapped
-  // ruby lines up to the next integer grid pitch on the theory that Word
-  // reserves whole grid slots for them. Empirical comparison against Word
-  // PNG exports of sample-5 (13.5pt base + 8pt rt on pitch=18) showed
-  // Word does NOT snap to integer pitches — the actual line height lands
-  // around 2.3× the pitch, which is what `natural` produces directly when
-  // the rt reserve in buildSegments is set generously enough. So the
-  // ruby-aware logic now lives entirely in the segment-level ascent
-  // reservation, and lineBoxHeight stays format-agnostic.
   // A single-spaced line on a docGrid snaps to whole grid CELLS in East Asian
-  // text: Word rounds its height UP to the next pitch multiple, so a line taller
-  // than one pitch reserves two (or more). sample-9 (pdftotext -bbox of the Word
-  // PDF): a 20pt CJK title on a 20pt pitch is 40px = 2 cells; an 11pt body is
-  // 20px = 1 cell. A Latin-only line is NOT cell-rounded — it keeps its natural
+  // text. The number of cells is derived from the run em rather than the Canvas
+  // glyph bounding box; see docGridLineCells for the boundary rule and Word
+  // observations. A Latin-only line is NOT cell-rounded — it keeps its natural
   // height above a one-cell floor (demo/sample-1: an 18pt heading on an 18pt
   // pitch stays ~20.7px, not 36). ECMA-376 Part 1 only defines the natural ≤
   // pitch case (§17.6.5 / §17.3.1.32); the East-Asian cell rounding for taller
   // lines is Word runtime behaviour, so it is gated on the line's script.
-  const gridSingleCell = (): number => eastAsian
-    ? Math.max(pitchPx, Math.ceil(glyphNatural / pitchPx) * pitchPx)
-    : Math.max(glyphNatural, pitchPx);
+  const gridSingleCell = (): number => {
+    if (!eastAsian) return Math.max(glyphNatural, pitchPx);
+    // Ruby lines reserve real furigana height (base + rt); honor the measured
+    // glyph box so the annotation is not clipped. Plain EA lines discount the
+    // substituted font's ~1.6em leading and snap by the run EM.
+    if (hasRuby) return Math.max(pitchPx, Math.ceil(glyphNatural / pitchPx) * pitchPx);
+    return docGridLineCells(emPx, pitchPx) * pitchPx;
+  };
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
     // No explicit spacing → single line. Use the intended single-line height
@@ -1029,7 +1053,7 @@ export function paragraphMarkLineHeight(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  return lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian);
+  return lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian, fs * scale);
 }
 
 /**
@@ -2366,13 +2390,16 @@ export function layoutLines(
   };
 
   let lineHasRuby = false;
+  let lineEastAsian = false;
   const flush = (
     forceHeight?: number,
     brTerminated = false,
     nextStart?: LineBoundary,
   ) => {
     applyBidiTabs();
-    const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
+    // §17.3.3.1 — the break is one run among the line's runs: its own size
+    // participates in the line height but must not override a taller peer.
+    const h = forceHeight !== undefined ? Math.max(lineHeight, forceHeight) : (lineHeight || 10);
     // If the line has no measured content (empty/line-break line), synthesize
     // stable ascent/descent from the effective font size so wrap/baseline math
     // stays consistent with non-empty lines.
@@ -2389,11 +2416,12 @@ export function layoutLines(
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
       hasRuby: lineHasRuby,
+      eastAsian: lineEastAsian,
       endsWithBreak: brTerminated,
       consumedEnd: nextStart ?? queue[0]?.src ?? endBoundary,
     });
     if (wrapCtx) {
-      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, h * scale, lineEastAsian);
     }
     currentLine = [];
     currentWidth = 0;
@@ -2403,6 +2431,7 @@ export function layoutLines(
     lineDescent = 0;
     lineIntendedSingle = 0;
     lineHasRuby = false;
+    lineEastAsian = false;
     isFirst = false;
     startLine(minLineStartWidth());
   };
@@ -2424,6 +2453,7 @@ export function layoutLines(
     if (!('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
+      if (!lineEastAsian && EAST_ASIAN_RE.test(ts.text)) lineEastAsian = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
       // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
       // Small caps (non-super/sub) keep the FULL run size here so the line box

@@ -113,6 +113,36 @@ function paragraph(): DocParagraph {
   } as unknown as DocParagraph;
 }
 
+/** A paragraph with caller-supplied runs (fontSize in pt; text runs get the
+ *  same inert defaults as {@link paragraph}). */
+function paragraphWithRuns(runs: Record<string, unknown>[]): DocParagraph {
+  const base = paragraph() as unknown as { runs: unknown[] };
+  base.runs = runs.map((r) => (
+    r.type === 'break'
+      ? r
+      : {
+          type: 'text',
+          bold: false, italic: false, underline: false, strikethrough: false,
+          color: null, fontFamily: 'serif', fontFamilyEastAsia: 'serif',
+          isLink: false, background: null, vertAlign: null, hyperlink: null,
+          ...r,
+        }
+  ));
+  return base as unknown as DocParagraph;
+}
+
+function cellWith(para: DocParagraph): DocTableCell {
+  const c = cell() as unknown as { content: unknown[] };
+  c.content = [{ type: 'paragraph', ...para }];
+  return c as unknown as DocTableCell;
+}
+
+function rowWith(para: DocParagraph): DocTableRow {
+  const r = row() as unknown as { cells: unknown[] };
+  r.cells = [cellWith(para)];
+  return r as unknown as DocTableRow;
+}
+
 function cell(): DocTableCell {
   return {
     content: [{ type: 'paragraph', ...paragraph() }],
@@ -189,5 +219,46 @@ describe('table-cell line grid compatibility', () => {
       1,
       makeMeasureState(true, 'snapToChars'),
     )).toBe(20);
+  });
+});
+
+// The docGrid line-cell count (docGridLineCells) is derived from the line's em
+// — the TALLEST run on the line (ECMA-376 §17.6.5; the grid reserves whole
+// cells for the line box, which the tallest run governs). These integration
+// cases pin two call-path properties the pure lineBoxHeight tests cannot see:
+// which em the layout hands over, and which script gate each LINE uses. The
+// grid is active in a cell via adjustLineHeightInTable (§17.15.3.1); pitch =
+// 20 pt; the mock font box is a fixed 8+2 px, so every height difference below
+// comes from the em / script routing alone.
+describe('docGrid line-cell integration through the cell measure path', () => {
+  it('a manual line break in a SMALLER run does not shrink the line em (tallest governs)', () => {
+    // Line 1: 'あ' at 20 pt + 'い' at 10 pt, terminated by a <w:br> whose
+    // nearby size resolves to 10 pt (§17.3.3.1; findNearbyFontSize looks at the
+    // preceding run). Line 2: 'う' at 10 pt. The break must NOT overwrite the
+    // line's tallest em (20 pt → floor(20/20)+1 = 2 cells = 40) with its own
+    // 10 pt (1 cell = 20).
+    const para = paragraphWithRuns([
+      { text: 'あ', fontSize: 20 },
+      { text: 'い', fontSize: 10 },
+      { type: 'break', breakType: 'line' },
+      { text: 'う', fontSize: 10 },
+    ]);
+    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+      .toBe(60); // 40 (2 cells) + 20 (1 cell)
+  });
+
+  it('the East Asian cell rounding is gated per LINE, not per paragraph', () => {
+    // Line 1: CJK 10 pt → 1 cell (20). Line 2: Latin-only 'Hello' at 22 pt —
+    // Word does not cell-round Latin lines; they keep their natural height
+    // above a one-cell floor (mock natural = 10 px → floor = 20), NOT the em
+    // cell count floor(22/20)+1 = 2 cells = 40 that a paragraph-level East
+    // Asian flag would apply.
+    const para = paragraphWithRuns([
+      { text: 'あ', fontSize: 10 },
+      { type: 'break', breakType: 'line' },
+      { text: 'Hello', fontSize: 22 },
+    ]);
+    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+      .toBe(40); // 20 (CJK, 1 cell) + 20 (Latin, one-cell floor)
   });
 });
