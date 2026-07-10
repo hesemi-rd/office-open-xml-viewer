@@ -2977,6 +2977,16 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
         && a.snap_to_grid == b.snap_to_grid
+        // Character metrics change measured or painted geometry, so every one
+        // must match before a noBreakHyphen run can be folded into its neighbour.
+        && a.char_spacing == b.char_spacing
+        && a.fit_text_val == b.fit_text_val
+        && a.fit_text_id == b.fit_text_id
+        && a.char_scale == b.char_scale
+        && a.position == b.position
+        && a.kerning == b.kerning
+        && a.east_asian_vert == b.east_asian_vert
+        && a.east_asian_vert_compress == b.east_asian_vert_compress
 }
 
 // Same parse-context threading as handle_run_in_para.
@@ -3120,8 +3130,11 @@ fn parse_run_inner(
     // char_scale as a horizontal glyph stretch, position as a baseline y-offset,
     // and kern as the ctx.fontKerning threshold (all measure==paint).
     let char_spacing = fmt.char_spacing;
-    let fit_text_val = fmt.fit_text_val;
-    let fit_text_id = fmt.fit_text_id;
+    let fit_text_val = fmt.fit_text.as_ref().map(|fit_text| fit_text.val);
+    let fit_text_id = fmt
+        .fit_text
+        .as_ref()
+        .and_then(|fit_text| fit_text.id.clone());
     let char_scale = fmt.char_scale;
     let position = fmt.position;
     let kerning = fmt.kerning;
@@ -3190,7 +3203,7 @@ fn parse_run_inner(
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
-                        fit_text_id,
+                        fit_text_id: fit_text_id.clone(),
                         char_scale,
                         position,
                         kerning,
@@ -3270,7 +3283,7 @@ fn parse_run_inner(
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
-                        fit_text_id,
+                        fit_text_id: fit_text_id.clone(),
                         char_scale,
                         position,
                         kerning,
@@ -3320,7 +3333,7 @@ fn parse_run_inner(
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
-                    fit_text_id,
+                    fit_text_id: fit_text_id.clone(),
                     char_scale,
                     position,
                     kerning,
@@ -3415,7 +3428,7 @@ fn parse_run_inner(
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
-                    fit_text_id,
+                    fit_text_id: fit_text_id.clone(),
                     char_scale,
                     position,
                     kerning,
@@ -3612,7 +3625,7 @@ fn parse_run_inner(
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
-                    fit_text_id,
+                    fit_text_id: fit_text_id.clone(),
                     char_scale,
                     position,
                     kerning,
@@ -8741,6 +8754,37 @@ mod tests {
         );
     }
 
+    // ECMA-376 §17.3.2.14: a fitText run renders at a MANUAL width, so merging
+    // a plain noBreakHyphen run into it (or vice versa) would silently extend
+    // the fixed-width region over glyphs that must lay out naturally. The
+    // `text_runs_mergeable` gate must treat `fit_text_val`/`fit_text_id` like
+    // every other formatting field.
+    #[test]
+    fn no_break_hyphen_does_not_merge_across_a_fit_text_change() {
+        let base = RunFmt::default();
+        let runs = parse_para(
+            concat!(
+                r#"<w:r><w:rPr><w:fitText w:val="2400" w:id="9"/></w:rPr><w:t>999</w:t></w:r>"#,
+                r#"<w:r><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+            ),
+            &base,
+            &StyleMap::parse(""),
+        );
+        let texts: Vec<&str> = runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["999", "-99"],
+            "a fitText difference must block the noBreakHyphen merge — the \
+             fixed-width \"999\" and the plain \"-99\" stay separate runs"
+        );
+    }
+
     /// Pins the `"type"` discriminant every `DocRun` variant serializes to on
     /// the wire, so a `#[serde(rename_all = "camelCase")]` heuristic mismatch
     /// (like the `PTab` → `"pTab"` bug fixed alongside this test — serde
@@ -9491,7 +9535,7 @@ mod cs_toggle_tests {
                </w:rPr><w:t>氏名</w:t></w:r></w:p>"#,
         );
         assert_eq!(run.fit_text_val, Some(2400.0));
-        assert_eq!(run.fit_text_id, Some(-1431456512));
+        assert_eq!(run.fit_text_id.as_deref(), Some("-1431456512"));
     }
 
     /// §17.3.2.40 `<w:u w:val>` → ST_Underline (§17.18.99). All 18 enum values
