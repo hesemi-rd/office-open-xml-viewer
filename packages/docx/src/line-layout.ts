@@ -47,7 +47,16 @@ import {
   wordMinLineStartPx,
 } from './float-layout.js';
 
-export interface LayoutTextSeg {
+export interface LineBoundary {
+  segIndex: number;
+  charOffset: number;
+}
+
+interface LayoutSegSource {
+  src?: LineBoundary;
+}
+
+export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
   bold: boolean;
   italic: boolean;
@@ -173,7 +182,7 @@ export interface LayoutTextSeg {
  * Horizontal tab. Width is resolved during layout against paragraph tab stops
  * (or the default 36pt interval if no explicit stop is configured).
  */
-export interface LayoutTabSeg {
+export interface LayoutTabSeg extends LayoutSegSource {
   isTab: true;
   fontSize: number;  // pt — for line-height purposes
   measuredWidth: number;
@@ -194,7 +203,7 @@ export interface LayoutTabSeg {
   };
 }
 
-export interface LayoutImageSeg {
+export interface LayoutImageSeg extends LayoutSegSource {
   /** Zip path of the blip — also the `'imagePath' in seg` discriminant that
    *  distinguishes an image segment from text/math/tab segments. */
   imagePath: string;
@@ -236,7 +245,7 @@ export interface LayoutImageSeg {
 }
 
 /** An inline OMML equation. Measured + drawn via the core math engine. */
-export interface LayoutMathSeg {
+export interface LayoutMathSeg extends LayoutSegSource {
   mathNodes: import('@silurus/ooxml-core').MathNode[];
   display: boolean;
   fontSize: number;  // pt
@@ -254,7 +263,7 @@ export interface LayoutMathSeg {
 }
 
 /** Sentinel that forces a new line when encountered in layoutLines. */
-export interface LayoutLineBreak {
+export interface LayoutLineBreak extends LayoutSegSource {
   lineBreak: true;
   fontSize: number;  // pt — used to set line height on empty lines
   measuredWidth: 0;
@@ -289,6 +298,13 @@ export interface LayoutLine {
    *  the end of a logical line and must be left-aligned, not stretched — exactly
    *  like the paragraph's final line (§17.18.44). */
   endsWithBreak?: boolean;
+  /** Issue #908 — the consumed-content END boundary of this line in the ORIGINAL
+   *  `segs` stream of the layoutLines call that produced it (see LineBoundary).
+   *  Break-aware: a manual-break-terminated line consumes its sentinel. Laying out
+   *  the suffix from this boundary (same width, firstIndent 0) reproduces the
+   *  following lines exactly; at a different width it re-wraps — the remainder
+   *  re-measure seam. */
+  consumedEnd?: LineBoundary;
 }
 
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
@@ -2231,6 +2247,7 @@ export function layoutLines(
   // tabs do not trigger the LTR right/center/overflow wrap paths. Default false
   // ⇒ the LTR tab paths run unchanged (byte-identical output).
   baseRtl = false,
+  startBoundary?: LineBoundary,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -2374,7 +2391,11 @@ export function layoutLines(
 
   let lineHasRuby = false;
   let lineEastAsian = false;
-  const flush = (forceHeight?: number, brTerminated = false) => {
+  const flush = (
+    forceHeight?: number,
+    brTerminated = false,
+    nextStart?: LineBoundary,
+  ) => {
     applyBidiTabs();
     // §17.3.3.1 — the break is one run among the line's runs: its own size
     // participates in the line height but must not override a taller peer.
@@ -2397,6 +2418,7 @@ export function layoutLines(
       hasRuby: lineHasRuby,
       eastAsian: lineEastAsian,
       endsWithBreak: brTerminated,
+      consumedEnd: nextStart ?? queue[0]?.src ?? endBoundary,
     });
     if (wrapCtx) {
       currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, h * scale, lineEastAsian);
@@ -2491,11 +2513,45 @@ export function layoutLines(
     return m;
   };
 
+  const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
+  const sourcedSegs = segs.map((seg, segIndex) => {
+    seg.src = { segIndex, charOffset: 0 };
+    return seg;
+  });
+  let queue: LayoutSeg[];
+  if (!startBoundary) {
+    queue = sourcedSegs;
+  } else if (startBoundary.segIndex >= sourcedSegs.length) {
+    queue = [];
+  } else {
+    const first = sourcedSegs[startBoundary.segIndex];
+    if (startBoundary.charOffset > 0) {
+      if (!('text' in first) || startBoundary.charOffset > first.text.length) {
+        queue = [];
+      } else {
+        const text = first.text.slice(startBoundary.charOffset);
+        queue = text
+          ? [
+              {
+                ...first,
+                text,
+                measuredWidth: 0,
+                src: { ...startBoundary },
+              },
+              ...sourcedSegs.slice(startBoundary.segIndex + 1),
+            ]
+          : sourcedSegs.slice(startBoundary.segIndex + 1);
+      }
+    } else {
+      queue = sourcedSegs.slice(startBoundary.segIndex);
+    }
+  }
+
   // Resolve §17.3.2.14 from RAW natural advances at this exact layout scale.
   // The resulting per-gap is folded into segAdvanceWidth below, so the line
   // breaker and paint pen use one width authority. Cached w:spacing is ignored.
   resolveFitTextSegments(
-    segs.filter((seg): seg is LayoutTextSeg => 'text' in seg),
+    queue.filter((seg): seg is LayoutTextSeg => 'text' in seg),
     scale,
     (segment) => measureText(segment).width,
   );
@@ -2530,9 +2586,6 @@ export function layoutLines(
     if ('lineBreak' in q) return 0;
     return segAdvance(q);
   };
-
-  // Use an explicit queue so CJK split-tails can be re-queued
-  const queue: LayoutSeg[] = [...segs];
 
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
   // content of the paragraph that new line is an EMPTY line that still
@@ -2616,7 +2669,7 @@ export function layoutLines(
         // content) to a fresh line — unless the line is empty (nowhere to wrap).
         if (tabW <= 0) {
           if (currentLine.length > 0) {
-            flush();
+            flush(undefined, false, seg.src);
             queue.unshift(seg);
             continue;
           }
@@ -2712,12 +2765,12 @@ export function layoutLines(
       if (stop) seg.leader = stop.leader;
       // Clamp to avoid negative widths; if tab would overflow the line, wrap instead
       if (tabWidth <= 0) {
-        flush();
+        flush(undefined, false, seg.src);
         queue.unshift(seg);
         continue;
       }
       if (currentWidth + tabWidth > availW() && currentLine.length > 0) {
-        flush();
+        flush(undefined, false, seg.src);
         queue.unshift(seg);
         continue;
       }
@@ -2733,7 +2786,9 @@ export function layoutLines(
       const h = seg.heightPt;
       const asc = seg.heightPt * scale;
       seg.measuredWidth = w;
-      if (currentLine.length > 0 && currentWidth + w > availW()) flush();
+      if (currentLine.length > 0 && currentWidth + w > availW()) {
+        flush(undefined, false, seg.src);
+      }
       addToLine(seg, w, h, asc, 0);
       continue;
     }
@@ -2751,7 +2806,9 @@ export function layoutLines(
         seg.measuredWidth = w;
         seg.mathAscent = asc;
         seg.mathDescent = desc;
-        if (currentLine.length > 0 && currentWidth + w > availW()) flush();
+        if (currentLine.length > 0 && currentWidth + w > availW()) {
+          flush(undefined, false, seg.src);
+        }
         addToLine(seg, w, seg.fontSize, Math.max(asc, emPx * 0.8), Math.max(desc, emPx * 0.2));
         continue;
       }
@@ -2772,7 +2829,9 @@ export function layoutLines(
       // does (tall math — fractions, big operators — keeps its larger ink box).
       const lineAsc = Math.max(asc, emPx * 0.8);
       const lineDesc = Math.max(desc, emPx * 0.2);
-      if (currentLine.length > 0 && currentWidth + w > availW()) flush();
+      if (currentLine.length > 0 && currentWidth + w > availW()) {
+        flush(undefined, false, seg.src);
+      }
       addToLine(seg, w, seg.fontSize, lineAsc, lineDesc);
       continue;
     }
@@ -2836,7 +2895,9 @@ export function layoutLines(
           if (!('text' in queued) || queued.fitTextRegionIndex !== s.fitTextRegionIndex) break;
           regionWidth += segAdvance(queued);
         }
-        if (currentLine.length > 0 && currentWidth + regionWidth > availW()) flush();
+        if (currentLine.length > 0 && currentWidth + regionWidth > availW()) {
+          flush(undefined, false, s.src);
+        }
       }
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc);
@@ -2917,7 +2978,9 @@ export function layoutLines(
         const ft = f.text.replace(/ +$/, '');
         groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
       }
-      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) flush();
+      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) {
+        flush(undefined, false, s.src);
+      }
     }
 
     if (currentWidth + wForFit <= availW() + shrinkBudget) {
@@ -2950,7 +3013,17 @@ export function layoutLines(
         const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pw };
         addToLine(headSeg, pw, h, asc, desc);
         const tail = s.text.slice(prefix.length);
-        if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
+        if (tail) {
+          queue.unshift({
+            ...s,
+            text: tail,
+            measuredWidth: 0,
+            src: {
+              segIndex: s.src!.segIndex,
+              charOffset: s.src!.charOffset + prefix.length,
+            },
+          });
+        }
       } else if (currentLine.length > 0) {
         // No prefix of `s` fits. If `s` would lead the next line with a 行頭禁則
         // char, kinsokuAdjustedSplit can't fix it from within `s` (the offending
@@ -2969,7 +3042,15 @@ export function layoutLines(
           if (k > 0) {
             const headText = chars.slice(0, chars.length - k).join('');
             const tailText = chars.slice(chars.length - k).join('');
-            retracted = { ...lastText, text: tailText, measuredWidth: strAdvance(lastText, tailText) };
+            retracted = {
+              ...lastText,
+              text: tailText,
+              measuredWidth: strAdvance(lastText, tailText),
+              src: {
+                segIndex: lastText.src!.segIndex,
+                charOffset: lastText.src!.charOffset + headText.length,
+              },
+            };
             if (headText) {
               const headW = strAdvance(lastText, headText);
               currentWidth -= lastText.measuredWidth - headW;
@@ -2983,7 +3064,7 @@ export function layoutLines(
             }
           }
         }
-        flush();
+        flush(undefined, false, retracted?.src ?? s.src);
         queue.unshift(s);
         if (retracted) queue.unshift(retracted);
       } else {
@@ -2994,7 +3075,17 @@ export function layoutLines(
           const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fw };
           addToLine(headSeg, fw, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
-          if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
+          if (tail) {
+            queue.unshift({
+              ...s,
+              text: tail,
+              measuredWidth: 0,
+              src: {
+                segIndex: s.src!.segIndex,
+                charOffset: s.src!.charOffset + firstChar.length,
+              },
+            });
+          }
         }
       }
     } else if (currentLine.length === 0) {
@@ -3020,7 +3111,15 @@ export function layoutLines(
         const prefix = allChars.slice(0, split).join('');
         const pw = strAdvance(s, prefix);
         addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
-        queue.unshift({ ...s, text: allChars.slice(split).join(''), measuredWidth: 0 });
+        queue.unshift({
+          ...s,
+          text: allChars.slice(split).join(''),
+          measuredWidth: 0,
+          src: {
+            segIndex: s.src!.segIndex,
+            charOffset: s.src!.charOffset + prefix.length,
+          },
+        });
       }
     } else {
       // Latin word does not fit on the current (non-empty) line: move it to a fresh
@@ -3028,7 +3127,7 @@ export function layoutLines(
       // whole column — the empty-line branch above breaks it at the character level
       // (overflow-wrap). Re-queueing rather than force-adding is what lets that
       // over-long-word path run instead of letting the word spill the column.
-      flush();
+      flush(undefined, false, s.src);
       queue.unshift(s);
     }
   }

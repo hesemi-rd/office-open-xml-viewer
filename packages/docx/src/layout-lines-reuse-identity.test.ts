@@ -643,3 +643,148 @@ describe('table-cell paint byte-identity — fragment table paint (PR 6)', () =>
     expect(r.drawn).toBeGreaterThan(0);
   });
 });
+
+describe('re-wrapped continuation slices (issue #908) — fragment paint parity', () => {
+  it.each([
+    ['fragment paint', true],
+    ['legacy paint', false],
+  ])('does not re-apply first-line indent while painting a continuation (%s)', async (_label, fragmentPaint) => {
+    const p = para('あ'.repeat(28), { defaultFontSize: 20, indentFirst: 20 });
+    (p.runs[0] as { fontSize: number }).fontSize = 20;
+    const model = doc([p as unknown as BodyElement], 60);
+    (model.section as SectionProps).columns = {
+      count: 2, spacePt: 32, equalWidth: false, sep: false,
+      cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
+    } as SectionProps['columns'];
+
+    const pages = paginateDocument(model);
+    const continuationPage = pages.findIndex((page) => page.some((el) => {
+      const slice = el as PaginatedBodyElement & {
+        lineSlice?: { start: number; end: number; continues?: boolean };
+      };
+      return slice.colIndex === 1 && slice.lineSlice?.continues === true;
+    }));
+    expect(continuationPage).toBeGreaterThanOrEqual(0);
+
+    const painted = await renderVariant(model, pages, { fragmentPaint, reuse: true });
+    const col1Origin = model.section.marginLeft + 100 + 32;
+    const lineCalls = painted.perPage[continuationPage]
+      .filter((call) => call.op === 'fill' && call.text.includes('あ') && call.x >= col1Origin);
+    const callsByY = new Map<number, Call[]>();
+    for (const call of lineCalls) {
+      const calls = callsByY.get(call.y);
+      if (calls) calls.push(call);
+      else callsByY.set(call.y, [call]);
+    }
+    const lineStarts = [...callsByY.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, calls]) => Math.min(...calls.map((call) => call.x)));
+
+    expect(lineStarts.length).toBeGreaterThan(1);
+    expect(lineStarts.slice(1).every((x) => x === lineStarts[0])).toBe(true);
+  });
+
+  it('draws paragraph anchors ONCE for a re-wrapped continuation (fragment === legacy)', async () => {
+    // A §17.6.4 unequal-width split: col0 keeps the wide partition, col1 gets a
+    // RE-MEASURED remainder whose fragment covers its WHOLE partition (lineStart 0,
+    // lineEnd = length). paintParagraphFragment must not degrade that full-range
+    // continuation slice to "no slice": renderParagraph's first-slice-only work
+    // (anchor drawing, §17.3.1.7 top border) would run again in the destination
+    // column. Legacy paint sees the element's `continues` flag; the fragment path
+    // must thread it through. The anchored no-wrap shape's text is the observable:
+    // its fillText must appear exactly once per page in BOTH paint modes.
+    const anchorShape = {
+      type: 'shape',
+      widthPt: 40, heightPt: 10,
+      anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: true,
+      anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+      zOrder: 0, subpaths: [], presetGeometry: 'rect',
+      fill: null, stroke: null,
+      // No wrap: the shape registers no float band, so the width-mismatch swap
+      // fires (a wrap float would scope the swap out — asserted below).
+      wrapMode: 'none', wrapSide: 'bothSides',
+      distTop: 0, distBottom: 0, distLeft: 0, distRight: 0,
+      textBlocks: [{
+        text: 'ANCHORTEXT', fontSizePt: 8, bold: false, italic: false,
+        color: '000000', fontFamily: 'Times New Roman', alignment: 'left',
+      }],
+      textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+    };
+    const p = para('あ'.repeat(28), { defaultFontSize: 20 });
+    (p.runs as unknown[]).unshift(anchorShape);
+    (p.runs[1] as { fontSize: number }).fontSize = 20;
+    const model = doc([p as unknown as BodyElement], 60);
+    (model.section as SectionProps).columns = {
+      count: 2, spacePt: 32, equalWidth: false, sep: false,
+      cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
+    } as SectionProps['columns'];
+
+    const pages = paginateDocument(model);
+    // Non-vacuity: the swap really fired — a col-1 slice carries the remainder
+    // partition marker (if a float had registered, the swap would be scoped out
+    // and this test would be exercising nothing).
+    const slices = pages.flat().filter((el) => el.type === 'paragraph') as
+      (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
+    expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
+
+    const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
+    const legacy = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
+    expect(production.perPage.length).toBe(legacy.perPage.length);
+    for (let pg = 0; pg < production.perPage.length; pg++) {
+      // Byte-identical streams — in particular the anchor's text appears the same
+      // number of times (once) in both modes.
+      const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
+      const anchorDrawsLegacy = legacy.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
+      expect(anchorDrawsProduction).toBe(anchorDrawsLegacy);
+      expect(anchorDrawsProduction).toBe(1);
+      expect(anchorDrawsLegacy).toBe(1);
+      expect(production.perPage[pg]).toEqual(legacy.perPage[pg]);
+    }
+    // The anchor really painted (observable non-vacuity).
+    expect(legacy.perPage.flat().some((c) => c.text === 'ANCHORTEXT')).toBe(true);
+  });
+
+  it('draws behindDoc paragraph anchors once for a re-wrapped continuation', async () => {
+    const anchorShape = {
+      type: 'shape',
+      widthPt: 40, heightPt: 10,
+      anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: true,
+      anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+      zOrder: 0, behindDoc: true,
+      subpaths: [], presetGeometry: 'rect',
+      fill: null, stroke: null,
+      wrapMode: 'none', wrapSide: 'bothSides',
+      distTop: 0, distBottom: 0, distLeft: 0, distRight: 0,
+      textBlocks: [{
+        text: 'ANCHORTEXT', fontSizePt: 8, bold: false, italic: false,
+        color: '000000', fontFamily: 'Times New Roman', alignment: 'left',
+      }],
+      textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+    };
+    const p = para('あ'.repeat(28), { defaultFontSize: 20 });
+    (p.runs as unknown[]).unshift(anchorShape);
+    (p.runs[1] as { fontSize: number }).fontSize = 20;
+    const model = doc([p as unknown as BodyElement], 60);
+    (model.section as SectionProps).columns = {
+      count: 2, spacePt: 32, equalWidth: false, sep: false,
+      cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
+    } as SectionProps['columns'];
+
+    const pages = paginateDocument(model);
+    const slices = pages.flat().filter((el) => el.type === 'paragraph') as
+      (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
+    expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
+
+    const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
+    const legacy = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
+    expect(production.perPage.length).toBe(legacy.perPage.length);
+    for (let pg = 0; pg < production.perPage.length; pg++) {
+      const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
+      const anchorDrawsLegacy = legacy.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
+      expect.soft(anchorDrawsProduction).toBe(1);
+      expect.soft(anchorDrawsLegacy).toBe(1);
+    }
+  });
+});

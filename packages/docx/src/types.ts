@@ -396,7 +396,14 @@ export type BodyElement =
  *  the element was placed in (ECMA-376 §17.6.4); absent / 0 for single-column
  *  sections. */
 export type PaginatedBodyElement = BodyElement & {
-  lineSlice?: { start: number; end: number };
+  lineSlice?: {
+    start: number;
+    end: number;
+    /** §17.6.4 remainder re-wrap: indices refer to the slice's OWN re-measured
+     *  partition, and `continues` marks that this partition is a paragraph
+     *  continuation even though `start === 0`. */
+    continues?: boolean;
+  };
   /** An empty paragraph that carries a section break (an inkless paragraph
    *  immediately followed by a `sectionBreak` element) has its spacing-BEFORE
    *  suppressed — Word/LibreOffice render it flush below the preceding paragraph.
