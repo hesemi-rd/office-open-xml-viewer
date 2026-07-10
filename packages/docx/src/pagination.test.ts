@@ -442,6 +442,96 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(target?.layoutLinesInputs?.paraW).toBe(48);
     expect(target?.layoutLines?.map((line) => line.topY ?? null)).toEqual([null, null]);
   });
+
+  // ECMA-376 §17.6.4 (cols / equalWidth=false / per-<w:col> w:w) — a newspaper
+  // column is a text region of a DEFINED width; text must wrap to ITS column's
+  // width. §17.3.1.12 (ind) — first-line/hanging indent applies to the paragraph's
+  // FIRST line only, so a continuation into a later column must not re-trigger it.
+  //
+  // Defect: `splitParagraphAcrossPages` measures the paragraph ONCE at its FIRST
+  // placement (the WIDE column) and slices that single partition across columns.
+  // `remeasureBeforeFirstLine` only re-measures when NOTHING has been placed yet
+  // (`lineIdx === 0`); the ordinary continuation branch (`if (!isFinalSlice)
+  // { newPage(...) }`, and the `lastFitting === firstFitting` advance for
+  // `lineIdx > 0`) advances into the NARROW column WITHOUT re-wrapping, so the
+  // remainder keeps the wide column's line breaks and overflows the narrow column.
+  //
+  // GROUNDED RED — OBSERVED failing (2026-07-10): the col1 continuation line is
+  // 100pt wide (col0 geometry) vs. the 48pt column → "expected 100 to be less than
+  // or equal to 48.000001" at the width assertion below. SKIPPED pending
+  // orchestrator adjudication: a spec-faithful remainder re-wrap needs `layoutLines`
+  // to expose per-line consumed-content boundaries (break-aware, in field-resolved
+  // segment-stream coordinates), which the line model does NOT record — see the
+  // "Escape-hatch design analysis" section in .superpowers/sdd/progress.md for the
+  // required seam and why a forced geometric approximation is not acceptable. Remove
+  // `.skip` when the boundary-provenance seam lands.
+  it.skip('re-wraps a paragraph continuation into a narrower unequal-width column', () => {
+    // col0 = 100pt wide (5 CJK glyphs/line at 20pt), col1 = 48pt wide (2/line).
+    // 100 + 12 + 48 = 160 = content width; both bands are 100pt tall (5 lines).
+    const unequalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    });
+    // 35 glyphs: 7 lines at the WIDE width. col0 holds 5 (chars 0–24); the tail
+    // (chars 25–34, 10 glyphs) continues into col1 and MUST re-wrap to 2/line.
+    const body = [para({ text: 'あ'.repeat(35), fontSize: 20, widowControl: false })];
+
+    const pages = computePages(body, unequalColumns, makeCtx());
+    expect(pages).toHaveLength(1);
+
+    // Every slice of the (single) paragraph, with its painted line geometry.
+    type LineLike = { segments: { measuredWidth?: number; text?: string }[] };
+    type Slice = PaginatedBodyElement & {
+      lineSlice?: { start: number; end: number };
+      layoutLines?: LineLike[];
+      layoutLinesInputs?: { paraW: number };
+    };
+    const slices = pages[0].filter((el) => el.type === 'paragraph') as Slice[];
+    const paintedLines = (s: Slice): LineLike[] => {
+      const all = s.layoutLines ?? [];
+      const sl = s.lineSlice;
+      return sl ? all.slice(sl.start, sl.end) : all;
+    };
+    const lineWidth = (l: LineLike): number =>
+      l.segments.reduce((sum, seg) => sum + (seg.measuredWidth ?? 0), 0);
+    const lineChars = (l: LineLike): number =>
+      l.segments.reduce((sum, seg) => sum + (seg.text ? [...seg.text].length : 0), 0);
+
+    const col0Lines = slices.filter((s) => s.colIndex === 0).flatMap(paintedLines);
+    const col1Lines = slices.filter((s) => s.colIndex === 1).flatMap(paintedLines);
+
+    // The paragraph genuinely spans both columns (precondition, not the assertion
+    // under test): col0 filled its 5 lines, and there IS continuation in col1.
+    expect(col0Lines.length).toBe(5);
+    expect(col1Lines.length).toBeGreaterThan(0);
+
+    // §17.6.4 — NO continuation line may overflow col1's 48pt band.
+    const EPS = 1e-6;
+    for (const line of col1Lines) {
+      expect(lineWidth(line)).toBeLessThanOrEqual(48 + EPS);
+    }
+    // The remainder actually re-wrapped: col1 packs at most 2 glyphs/line (its
+    // width), strictly narrower than col0's 5/line. With the defect the tail keeps
+    // col0's 5-glyph, 100pt-wide lines (which overflow the 48pt column).
+    expect(Math.max(...col1Lines.map(lineChars))).toBeLessThanOrEqual(2);
+    expect(Math.max(...col1Lines.map(lineChars))).toBeLessThan(
+      Math.max(...col0Lines.map(lineChars)),
+    );
+    // All 35 glyphs are still placed (10 in col1), and the continuation records the
+    // NARROW column width (no stale wide-column measurement leaks through).
+    expect(col1Lines.reduce((sum, l) => sum + lineChars(l), 0)).toBe(10);
+    for (const s of slices.filter((sl) => sl.colIndex === 1)) {
+      expect(s.layoutLinesInputs?.paraW).toBe(48);
+    }
+  });
 });
 
 describe('computePages — empty-paragraph relocation (C2: §17.3.1.29)', () => {
