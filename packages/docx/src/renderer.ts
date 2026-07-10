@@ -3751,10 +3751,10 @@ function gridForParagraphContext(
 }
 
 function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
-  if (state.storyContext?.containers.some((container) => container.kind === 'tableCell')) {
-    return gridForParagraphContext(state, resolveStateParagraphLayoutContext(state, para));
-  }
-  return para.snapToGrid === false ? { type: null, linePitchPt: null } : state.docGrid;
+  return gridForParagraphContext(
+    state,
+    resolveStateParagraphLayoutContext(state, para),
+  );
 }
 
 /** Lay out a paragraph's lines, then walk the line list distributing them
@@ -3853,6 +3853,7 @@ function splitParagraphAcrossPages(
   // the paint pass (layoutBidiTabStops measures stops from the text margin)
   // and re-introduce a paginate/render disagreement.
   const paragraphContext = resolveBodyParagraphLayoutContext(measureState, para);
+  const grid = paraGrid(para, measureState);
   const indLeft = paragraphContext.physicalIndentLeftPt;
   const indRight = paragraphContext.physicalIndentRightPt;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
@@ -3882,10 +3883,10 @@ function splitParagraphAcrossPages(
     startPageY: measureState.y,
     paraX,
     floats: measureState.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphContext.hasRuby, is ?? 0, paragraphContext.hasEastAsianText),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paragraphContext.hasRuby, is ?? 0, paragraphContext.hasEastAsianText),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(grid, 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -3899,9 +3900,9 @@ function splitParagraphAcrossPages(
   // See paragraphSegsStateSensitive.
   const stampLines = !paragraphSegsStateSensitive(para);
 
-  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText);
+  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText);
   const uniformH = paraHasRuby
-    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
+    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), grid, 1)
     : 0;
   const lineHeights = lines.map(l => paraHasRuby ? uniformH : perLineH(l));
   const spaceBefore = suppressSpaceBefore ? 0 : para.spaceBefore;

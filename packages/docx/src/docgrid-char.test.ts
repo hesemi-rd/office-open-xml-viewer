@@ -88,7 +88,12 @@ type DocRun = DocParagraph['runs'][number];
 
 function para(
   text: string,
-  opts: { fontSize?: number; alignment?: string; runSnapToGrid?: boolean } = {},
+  opts: {
+    fontSize?: number;
+    alignment?: string;
+    runSnapToGrid?: boolean;
+    paragraphSnapToGrid?: boolean;
+  } = {},
 ): BodyElement {
   const fontSize = opts.fontSize ?? FONT_PX;
   const run = textRun(text, fontSize);
@@ -101,6 +106,9 @@ function para(
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
     widowControl: false, // keep greedy split deterministic
   };
+  if (opts.paragraphSnapToGrid !== undefined) {
+    p.snapToGrid = opts.paragraphSnapToGrid;
+  }
   return { type: 'paragraph', ...p } as BodyElement;
 }
 
@@ -201,6 +209,16 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     ]);
     expect(rendered.fillTextCalls.map((call) => call.letterSpacing))
       .toEqual(['0px', '0px', '0px']);
+  });
+
+  it('keeps character-grid spacing when only paragraph line snapping is disabled', async () => {
+    const rendered = await renderRun(
+      [para('あ', { paragraphSnapToGrid: false })],
+      section(charGrid(4096)),
+    );
+
+    expect(rendered.runs[0].w).toBe(FONT_PX + 1);
+    expect(rendered.fillTextCalls[0].letterSpacing).toBe('1px');
   });
 
   // THE core anti-corruption guard. For a CJK string under an active char grid,
@@ -395,5 +413,28 @@ describe('docGrid character grid — packs more chars per line (§17.6.5)', () =
     const text = 'あ'.repeat(22);
     const lineGrid = section({ docGridType: 'lines', docGridLinePitch: 20, docGridCharSpace: -8192, ...ONE_LINE_PAGE });
     expect(linesOf(text, lineGrid)).toBe(linesOf(text, section(ONE_LINE_PAGE)));
+  });
+
+  it('uses natural line height for pagination when paragraph grid snapping is disabled', () => {
+    const bodyParagraph = para('あ', {
+      fontSize: 10,
+      paragraphSnapToGrid: false,
+    }) as BodyElement & DocParagraph;
+    bodyParagraph.runs.push(
+      { type: 'break', breakType: 'line' } as DocRun,
+      { type: 'text', ...textRun('あ', 10) } as DocRun,
+    );
+    const sec = section({
+      pageHeight: 25,
+      docGridType: 'lines',
+      docGridLinePitch: 20,
+    });
+
+    const pages = computePages(
+      [bodyParagraph],
+      sec,
+      makeRecordingCanvas().canvas.getContext('2d') as CanvasRenderingContext2D,
+    );
+    expect(pages).toHaveLength(1);
   });
 });

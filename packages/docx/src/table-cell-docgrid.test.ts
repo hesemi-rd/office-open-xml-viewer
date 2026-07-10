@@ -14,7 +14,10 @@ import type {
 
 type MeasureState = Parameters<typeof calculateRowHeight>[4];
 
-function makeMeasureState(adjustLineHeightInTable: boolean): MeasureState {
+function makeMeasureState(
+  adjustLineHeightInTable: boolean,
+  docGridType: 'lines' | 'snapToChars' = 'lines',
+): MeasureState {
   let font = '10px serif';
   const ctx = {
     get font() {
@@ -60,7 +63,7 @@ function makeMeasureState(adjustLineHeightInTable: boolean): MeasureState {
     footerDistance: 10,
     titlePage: false,
     evenAndOddHeaders: false,
-    docGridType: 'lines',
+    docGridType,
     docGridLinePitch: 20,
   });
 
@@ -169,5 +172,22 @@ describe('table-cell line grid compatibility', () => {
 
   it('applies the section line pitch when compatibility is enabled', () => {
     expect(calculateRowHeight(row(), table(), [100], 1, makeMeasureState(true))).toBe(20);
+  });
+
+  it('gates the line axis of snapToChars by the same compatibility setting', () => {
+    expect(calculateRowHeight(
+      row(),
+      table(),
+      [100],
+      1,
+      makeMeasureState(false, 'snapToChars'),
+    )).toBe(10);
+    expect(calculateRowHeight(
+      row(),
+      table(),
+      [100],
+      1,
+      makeMeasureState(true, 'snapToChars'),
+    )).toBe(20);
   });
 });
