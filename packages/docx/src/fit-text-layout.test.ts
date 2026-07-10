@@ -112,4 +112,18 @@ describe('ECMA-376 §17.3.2.14 fitText layout integration', () => {
     expect(segs[0].fitTextPerGapPx).toBeCloseTo(19.2, 9);
     expect(segs.reduce((sum, seg) => sum + seg.measuredWidth, 0)).toBeCloseTo(240, 9);
   });
+
+  it('recomputes a single-glyph region cell at paint scale', () => {
+    const stamp = layoutLines(
+      makeLinearCtx(),
+      buildSegments([textRun('氏', { fitTextVal: 2400 })], ENV),
+      1000,
+      0,
+      1,
+    );
+    const painted = rescaleLayoutLines(stamp, 2, makeLinearCtx(), {}, 0);
+
+    expect(textSegments(stamp[0].segments)[0].measuredWidth).toBeCloseTo(120, 9);
+    expect(textSegments(painted[0].segments)[0].measuredWidth).toBeCloseTo(240, 9);
+  });
 });

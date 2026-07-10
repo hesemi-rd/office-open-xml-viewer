@@ -130,16 +130,18 @@ export interface LayoutTextSeg {
    *  Absent ⇒ 1 (100%). */
   charScale?: number;
   /** ECMA-376 §17.3.2.14 `<w:fitText>` — target width in TWIPS and optional
-   *  signed link id. All segments emitted from one source run retain the same
-   *  run/region indices so script and small-caps splitting cannot create a new
-   *  fit region. */
+   *  link id (wire strings plus numeric synthetic inputs). All segments emitted
+   *  from one tab-delimited source-run fragment retain the same fragment/region
+   *  indices so script and small-caps splitting cannot create a new fit region. */
   fitTextVal?: number;
-  fitTextId?: number;
+  fitTextId?: number | string;
   fitTextRegionIndex?: number;
+  /** Flattened tab-delimited source-fragment index (historical field name). */
   fitTextRunIndex?: number;
-  fitTextRunCharCount?: number;
   /** Scale-resolved gap shared by the canonical advance and paint paths. */
   fitTextPerGapPx?: number;
+  /** Region residual carried after its final glyph; scale-resolved like the gap. */
+  fitTextTrailingPadPx?: number;
   fitTextRegionStart?: boolean;
   fitTextRegionEnd?: boolean;
   /** ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in POINTS,
@@ -792,7 +794,9 @@ export function segAdvanceWidth(
   if (seg.fitTextPerGapPx !== undefined) {
     const charCount = [...seg.text].length;
     const gapCount = seg.fitTextRegionEnd ? Math.max(0, charCount - 1) : charCount;
-    return naturalWidthPx * charScaleFactor(seg) + gapCount * seg.fitTextPerGapPx;
+    return naturalWidthPx * charScaleFactor(seg)
+      + gapCount * seg.fitTextPerGapPx
+      + (seg.fitTextTrailingPadPx ?? 0);
   }
   // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): the whole run is written
   // horizontally inside ONE cell of the vertical line ("keeping the text on the
@@ -1700,10 +1704,11 @@ export function paragraphSegsStateSensitive(para: DocParagraph): boolean {
   return false;
 }
 
-/** Resolve §17.3.2.14 region gaps after raw Canvas advances are available.
- *  Source-run aggregation is deliberate: a run split into Latin/CJK/small-caps
- *  segments still contributes one kernel input and cannot become multiple
- *  id-less regions. */
+/** Resolve §17.3.2.14 region geometry after raw Canvas advances are available.
+ *  Region membership was fixed over tab-delimited source fragments in
+ *  {@link buildSegments}; width and code-point count are deliberately derived
+ *  here from the emitted segments so script/case transformations cannot create
+ *  a second source of truth. */
 function resolveFitTextSegments(
   segments: LayoutTextSeg[],
   scale: number,
@@ -1718,25 +1723,27 @@ function resolveFitTextSegments(
   }
 
   for (const members of regionSegments.values()) {
-    const runInputs = new Map<number, FitTextRun>();
+    const first = members.find((segment) => segment.fitTextVal !== undefined);
+    if (!first || first.fitTextVal === undefined) continue;
+
+    let naturalWidthPx = 0;
+    let charCount = 0;
     for (const segment of members) {
-      const runIndex = segment.fitTextRunIndex;
-      if (runIndex === undefined || segment.fitTextVal === undefined) continue;
-      const input = runInputs.get(runIndex) ?? {
-        fitTextValTwips: segment.fitTextVal,
-        fitTextId: segment.fitTextId,
-        charCount: segment.fitTextRunCharCount ?? [...segment.text].length,
-        naturalWidthPx: 0,
-        charScale: segment.charScale,
-      };
-      input.naturalWidthPx += measureNaturalWidthPx(segment);
-      runInputs.set(runIndex, input);
+      naturalWidthPx += measureNaturalWidthPx(segment) * charScaleFactor(segment);
+      charCount += [...segment.text].length;
     }
 
-    const resolved = groupFitTextRegions([...runInputs.values()], scale)[0];
+    const resolved = groupFitTextRegions([{
+      fitTextValTwips: first.fitTextVal,
+      charCount,
+      naturalWidthPx,
+    }], scale)[0];
     if (!resolved) continue;
     members.forEach((segment, index) => {
       segment.fitTextPerGapPx = resolved.perGapPx;
+      segment.fitTextTrailingPadPx = index === members.length - 1
+        ? resolved.trailingPadPx
+        : undefined;
       segment.fitTextRegionStart = index === 0 ? true : undefined;
       segment.fitTextRegionEnd = index === members.length - 1 ? true : undefined;
     });
@@ -1745,23 +1752,38 @@ function resolveFitTextSegments(
 
 export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
-  // Group §17.3.2.14 adjacency over SOURCE RUNS before any script/font, word, or
-  // small-caps segmentation. Widths are deliberately zero here; the same pure
-  // kernel resolves the real natural widths at layout scale below.
-  const fitTextRegionByRun = new Map<number, number>();
-  const fitTextRuns: FitTextRun[] = runs.map((run) => {
-    if (run.type !== 'text') return { charCount: 0, naturalWidthPx: 0 };
-    return {
-      fitTextValTwips: run.fitTextVal,
-      fitTextId: run.fitTextId,
-      charCount: [...run.text].length,
-      naturalWidthPx: 0,
-      charScale: run.charScale,
-    };
-  });
+  // Group §17.3.2.14 adjacency over SOURCE RUNS before script/font, word, or
+  // small-caps segmentation, but model each tab-delimited fragment as its own
+  // source unit. A tab is a position-dependent advance rather than a glyph, so a
+  // non-fit kernel entry at every tab boundary prevents same-id fragments from
+  // linking across it. Width/count placeholders are resolved from emitted text
+  // at layout scale below.
+  const fitTextFragmentEntryByKey = new Map<string, number>();
+  const fitTextRuns: FitTextRun[] = [];
+  for (const [runIndex, run] of runs.entries()) {
+    if (run.type !== 'text') {
+      fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
+      continue;
+    }
+    const fragments = run.text.split('\t');
+    for (let fragmentIndex = 0; fragmentIndex < fragments.length; fragmentIndex += 1) {
+      fitTextFragmentEntryByKey.set(`${runIndex}:${fragmentIndex}`, fitTextRuns.length);
+      fitTextRuns.push({
+        fitTextValTwips: run.fitTextVal,
+        fitTextId: run.fitTextId,
+        charCount: [...fragments[fragmentIndex]].length,
+        naturalWidthPx: 0,
+        charScale: run.charScale,
+      });
+      if (fragmentIndex < fragments.length - 1) {
+        fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
+      }
+    }
+  }
+  const fitTextRegionByEntry = new Map<number, number>();
   groupFitTextRegions(fitTextRuns, 1).forEach((region, regionIndex) => {
-    for (let runIndex = region.start; runIndex < region.end; runIndex += 1) {
-      fitTextRegionByRun.set(runIndex, regionIndex);
+    for (let entryIndex = region.start; entryIndex < region.end; entryIndex += 1) {
+      fitTextRegionByEntry.set(entryIndex, regionIndex);
     }
   });
   const pushTextPiece = (
@@ -1769,7 +1791,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     base: DocxTextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
     sourceRunIndex: number,
-    sourceRunCharCount?: number,
+    sourceFragmentIndex?: number,
   ) => {
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
@@ -1787,7 +1809,12 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     const revision = (base as DocxTextRun).revision;
     const r = base as DocxTextRun;
     const rtl = r.rtl === true ? true : undefined;
-    const fitTextRegionIndex = fitTextRegionByRun.get(sourceRunIndex);
+    const fitTextFragmentEntryIndex = sourceFragmentIndex === undefined
+      ? undefined
+      : fitTextFragmentEntryByKey.get(`${sourceRunIndex}:${sourceFragmentIndex}`);
+    const fitTextRegionIndex = fitTextFragmentEntryIndex === undefined
+      ? undefined
+      : fitTextRegionByEntry.get(fitTextFragmentEntryIndex);
 
     // IX1 — resolve the run's hyperlink target ONCE (§17.16.22 external URL /
     // §17.16.23 internal anchor). An external URL (`r.hyperlink`) wins over the
@@ -1890,8 +1917,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         fitTextVal: fitTextRegionIndex === undefined ? undefined : r.fitTextVal,
         fitTextId: fitTextRegionIndex === undefined ? undefined : r.fitTextId,
         fitTextRegionIndex,
-        fitTextRunIndex: fitTextRegionIndex === undefined ? undefined : sourceRunIndex,
-        fitTextRunCharCount: fitTextRegionIndex === undefined ? undefined : sourceRunCharCount,
+        fitTextRunIndex: fitTextRegionIndex === undefined ? undefined : fitTextFragmentEntryIndex,
         position: r.position,
         kerning: r.kerning,
         // ECMA-376 §17.3.2.10 eastAsianLayout — 縦中横 is meaningful ONLY in a
@@ -1998,7 +2024,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       if (t.noteRef) {
         const label = noteText != null ? String(noteText) : (t.text || '');
         if (label.length > 0) {
-          pushTextPiece(label, t, t.vertAlign ?? 'super', runIndex, [...t.text].length);
+          pushTextPiece(label, t, t.vertAlign ?? 'super', runIndex, 0);
         }
         continue;
       }
@@ -2006,7 +2032,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       const parts = t.text.split('\t');
       for (let i = 0; i < parts.length; i++) {
         if (parts[i].length > 0) {
-          pushTextPiece(parts[i], t, t.vertAlign, runIndex, [...t.text].length);
+          pushTextPiece(parts[i], t, t.vertAlign, runIndex, i);
         }
         if (i < parts.length - 1) {
           segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0, bold: t.bold, italic: t.italic });

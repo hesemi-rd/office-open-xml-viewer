@@ -3,7 +3,7 @@ export interface FitTextRun {
   fitTextValTwips?: number;
   /** §17.3.2.14 w:id — links CONSECUTIVE fitText runs into ONE region. undefined ⇒
    *  standalone region (an id-less fitText run never links to any neighbour). */
-  fitTextId?: number;
+  fitTextId?: number | string;
   /** Code-point count of the run. */
   charCount: number;
   /** Natural glyph-advance SUM of the run in px (at the layout scale), BEFORE the
@@ -20,6 +20,7 @@ export interface FitTextRegion {
   naturalPx: number;
   charCount: number;
   perGapPx: number;
+  trailingPadPx: number;
 }
 
 /** ECMA-376 §17.3.2.14. `scale` is px-per-pt. */
@@ -53,13 +54,18 @@ export function groupFitTextRegions(runs: FitTextRun[], scale: number): FitTextR
     }
 
     const targetPx = (first.fitTextValTwips / 20) * scale;
-    // ECMA-376 §17.3.2.14 describes compression as “decreasing the size of each
-    // character”. Word-observed expansion uses inter-character gaps; until a
-    // compression ground truth is available, use the same general gap formula.
-    // A future ground-truth sample may require changing compression to char scale.
+    // ECMA-376 §17.3.2.14 requires the region to occupy exactly w:val and
+    // describes compression as “decreasing the size of each character”.
+    // Word-observed multi-character expansion uses inter-character gaps; until
+    // compression ground truth is available, keep every glyph at its natural
+    // width and use the same gap formula. A one-character region has no gap, so
+    // its residual becomes cell padding AFTER the glyph instead of stretching or
+    // shrinking the glyph. A future ground-truth sample may replace that padding
+    // (and negative-gap compression) with character scaling.
     const perGapPx = charCount > 1 ? (targetPx - naturalPx) / (charCount - 1) : 0;
+    const trailingPadPx = targetPx - naturalPx - Math.max(0, charCount - 1) * perGapPx;
 
-    regions.push({ start, end, targetPx, naturalPx, charCount, perGapPx });
+    regions.push({ start, end, targetPx, naturalPx, charCount, perGapPx, trailingPadPx });
     start = end;
   }
 
