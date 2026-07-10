@@ -139,6 +139,7 @@ import {
   rescaleLayoutLines,
   shapeRenderState,
   shapeRunToDocRun,
+  segmentCharacterGridDeltaPx,
   splitTextForLayout,
 } from './line-layout.js';
 import type {
@@ -6940,7 +6941,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //   2. Justified inter-CJK pitch only (no grid): the existing
         //      `justifiedPiecePositions` slice-at-gaps path.
         //   3. Neither: a single fillText (the common path).
-        const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
+        const segmentGridDeltaPx = segmentCharacterGridDeltaPx(s, drawGridDeltaPx);
+        const segGridDelta = gridSegDeltaPx(s.text, segmentGridDeltaPx);
         if (state.verticalCJK && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
@@ -6973,7 +6975,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             x,
             baseline + yOffset,
             effSizePx,
-            segGridDelta !== 0 ? drawGridDeltaPx : 0,
+            segGridDelta !== 0 ? segmentGridDeltaPx : 0,
           );
         } else if (segGridDelta !== 0) {
           const cps = [...s.text]; // code points (handles surrogate pairs)
@@ -7003,7 +7005,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // includes the accumulated pitch of the glyphs before it) and as
           // `ctx.letterSpacing` (so the canvas adds it WITHIN each piece) —
           // together glyph i lands at measure(prefix)+i·pitch (measure==paint).
-          const gridPlusSpacing = drawGridDeltaPx + segCharSpacingPx;
+          const gridPlusSpacing = segmentGridDeltaPx + segCharSpacingPx;
           // ECMA-376 §17.3.2.43 `<w:w>` (issue #816): the MEASURE pass scaled the
           // natural glyph advance by `segCharScale` (segAdvanceWidth) but left the
           // fixed per-cell pitches (grid delta, char spacing, justify slack)
@@ -7177,7 +7179,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             stretch.splitBefore.length === [...s.text].length - 1;
           const markPitch =
             segGridDelta !== 0
-              ? drawGridDeltaPx
+              ? segmentGridDeltaPx
               : fullyDistributed
                 ? distPerGap
                 : 0;

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { computePages, renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import {
+  segAdvanceWidth,
+  segLetterSpacingPx,
+  type LayoutTextSeg,
+} from './line-layout.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -81,13 +86,18 @@ function textRun(text: string, fontSize: number, fontFamily = 'NotInMetrics'): D
 
 type DocRun = DocParagraph['runs'][number];
 
-function para(text: string, opts: { fontSize?: number; alignment?: string } = {}): BodyElement {
+function para(
+  text: string,
+  opts: { fontSize?: number; alignment?: string; runSnapToGrid?: boolean } = {},
+): BodyElement {
   const fontSize = opts.fontSize ?? FONT_PX;
+  const run = textRun(text, fontSize);
+  if (opts.runSnapToGrid !== undefined) run.snapToGrid = opts.runSnapToGrid;
   const p: DocParagraph = {
     alignment: opts.alignment ?? 'left',
     indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
-    runs: [{ type: 'text', ...textRun(text, fontSize) } as DocRun],
+    runs: [{ type: 'text', ...run } as DocRun],
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
     widowControl: false, // keep greedy split deterministic
   };
@@ -144,6 +154,40 @@ async function renderRun(
 }
 
 describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => {
+  it('lets an individual run opt out of character-grid advance and paint spacing', () => {
+    const base: LayoutTextSeg = {
+      text: 'あ',
+      bold: false,
+      italic: false,
+      underline: false,
+      strikethrough: false,
+      fontSize: FONT_PX,
+      color: null,
+      fontFamily: null,
+      vertAlign: null,
+      measuredWidth: 0,
+    };
+    const optedOut = {
+      ...base,
+      snapToCharacterGrid: false,
+    } as unknown as LayoutTextSeg;
+
+    expect(segAdvanceWidth(base, FONT_PX, 1, 1)).toBe(FONT_PX + 1);
+    expect(segAdvanceWidth(optedOut, FONT_PX, 1, 1)).toBe(FONT_PX);
+    expect(segLetterSpacingPx(optedOut, 1, 1)).toBe(0);
+  });
+
+  it('carries run-level character-grid opt-out through measurement and paint', async () => {
+    const sec = section(charGrid(4096));
+    const snapped = await renderRun([para('あ')], sec);
+    const optedOut = await renderRun([para('あ', { runSnapToGrid: false })], sec);
+
+    expect(snapped.runs[0].w).toBe(FONT_PX + 1);
+    expect(snapped.fillTextCalls[0].letterSpacing).toBe('1px');
+    expect(optedOut.runs[0].w).toBe(FONT_PX);
+    expect(optedOut.fillTextCalls[0].letterSpacing).toBe('0px');
+  });
+
   // THE core anti-corruption guard. For a CJK string under an active char grid,
   // the measured segment box (onTextRun.w) and the painted advance must be
   // derived from the SAME per-char cell width fontPx + Δpx. A no-justify pure-EA
