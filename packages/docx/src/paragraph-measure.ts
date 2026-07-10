@@ -222,7 +222,7 @@ export function measureParagraph(
         columnWidthPt: placement.availableWidthPt,
         floats: [],
         lineWindow: (input) => placement.wrap!.lineWindow(input),
-        lineBoxH: (ascent, descent, _hasRuby, intendedSingle) => lineBoxHeight(
+        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, emPx) => lineBoxHeight(
           context.lineSpacing,
           ascent,
           descent,
@@ -231,6 +231,7 @@ export function measureParagraph(
           context.hasRuby,
           intendedSingle ?? 0,
           context.hasEastAsianText,
+          emPx,
         ),
         pageH: placement.maximumYPt,
       }
@@ -264,6 +265,7 @@ export function measureParagraph(
           true,
           line.intendedSingle,
           context.hasEastAsianText,
+          line.height,
         ))),
         grid,
       )
@@ -284,6 +286,7 @@ export function measureParagraph(
           false,
           line.intendedSingle,
           context.hasEastAsianText,
+          line.height,
         );
     measuredLines.push({ layout: line, topYPt, advancePt });
     cursorPt = topYPt + advancePt;

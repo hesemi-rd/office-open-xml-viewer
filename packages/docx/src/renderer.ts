@@ -6487,7 +6487,7 @@ function resolveFrameBox(
   const contentH = lines.reduce(
     (s, l) =>
       s +
-      lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText),
+      lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText, l.height * scale),
     0,
   );
 
@@ -6803,7 +6803,7 @@ function renderParagraph(
     columnXPt: contentX,
     columnWidthPt: contentW,
     floats: state.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphContext.hasEastAsianText),
+    lineBoxH: (a, d, _h, is, emPx) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphContext.hasEastAsianText, emPx),
     pageH: state.pageH,
   } : undefined;
 
@@ -6979,7 +6979,7 @@ function renderParagraph(
   // else just the max natural.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText, l.height * scale))),
         grid,
         scale,
       )
@@ -6987,7 +6987,7 @@ function renderParagraph(
   const lineHForLine = (l: typeof lines[number]): number =>
     paraHasRuby
       ? uniformLineH
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText);
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText, l.height * scale);
 
   // Slice bounds — when the paginator split this paragraph across pages,
   // only render lines in [sliceStart, sliceEnd). The first line we paint
@@ -8981,7 +8981,7 @@ export function measureShapeTextAutoFitHeight(
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
       : null;
     const eastAsian = EAST_ASIAN_RE.test(lineText);
-    return lineBoxHeight(ls, c.ascent, c.descent, scale, effState.docGrid, false, floorPx, eastAsian);
+    return lineBoxHeight(ls, c.ascent, c.descent, scale, effState.docGrid, false, floorPx, eastAsian, fontPx);
   };
 
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
@@ -9205,7 +9205,7 @@ export function renderShapeText(
     const ls: LineSpacing | null = b.lineSpacingRule
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
       : null;
-    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, false, intended, eastAsian);
+    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, false, intended, eastAsian, fontPx);
     // Word centers the font's GLYPH box within the (possibly expanded) line box
     // (half-leading): when line-spacing or the design-line floor grows the box
     // the extra space is split above and below the glyph box, so the baseline is
@@ -10721,7 +10721,7 @@ function measureCellParagraphHeight(
     const uniformLineH = paraHasRuby
       ? snapParaLineToGrid(
           Math.max(0, ...paintLines.map((l) => lineBoxHeight(
-            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian,
+            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian, l.height * scale,
           ))),
           grid,
           scale,
@@ -10730,7 +10730,7 @@ function measureCellParagraphHeight(
     const lineHForLine = (l: LayoutLine): number =>
       paraHasRuby
         ? uniformLineH
-        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, eastAsian);
+        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, eastAsian, l.height * scale);
     return paintedParagraphHeight(paintLines, 0, paintLines.length, 0, lineHForLine);
   }
 }
