@@ -36,7 +36,14 @@ export interface WrapOracle {
     readonly xOffsetPt: number;
     readonly maximumWidthPt: number;
   };
-  skipTopAndBottomBands(yPt: number): number;
+  skipTopAndBottomBands(input: {
+    readonly yPt: number;
+    /** The paragraph's COLUMN band (colX()/colW()), used to scope a topAndBottom
+     *  float to the column it is anchored in (§20.4.2.20 / §17.6.4) — NOT the
+     *  indented text band `lineWindow` uses. */
+    readonly columnXPt: number;
+    readonly columnWidthPt: number;
+  }): number;
 }
 
 /** Adapt registered scale-1 float rectangles to the placement-aware paragraph
@@ -66,7 +73,8 @@ export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle 
         maximumWidthPt: window.maxWidth,
       };
     },
-    skipTopAndBottomBands: (yPt) => skipPastTopAndBottom(yPt, activeFloats),
+    skipTopAndBottomBands: ({ yPt, columnXPt, columnWidthPt }) =>
+      skipPastTopAndBottom(yPt, activeFloats, columnXPt, columnXPt + columnWidthPt),
   };
 }
 
@@ -142,7 +150,17 @@ export function measureParagraph(
   let cursorPt = placement.startYPt
     + (placement.suppressSpaceBefore ? 0 : requestedSpaceBeforePt);
   if (placement.wrap) {
-    cursorPt = placement.wrap.skipTopAndBottomBands(cursorPt);
+    // §20.4.2.20 / §17.6.4 column scope: pass this paragraph's COLUMN band
+    // (placement.paragraphXPt / availableWidthPt = colX()/colW()), NOT the
+    // indented text band, so measure agrees bit-for-bit with the paint pass,
+    // which scopes the same skip against state.contentX/contentW (the column
+    // band). A topAndBottom float anchored in another newspaper column is
+    // filtered out in both passes.
+    cursorPt = placement.wrap.skipTopAndBottomBands({
+      yPt: cursorPt,
+      columnXPt: placement.paragraphXPt,
+      columnWidthPt: placement.availableWidthPt,
+    });
   }
 
   const measureMarkOnly = (): MeasuredParagraph => {

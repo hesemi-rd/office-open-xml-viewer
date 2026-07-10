@@ -308,7 +308,7 @@ describe('measureParagraph', () => {
       lineWindow: ({ topYPt, maximumWidthPt }) => topYPt < 50
         ? { topYPt, xOffsetPt: 10, maximumWidthPt: 20 }
         : { topYPt, xOffsetPt: 0, maximumWidthPt },
-      skipTopAndBottomBands: (yPt) => yPt,
+      skipTopAndBottomBands: ({ yPt }) => yPt,
     };
     const doc = paragraph({
       spaceBefore: 0,

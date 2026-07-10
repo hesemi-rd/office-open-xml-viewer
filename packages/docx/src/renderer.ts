@@ -6283,8 +6283,13 @@ function renderParagraph(
   // behindDoc shapes must render before text so they appear behind it.
   renderAnchorImages(para, state, paragraphStartY, 'behind');
 
-  // If any topAndBottom float already extends past state.y, skip past it before text starts.
-  state.y = skipPastTopAndBottom(state.y, state.floats);
+  // If any topAndBottom float already extends past state.y, skip past it before
+  // text starts. Scoped to this paragraph's column band (§20.4.2.20 / §17.6.4):
+  // a topAndBottom float anchored in another newspaper column must not push this
+  // column's text down — state.floats is page-scoped across columns, and
+  // state.contentX/contentW is this element's column band (set per column by the
+  // paint loop).
+  state.y = skipPastTopAndBottom(state.y, state.floats, contentX, contentX + contentW);
 
   const textAreaTopY = state.y;
 
