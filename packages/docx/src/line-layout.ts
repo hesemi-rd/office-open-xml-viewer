@@ -758,7 +758,7 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  *             multiplier applies against the grid pitch instead, with a
  *             floor of the natural line height.
  *   exact   → value in pt, converted to px (ignores font and grid).
- *   atLeast → max(natural, value in pt × scale).
+ *   atLeast → max(natural, authored minimum, active grid minimum).
  *   null    → natural, or grid pitch if the section defines one.
  *
  * Exported for unit tests only — not part of the package API (not
@@ -845,7 +845,13 @@ export function lineBoxHeight(
     return natural * ls.value;
   }
   if (ls.rule === 'exact') return ls.value * scale;
-  if (ls.rule === 'atLeast') return Math.max(natural, ls.value * scale);
+  if (ls.rule === 'atLeast') {
+    return Math.max(
+      natural,
+      ls.value * scale,
+      hasGrid ? gridSingleCell() : 0,
+    );
+  }
   return natural;
 }
 

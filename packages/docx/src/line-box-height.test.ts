@@ -12,6 +12,11 @@ import type { LineSpacing } from './types.js';
 
 const exact = (value: number): LineSpacing => ({ value, rule: 'exact', explicit: true });
 const auto = (value: number): LineSpacing => ({ value, rule: 'auto', explicit: true });
+const atLeast = (value: number): LineSpacing => ({
+  value,
+  rule: 'atLeast',
+  explicit: true,
+});
 
 describe('lineBoxHeight — degenerate zero line spacing', () => {
   // ascent 12 + descent 3 = 15px natural single-line height (no grid).
@@ -52,6 +57,18 @@ describe('lineBoxHeight — snapToChars line-grid participation', () => {
 
   it('applies the line pitch as well as the character-grid behavior', () => {
     expect(lineBoxHeight(null, 8, 2, 1, grid20, false, 0, true)).toBe(20);
+  });
+});
+
+describe('lineBoxHeight — atLeast with an active line grid', () => {
+  const grid20 = { type: 'lines', linePitchPt: 20 } as const;
+
+  it('retains the active grid minimum when the authored minimum is smaller', () => {
+    expect(lineBoxHeight(atLeast(18), 10, 2, 1, grid20)).toBe(20);
+  });
+
+  it('retains the authored minimum when it is larger than the grid minimum', () => {
+    expect(lineBoxHeight(atLeast(24), 10, 2, 1, grid20)).toBe(24);
   });
 });
 
