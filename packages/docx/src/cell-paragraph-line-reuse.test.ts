@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas, paginateDocument, __test_setLineReuseEnabled } from './renderer.js';
+import {
+  renderDocumentToCanvas,
+  paginateDocument,
+  __test_setFragmentPaintEnabled,
+  __test_setLineReuseEnabled,
+} from './renderer.js';
 import type { BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,18 +187,23 @@ async function renderAll(model: DocxDocumentModel, pages: PaginatedBodyElement[]
 /** Paginate once, then paint with reuse OFF and ON at `width`; assert byte-identical
  *  streams and report the measure counts. */
 async function reuseVsRecompute(model: DocxDocumentModel, width = 300): Promise<{ pages: number; drawn: number; on: number; off: number; streams: Call[][] }> {
-  const pages = paginateDocument(model);
-  const prev = __test_setLineReuseEnabled(false);
-  let off: { perPage: Call[][]; measures: number };
-  try { off = await renderAll(model, pages, width); } finally { __test_setLineReuseEnabled(prev); }
-  const on = await renderAll(model, pages, width);
-  expect(on.perPage.length).toBe(off.perPage.length);
-  let drawn = 0;
-  for (let p = 0; p < on.perPage.length; p++) {
-    expect(on.perPage[p]).toEqual(off.perPage[p]); // exact stream identity
-    drawn += on.perPage[p].filter((c) => c.op !== 'img').length;
+  const prevFragmentPaint = __test_setFragmentPaintEnabled(false);
+  try {
+    const pages = paginateDocument(model);
+    const prev = __test_setLineReuseEnabled(false);
+    let off: { perPage: Call[][]; measures: number };
+    try { off = await renderAll(model, pages, width); } finally { __test_setLineReuseEnabled(prev); }
+    const on = await renderAll(model, pages, width);
+    expect(on.perPage.length).toBe(off.perPage.length);
+    let drawn = 0;
+    for (let p = 0; p < on.perPage.length; p++) {
+      expect(on.perPage[p]).toEqual(off.perPage[p]); // exact stream identity
+      drawn += on.perPage[p].filter((c) => c.op !== 'img').length;
+    }
+    return { pages: pages.length, drawn, on: on.measures, off: off.measures, streams: on.perPage };
+  } finally {
+    __test_setFragmentPaintEnabled(prevFragmentPaint);
   }
-  return { pages: pages.length, drawn, on: on.measures, off: off.measures, streams: on.perPage };
 }
 
 function tableMeasurementGeometry() {

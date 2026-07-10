@@ -172,12 +172,13 @@ import {
   type PlacedFragment,
   type FlowFragment,
   type TableFragment,
+  type CellFragment,
 } from './layout-fragments.js';
 import { buildTableFragment } from './table-fragments.js';
 // PR 5 — body fragment paint. renderer <-> fragment-paint is a deliberate import
 // cycle: both sides use the other only inside function bodies (never at module
 // evaluation), so ESM live bindings resolve them at call time.
-import { paintParagraphFragment } from './fragment-paint.js';
+import { paintParagraphFragment, paintTableFragment } from './fragment-paint.js';
 import {
   drawVerticalRun,
   drawTateChuYokoRun,
@@ -3311,6 +3312,7 @@ export function computePages(
               sliceEl as unknown as DocTable,
               tblColWidthsPt,
               meta.heightsPt,
+              tblContentWPt,
               measureState,
               {
                 columnIndex: sliceEl.colIndex ?? 0,
@@ -3330,14 +3332,17 @@ export function computePages(
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
         if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
-        // B2 table stage 1b — stamp the whole-table scale-1 layout for paint reuse.
-        stampTableLayout(tableEl, tblColWidthsPt, rowHs, tblContentWPt);
-        // PR 6 — the fragment for the whole-table placement (no page continuation).
+        // PR 6 — a whole (non-split) block table paints from its fragment, so it is NOT
+        // stamped: `tableEl` is the PARSED DocTable when the table was not row-split, and
+        // stamping it would mutate the parsed model (the defect class this migration
+        // closes). A gate-rejected non-split table (e.g. negative `tblInd`) recomputes
+        // through the legacy `computeTableLayout`, byte-identical to the removed reuse.
         attachTableFragment(
           tableEl,
           tableEl as unknown as DocTable,
           tblColWidthsPt,
           rowHs,
+          tblContentWPt,
           measureState,
           {
             columnIndex: colIndex,
@@ -3966,6 +3971,14 @@ function buildTableCellBlocks(
   return blocks;
 }
 
+/** Side table: emitted table element -> the scale-1 content-band width its fragment
+ *  was resolved at. The fragment-paint gate reuses the fragment only when this paint's
+ *  band matches (mirroring the removed `tableLayoutInputs.contentWPt` stamp gate — a
+ *  negative-`tblInd` table paints at the page-width budget, not the column band, so it
+ *  must recompute on the legacy path). Renderer-internal; not part of the public
+ *  {@link TableFragment}. */
+const tableFragmentBandPt = new WeakMap<object, number>();
+
 /** Build and attach the {@link TableFragment} for one placed table (whole table or one
  *  page slice) to the emitted element's side-table entry. `table` supplies the rows to
  *  fragment (the SOURCE table for a whole-table push; the slice for a split). Never
@@ -3975,6 +3988,7 @@ function attachTableFragment(
   table: DocTable,
   colWidthsPt: number[],
   rowHeightsPt: number[],
+  contentWPt: number,
   measureState: RenderState,
   placement: {
     columnIndex: number;
@@ -4008,6 +4022,56 @@ function attachTableFragment(
       heightPt: tableFragmentHeightPt(fragment),
     }),
   );
+  tableFragmentBandPt.set(el as object, contentWPt);
+}
+
+/** A table (or any table nested in its cells) stays on the LEGACY paint path when it
+ *  needs re-measurement or an out-of-flow path the fragment paint does not yet cover:
+ *   - a `vAlign` of center/bottom re-measures cell content to centre the inked block
+ *     (ECMA-376 §17.4.84);
+ *   - a nested floating table (§17.4.57 `<w:tblpPr>`) is drawn out of flow.
+ *  Top-aligned in-flow tables — the common case — carry no re-measurement and paint
+ *  measure-free from their fragment. Recursion covers nested tables (painted from their
+ *  own fragment). Tracked: migrate vAlign and nested-floating tables in a follow-up. */
+function tableRequiresLegacyPaint(table: DocTable): boolean {
+  for (const row of table.rows) {
+    for (const cell of row.cells) {
+      if (cell.vAlign === 'center' || cell.vAlign === 'bottom') return true;
+      for (const ce of cell.content) {
+        if (ce.type === 'table') {
+          const nested = ce as unknown as DocTable;
+          if (nested.tblpPr != null || tableRequiresLegacyPaint(nested)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** PR 6 — a block table paints from its {@link TableFragment} when the migration gate
+ *  holds: the fragment is present, the table is in flow (not a §17.4.57 floating
+ *  table), it has no vAlign-center/bottom re-measurement, the story is horizontal, and
+ *  this paint's content band matches the band the fragment was resolved at. Otherwise
+ *  the legacy `renderTable` recompute path runs (byte-identical). */
+function isFragmentPaintableTable(
+  table: DocTable,
+  placed: PlacedFragment | undefined,
+  state: RenderState,
+): placed is PlacedFragment {
+  if (
+    !fragmentPaintEnabled ||
+    placed === undefined ||
+    placed.fragment.kind !== 'table' ||
+    table.tblpPr != null ||
+    state.verticalCJK ||
+    tableRequiresLegacyPaint(table)
+  ) {
+    return false;
+  }
+  const bandPt = tableFragmentBandPt.get(table as object);
+  if (bandPt === undefined) return false;
+  const paintBandPt = state.contentW / state.scale;
+  return Math.abs(bandPt - paintBandPt) <= 1e-6 * Math.max(1, Math.abs(paintBandPt));
 }
 
 /** Master switch for the M-1 fit-check measurement reuse. Always ON in production; the
@@ -6062,7 +6126,15 @@ function renderBodyElements(
       // prevPara/spaceAfter untouched (the following content spaces against the
       // paragraph BEFORE the table, exactly like a frame paragraph). A block
       // table resets them (it ends the previous spacing context).
-      renderTable(tbl, state);
+      // PR 6 — a migrated block table paints from its stored fragment (geometry +
+      // cell content, no re-layout). Floating / vAlign / band-mismatch tables fall
+      // through to the legacy `renderTable` recompute path.
+      const placedTable = bodyFragmentFor(el);
+      if (isFragmentPaintableTable(tbl, placedTable, state)) {
+        paintTableFragment(placedTable, state);
+      } else {
+        renderTable(tbl, state);
+      }
       if (!tbl.tblpPr) {
         prevPara = null;
         prevSpaceAfter = 0;
@@ -9964,6 +10036,10 @@ interface TableCellPaintJob {
   ri: number;
   span: number;
   lastRi: number;
+  /** PR 6 — the measured cell fragment for this cell (when the table is painted from
+   *  its {@link TableFragment}); its content is drawn from stored fragments instead of
+   *  being re-laid-out. Absent on the legacy recompute path. */
+  cellFragment?: CellFragment;
 }
 
 function drawTableRows(
@@ -9974,6 +10050,10 @@ function drawTableRows(
   tableX: number,
   startY: number,
   state: RenderState,
+  /** PR 6 — when present, cell content is painted from the matching
+   *  {@link CellFragment}s (measure-free) instead of re-laid-out by {@link renderCell}.
+   *  Aligned 1:1 with `table.rows` / `row.cells`. */
+  fragment?: TableFragment,
 ): number {
   const { scale, dryRun } = state;
   // ECMA-376 §17.4.1 `<w:bidiVisual>`: lay the grid columns right-to-left, so
@@ -10003,11 +10083,15 @@ function drawTableRows(
   let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
+    const rowFragment = fragment?.rows[ri];
     const rowH = rowHeights[ri];
     let x = tableX;
     let ci = 0;
+    let cellIdx = 0;
 
     for (const cell of row.cells) {
+      const cellFragment = rowFragment?.cells[cellIdx];
+      cellIdx++;
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
       // Physical left edge of this cell. LTR: cumulative from the left (`x`).
@@ -10049,7 +10133,7 @@ function drawTableRows(
         if (dryRun) measureCellContent(cell, table, cellW, scale, state);
         else {
           const jobIndex = jobs.length;
-          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell });
+          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell, cellFragment });
           // ECMA-376 §17.4.66 — record this cell's grid footprint so interior-edge
           // neighbour lookups resolve to it. A vMerge=restart cell owns every row it
           // spans; a colSpan cell owns every column in its span.
@@ -10073,7 +10157,7 @@ function drawTableRows(
   // physical side a logical border maps to, so it is consulted in the border
   // pass alone.
   for (const j of jobs) {
-    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact);
+    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact, j.cellFragment);
   }
 
   // ECMA-376 §17.4.66 — adjacent-cell border conflict resolution. Each SHARED
@@ -10514,6 +10598,11 @@ function renderCell(
   h: number,
   state: RenderState,
   clipExact = false,
+  /** PR 6 — when present, this cell's content is painted from its stored
+   *  {@link CellFragment} blocks (measure-free) rather than re-laid-out. Only supplied
+   *  by the fragment paint path, which the migration gate limits to top-aligned tables,
+   *  so the vAlign centring branch below is not reached for a fragment cell. */
+  cellFragment?: CellFragment,
 ): void {
   const { ctx, scale } = state;
 
@@ -10646,10 +10735,12 @@ function renderCell(
     // fixture; when they are, tighten this to the logical content width.
     ctx.rect(0, y, ctx.canvas.width, h);
     ctx.clip();
-    renderCellContent(cell.content, cellState);
+    if (cellFragment) renderCellContentFragment(cellFragment, cellState);
+    else renderCellContent(cell.content, cellState);
     ctx.restore();
   } else {
-    renderCellContent(cell.content, cellState);
+    if (cellFragment) renderCellContentFragment(cellFragment, cellState);
+    else renderCellContent(cell.content, cellState);
   }
 }
 
@@ -10693,6 +10784,77 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
       prevSpaceAfter = 0;
     }
   }
+}
+
+/**
+ * PR 6 — paint a cell's content from its {@link CellFragment} blocks, WITHOUT
+ * re-laying-out. Mirrors {@link renderCellContent} exactly: paragraph blocks draw from
+ * their stored scale-1 line partition (rescaled through the same bridge body fragment
+ * paint uses; measure-free at scale 1), nested-table blocks from their own
+ * {@link TableFragment}, with the SAME §17.3.1.9 contextualSpacing / spaceBefore-after
+ * overlap collapse. Cell paragraphs are drawn whole (no line slice), identically to
+ * `renderCellContent`.
+ */
+function renderCellContentFragment(cellFragment: CellFragment, state: RenderState): void {
+  let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
+  for (const block of cellFragment.blocks) {
+    if (block.kind === 'paragraph') {
+      const para = block.source;
+      const suppress = contextualSuppressed(prevPara, para);
+      const effBefore = suppress ? 0 : para.spaceBefore;
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      state.y -= overlap * state.scale;
+      renderBodyParagraphLines(
+        para,
+        state,
+        block.measured.lines.map((line) => line.layout),
+        suppress,
+        undefined,
+        undefined,
+      );
+      prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
+    } else {
+      renderTableFragment(block, state);
+      prevPara = null;
+      prevSpaceAfter = 0;
+    }
+  }
+}
+
+/**
+ * PR 6 — paint a block table from its {@link TableFragment}: geometry from the stored
+ * scale-1 column widths + per-row heights (× scale), cell content from the cell
+ * fragments (measure-free at scale 1). Mirrors {@link renderTable}'s in-flow block path
+ * (ECMA-376 §17.4.63/§17.4.50 jc + positive `tblInd`, §17.4.1 bidiVisual origin);
+ * negative `tblInd` and floating tables are gate-excluded ({@link isFragmentPaintableTable})
+ * and stay on the legacy recompute path, so this handles only the fragment-migrated
+ * class. Advances `state.y` past the table exactly as `renderTable` does.
+ */
+export function renderTableFragment(fragment: TableFragment, state: RenderState): void {
+  const table = fragment.source;
+  const { contentX, contentW, scale } = state;
+  const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
+  const tableW = colWidths.reduce((s, w) => s + w, 0);
+  const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+
+  const applyInd = table.tblInd != null && table.jc === 'left';
+  let tableX =
+    table.jc === 'center'
+      ? contentX + Math.max(0, (contentW - tableW) / 2)
+      : table.jc === 'right'
+        ? contentX + Math.max(0, contentW - tableW)
+        : contentX;
+  if (applyInd) {
+    const indPx = (table.tblInd as number) * scale;
+    tableX =
+      table.bidiVisual === true
+        ? contentX + contentW - indPx - tableW
+        : contentX + indPx;
+  }
+
+  state.y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state, fragment);
 }
 
 /** Which grid edges of the table this cell touches, so {@link resolveCellEdges}

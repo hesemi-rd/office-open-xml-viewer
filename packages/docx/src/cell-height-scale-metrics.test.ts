@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   renderDocumentToCanvas,
   __test_setTableReuseEnabled,
+  __test_setFragmentPaintEnabled,
 } from './renderer.js';
 import type {
   BodyElement,
@@ -259,6 +260,10 @@ describe('Finding 1 — cell content height uses real-scale (rescaled) Canvas me
     // Auto height → the row height IS the measured cell content height. Disable the
     // stamped-layout reuse so computeTableLayout runs the fresh real-scale fallback
     // (the exact path Finding 1 flags), not the paginator's scale-1 stamp × scale.
+    // PR 6 — also disable the fragment paint path (which, like the reuse, draws the
+    // paginator's scale-1 row height × scale); the legacy `renderTable` recompute is
+    // the path this Finding characterizes.
+    const prevFrag = __test_setFragmentPaintEnabled(false);
     const prev = __test_setTableReuseEnabled(false);
     try {
       const t = tableOf(row(
@@ -276,6 +281,7 @@ describe('Finding 1 — cell content height uses real-scale (rescaled) Canvas me
       expect(bg!.h).toBeCloseTo(bottom - top, 1);
     } finally {
       __test_setTableReuseEnabled(prev);
+      __test_setFragmentPaintEnabled(prevFrag);
     }
   });
 });

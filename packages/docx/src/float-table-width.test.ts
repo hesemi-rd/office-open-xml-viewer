@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computePages } from './renderer.js';
+import { bodyFragmentFor, computePages } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
   DocxTextRun, SectionProps, TblpPr, PaginatedBodyElement,
@@ -104,9 +104,13 @@ function table(
 }
 
 const isTable = (e: PaginatedBodyElement): boolean => e.type === 'table';
-const stampedWidth = (pages: PaginatedBodyElement[][]): number => {
+const resolvedWidth = (pages: PaginatedBodyElement[][]): number => {
   const el = pages.flat().find(isTable);
   expect(el).toBeDefined();
+  const placed = bodyFragmentFor(el as PaginatedBodyElement);
+  if (placed?.fragment.kind === 'table') {
+    return placed.fragment.columnWidthsPt.reduce((s, w) => s + w, 0);
+  }
   return ((el as PaginatedBodyElement).tableColWidthsPt ?? []).reduce((s, w) => s + w, 0);
 };
 
@@ -117,7 +121,7 @@ describe('floating-table width cap (§17.4.57) — page width, not the column ba
       [table([200, 120, 200], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(stampedWidth(pages)).toBeCloseTo(520, 1);
+    expect(resolvedWidth(pages)).toBeCloseTo(520, 1);
   });
 
   it('keeps an AUTOFIT floating table with a preferred tblW at its full grid width (sample-28 p.17)', () => {
@@ -126,7 +130,7 @@ describe('floating-table width cap (§17.4.57) — page width, not the column ba
       [table([200, 120, 200], { widthPt: 520, float: true })],
       section(), makeCtx(),
     );
-    expect(stampedWidth(pages)).toBeCloseTo(520, 1);
+    expect(resolvedWidth(pages)).toBeCloseTo(520, 1);
   });
 
   it('clamps a floating table wider than the PAGE to the page width', () => {
@@ -135,7 +139,7 @@ describe('floating-table width cap (§17.4.57) — page width, not the column ba
       [table([300, 100, 300], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(stampedWidth(pages)).toBeCloseTo(600, 1);
+    expect(resolvedWidth(pages)).toBeCloseTo(600, 1);
   });
 
   it('still scales a NON-floating fixed table down to the column band (block-table cap unchanged)', () => {
@@ -143,7 +147,7 @@ describe('floating-table width cap (§17.4.57) — page width, not the column ba
       [table([200, 120, 200], { layout: 'fixed' })],
       section(), makeCtx(),
     );
-    expect(stampedWidth(pages)).toBeCloseTo(450, 1);
+    expect(resolvedWidth(pages)).toBeCloseTo(450, 1);
   });
 
   it('leaves a floating table narrower than the band untouched (cap never bites)', () => {
@@ -151,6 +155,6 @@ describe('floating-table width cap (§17.4.57) — page width, not the column ba
       [table([100, 100], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(stampedWidth(pages)).toBeCloseTo(200, 1);
+    expect(resolvedWidth(pages)).toBeCloseTo(200, 1);
   });
 });
