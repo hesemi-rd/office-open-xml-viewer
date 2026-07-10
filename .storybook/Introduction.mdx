@@ -133,7 +133,8 @@ npm install @silurus/ooxml
 ```typescript
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
-const viewer = new PptxViewer(document.getElementById('container')!);
+const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+const viewer = new PptxViewer(canvas);
 const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
 await viewer.load(buf);
 viewer.nextSlide();
@@ -156,7 +157,7 @@ import { PptxPresentation, autoResize } from '@silurus/ooxml/pptx';
 const pres = await PptxPresentation.load('/deck.pptx');
 const detach = autoResize(
   (width) => pres.renderSlide(canvas, 0, { width }),
-  canvas.parentElement!, // observe the container so canvas can fill it
+  canvas.parentElement as HTMLElement, // observe the container so canvas can fill it
 );
 
 // teardown
