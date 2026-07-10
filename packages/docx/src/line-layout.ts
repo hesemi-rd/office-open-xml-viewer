@@ -40,6 +40,7 @@ import {
   parseDateTimePictureSwitch,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
+import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
 import {
   type FloatRect,
   resolveLineFloatWindow,
@@ -128,6 +129,19 @@ export interface LayoutTextSeg {
    *  under `ctx.scale(charScale, 1)`; decorations follow the scaled extent.
    *  Absent ⇒ 1 (100%). */
   charScale?: number;
+  /** ECMA-376 §17.3.2.14 `<w:fitText>` — target width in TWIPS and optional
+   *  signed link id. All segments emitted from one source run retain the same
+   *  run/region indices so script and small-caps splitting cannot create a new
+   *  fit region. */
+  fitTextVal?: number;
+  fitTextId?: number;
+  fitTextRegionIndex?: number;
+  fitTextRunIndex?: number;
+  fitTextRunCharCount?: number;
+  /** Scale-resolved gap shared by the canonical advance and paint paths. */
+  fitTextPerGapPx?: number;
+  fitTextRegionStart?: boolean;
+  fitTextRegionEnd?: boolean;
   /** ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in POINTS,
    *  applied as a y-offset to the glyphs and decorations without changing the
    *  font size or the line box. Absent ⇒ 0. */
@@ -715,6 +729,9 @@ export function segmentCharacterGridDeltaPx(
  *  ("the amount of character pitch … added after each character in this run").
  *  0 when the run declares no `w:spacing`. */
 export function charSpacingDeltaPx(seg: LayoutTextSeg, scale: number): number {
+  // §17.3.2.14 fitText replaces cached §17.3.2.35 spacing with the resolved
+  // region gap. The paint path already reads this authority.
+  if (seg.fitTextPerGapPx !== undefined) return seg.fitTextPerGapPx;
   return (seg.charSpacing ?? 0) * scale;
 }
 
@@ -755,6 +772,7 @@ export function segLetterSpacingPx(
   gridDeltaPx: number,
   scale: number,
 ): number {
+  if (seg.fitTextPerGapPx !== undefined) return seg.fitTextPerGapPx;
   const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
   const grid = gridSegDeltaPx(seg.text, segmentDelta) === 0 ? 0 : segmentDelta;
   return grid + charSpacingDeltaPx(seg, scale);
@@ -771,6 +789,11 @@ export function segAdvanceWidth(
   gridDeltaPx: number,
   scale: number,
 ): number {
+  if (seg.fitTextPerGapPx !== undefined) {
+    const charCount = [...seg.text].length;
+    const gapCount = seg.fitTextRegionEnd ? Math.max(0, charCount - 1) : charCount;
+    return naturalWidthPx * charScaleFactor(seg) + gapCount * seg.fitTextPerGapPx;
+  }
   // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): the whole run is written
   // horizontally inside ONE cell of the vertical line ("keeping the text on the
   // same line"), so its advance ALONG the column is exactly one em (one cell),
@@ -1677,12 +1700,76 @@ export function paragraphSegsStateSensitive(para: DocParagraph): boolean {
   return false;
 }
 
+/** Resolve §17.3.2.14 region gaps after raw Canvas advances are available.
+ *  Source-run aggregation is deliberate: a run split into Latin/CJK/small-caps
+ *  segments still contributes one kernel input and cannot become multiple
+ *  id-less regions. */
+function resolveFitTextSegments(
+  segments: LayoutTextSeg[],
+  scale: number,
+  measureNaturalWidthPx: (segment: LayoutTextSeg) => number,
+): void {
+  const regionSegments = new Map<number, LayoutTextSeg[]>();
+  for (const segment of segments) {
+    if (segment.fitTextRegionIndex === undefined) continue;
+    const members = regionSegments.get(segment.fitTextRegionIndex) ?? [];
+    members.push(segment);
+    regionSegments.set(segment.fitTextRegionIndex, members);
+  }
+
+  for (const members of regionSegments.values()) {
+    const runInputs = new Map<number, FitTextRun>();
+    for (const segment of members) {
+      const runIndex = segment.fitTextRunIndex;
+      if (runIndex === undefined || segment.fitTextVal === undefined) continue;
+      const input = runInputs.get(runIndex) ?? {
+        fitTextValTwips: segment.fitTextVal,
+        fitTextId: segment.fitTextId,
+        charCount: segment.fitTextRunCharCount ?? [...segment.text].length,
+        naturalWidthPx: 0,
+        charScale: segment.charScale,
+      };
+      input.naturalWidthPx += measureNaturalWidthPx(segment);
+      runInputs.set(runIndex, input);
+    }
+
+    const resolved = groupFitTextRegions([...runInputs.values()], scale)[0];
+    if (!resolved) continue;
+    members.forEach((segment, index) => {
+      segment.fitTextPerGapPx = resolved.perGapPx;
+      segment.fitTextRegionStart = index === 0 ? true : undefined;
+      segment.fitTextRegionEnd = index === members.length - 1 ? true : undefined;
+    });
+  }
+}
+
 export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
+  // Group §17.3.2.14 adjacency over SOURCE RUNS before any script/font, word, or
+  // small-caps segmentation. Widths are deliberately zero here; the same pure
+  // kernel resolves the real natural widths at layout scale below.
+  const fitTextRegionByRun = new Map<number, number>();
+  const fitTextRuns: FitTextRun[] = runs.map((run) => {
+    if (run.type !== 'text') return { charCount: 0, naturalWidthPx: 0 };
+    return {
+      fitTextValTwips: run.fitTextVal,
+      fitTextId: run.fitTextId,
+      charCount: [...run.text].length,
+      naturalWidthPx: 0,
+      charScale: run.charScale,
+    };
+  });
+  groupFitTextRegions(fitTextRuns, 1).forEach((region, regionIndex) => {
+    for (let runIndex = region.start; runIndex < region.end; runIndex += 1) {
+      fitTextRegionByRun.set(runIndex, regionIndex);
+    }
+  });
   const pushTextPiece = (
     text: string,
     base: DocxTextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
+    sourceRunIndex: number,
+    sourceRunCharCount?: number,
   ) => {
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
@@ -1700,6 +1787,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     const revision = (base as DocxTextRun).revision;
     const r = base as DocxTextRun;
     const rtl = r.rtl === true ? true : undefined;
+    const fitTextRegionIndex = fitTextRegionByRun.get(sourceRunIndex);
 
     // IX1 — resolve the run's hyperlink target ONCE (§17.16.22 external URL /
     // §17.16.23 internal anchor). An external URL (`r.hyperlink`) wins over the
@@ -1799,6 +1887,11 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         // passes apply them identically (measure==paint).
         charSpacing: r.charSpacing,
         charScale: r.charScale,
+        fitTextVal: fitTextRegionIndex === undefined ? undefined : r.fitTextVal,
+        fitTextId: fitTextRegionIndex === undefined ? undefined : r.fitTextId,
+        fitTextRegionIndex,
+        fitTextRunIndex: fitTextRegionIndex === undefined ? undefined : sourceRunIndex,
+        fitTextRunCharCount: fitTextRegionIndex === undefined ? undefined : sourceRunCharCount,
         position: r.position,
         kerning: r.kerning,
         // ECMA-376 §17.3.2.10 eastAsianLayout — 縦中横 is meaningful ONLY in a
@@ -1889,7 +1982,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     }
   };
 
-  for (const run of runs) {
+  for (const [runIndex, run] of runs.entries()) {
     if (run.type === 'text') {
       const t = run as unknown as DocxTextRun & { type: 'text' };
       // ECMA-376 §17.11: substitute a footnote/endnote reference marker's glyph
@@ -1904,13 +1997,17 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           : undefined;
       if (t.noteRef) {
         const label = noteText != null ? String(noteText) : (t.text || '');
-        if (label.length > 0) pushTextPiece(label, t, t.vertAlign ?? 'super');
+        if (label.length > 0) {
+          pushTextPiece(label, t, t.vertAlign ?? 'super', runIndex, [...t.text].length);
+        }
         continue;
       }
       // Split on tab chars so tab alignment can be resolved during layout.
       const parts = t.text.split('\t');
       for (let i = 0; i < parts.length; i++) {
-        if (parts[i].length > 0) pushTextPiece(parts[i], t, t.vertAlign);
+        if (parts[i].length > 0) {
+          pushTextPiece(parts[i], t, t.vertAlign, runIndex, [...t.text].length);
+        }
         if (i < parts.length - 1) {
           segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0, bold: t.bold, italic: t.italic });
         }
@@ -1968,7 +2065,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     } else if (run.type === 'field') {
       const f = run as unknown as FieldRun & { type: 'field' };
       const text = resolveFieldText(f, environment);
-      if (text) pushTextPiece(text, f, f.vertAlign);
+      if (text) pushTextPiece(text, f, f.vertAlign, runIndex);
     } else if (run.type === 'math') {
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
@@ -2029,6 +2126,19 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // space is a legal break, so the mark may legitimately start the line).
     if (!('text' in prev) || /\s$/.test(prev.text)) continue;
     cur.joinPrev = true;
+  }
+
+  // §17.3.2.14 fitText is a fixed-width, non-wrapping unit. Glue every segment
+  // after the first in the RUN-grouped region, including script/small-caps
+  // pieces emitted from the same source run.
+  const seenFitTextRegions = new Set<number>();
+  for (const seg of segs) {
+    if (!('text' in seg) || seg.fitTextRegionIndex === undefined) continue;
+    if (seenFitTextRegions.has(seg.fitTextRegionIndex)) seg.joinPrev = true;
+    else {
+      seg.fitTextRegionStart = true;
+      seenFitTextRegions.add(seg.fitTextRegionIndex);
+    }
   }
 
   return segs;
@@ -2324,6 +2434,15 @@ export function layoutLines(
     restoreKerning(prevKern);
     return m;
   };
+
+  // Resolve §17.3.2.14 from RAW natural advances at this exact layout scale.
+  // The resulting per-gap is folded into segAdvanceWidth below, so the line
+  // breaker and paint pen use one width authority. Cached w:spacing is ignored.
+  resolveFitTextSegments(
+    segs.filter((seg): seg is LayoutTextSeg => 'text' in seg),
+    scale,
+    (segment) => measureText(segment).width,
+  );
 
   // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
   // character-grid delta, the §17.3.2.43 horizontal glyph scale (w:w) and the
@@ -2648,6 +2767,25 @@ export function layoutLines(
     if (s.ruby) {
       asc = asc + s.ruby.fontSizePt * scale * 1.5;
     }
+
+    // ECMA-376 §17.3.2.14: a fit region is an atomic fixed-width cell. The
+    // first segment judges the WHOLE resolved region; after an optional flush,
+    // every member is added without entering the CJK/overlong-word split paths.
+    // This also handles a target wider than the line: it overflows as one unit
+    // instead of violating the required internal non-wrap boundary.
+    if (s.fitTextRegionIndex !== undefined) {
+      if (s.fitTextRegionStart) {
+        let regionWidth = w;
+        for (const queued of queue) {
+          if (!('text' in queued) || queued.fitTextRegionIndex !== s.fitTextRegionIndex) break;
+          regionWidth += segAdvance(queued);
+        }
+        if (currentLine.length > 0 && currentWidth + regionWidth > availW()) flush();
+      }
+      s.measuredWidth = w;
+      addToLine(s, w, h, asc, desc);
+      continue;
+    }
     // Wrap-fit check uses two standard typographic allowances:
     //   1. Trailing-space collapse: if this word becomes the last on the
     //      line, its trailing space (if any) collapses. We subtract it from
@@ -2922,7 +3060,20 @@ export function rescaleLayoutLines(
     let desc = 0;
     let intended = 0;
     let hasText = false;
-    const segments = l.segments.map((s) => {
+    const scaledSource = l.segments.map((segment) => ({ ...segment })) as LayoutSeg[];
+    // Recompute the region gap from paint-scale natural metrics. Reusing the
+    // scale-1 gap would break measure==paint because targetPx and font advances
+    // are both scale-relative (and font hinting need not be linearly scalable).
+    resolveFitTextSegments(
+      scaledSource.filter((segment): segment is LayoutTextSeg => 'text' in segment),
+      scale,
+      (segment) => {
+        const effPx = calcEffectiveFontPx(segment, scale);
+        ctx.font = buildFont(segment.bold, segment.italic, effPx, segment.fontFamily, fontFamilyClasses);
+        return ctx.measureText(segment.text).width;
+      },
+    );
+    const segments = scaledSource.map((s) => {
       if ('isTab' in s) {
         // Tab advance is position-dependent (pen → next stop) and box-neutral; a
         // ×scale reproduces the scale-1 tab-to-stop advance scaled to paint space
