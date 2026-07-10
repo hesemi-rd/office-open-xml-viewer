@@ -643,3 +643,64 @@ describe('table-cell paint byte-identity — fragment table paint (PR 6)', () =>
     expect(r.drawn).toBeGreaterThan(0);
   });
 });
+
+describe('re-wrapped continuation slices (issue #908) — fragment paint parity', () => {
+  it('draws paragraph anchors ONCE for a re-wrapped continuation (fragment === legacy)', async () => {
+    // A §17.6.4 unequal-width split: col0 keeps the wide partition, col1 gets a
+    // RE-MEASURED remainder whose fragment covers its WHOLE partition (lineStart 0,
+    // lineEnd = length). paintParagraphFragment must not degrade that full-range
+    // continuation slice to "no slice": renderParagraph's first-slice-only work
+    // (anchor drawing, §17.3.1.7 top border) would run again in the destination
+    // column. Legacy paint sees the element's `continues` flag; the fragment path
+    // must thread it through. The anchored no-wrap shape's text is the observable:
+    // its fillText must appear exactly once per page in BOTH paint modes.
+    const anchorShape = {
+      type: 'shape',
+      widthPt: 40, heightPt: 10,
+      anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: true,
+      anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+      zOrder: 0, subpaths: [], presetGeometry: 'rect',
+      fill: null, stroke: null,
+      // No wrap: the shape registers no float band, so the width-mismatch swap
+      // fires (a wrap float would scope the swap out — asserted below).
+      wrapMode: 'none', wrapSide: 'bothSides',
+      distTop: 0, distBottom: 0, distLeft: 0, distRight: 0,
+      textBlocks: [{
+        text: 'ANCHORTEXT', fontSizePt: 8, bold: false, italic: false,
+        color: '000000', fontFamily: 'Times New Roman', alignment: 'left',
+      }],
+      textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+    };
+    const p = para('あ'.repeat(28), { defaultFontSize: 20 });
+    (p.runs as unknown[]).unshift(anchorShape);
+    (p.runs[1] as { fontSize: number }).fontSize = 20;
+    const model = doc([p as unknown as BodyElement], 60);
+    (model.section as SectionProps).columns = {
+      count: 2, spacePt: 32, equalWidth: false, sep: false,
+      cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
+    } as SectionProps['columns'];
+
+    const pages = paginateDocument(model);
+    // Non-vacuity: the swap really fired — a col-1 slice carries the remainder
+    // partition marker (if a float had registered, the swap would be scoped out
+    // and this test would be exercising nothing).
+    const slices = pages.flat().filter((el) => el.type === 'paragraph') as
+      (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
+    expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
+
+    const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
+    const legacy = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
+    expect(production.perPage.length).toBe(legacy.perPage.length);
+    for (let pg = 0; pg < production.perPage.length; pg++) {
+      // Byte-identical streams — in particular the anchor's text appears the same
+      // number of times (once) in both modes.
+      const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
+      const anchorDrawsLegacy = legacy.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
+      expect(anchorDrawsProduction).toBe(anchorDrawsLegacy);
+      expect(production.perPage[pg]).toEqual(legacy.perPage[pg]);
+    }
+    // The anchor really painted (observable non-vacuity).
+    expect(legacy.perPage.flat().some((c) => c.text === 'ANCHORTEXT')).toBe(true);
+  });
+});

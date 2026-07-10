@@ -149,6 +149,7 @@ import {
 } from './line-layout.js';
 import type {
   DocGridCtx,
+  LineBoundary,
   LayoutImageSeg,
   LayoutLine,
   LayoutMathSeg,
@@ -4435,6 +4436,7 @@ function splitParagraphAcrossPages(
     const indLeft = paragraphContext.physicalIndentLeftPt;
     const indRight = paragraphContext.physicalIndentRightPt;
     let paraW = Math.max(1, contentWPt() - indLeft - indRight);
+    let remainderBoundary: LineBoundary | null = null;
     const measureAtCurrentPlacement = (suppressLeadingSpace: boolean) => measureParagraph(
       para,
       paragraphContext,
@@ -4443,7 +4445,7 @@ function splitParagraphAcrossPages(
         paragraphXPt: paragraphXPt(),
         availableWidthPt: contentWPt(),
         maximumYPt: measureState.pageH,
-        suppressSpaceBefore: suppressLeadingSpace,
+        suppressSpaceBefore: remainderBoundary !== null ? true : suppressLeadingSpace,
         wrap: measureState.floats.length > 0
           ? createFloatWrapOracle(measureState.floats)
           : undefined,
@@ -4453,6 +4455,7 @@ function splitParagraphAcrossPages(
         fontFamilyClasses: measureState.fontFamilyClasses,
       },
       paragraphMeasurementEnvironment(measureState),
+      remainderBoundary !== null ? { boundary: remainderBoundary } : undefined,
     );
     let measured = measureAtCurrentPlacement(suppressSpaceBefore);
     const placeMarkOnly = (): { endY: number } => {
@@ -4502,6 +4505,34 @@ function splitParagraphAcrossPages(
     );
 
     let lineIdx = 0;
+    let paragraphContinued = false;
+    // §17.6.4 — a continuation must wrap to ITS column's width. When the destination
+    // band differs from the measured placement (unequal-width columns), re-measure the
+    // REMAINDER from the last placed line's consumed boundary at the destination;
+    // same-width continuations keep the single measurement, byte-identical.
+    const maybeSwapToRemainder = (): void => {
+      if (lineIdx === 0) return;
+      if (measureState.floats.length > 0) return;
+      if (measured.placement.wrap !== undefined) return;
+      const destW = contentWPt();
+      const eps = 1e-6 * Math.max(1, Math.abs(destW));
+      if (Math.abs(measured.placement.availableWidthPt - destW) <= eps) return;
+      const boundary = lines[lineIdx - 1].consumedEnd;
+      if (!boundary) return;
+      const previous = { measured, lines, lineExtents, paraW, boundary: remainderBoundary };
+      remainderBoundary = boundary;
+      const next = measureAtCurrentPlacement(true);
+      if (next.markOnly || next.lines.length === 0) {
+        remainderBoundary = previous.boundary;
+        return;
+      }
+      measured = next;
+      paraW = Math.max(1, measured.placement.availableWidthPt - indLeft - indRight);
+      lines = measured.lines.map((line) => line.layout);
+      lineExtents = measuredLineExtents();
+      lineIdx = 0;
+      paragraphContinued = true;
+    };
     let cursorY = initialY;
     while (lineIdx < lines.length) {
       const remaining = colBot() - cursorY;
@@ -4517,6 +4548,7 @@ function splitParagraphAcrossPages(
           newPage(cursorY);
           cursorY = colTop();
           if (lineIdx === 0) remeasureBeforeFirstLine();
+          else maybeSwapToRemainder();
           continue;
         }
         lastFitting = firstFitting + 1;
@@ -4539,11 +4571,18 @@ function splitParagraphAcrossPages(
       const sliceEl = {
         ...(para as object),
         type: 'paragraph',
-        lineSlice: { start: firstFitting, end: lastFitting },
+        lineSlice: {
+          start: firstFitting,
+          end: lastFitting,
+          ...(paragraphContinued ? { continues: true } : {}),
+        },
       } as PaginatedElementWithLines;
       if (stampLines) {
         stampParagraphLines(sliceEl, lines, {
           paraW,
+          // A remainder is laid out with firstIndent=0, but this stamp is the legacy
+          // paint path's cache key. Keep what paint reconstructs so it reuses the
+          // stored remainder partition — the only correct lines for this slice.
           firstIndent: para.indentFirst,
           tabOriginPx: indLeft,
           gridDeltaPx: gridCharDeltaPx(grid, 1),
@@ -4565,7 +4604,7 @@ function splitParagraphAcrossPages(
           measured,
           firstFitting,
           lastFitting,
-          firstFitting === 0,
+          firstFitting === 0 && !paragraphContinued,
           isFinalSlice,
           trailingExtent,
         );
@@ -4583,6 +4622,7 @@ function splitParagraphAcrossPages(
       if (!isFinalSlice) {
         newPage(cursorY);
         cursorY = colTop();
+        maybeSwapToRemainder();
       }
     }
     return { endY: cursorY };
@@ -6197,7 +6237,7 @@ function renderBodyElements(
       // earlier slice already consumed it on the previous page. Likewise
       // mid-paragraph slices (slice.end < total) suppress spaceAfter — only
       // the slice covering the FINAL line of the paragraph emits it.
-      const isContinuation = !!slice && slice.start > 0;
+      const isContinuation = (!!slice && slice.start > 0) || slice?.continues === true;
       // ECMA-376 §17.3.1.7 paragraph-border merge: suppress this paragraph's TOP
       // edge when the previous IN-FLOW paragraph (already null on column/section
       // change, table/frame boundary — exactly the run-breaking cases) shares its
@@ -6221,6 +6261,11 @@ function renderBodyElements(
         paintParagraphFragment(placedFragment, state, {
           suppressSpaceBefore: suppress || isContinuation,
           borderMerge,
+          // §17.6.4 remainder re-wrap — a re-measured continuation covers its whole
+          // partition (fragment range [0, len)), so the fragment cannot see that it
+          // is a continuation; thread the element slice's marker through so the
+          // fragment path mirrors the legacy path's first-slice-only guards.
+          continuesParagraph: slice?.continues === true,
         });
       } else {
         renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
@@ -6337,7 +6382,7 @@ function renderEmptyMarkParagraph(
     markTop: number;
     /** Total laid-out line count (0 here); used by the slice guards. */
     totalLines: number;
-    lineSlice?: { start: number; end: number };
+    lineSlice?: { start: number; end: number; continues?: boolean };
     /** §17.3.1.7 paragraph-border merge (suppress top/bottom edges). */
     borderMerge?: ParaBorderMerge;
   },
@@ -6375,7 +6420,7 @@ function renderEmptyMarkParagraph(
   // shapes are themselves the float band, so they stay anchored to the original
   // paragraph top (§20.4.3.5) instead of following the paragraph mark's flow.
   // Only the first slice draws them (a continuation slice already did on its page).
-  if (!lineSlice || lineSlice.start === 0) {
+  if (!lineSlice || (lineSlice.start === 0 && !lineSlice.continues)) {
     renderAnchorImages(para, state, paragraphStartY + flowShift, 'front', paragraphStartY);
   }
 }
@@ -6652,7 +6697,7 @@ function renderParagraph(
   suppressSpaceBefore = false,
   /** When set, render only `lines[start, end)` of the laid-out paragraph,
    *  used by the paginator to split paragraphs that don't fit on one page. */
-  lineSlice?: { start: number; end: number },
+  lineSlice?: { start: number; end: number; continues?: boolean },
   /** True when this call is the redirected draw of a `<w:framePr>` frame
    *  paragraph (from {@link renderFrameParagraph}). It suppresses the in-flow
    *  cursor bookkeeping that the frame path handles itself: anchor-float
@@ -7075,7 +7120,7 @@ function renderParagraph(
   // Anchor images are absolutely positioned — draw after inline flow.
   // Skip this for continuation slices: anchor positioning is paragraph-relative
   // and the first slice already painted them.
-  if (!lineSlice || lineSlice.start === 0) {
+  if (!lineSlice || (lineSlice.start === 0 && !lineSlice.continues)) {
     renderAnchorImages(para, state, paragraphStartY);
   }
 }
@@ -7161,7 +7206,7 @@ export function renderBodyParagraphLines(
   state: RenderState,
   scale1Lines: readonly LayoutLine[],
   suppressSpaceBefore: boolean,
-  lineSlice: { start: number; end: number } | undefined,
+  lineSlice: { start: number; end: number; continues?: boolean } | undefined,
   borderMerge: ParaBorderMerge | undefined,
 ): void {
   renderParagraph(source, state, suppressSpaceBefore, lineSlice, false, borderMerge, scale1Lines);

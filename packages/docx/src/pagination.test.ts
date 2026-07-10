@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computePages, computeColumns } from './renderer.js';
+import { bodyFragmentFor, computePages, computeColumns } from './renderer.js';
 import type {
   BodyElement, CellElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
 } from './types';
@@ -64,11 +64,12 @@ function para(
     keepNext?: boolean;
     spaceBefore?: number;
     spaceAfter?: number;
+    indentFirst?: number;
   } = {},
 ): BodyElement {
   const fontSize = opts.fontSize ?? 20;
   const p: DocParagraph = {
-    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: opts.indentFirst ?? 0,
     spaceBefore: opts.spaceBefore ?? 0, spaceAfter: opts.spaceAfter ?? 0, lineSpacing: null, numbering: null, tabStops: [],
     runs: opts.text ? [textRun(opts.text, fontSize)] : [],
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
@@ -456,16 +457,14 @@ describe('computePages — shared paragraph measurement migration geometry', () 
   // `lineIdx > 0`) advances into the NARROW column WITHOUT re-wrapping, so the
   // remainder keeps the wide column's line breaks and overflows the narrow column.
   //
-  // GROUNDED RED — OBSERVED failing (2026-07-10): the col1 continuation line is
-  // 100pt wide (col0 geometry) vs. the 48pt column → "expected 100 to be less than
-  // or equal to 48.000001" at the width assertion below. SKIPPED pending
-  // orchestrator adjudication: a spec-faithful remainder re-wrap needs `layoutLines`
-  // to expose per-line consumed-content boundaries (break-aware, in field-resolved
-  // segment-stream coordinates), which the line model does NOT record — see the
-  // "Escape-hatch design analysis" section in .superpowers/sdd/progress.md for the
-  // required seam and why a forced geometric approximation is not acceptable. Remove
-  // `.skip` when the boundary-provenance seam lands.
-  it.skip('re-wraps a paragraph continuation into a narrower unequal-width column', () => {
+  // Fixed by the issue-#908 boundary-provenance seam: `layoutLines` records each
+  // line's consumed-content END boundary (break-aware, in field-resolved segment-
+  // stream coordinates), `measureParagraph` lays out a remainder suffix from such a
+  // boundary (first-line indent suppressed per §17.3.1.12 — a continuation is not a
+  // first line), and `splitParagraphAcrossPages` re-measures the remainder when the
+  // destination placement mismatches the recorded one (same-width continuations keep
+  // the exact single-measurement path).
+  it('re-wraps a paragraph continuation into a narrower unequal-width column', () => {
     // col0 = 100pt wide (5 CJK glyphs/line at 20pt), col1 = 48pt wide (2/line).
     // 100 + 12 + 48 = 160 = content width; both bands are 100pt tall (5 lines).
     const unequalColumns = section({
@@ -530,6 +529,154 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(col1Lines.reduce((sum, l) => sum + lineChars(l), 0)).toBe(10);
     for (const s of slices.filter((sl) => sl.colIndex === 1)) {
       expect(s.layoutLinesInputs?.paraW).toBe(48);
+    }
+  });
+
+  type RuntimeLine = { segments: { measuredWidth?: number; text?: string }[] };
+  type RuntimeSlice = PaginatedBodyElement & {
+    lineSlice?: { start: number; end: number; continues?: boolean };
+    layoutLines?: RuntimeLine[];
+    layoutLinesInputs?: { paraW: number };
+  };
+  const paragraphSlices = (pages: PaginatedBodyElement[][]): RuntimeSlice[] =>
+    pages.flat().filter((el) => el.type === 'paragraph') as RuntimeSlice[];
+  const paintedLines = (slice: RuntimeSlice): RuntimeLine[] => {
+    const lines = slice.layoutLines ?? [];
+    return slice.lineSlice
+      ? lines.slice(slice.lineSlice.start, slice.lineSlice.end)
+      : lines;
+  };
+  const lineWidth = (line: RuntimeLine): number =>
+    line.segments.reduce((sum, segment) => sum + (segment.measuredWidth ?? 0), 0);
+  const lineChars = (line: RuntimeLine): number =>
+    line.segments.reduce(
+      (sum, segment) => sum + (segment.text ? [...segment.text].length : 0),
+      0,
+    );
+
+  it('keeps equal-width column continuations on the original line partition', () => {
+    const equalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 20,
+        equalWidth: true,
+        sep: false,
+        cols: [],
+      },
+    });
+    const sharedWidth = computeColumns(equalColumns)[0].wPt;
+    const pages = computePages(
+      [para({ text: 'あ'.repeat(35), fontSize: 20, widowControl: false })],
+      equalColumns,
+      makeCtx(),
+    );
+    const slices = paragraphSlices(pages);
+    const col1Slices = slices.filter((slice) => slice.colIndex === 1);
+
+    expect(col1Slices.length).toBeGreaterThan(0);
+    expect(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
+    expect(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
+    expect(new Set(slices.map((slice) => slice.layoutLines)).size).toBe(1);
+    expect(slices.every((slice) => slice.layoutLinesInputs?.paraW === sharedWidth)).toBe(true);
+  });
+
+  it('composes remainder boundaries across three unequal-width columns', () => {
+    // 100 + 6 + 48 + 6 + 30 = 190pt, exactly the section content width.
+    const unequalColumns = section({
+      pageWidth: 230,
+      columns: {
+        count: 3,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 6 },
+          { widthPt: 48, spacePt: 6 },
+          { widthPt: 30, spacePt: 0 },
+        ],
+      },
+    });
+    const pages = computePages(
+      [para({ text: 'あ'.repeat(40), fontSize: 20, widowControl: false })],
+      unequalColumns,
+      makeCtx(),
+    );
+    const slices = paragraphSlices(pages);
+    const col1Lines = slices.filter((slice) => slice.colIndex === 1).flatMap(paintedLines);
+    const col2Slices = slices.filter((slice) => slice.colIndex === 2);
+    const col2Lines = col2Slices.flatMap(paintedLines);
+
+    expect(col1Lines.length).toBeGreaterThan(0);
+    expect(col2Lines.length).toBeGreaterThan(0);
+    expect(col1Lines.every((line) => lineWidth(line) <= 48 + 1e-6)).toBe(true);
+    expect(col2Lines.every((line) => lineWidth(line) <= 30 + 1e-6)).toBe(true);
+    expect(slices.flatMap(paintedLines).reduce((sum, line) => sum + lineChars(line), 0)).toBe(40);
+    expect(col2Slices.every((slice) => slice.layoutLinesInputs?.paraW === 30)).toBe(true);
+  });
+
+  it('does not re-apply first-line indent when re-wrapping a continuation', () => {
+    const unequalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    });
+    const pages = computePages(
+      [para({
+        text: 'あ'.repeat(35),
+        fontSize: 20,
+        widowControl: false,
+        indentFirst: 20,
+      })],
+      unequalColumns,
+      makeCtx(),
+    );
+    const col1Lines = paragraphSlices(pages)
+      .filter((slice) => slice.colIndex === 1)
+      .flatMap(paintedLines);
+    const glyphCounts = col1Lines.map(lineChars);
+
+    expect(glyphCounts.length).toBeGreaterThan(1);
+    expect(glyphCounts.every((count) => count === glyphCounts[0])).toBe(true);
+    expect(col1Lines.every((line) => lineWidth(line) <= 48 + 1e-6)).toBe(true);
+  });
+
+  it('does not re-charge leading spacing on a re-wrapped continuation', () => {
+    const unequalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    });
+    const pages = computePages(
+      [para({
+        text: 'あ'.repeat(35),
+        fontSize: 20,
+        widowControl: false,
+        spaceBefore: 30,
+      })],
+      unequalColumns,
+      makeCtx(),
+    );
+    const firstCol1Slice = paragraphSlices(pages).find((slice) => slice.colIndex === 1);
+    const placed = firstCol1Slice ? bodyFragmentFor(firstCol1Slice) : undefined;
+
+    expect(firstCol1Slice?.lineSlice?.continues).toBe(true);
+    expect(placed?.fragment.kind).toBe('paragraph');
+    if (placed?.fragment.kind === 'paragraph') {
+      expect(placed.fragment.leadingSpacePt).toBe(0);
     }
   });
 });

@@ -40,7 +40,10 @@ import type { PlacedFragment } from './layout-fragments.js';
  * @param placed  the placed paragraph fragment (its `measured` holds the scale-1 lines).
  * @param state   the page paint state (its `scale`, `ctx`, `contentX/W`, `y` cursor).
  * @param options paint-adjacency inputs the paginator does not own: `suppressSpaceBefore`
- *   (continuation slices / spacing collapse) and the §17.3.1.7 `borderMerge`.
+ *   (continuation slices / spacing collapse), the §17.3.1.7 `borderMerge`, and
+ *   `continuesParagraph` (§17.6.4 remainder re-wrap: this fragment's partition is a
+ *   paragraph CONTINUATION even when it covers the whole re-measured partition, so
+ *   first-slice-only paint work — anchor drawing, the top border edge — must not run).
  */
 export function paintParagraphFragment(
   placed: PlacedFragment,
@@ -48,6 +51,7 @@ export function paintParagraphFragment(
   options: {
     suppressSpaceBefore?: boolean;
     borderMerge?: ParaBorderMerge;
+    continuesParagraph?: boolean;
   } = {},
 ): void {
   const fragment = placed.fragment;
@@ -60,11 +64,19 @@ export function paintParagraphFragment(
   // (empty / anchor-only) paragraph — the renderer's empty-mark branch handles it.
   const scale1Lines = measured.lines.map((line) => line.layout);
   // A full-range fragment paints the whole paragraph (no slice); a continuation
-  // fragment paints only its `[lineStart, lineEnd)` window.
+  // fragment paints only its `[lineStart, lineEnd)` window. A RE-WRAPPED remainder
+  // (issue #908) covers its whole re-measured partition yet is still a continuation:
+  // keep the slice object with `continues` so the draw path mirrors the legacy
+  // element-slice semantics exactly (no re-run of first-slice-only work).
+  const continues = options.continuesParagraph === true;
   const lineSlice =
-    fragment.lineStart === 0 && fragment.lineEnd === measured.lines.length
+    fragment.lineStart === 0 && fragment.lineEnd === measured.lines.length && !continues
       ? undefined
-      : { start: fragment.lineStart, end: fragment.lineEnd };
+      : {
+          start: fragment.lineStart,
+          end: fragment.lineEnd,
+          ...(continues ? { continues: true as const } : {}),
+        };
   renderBodyParagraphLines(
     fragment.source,
     state,
