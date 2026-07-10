@@ -506,6 +506,9 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing (e.g. `"bold 16px Arial"`). */
   font: string;
+  /** Uniform per-code-point pitch in CSS px used to draw a horizontal run.
+   *  Absent when the pitch is zero or the run uses vertical / 縦中横 paint. */
+  letterSpacingPx?: number;
   /** ECMA-376 §17.6.20 (tbRl) — when the page is vertical the canvas is the
    *  physical landscape page rotated +90° at paint, so this run's `x`/`y` are the
    *  PHYSICAL top-left the overlay span must sit at, and `transform` is the CSS
@@ -6931,7 +6934,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     let shrinkDelta = 0;
     if (!applyJustify && lineSlack < 0) {
       const distSegs = line.segments.map(seg =>
-        'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+        // §17.3.2.14 fixes fit-region pitch; §17.18.44 must therefore treat the
+        // region like a non-text object so none of its internal gaps get slack.
+        'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
+          ? { text: (seg as LayoutTextSeg).text }
+          : {},
       );
       const shrinkDist = shrinkFitCompression(
         distSegs,
@@ -7069,7 +7076,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       // Expansion opens inter-CJK boundaries; compression touches only spaces
       // (shrinking a space is fine, overlapping ideographs is not).
       const distSegs = line.segments.map(seg =>
-        'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+        // §17.3.2.14 fixes fit-region pitch; §17.18.44 must therefore treat the
+        // region like a non-text object so none of its internal gaps get slack.
+        'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
+          ? { text: (seg as LayoutTextSeg).text }
+          : {},
       );
       const dist = distributeLineSlack(
         distSegs,
@@ -7163,7 +7174,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       // drawing. `spanW` (the glyph advance + internalStretch) covers every glyph
       // and the interior pitch; `decoW` (below) additionally covers the segment's
       // own widened trailing SPACE so run decorations stay gap-free under `both`.
-      const stretch = segStretch?.get(si);
+      // §17.3.2.14 fitText is already a fixed-width cell; paragraph
+      // justification must not stretch its internal glyph gaps a second time.
+      const stretch = s.fitTextRegionIndex === undefined ? segStretch?.get(si) : undefined;
+      // A fit region contributes an opaque atom to §17.18.44 distribution. Its
+      // INTERNAL pitch stays suppressed above, but a legal boundary AFTER that
+      // atom is paragraph slack, not §17.3.2.14 fit pitch, and must still advance
+      // the following segment.
+      const trailingDistributionGap = segStretch?.get(si)?.trailingGap ?? false;
       const internalStretch = stretch?.internalStretch ?? 0;
       if (!dryRun) {
         const effSizePx = calcEffectiveFontPx(s, scale);
@@ -7188,7 +7206,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // `ctx.fontKerning` to match the measure pass exactly (see line-layout's
         // `setSegKerning`); restored after the glyph block.
         const segCharScale = s.charScale ?? 1;
-        const segCharSpacingPx = (s.charSpacing ?? 0) * scale;
+        const segCharSpacingPx = s.fitTextPerGapPx ?? (s.charSpacing ?? 0) * scale;
         const prevFontKerning = ctx.fontKerning;
         if (s.kerning != null) {
           ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
@@ -7316,19 +7334,21 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           glyphColor = defaultColor;
         }
         ctx.fillStyle = glyphColor;
-        // Draw the glyphs. Three cases, all anchored to the WHOLE-string
+        // Draw the glyphs. Four cases, all anchored to the WHOLE-string
         // cumulative advance so the browser's contextual CJK metrics (most
         // visibly 約物半角, the half-width collapse of （「」。）) are honoured and
         // the painted advance equals the segment's box exactly:
-        //   1. Character grid active on a pure-EA segment (segGridDelta !== 0):
+        //   1. §17.3.2.14 fitText: resolved per-gap, with no trailing gap after
+        //      the region's last glyph and no cached w:spacing contribution.
+        //   2. Character grid active on a pure-EA segment (segGridDelta !== 0):
         //      walk every glyph, advancing each to its cell start
         //      `measure(prefix) + i·Δ + justGaps·perGap`. The final glyph lands so
         //      the segment edge is measure(whole) + len·Δ + nGaps·perGap =
         //      measuredWidth + internalStretch — measure==draw by construction
         //      (§17.6.5). Folds in any justification pitch at the same time.
-        //   2. Justified inter-CJK pitch only (no grid): the existing
+        //   3. Justified inter-CJK pitch only (no grid): the existing
         //      `justifiedPiecePositions` slice-at-gaps path.
-        //   3. Neither: a single fillText (the common path).
+        //   4. Neither: a single fillText (the common path).
         const segmentGridDeltaPx = segmentCharacterGridDeltaPx(s, drawGridDeltaPx);
         const segGridDelta = gridSegDeltaPx(s.text, segmentGridDeltaPx);
         if (state.verticalCJK && s.tateChuYoko) {
@@ -7368,6 +7388,28 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             segLetterSpacingPx(s, drawGridDeltaPx, scale),
             segCharScale,
           );
+        } else if (s.fitTextPerGapPx !== undefined) {
+          // ECMA-376 §17.3.2.14 Manual Run Width. Same draw model as the
+          // §17.18.44 FULLY-distributed arm below: the resolved region gap opens
+          // at EVERY internal code-point boundary, so the whole
+          // contextually-shaped string is painted in ONE fillText with a uniform
+          // `ctx.letterSpacing = perGap` — glyph i lands at
+          // measure(prefix_i) + i·perGap and the final glyph reaches
+          // measure(whole) + (n−1)·perGap, the segment's canonical advance
+          // (measure==paint; no piece slicing is needed when every boundary is a
+          // gap). The canonical measuredWidth already includes one trailing
+          // boundary gap on every NON-last region segment and none on the last;
+          // the normal pen advance supplies that cross-segment gap. Composed
+          // with §17.3.2.43 `w:w` exactly like the sibling arms: the fixed pitch
+          // is divided by `segCharScale` so the ×scale frame reproduces its
+          // un-scaled magnitude.
+          const scaled = segCharScale !== 1;
+          const prevLetterSpacing = ctx.letterSpacing;
+          if (scaled) { ctx.save(); ctx.translate(x, 0); ctx.scale(segCharScale, 1); }
+          ctx.letterSpacing = `${s.fitTextPerGapPx / segCharScale}px`;
+          ctx.fillText(s.text, scaled ? 0 : x, baseline + yOffset);
+          ctx.letterSpacing = prevLetterSpacing;
+          if (scaled) ctx.restore();
         } else if (segGridDelta !== 0) {
           const cps = [...s.text]; // code points (handles surrogate pairs)
           // Draw each CONTIGUOUS piece (sliced only at justify gaps) as ONE
@@ -7627,6 +7669,12 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const place = verticalTextLayerPlacement(
             x, state.y, state.verticalPhys?.cssWidthPx ?? 0, !!state.verticalCJK,
           );
+          // Reuse the paint path's single pitch authority so selection and find
+          // overlays reproduce §17.3.2.14 fitText or docGrid + §17.3.2.35 spacing.
+          // Vertical / 縦中横 runs retain their existing payload and geometry.
+          const letterSpacingPx = !state.verticalCJK && !s.tateChuYoko
+            ? segLetterSpacingPx(s, drawGridDeltaPx, scale)
+            : 0;
           state.onTextRun({
             text: s.text,
             x: place ? place.left : x,
@@ -7635,6 +7683,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             h: lineH,
             fontSize: effSizePx,
             font: ctx.font,
+            ...(letterSpacingPx !== 0 ? { letterSpacingPx } : {}),
             transform: place?.transform,
             // IX1 — hand the resolved hyperlink target to the overlay so a link
             // run becomes clickable. Undefined for non-link runs (no payload
@@ -7739,7 +7788,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       // shifted. distributeLineSlack only sets trailingGap on gap-opening
       // segments — never the visually-final segment or a leading-indent segment —
       // so the final glyph still lands on the margin (Σgaps == slack).
-      if (stretch?.trailingGap) x += distPerGap;
+      if (trailingDistributionGap) x += distPerGap;
     }
     // End of line closes any open run-border group: a frame never spans lines
     // (each line wrap starts a fresh box on the next line).
@@ -9049,7 +9098,11 @@ export function renderShapeText(
         let shrinkDelta = 0;
         if (!applyJustify && lineSlack < 0) {
           const distSegs = line.segments.map((seg) =>
-            'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+            // §17.3.2.14 fixes fit-region pitch; §17.18.44 must therefore treat
+            // the region like a non-text object with no distributable gaps.
+            'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
+              ? { text: (seg as LayoutTextSeg).text }
+              : {},
           );
           const shrinkDist = shrinkFitCompression(
             distSegs,
@@ -9094,7 +9147,11 @@ export function renderShapeText(
         if (applyJustify) {
           const minPerGap = -line.ascent * 0.25;
           const distSegs = line.segments.map((seg) =>
-            'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+            // §17.3.2.14 fixes fit-region pitch; §17.18.44 must therefore treat
+            // the region like a non-text object with no distributable gaps.
+            'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
+              ? { text: (seg as LayoutTextSeg).text }
+              : {},
           );
           const dist = distributeLineSlack(
             distSegs,

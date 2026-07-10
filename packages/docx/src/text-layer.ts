@@ -93,6 +93,9 @@ export function buildDocxTextLayer(
     // identical to a plain run. A non-link run is byte-identical to before.
     const link = onHyperlinkClick ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
+    const letterSpacing = run.letterSpacingPx !== undefined
+      ? `${run.letterSpacingPx}px`
+      : '0';
     // Position the span as a % of the page's intended CSS box so it tracks the
     // canvas's actual rendered size under external CSS scaling. `font` /
     // `line-height` stay px (the glyph metrics of the transparent hit text laid
@@ -102,7 +105,7 @@ export function buildDocxTextLayer(
     span.style.cssText =
       `position:absolute;` +
       `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-      `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
+      `font:${run.font};line-height:${run.h}px;letter-spacing:${letterSpacing};` +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
     if (link && onHyperlinkClick) {

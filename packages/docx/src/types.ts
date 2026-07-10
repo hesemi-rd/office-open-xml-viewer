@@ -1125,6 +1125,13 @@ export interface DocxTextRun {
    *  measure and paint passes so line breaking / pagination stay consistent.
    *  Absent ⇒ no extra pitch. */
   charSpacing?: number;
+  /** ECMA-376 §17.3.2.14 `<w:fitText>` — manual run-width target in TWIPS
+   *  (`w:val`, 1/20 pt) plus the optional `w:id` that links consecutive runs
+   *  into one region. The arbitrary-precision XSD integer id is serialized as a
+   *  string; numeric synthetic inputs remain supported for layout tests and
+   *  direct model construction. An id-less run is always standalone. */
+  fitTextVal?: number;
+  fitTextId?: string | number;
   /** ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal text scale as a FRACTION of
    *  normal character width (0.67 = 67%, 2.0 = 200%). Stretches each glyph's
    *  width, not the gap between glyphs. Absent ⇒ 100%. */

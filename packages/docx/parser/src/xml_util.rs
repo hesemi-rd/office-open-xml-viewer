@@ -62,6 +62,39 @@ pub fn attr_w(node: Node, name: &str) -> Option<String> {
     .map(|s| s.to_string())
 }
 
+/// Parse a bare decimal or an ECMA-376 universal measure into points.
+///
+/// Suffixed values use the fixed physical-unit conversions from
+/// `ST_UniversalMeasure` (`pt`, `in`, `pc`/`pi`, `mm`, `cm`). The meaning of a
+/// bare number is context-dependent, so callers supply its points-per-unit
+/// scale: VML shape lengths use `1.0`, while `ST_TwipsMeasure` uses `1.0 / 20.0`.
+pub(crate) fn parse_measure_to_pt(value: &str, unitless_scale: f64) -> Option<f64> {
+    let value = value.trim();
+    let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("in") {
+        (number, 72.0)
+    } else if let Some(number) = value
+        .strip_suffix("pc")
+        .or_else(|| value.strip_suffix("pi"))
+    {
+        (number, 12.0)
+    } else if let Some(number) = value.strip_suffix("mm") {
+        (number, 72.0 / 25.4)
+    } else if let Some(number) = value.strip_suffix("cm") {
+        (number, 72.0 / 2.54)
+    } else {
+        (value, unitless_scale)
+    };
+
+    number
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+        .map(|number| number * scale)
+}
+
 /// Parse twips (1/20 pt) string to f64 pt.
 pub fn twips_to_pt(s: &str) -> f64 {
     s.parse::<f64>().unwrap_or(0.0) / 20.0

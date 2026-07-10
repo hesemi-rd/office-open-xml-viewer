@@ -1342,6 +1342,15 @@ pub struct TextRun {
     /// pitch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub char_spacing: Option<f64>,
+    /// ECMA-376 §17.3.2.14 `<w:fitText w:val>` — manual run-width target in
+    /// TWIPS (1/20 pt). Consecutive runs with the same `fit_text_id` form one
+    /// region; an id-less run is standalone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit_text_val: Option<f64>,
+    /// ECMA-376 §17.3.2.14 `<w:fitText w:id>` — arbitrary-precision signed
+    /// XSD integer serialized as a string for exact equality linking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit_text_id: Option<String>,
     /// ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal text scale as a FRACTION of
     /// normal character width (e.g. 0.67 = 67%, 2.0 = 200%). Stretches each
     /// glyph's width (not the gap). `None` = 100%.

@@ -7,30 +7,17 @@ use std::collections::{HashMap, HashSet};
 
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
-/// (1pt), `in` (72pt), `pc` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A bare
-/// number with no unit is treated as pt (VML's default user unit for shapes is
-/// the point). Returns `None` when the property is absent or unparseable.
+/// (1pt), `in` (72pt), `pc`/`pi` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A
+/// bare number with no unit is treated as pt (VML's default user unit for
+/// shapes is the point). Returns `None` when the property is absent or
+/// unparseable.
 fn vml_style_len(style: &str, prop: &str) -> Option<f64> {
     for decl in style.split(';') {
         let (k, v) = decl.split_once(':')?;
         if k.trim() != prop {
             continue;
         }
-        let v = v.trim();
-        let (num, factor) = if let Some(n) = v.strip_suffix("pt") {
-            (n, 1.0)
-        } else if let Some(n) = v.strip_suffix("in") {
-            (n, 72.0)
-        } else if let Some(n) = v.strip_suffix("pc") {
-            (n, 12.0)
-        } else if let Some(n) = v.strip_suffix("mm") {
-            (n, 2.834_645_7)
-        } else if let Some(n) = v.strip_suffix("cm") {
-            (n, 28.346_457)
-        } else {
-            (v, 1.0)
-        };
-        return num.trim().parse::<f64>().ok().map(|n| n * factor);
+        return parse_measure_to_pt(v, 1.0);
     }
     None
 }

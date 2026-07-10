@@ -2,6 +2,16 @@ use crate::xml_util::*;
 use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
+/// ECMA-376 §17.3.2.14 `<w:fitText>` as one cascaded run property.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FitTextSpec {
+    /// Target manual run width in TWIPS (`ST_TwipsMeasure`, 1/20 pt).
+    pub val: f64,
+    /// Raw, trimmed `ST_DecimalNumber` identifier. Its arbitrary-precision XSD
+    /// integer domain is preserved because it is used only for equality linking.
+    pub id: Option<String>,
+}
+
 /// Resolved run (character) formatting.
 #[derive(Debug, Clone, Default)]
 pub struct RunFmt {
@@ -110,6 +120,10 @@ pub struct RunFmt {
     /// measure and paint so wrapping/pagination stay measure==paint. `None` =
     /// inherit (no additional pitch when never set in the style hierarchy).
     pub char_spacing: Option<f64>,
+    /// ECMA-376 §17.3.2.14 `<w:fitText>` — manual run width and optional link
+    /// id. The element cascades as one composite property, so a direct element
+    /// without `w:id` clears an inherited id instead of retaining it.
+    pub fit_text: Option<FitTextSpec>,
     /// ECMA-376 §17.3.2.43 `<w:w w:val>` — horizontal Expanded/Compressed text
     /// scale. ST_TextScale is a percentage of the normal (100%) character width
     /// (1%–600%), stored here as a FRACTION (e.g. `w:val="67"` or `"67%"` →
@@ -970,12 +984,15 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
     }
-    // Run character-metric axes (§17.3.2.35 spacing / §17.3.2.43 w / §17.3.2.24
-    // position / §17.3.2.19 kern). Each carries the same "if omitted, inherit;
-    // if set, override" rule as the other run properties, so a level that names
-    // the attribute wins and absence inherits.
+    // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
+    // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
+    // same "if omitted, inherit; if set, override" rule as the other run
+    // properties, so a level that names the attribute wins and absence inherits.
     if src.char_spacing.is_some() {
         dst.char_spacing = src.char_spacing;
+    }
+    if src.fit_text.is_some() {
+        dst.fit_text.clone_from(&src.fit_text);
     }
     if src.char_scale.is_some() {
         dst.char_scale = src.char_scale;
@@ -1487,6 +1504,24 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         if let Some(v) = attr_w(sp, "val") {
             fmt.char_spacing = Some(twips_to_pt(&v));
         }
+    }
+
+    // Manual run width (ECMA-376 §17.3.2.14 `<w:fitText>`). The whole element is
+    // one cascaded property. Keep w:val in ST_TwipsMeasure units; suffixed
+    // ST_PositiveUniversalMeasure values are normalized back to twips. Preserve
+    // w:id as its trimmed lexical XSD integer because it has arbitrary precision
+    // and is used only for equality linking.
+    if let Some(fit_text) = child_w(rpr, "fitText") {
+        fmt.fit_text = attr_w(fit_text, "val")
+            .and_then(|value| parse_measure_to_pt(&value, 1.0 / 20.0))
+            .map(|points| points * 20.0)
+            .filter(|value| *value >= 0.0)
+            .map(|val| FitTextSpec {
+                val,
+                id: attr_w(fit_text, "id")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            });
     }
 
     // Expanded/Compressed text scale (ECMA-376 §17.3.2.43 `<w:w w:val>`).
@@ -2300,6 +2335,67 @@ mod tests {
     }
 
     #[test]
+    fn fit_text_parses_twips_and_signed_id() {
+        // ECMA-376 §17.3.2.14: w:val is ST_TwipsMeasure and remains in twips;
+        // w:id is ST_DecimalNumber and may therefore be a large signed value.
+        let f = run_fmt_from(r#"<w:fitText w:val="2400" w:id="-1431456512"/>"#);
+        let fit_text = f.fit_text.expect("fitText");
+        assert_eq!(fit_text.val, 2400.0);
+        assert_eq!(fit_text.id.as_deref(), Some("-1431456512"));
+    }
+
+    #[test]
+    fn fit_text_cascades_as_one_composite_property() {
+        // ECMA-376 §17.3.2.14: a direct `<w:fitText>` ELEMENT replaces the
+        // inherited one as a UNIT. Omitting `w:id` on the direct element means
+        // "this run does not link with any other run" — the style level's id
+        // must NOT survive underneath the direct val (val and id are one
+        // composite property, not two independently-cascading axes).
+        let mut base = run_fmt_from(r#"<w:fitText w:val="2400" w:id="7"/>"#);
+        let over = run_fmt_from(r#"<w:fitText w:val="1200"/>"#);
+        apply_run(&mut base, &over);
+        assert_eq!(
+            base.fit_text.as_ref().map(|fit_text| fit_text.val),
+            Some(1200.0)
+        );
+        assert!(
+            base.fit_text.and_then(|fit_text| fit_text.id).is_none(),
+            "a direct fitText WITHOUT w:id must clear the inherited id"
+        );
+    }
+
+    #[test]
+    fn fit_text_id_preserves_arbitrary_precision_decimals() {
+        // §17.18.10 ST_DecimalNumber is an XSD integer with NO range facet —
+        // arbitrary precision. An id wider than i64 / an f64 mantissa must
+        // still survive parsing so equality linking of consecutive runs works.
+        let f = run_fmt_from(r#"<w:fitText w:val="2400" w:id="123456789012345678901234567890"/>"#);
+        assert!(
+            f.fit_text.and_then(|fit_text| fit_text.id).is_some(),
+            "an arbitrary-precision w:id must be preserved for equality linking"
+        );
+    }
+
+    #[test]
+    fn fit_text_val_accepts_positive_universal_measures() {
+        // ST_TwipsMeasure (§22.9.2.14) = ST_UnsignedDecimalNumber |
+        // ST_PositiveUniversalMeasure — a plain number is twips, but the
+        // suffixed forms ('1in', '12pt', '2cm', …) are equally valid.
+        let inch = run_fmt_from(r#"<w:fitText w:val="1in" w:id="1"/>"#);
+        assert_eq!(
+            inch.fit_text.map(|fit_text| fit_text.val),
+            Some(1440.0),
+            "1in = 1440 twips"
+        );
+        let pt = run_fmt_from(r#"<w:fitText w:val="12pt" w:id="1"/>"#);
+        assert_eq!(
+            pt.fit_text.map(|fit_text| fit_text.val),
+            Some(240.0),
+            "12pt = 240 twips"
+        );
+    }
+
+    #[test]
     fn run_spacing_does_not_collide_with_para_spacing() {
         // The paragraph `<w:spacing before/after/line>` (§17.3.1.33) must never
         // populate the run char_spacing, and the run `<w:spacing w:val>` must
@@ -2369,15 +2465,36 @@ mod tests {
         // The four axes follow the shared "set overrides, absent inherits" rule
         // in `apply_run` (used by both the style cascade and apply_direct_run).
         let mut base = run_fmt_from(
-            r#"<w:spacing w:val="200"/><w:w w:val="90"/><w:position w:val="4"/><w:kern w:val="24"/>"#,
+            r#"<w:fitText w:val="2400" w:id="-10"/><w:spacing w:val="200"/><w:w w:val="90"/><w:position w:val="4"/><w:kern w:val="24"/>"#,
         );
         // A later level that only re-sets spacing must keep the inherited w /
         // position / kern.
         let over = run_fmt_from(r#"<w:spacing w:val="-20"/>"#);
         apply_run(&mut base, &over);
         assert_eq!(base.char_spacing, Some(-1.0)); // overridden
+        assert_eq!(
+            base.fit_text.as_ref().map(|fit_text| fit_text.val),
+            Some(2400.0)
+        ); // inherited
+        assert_eq!(
+            base.fit_text
+                .as_ref()
+                .and_then(|fit_text| fit_text.id.as_deref()),
+            Some("-10")
+        ); // inherited
         assert_eq!(base.char_scale, Some(0.90)); // inherited
         assert_eq!(base.position, Some(2.0)); // inherited (8 half-pt = 4 pt? no: val=4 → 2pt)
         assert_eq!(base.kerning, Some(12.0)); // inherited (24 half-pt = 12 pt)
+
+        let fit_override = run_fmt_from(r#"<w:fitText w:val="1200" w:id="-20"/>"#);
+        apply_run(&mut base, &fit_override);
+        assert_eq!(
+            base.fit_text.as_ref().map(|fit_text| fit_text.val),
+            Some(1200.0)
+        );
+        assert_eq!(
+            base.fit_text.and_then(|fit_text| fit_text.id),
+            Some("-20".to_string())
+        );
     }
 }
