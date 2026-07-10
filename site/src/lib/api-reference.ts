@@ -31,6 +31,7 @@ const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", de
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
 const ON_SCALE_CHANGE = { name: 'onScaleChange', type: '(scale: number) => void', desc: 'Called when the zoom factor changes (setScale / fitWidth / fitPage / zoomIn / zoomOut), with the clamped factor (1 = 100%).' };
 const ON_HYPERLINK_CLICK = { name: 'onHyperlinkClick', type: '(target: HyperlinkTarget) => void', desc: "Called when a hyperlink is clicked. `target` is `{ kind: 'external', url }` or `{ kind: 'internal', ref, slideIndex? }`. When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run). External URLs are scheme-sanitized (http / https / mailto / tel only); internal targets resolve to a docx bookmark / pptx slide jump / xlsx defined name or cell." };
+const ENABLE_HYPERLINKS = { name: 'enableHyperlinks', type: 'boolean', def: 'true', desc: "Master switch for hyperlink interactivity. Set `false` to disable it entirely: no hit-testing, no pointer cursor over links, no default navigation, and `onHyperlinkClick` is never called. Links still render exactly as authored but are inert, like plain text." };
 
 // Shared zoom methods (IX9) — same contract across all three viewers; the return
 // type differs (docx/pptx re-render asynchronously → Promise<void>; xlsx is sync).
@@ -70,6 +71,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ZOOM_MIN_MAX,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
+        ENABLE_HYPERLINKS,
         { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -161,6 +163,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ZOOM_MIN_MAX,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
+        ENABLE_HYPERLINKS,
         { name: 'onPageChange', type: '(index: number, total: number) => void', desc: 'Called after a page finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -246,6 +249,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
+        ENABLE_HYPERLINKS,
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
         { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },

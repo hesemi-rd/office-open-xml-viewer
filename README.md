@@ -229,6 +229,16 @@ a transparent, selectable text layer per page/slide for native copy. In
 worker boundary) and the viewer logs one warning — use the default `mode: 'main'`
 for selectable text.
 
+**Hyperlinks.** Links are clickable by default: an external link opens in a new
+tab (scheme-sanitized to `http` / `https` / `mailto` / `tel`, `noopener`), and an
+internal target navigates within the document (docx bookmark, pptx slide jump,
+xlsx sheet). Pass `onHyperlinkClick(target)` to take over the click yourself.
+Pass `enableHyperlinks: false` to disable hyperlink interactivity entirely — no
+hit-testing, no pointer cursor over links, no default navigation, and
+`onHyperlinkClick` is never called; links still render as authored but are inert.
+This applies to every viewer that supports hyperlinks (`DocxViewer`,
+`DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`, `XlsxViewer`).
+
 **Master–detail / shared engine.** Inject an already-loaded headless engine so a
 paged viewer and a scroll viewer (or several panes) share **one** parse. When you
 inject, `load()` is unsupported (the engine is already loaded), the engine's own

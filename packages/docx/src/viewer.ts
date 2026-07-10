@@ -33,6 +33,15 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
    *  new tab via core `openExternalHyperlink` (sanitised, noopener,noreferrer);
    *  internal → jump to the page whose text contains the bookmark (best-effort). */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
+  /** IX1 — master switch for hyperlink interactivity. Default `true`. When
+   *  `false`, the hyperlink machinery is not wired at all: no overlay hit region
+   *  is installed for link runs, so there is no pointer cursor, no title tooltip,
+   *  no default navigation (external new-tab / internal bookmark jump), and
+   *  `onHyperlinkClick` is never called. Links still render exactly as authored
+   *  (their colour/underline are painted on the canvas) but are inert, like plain
+   *  text. Set it to disable clickable links entirely — e.g. in a preview where
+   *  navigation must not leave the current view. */
+  enableHyperlinks?: boolean;
   /** Called on parse or render errors. */
   onError?: (err: Error) => void;
 }
@@ -617,8 +626,15 @@ export class DocxViewer implements ZoomableViewer {
    * {@link DocxDocument.getBookmarkPage} (ECMA-376 §17.16.23) and jumps there
    * with {@link goToPage}. An anchor naming no known bookmark is a safe no-op
    * rather than a jump to a guessed page.
+   *
+   * IX1 — returns `undefined` when `enableHyperlinks` is `false`, the single gate
+   * that disables hyperlink interactivity: {@link buildDocxTextLayer} treats a
+   * missing handler as "render link runs like plain runs", so no hit region,
+   * cursor, tooltip, listener, or navigation is wired (a custom
+   * `onHyperlinkClick` is suppressed too).
    */
-  private _hyperlinkHandler(): (target: HyperlinkTarget) => void {
+  private _hyperlinkHandler(): ((target: HyperlinkTarget) => void) | undefined {
+    if (this._opts.enableHyperlinks === false) return undefined;
     const custom = this._opts.onHyperlinkClick;
     if (custom) return custom;
     return (target: HyperlinkTarget): void => {

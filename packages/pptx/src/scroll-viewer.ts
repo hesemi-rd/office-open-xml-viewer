@@ -141,6 +141,13 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    * instead and takes NO default action.
    */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
+  /** IX1 — master switch for hyperlink interactivity. Default `true`. When
+   *  `false`, the hyperlink machinery is not wired at all: the overlay's link
+   *  spans are non-interactive, so there is no pointer cursor, no title tooltip,
+   *  no default navigation (external new-tab / internal slide jump), and
+   *  `onHyperlinkClick` is never called. Links still render exactly as authored
+   *  but are inert, like plain text. */
+  enableHyperlinks?: boolean;
 }
 
 /** One mounted slide. `canvas` is the drawn slide; `textLayer` the optional
@@ -834,7 +841,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           // overlay 2× too large (overflowing the wrapper + inflating the scroll
           // area). Pass the CSS px directly — the uniform slide width/height at the
           // current scale (rounded).
-          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), (t) => this._onHyperlinkClick(t));
+          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
         }
       })
       .catch((err: unknown) => {
@@ -954,7 +961,7 @@ export class PptxScrollViewer implements ZoomableViewer {
             runs,
             Math.round(widthPx),
             Math.round(this._slideHeightPx()),
-            (t) => this._onHyperlinkClick(t),
+            this._hyperlinkHandler(),
           );
         }
       }
@@ -1359,7 +1366,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           if (wantOverlay) {
             // buildPptxTextLayer takes NUMBERS: pass the CSS box (uniform slide
             // width/height at the current scale), NOT the retina backing store.
-            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), (t) => this._onHyperlinkClick(t));
+            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
           }
         }
       })
@@ -1421,6 +1428,19 @@ export class PptxScrollViewer implements ZoomableViewer {
    * to the target slide via {@link scrollToSlide} once the action resolves to a
    * slide index (a jump resolving to no reachable slide is a safe no-op).
    */
+  /**
+   * IX1 — the click handler passed to the text-layer overlay, or `undefined` when
+   * `enableHyperlinks` is `false`. This is the single gate that disables hyperlink
+   * interactivity: {@link buildPptxTextLayer} renders link runs exactly like plain
+   * runs when no handler is supplied, so no hit region, cursor, tooltip, listener,
+   * or navigation is wired (a custom `onHyperlinkClick` is suppressed too). When
+   * enabled, the returned handler dispatches through {@link _onHyperlinkClick}.
+   */
+  private _hyperlinkHandler(): ((target: HyperlinkTarget) => void) | undefined {
+    if (this._opts.enableHyperlinks === false) return undefined;
+    return (t) => this._onHyperlinkClick(t);
+  }
+
   private _onHyperlinkClick(target: HyperlinkTarget): void {
     const enriched = this._resolveInternalSlideIndex(target);
     if (this._opts.onHyperlinkClick) {

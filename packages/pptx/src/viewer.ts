@@ -83,6 +83,14 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * viewer calls this instead and takes NO default action.
    */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
+  /** IX1 — master switch for hyperlink interactivity. Default `true`. When
+   *  `false`, the hyperlink machinery is not wired at all: the overlay's link
+   *  spans are non-interactive, so there is no pointer cursor, no title tooltip,
+   *  no default navigation (external new-tab / internal slide jump), and
+   *  `onHyperlinkClick` is never called. Links still render exactly as authored
+   *  (theme `hlink` colour + underline are painted on the canvas) but are inert,
+   *  like plain text. */
+  enableHyperlinks?: boolean;
 }
 
 /**
@@ -609,7 +617,20 @@ export class PptxViewer implements ZoomableViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-    buildPptxTextLayer(layer, runs, cssWidth, cssHeight, (t) => this._onHyperlinkClick(t));
+    buildPptxTextLayer(layer, runs, cssWidth, cssHeight, this._hyperlinkHandler());
+  }
+
+  /**
+   * IX1 — the click handler passed to the text-layer overlay, or `undefined` when
+   * `enableHyperlinks` is `false`. This is the single gate that disables hyperlink
+   * interactivity: {@link buildPptxTextLayer} renders link runs exactly like plain
+   * runs when no handler is supplied, so no hit region, cursor, tooltip, listener,
+   * or navigation is wired (a custom `onHyperlinkClick` is suppressed too). When
+   * enabled, the returned handler dispatches through {@link _onHyperlinkClick}.
+   */
+  private _hyperlinkHandler(): ((target: HyperlinkTarget) => void) | undefined {
+    if (this.opts.enableHyperlinks === false) return undefined;
+    return (t) => this._onHyperlinkClick(t);
   }
 
   /**
