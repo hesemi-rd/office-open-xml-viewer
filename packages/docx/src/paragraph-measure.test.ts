@@ -303,6 +303,61 @@ describe('measureParagraph', () => {
     expect(result.lines[0].layout.segments[0]).toMatchObject({ text: '42' });
   });
 
+  it('hands the RAW column band (not the indented text band) to the wrap oracle', () => {
+    // §20.4.2.20 / §17.6.4: the topAndBottom gate must see the COLUMN band, so
+    // measure and paint scope a page-shared float to the same column. With a
+    // physical left indent the indented text band (paragraphXPt) differs from the
+    // column band (placement.paragraphXPt / availableWidthPt); both the one-time
+    // pre-paragraph skip AND the per-line window must be handed the column band.
+    const lineWindowColumns: Array<{
+      columnXPt: number;
+      columnWidthPt: number;
+      paragraphXPt: number;
+      maximumWidthPt: number;
+    }> = [];
+    const skipColumns: Array<{ columnXPt: number; columnWidthPt: number }> = [];
+    const wrap: WrapOracle = {
+      lineWindow: (input) => {
+        lineWindowColumns.push({
+          columnXPt: input.columnXPt,
+          columnWidthPt: input.columnWidthPt,
+          paragraphXPt: input.paragraphXPt,
+          maximumWidthPt: input.maximumWidthPt,
+        });
+        return { topYPt: input.topYPt, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
+      },
+      skipTopAndBottomBands: (input) => {
+        skipColumns.push({ columnXPt: input.columnXPt, columnWidthPt: input.columnWidthPt });
+        return input.yPt;
+      },
+    };
+
+    measureParagraph(
+      paragraph({ spaceBefore: 0, runs: [{ type: 'text', ...textRun('hello world') }] }),
+      layoutContext({ spaceBeforePt: 0, physicalIndentLeftPt: 100, physicalIndentRightPt: 0 }),
+      placement({ paragraphXPt: 60, availableWidthPt: 228, wrap }),
+      measurer,
+      environment(),
+    );
+
+    // Column band = placement (60, 228). Indented text band = 60 + 100 = 160,
+    // width 228 − 100 = 128. The oracle must be scoped to the COLUMN band.
+    expect(skipColumns.length).toBeGreaterThan(0);
+    for (const c of skipColumns) {
+      expect(c.columnXPt).toBe(60);
+      expect(c.columnWidthPt).toBe(228);
+    }
+    expect(lineWindowColumns.length).toBeGreaterThan(0);
+    for (const c of lineWindowColumns) {
+      expect(c.columnXPt).toBe(60);
+      expect(c.columnWidthPt).toBe(228);
+      // The indented text band handed alongside (for the square side-gap math) is
+      // distinct — this is exactly the seam the finding is about.
+      expect(c.paragraphXPt).toBe(160);
+      expect(c.maximumWidthPt).toBe(128);
+    }
+  });
+
   it('remeasures at a changed start Y and records the exact placement', () => {
     const wrap: WrapOracle = {
       lineWindow: ({ topYPt, maximumWidthPt }) => topYPt < 50

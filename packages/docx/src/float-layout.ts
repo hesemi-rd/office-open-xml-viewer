@@ -240,6 +240,14 @@ export function resolveLineFloatWindow(
   paraX: number,
   maxWidth: number,
   floats: FloatRect[],
+  // The paragraph's RAW COLUMN band, distinct from the indented text band
+  // [paraX, paraX + maxWidth]. Step 1 (topAndBottom) gates by the COLUMN band —
+  // §20.4.2.20 blocks the FULL column where the object sits, including the
+  // paragraph's indent margins — while step 2 (square side-gap) keeps gating by
+  // the narrower indented text band (§20.4.2.17). Defaults to the indented band
+  // so a direct unit caller that has no separate column band stays correct.
+  columnXLeftPt: number = paraX,
+  columnXRightPt: number = paraX + maxWidth,
 ): { topY: number; xOffset: number; maxWidth: number } {
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
@@ -249,11 +257,13 @@ export function resolveLineFloatWindow(
   // §20.4.2.20 (wrapTopAndBottom) excludes text only where THIS OBJECT is
   // horizontally placed. A page-scoped float anchored in another newspaper
   // column (§17.6.4) must not push this column's line below an unrelated
-  // vertical band, so it is gated by `floatOverlapsColumnX` exactly as the
-  // square sweep in step 2 is — both wrap modes share one column-scope
-  // predicate. Within a column the object DOES overlap it still blocks the full
-  // width (topY is advanced to the band bottom, no side gap is computed), per
-  // "text must wrap around neither side of this object."
+  // vertical band, so it is gated by `floatOverlapsColumnX` against the RAW
+  // COLUMN band — NOT the indented text band step 2 uses. §20.4.2.20 blocks the
+  // whole column where the object sits ("text must wrap around neither side of
+  // this object"), so a topAndBottom float in this column's indent margin still
+  // pushes an indented paragraph's lines below it even though it does not overlap
+  // the narrower indented band. Within a column the object DOES overlap it blocks
+  // the full width (topY is advanced to the band bottom, no side gap is computed).
   //
   // ASSUMPTION (M3): step 1 runs ONCE, before the square sweep, and is not
   // re-checked after a square push in step 2. This relies on "no topAndBottom
@@ -270,7 +280,7 @@ export function resolveLineFloatWindow(
     let skip: number | null = null;
     for (const f of floats) {
       if (f.mode !== 'topAndBottom') continue;
-      if (!floatOverlapsColumnX(f, paraXLeft, paraXRight)) continue;
+      if (!floatOverlapsColumnX(f, columnXLeftPt, columnXRightPt)) continue;
       if (lineBot > f.yTop && topY < f.yBottom) {
         skip = skip === null ? f.yBottom : Math.max(skip, f.yBottom);
       }
@@ -298,8 +308,10 @@ export function resolveLineFloatWindow(
       // §20.4.2.17 excludes text only where the square wrap rectangle overlaps
       // its line area. A page-scoped float in another newspaper column must not
       // turn this column's full width into a sub-inch "side gap" and push the
-      // line below an unrelated vertical band. Same column-scope predicate as
-      // the topAndBottom sweep in step 1.
+      // line below an unrelated vertical band. Unlike step 1 (which gates by the
+      // raw COLUMN band for a full-column block), the square side-gap math is
+      // relative to the actual text band, so it gates by the INDENTED band
+      // [paraXLeft, paraXRight].
       if (!floatOverlapsColumnX(f, paraXLeft, paraXRight)) continue;
       intersecting.push(f);
       switch (f.side) {

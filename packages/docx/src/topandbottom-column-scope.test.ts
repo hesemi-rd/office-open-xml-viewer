@@ -126,6 +126,90 @@ describe('resolveLineFloatWindow — topAndBottom float column scope (§20.4.2.2
   });
 });
 
+describe('resolveLineFloatWindow — topAndBottom gate uses the COLUMN band, not the indented text band', () => {
+  // An indented paragraph's text band starts INSIDE its column (indentLeft > 0).
+  // Step 1 (topAndBottom, §20.4.2.20 "text must wrap around neither side of this
+  // object" — a full-COLUMN block) must be gated by the raw COLUMN band, while
+  // step 2 (square side-gap, §20.4.2.17) keeps gating by the narrower indented
+  // text band. A topAndBottom float sitting in the column's LEFT indent margin
+  // (inside the column, left of the indented text) therefore still pushes the
+  // paragraph's lines below it even though it does not overlap the indented band.
+  const COLUMN = { xLeft: 60, xRight: 288 };
+  const INDENT_LEFT = 160; // indentLeft = 100 within the column band [60, 288]
+  const INDENT_WIDTH = 128; // indented text band [160, 288]
+  // [60, 140] ⊂ column band, ∩ indented text band = ∅ (140 < 160).
+  const floatInIndentMargin = topAndBottomBand({
+    xLeft: 60,
+    xRight: 140,
+    yTop: 100,
+    yBottom: 200,
+  });
+
+  it('pushes an indented line below a topAndBottom float in the column indent margin', () => {
+    // Reviewer repro: line at y=95 (band [100,200]); column band [60,288] passed
+    // as columnXLeft/columnXRight, indented band [160,288] as paraX/maxWidth.
+    const topY = resolveLineFloatWindow(
+      95,
+      0,
+      PROBE_H,
+      INDENT_LEFT,
+      INDENT_WIDTH,
+      [floatInIndentMargin],
+      COLUMN.xLeft,
+      COLUMN.xRight,
+    ).topY;
+    expect(topY).toBe(200);
+  });
+
+  it('leaves the line put when no column band is supplied (defaults to the indented band)', () => {
+    // Safe default for direct unit callers: without a column band the float —
+    // outside the indented band — is not seen by step 1, so nothing is pushed.
+    const topY = resolveLineFloatWindow(
+      95,
+      0,
+      PROBE_H,
+      INDENT_LEFT,
+      INDENT_WIDTH,
+      [floatInIndentMargin],
+    ).topY;
+    expect(topY).toBe(95);
+  });
+});
+
+describe('resolveLineFloatWindow — topAndBottom float in the inter-column gutter pushes neither column', () => {
+  // Content band [60, 540]; col 0 = [60, 288], col 1 = [312, 540]; gutter
+  // (288, 312). A float wholly inside the gutter overlaps neither column.
+  const gutterFloat = topAndBottomBand({ xLeft: 292, xRight: 308, yTop: 100, yBottom: 200 });
+
+  it('does not push a line in column 0', () => {
+    const topY = resolveLineFloatWindow(
+      LINE_TOP,
+      wordMinLineStartPx(1),
+      PROBE_H,
+      COL0.xLeft,
+      COL0.width,
+      [gutterFloat],
+      COL0.xLeft,
+      COL0.xRight,
+    ).topY;
+    expect(topY).toBe(LINE_TOP);
+  });
+
+  it('does not push a line in column 1', () => {
+    const topY = resolveLineFloatWindow(
+      LINE_TOP,
+      wordMinLineStartPx(1),
+      PROBE_H,
+      COL1.xLeft,
+      COL1.width,
+      [gutterFloat],
+      COL1.xLeft,
+      COL1.xRight,
+    ).topY;
+    expect(topY).toBe(LINE_TOP);
+  });
+});
+
 describe('skipPastTopAndBottom — topAndBottom float column scope (§20.4.2.20 / §17.6.4)', () => {
   const floatInCol0 = topAndBottomBand({
     xLeft: COL0.xLeft,

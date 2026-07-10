@@ -31,6 +31,11 @@ export interface WrapOracle {
     readonly probeHeightPt: number;
     readonly paragraphXPt: number;
     readonly maximumWidthPt: number;
+    /** The paragraph's COLUMN band, scoping the topAndBottom gate (§20.4.2.20 /
+     *  §17.6.4) to the column the float is anchored in — NOT the indented text
+     *  band `paragraphXPt`/`maximumWidthPt` the square side-gap math uses. */
+    readonly columnXPt: number;
+    readonly columnWidthPt: number;
   }): {
     readonly topYPt: number;
     readonly xOffsetPt: number;
@@ -58,6 +63,8 @@ export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle 
       probeHeightPt,
       paragraphXPt,
       maximumWidthPt,
+      columnXPt,
+      columnWidthPt,
     }) => {
       const window = resolveLineFloatWindow(
         topYPt,
@@ -66,6 +73,8 @@ export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle 
         paragraphXPt,
         maximumWidthPt,
         activeFloats,
+        columnXPt,
+        columnXPt + columnWidthPt,
       );
       return {
         topYPt: window.topY,
@@ -172,6 +181,10 @@ export function measureParagraph(
         probeHeightPt: 10,
         paragraphXPt,
         maximumWidthPt: paragraphWidthPt,
+        // §20.4.2.20 / §17.6.4 column scope: the topAndBottom gate sees the raw
+        // COLUMN band, not the indented mark band above.
+        columnXPt: placement.paragraphXPt,
+        columnWidthPt: placement.availableWidthPt,
       }).topYPt;
     }
     const markAdvancePt = paragraphMarkLineHeight(
@@ -202,6 +215,11 @@ export function measureParagraph(
     ? {
         startPageY: cursorPt,
         paraX: paragraphXPt,
+        // Raw COLUMN band (placement) for the topAndBottom gate; paraX above is
+        // the indented text band for the square side-gap math (§20.4.2.20 vs
+        // §20.4.2.17). See WrapLayoutCtx.columnXPt.
+        columnXPt: placement.paragraphXPt,
+        columnWidthPt: placement.availableWidthPt,
         floats: [],
         lineWindow: (input) => placement.wrap!.lineWindow(input),
         lineBoxH: (ascent, descent, _hasRuby, intendedSingle) => lineBoxHeight(
