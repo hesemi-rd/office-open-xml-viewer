@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## Unreleased
+
+**Viewers / interaction**
+
+- **Disable hyperlink interactivity:** every hyperlink-supporting viewer
+  (`DocxViewer`, `DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`,
+  `XlsxViewer`) now accepts an `enableHyperlinks?: boolean` constructor option
+  (default `true`). When `false`, hyperlink interactivity is disabled entirely:
+  no overlay/cell hit-testing, no pointer cursor over links, no default
+  navigation (external new-tab / internal bookmark / slide / sheet jump), and
+  `onHyperlinkClick` is never called. Links still render exactly as authored but
+  are inert. The switch gates the wiring at a single point per viewer rather than
+  scattering flag checks through the hit-test/click paths, so the existing
+  `onHyperlinkClick` behaviour is unchanged when the option is omitted or `true`.
+  (#891, IX1)
+
 ## 0.71.0 — 2026-07-06
 
 Minor. The 2026-07 second improvement cycle lands: in-document **find**

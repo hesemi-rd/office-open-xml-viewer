@@ -151,6 +151,13 @@ export interface XlsxViewerOptions extends LoadOptions {
    * default handler's job, so a blocked scheme still reaches a custom callback).
    */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
+  /** IX1 — master switch for hyperlink interactivity. Default `true`. When
+   *  `false`, the cell hit-test reports no hyperlink under any cell, so hyperlink
+   *  interactivity is disabled entirely: no pointer cursor over a link, no default
+   *  navigation (external new-tab / internal sheet jump), and `onHyperlinkClick`
+   *  is never called. Hyperlinked cells still render exactly as authored but are
+   *  inert. */
+  enableHyperlinks?: boolean;
   /**
    * Color of the cell-selection highlight. A single CSS color drives both the
    * selection rectangle's border (drawn in this color) and its fill (the same
@@ -2417,8 +2424,15 @@ export class XlsxViewer implements ZoomableViewer {
   }
 
   /** IX1 — the hyperlink at a cell, or null. `getCellAt` returns 1-based
-   *  {row,col}, matching the parser/renderer keying. */
+   *  {row,col}, matching the parser/renderer keying.
+   *
+   *  Returns null unconditionally when `enableHyperlinks` is `false`: this is the
+   *  single gate that disables hyperlink interactivity. Both consumers — the
+   *  pointermove pointer-cursor affordance and the click dispatch
+   *  ({@link dispatchHyperlink}) — funnel through this hit-test, so a null result
+   *  means no cursor change, no default navigation, and no `onHyperlinkClick`. */
   private hyperlinkAtCell(cell: CellAddress): Hyperlink | null {
+    if (this.opts.enableHyperlinks === false) return null;
     return this.hyperlinkMap.get(`${cell.row}:${cell.col}`) ?? null;
   }
 
