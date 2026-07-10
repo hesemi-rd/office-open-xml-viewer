@@ -3831,7 +3831,11 @@ function splitParagraphAcrossPages(
     );
     let measured = measureAtCurrentPlacement(suppressSpaceBefore);
     const placeMarkOnly = (): { endY: number } => {
-      measured = measureAtCurrentPlacement(suppressSpaceBefore);
+      // Reuse the entry measurement: nothing that measureAtCurrentPlacement reads
+      // (measureState.y, floats, width, pageH, suppressSpaceBefore) changes between
+      // it and the single call site below, and measurement is deterministic for
+      // identical inputs — so a re-measure here would return the same result. The
+      // page-overflow branch re-measures because newPage() changes the placement.
       const measuredHeight = () => measured.contentEndYPt - measured.placement.startYPt
         + Math.max(
           measured.requestedSpaceAfterPt,
