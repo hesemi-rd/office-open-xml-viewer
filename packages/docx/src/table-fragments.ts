@@ -80,8 +80,12 @@ function verticalMergeRole(cell: DocTableCell): CellFragment['verticalMerge'] {
 
 /**
  * Produce the immutable {@link TableFragment} for one placed table (whole table or one
- * page slice). Deep-freezes the fragment and its nested row/cell/column arrays (M-3),
- * so a consumer can rely on the layout result being immutable.
+ * page slice). STRUCTURALLY freezes the fragment and its nested row/cell/column arrays
+ * (M-3): every wrapper object and array this module creates is frozen, so the layout
+ * result's shape cannot be mutated. The freeze is structural, not deep — the referenced
+ * parsed model objects and the measured paragraph internals (`MeasuredParagraph.lines`
+ * and its line objects) stay shared and unfrozen, exactly as the PR 5 body fragments
+ * document.
  */
 export function buildTableFragment(input: BuildTableFragmentInput): TableFragment {
   const {

@@ -3917,7 +3917,17 @@ function measureCellParagraphScale1(
  *  fragment per `<w:tbl>`, in document order, measured at scale 1 in the cell story.
  *  `outerState` is the enclosing scale-1 measure state (body, or the parent cell for a
  *  nested table); this enters THIS cell's story once. `cellTotalWidthPt` is the sum of
- *  the grid columns the cell spans (before its own margins). */
+ *  the grid columns the cell spans (before its own margins).
+ *
+ *  KNOWN COST (PR 6, review-acknowledged): this measures cell content a SECOND time —
+ *  the paginator already measured every cell through `computeTablePtLayout` /
+ *  `resolveTableRowHeights` for the row heights, and repeated header rows are re-built
+ *  per continuation slice. The duplication exists because the row-height path measures
+ *  HEIGHTS through `measureCellContentHeightPx` (which does not retain the line
+ *  partitions) while fragments need the full {@link MeasuredParagraph}. It is resolved
+ *  when the legacy measure path is retired and row heights are derived FROM the
+ *  fragments (tracked with the stamp-field removal follow-up); pagination-time only,
+ *  paint is unaffected. */
 function buildTableCellBlocks(
   cell: DocTableCell,
   table: DocTable,

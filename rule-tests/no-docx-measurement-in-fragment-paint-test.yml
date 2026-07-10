@@ -22,6 +22,9 @@ invalid:
   - "const layout = computeTableLayout(table, contentW, state);"
   - "const rowHeight = calculateRowHeight(tableRow, table, cols, scale, state);"
   - "const h = measureCellContentHeightPx(cell, table, cellW, scale, state);"
+  # Namespace-member form (`import * as ns` evasion of the named-import regex).
+  - "const cols = geometry.resolveColumnWidths(table, contentWPt, state);"
+  - "const m = renderer.measureParagraph(para, context, placement, measurer, environment);"
   # Importing a forbidden symbol.
   - "import { layoutLines } from './line-layout.js';"
   - "import { measureParagraph } from './paragraph-measure.js';"
