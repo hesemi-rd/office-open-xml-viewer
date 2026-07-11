@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { ChartSeries } from '../types/chart';
-import { legendEntryColor, CHART_PALETTE } from './renderer.js';
+import type { ChartSeries, ChartModel } from '../types/chart';
+import { legendEntryColor, chartVariesColorsByPoint, CHART_PALETTE } from './renderer.js';
 
 function series(partial: Partial<ChartSeries>): ChartSeries {
   return { name: '', color: null, values: [], ...partial };
@@ -61,5 +61,65 @@ describe('legendEntryColor', () => {
       expect(legendEntryColor('doughnut', s, 1)).toBe(pal(1));
       expect(legendEntryColor('doughnut', s, 2)).toBe('#CC0000');
     });
+  });
+
+  describe('§21.2.2.227 varyColors single-series bar — one legend entry per point', () => {
+    // The `varyByPoint` flag makes a bar legend resolve per DATA POINT of the
+    // first series (like a pie) instead of per series (issue #931). The parser
+    // sets the accents into `dataPointColors`; here we assert the resolution.
+    const s: ChartSeries[] = [
+      series({ name: 'Region', color: '4472C4', values: [10, 20, 30, 40] }),
+    ];
+
+    it('falls back to the per-point palette when varyByPoint is set', () => {
+      expect(legendEntryColor('clusteredBar', s, 0, true)).toBe(pal(0));
+      expect(legendEntryColor('clusteredBar', s, 1, true)).toBe(pal(1));
+      expect(legendEntryColor('clusteredBar', s, 2, true)).toBe(pal(2));
+      // Distinct colors, not all the single series color.
+      expect(legendEntryColor('clusteredBar', s, 0, true)).not.toBe(
+        legendEntryColor('clusteredBar', s, 1, true),
+      );
+    });
+
+    it('honors accent/dPt colors resolved into dataPointColors', () => {
+      const withAccents: ChartSeries[] = [
+        series({
+          name: 'Region',
+          color: '4472C4',
+          values: [10, 20, 30, 40],
+          dataPointColors: ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000'],
+        }),
+      ];
+      expect(legendEntryColor('clusteredBar', withAccents, 0, true)).toBe('#4472C4');
+      expect(legendEntryColor('clusteredBar', withAccents, 2, true)).toBe('#A5A5A5');
+    });
+
+    it('without varyByPoint, a bar legend stays per-series', () => {
+      expect(legendEntryColor('clusteredBar', s, 0)).toBe(pal(0));
+      expect(legendEntryColor('clusteredBar', s, 1)).toBe(pal(1));
+    });
+  });
+});
+
+describe('chartVariesColorsByPoint', () => {
+  const model = (partial: Partial<ChartModel>): ChartModel =>
+    ({ chartType: 'clusteredBar', series: [], varyColors: false, ...partial }) as ChartModel;
+  const oneSeries = [{ name: 'A', color: null, values: [1, 2, 3] }] as ChartSeries[];
+  const twoSeries = [
+    { name: 'A', color: null, values: [1, 2] },
+    { name: 'B', color: null, values: [3, 4] },
+  ] as ChartSeries[];
+
+  it('is true for a single-series bar/column with varyColors set', () => {
+    expect(chartVariesColorsByPoint(model({ chartType: 'clusteredBar', series: oneSeries, varyColors: true }))).toBe(true);
+    expect(chartVariesColorsByPoint(model({ chartType: 'clusteredBarH', series: oneSeries, varyColors: true }))).toBe(true);
+    expect(chartVariesColorsByPoint(model({ chartType: 'stackedBar', series: oneSeries, varyColors: true }))).toBe(true);
+  });
+
+  it('is false without the flag, for multi-series, or for non-bar types', () => {
+    expect(chartVariesColorsByPoint(model({ series: oneSeries, varyColors: false }))).toBe(false);
+    expect(chartVariesColorsByPoint(model({ series: twoSeries, varyColors: true }))).toBe(false);
+    expect(chartVariesColorsByPoint(model({ chartType: 'line', series: oneSeries, varyColors: true }))).toBe(false);
+    expect(chartVariesColorsByPoint(model({ chartType: 'pie', series: oneSeries, varyColors: true }))).toBe(false);
   });
 });

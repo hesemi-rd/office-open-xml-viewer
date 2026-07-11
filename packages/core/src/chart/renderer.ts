@@ -105,6 +105,26 @@ function legendIsCategoryDriven(chartType: string | undefined): boolean {
   return chartType === 'pie' || chartType === 'doughnut';
 }
 
+/** §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column chart:
+ *  Office colors each bar from the theme/palette sequence (like a pie's slices)
+ *  and lists one legend entry per data point. Restricted to the bar family with
+ *  exactly one series — the only case Office varies this way, and the only case
+ *  the shared parser sets `varyColors` for. Pie/doughnut are already
+ *  category-driven via {@link legendIsCategoryDriven}; this covers the bar case
+ *  so the plot fill and the legend agree on the same per-point resolution. */
+export function chartVariesColorsByPoint(chart: {
+  chartType?: string | null;
+  series: unknown[];
+  varyColors?: boolean | null;
+}): boolean {
+  return (
+    !!chart.varyColors &&
+    chart.series.length === 1 &&
+    typeof chart.chartType === 'string' &&
+    /Bar/.test(chart.chartType)
+  );
+}
+
 /** Resolve the color for legend entry `entryIndex`, matching the marks the
  *  plot actually draws.
  *
@@ -121,8 +141,9 @@ export function legendEntryColor(
   chartType: string | undefined,
   series: ChartSeries[],
   entryIndex: number,
+  varyByPoint = false,
 ): string {
-  if (legendIsCategoryDriven(chartType)) {
+  if (varyByPoint || legendIsCategoryDriven(chartType)) {
     const first = series[0];
     if (first) return pieSliceColor(entryIndex, first);
     return `#${CHART_PALETTE[entryIndex % CHART_PALETTE.length]}`;
@@ -326,15 +347,19 @@ function buildLegendEntries(
   series: ChartSeries[],
   chartType: string | undefined,
   scatterStyle?: string | null,
+  varyByPoint = false,
 ): LegendEntry[] {
-  if (legendIsCategoryDriven(chartType)) {
+  if (varyByPoint || legendIsCategoryDriven(chartType)) {
+    // Category-driven: one entry per data point of the first series, labeled by
+    // its category and colored exactly like the mark the plot draws for that
+    // point (pie slice, or a varyColors bar). §21.2.2.227.
     const first = series[0];
     const n = first ? first.values.length : 0;
     const cats = first?.categories ?? [];
     return Array.from({ length: n }, (_, i) => ({
       label: (cats[i] ?? `Item ${i + 1}`).toString(),
-      color: legendEntryColor(chartType, series, i),
-      marker: null, // pie/doughnut keys are always filled swatches.
+      color: legendEntryColor(chartType, series, i, varyByPoint),
+      marker: null, // pie/doughnut/varyColors keys are always filled swatches.
     }));
   }
   return series.map((s, i) => ({
@@ -370,10 +395,11 @@ function drawLegend(
   chartType?: string,
   style: LegendTextStyle = DEFAULT_LEGEND_STYLE,
   scatterStyle?: string | null,
+  varyByPoint = false,
 ): void {
   const sw = 10; const gap = 4;
   const swatchStyle = legendSwatchStyle(chartType);
-  const entries = buildLegendEntries(series, chartType, scatterStyle);
+  const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint);
   const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
@@ -448,6 +474,9 @@ function drawLegendForLayout(
 ): void {
   if (!leg) return;
   const legStyle = legendTextStyle(chart);
+  // §21.2.2.227 varyColors single-series bar: the legend lists one entry per
+  // data point (colored like each bar), so the legend and the plot fill agree.
+  const varyByPoint = chartVariesColorsByPoint(chart);
   // `<c:legend><c:manualLayout>` (§21.2.2.31) wins over the default side-based
   // rectangle. We honor the `edge` placement mode — fractions are measured
   // from the top-left of the chart space — which matches what Excel's built-in
@@ -463,21 +492,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle);
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle);
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
       break;
   }
 }
@@ -1066,6 +1095,14 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const n = cats.length;
   if (n === 0) return;
 
+  // §21.2.2.227 varyColors on a single-series bar: color each bar per DATA
+  // POINT (its category index) from the palette/theme sequence instead of the
+  // one series color — `pieSliceColor` honors an explicit `dPt` fill first,
+  // then the accent/palette for that point. Only ever true for a single bar
+  // series (see {@link chartVariesColorsByPoint}), so combo/multi-series bars
+  // are byte-identical.
+  const varyByPoint = chartVariesColorsByPoint(chart);
+
   // Honor the XML-specified title font size when present; otherwise fall back
   // to the proportional heuristic. Reserve the title band based on the actual
   // drawn height so the plot shrinks to avoid overlap.
@@ -1481,7 +1518,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       // a percentStacked chart reaches below the zero line).
       const sv = pct ? (raw / stackSum) * 100 : raw;
       const negative = sv < 0;
-      const color = chartColor(si, s);
+      const color = varyByPoint ? pieSliceColor(ci, s) : chartColor(si, s);
 
       if (!isH) {
         const bx = stacked

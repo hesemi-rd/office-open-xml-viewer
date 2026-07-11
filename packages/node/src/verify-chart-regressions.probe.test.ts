@@ -21,8 +21,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
 const SAMPLE_14 = resolve(ROOT, 'packages/pptx/public/private/sample-14.pptx');
 const SAMPLE_30 = resolve(ROOT, 'packages/xlsx/public/private/sample-30.xlsx');
+const SAMPLE_17 = resolve(ROOT, 'packages/pptx/public/private/sample-17.pptx');
+const SAMPLE_18 = resolve(ROOT, 'packages/pptx/public/private/sample-18.pptx');
 
-const pptxMod = skia && existsSync(SAMPLE_14)
+const varySamples = [SAMPLE_17, SAMPLE_18].filter((p) => existsSync(p));
+const pptxMod = skia && (existsSync(SAMPLE_14) || varySamples.length > 0)
   ? await importForTests(() => import('./pptx.ts'), './pptx.ts (pptx WASM)')
   : null;
 const xlsxMod = skia && existsSync(SAMPLE_30)
@@ -124,7 +127,7 @@ function renderCapture(
   return { texts, seriesStrokes, legendKeys };
 }
 
-describe.skipIf(!pptxMod || !coreMod)('sample-14 slide-7 pie: white percent-only labels', () => {
+describe.skipIf(!pptxMod || !coreMod || !existsSync(SAMPLE_14))('sample-14 slide-7 pie: white percent-only labels', () => {
   it('renders bare percentages in white (no black category names)', () => {
     const { parsePptx } = pptxMod as Any;
     const { renderChart } = coreMod as Any;
@@ -198,3 +201,78 @@ describe.skipIf(!xlsxMod || !coreMod)('sample-30 sheet-1 scatter: markers only (
     expect(sawMarker, 'a scatter draws a marker legend key').toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #931 — §21.2.2.227 varyColors on a single-series bar/column chart. sample-17
+// and sample-18 slide 4 each carry a lone column series with NO <c:varyColors>
+// element; Office varies each bar by the theme/palette sequence and lists one
+// legend entry per data point (four vs. our former one). This probe renders the
+// REAL decks and asserts four distinct bar fills plus a per-point legend.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Render a chart and collect every fillRect color and fillText string. */
+function captureBars(
+  chart: ChartModel,
+  renderChart: (ctx: unknown, c: ChartModel, r: unknown, p?: number) => void,
+): { rectFills: string[]; texts: string[] } {
+  const canvas = new Canvas(700, 460);
+  const raw = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+  const rectFills: string[] = [];
+  const texts: string[] = [];
+  const proxy = new Proxy(raw, {
+    get(t, p: string) {
+      if (p === 'fillRect') {
+        return (x: number, y: number, w: number, h: number) => {
+          rectFills.push(String((raw as Any).fillStyle).toLowerCase());
+          return (raw.fillRect as Any)(x, y, w, h);
+        };
+      }
+      if (p === 'fillText') {
+        return (s: string, x: number, y: number) => { texts.push(s); return (raw.fillText as Any)(s, x, y); };
+      }
+      const v = (t as Any)[p];
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+    set(t, p: string, v) { (t as Any)[p] = v; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  renderChart(proxy, chart, { x: 0, y: 0, w: 700, h: 460 }, 1.05);
+  return { rectFills, texts };
+}
+
+describe.skipIf(!pptxMod || !coreMod || varySamples.length === 0)(
+  '#931 single-series bar varyColors (sample-17/18 slide 4)',
+  () => {
+    it('renders four distinct bar colors and a per-point legend', () => {
+      const { parsePptx } = pptxMod as Any;
+      const { renderChart } = coreMod as Any;
+      for (const path of varySamples) {
+        const pres = parsePptx(readFileSync(path));
+        const slide4 = pres.slides[3];
+        const charts: ChartModel[] = [];
+        collectCharts(slide4, charts);
+        const bar = charts.find(
+          (c) => typeof c.chartType === 'string' && /Bar/.test(c.chartType) && c.series.length === 1,
+        );
+        expect(bar, `${path}: slide 4 has a single-series bar`).toBeTruthy();
+        const chart = bar as ChartModel;
+        // The parser flags default vary-by-point (element absent) as varyColors.
+        expect(chart.varyColors, 'single-series bar varies by default').toBe(true);
+
+        const { rectFills, texts } = captureBars(chart, renderChart);
+        const distinct = [...new Set(rectFills)];
+        // Four categories → four distinct bar fills (was one before the fix).
+        expect(
+          distinct.length,
+          `${path}: at least ${chart.categories.length} distinct bar colors`,
+        ).toBeGreaterThanOrEqual(chart.categories.length);
+        // Each category label now appears twice — once on the axis, once in the
+        // per-point legend (the pre-fix legend held only the series name).
+        for (const cat of chart.categories) {
+          if (!cat) continue;
+          const occurrences = texts.filter((s) => s === cat).length;
+          expect(occurrences, `${path}: "${cat}" drawn as axis label + legend entry`).toBeGreaterThanOrEqual(2);
+        }
+      }
+    });
+  },
+);

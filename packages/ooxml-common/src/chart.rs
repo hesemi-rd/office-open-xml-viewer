@@ -323,6 +323,14 @@ pub struct ChartModel {
     /// the renderer then falls back to its own `CHART_PALETTE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chartex_accents: Option<Vec<String>>,
+    /// §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column
+    /// chart: color each data point (bar) from the theme/palette sequence and
+    /// list one legend entry per point (like a pie). `Some(true)` only for that
+    /// non-pie, single-series case the core renderer consumes; the pie family
+    /// already varies by point via `chart_type` + `data_point_colors`, so it
+    /// stays `None` here (byte-stable wire for every existing chart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vary_colors: Option<bool>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -2141,6 +2149,10 @@ pub fn parse_chartex_part(
         title: chartex_title,
         categories,
         series,
+        // chartEx layouts color by branch/series index, not §21.2.2.227
+        // varyColors (a `<c:>` chart-group element that chartEx has no analog
+        // of), so the flag never applies here.
+        vary_colors: None,
         val_max: None,
         val_min: None,
         subtotal_indices,
@@ -3505,6 +3517,12 @@ pub fn parse_chart_part(
         .map(|s| s.to_string())
     };
 
+    // Total series in the plot. §21.2.2.227 varyColors on a NON-pie chart
+    // varies each data point by color only for a single-series plot (Office
+    // keeps per-series colors when several series share the axes); captured
+    // here so the per-series closure can gate the accent fill on it.
+    let series_count = ser_nodes.len();
+
     let series: Vec<ChartSeries> = ser_nodes
         .iter()
         .map(|ser| {
@@ -3721,20 +3739,29 @@ pub fn parse_chart_part(
             // renderer consumes `data_point_colors`, and a multi-series pie (rare)
             // still varies by point within series[0].
             let is_pie_family = chart_type == "pie" || chart_type == "doughnut";
+            let is_bar_family = chart_type.contains("Bar");
+            // §21.2.2.227 `<c:varyColors>` — CT_Boolean (bare element ⇒ true).
+            // "Vary colors by point" is the effective default for the pie family
+            // AND for a SINGLE-series bar/column chart (Word/Excel/PowerPoint
+            // draw a lone series' bars in the rotating theme palette and keep an
+            // explicit `<c:varyColors val="0"/>` when the user forces one color
+            // — verified against the sample-17/18 decks, whose single-series
+            // columns render four accent-colored bars with the element ABSENT).
+            // A multi-series plot keeps per-series colors, so it never varies by
+            // point even with `val="1"`. When ON, each data point takes the
+            // accent for its POINT index (i); `dPt` fills already sit in
+            // `data_point_colors` and are never overwritten (explicit per-point
+            // color keeps priority, §21.2.2.52).
+            let qualifies_for_vary = is_pie_family || (is_bar_family && series_count == 1);
+            let vary = group
+                .and_then(|g| bool_child(g, "varyColors"))
+                .unwrap_or(true);
+            let vary_by_point = qualifies_for_vary && vary;
             let mut data_point_colors = data_point_colors;
-            if is_pie_family {
-                // §21.2.2.203 `<c:varyColors>` — CT_Boolean (bare element ⇒ true).
-                // For the pie family the effective default is also "vary" when
-                // the element is ABSENT, so both the bare-present and absent cases
-                // resolve to true here.
-                let vary = group
-                    .and_then(|g| bool_child(g, "varyColors"))
-                    .unwrap_or(true);
-                if vary {
-                    for (i, slot) in data_point_colors.iter_mut().enumerate() {
-                        if slot.is_none() {
-                            *slot = color_resolver.resolve_series_accent(i);
-                        }
+            if vary_by_point {
+                for (i, slot) in data_point_colors.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        *slot = color_resolver.resolve_series_accent(i);
                     }
                 }
             }
@@ -4286,11 +4313,38 @@ pub fn parse_chart_part(
         .and_then(|t| child(t, "layout"))
         .and_then(extract_manual_layout);
 
+    // §21.2.2.227 varyColors chart-level flag. Emitted (`Some(true)`) for a
+    // SINGLE-series bar/column chart that varies by point — the case where the
+    // core renderer must color each bar per point and list one legend entry per
+    // point. "Vary by point" is the default for a lone bar series, so an ABSENT
+    // `<c:varyColors>` resolves to `true` here; an explicit `val="0"` (the way
+    // Office records "force one color") leaves it `None`. The pie family already
+    // varies by point via `chart_type` + `data_point_colors`, so it stays `None`
+    // to keep the wire byte-identical for every existing pie/doughnut chart.
+    let vary_colors = {
+        let is_pie_family = chart_type == "pie" || chart_type == "doughnut";
+        let is_bar_family = chart_type.contains("Bar");
+        if !is_pie_family && is_bar_family && series_count == 1 {
+            let vary = ser_nodes[0]
+                .parent()
+                .and_then(|g| bool_child(g, "varyColors"))
+                .unwrap_or(true);
+            if vary {
+                Some(true)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     Some(ChartModel {
         chart_type,
         title,
         categories,
         series,
+        vary_colors,
         val_max,
         val_min,
         subtotal_indices: vec![],
@@ -4500,6 +4554,7 @@ mod tests {
                 trend_lines: None,
                 line_hidden: None,
             }],
+            vary_colors: None,
             show_data_labels: false,
             val_min: None,
             val_max: None,
@@ -7209,18 +7264,99 @@ mod tests {
         assert_eq!(colors2[2], None);
     }
 
-    /// A NON-pie chart (bar) never gets varyColors slice accents even when the
-    /// resolver supplies them — only the pie renderer consumes
-    /// `data_point_colors`, so a bar's slice palette must stay empty (`None`).
+    /// A SINGLE-series bar chart with `<c:varyColors>` ABSENT varies by point by
+    /// default (issue #931): each data point takes the accent for its index and
+    /// the chart-level flag is set. This is the sample-17/18 shape — a lone
+    /// column series whose four bars render in the rotating theme palette even
+    /// though the file carries no `<c:varyColors>` element.
     #[test]
-    fn parse_chart_part_bar_no_vary_colors_slice_fill() {
+    fn parse_chart_part_bar_single_series_varies_by_default() {
         let group = format!(
             r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{CH13_SER}</c:barChart>"#
         );
         let xml = chart_space_with_group(&group);
         let d = chart_space_of(&xml);
         let m = parse_chart_part(d.root_element(), &AccentResolver).expect("bar parses");
+        assert_eq!(m.vary_colors, Some(true));
+        let colors = m.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("default vary populates per-point palette");
+        assert_eq!(colors[0].as_deref(), Some("4472C4")); // accent1
+        assert_eq!(colors[1].as_deref(), Some("ED7D31")); // accent2
+    }
+
+    /// A SINGLE-series bar chart with an explicit `<c:varyColors val="0"/>`
+    /// keeps its one per-series color (Office records the forced-single-color
+    /// choice this way — sample-1.xlsx / sample-14 chart8/9). No per-point fill,
+    /// no chart-level flag.
+    #[test]
+    fn parse_chart_part_bar_single_series_vary_off_keeps_series_color() {
+        let group = format!(
+            r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>{CH13_SER}</c:barChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("bar parses");
+        assert_eq!(m.vary_colors, None);
         assert!(m.series[0].data_point_colors.is_none());
+    }
+
+    /// §21.2.2.227 varyColors on a SINGLE-series bar/column chart: each data
+    /// point (bar) without an explicit `<c:dPt>` fill takes the theme accent for
+    /// its point index, and the chart-level `vary_colors` flag is set so the
+    /// core renderer colors each bar per point and lists one legend entry per
+    /// point (issue #931). The point that carries a `<c:dPt>` fill keeps it.
+    #[test]
+    fn parse_chart_part_bar_vary_colors_single_series_fills_accents() {
+        let ser = r#"<c:ser><c:idx val="0"/>
+            <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></c:spPr></c:dPt>
+            <c:cat><c:strCache>
+              <c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt>
+              <c:pt idx="2"><c:v>C</c:v></c:pt><c:pt idx="3"><c:v>D</c:v></c:pt>
+            </c:strCache></c:cat>
+            <c:val><c:numCache>
+              <c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt>
+              <c:pt idx="2"><c:v>3</c:v></c:pt><c:pt idx="3"><c:v>4</c:v></c:pt>
+            </c:numCache></c:val></c:ser>"#;
+        let group = format!(
+            r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="1"/>{ser}</c:barChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("bar parses");
+        assert_eq!(m.vary_colors, Some(true));
+        let colors = m.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("varyColors populates per-point palette");
+        assert_eq!(colors[0].as_deref(), Some("112233")); // explicit dPt wins
+        assert_eq!(colors[1].as_deref(), Some("ED7D31")); // accent2
+        assert_eq!(colors[2].as_deref(), Some("A5A5A5")); // accent3
+        assert_eq!(colors[3].as_deref(), Some("FFC000")); // accent4
+    }
+
+    /// §21.2.2.227 varyColors on a MULTI-series bar chart is a no-op for the
+    /// per-point fill: Office keeps per-series colors when several series share
+    /// the axes, so neither the per-point palette nor the chart-level flag is
+    /// emitted. Only the single-series case (issue #931) varies by point.
+    #[test]
+    fn parse_chart_part_bar_vary_colors_multi_series_keeps_series_colors() {
+        let ser0 = r#"<c:ser><c:idx val="0"/>
+            <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:cat>
+            <c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:val></c:ser>"#;
+        let ser1 = r#"<c:ser><c:idx val="1"/>
+            <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:cat>
+            <c:val><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>4</c:v></c:pt></c:numCache></c:val></c:ser>"#;
+        let group = format!(
+            r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="1"/>{ser0}{ser1}</c:barChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("bar parses");
+        assert_eq!(m.vary_colors, None);
+        assert!(m.series[0].data_point_colors.is_none());
+        assert!(m.series[1].data_point_colors.is_none());
     }
 
     /// A named single series in `<c:tx>` — reused by the auto-title tests. `idx`

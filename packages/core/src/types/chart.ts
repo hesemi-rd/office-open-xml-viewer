@@ -309,6 +309,14 @@ export interface ChartModel {
   title: string | null;
   categories: string[];
   series: ChartSeries[];
+  /**
+   * §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column chart:
+   * color each data point (bar) from the theme/palette sequence and list one
+   * legend entry per point, matching Office. Set by the shared parser ONLY for
+   * that non-pie, single-series case (pie/doughnut already vary by point via
+   * `chartType` + `dataPointColors`); absent/false otherwise.
+   */
+  varyColors?: boolean | null;
   /** Show data labels on bars / points / slices. */
   showDataLabels: boolean;
   /** Explicit Y-axis minimum (OOXML `<c:valAx><c:min>`). */
