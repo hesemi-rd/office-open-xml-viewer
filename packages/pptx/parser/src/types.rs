@@ -896,6 +896,14 @@ pub(crate) enum Bullet {
         color: Option<String>,
         /// Size as % of text size (100.0 = same size)
         size_pct: Option<f64>,
+        /// `<a:buSzPts>` (ECMA-376 §21.1.2.4.10) — an ABSOLUTE marker size in
+        /// points (18.0 = 18pt), independent of the run size. Mutually exclusive
+        /// with `size_pct` (both are the one `EG_TextBulletSize` choice). Omitted
+        /// from the JSON when absent (serde skip), so existing bullets that carry
+        /// no `buSzPts` serialize byte-identically.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        size_pts: Option<f64>,
         font_family: Option<String>,
     },
     /// Auto-numbered bullet (buAutoNum)
@@ -913,7 +921,7 @@ pub(crate) enum Bullet {
     /// r:embed="rIdN"/></a:buBlip>`. The `r:embed` is resolved to the blip's
     /// embedded **zip path** (e.g. "ppt/media/image1.png") + mime at parse time,
     /// exactly like `Fill::Image`; the renderer fetches the bytes lazily by path.
-    /// `size_pct` carries `<a:buSzPct>` (§21.1.2.4.3) as a fraction of 100 (e.g.
+    /// `size_pct` carries `<a:buSzPct>` (§21.1.2.4.9) as a fraction of 100 (e.g.
     /// 80.0 = 80% of the text size); None means the spec default of 100%.
     #[serde(rename_all = "camelCase")]
     Blip {
@@ -924,6 +932,12 @@ pub(crate) enum Bullet {
         /// `<a:buSzPct val>` as a percentage (100.0 = same size as text). None
         /// when no explicit `<a:buSzPct>` is present (renderer uses 100%).
         size_pct: Option<f64>,
+        /// `<a:buSzPts val>` (ECMA-376 §21.1.2.4.10) — an ABSOLUTE marker size in
+        /// points, independent of the text size. Mutually exclusive with
+        /// `size_pct`. Omitted from the JSON when absent (serde skip).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        size_pts: Option<f64>,
     },
 }
 

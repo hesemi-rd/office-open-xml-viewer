@@ -241,10 +241,17 @@ export type SpaceLine =
   | { type: 'pct'; val: number }   // val: e.g. 100000 = 100%, 150000 = 150%
   | { type: 'pts'; val: number };  // val in points
 
+/**
+ * A paragraph's bullet marker. For `char`, the marker size is EITHER `sizePct`
+ * (a percentage of the run size — ECMA-376 §21.1.2.4.9 `<a:buSzPct>`) OR `sizePts`
+ * (an absolute size in points — §21.1.2.4.10 `<a:buSzPts>`), never both: they are
+ * the one `EG_TextBulletSize` xsd:choice. `sizePts` is optional (absent when no
+ * `<a:buSzPts>` was declared); when present it takes precedence over `sizePct`.
+ */
 export type Bullet =
   | { type: 'none' }
   | { type: 'inherit' }
-  | { type: 'char'; char: string; color: string | null; sizePct: number | null; fontFamily: string | null }
+  | { type: 'char'; char: string; color: string | null; sizePct: number | null; sizePts?: number; fontFamily: string | null }
   | { type: 'autoNum'; numType: string; startAt: number | null; color: string | null };
 
 export interface TabStop {

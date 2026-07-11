@@ -169,24 +169,24 @@ pub(crate) enum BuFont {
     Font(String),
 }
 
-/// Bullet size group (EG_TextBulletSize): `<a:buSzPct>` percent-of-text or
-/// `<a:buSzTx>` follow-text. Absence = inherit (enclosing `Option`).
+/// Bullet size group (EG_TextBulletSize): `<a:buSzTx>` follow-text,
+/// `<a:buSzPct>` percent-of-text, or `<a:buSzPts>` absolute point size. Absence =
+/// inherit (enclosing `Option`). The three are members of one `xsd:choice`, so at
+/// most one is present at a level; whichever is present BLOCKS a lower-tier size.
 ///
-/// `<a:buSzPts>` (§21.1.2.4.10, absolute point size) is deliberately NOT modelled
-/// here: the resolved [`Bullet`] contract carries only a percentage (`sizePct`),
-/// and an absolute point size cannot be expressed as a percentage without the run
-/// size (which the parser does not know). Rather than record `buSzPts` as an
-/// override that BLOCKS an inherited lower-tier `buSzPct` but then renders at the
-/// default 100% — a behaviour change from before this cascade existed — we leave
-/// `buSzPts` unparsed (identical to prior behaviour) so a lower-tier `buSzPct`
-/// still inherits. Honouring absolute-point bullet sizes needs a renderer +
-/// contract extension and is tracked as follow-up work.
+/// `Pct` and `Pts` are separate variants (never both) because they collapse to
+/// distinct resolved fields — `sizePct` (percent of the run size, resolved at
+/// draw time) and `sizePts` (absolute points, run-independent) — on the [`Bullet`]
+/// contract. Keeping them apart lets the renderer honour absolute-point bullets
+/// (§21.1.2.4.10) while the cascade still treats the whole size group uniformly.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum BuSize {
     /// `<a:buSzTx>` (§21.1.2.4.11) — follow the text run's size.
     FollowText,
     /// `<a:buSzPct val>` (§21.1.2.4.9) — percentage of text size (100.0 = 100%).
     Pct(f64),
+    /// `<a:buSzPts val>` (§21.1.2.4.10) — absolute size in points (18.0 = 18pt).
+    Pts(f64),
 }
 
 /// A paragraph's bullet as FOUR independent choice groups (ECMA-376 §21.1.2.4:
@@ -234,7 +234,9 @@ impl BulletProps {
     /// follow-text-vs-inherit distinction is preserved while merging:
     /// - colour: `Color(c)` → `Some(c)`; `FollowText`/inherit → `None` (the
     ///   renderer already treats `None` as "follow the run's colour");
-    /// - size: `Pct(p)` → `Some(p)`; `FollowText`/inherit → `None`;
+    /// - size: `Pct(p)` → `size_pct = Some(p)`; `Pts(p)` → `size_pts = Some(p)`
+    ///   (§21.1.2.4.10, absolute points); `FollowText`/inherit → both `None`. The
+    ///   two size fields are mutually exclusive (one `xsd:choice`);
     /// - font: `Font(f)` → `Some(f)`; `FollowText`/inherit → `None`.
     ///   Auto-number and picture markers carry no font/size in the `Bullet`
     ///   contract (the renderer draws numbers in the run font and pictures as a
@@ -248,6 +250,12 @@ impl BulletProps {
             Some(BuSize::Pct(v)) => Some(*v),
             _ => None,
         };
+        // Absolute-point size (§21.1.2.4.10). Exclusive with `size_pct` above (one
+        // `xsd:choice`), so at most one of the two is `Some` on a resolved bullet.
+        let size_pts = match &self.size {
+            Some(BuSize::Pts(v)) => Some(*v),
+            _ => None,
+        };
         let font_family = match &self.font {
             Some(BuFont::Font(f)) => Some(f.clone()),
             _ => None,
@@ -259,6 +267,7 @@ impl BulletProps {
                 ch: ch.clone(),
                 color,
                 size_pct,
+                size_pts,
                 font_family,
             },
             Some(BuMarker::AutoNum { num_type, start_at }) => Bullet::AutoNum {
@@ -273,6 +282,7 @@ impl BulletProps {
                 image_path: image_path.clone(),
                 mime_type: mime_type.clone(),
                 size_pct,
+                size_pts,
             },
         }
     }
@@ -1072,12 +1082,20 @@ pub(crate) fn parse_bu_sz_pct(val: &str) -> Option<f64> {
     }
 }
 
+/// Parse a `<a:buSzPts val>` value into an absolute size in points. ECMA-376's
+/// attribute type is `ST_TextFontSize` (§21.1.2.4.10 CT_TextBulletSizePoint):
+/// an integer in hundredths of a point (`"1800"` = 18pt), exactly like the run
+/// `<a:rPr sz>` the parser already divides by 100 elsewhere.
+pub(crate) fn parse_bu_sz_pts(val: &str) -> Option<f64> {
+    val.trim().parse::<f64>().ok().map(|n| n / 100.0)
+}
+
 /// Parse a paragraph's four bullet choice groups (ECMA-376 §21.1.2.4) from a
 /// `<a:pPr>` / `<a:lvlNpPr>` node into a [`BulletProps`]. Each group is read
 /// independently so the cascade can merge them per-property:
 /// - colour (EG_TextBulletColor): `<a:buClrTx>` (follow text) or `<a:buClr>`;
-/// - size (EG_TextBulletSize): `<a:buSzTx>` (follow text) or `<a:buSzPct>`
-///   (percent of text). `<a:buSzPts>` is intentionally not read — see [`BuSize`];
+/// - size (EG_TextBulletSize): `<a:buSzTx>` (follow text), `<a:buSzPct>` (percent
+///   of text) or `<a:buSzPts>` (absolute points, §21.1.2.4.10) — see [`BuSize`];
 /// - typeface (EG_TextBulletTypeface): `<a:buFontTx>` (follow text) or `<a:buFont>`;
 /// - marker (EG_TextBullet): see [`parse_bullet_marker`].
 ///
@@ -1103,16 +1121,22 @@ pub(crate) fn parse_bullet_props<F: FnMut(&str) -> Option<String>>(
             .map(BuColor::Color)
     };
 
-    // Size group (EG_TextBulletSize): buSzTx (§21.1.2.4.11) follow-text; buSzPct
-    // (§21.1.2.4.9) percent-of-text. buSzPts (§21.1.2.4.10) is intentionally
-    // ignored — see [`BuSize`].
+    // Size group (EG_TextBulletSize xsd:choice): buSzTx (§21.1.2.4.11) follow-text;
+    // buSzPct (§21.1.2.4.9) percent-of-text; buSzPts (§21.1.2.4.10) absolute points.
+    // At most one is present; check them in schema order so a well-formed level
+    // reads deterministically (a stray second element is ignored).
     let size = if child(p_pr, "buSzTx").is_some() {
         Some(BuSize::FollowText)
+    } else if let Some(pct) = child(p_pr, "buSzPct")
+        .and_then(|n| attr(&n, "val"))
+        .and_then(|v| parse_bu_sz_pct(&v))
+    {
+        Some(BuSize::Pct(pct))
     } else {
-        child(p_pr, "buSzPct")
+        child(p_pr, "buSzPts")
             .and_then(|n| attr(&n, "val"))
-            .and_then(|v| parse_bu_sz_pct(&v))
-            .map(BuSize::Pct)
+            .and_then(|v| parse_bu_sz_pts(&v))
+            .map(BuSize::Pts)
     };
 
     // Typeface group (EG_TextBulletTypeface): buFontTx (§21.1.2.4.7) follow-text;

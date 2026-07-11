@@ -3004,9 +3004,15 @@ export function renderTextBody(
     const bullet = asBullet(para.bullet);
     if (bullet.type === 'char') {
       const b = bullet;
-      const bSizePx = b.sizePct != null
-        ? bulletBaseSizePx * (b.sizePct / 100)
-        : bulletBaseSizePx;
+      // ECMA-376 §21.1.2.4.10 (buSzPts): an ABSOLUTE point size sizes the marker
+      // independent of the run — convert pt → px like any run size
+      // (PT_TO_EMU·scale·fontScale). It wins over §21.1.2.4.9 (buSzPct, percent of
+      // the run size); with neither, the marker takes the run size (§21.1.2.4.13).
+      const bSizePx = b.sizePts != null
+        ? b.sizePts * PT_TO_EMU * scale * fontScale
+        : b.sizePct != null
+          ? bulletBaseSizePx * (b.sizePct / 100)
+          : bulletBaseSizePx;
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
       const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
@@ -3022,13 +3028,17 @@ export function renderTextBody(
     } else if (bullet.type === 'blip') {
       // ECMA-376 §21.1.2.4.2 picture bullet. The bitmap is drawn as a square
       // sized to the text (the bullet's em box), scaled by `<a:buSzPct>`
-      // (§21.1.2.4.3; default 100%). It's not a glyph, so there is no label —
+      // (§21.1.2.4.9; default 100%). It's not a glyph, so there is no label —
       // an empty paragraph still draws no marker (bulletLabel stays '' and the
       // draw site gates the image on the first line having content).
+      // §21.1.2.4.10 (buSzPts): an absolute point size overrides the §21.1.2.4.9
+      // percentage, matching the char-bullet branch above.
       const b = bullet;
-      const sizePx = b.sizePct != null
-        ? bulletBaseSizePx * (b.sizePct / 100)
-        : bulletBaseSizePx;
+      const sizePx = b.sizePts != null
+        ? b.sizePts * PT_TO_EMU * scale * fontScale
+        : b.sizePct != null
+          ? bulletBaseSizePx * (b.sizePct / 100)
+          : bulletBaseSizePx;
       bulletImage = { imagePath: b.imagePath, mimeType: b.mimeType, sizePx };
     }
 

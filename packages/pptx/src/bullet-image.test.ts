@@ -191,7 +191,7 @@ describe('renderTextBody — picture bullet (buBlip) draws the bitmap', () => {
     expect(d.w).toBeCloseTo(d.h * SENTINEL_RATIO, 6);
   });
 
-  it('scales the bullet by buSzPct (§21.1.2.4.3)', async () => {
+  it('scales the bullet by buSzPct (§21.1.2.4.9)', async () => {
     const path = 'ppt/media/bullet-sized.png';
     await getCachedBitmap(path, 'image/png', fetchImage);
 
@@ -212,6 +212,54 @@ describe('renderTextBody — picture bullet (buBlip) draws the bitmap', () => {
     // Height = 20px text × 50% = 10px; width preserves the 2:1 aspect ratio.
     expect(draws[0].h).toBeCloseTo(10, 6);
     expect(draws[0].w).toBeCloseTo(10 * SENTINEL_RATIO, 6);
+  });
+
+  it('sizes the bullet by buSzPts absolutely (§21.1.2.4.10), independent of the run', async () => {
+    const path = 'ppt/media/bullet-pts.png';
+    await getCachedBitmap(path, 'image/png', fetchImage);
+
+    const { ctx, draws } = mockCtx();
+    renderTextBody(
+      ctx,
+      // Run is 20pt; buSzPts = 40pt → the bullet box is 40px (40pt at this
+      // scale), NOT the 20px run height — the size is absolute, not relative.
+      bodyWithBullet(blipBullet({ imagePath: path, sizePts: 40 })),
+      0, 0, 4000, 2000,
+      SCALE,
+      null, 0, false, false, '#000000', 1,
+      { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+      undefined,
+      false,
+      fetchImage,
+    );
+
+    expect(draws).toHaveLength(1);
+    expect(draws[0].h).toBeCloseTo(40, 6);
+    expect(draws[0].w).toBeCloseTo(40 * SENTINEL_RATIO, 6);
+  });
+
+  it('prefers buSzPts over a co-present buSzPct on a picture bullet', async () => {
+    const path = 'ppt/media/bullet-pts-over-pct.png';
+    await getCachedBitmap(path, 'image/png', fetchImage);
+
+    const { ctx, draws } = mockCtx();
+    renderTextBody(
+      ctx,
+      // Absolute 30pt → 30px wins over 200% × 20pt run (= 40px): the two are the
+      // one EG_TextBulletSize choice, and the absolute size takes precedence.
+      bodyWithBullet(blipBullet({ imagePath: path, sizePts: 30, sizePct: 200 })),
+      0, 0, 4000, 2000,
+      SCALE,
+      null, 0, false, false, '#000000', 1,
+      { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+      undefined,
+      false,
+      fetchImage,
+    );
+
+    expect(draws).toHaveLength(1);
+    expect(draws[0].h).toBeCloseTo(30, 6);
+    expect(draws[0].w).toBeCloseTo(30 * SENTINEL_RATIO, 6);
   });
 
   it('draws nothing (no throw) when the bullet image is not yet decoded', () => {

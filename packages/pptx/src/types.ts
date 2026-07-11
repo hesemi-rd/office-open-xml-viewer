@@ -36,11 +36,18 @@ export interface BlipBullet {
   /** MIME type of the blip at {@link BlipBullet.imagePath} (e.g. `image/png`). */
   mimeType: string;
   /**
-   * `<a:buSzPct val>` (ECMA-376 §21.1.2.4.3) as a percentage of the text size
+   * `<a:buSzPct val>` (ECMA-376 §21.1.2.4.9) as a percentage of the text size
    * (100 = same size). `null` when no explicit `<a:buSzPct>` is present, in
    * which case the renderer uses the spec default of 100%.
    */
   sizePct: number | null;
+  /**
+   * `<a:buSzPts val>` (ECMA-376 §21.1.2.4.10) — an ABSOLUTE marker size in
+   * points, independent of the text size. Mutually exclusive with {@link
+   * BlipBullet.sizePct} (both are the one `EG_TextBulletSize` choice). Omitted
+   * when no explicit `<a:buSzPts>` is present; when present it takes precedence.
+   */
+  sizePts?: number;
 }
 
 /**

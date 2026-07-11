@@ -2064,6 +2064,72 @@ mod tests {
         );
     }
 
+    /// §21.1.2.4.10 (buSzPts): an absolute-point bullet size on the paragraph is
+    /// parsed as `sizePts` (points; the `ST_TextFontSize` val 1800 = 18pt) and is
+    /// exclusive with `sizePct` — a `buSzPts` marker carries no `sizePct` (the two
+    /// are members of the same `EG_TextBulletSize` xsd:choice).
+    #[test]
+    fn bullet_buszpts_parsed_as_absolute_points() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buSzPts val="1800"/><a:buChar char="X"/>"#),
+            "",
+            "",
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "X");
+        assert_eq!(b["sizePts"], 18.0, "buSzPts val=1800 → 18pt");
+        assert!(
+            b["sizePct"].is_null(),
+            "buSzPts is exclusive with buSzPct (same xsd:choice), got {:?}",
+            b["sizePct"]
+        );
+    }
+
+    /// §21.1.2.4.10 (buSzPts) cascade: the master declares the marker while the
+    /// slide paragraph overrides only the char — a lower-tier `buSzPts` must carry
+    /// onto the new char (the size group inherits independently of the marker).
+    #[test]
+    fn bullet_cascade_new_char_inherits_lower_tier_buszpts() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buChar char="X"/>"#),
+            "",
+            &txstyles_body_lvl1(r#"<a:buSzPts val="1800"/><a:buChar char="•"/>"#),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "X");
+        assert_eq!(
+            b["sizePts"], 18.0,
+            "absolute-point size inherited independently of the marker"
+        );
+        assert!(b["sizePct"].is_null(), "no percent size in the cascade");
+    }
+
+    /// §21.1.2.4.9/.10 cross-group precedence: a higher-tier `buSzPts` BLOCKS a
+    /// lower-tier `buSzPct` (both are the single size choice group, so the primary
+    /// tier's explicit absolute size wins and the inherited percent is dropped).
+    #[test]
+    fn bullet_buszpts_blocks_lower_tier_buszpct() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buSzPts val="2400"/><a:buChar char="X"/>"#),
+            "",
+            &txstyles_body_lvl1(r#"<a:buSzPct val="50000"/><a:buChar char="•"/>"#),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "X");
+        assert_eq!(
+            b["sizePts"], 24.0,
+            "primary-tier buSzPts wins the size group"
+        );
+        assert!(
+            b["sizePct"].is_null(),
+            "the inherited lower-tier buSzPct is blocked, got {:?}",
+            b["sizePct"]
+        );
+    }
+
     /// §21.1.2.4.8 (buNone): an explicit `<a:buNone/>` on the slide paragraph
     /// suppresses the inherited master marker — the marker group's explicit
     /// "no bullet" value blocks a lower-tier char. Regression guard for the
@@ -2111,6 +2177,7 @@ mod tests {
                 ch,
                 color,
                 size_pct,
+                size_pts,
                 font_family,
             } => {
                 assert_eq!(ch, "›");
@@ -2119,6 +2186,7 @@ mod tests {
                     "buClrTx collapses to follow-text (None) at the leaf"
                 );
                 assert_eq!(size_pct, Some(80.0));
+                assert_eq!(size_pts, None, "a Pct size carries no absolute points");
                 assert_eq!(font_family, Some("Wingdings".to_string()));
             }
             other => panic!("expected Char, got {other:?}"),
@@ -2145,6 +2213,38 @@ mod tests {
         assert_eq!(parse_bu_sz_pct(" 111% "), Some(111.0));
         assert_eq!(parse_bu_sz_pct("62.5%"), Some(62.5));
         assert_eq!(parse_bu_sz_pct("garbage"), None);
+    }
+
+    /// §21.1.2.4.10 — `<a:buSzPts val>` is `ST_TextFontSize` (hundredths of a
+    /// point); `parse_bu_sz_pts` divides by 100 to yield points, like the run
+    /// `sz`. A non-numeric value yields `None` (no size specified at this tier).
+    #[test]
+    fn parse_bu_sz_pts_is_hundredths_of_a_point() {
+        assert_eq!(parse_bu_sz_pts("1800"), Some(18.0));
+        assert_eq!(parse_bu_sz_pts("2400"), Some(24.0));
+        assert_eq!(parse_bu_sz_pts(" 100 "), Some(1.0));
+        assert_eq!(parse_bu_sz_pts("garbage"), None);
+    }
+
+    /// §21.1.2.4.10 — a `BuSize::Pts` size collapses to the resolved bullet's
+    /// `size_pts` (absolute points) and leaves `size_pct` `None`; the two size
+    /// fields are mutually exclusive at the leaf.
+    #[test]
+    fn bullet_props_pts_size_resolves_to_size_pts() {
+        let props = BulletProps {
+            marker: Some(BuMarker::Char("•".into())),
+            size: Some(BuSize::Pts(18.0)),
+            ..Default::default()
+        };
+        match props.resolve() {
+            Bullet::Char {
+                size_pct, size_pts, ..
+            } => {
+                assert_eq!(size_pts, Some(18.0), "Pts collapses to absolute points");
+                assert_eq!(size_pct, None, "Pts carries no percent size");
+            }
+            other => panic!("expected Char, got {other:?}"),
+        }
     }
 
     /// The master `or_insert` edge (codex review): a master body placeholder
@@ -2700,7 +2800,7 @@ mod tests {
 
     /// ECMA-376 §21.1.2.4.2 — a paragraph `<a:pPr><a:buBlip><a:blip r:embed>`
     /// resolves into `Bullet::Blip` carrying the blip's zip path + mime. The
-    /// `<a:buSzPct val>` (§21.1.2.4.3, thousandths of a percent) becomes a plain
+    /// `<a:buSzPct val>` (§21.1.2.4.9, thousandths of a percent) becomes a plain
     /// percentage on the bullet.
     #[test]
     fn test_parse_bullet_blip_resolves_embed_and_size() {
@@ -2720,10 +2820,12 @@ mod tests {
                 image_path,
                 mime_type,
                 size_pct,
+                size_pts,
             } => {
                 assert_eq!(image_path, "ppt/media/image3.png");
                 assert_eq!(mime_type, "image/png");
                 assert!((size_pct.expect("size_pct") - 80.0).abs() < 1e-9);
+                assert_eq!(size_pts, None, "a buSzPct blip carries no absolute points");
             }
             other => panic!("expected Bullet::Blip, got {other:?}"),
         }
@@ -2746,10 +2848,12 @@ mod tests {
                 image_path,
                 mime_type,
                 size_pct,
+                size_pts,
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");
                 assert_eq!(mime_type, "image/jpeg");
                 assert!(size_pct.is_none());
+                assert!(size_pts.is_none());
             }
             other => panic!("expected Bullet::Blip, got {other:?}"),
         }
