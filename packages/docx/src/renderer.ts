@@ -2592,6 +2592,30 @@ export function computePages(
     }
     return false;
   };
+  // Issue #981 — does INK-BEARING flow content follow `startIdx` that would CASCADE
+  // through this position? A table, or a paragraph that draws something (visible text
+  // / image / shape / math). Used to gate the trailing-empty-mark grazing allowance:
+  // keeping a trailing empty paragraph on the page only matters when later visible
+  // content would otherwise be pushed down by one line. A document-terminal run of
+  // empty paragraphs has NO following ink, so it is paginated normally and Word's
+  // trailing blank page is preserved. A FORCED pagination boundary (hard page/column
+  // break, a page-starting section break, or a `pageBreakBefore` paragraph) starts the
+  // following content on a fresh page/column regardless of whether the empty is kept,
+  // so it cannot cascade — stop the scan there (Codex review of this fix).
+  const hasFollowingInkContent = (startIdx: number): boolean => {
+    for (let j = startIdx; j < body.length; j++) {
+      const nxt = body[j];
+      if (nxt.type === 'pageBreak' || nxt.type === 'columnBreak') return false;
+      if (nxt.type === 'sectionBreak' && sectionKindFrom(j + 1) !== 'continuous') return false;
+      if (nxt.type === 'table') return true;
+      if (nxt.type === 'paragraph') {
+        const p = nxt as unknown as DocParagraph;
+        if (p.pageBreakBefore) return false;
+        if (!isInklessParagraph(p)) return true;
+      }
+    }
+    return false;
+  };
 
   for (let i = 0; i < body.length; i++) {
     const el = body[i];
@@ -2914,7 +2938,44 @@ export function computePages(
       // `w:spacing/@w:after` land flush against the bottom margin.
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
       const fitHeight = h - para.spaceAfter;
-      const needed = fitHeight + needNext + addReservePt;
+      // Issue #981 — a TRAILING empty paragraph whose mark line's box would overflow
+      // the bottom content edge by no more than its below-baseline whitespace
+      // (descent + half leading) is KEPT on the page rather than pushed to the next
+      // page's top. This mirrors Word's observed page-fit, which is baseline-based:
+      // the last line stays if its BASELINE is within the text area, letting the
+      // descent hang into the bottom margin. Pushing such an empty paragraph forward
+      // cascades every following line down by ~one line and spilled dense-page
+      // content one page late in the reference (a formula paragraph, a table row).
+      // NOTE: this is Word RUNTIME behaviour reconstructed from its output — ECMA-376
+      // §17.3.1.29 requires the mark line box to exist, but neither it nor §17.3.1.33
+      // specifies baseline-based pagination or bottom-margin overflow.
+      //
+      // Tightly scoped so the allowance is only taken where it is BOTH observable and
+      // invisible:
+      //   • fitMeasured.markOnly + isInklessParagraph — an empty paragraph mark, not a
+      //     visible last line and not an anchor-only paragraph (which carries a drawing).
+      //   • no shading / borders — those paint the FULL mark box, so its overflow would
+      //     put visible fill/border into the bottom margin (finding: markOnly ≠ no ink).
+      //   • hasFollowingInkContent(i+1) — later visible content exists whose pagination
+      //     would cascade; a document-terminal empty run has none, so it paginates
+      //     normally and Word's trailing blank page is preserved (no page-count change).
+      //   • no keepNext block / footnote-or-footer reserve on this page — the empty is
+      //     truly the last line and it grazes the PHYSICAL bottom margin, not a reserved
+      //     footnote/tall-footer band (which is not invisible).
+      const pageBottomReserve = reserveAt(pages.length - 1).bottom
+        + (footnoteReservePt[pages.length - 1] ?? 0);
+      const trailingMarkGrazes =
+        fitMeasured.markOnly
+        && isInklessParagraph(para)
+        && !para.shading
+        && !para.borders
+        && needNext === 0
+        && addReservePt === 0
+        && pageBottomReserve === 0
+        && hasFollowingInkContent(i + 1);
+      const trailingMarkOverflow = trailingMarkGrazes ? fitMeasured.lastLineBelowBaselinePt : 0;
+      const fitHeightForBreak = fitHeight - trailingMarkOverflow;
+      const needed = fitHeightForBreak + needNext + addReservePt;
       // A paragraph-anchored float must fit below the paragraph's top on the
       // same page. If it overflows the bottom margin here but would fit when the
       // paragraph starts a fresh page, displace the paragraph (Word's float
@@ -3063,8 +3124,15 @@ export function computePages(
         balanceColH != null && colIndex < columns.length - 1
           ? Math.min(effContentH(), colTopY + balanceColH)
           : effContentH();
-      const remainingH = columnBottomLimit() - y;
-      if (fitHeight > remainingH && splittable) {
+      const bottomLimit = columnBottomLimit();
+      const remainingH = bottomLimit - y;
+      // Issue #981 — apply the trailing-empty-mark grazing allowance ONLY when the
+      // active limit is the real page-content bottom. At a NON-last balanced-column
+      // target (§17.6.4) the limit is the artificial `colTopY + balanceColH`, which
+      // is not a physical margin the descent may hang into — use the full box there
+      // so the empty mark does not sink the first column below the balance target.
+      const splitFitHeight = bottomLimit === effContentH() ? fitHeightForBreak : fitHeight;
+      if (splitFitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
           measureState, para, colW, suppressBefore, colX,
           y, pageContentH, pages,
