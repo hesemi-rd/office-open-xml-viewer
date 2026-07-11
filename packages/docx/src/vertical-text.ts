@@ -22,13 +22,15 @@
 //     corner-designed in many fonts and would shift ！？ off-column). Where no
 //     form exists (．, small kana) we draw the original upright unchanged (．
 //     keeps a corner-nudge fallback).
-//   • vo=Tr (transform, fallback rotate): （「」〈〉“”：；〖〗 and the ー prolonged
-//     sound mark. UAX#50's fallback (no vertical glyph available to a Canvas —
-//     the font's `vert`/`vrt2` OpenType feature is not reachable via `fillText`)
-//     is to ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame is
-//     already that rotation; we draw the glyph CENTRED on the column axis (these
-//     are full-width cells) so the rotated bracket/長音符 sits mid-column.
-//     Substitute-first Tr (FE13/FE14/FE17/FE18, FE35+) is the #790/#771 follow-up.
+//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】…, the
+//     white lenticular brackets 〖〗, and the fullwidth colon/semicolon ：； have a
+//     U+FE1x/FE3x vertical presentation form (core `verticalBracketFormSubstitute`);
+//     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
+//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). Only Tr
+//     code points with NO vertical form — the ー prolonged sound mark and the quotes
+//     “” — take the ROTATE fallback: a plain `fillText` in the +90° page frame is
+//     already that 90° CW rotation, drawn CENTRED on the column axis so ー sits
+//     mid-column.
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied"
 //     appearance — drawn as an ordinary contextual `fillText` at the alphabetic
@@ -287,7 +289,8 @@ export function drawVerticalRun(
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
     const adv = ctx.measureText(ch).width * charScale + letterSpacingPx;
-    // A vo=Tr bracket with a Unicode vertical presentation form (（）「」〈〉…) is
+    // A vo=Tr code point with a Unicode vertical presentation form — the brackets
+    // （）「」〈〉… and the colon/semicolon/white-lenticular ：；〖〗 (#969) — is
     // SUBSTITUTED and drawn upright, exactly like the upright cells — UAX#50 §5
     // Tr means "substitute a vertical glyph; rotate only as fallback". Only Tr
     // code points with NO vertical form (ー, quotes “”) keep the rotate fallback.

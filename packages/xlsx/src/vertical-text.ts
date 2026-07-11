@@ -13,9 +13,11 @@
 //   • vo=Tu with a U+FE10–FE12 vertical form (、。，) → SUBSTITUTE that form
 //     (core `verticalFormSubstitute`), drawn upright so the font hangs it in the
 //     cell's upper-right corner; ！？ and small kana have no form and draw upright.
-//   • vo=Tr with a U+FE35–FE44 vertical form (（）「」〈〉【】…) → SUBSTITUTE that form
-//     (core `verticalBracketFormSubstitute`), drawn upright (UAX#50 §5
-//     "substitute a vertical glyph, rotate only as fallback").
+//   • vo=Tr with a U+FE1x/FE3x vertical form — the brackets （）「」〈〉【】…, the white
+//     lenticular brackets 〖〗, and the fullwidth colon/semicolon ：； (#969) →
+//     SUBSTITUTE that form (core `verticalBracketFormSubstitute`), drawn upright
+//     (UAX#50 §5 "substitute a vertical glyph, rotate only as fallback"). XLSX has
+//     no Excel ground-truth image, so ：；〖〗 follow the Word/PowerPoint verdict.
 //   • vo=Tr with NO vertical form (ー U+30FC, quotes “”) → ROTATE the glyph 90° CW
 //     (the Tr fallback) so ー becomes the vertical bar Excel draws.
 
@@ -57,9 +59,10 @@ export function drawStackedVerticalChar(
   const vo = verticalOrientation(cp);
 
   if (vo === 'Tr') {
-    // Substitute-first: a fullwidth bracket has a U+FE35–FE44 vertical form drawn
-    // UPRIGHT (UAX#50 §5). It fills the cell like an ideograph, so the caller's
-    // center/top placement lands it correctly.
+    // Substitute-first: a fullwidth bracket, white lenticular bracket, or the
+    // colon/semicolon ：；〖〗 (#969) has a U+FE1x/FE3x vertical form drawn UPRIGHT
+    // (UAX#50 §5). It fills the cell like an ideograph, so the caller's center/top
+    // placement lands it correctly.
     const bracket = verticalBracketFormSubstitute(cp);
     if (bracket !== null) {
       ctx.fillText(String.fromCodePoint(bracket), centerX, cellTopY);

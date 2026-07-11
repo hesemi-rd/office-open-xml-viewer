@@ -91,11 +91,10 @@ export function verticalOrientation(cp: number): VerticalOrientation {
  *     (Hiragino ink at +0.31em cross-axis), so substituting them pushed ！／？ to
  *     the right of the column — the sample-26 "！ shifted right" defect (#771).
  *     PDF ground truth: Word centres ！ (+0.03em), matching the upright original.
- *   • ：FF1A / ；FF1B and 〖3016 / 〗3017 are vo=Tr — the Tr draw branch rotates
- *     them and never consults this map. Making Tr substitute-first (FE13/FE14/
- *     FE17/FE18 here, plus the U+FE35+ forms for fullwidth parens/brackets —
- *     UAX#50's Tr means "substitute a vertical glyph, rotate only as fallback")
- *     is tracked as follow-up in issues #790 / #771.
+ *   • ：FF1A / ；FF1B and 〖3016 / 〗3017 are vo=Tr, so their vertical forms
+ *     (FE13/FE14/FE17/FE18) live in {@link verticalBracketFormSubstitute} (the Tr
+ *     map), NOT here — the Tr draw branch consults that map, and this Tu-only map
+ *     stays null for them (issue #969, following #790 / #771).
  *   • … U+2026 is vo=R — the sideways branch rotates it 90° with the page, so
  *     its three dots already stack vertically, visually equivalent to Word's
  *     vertical ellipsis; no substitution is needed.
@@ -135,16 +134,25 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
 ]);
 
 /**
- * DRAW-TIME vertical-form substitution for vo=Tr BRACKETS: the U+FE35–U+FE44
- * "Presentation Forms For Vertical" glyph for a fullwidth paren / corner
- * bracket / angle bracket / brace / lenticular bracket, or `null` when the code
- * point is not one of them (or is a Tr code point with no vertical form).
+ * DRAW-TIME vertical-form substitution for a vo=Tr code point: the U+FE1x/FE3x
+ * vertical presentation glyph to paint instead of `cp`, or `null` when the code
+ * point is not one that has a form (or is a Tr code point with no vertical form).
+ *
+ * Covers, keyed by their horizontal form:
+ *   • the fullwidth parens / corner / angle / brace / tortoise-shell / black-
+ *     lenticular brackets → U+FE35–U+FE44 ("Presentation Forms For Vertical");
+ *   • the fullwidth colon ： / semicolon ； and the WHITE lenticular brackets 〖〗
+ *     → U+FE13/FE14/FE17/FE18 (the U+FE1x "Vertical Forms" block, issue #969).
+ *     The colon/semicolon are vo=Tr PUNCTUATION, not brackets, but they share the
+ *     substitute-first / rotate-fallback behaviour this map encodes, so they live
+ *     here. Word and PowerPoint substitute all four upright (PDF-adjudicated).
  *
  * WHY this is separate from {@link verticalFormSubstitute} (the Tu map): the two
  * fallbacks differ. A Tu code point with no vertical form draws UPRIGHT; a Tr
  * one ROTATES. Keeping the maps distinct lets each draw branch pick the right
  * fallback (see the docx renderer's `drawVerticalRun`) without conflating the
- * two UAX #50 transform classes.
+ * two UAX #50 transform classes. (The name says "Bracket" for its original scope;
+ * it is really "the vo=Tr vertical-form map" — brackets plus ：；.)
  *
  * WHY substitute a Tr bracket at all: UAX #50 §5 defines the Tr transform as
  * "substitute a vertical glyph variant; ROTATE only as the fallback when none is
@@ -160,29 +168,50 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  * `measureText` does NOT expose (it reports the advance box, not the tight ink
  * box). So substitution is what makes metric-driven cell-centring possible.
  *
- * Deliberately NOT here (they are vo=Tr but have no U+FE3x vertical form, so the
- * renderer keeps the rotate fallback):
+ * Deliberately NOT here (they are vo=Tr but have no Unicode vertical presentation
+ * form, so the renderer keeps the rotate fallback):
  *   • ー U+30FC prolonged sound mark
  *   • “ ” U+201C/201D double quotation marks
  *
  * Mapping source: the UnicodeData.txt `<vertical>` compatibility decompositions
- * of the U+FE30 block (each vertical form decomposes to its horizontal bracket).
+ * of the U+FE10 and U+FE30 blocks (each vertical form decomposes to its horizontal
+ * source). FE17/FE18 decompose exactly to 〖/〗; FE13/FE14 decompose to the ASCII
+ * colon/semicolon, but vertical Japanese carries the fullwidth forms, so the map
+ * keys on FF1A/FF1B (as verticalFormSubstitute keys FE10 on FF0C).
  *
  * Renderers apply this ONLY at glyph-draw time (glyph selection): the advance/
  * width, text model, selection, and find/highlight all keep the ORIGINAL code
- * point, so searching for （ still matches a substituted （.
+ * point, so searching for （ or ： still matches a substituted （ / ：.
  *
  * @param cp A Unicode scalar value.
- * @returns The U+FE3x vertical presentation-form code point, or null.
+ * @returns The U+FE1x/FE3x vertical presentation-form code point, or null.
  */
 export function verticalBracketFormSubstitute(cp: number): number | null {
   return VERTICAL_BRACKET_FORM_MAP.get(cp) ?? null;
 }
 
-// vo=Tr fullwidth brackets → U+FE35–U+FE44 "Presentation Forms For Vertical".
-// Keyed on the horizontal bracket; values from the UnicodeData `<vertical>`
-// decompositions. ー (30FC) and the double quotes (201C/201D) are vo=Tr with no
-// vertical form and are absent, so the renderer rotates them.
+// vo=Tr code points → their U+FE1x/FE3x vertical presentation form (drawn upright,
+// rotate only as the fallback for the entries NOT listed here). Values are the
+// UnicodeData `<vertical>` decompositions read backwards.
+//
+// Two groups share this map because they share the vo=Tr substitute-first / rotate-
+// fallback BEHAVIOUR — which is what the renderer keys on — even though the second
+// group is punctuation, not brackets:
+//   1. Fullwidth brackets / parens / braces → U+FE35–FE44 ("Presentation Forms For
+//      Vertical" block). Keyed on the horizontal bracket.
+//   2. The fullwidth colon / semicolon ：； and the white lenticular brackets 〖〗
+//      → the U+FE13/FE14/FE17/FE18 forms in the U+FE1x "Vertical Forms" block
+//      (issue #969). Word and PowerPoint substitute these upright too (Yu Mincho
+//      tbRl + eaVert, PDF-adjudicated): the colon becomes two side-by-side dots
+//      (FE13 — which *looks* rotated but is the vertical form), the semicolon stays
+//      an upright dot-over-comma (FE14 — a 90° rotation could never produce that,
+//      proving substitution), and the lenticular brackets become horizontal bracket
+//      forms (FE17/FE18). FE13/FE14 decompose to the ASCII colon/semicolon
+//      (003A/003B); vertical Japanese carries the FULLWIDTH forms, so — exactly like
+//      FE10 ← FF0C in verticalFormSubstitute — the map keys on FF1A/FF1B.
+//
+// ー (30FC) and the double quotes (201C/201D) are vo=Tr with NO vertical form and are
+// absent, so the renderer rotates them.
 const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
   [0xff08, 0xfe35], // （ fullwidth left parenthesis  → ︵
   [0xff09, 0xfe36], // ） fullwidth right parenthesis → ︶
@@ -200,4 +229,9 @@ const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, n
   [0x300d, 0xfe42], // 」 right corner bracket         → ﹂
   [0x300e, 0xfe43], // 『 left white corner bracket    → ﹃
   [0x300f, 0xfe44], // 』 right white corner bracket   → ﹄
+  // vo=Tr punctuation + white lenticular brackets in the U+FE1x block (issue #969).
+  [0xff1a, 0xfe13], // ： fullwidth colon              → ︓ vertical colon
+  [0xff1b, 0xfe14], // ； fullwidth semicolon          → ︔ vertical semicolon
+  [0x3016, 0xfe17], // 〖 left white lenticular        → ︗ vertical left white lenticular
+  [0x3017, 0xfe18], // 〗 right white lenticular       → ︘ vertical right white lenticular
 ]);

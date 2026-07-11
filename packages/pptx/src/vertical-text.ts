@@ -17,12 +17,13 @@
 //     `verticalFormSubstitute`) and drawn upright, so the font supplies the
 //     designed upper-right placement; ！？ and small kana have no form and draw
 //     upright unchanged.
-//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】…
-//     have a U+FE35–FE44 vertical presentation form (core
-//     `verticalBracketFormSubstitute`); UAX#50 §5 makes Tr "substitute a vertical
-//     glyph, ROTATE only as fallback", so we substitute and draw them upright.
-//     The prolonged sound mark ー (U+30FC) and the quotation marks “” have no
-//     vertical form, so they take the rotate fallback (drawn with the page).
+//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】…, the
+//     white lenticular brackets 〖〗, and the fullwidth colon/semicolon ：； have a
+//     U+FE1x/FE3x vertical presentation form (core `verticalBracketFormSubstitute`);
+//     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
+//     we substitute and draw them upright (Word/PowerPoint-verified, #969). The
+//     prolonged sound mark ー (U+30FC) and the quotation marks “” have no vertical
+//     form, so they take the rotate fallback (drawn with the page).
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied" look.
 //
@@ -141,7 +142,8 @@ export function drawEaVertRun(
     // Advance/width uses the ORIGINAL code point (measure == draw; the text model,
     // selection and find keep the original character — substitution is glyph-only).
     const adv = ctx.measureText(ch).width + letterSpacingPx;
-    // A vo=Tr bracket with a Unicode vertical presentation form is substituted and
+    // A vo=Tr code point with a Unicode vertical presentation form — brackets （「」…
+    // and the colon/semicolon/white-lenticular ：；〖〗 (#969) — is substituted and
     // drawn UPRIGHT (UAX#50 §5 substitute-first); only Tr code points with NO form
     // (ー, quotes) take the rotate fallback.
     const bracketCp = vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;

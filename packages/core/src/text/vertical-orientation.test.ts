@@ -87,9 +87,10 @@ describe('verticalFormSubstitute (UAX #50 §5 vertical-form glyph substitution)'
     expect(verticalFormSubstitute(0xff1f)).toBeNull(); // ？
   });
 
-  it('returns null for non-Tu punctuation (Tr rotates, R stays sideways — no substitute)', () => {
-    // ：； and 〖〗 are vo=Tr: the renderer's rotate branch never substitutes.
-    // Substitute-first Tr (FE13/FE14/FE17/FE18) is the #790/#771 follow-up.
+  it('returns null for non-Tu punctuation (Tr substitutes via the OTHER map, R stays sideways)', () => {
+    // ：； and 〖〗 are vo=Tr, so their vertical forms (FE13/FE14/FE17/FE18) live in
+    // verticalBracketFormSubstitute (the Tr map), NOT here — this Tu-only map stays
+    // null for them so the renderer never draws a Tr form on the upright(Tu) path.
     expect(verticalFormSubstitute(0xff1a)).toBeNull(); // ：
     expect(verticalFormSubstitute(0xff1b)).toBeNull(); // ；
     expect(verticalFormSubstitute(0x3016)).toBeNull(); // 〖
@@ -111,7 +112,7 @@ describe('verticalFormSubstitute (UAX #50 §5 vertical-form glyph substitution)'
   });
 });
 
-describe('verticalBracketFormSubstitute (UAX #50 Tr brackets → U+FE30 vertical forms)', () => {
+describe('verticalBracketFormSubstitute (UAX #50 Tr code points → U+FE1x/FE3x vertical forms)', () => {
   it('maps each fullwidth bracket/paren/brace to its U+FE3x vertical form', () => {
     expect(verticalBracketFormSubstitute(0xff08)).toBe(0xfe35); // （ → ︵
     expect(verticalBracketFormSubstitute(0xff09)).toBe(0xfe36); // ） → ︶
@@ -129,6 +130,21 @@ describe('verticalBracketFormSubstitute (UAX #50 Tr brackets → U+FE30 vertical
     expect(verticalBracketFormSubstitute(0x300d)).toBe(0xfe42); // 」 → ﹂
     expect(verticalBracketFormSubstitute(0x300e)).toBe(0xfe43); // 『 → ﹃
     expect(verticalBracketFormSubstitute(0x300f)).toBe(0xfe44); // 』 → ﹄
+  });
+
+  it('maps the vo=Tr fullwidth colon/semicolon and white lenticular brackets to their U+FE1x form (issue #969)', () => {
+    // Word/PowerPoint ground truth (Yu Mincho tbRl + eaVert, PDF-adjudicated):
+    // these vo=Tr code points SUBSTITUTE their U+FE1x vertical presentation form
+    // and draw UPRIGHT — NOT the rotate fallback. The fullwidth colon/semicolon are
+    // vo=Tr punctuation (not brackets) but share the same substitute-first behaviour,
+    // so they live in this Tr map. FE13/FE14 decompose (UnicodeData `<vertical>`) to
+    // the ASCII 003A/003B; vertical Japanese carries the FULLWIDTH forms, so — like
+    // FE10 ← FF0C — the map keys on FF1A/FF1B. FE17/FE18 are the exact `<vertical>`
+    // inverses of the white lenticular brackets 3016/3017.
+    expect(verticalBracketFormSubstitute(0xff1a)).toBe(0xfe13); // ： → ︓ vertical colon
+    expect(verticalBracketFormSubstitute(0xff1b)).toBe(0xfe14); // ； → ︔ vertical semicolon
+    expect(verticalBracketFormSubstitute(0x3016)).toBe(0xfe17); // 〖 → ︗ vertical left white lenticular
+    expect(verticalBracketFormSubstitute(0x3017)).toBe(0xfe18); // 〗 → ︘ vertical right white lenticular
   });
 
   it('returns null for Tr code points with no U+FE30 vertical form (ー, quotes)', () => {

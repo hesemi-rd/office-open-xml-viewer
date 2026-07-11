@@ -268,6 +268,22 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
   });
 
+  it('substitutes the vo=Tr colon/semicolon and white lenticular brackets, drawn UPRIGHT (issue #969)', () => {
+    // Word/PowerPoint ground truth (PDF-adjudicated): ：；〖〗 are vo=Tr with a
+    // U+FE1x vertical form, so they substitute-first and draw upright like the other
+    // brackets — NOT the rotate fallback (the semicolon staying an upright dot-over-
+    // comma is the proof; a rotation could not produce that).
+    const { ctx, ops } = mockCtx();
+    drawVerticalRun(ctx, '：；〖〗', 0, 0, 12, 0);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((f) => f.text)).toEqual(['︓', '︔', '︗', '︘']); // FE13/FE14/FE17/FE18
+    // All four are counter-rotated −90° (upright), centred on the column.
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(4);
+    expect(rotates.every((r) => Math.abs(r.a - -Math.PI / 2) < 1e-9)).toBe(true);
+    expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
+  });
+
   it('substitutes a Tu comma/period with its vertical presentation form (、→︑, 。→︒)', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, '、。', 0, 0, 12, 0);
