@@ -7809,7 +7809,18 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
         // which forced every number/bullet sans regardless of the heading's font.
         ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
-        ctx.fillStyle = defaultColor;
+        // Marker ink (§17.9.24 + §17.3.1.29): the level rPr's own color wins;
+        // absent that, Word layers the level rPr over the PARAGRAPH MARK's run
+        // properties, so the mark's resolved color tints the bullet/number;
+        // else the default ink. An EXPLICIT `w:color w:val="auto"` on the
+        // level (colorAuto, §17.3.2.6) breaks that mark fallback — auto is a
+        // named automatic color, not "unset" — and lands on the default ink.
+        // Body-run colors never reach the marker (§17.9.24: the level rPr
+        // "affects only the numbering text itself, not the remainder of runs
+        // in the numbered paragraph").
+        const markerColor = para.numbering!.color
+          ?? (para.numbering!.colorAuto ? null : para.paragraphMarkColor);
+        ctx.fillStyle = markerColor ? `#${markerColor}` : defaultColor;
         if (baseRtl) {
           // The RTL list marker is laid out INLINE at the line's start (right)
           // edge: its right edge sits numTab (w:hanging) to the right of the
@@ -7842,6 +7853,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             ctx.fillText(markerText, markerX, baseline);
           }
         }
+        // Restore the default ink: everything after the marker previously ran
+        // with fillStyle === defaultColor, and fills that don't set their own
+        // style must keep seeing it.
+        ctx.fillStyle = defaultColor;
       }
     }
 
@@ -10042,7 +10057,15 @@ export function renderShapeText(
         if (isFirstLine && block.numbering) {
           const markerSize = block.fontSizePt * scale;
           ctx.font = buildFont(false, false, markerSize, markerFontFamily(block.numbering), fontFamilyClasses);
-          const markerColor = block.color ?? block.runs?.find((r) => r.color)?.color ?? null;
+          // §17.9.24 — a color on the numbering level rPr wins for the marker
+          // glyph (same precedence as the body path), and an explicit
+          // level `auto` (§17.3.2.6) stops at the default ink; the block/run
+          // colors remain the textbox fallback (the textbox model carries no
+          // paragraph-mark color — a known, narrower approximation).
+          const markerColor = block.numbering.color
+            ?? (block.numbering.colorAuto
+              ? null
+              : block.color ?? block.runs?.find((r) => r.color)?.color ?? null);
           ctx.fillStyle = markerColor ? `#${markerColor}` : defaultColor;
           const markerText = markerDisplayText(block.numbering);
           const markerW = ctx.measureText(markerText).width;

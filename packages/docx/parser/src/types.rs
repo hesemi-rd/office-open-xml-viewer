@@ -622,6 +622,16 @@ pub struct DocParagraph {
     /// the ASCII fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_family_east_asia: Option<String>,
+    /// ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `<w:color>`
+    /// (direct `pPr/rPr` → pStyle chain → docDefaults, the same `mark_run`
+    /// resolution that feeds `default_font_size`; hex 6 lowercased; an
+    /// explicit `auto` breaks the chain and surfaces as `None`, §17.3.2.6).
+    /// Word formats a numbering marker with the level rPr (§17.9.24) layered
+    /// over the mark's run properties, so a mark-colored list item tints its
+    /// bullet/number even when the level rPr carries no color — the renderer
+    /// reads this as the marker-color fallback after `NumberingInfo::color`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_mark_color: Option<String>,
     /// ECMA-376 §17.3.1.20 `<w:outlineLvl w:val="N">` (0–8). Resolved through
     /// the style chain: explicit pPr → linked paragraph style → docDefaults.
     /// `None` for body paragraphs that don't appear in the document outline.
@@ -809,6 +819,23 @@ pub struct NumberingInfo {
     /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// ECMA-376 §17.9.24 — the numbering level rPr's `<w:color w:val>` (hex 6,
+    /// lowercased like run colors). Colors the marker glyph only, never the
+    /// paragraph's runs. `None` (absent `<w:color>`) lets the renderer fall
+    /// back to the paragraph MARK's resolved color
+    /// (`DocParagraph::paragraph_mark_color`, §17.3.1.29 — Word layers the
+    /// level rPr over the mark's run properties), and finally to its default
+    /// ink. An explicit `val="auto"` is `None` + `color_auto` below.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
+    /// rPr carries an EXPLICIT `<w:color w:val="auto"/>`. Auto names no
+    /// concrete color but is NOT "unset": layered over the paragraph mark
+    /// (§17.9.24 over §17.3.1.29) it breaks an inherited concrete mark color,
+    /// so the renderer must NOT fall back to `paragraph_mark_color` and draws
+    /// the automatic (default) ink instead.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub color_auto: bool,
     /// ECMA-376 §17.9.9/§17.9.20 — when the level uses a `<w:lvlPicBulletId>`,
     /// the marker is this image (zip path, e.g. `word/media/image1.gif`) drawn in
     /// place of `text`. `None` ⇒ ordinary text/glyph marker.

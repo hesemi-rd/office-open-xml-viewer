@@ -580,6 +580,13 @@ export interface DocParagraph {
    *  anchor-only paragraph marks in East Asian documents use this axis for line
    *  metrics instead of the ASCII fallback. */
   defaultFontFamilyEastAsia?: string | null;
+  /** ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `w:color` (direct
+   *  pPr/rPr → pStyle chain → docDefaults; hex 6 without `#`, lowercased; an
+   *  explicit `auto` surfaces as absent, §17.3.2.6). Word formats a numbering
+   *  marker with the level rPr (§17.9.24) layered over the mark's run
+   *  properties, so the renderer uses this as the marker-color fallback when
+   *  {@link NumberingInfo.color} is absent. */
+  paragraphMarkColor?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
    * `false` = explicitly LTR, absent = unspecified (inherit). The renderer uses
@@ -719,6 +726,19 @@ export interface NumberingInfo {
    *  this family. Absent ⇒ the renderer falls back to
    *  {@link NumberingInfo.fontFamily}. */
   fontFamilyEastAsia?: string | null;
+  /** ECMA-376 §17.9.24 — the numbering level rPr's `w:color` (hex 6 without
+   *  `#`, lowercased). Colors the marker glyph only, never the paragraph's
+   *  runs. Absent ⇒ the renderer falls back to
+   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — Word layers the
+   *  level rPr over the paragraph mark's run properties) and finally to its
+   *  default ink. An explicit `w:val="auto"` is absent here + {@link colorAuto}. */
+  color?: string | null;
+  /** ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
+   *  rPr carries an EXPLICIT `w:color w:val="auto"`. Auto names no concrete
+   *  color but is not "unset": it breaks the paragraph-mark fallback, so the
+   *  marker draws the automatic (default) ink instead of
+   *  {@link DocParagraph.paragraphMarkColor}. */
+  colorAuto?: boolean;
   /** ECMA-376 §17.9.9/§17.9.20 — when the level uses a `<w:lvlPicBulletId>`,
    *  the marker is this image (zip path, e.g. `word/media/image1.gif`), drawn in
    *  place of {@link NumberingInfo.text}. Absent ⇒ ordinary text/glyph marker. */
