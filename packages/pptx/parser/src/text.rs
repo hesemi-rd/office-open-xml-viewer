@@ -556,14 +556,14 @@ pub(crate) fn push_math_runs(
                 }
             }
         }
-        // mc:AlternateContent → take the a14 `Choice` (the live equation) and
-        // ignore mc:Fallback (a rasterized picture PowerPoint emits for old apps).
         "AlternateContent" => {
-            if let Some(choice) = node
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "Choice")
-            {
-                for c in choice.children().filter(|n| n.is_element()) {
+            // §9.3 — take the understood Choice's live equation, else the Fallback
+            // (which for math is a raster this walker ignores).
+            if let Some(sel) = ooxml_common::mce::select_alternate_content(
+                node,
+                &crate::shape::pptx_understands_ns,
+            ) {
+                for c in sel.children().filter(|n| n.is_element()) {
                     push_math_runs(c, font_size, theme, runs);
                 }
             }
