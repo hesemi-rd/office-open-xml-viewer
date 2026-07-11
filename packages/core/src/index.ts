@@ -362,6 +362,12 @@ export {
   crossRunKinsokuRetract,
 } from './text/kinsoku';
 export { isCjkBreakChar, isLatinWordCodePoint } from './text/cjk-ranges';
+export {
+  lineBreakClass,
+  isUax14NoBreakPair,
+  LINE_BREAK_UNICODE_VERSION,
+  type LBClass,
+} from './text/line-break';
 // Dictionary-based line breaking for no-inter-word-space SEA scripts (Thai / Lao
 // / Khmer, issue #797): the ICU-backed word-break offset enumerator plus the
 // shared greedy whole-word fit kernel, consumed by all three renderers' wrap

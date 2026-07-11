@@ -6,7 +6,7 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, containsSeaScript, seaWordBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, seaWordBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -877,6 +877,40 @@ function extendLatinWordRetract(lineCps: string[], retract: number): number {
   return r >= lineCps.length ? retract : r;
 }
 
+/**
+ * Return the supported UAX #14 no-break suffix of the current line that must
+ * move before `nextCps`. The predicate is deliberately one-way: walking stops
+ * on false even when a deferred rule might also prohibit that earlier boundary.
+ * Returning zero for a whole-line sequence preserves the existing emergency
+ * overflow behavior and avoids emitting an empty soft-wrapped line.
+ */
+function uaxNoBreakRetractCount(lineCps: string[], nextCps: string[]): number {
+  if (lineCps.length === 0 || nextCps.length === 0) return 0;
+  const nextCp = nextCps[0].codePointAt(0);
+  let firstMoved = lineCps.length - 1;
+  const lastCp = lineCps[firstMoved].codePointAt(0);
+  if (
+    lastCp === undefined ||
+    nextCp === undefined ||
+    lastCp === 0x200b ||
+    nextCp === 0x200b ||
+    !isUax14NoBreakPair(lastCp, nextCp)
+  ) return 0;
+
+  while (firstMoved > 0) {
+    const prevCp = lineCps[firstMoved - 1].codePointAt(0);
+    const movedCp = lineCps[firstMoved].codePointAt(0);
+    if (
+      prevCp === undefined ||
+      movedCp === undefined ||
+      !isUax14NoBreakPair(prevCp, movedCp)
+    ) break;
+    firstMoved--;
+  }
+
+  return firstMoved === 0 ? 0 : lineCps.length - firstMoved;
+}
+
 /** Word-wrap a single paragraph (no embedded \n). Unlike a naive
  *  `split(' ')`, CJK characters are treated as individual break opportunities
  *  so that Japanese headings like "夏休みアクティビティ カレンダー 2026"
@@ -1065,7 +1099,21 @@ export function layoutRichTextLines(
       // a separate run overflowing after "system" → "syste" / "m,"). Pull the
       // retract back to the last whitespace so the whole word rides down with the
       // non-starter; CJK boundaries (move char is CJK) are left untouched.
-      if (retract > 0) retract = extendLatinWordRetract(lineCps, retract);
+      if (retract > 0) {
+        retract = extendLatinWordRetract(lineCps, retract);
+      } else if (
+        // SEA (Thai/Lao/Khmer) dictionary tailoring wins over the LB1 SA→AL
+        // default on BOTH sides: guard the incoming `text` AND the last segment
+        // that would be retracted, so LB28 never suppresses a SEA word boundary
+        // (mirror the DOCX buildSegments prev/cur guard). Retraction is capped to
+        // the last segment below, so checking it is the precise preceding-side test.
+        !containsSeaScript(text) &&
+        !containsSeaScript(cur[cur.length - 1]?.text ?? '') &&
+        !/^\s/u.test(text) &&
+        !/\s$/u.test(lineCps.at(-1) ?? '')
+      ) {
+        retract = uaxNoBreakRetractCount(lineCps, [...text]);
+      }
       const last = cur[cur.length - 1];
       const lastCps = [...last.text];
       // Only retract within the last segment to preserve each run's font; the

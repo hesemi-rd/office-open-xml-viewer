@@ -30,6 +30,7 @@ import {
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
   isCjkBreakChar,
+  isUax14NoBreakPair,
   containsSeaScript,
   seaWordBreakOffsets,
   fitSeaWordPrefix,
@@ -2317,6 +2318,42 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // space is a legal break, so the mark may legitimately start the line).
     if (!('text' in prev) || /\s$/.test(prev.text)) continue;
     cur.joinPrev = true;
+  }
+
+  // ── UAX #14 LB28 — no break between adjacent alphabetics across segments ──
+  // buildSegments intentionally splits at run / font-script boundaries, but
+  // those formatting seams are not line-break opportunities. Mark the following
+  // segment so layoutLines' existing atomic-group pre-flush selects the previous
+  // real opportunity instead. The shared predicate is deliberately one-way:
+  // false means unsupported/deferred, never "break allowed".
+  for (let i = 1; i < segs.length; i++) {
+    const cur = segs[i];
+    if (!('text' in cur) || cur.joinPrev || cur.text.length === 0) continue;
+    const prev = segs[i - 1];
+    if (!('text' in prev) || prev.text.length === 0) continue;
+
+    // Whitespace is an actual wrap boundary. Check both sides because source
+    // runs may start with whitespace even though ASCII spaces normally remain
+    // attached to the preceding splitTextForLayout token.
+    if (/\s$/u.test(prev.text) || /^\s/u.test(cur.text)) continue;
+
+    const prevChar = [...prev.text].at(-1);
+    const nextChar = [...cur.text][0];
+    const prevCp = prevChar?.codePointAt(0);
+    const nextCp = nextChar?.codePointAt(0);
+    if (prevCp === undefined || nextCp === undefined) continue;
+
+    // U+200B is the explicit zero-width-space opportunity from LB8 and is not
+    // included in JavaScript's \s character class.
+    if (prevCp === 0x200b || nextCp === 0x200b) continue;
+
+    // SEA uses the application's dictionary tailoring, so the LB1 SA→AL default
+    // must not suppress a real word boundary. CJK keeps its established
+    // per-character split / kinsoku path and sparse-line safeguards.
+    if (containsSeaScript(prev.text) || containsSeaScript(cur.text)) continue;
+    if (hasCJKBreakOpportunity(prev.text) || hasCJKBreakOpportunity(cur.text)) continue;
+
+    if (isUax14NoBreakPair(prevCp, nextCp)) cur.joinPrev = true;
   }
 
   // §17.3.2.14 fitText is a fixed-width, non-wrapping unit. Glue every segment

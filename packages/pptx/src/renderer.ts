@@ -61,6 +61,7 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
+  isUax14NoBreakPair,
   containsSeaScript,
   seaWordBreakOffsets,
   fitSeaWordPrefix,
@@ -1132,15 +1133,35 @@ export function layoutParagraph(
         // size the bbox correctly. Match that behavior.
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       } else {
-        // UAX#14 LB13: if the overflowing token is a non-starter (comma, …) glued
-        // to the word ending this line (no whitespace between — e.g. authored in a
-        // separate run), move the WHOLE word down with it so the comma never leads
-        // a line and the word is never torn. Otherwise wrap normally.
+        // UAX #14 segment-boundary glue: LB13 keeps a non-starter with the word
+        // before it; LB28 keeps adjacent alphabetics together across a formatting
+        // run seam. CJK and SEA tokens have already taken their dedicated paths.
+        // Move the trailing word down to the previous real opportunity.
+        const previousText = currentLine.segments.at(-1)?.text ?? '';
         const firstCp = token.codePointAt(0);
-        const glued =
+        const previousChar = [...previousText].at(-1);
+        const prevCp = previousChar?.codePointAt(0);
+        const immediateBoundary =
+          /\S$/u.test(previousText) &&
+          /^\S/u.test(token) &&
+          prevCp !== 0x200b &&
+          firstCp !== 0x200b;
+        const lb13Glued =
           firstCp !== undefined &&
           DEFAULT_KINSOKU_RULES.lineStartForbidden.has(firstCp) &&
-          /\S$/.test(currentLine.segments.at(-1)?.text ?? '');
+          immediateBoundary;
+        // SEA (Thai/Lao/Khmer) tailoring wins over the LB1 SA→AL default on BOTH
+        // sides: a preceding SEA segment exposes a dictionary boundary that LB28
+        // must not suppress (mirror the DOCX buildSegments guard, which checks
+        // prev AND cur). A SEA `token` already took the dedicated SEA branch above.
+        const lb28Glued =
+          prevCp !== undefined &&
+          firstCp !== undefined &&
+          immediateBoundary &&
+          !containsSeaScript(previousText) &&
+          !containsSeaScript(token) &&
+          isUax14NoBreakPair(prevCp, firstCp);
+        const glued = lb13Glued || lb28Glued;
         if (!(glued && retractTrailingWord())) newLine();
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       }
