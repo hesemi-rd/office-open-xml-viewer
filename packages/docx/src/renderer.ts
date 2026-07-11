@@ -7137,6 +7137,24 @@ function renderParagraph(
   const firstLineX = paraX + indFirst;
   const paraW = contentW - indLeft - indRight;
 
+  // ECMA-376 §17.9.28 (`<w:suff>`) governs where a numbering marker's first-line
+  // body starts. With suff=tab (default) the body advances to the indentLeft tab
+  // stop (`numBodyOffset`); §17.3.1.6 makes `<w:ind>` logical under `<w:bidi>`, so
+  // this applies to the RTL body's start (physical-right) edge just as it does to
+  // the LTR body's left edge.
+  //
+  // The RTL branch is gated to a genuine HANGING indent (`indFirst < 0`) — the only
+  // shape a real numbered/bulleted list uses (§17.3.1.12: the marker sits in the
+  // hanging margin). A non-hanging RTL marker (positive/zero first-line indent, a
+  // degenerate authoring) keeps its legacy raw-`indFirst` handling so it stays
+  // consistent with the measure pass (which cannot recompute `numBodyOffset`), and
+  // suff=space/nothing (body abuts the marker) is likewise EXCLUDED — its RTL
+  // mirror is a follow-up. LTR is unaffected by these RTL-only guards (it already
+  // used numBodyOffset for every suffix and indent), so LTR stays byte-identical.
+  const markerUsesBodyOffset =
+    hasMarker
+    && (!baseRtl || ((para.numbering?.suff || 'tab') === 'tab' && indFirst < 0));
+
   // Collect all text segments with formatting (resolving field runs against page context)
   const segments = buildSegments(para.runs, state);
   // Word renders ruby paragraphs with consistent line spacing — every line
@@ -7230,8 +7248,17 @@ function renderParagraph(
   // only the marker. With suff=space/nothing the body abuts the marker instead
   // (numBodyOffset, computed above). Non-numbered paragraphs apply the first-line
   // indent (positive firstLine, or a bare negative hanging without a marker) to
-  // the body as usual. RTL lists keep their existing start-edge handling.
-  const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
+  // the body as usual.
+  //
+  // §17.3.1.6 makes `<w:ind>` (and its hanging first-line component) logical under
+  // `<w:bidi>`, so this whole construction is direction-symmetric: an RTL list
+  // mirrors it to the physical RIGHT — the marker sits in the hanging margin past
+  // the start (right) edge and the suff=tab body still starts at the indentLeft tab
+  // stop. So a suff=tab marker uses `numBodyOffset` for BOTH directions
+  // (`markerUsesBodyOffset`); the RTL start-edge placement then falls out of
+  // `effAvailW` (the negative first-line indent must NOT widen the body, only
+  // position the marker).
+  const firstLineIndent = markerUsesBodyOffset ? numBodyOffset : firstLineX - paraX;
   const paintGridDeltaPx = gridCharDeltaPx(grid, scale);
   // Phase 4-1 B2 Stage 2 — compute-once, ZOOM-INVARIANT reuse. When the paginator
   // split this paragraph it stamped the scale-1 lines it laid out
@@ -7278,7 +7305,7 @@ function renderParagraph(
     - (inFrame ? 0 : paragraphContext.physicalIndentLeftPt)
     - (inFrame ? 0 : paragraphContext.physicalIndentRightPt);
   const indLeft1 = inFrame ? 0 : paragraphContext.physicalIndentLeftPt;
-  const firstIndent1 = hasMarker && !baseRtl ? numBodyOffset / scale : para.indentFirst;
+  const firstIndent1 = markerUsesBodyOffset ? numBodyOffset / scale : para.indentFirst;
   const gridDelta1 = gridCharDeltaPx(grid, 1);
   const reuse =
     lineReuseEnabled &&
@@ -7463,7 +7490,7 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
@@ -7608,6 +7635,7 @@ interface ParagraphLineDrawCtx {
   continuesParagraph: boolean;
   baseRtl: boolean;
   hasMarker: boolean;
+  markerUsesBodyOffset: boolean;
   numTab: number;
   numBodyOffset: number;
   markerJcShiftPx: number;
@@ -7628,7 +7656,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
   const {
     ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses,
     contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft,
-    indFirst, continuesParagraph, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx,
+    indFirst, continuesParagraph, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx,
     picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
     decimalAutoTabPx, drawGridDeltaPx, lineHForLine,
   } = c;
@@ -7663,7 +7691,19 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // space/nothing); indFirst only pulls the marker into the hanging margin
     // (drawn below). Non-numbered first lines apply indFirst to the body directly.
     let x = firstLine && !baseRtl ? (hasMarker ? lineLeft + numBodyOffset : lineLeft + indFirst) : lineLeft;
-    const effAvailW = baseRtl && firstLine ? lineAvailW - indFirst : lineAvailW;
+    // RTL first-line width. For a bare (non-marker) indent the raw first-line
+    // indent narrows (positive firstLine) or widens (hanging) the line, so the
+    // body's start (right) edge tracks the indent — mirror of the LTR x-shift.
+    // But a suff=tab numbering marker follows §17.9.28: the negative hanging indent
+    // positions only the marker, and the body starts at the indentLeft tab stop, so
+    // the first line's text region equals the continuation lines' — use
+    // `numBodyOffset` (0 for suff=tab), NOT the raw `indFirst`, so the body does NOT
+    // hang one `hanging` past the start edge. `markerUsesBodyOffset` also excludes
+    // the suff=space/nothing RTL case (kept on legacy `indFirst` here — out of
+    // scope), keeping this consistent with the `firstLineIndent` used for breaking.
+    const effAvailW = baseRtl && firstLine
+      ? lineAvailW - (markerUsesBodyOffset ? numBodyOffset : indFirst)
+      : lineAvailW;
 
     // Visual draw order. Under bidi we reorder the line's segments per UAX#9
     // (rule L2) and draw each with ctx.direction matching its resolved

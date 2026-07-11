@@ -257,6 +257,36 @@ export function resolveParagraphLayoutContext(
     && section.grid.charSpacePt != null;
   const baseRtl = paragraph.bidi === true;
 
+  // ECMA-376 §17.9.28 (`<w:suff>`, default "tab") + §17.3.1.6 (`<w:ind>` is logical
+  // under `<w:bidi>`): a suff=tab numbering marker with a HANGING first-line indent
+  // advances the first-line body to the indentLeft tab stop, so the first line's
+  // effective indent is 0 — the marker occupies the hanging margin, mirrored to the
+  // physical-right start edge in an RTL paragraph. The PAINT pass positions the RTL
+  // suff=tab body with that marker-aware indent (renderer.ts `markerUsesBodyOffset` →
+  // `numBodyOffset`, which is 0 whenever the marker fits the hanging indent), so the
+  // MEASURE/paginate pass must use the same effective first-line width or the two
+  // disagree on line count for a paragraph split across pages (the paginator's
+  // `lineSlice` indices would then reference a different partition). Align them for
+  // the RTL hanging suff=tab case here.
+  //
+  // Scope matches the paint gate exactly: RTL only, suff=tab only, and a genuine
+  // hanging indent (`indentFirst < 0`). LTR keeps raw `indentFirst` (byte-identical
+  // pagination; its long-standing measure/paint marker approximation is untouched);
+  // a non-hanging or suff=space/nothing marker also keeps raw `indentFirst`, staying
+  // consistent with paint. numBodyOffset needs marker font metrics (only resolved in
+  // the renderer), so the rare suff=tab marker-OVERRUN sub-case — where a marker
+  // wider than the hanging indent advances the body PAST the tab stop (§17.3.1.37) —
+  // keeps a small bounded residual here; 0 still matches the common case exactly and
+  // is far closer than the raw −hanging it replaces.
+  const numbering = paragraph.numbering;
+  const hasNumberingMarker =
+    numbering != null && (numbering.text !== '' || numbering.picBulletImagePath != null);
+  const rtlHangingSuffTabMarker =
+    baseRtl
+    && hasNumberingMarker
+    && (numbering!.suff || 'tab') === 'tab'
+    && paragraph.indentFirst < 0;
+
   return {
     lineGrid: {
       active: lineGridActive,
@@ -268,7 +298,7 @@ export function resolveParagraphLayoutContext(
     },
     physicalIndentLeftPt: baseRtl ? paragraph.indentRight : paragraph.indentLeft,
     physicalIndentRightPt: baseRtl ? paragraph.indentLeft : paragraph.indentRight,
-    firstIndentPt: paragraph.indentFirst,
+    firstIndentPt: rtlHangingSuffTabMarker ? 0 : paragraph.indentFirst,
     lineSpacing: paragraph.lineSpacing,
     spaceBeforePt: paragraph.spaceBefore,
     spaceAfterPt: paragraph.spaceAfter,

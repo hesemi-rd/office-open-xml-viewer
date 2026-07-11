@@ -220,6 +220,47 @@ describe('layout context resolvers', () => {
     expect(context.lineGrid).toEqual({ active: true, pitchPt: 20 });
   });
 
+  it('measures an RTL suff=tab numbered first line at the indentLeft tab stop (§17.9.28)', () => {
+    const settings = resolveDocumentLayoutSettings(documentModel());
+    const sectionContext = resolveSectionLayoutContext(settings, section());
+    const num = (overrides: Record<string, unknown> = {}) => ({
+      numId: 1, level: 0, format: 'bullet', text: '•',
+      indentLeft: 12, tab: 9, suff: 'tab', ...overrides,
+    }) as unknown as DocParagraph['numbering'];
+
+    // §17.9.28 + §17.3.1.6: a suff=tab marker's RTL first-line body advances to the
+    // indentLeft tab stop, so the measured first-line indent is 0 — mirroring the
+    // paint pass — NOT the raw −hanging (which would widen the first line and let a
+    // split paragraph disagree with paint on line count).
+    const rtlTab = resolveParagraphLayoutContext(settings, sectionContext, bodyStory,
+      paragraph({ bidi: true, indentFirst: -9, numbering: num() }));
+    expect(rtlTab.firstIndentPt).toBe(0);
+
+    // LTR is byte-identical: keeps raw indentFirst (its pre-existing measure/paint
+    // marker approximation is untouched by this RTL fix).
+    const ltrTab = resolveParagraphLayoutContext(settings, sectionContext, bodyStory,
+      paragraph({ bidi: false, indentFirst: -9, numbering: num() }));
+    expect(ltrTab.firstIndentPt).toBe(-9);
+
+    // suff=space/nothing under RTL is out of scope → keeps legacy raw indentFirst.
+    const rtlNothing = resolveParagraphLayoutContext(settings, sectionContext, bodyStory,
+      paragraph({ bidi: true, indentFirst: -9, numbering: num({ suff: 'nothing' }) }));
+    expect(rtlNothing.firstIndentPt).toBe(-9);
+
+    // An RTL numbering level with no marker glyph (empty text, no picture bullet) is
+    // not a marker — the hanging indent applies to the body as usual.
+    const rtlNoMarker = resolveParagraphLayoutContext(settings, sectionContext, bodyStory,
+      paragraph({ bidi: true, indentFirst: -9, numbering: num({ text: '' }) }));
+    expect(rtlNoMarker.firstIndentPt).toBe(-9);
+
+    // A non-hanging (positive) first-line indent is not the §17.3.1.12 hanging-list
+    // shape the tab-stop body placement targets — keep raw indentFirst (matches the
+    // paint gate, which also requires indFirst < 0), so measure and paint agree.
+    const rtlPositive = resolveParagraphLayoutContext(settings, sectionContext, bodyStory,
+      paragraph({ bidi: true, indentFirst: 9, numbering: num() }));
+    expect(rtlPositive.firstIndentPt).toBe(9);
+  });
+
   it('gates only line-grid policy for paragraphs and table cells', () => {
     const noCompat = resolveDocumentLayoutSettings(documentModel());
     const withCompat = resolveDocumentLayoutSettings(documentModel({
