@@ -95,7 +95,8 @@ export function paintParagraphFragment(
  * called at all. Like {@link paintParagraphFragment}, this owns the fragment boundary
  * and delegates the draw to the renderer's shared table paint through a supplied-geometry
  * entry (`renderTableFragment`), so the paint stream is byte-identical to the legacy
- * `renderTable` acquisition for the migrated (in-flow, top-aligned) table class.
+ * `renderTable` acquisition for the migrated in-flow table class, including supported
+ * center/bottom-aligned and sliced cell fragments.
  */
 export function paintTableFragment(placed: PlacedFragment, state: RenderState): void {
   const fragment = placed.fragment;

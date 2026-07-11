@@ -64,6 +64,11 @@ export interface CellFragment {
   readonly source: DocTableCell;
   readonly blocks: readonly FlowFragment[];
   readonly verticalMerge: 'none' | 'restart' | 'continue';
+  /** Scale-1 point height of this cell's page-local row piece. This is the same
+   *  post-repair row height the paginator charged and {@link RowFragment.heightPt}
+   *  records; fragment-backed vAlign paint centres against it without deriving
+   *  geometry again from the unsplit source cell. */
+  readonly boxHeightPt?: number;
 }
 
 /**
@@ -186,6 +191,21 @@ export function paragraphFragmentAdvancePt(fragment: ParagraphFragment): number 
 export function tableFragmentHeightPt(fragment: TableFragment): number {
   let sum = 0;
   for (const row of fragment.rows) sum += row.heightPt;
+  return sum;
+}
+
+/** Piece-local content height (scale-1 pt) owned by a cell fragment. Paragraph
+ * blocks contribute only their recorded `[lineStart, lineEnd)` advancement plus
+ * fragment-owned spacing; nested tables contribute their already-resolved row
+ * heights. This is deliberately a pure fragment fold: paint must not call a cell
+ * or paragraph measurer to recover geometry the paginator already produced. */
+export function cellFragmentContentHeightPt(fragment: CellFragment): number {
+  let sum = 0;
+  for (const block of fragment.blocks) {
+    sum += block.kind === 'table'
+      ? tableFragmentHeightPt(block)
+      : paragraphFragmentAdvancePt(block);
+  }
   return sum;
 }
 

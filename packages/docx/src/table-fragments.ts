@@ -118,6 +118,7 @@ export function buildTableFragment(input: BuildTableFragmentInput): TableFragmen
         source: sourceCell,
         blocks,
         verticalMerge: role,
+        boxHeightPt: rowHeightsPt[ri] ?? 0,
       }) as CellFragment;
     });
     return Object.freeze({

@@ -13,13 +13,16 @@ import type {
 } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Split-edge border semantics for a MID-ROW page cut (stage D of the row-split
-// series). When a row is split at a cell line boundary across a page break, the
-// page-1 piece's bottom edge is a PAGE CUT, not a row boundary: Word leaves it
-// OPEN (no bottom rule — the row visually continues), while the continuation
-// piece on the next page draws its top edge as usual. A ROW-BOUNDARY page cut
-// (whole rows per page) keeps its existing border behavior — only the mid-row
-// cut suppresses the bottom edge.
+// Split-edge border semantics for a MID-ROW page cut (fidelity round, agreed
+// design). Measured Word ground truth across two document classes: a bordered
+// form table DRAWS a full-width rule at the page-1 cut (even over a column
+// whose cell has NO bottom border but a single top border), while a completely
+// borderless table draws NOTHING at its cut. The unifying rule is ECMA-376
+// §17.4.66: the cut is a shared horizontal edge between the leading piece's
+// cell bottoms and a SYNTHETIC continuation sibling's cell tops (same source
+// row specs, resolved as the next page's outer top) — none∨single → single,
+// none∨none → nothing. The continuation piece still draws its own outer top on
+// the next page. Row-boundary page cuts are untouched.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string }
@@ -140,8 +143,8 @@ async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[
 const horizontals = (strokes: StrokeSeg[]) =>
   strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.x2 - s.x1) > 10);
 
-describe('mid-row page-cut border semantics (stage D)', () => {
-  it('leaves the page-1 piece bottom OPEN and draws the continuation top', async () => {
+describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', () => {
+  it('draws the §17.4.66 winner at the page-1 cut and the continuation top on page 2', async () => {
     // 4-line cell (80pt) into a 60pt page body: p.1 piece = 3 lines, cut at y=60.
     const model = splitDoc([wrappingRow()], 60);
     const pages = paginateDocument(model);
@@ -157,12 +160,39 @@ describe('mid-row page-cut border semantics (stage D)', () => {
     const p1H = horizontals(p1);
     // Top frame at y=0 present…
     expect(p1H.some((s) => Math.abs(s.y1 - 0) <= 1)).toBe(true);
-    // …but NO horizontal rule at the page cut (y=60): the row continues.
-    expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(0);
+    // …and the cut draws the conflict winner (single ∨ single) at y=60, full width.
+    const cut = p1H.filter((s) => Math.abs(s.y1 - 60) <= 1);
+    expect(cut.length).toBe(1);
+    expect(Math.min(cut[0].x1, cut[0].x2)).toBeLessThanOrEqual(1);
+    expect(Math.max(cut[0].x1, cut[0].x2)).toBeGreaterThanOrEqual(159);
 
-    // The continuation piece draws its top edge on page 2 (y=0).
+    // The continuation piece draws its own outer top on page 2 (y=0).
     const p2H = horizontals(p2);
     expect(p2H.some((s) => Math.abs(s.y1 - 0) <= 1)).toBe(true);
+  });
+
+  it('draws the cut rule over a NO-BOTTOM-border cell when its top border wins the conflict', async () => {
+    // The decisive ground-truth datum: the form label cell has top/left/right
+    // single but NO bottom — the cut still shows a full-width rule because the
+    // synthetic continuation sibling's TOP (single) wins none ∨ single.
+    const row = wrappingRow();
+    (row.cells[0].borders as { bottom: BorderSpec | null }).bottom = null;
+    const model = splitDoc([row], 60);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+    const p1H = horizontals(await renderPage(model, pages, 0));
+    expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(1);
+  });
+
+  it('draws NOTHING at the cut of a borderless table', async () => {
+    const row = wrappingRow();
+    (row.cells[0] as { borders: unknown }).borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
+    const model = splitDoc([row], 60);
+    (model.body[0] as unknown as DocTable).borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null } as DocTable['borders'];
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+    const p1H = horizontals(await renderPage(model, pages, 0));
+    expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(0);
   });
 
   it('keeps the row-boundary page cut borders unchanged', async () => {

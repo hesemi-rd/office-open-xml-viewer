@@ -520,17 +520,17 @@ describe('table fragment-paint legacy gate', () => {
     expect(__test_tableRequiresLegacyPaint(centeredNegative)).toBe(false);
   });
 
-  it('excludes a table containing a sliced cell paragraph', () => {
+  it('permits a table containing a sliced cell paragraph', () => {
     const sliced = {
       ...para('sliced'),
       lineSlice: { start: 0, end: 2 },
     } as unknown as CellElement;
     const table = tableOf([sliced]) as unknown as DocTable;
 
-    expect(__test_tableRequiresLegacyPaint(table)).toBe(true);
+    expect(__test_tableRequiresLegacyPaint(table)).toBe(false);
   });
 
-  it('excludes production row slices emitted from a tall cell paragraph', () => {
+  it('permits production row slices emitted from a tall cell paragraph', () => {
     const cellPara = para(Array.from({ length: 40 }, () => 'wrap').join(' '));
     const pages = paginateDocument(doc([tableOf([cellPara])], 60));
     const sliceTables = pages
@@ -551,7 +551,7 @@ describe('table fragment-paint legacy gate', () => {
     expect(sliceTables.length).toBeGreaterThan(1);
     expect(slicedTables.length).toBeGreaterThan(0);
     for (const table of slicedTables) {
-      expect(__test_tableRequiresLegacyPaint(table)).toBe(true);
+      expect(__test_tableRequiresLegacyPaint(table)).toBe(false);
     }
   });
 });
