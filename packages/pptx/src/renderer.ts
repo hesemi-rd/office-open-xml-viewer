@@ -63,6 +63,7 @@ import {
   isCjkBreakChar,
   isUax14NoBreakPair,
   containsSeaScript,
+  isGraphemeFillText,
   seaMixedBreakOffsets,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
@@ -1140,18 +1141,22 @@ export function layoutParagraph(
           }
           flush();
         };
+        // Grapheme-fill runs (Myanmar/Tibetan, #961) have dense per-cluster offsets:
+        // use the O(log n) monotone binary-search fit. Dictionary runs keep the
+        // negative-spacing-safe full scan.
+        const monotone = isGraphemeFillText(token);
         const N = token.length;
         let start = 0;
         while (start < N) {
           const avail = lineMaxW() - lineW;
-          let end = fitSeaWordPrefix(token, seaBreaks, start, avail, measureSub);
+          let end = fitSeaWordPrefix(token, seaBreaks, start, avail, measureSub, monotone);
           if (end <= start) {
             if (lineW > 0) { newLine(); continue; } // wrap first, retry empty line
             // Empty line, first word wider than the shape: grapheme-safe split.
             const firstWordEnd = seaBreaks.find((b) => b > start) ?? N;
             const firstWord = token.slice(start, firstWordEnd);
             const graphemes = graphemeClusterOffsets(firstWord);
-            let g = fitSeaWordPrefix(firstWord, graphemes, 0, avail, measureSub);
+            let g = fitSeaWordPrefix(firstWord, graphemes, 0, avail, measureSub, monotone);
             if (g <= 0) g = graphemes.length > 0 ? graphemes[0] : firstWord.length;
             end = start + g;
           }

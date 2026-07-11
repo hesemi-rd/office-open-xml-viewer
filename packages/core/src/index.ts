@@ -381,6 +381,7 @@ export {
   isSeaScriptCodePoint,
   isSeaGraphemeExtend,
   containsSeaScript,
+  isGraphemeFillText,
   seaWordBreakOffsets,
   seaTransitionOffsets,
   seaMixedBreakOffsets,

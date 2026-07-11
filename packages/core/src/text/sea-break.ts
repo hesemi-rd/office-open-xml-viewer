@@ -1,52 +1,80 @@
-// Dictionary-based line breaking for Southeast-Asian (SEA) scripts that write
-// without inter-word spaces: Thai, Lao and Khmer (GitHub issue #797). Word
-// boundaries in these scripts are not marked by whitespace and cannot be derived
-// from Unicode ranges alone; they require a dictionary. We use the platform ICU
-// dictionary via `Intl.Segmenter({ granularity: 'word' })` to enumerate the
-// break opportunities INTERIOR to each SEA-script span, and expose a pure,
-// package-agnostic kernel that every renderer's wrap loop consumes.
+// Line breaking for scripts written WITHOUT inter-word spaces, where a line may
+// break between two characters that have no whitespace between them. Two families
+// need different opportunity sources, both funnelled through the same wrap kernel
+// ({@link fitSeaWordPrefix}) so every renderer's wrap loop consumes one contract:
+//
+//   • DICTIONARY scripts — Thai U+0E00–0E7F, Lao U+0E80–0EFF, Khmer U+1780–17FF
+//     (GitHub #797 / #955). Word boundaries here are lexical and cannot be
+//     derived from Unicode ranges; they require a dictionary. We enumerate them
+//     with the platform ICU dictionary via `Intl.Segmenter({granularity:'word'})`.
+//
+//   • GRAPHEME-FILL scripts — Myanmar U+1000–109F (+ Extended-A U+AA60–AA7F,
+//     Extended-B U+A9E0–A9FF) and Tibetan U+0F00–0FFF (GitHub #961). Word (macOS
+//     layout) does NOT break these at dictionary words nor at the Tibetan tsheg
+//     `་`: ground-truth measurement (Word export of sample-46) shows it fills each
+//     line to the column edge and breaks at ANY grapheme-cluster boundary — 4 of 6
+//     observed Tibetan breaks and 1 of 5 Myanmar breaks split a syllable/word
+//     mid-cluster (e.g. the Myanmar word `သည်` broken `သ`|`ည်`), and it ships a
+//     Burmese dictionary it declines to use. So the break opportunities for these
+//     scripts are EVERY interior grapheme-cluster boundary; the sole invariant is
+//     "never split a base + stacked/combining cluster". Routing them here — rather
+//     than the renderers' generic over-long-word splitter, which splits at
+//     CODE-POINT granularity and can tear a cluster (Myanmar `တို`→`တိ`|`ု`) —
+//     upgrades that split to grapheme granularity, matching Word.
 //
 // Design invariants (shared with the docx/pptx/xlsx breakers):
 //   • ADD break opportunities only; never change glyphs or advances. The run is
 //     split only at the ACTUAL line break, so within a line the text stays one
 //     contiguous draw (measure==paint).
-//   • Restrict added opportunities to boundaries INTERIOR to a maximal SEA span,
-//     between two dictionary WORDS. A boundary that touches non-SEA text (Latin,
-//     digits, CJK, whitespace) is left to the existing whitespace/Latin/CJK
-//     logic, so non-SEA content stays byte-identical.
+//   • Restrict added opportunities to boundaries INTERIOR to a maximal same-class
+//     no-space span — between two dictionary WORDS (dictionary scripts) or between
+//     two grapheme CLUSTERS (grapheme-fill scripts). A boundary that touches
+//     non-SEA text (Latin, digits, CJK, whitespace) is left to the existing
+//     whitespace/Latin/CJK logic, so non-SEA content stays byte-identical.
 //   • Graceful fallback: when `Intl.Segmenter` is unavailable (old runtimes, a
-//     `small-icu` build without the SEA dictionaries) or throws, we return no
-//     offsets and the caller keeps its current cluster/character behaviour.
+//     `small-icu` build without the dictionaries) or throws, dictionary scripts
+//     return no offsets and grapheme-fill scripts fall back to code-point
+//     boundaries; the caller keeps its current cluster/character behaviour.
 //
-// Scope: Thai U+0E00–0E7F, Lao U+0E80–0EFF, Khmer U+1780–17FF — exactly the
-// ranges named in the issue. Myanmar/Tibetan remain out of scope (follow-up
-// #961). The no-space SEA↔Latin/CJK/digit script-transition boundary (#960) is
-// added by {@link seaTransitionOffsets}; {@link seaMixedBreakOffsets} unions the
-// dictionary, transition and CJK per-character opportunities for a single run
-// that mixes SEA with Latin/digits/CJK.
+// The no-space SEA↔Latin/CJK/digit script-transition boundary (#960) is added by
+// {@link seaTransitionOffsets}; {@link seaMixedBreakOffsets} unions the dictionary
+// (or grapheme-fill) word/cluster boundaries, the transition boundaries and the
+// CJK per-character opportunities for a single run that mixes these scripts with
+// Latin/digits/CJK.
 
 import { isCjkBreakChar } from './cjk-ranges.js';
 
-/** Southeast-Asian dictionary-break script tags used to pick the ICU dictionary.
- *  ICU dispatches the dictionary by the character's SCRIPT, not by this locale,
- *  so it is only a hint; we still pick per-span for clarity/forward-safety. */
-export type SeaScript = 'th' | 'lo' | 'km';
+/** No-inter-word-space script tag. Dictionary scripts (`th`/`lo`/`km`) pick the
+ *  ICU dictionary — ICU dispatches by the character's SCRIPT, not this locale, so
+ *  it is only a hint. Grapheme-fill scripts (`my`/`bo`, #961) take no dictionary:
+ *  every grapheme-cluster boundary is a break opportunity. */
+export type SeaScript = 'th' | 'lo' | 'km' | 'my' | 'bo';
+
+/** Grapheme-fill scripts (Myanmar, Tibetan): break at every interior grapheme
+ *  cluster, never a dictionary word (Word ground truth, #961). */
+function isGraphemeFillScript(s: SeaScript): boolean {
+  return s === 'my' || s === 'bo';
+}
 
 /**
- * True when `cp` belongs to one of the no-inter-word-space SEA scripts (Thai,
- * Lao, Khmer). This is a SCRIPT-membership test, not a break predicate: the
- * blocks include combining marks, tone marks, digits and punctuation that are
- * NOT independently breakable — the actual break opportunities come from
- * {@link seaWordBreakOffsets}. Used to detect SEA spans and as the cheap gate in
- * {@link containsSeaScript}.
+ * True when `cp` belongs to a no-inter-word-space script — the dictionary scripts
+ * Thai/Lao/Khmer or the grapheme-fill scripts Myanmar/Tibetan. This is a SCRIPT-
+ * membership test, not a break predicate: the blocks include combining marks,
+ * tone/stacked marks, digits and punctuation that are NOT independently
+ * breakable — the actual break opportunities come from {@link seaWordBreakOffsets}.
+ * Used to detect spans and as the cheap gate in {@link containsSeaScript}.
  *
  * @param cp A Unicode scalar value (e.g. from `String.prototype.codePointAt`).
  */
 export function isSeaScriptCodePoint(cp: number): boolean {
   return (
-    (cp >= 0x0e00 && cp <= 0x0e7f) || // Thai
-    (cp >= 0x0e80 && cp <= 0x0eff) || // Lao
-    (cp >= 0x1780 && cp <= 0x17ff) // Khmer
+    (cp >= 0x0e00 && cp <= 0x0e7f) || // Thai (dictionary)
+    (cp >= 0x0e80 && cp <= 0x0eff) || // Lao (dictionary)
+    (cp >= 0x1780 && cp <= 0x17ff) || // Khmer (dictionary)
+    (cp >= 0x1000 && cp <= 0x109f) || // Myanmar (grapheme-fill)
+    (cp >= 0xaa60 && cp <= 0xaa7f) || // Myanmar Extended-A (grapheme-fill)
+    (cp >= 0xa9e0 && cp <= 0xa9ff) || // Myanmar Extended-B (grapheme-fill)
+    (cp >= 0x0f00 && cp <= 0x0fff) // Tibetan (grapheme-fill)
   );
 }
 
@@ -83,23 +111,44 @@ export function isSeaGraphemeExtend(cp: number): boolean {
   );
 }
 
-/** The SEA script of a code point already known to be SEA (see
- *  {@link isSeaScriptCodePoint}). Used to pick the per-span ICU dictionary. */
+/** The no-space script of a code point already known to be one (see
+ *  {@link isSeaScriptCodePoint}). Dictionary scripts pick the per-span ICU
+ *  dictionary; grapheme-fill scripts pick the grapheme path. */
 function seaScriptOf(cp: number): SeaScript {
-  if (cp <= 0x0e7f) return 'th';
-  if (cp <= 0x0eff) return 'lo';
-  return 'km';
+  if (cp <= 0x0e7f) return 'th'; // 0E00–0E7F Thai
+  if (cp <= 0x0eff) return 'lo'; // 0E80–0EFF Lao
+  if (cp <= 0x0fff) return 'bo'; // 0F00–0FFF Tibetan
+  if (cp <= 0x109f) return 'my'; // 1000–109F Myanmar
+  if (cp <= 0x17ff) return 'km'; // 1780–17FF Khmer
+  return 'my'; // AA60–AA7F / A9E0–A9FF Myanmar Extended-A/B
 }
 
 /**
- * Cheap presence gate: true when any code point of `text` is SEA-script. Used by
- * the renderers to skip all segmentation work for the overwhelmingly common
- * non-SEA input (zero `Intl.Segmenter` cost), mirroring docx's
- * `hasCJKBreakOpportunity`.
+ * Cheap presence gate: true when any code point of `text` is a no-inter-word-space
+ * script (Thai/Lao/Khmer or Myanmar/Tibetan). Used by the renderers to skip all
+ * segmentation work for the overwhelmingly common non-SEA input (zero
+ * `Intl.Segmenter` cost), mirroring docx's `hasCJKBreakOpportunity`.
  */
 export function containsSeaScript(text: string): boolean {
   for (const ch of text) {
     if (isSeaScriptCodePoint(ch.codePointAt(0)!)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when `text`'s no-space script is grapheme-fill (Myanmar/Tibetan) rather
+ * than dictionary (Thai/Lao/Khmer) — decided by its FIRST no-space character
+ * (a segment produced by the renderers is a single same-class span). Callers pass
+ * this as {@link fitSeaWordPrefix}'s `assumeMonotone` so a grapheme-fill run — whose
+ * break offsets are dense (one per cluster) — takes the O(log n) binary-search fit
+ * instead of the O(n) full scan the dictionary path needs. Returns false for pure
+ * dictionary text (keep the safe full scan) and for non-no-space text.
+ */
+export function isGraphemeFillText(text: string): boolean {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (isSeaScriptCodePoint(cp)) return isGraphemeFillScript(seaScriptOf(cp));
   }
   return false;
 }
@@ -159,20 +208,24 @@ export function resetSeaSegmenterForTest(): void {
   graphemeSegmenter = undefined;
 }
 
-// ── Word break offsets ───────────────────────────────────────────────────────
+// ── Break offsets ────────────────────────────────────────────────────────────
 
 /**
- * Enumerate dictionary word-break opportunities in `text`, as UTF-16 offsets `i`
+ * Enumerate no-space line-break opportunities in `text`, as UTF-16 offsets `i`
  * such that a line break is permitted immediately BEFORE `text[i]`.
  *
- * Only boundaries that are (1) interior to a maximal SEA-script span and (2) the
- * START of a word-like segment are returned — so we never break before intra-SEA
- * punctuation (Khmer `។`, Thai `๚`) nor at a SEA↔non-SEA transition (left to the
- * existing logic). The offsets are always at grapheme-cluster boundaries (ICU
- * word breaks never split a base + combining mark).
+ * For DICTIONARY scripts (Thai/Lao/Khmer) the offsets are dictionary WORD starts:
+ * boundaries that are (1) interior to a maximal same-class span and (2) the start
+ * of a word-like segment — so we never break before intra-script punctuation
+ * (Khmer `។`, Thai `๚`). For GRAPHEME-FILL scripts (Myanmar/Tibetan, #961) the
+ * offsets are EVERY interior grapheme-cluster boundary (Word's grapheme-fill;
+ * no dictionary, no tsheg). Either way the offsets are grapheme-cluster
+ * boundaries — a base + stacked/combining cluster is never split — and a
+ * SEA↔non-SEA transition is left to the existing logic.
  *
- * Returns `[]` (graceful fallback) when `text` has no SEA character, when
- * `Intl.Segmenter` is unavailable, or when segmentation throws. Segment ONCE per
+ * Returns `[]` (graceful fallback) when `text` has no no-space character. A
+ * dictionary span adds no offsets when `Intl.Segmenter` is unavailable or throws;
+ * a grapheme-fill span falls back to code-point boundaries. Segment ONCE per
  * logical string and cache/slice the result; do not call this per line.
  */
 export function seaWordBreakOffsets(text: string): number[] {
@@ -187,33 +240,44 @@ export function seaWordBreakOffsets(text: string): number[] {
       i += step;
       continue;
     }
-    // Maximal SEA span [i, j). The span's dictionary is picked from its first
-    // character; ICU still dispatches per-script internally within the span.
+    // Maximal SAME-CLASS span [i, j): keep dictionary scripts (th/lo/km) and
+    // grapheme-fill scripts (my/bo) in separate spans so each gets the right
+    // treatment; a dictionary span's dictionary is picked from its first char
+    // (ICU still dispatches per-script internally within it).
     const script = seaScriptOf(cp);
+    const fill = isGraphemeFillScript(script);
     let j = i + step;
     while (j < len) {
       const c = text.codePointAt(j)!;
       if (!isSeaScriptCodePoint(c)) break;
+      if (isGraphemeFillScript(seaScriptOf(c)) !== fill) break;
       j += c > 0xffff ? 2 : 1;
     }
-    const segFn = wordSegmenterFor(script);
-    if (segFn) {
-      const span = text.slice(i, j);
-      // Accumulate this span's offsets in a temp buffer and commit them only
-      // after the iterator completes, so a mid-iteration `segment()` failure
-      // leaves NO partial offsets (all-or-nothing graceful fallback per span).
-      const spanOffsets: number[] = [];
-      try {
-        for (const g of segFn(span)) {
-          // index>0 keeps the offset interior to the span (never span-start,
-          // which is a SEA↔non-SEA edge or the string start). isWordLike keeps
-          // it a break-before-a-WORD (never before punctuation). Fake segmenters
-          // may omit isWordLike → treat as word-like.
-          if (g.index > 0 && (g.isWordLike ?? true)) spanOffsets.push(i + g.index);
+    const span = text.slice(i, j);
+    if (fill) {
+      // Grapheme-fill (Myanmar/Tibetan): every interior grapheme-cluster boundary
+      // is a legal break (Word ground truth, #961). graphemeClusterOffsets is
+      // grapheme-safe and degrades to code-point boundaries without a segmenter.
+      for (const off of graphemeClusterOffsets(span)) offsets.push(i + off);
+    } else {
+      const segFn = wordSegmenterFor(script);
+      if (segFn) {
+        // Accumulate this span's offsets in a temp buffer and commit them only
+        // after the iterator completes, so a mid-iteration `segment()` failure
+        // leaves NO partial offsets (all-or-nothing graceful fallback per span).
+        const spanOffsets: number[] = [];
+        try {
+          for (const g of segFn(span)) {
+            // index>0 keeps the offset interior to the span (never span-start,
+            // which is a SEA↔non-SEA edge or the string start). isWordLike keeps
+            // it a break-before-a-WORD (never before punctuation). Fake segmenters
+            // may omit isWordLike → treat as word-like.
+            if (g.index > 0 && (g.isWordLike ?? true)) spanOffsets.push(i + g.index);
+          }
+          for (const o of spanOffsets) offsets.push(o);
+        } catch {
+          // segment() failure on this span → add no offsets (graceful fallback).
         }
-        for (const o of spanOffsets) offsets.push(o);
-      } catch {
-        // segment() failure on this span → add no offsets (graceful fallback).
       }
     }
     i = j;
@@ -371,11 +435,12 @@ function codePointEndingAt(text: string, o: number): number | undefined {
   return lo;
 }
 
-// ── Greedy whole-word line fit (shared kernel) ───────────────────────────────
+// ── Greedy whole-prefix line fit (shared kernel) ─────────────────────────────
 
 /**
- * Greedy whole-word line fit for SEA dictionary breaking, shared by all three
- * renderers so the break decision is defined once.
+ * Greedy line fit for no-space breaking (dictionary words or grapheme clusters),
+ * shared by all three renderers so the break decision is defined once. `offsets`
+ * are the legal break-before positions from {@link seaWordBreakOffsets}.
  *
  * Returns the largest `end` with `start < end <= text.length` such that
  *   (a) `end === text.length` OR `end` is a member of `offsets` (a legal word
@@ -385,10 +450,20 @@ function codePointEndingAt(text: string, o: number): number | undefined {
  * (no progress) so the caller can wrap to a fresh line first, or — on an already
  * empty line — fall back to a grapheme-safe emergency split.
  *
- * Every candidate is measured (no early return): advance width is NOT guaranteed
- * monotone in the prefix length because Word/PowerPoint allow NEGATIVE character
- * spacing (`w:spacing` / `a:spc`), so a longer prefix can fit after a shorter one
- * overflowed. We keep the largest boundary (or the full remainder) that fits.
+ * By default EVERY candidate is measured (no early return): advance width is NOT
+ * guaranteed monotone in the prefix length because Word/PowerPoint allow NEGATIVE
+ * character spacing (`w:spacing` / `a:spc`), so a longer prefix can fit after a
+ * shorter one overflowed. We keep the largest boundary (or the full remainder)
+ * that fits. This full scan is O(#offsets) measures per call — fine for the sparse
+ * dictionary-word offsets of Thai/Lao/Khmer.
+ *
+ * `assumeMonotone` switches to an O(log #offsets) BINARY SEARCH for callers whose
+ * advance IS monotone in the prefix length — the grapheme-fill scripts
+ * Myanmar/Tibetan (#961), whose `offsets` are EVERY grapheme boundary (dense: one
+ * per cluster), where a per-line full scan would be O(n²) down a long run. This
+ * matches the monotone assumption {@link fitCJKPrefix} already makes for CJK. Do
+ * NOT set it for a run that can carry glyph-overlapping negative spacing (the
+ * dictionary path keeps the safe full scan).
  *
  * `offsets` MUST be sorted ascending (as produced by {@link seaWordBreakOffsets}
  * or {@link graphemeClusterOffsets}). `measure` supplies the caller's exact
@@ -400,9 +475,31 @@ export function fitSeaWordPrefix(
   start: number,
   avail: number,
   measure: (sub: string) => number,
+  assumeMonotone = false,
 ): number {
   const len = text.length;
   if (start >= len) return start;
+  if (assumeMonotone) {
+    // Monotone advance: "fits" is downward-closed over the boundary position, so
+    // the whole remainder is the max if it fits, else binary-search the interior
+    // offsets (ascending) for the largest fitting one. Offsets ≤ start form a
+    // prefix and ≥ len a suffix of the sorted array; the search skips both.
+    if (measure(text.slice(start, len)) <= avail) return len;
+    let lo = 0;
+    let hi = offsets.length - 1;
+    let ans = start;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const b = offsets[mid];
+      if (b <= start) lo = mid + 1;
+      else if (b >= len) hi = mid - 1;
+      else if (measure(text.slice(start, b)) <= avail) {
+        ans = b;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return ans;
+  }
   let best = start;
   for (const b of offsets) {
     if (b <= start || b >= len) continue;
@@ -436,17 +533,24 @@ function getGraphemeSegmenter(): Intl.Segmenter | null {
  * wider than the whole line/cell: a code-point split would tear a base +
  * combining/tone mark (both are BMP, so "SEA is BMP therefore safe" is false),
  * whereas a grapheme boundary keeps the cluster intact. Falls back to code-point
- * boundaries when `Intl.Segmenter` is unavailable.
+ * boundaries when `Intl.Segmenter` is unavailable OR `segment()`/its iterator
+ * throws (a `small-icu` build, an exotic runtime) — never propagates, so the
+ * grapheme-fill wrap (#961) degrades to a safe code-point split instead of failing.
  */
 export function graphemeClusterOffsets(text: string): number[] {
-  const out: number[] = [];
   const seg = getGraphemeSegmenter();
   if (seg) {
-    for (const g of seg.segment(text)) {
-      if (g.index > 0) out.push(g.index);
+    try {
+      const out: number[] = [];
+      for (const g of seg.segment(text)) {
+        if (g.index > 0) out.push(g.index);
+      }
+      return out;
+    } catch {
+      // fall through to the code-point boundaries below (graceful fallback)
     }
-    return out;
   }
+  const out: number[] = [];
   for (let i = 0; i < text.length; ) {
     const cp = text.codePointAt(i)!;
     i += cp > 0xffff ? 2 : 1;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_KINSOKU_RULES, seaWordBreakOffsets } from '@silurus/ooxml-core';
+import { DEFAULT_KINSOKU_RULES, graphemeClusterOffsets, seaWordBreakOffsets } from '@silurus/ooxml-core';
 import { layoutLines, type LayoutLine, type LayoutSeg, type LayoutTextSeg } from './line-layout.js';
 
 // Issue #797 — dictionary-based line breaking for Thai/Lao/Khmer (no inter-word
@@ -119,5 +119,65 @@ describe('SEA (Thai) dictionary line breaking in docx layoutLines', () => {
     const lines = lay([textSeg('hello '), textSeg('world')], 30);
     expect(lineTexts(lines).join('')).toContain('hello');
     expect(lineTexts(lines).join('')).toContain('world');
+  });
+});
+
+// Issue #961 — Myanmar and Tibetan write without inter-word spaces. Word (macOS)
+// ground truth (sample-46) breaks them at GRAPHEME-cluster boundaries with maximal
+// line fill — NOT dictionary words (Myanmar) and NOT the tsheg rule (Tibetan) —
+// and never splits a base + stacked/combining cluster. Before this fix the wrap
+// fell to the generic over-long-word splitter, which cut at CODE-POINT granularity
+// and could tear a cluster (e.g. Myanmar `တို` → `တိ` | `ု`).
+describe('Myanmar / Tibetan grapheme-fill line breaking in docx layoutLines', () => {
+  const myanmar = 'မြန်မာဘာသာစကားကိုစာလုံးများအကြားတွင်ကွက်လပ်မထားဘဲဆက်တိုက်ရေးသားလေ့ရှိသည်';
+  const tibetan = 'བོད་ཡིག་ནི་ཚིག་གྲུབ་སོ་སོའི་བར་དུ་ཚེག་ཅེས་པའི་རྟགས།';
+
+  for (const [name, text] of [['Myanmar', myanmar], ['Tibetan', tibetan]] as const) {
+    it(`${name}: every break lands on a grapheme-cluster boundary (never tears a cluster)`, () => {
+      const texts = lineTexts(lay([textSeg(text)], 90)); // ~18 cp/line → several wraps
+      expect(texts.length).toBeGreaterThan(2); // it actually wrapped
+      expect(texts.join('')).toBe(text); // nothing lost or duplicated
+      const clusterStarts = new Set(graphemeClusterOffsets(text));
+      for (const b of breakOffsets(texts)) {
+        expect(clusterStarts.has(b)).toBe(true); // grapheme-safe, never mid-cluster
+      }
+    });
+
+    it(`${name}: packs multiple clusters per line (maximal fill, not one-per-line)`, () => {
+      const texts = lineTexts(lay([textSeg(text)], 90));
+      // A per-cluster (unfilled) break would leave lines of ~1 cluster; maximal fill
+      // packs many code points before each break.
+      for (const t of texts.slice(0, -1)) expect(t.length).toBeGreaterThan(6);
+    });
+
+    it(`${name}: keeps a run that fits on one line as a single contiguous draw`, () => {
+      const lines = lay([textSeg(text)], 2000); // wide enough for the whole run
+      expect(lines).toHaveLength(1);
+      const segs = lines[0].segments.filter((s): s is LayoutTextSeg => 'text' in s);
+      expect(segs).toHaveLength(1); // ONE draw (measure==paint), not fragmented
+      expect(segs[0].text).toBe(text);
+    });
+
+    it(`${name}: makes progress in a band narrower than one cluster (grapheme emergency split)`, () => {
+      const texts = lineTexts(lay([textSeg(text)], 3)); // < one cluster's width
+      expect(texts.join('')).toBe(text);
+      expect(texts.every((t) => t.length > 0)).toBe(true); // no empty line / infinite loop
+    });
+  }
+
+  it('does not use the ICU dictionary for Myanmar (breaks are grapheme, not word)', () => {
+    // Guard against regressing to dictionary breaking: the wrap breaks at grapheme
+    // boundaries, which are strictly denser than the ICU 'my' word boundaries.
+    const texts = lineTexts(lay([textSeg(myanmar)], 90));
+    const breaks = breakOffsets(texts);
+    const wordStarts = new Set<number>();
+    for (const s of new Intl.Segmenter('my', { granularity: 'word' }).segment(myanmar)) {
+      if (s.index > 0 && s.isWordLike) wordStarts.add(s.index);
+    }
+    expect(wordStarts.size).toBeGreaterThan(0);
+    // At least one break falls at a grapheme boundary that is NOT a dictionary word
+    // start (proves grapheme-fill, not dictionary). Robust to ICU drift: a maximal
+    // fill over ~18 cp/line reliably produces a non-word grapheme break.
+    expect(breaks.some((b) => !wordStarts.has(b))).toBe(true);
   });
 });

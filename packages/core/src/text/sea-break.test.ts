@@ -3,6 +3,7 @@ import {
   containsSeaScript,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
+  isGraphemeFillText,
   isSeaGraphemeExtend,
   isSeaScriptCodePoint,
   resetSeaSegmenterForTest,
@@ -23,13 +24,26 @@ describe('isSeaScriptCodePoint', () => {
     [0x0e50, true], // THAI DIGIT ZERO
     [0x0e7f, true], // Thai end
     [0x0e80, true], // Lao start
-    [0x0eff, true], // Lao end
-    [0x0f00, false], // Tibetan — out of scope
+    [0x0eff, true], // Lao end (Tibetan begins immediately at 0x0F00 — no gap)
+    [0x0f00, true], // Tibetan start (grapheme-fill, #961)
+    [0x0f0b, true], // TIBETAN MARK INTERSYLLABIC TSHEG
+    [0x0f0d, true], // TIBETAN MARK SHAD
+    [0x0fff, true], // Tibetan end
+    [0x1000, true], // Myanmar start (grapheme-fill, #961)
+    [0x1031, true], // MYANMAR VOWEL SIGN E
+    [0x103c, true], // MYANMAR CONSONANT SIGN MEDIAL RA
+    [0x109f, true], // Myanmar end
+    [0x10a0, false], // just above Myanmar (Georgian)
     [0x177f, false], // just below Khmer
     [0x1780, true], // Khmer start
     [0x17d2, true], // KHMER SIGN COENG
     [0x17ff, true], // Khmer end
     [0x1800, false], // just above Khmer
+    [0xa9e0, true], // Myanmar Extended-B start (grapheme-fill)
+    [0xa9ff, true], // Myanmar Extended-B end
+    [0xaa60, true], // Myanmar Extended-A start (grapheme-fill)
+    [0xaa7f, true], // Myanmar Extended-A end
+    [0xaa80, false], // just above Myanmar Extended-A
     [0x0041, false], // Latin A
     [0x3042, false], // Hiragana — CJK, not SEA
   ];
@@ -96,6 +110,10 @@ describe('containsSeaScript', () => {
     expect(containsSeaScript('ພາສາລາວ')).toBe(true);
     expect(containsSeaScript('ភាសាខ្មែរ')).toBe(true);
   });
+  it('true for Myanmar / Tibetan text (grapheme-fill scripts, #961)', () => {
+    expect(containsSeaScript('မြန်မာဘာသာ')).toBe(true);
+    expect(containsSeaScript('བོད་ཡིག')).toBe(true);
+  });
   it('true when SEA is embedded in Latin', () => {
     expect(containsSeaScript('Hello ภาษา world')).toBe(true);
   });
@@ -156,6 +174,57 @@ describe('seaWordBreakOffsets — platform ICU', () => {
   it('returns [] for non-SEA / empty input', () => {
     expect(seaWordBreakOffsets('Hello world')).toEqual([]);
     expect(seaWordBreakOffsets('')).toEqual([]);
+  });
+});
+
+describe('seaWordBreakOffsets — grapheme-fill (Myanmar / Tibetan, #961)', () => {
+  // Word (macOS) breaks these at EVERY grapheme cluster, not dictionary words nor
+  // the Tibetan tsheg (sample-46 ground truth). So the offsets must be exactly the
+  // interior grapheme-cluster boundaries — every one, never a dictionary subset,
+  // never mid-cluster.
+  const myanmar = 'မြန်မာဘာသာစကားကိုစာလုံး'; // spaceless Myanmar run
+  const tibetan = 'བོད་ཡིག་ནི་ཚིག'; // tsheg-separated Tibetan run
+
+  for (const [name, text] of [['Myanmar', myanmar], ['Tibetan', tibetan]] as const) {
+    it(`${name}: offsets == interior grapheme-cluster boundaries`, () => {
+      const offsets = seaWordBreakOffsets(text);
+      expect(offsets.length).toBeGreaterThan(1);
+      // Ascending and strictly interior.
+      for (let k = 1; k < offsets.length; k++) expect(offsets[k]).toBeGreaterThan(offsets[k - 1]);
+      for (const o of offsets) {
+        expect(o).toBeGreaterThan(0);
+        expect(o).toBeLessThan(text.length);
+      }
+      // EXACTLY the interior grapheme boundaries (not a dictionary subset).
+      expect(offsets).toEqual(graphemeClusterOffsets(text));
+      // Both sides of every break are the same-script (interior to the span).
+      for (const o of offsets) {
+        expect(isSeaScriptCodePoint(text.codePointAt(o - 1)!)).toBe(true);
+        expect(isSeaScriptCodePoint(text.codePointAt(o)!)).toBe(true);
+      }
+    });
+  }
+
+  it('Myanmar break offsets do NOT collapse to the coarser ICU dictionary set', () => {
+    // Property proof that this is grapheme-fill, not dictionary: there are strictly
+    // more grapheme boundaries than ICU 'my' word-like boundaries for this run.
+    const graphemeCount = seaWordBreakOffsets(myanmar).length;
+    let wordLike = 0;
+    for (const s of new Intl.Segmenter('my', { granularity: 'word' }).segment(myanmar)) {
+      if (s.index > 0 && s.isWordLike) wordLike++;
+    }
+    expect(graphemeCount).toBeGreaterThan(wordLike);
+  });
+
+  it('keeps dictionary (Thai) and grapheme-fill (Myanmar) spans separate when adjacent', () => {
+    // A Thai↔Myanmar no-space boundary must not be a break (SEA↔SEA cross-class
+    // edge is left to the caller); Thai stays dictionary, Myanmar stays grapheme.
+    const mixed = 'ไทยမြန်မာ'; // Thai 'ไทย' then Myanmar 'မြန်မာ', no space
+    const thaiLen = 'ไทย'.length;
+    for (const o of seaWordBreakOffsets(mixed)) {
+      // No break exactly at the class boundary.
+      expect(o).not.toBe(thaiLen);
+    }
   });
 });
 
@@ -348,7 +417,63 @@ describe('fitSeaWordPrefix', () => {
     // widths: [0,2)=30, [0,5)=10, [0,7)=40, whole [0,9)=50; avail 15 → best 5.
     const w: Record<number, number> = { 2: 30, 5: 10, 7: 40, 9: 50 };
     const nonMono = (s: string) => w[s.length] ?? s.length;
+    // Default (full scan) keeps the non-monotone contract.
     expect(fitSeaWordPrefix(text, offsets, 0, 15, nonMono)).toBe(5);
+  });
+});
+
+describe('fitSeaWordPrefix — assumeMonotone binary-search fast path (#961)', () => {
+  // For grapheme-fill scripts the offsets are DENSE (one per cluster). The
+  // monotone binary search must return the SAME boundary as the full scan for any
+  // monotone measure, at O(log n) measure calls instead of O(n).
+  const text = 'abcdefghij'; // len 10
+  const denseOffsets = [1, 2, 3, 4, 5, 6, 7, 8, 9]; // every interior boundary
+  const measure = (s: string) => s.length * 10; // monotone: 10px/char
+
+  it('matches the full scan for a monotone measure at every avail', () => {
+    for (let avail = 0; avail <= 120; avail += 5) {
+      const fast = fitSeaWordPrefix(text, denseOffsets, 0, avail, measure, true);
+      const slow = fitSeaWordPrefix(text, denseOffsets, 0, avail, measure, false);
+      expect(fast).toBe(slow);
+    }
+  });
+
+  it('respects a non-zero start under binary search', () => {
+    // from start 4: avail 30 → [4,7)=30 ok, [4,8)=40 no → 7.
+    expect(fitSeaWordPrefix(text, denseOffsets, 4, 30, measure, true)).toBe(7);
+    expect(fitSeaWordPrefix(text, denseOffsets, 4, 30, measure, false)).toBe(7);
+  });
+
+  it('returns len when the whole remainder fits, and start when nothing does', () => {
+    expect(fitSeaWordPrefix(text, denseOffsets, 0, 999, measure, true)).toBe(10);
+    expect(fitSeaWordPrefix(text, denseOffsets, 0, 5, measure, true)).toBe(0); // < 1 char
+  });
+
+  it('uses O(log n) measure calls, not O(n) — the perf fix', () => {
+    // 1000 dense boundaries; count measure invocations. Full scan ≈ n; binary
+    // search ≈ log2(n) (+ the whole-remainder probe). Assert a tight log bound.
+    const big = 'x'.repeat(1000);
+    const bigOffsets = Array.from({ length: 999 }, (_, k) => k + 1);
+    let calls = 0;
+    const counting = (s: string) => { calls++; return s.length * 10; };
+    fitSeaWordPrefix(big, bigOffsets, 0, 155, counting, true); // fits ~15 chars
+    expect(calls).toBeLessThan(20); // ~log2(1000)=10, plus a couple probes
+  });
+});
+
+describe('isGraphemeFillText (#961)', () => {
+  it('true for Myanmar / Tibetan text (drives the monotone fit)', () => {
+    expect(isGraphemeFillText('မြန်မာ')).toBe(true);
+    expect(isGraphemeFillText('བོད་ཡིག')).toBe(true);
+    expect(isGraphemeFillText('Hello မြန်မာ')).toBe(true); // first no-space char is Myanmar
+  });
+  it('false for dictionary (Thai/Lao/Khmer) and non-no-space text', () => {
+    expect(isGraphemeFillText('ภาษาไทย')).toBe(false); // dictionary — keep full scan
+    expect(isGraphemeFillText('ພາສາລາວ')).toBe(false);
+    expect(isGraphemeFillText('ភាសាខ្មែរ')).toBe(false);
+    expect(isGraphemeFillText('Hello world')).toBe(false);
+    expect(isGraphemeFillText('日本語')).toBe(false);
+    expect(isGraphemeFillText('')).toBe(false);
   });
 });
 

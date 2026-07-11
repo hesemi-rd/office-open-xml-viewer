@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { seaWordBreakOffsets } from '@silurus/ooxml-core';
+import { graphemeClusterOffsets, seaWordBreakOffsets } from '@silurus/ooxml-core';
 import { layoutParagraph } from './renderer.js';
 import type { Paragraph } from './types';
 import type { TextRunData } from '@silurus/ooxml-core';
@@ -83,4 +83,23 @@ describe('pptx SEA (Thai) dictionary line breaking', () => {
     expect(textSegs).toHaveLength(1);
     expect(textSegs[0].text).toBe(thai);
   });
+});
+
+// Issue #961 — Myanmar/Tibetan grapheme-fill in pptx (same cross-package fix as
+// docx): break at grapheme-cluster boundaries with maximal fill, never tearing a
+// base + stacked cluster (previously the per-code-point over-long split could).
+describe('pptx Myanmar / Tibetan grapheme-fill line breaking', () => {
+  for (const [name, text] of [
+    ['Myanmar', 'မြန်မာဘာသာစကားကိုစာလုံးများအကြားတွင်ကွက်လပ်မထား'],
+    ['Tibetan', 'བོད་ཡིག་ནི་ཚིག་གྲུབ་སོ་སོའི་བར་དུ་ཚེག'],
+  ] as const) {
+    it(`${name}: wraps at grapheme boundaries, preserving the text`, () => {
+      const lines = layoutParagraph(mockCtx(), para([run(text)]), 120, 20, '000000', 1, 0);
+      const texts = lines.map(lineText);
+      expect(texts.length).toBeGreaterThan(1);
+      expect(texts.join('')).toBe(text);
+      const clusterStarts = new Set(graphemeClusterOffsets(text));
+      for (const b of breakOffsets(texts)) expect(clusterStarts.has(b)).toBe(true);
+    });
+  }
 });
