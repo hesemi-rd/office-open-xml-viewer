@@ -6,7 +6,7 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -1167,17 +1167,20 @@ export function layoutRichTextLines(
     if (seaBreaks.length === 0) { push(text, font); return; }
     ctx.font = buildFont(vertAlignDrawFont(font), cs);
     const measureSub = (sub: string): number => ctx.measureText(sub).width;
+    // Grapheme-fill runs (Myanmar/Tibetan, #961) have dense per-cluster offsets:
+    // O(log n) monotone binary-search fit. Dictionary runs keep the full scan.
+    const monotone = isGraphemeFillText(text);
     const N = text.length;
     let start = 0;
     while (start < N) {
       const avail = maxWidth - curW;
-      let end = fitSeaWordPrefix(text, seaBreaks, start, avail, measureSub);
+      let end = fitSeaWordPrefix(text, seaBreaks, start, avail, measureSub, monotone);
       if (end <= start) {
         if (curW > 0) { flush(); continue; } // wrap first, retry on an empty line
         const firstWordEnd = seaBreaks.find((b) => b > start) ?? N;
         const firstWord = text.slice(start, firstWordEnd);
         const graphemes = graphemeClusterOffsets(firstWord);
-        let g = fitSeaWordPrefix(firstWord, graphemes, 0, avail, measureSub);
+        let g = fitSeaWordPrefix(firstWord, graphemes, 0, avail, measureSub, monotone);
         if (g <= 0) g = graphemes.length > 0 ? graphemes[0] : firstWord.length;
         end = start + g;
       }

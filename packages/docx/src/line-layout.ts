@@ -32,6 +32,7 @@ import {
   isCjkBreakChar,
   isUax14NoBreakPair,
   containsSeaScript,
+  isGraphemeFillText,
   seaMixedBreakOffsets,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
@@ -3281,22 +3282,27 @@ export function layoutLines(
         }
       }
     } else if (s.seaBreaks !== undefined) {
-      // SEA (Thai/Lao/Khmer) line wrap (issue #797 / #960). These scripts have no
-      // inter-word spaces, so this ONE segment is a whole run; break it only at a
-      // member of `s.seaBreaks` — the UNION of dictionary word boundaries, the
-      // no-space SEA↔non-SEA script transitions, and (for a mixed CJK+SEA `<w:cs/>`
-      // run) the CJK per-character opportunities, already kinsoku-filtered by
-      // `seaMixedBreakOffsets`. Entered for ANY SEA segment (even one with no
-      // boundary — a single word wider than the column, or Segmenter unavailable)
-      // so the emergency split below stays GRAPHEME-safe instead of falling to the
-      // code-point path. Kinsoku 行頭/行末禁則 was applied when the offsets were
-      // built (so a forbidden CJK char never heads/tails a line); choosing an
-      // earlier legal offset is the only remaining adjustment, which
-      // fitSeaWordPrefix already does. The run stays one contiguous draw per line
-      // (measure==paint); the tail re-queues with its offsets rebased.
+      // No-inter-word-space line wrap: Thai/Lao/Khmer dictionary words (#797) or
+      // Myanmar/Tibetan grapheme clusters (#961). This ONE segment is a whole run;
+      // break it only at a member of `s.seaBreaks` — the UNION (#960) of the
+      // dictionary word (or grapheme-cluster) boundaries, the no-space SEA↔non-SEA
+      // script transitions, and (for a mixed CJK+SEA `<w:cs/>` run) the CJK
+      // per-character opportunities, already kinsoku-filtered by
+      // `seaMixedBreakOffsets`. Entered for ANY such segment (even one with no
+      // interior boundary — a single word/cluster wider than the column, or
+      // Segmenter unavailable) so the emergency split below stays GRAPHEME-safe
+      // instead of falling to the code-point path. Kinsoku 行頭/行末禁則 was applied
+      // when the offsets were built (so a forbidden CJK char never heads/tails a
+      // line); choosing an earlier legal offset is the only remaining adjustment,
+      // which fitSeaWordPrefix already does. The run stays one contiguous draw per
+      // line (measure==paint); the tail re-queues with its offsets rebased.
       const available = availW() - currentWidth;
       const measureSub = (sub: string): number => strAdvance(s, sub);
-      const split = fitSeaWordPrefix(s.text, s.seaBreaks, 0, available, measureSub);
+      // Grapheme-fill runs (Myanmar/Tibetan) have DENSE offsets (one per cluster),
+      // so use the monotone binary-search fit — a per-line full scan would be O(n²)
+      // down a long run. Dictionary runs keep the negative-spacing-safe full scan.
+      const monotone = isGraphemeFillText(s.text);
+      const split = fitSeaWordPrefix(s.text, s.seaBreaks, 0, available, measureSub, monotone);
       if (split > 0) {
         const prefix = s.text.slice(0, split);
         const pw = strAdvance(s, prefix);
@@ -3360,7 +3366,7 @@ export function layoutLines(
         const firstWordEnd = s.seaBreaks[0] ?? s.text.length;
         const firstWord = s.text.slice(0, firstWordEnd);
         const graphemes = graphemeClusterOffsets(firstWord);
-        let gsplit = fitSeaWordPrefix(firstWord, graphemes, 0, available, measureSub);
+        let gsplit = fitSeaWordPrefix(firstWord, graphemes, 0, available, measureSub, monotone);
         if (gsplit <= 0) gsplit = graphemes.length > 0 ? graphemes[0] : firstWord.length;
         const prefix = s.text.slice(0, gsplit);
         const pw = strAdvance(s, prefix);

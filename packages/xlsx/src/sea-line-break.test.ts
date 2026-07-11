@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { seaMixedBreakOffsets, seaTransitionOffsets, seaWordBreakOffsets } from '@silurus/ooxml-core';
+import { graphemeClusterOffsets, seaMixedBreakOffsets, seaTransitionOffsets, seaWordBreakOffsets } from '@silurus/ooxml-core';
 import { wrapParagraphLines, layoutRichTextLines } from './renderer.js';
 import type { CellFont, Run } from './types.js';
 
@@ -106,4 +106,28 @@ describe('xlsx SEA↔non-SEA no-space transitions (#960)', () => {
     for (const b of breakOffsets(texts)) expect(legalSet.has(b)).toBe(true);
     expect(breakOffsets(texts).some((b) => transitions.has(b))).toBe(true);
   });
+});
+
+// Issue #961 — Myanmar/Tibetan grapheme-fill in xlsx (same cross-package fix):
+// wrap at grapheme-cluster boundaries with maximal fill, never tearing a cluster.
+describe('xlsx Myanmar / Tibetan grapheme-fill breaking', () => {
+  for (const [name, text] of [
+    ['Myanmar', 'မြန်မာဘာသာစကားကိုစာလုံးများအကြားတွင်ကွက်လပ်မထား'],
+    ['Tibetan', 'བོད་ཡིག་ནི་ཚིག་གྲུབ་སོ་སོའི་བར་དུ་ཚེག'],
+  ] as const) {
+    it(`${name}: plain path wraps grapheme-safely and preserves text`, () => {
+      const out = wrapParagraphLines(ctx, text, 120);
+      expect(out.length).toBeGreaterThan(1);
+      expect(out.join('')).toBe(text);
+      const clusterStarts = new Set(graphemeClusterOffsets(text));
+      for (const b of breakOffsets(out)) expect(clusterStarts.has(b)).toBe(true);
+    });
+    it(`${name}: rich path wraps grapheme-safely and preserves text`, () => {
+      const texts = richText(layoutRichTextLines(ctx, [{ text }] as Run[], baseFont, 1, 120));
+      expect(texts.length).toBeGreaterThan(1);
+      expect(texts.join('')).toBe(text);
+      const clusterStarts = new Set(graphemeClusterOffsets(text));
+      for (const b of breakOffsets(texts)) expect(clusterStarts.has(b)).toBe(true);
+    });
+  }
 });
