@@ -1,5 +1,35 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeFontFamily } from './line-layout.js';
+import { normalizeFontFamily, normalizeFontFamilyUncached } from './line-layout.js';
+
+describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.29)', () => {
+  it('keeps a variable-pitch modern face on the Meiryo/CJK-sans path', () => {
+    const chain = normalizeFontFamilyUncached(
+      'Meiryo UI',
+      { 'Meiryo UI': 'modern' },
+      { 'Meiryo UI': 'variable' },
+    );
+
+    expect(chain).not.toContain('monospace');
+    expect(chain).toContain('"Meiryo UI"');
+  });
+
+  it('maps a fixed-pitch modern face to monospace', () => {
+    const chain = normalizeFontFamilyUncached(
+      'MonoFace',
+      { MonoFace: 'modern' },
+      { MonoFace: 'fixed' },
+    );
+
+    expect(chain).toContain('"Courier New", monospace');
+  });
+
+  it('does not assume an omitted pitch is fixed', () => {
+    const chain = normalizeFontFamilyUncached('Meiryo UI', { 'Meiryo UI': 'modern' });
+
+    expect(chain).not.toContain('monospace');
+    expect(chain).toContain('"Meiryo UI"');
+  });
+});
 
 describe('normalizeFontFamily — Arabic substitute fonts', () => {
   it('puts the Arabic substitute first so Latin/digits resolve from the same family as Arabic', () => {

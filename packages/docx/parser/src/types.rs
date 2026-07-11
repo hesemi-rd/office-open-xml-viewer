@@ -29,6 +29,16 @@ pub struct Document {
     /// sorted), making the parser output byte-stable for identical input.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_classes: BTreeMap<String, String>,
+    /// ECMA-376 §17.8.3.29 — per-font pitch from `word/fontTable.xml`
+    /// (`<w:pitch w:val="…"/>`, ST_Pitch §17.18.66: "fixed" | "variable" |
+    /// "default"). Maps font name → pitch value; a font is present only when it
+    /// declares `<w:pitch>` (an omitted element is assumed "default" per
+    /// §17.8.3.29, which the renderer treats as non-fixed). The renderer uses this
+    /// to decide whether a `family="modern"` (§17.8.3.10) face is genuinely
+    /// monospace: only "fixed" is. Empty when fontTable.xml is absent or declares
+    /// no pitches. BTreeMap for deterministic (byte-stable) JSON key order.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub font_family_pitches: BTreeMap<String, String>,
     /// ECMA-376 §17.8.3.3-.6 — embedded fonts declared in `word/fontTable.xml`
     /// (`<w:embedRegular>` / `embedBold` / `embedItalic` / `embedBoldItalic`),
     /// resolved through `word/_rels/fontTable.xml.rels` to their obfuscated

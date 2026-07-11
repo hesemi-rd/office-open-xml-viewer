@@ -20,6 +20,16 @@ export interface DocxDocumentModel {
    * entry is absent or classified as "auto".
    */
   fontFamilyClasses?: Record<string, string>;
+  /**
+   * ECMA-376 §17.8.3.29 — per-font pitch from `word/fontTable.xml`
+   * (`<w:pitch>`, ST_Pitch §17.18.66): font name → "fixed" | "variable" |
+   * "default". Present only for fonts that declare `<w:pitch>`. The renderer
+   * pairs this with {@link fontFamilyClasses}: a `family="modern"` face is
+   * treated as monospace ONLY when its pitch is "fixed"; "variable" /
+   * "default" / absent fall through to name-pattern / CJK-sans classification
+   * (§17.8.3.10 `family` classifies the design, not the pitch — issue #855).
+   */
+  fontFamilyPitches?: Record<string, string>;
   /** ECMA-376 §17.8.3.3-.6 — embedded fonts from `word/fontTable.xml`, resolved
    *  to their `.odttf` part paths + fontKey. The viewer de-obfuscates (§17.8.1)
    *  and registers each as a FontFace before pagination so text measures/draws
