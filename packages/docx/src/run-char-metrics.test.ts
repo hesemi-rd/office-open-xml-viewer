@@ -3,8 +3,6 @@ import {
   charScaleFactor,
   charSpacingDeltaPx,
   segAdvanceWidth,
-  segGlyphScaleFactor,
-  segLetterSpacingPx,
   type LayoutTextSeg,
 } from './line-layout.js';
 
@@ -96,25 +94,5 @@ describe('WD4 run character-metric width helpers', () => {
     // byte-identical.
     const s = seg({ text: '２９', fontSize: 12, charScale: 0.67 });
     expect(segAdvanceWidth(s, 100, 0, 1)).toBeCloseTo(67, 10);
-  });
-
-  it('composes a resolved Meiryo UI advance stamp with authored w:w but leaves fixed spacing unscaled', () => {
-    const s = seg({
-      text: 'ひら',
-      fontFamily: 'Meiryo UI',
-      fontAdvanceScale: 0.7775,
-      charScale: 0.8,
-      charSpacing: 0.5,
-    });
-    const glyphScale = 0.8 * 0.7775;
-    expect(segGlyphScaleFactor(s)).toBeCloseTo(glyphScale, 10);
-    expect(segLetterSpacingPx(s, 0, 2)).toBe(1);
-    expect(segAdvanceWidth(s, 100, 0, 2)).toBeCloseTo(100 * glyphScale + 2, 10);
-  });
-
-  it('keeps non-condensed fonts on the existing advance path', () => {
-    const s = seg({ text: 'ひら', fontFamily: 'Meiryo', charScale: 0.8 });
-    expect(segGlyphScaleFactor(s)).toBe(0.8);
-    expect(segAdvanceWidth(s, 100, 0, 1)).toBe(80);
   });
 });

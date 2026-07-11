@@ -480,17 +480,10 @@ export {
   intendedSingleLinePx,
   correctLineMetrics,
 } from './text/line-metrics';
-// Format-agnostic requested-font horizontal advance profiles and Canvas-vs-Word
-// line-fit bias. Consumers keep their layout/paint wiring local, while the
-// metric provenance and normalized family matching remain shared data.
-export {
-  fontAdvanceScriptClass,
-  fontScriptAdvanceScale,
-  splitFontAdvanceRuns,
-  fontAdvanceBiasEm,
-  type FontAdvanceScriptClass,
-  type FontAdvanceRun,
-} from './text/font-advance-metrics';
+// Format-agnostic same-font Canvas-vs-Word line-fit bias. Consumers keep their
+// layout/paint wiring local, while the metric provenance and normalized family
+// matching remain shared data.
+export { fontAdvanceBiasEm } from './text/font-advance-metrics';
 // IX2 in-document text search (findText). Format-agnostic index + match →
 // run-slice resolution (buildTextIndex/findMatches), the pure highlight-extent
 // helper (sliceHorizontalExtent), the active-match cursor arithmetic behind

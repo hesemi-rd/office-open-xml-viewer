@@ -155,32 +155,6 @@ function paintedInkExtent(fills: FillCall[], expectedText: string): { left: numb
 }
 
 describe('WD4 #816 — w:w charScale reaches paint under an active docGrid / justify (measure==paint)', () => {
-  it('Meiryo UI kana advance profile paints ink to the measured segment edge', async () => {
-    const kana = 'ひら';
-    const following = '漢';
-    const metricScale = 0.7775;
-    const { runs, fills } = await render(
-      [para([textRun(`${kana}${following}`, {
-        fontFamily: 'Meiryo UI',
-        fontFamilyEastAsia: 'Meiryo UI',
-      })])],
-      section(),
-    );
-
-    const kanaRun = runs.find((r) => r.text === kana);
-    const followingRun = runs.find((r) => r.text === following);
-    expect(kanaRun).toBeDefined();
-    expect(followingRun).toBeDefined();
-    expect(kanaRun!.glyphScaleX).toBeCloseTo(metricScale, 9);
-    expect(kanaRun!.w).toBeCloseTo([...kana].length * FONT_PX * metricScale, 6);
-
-    const kanaFill = fills.find((fill) => fill.text === kana);
-    expect(kanaFill?.scaleX).toBeCloseTo(metricScale, 9);
-    const paintedRight = kanaFill!.translateX
-      + kanaFill!.scaleX * (kanaFill!.x + [...kana].length * FONT_PX);
-    expect(paintedRight).toBeCloseTo(followingRun!.x, 5);
-  });
-
   // Reviewer's probe (grid arm): a pure-EA run with w:w=0.5 in a linesAndChars
   // grid. The measured box scales natural width by 0.5 and adds the cell delta;
   // the paint must draw the glyphs at 0.5× so the ink fills exactly that box.

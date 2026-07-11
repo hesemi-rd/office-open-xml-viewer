@@ -44,7 +44,6 @@ import {
   parseFieldFormatSwitch,
   formatDateTimePicture,
   parseDateTimePictureSwitch,
-  splitFontAdvanceRuns,
   fontAdvanceBiasEm,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -146,14 +145,6 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  under `ctx.scale(charScale, 1)`; decorations follow the scaled extent.
    *  Absent ⇒ 1 (100%). */
   charScale?: number;
-  /** Candidate horizontal advance scale harvested for the requested family.
-   *  {@link layoutLines} resolves it against the host's actual face resolution
-   *  before any width is measured. Absent for vertical CJK and ruby bases. */
-  fontAdvanceScaleCandidate?: number;
-  /** Resolved horizontal font-advance scale. A full-width substitute keeps the
-   *  candidate; an installed condensed face resolves to 1. Paint reads this
-   *  stamp directly, so it never performs a second face-resolution probe. */
-  fontAdvanceScale?: number;
   /** ECMA-376 §17.3.2.14 `<w:fitText>` — target width in TWIPS and optional
    *  link id (wire strings plus numeric synthetic inputs). All segments emitted
    *  from one tab-delimited source-run fragment retain the same fragment/region
@@ -839,63 +830,6 @@ export function charScaleFactor(seg: LayoutTextSeg): number {
   return seg.charScale ?? 1;
 }
 
-/**
- * Horizontal glyph scale composed from the authored §17.3.2.43 `w:w` value and
- * the requested face's real per-script advance profile. `buildSegments` splits
- * tabled fonts into homogeneous scale runs, so one Canvas transform reproduces
- * the same correction in measure and paint without per-glyph shaping loss.
- */
-export function segGlyphScaleFactor(seg: LayoutTextSeg): number {
-  return charScaleFactor(seg) * (seg.fontAdvanceScale ?? 1);
-}
-
-const FONT_ADVANCE_PROBE_TEXT = 'あアかカ';
-const FONT_ADVANCE_PROBE_PX = 100;
-const FULL_WIDTH_SUBSTITUTE_MIN_EM = 0.92;
-const fontAdvanceSubstitutionProbeCache = new Map<string, boolean>();
-
-/** Clear host-face probe results. Production callers do not need this; tests
- *  use it when swapping synthetic measuring contexts in one module instance. */
-export function resetFontAdvanceSubstitutionProbeCache(): void {
-  fontAdvanceSubstitutionProbeCache.clear();
-}
-
-/** Resolve candidate family profiles against the face Canvas actually selected.
- *  A real Meiryo UI face already exposes condensed kana advances, while its
- *  common substitute is full-width. Probe once per normalized Canvas font string
- *  and stamp the result onto the segment before fitText or line measurement. */
-function resolveFontAdvanceScaleCandidates(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  segments: readonly LayoutTextSeg[],
-  fontFamilyClasses: Record<string, string>,
-): void {
-  const previousFont = ctx.font;
-  try {
-    for (const segment of segments) {
-      const candidate = segment.fontAdvanceScaleCandidate;
-      if (candidate === undefined) continue;
-      const probeFont = buildFont(
-        false,
-        false,
-        FONT_ADVANCE_PROBE_PX,
-        segment.fontFamily,
-        fontFamilyClasses,
-      );
-      let fullWidthSubstitute = fontAdvanceSubstitutionProbeCache.get(probeFont);
-      if (fullWidthSubstitute === undefined) {
-        ctx.font = probeFont;
-        const perGlyphEm = ctx.measureText(FONT_ADVANCE_PROBE_TEXT).width
-          / ([...FONT_ADVANCE_PROBE_TEXT].length * FONT_ADVANCE_PROBE_PX);
-        fullWidthSubstitute = perGlyphEm >= FULL_WIDTH_SUBSTITUTE_MIN_EM;
-        fontAdvanceSubstitutionProbeCache.set(probeFont, fullWidthSubstitute);
-      }
-      segment.fontAdvanceScale = fullWidthSubstitute ? candidate : 1;
-    }
-  } finally {
-    ctx.font = previousFont;
-  }
-}
-
 /** Canonical advance formula for a text string in a run: natural glyph width
  *  scaled by ECMA-376 §17.3.2.43 `<w:w>`, plus the §17.6.5 character-grid
  *  delta, plus one ECMA-376 §17.3.2.35 `<w:spacing>` pitch per code point. */
@@ -946,7 +880,7 @@ export function segAdvanceWidth(
   if (seg.fitTextPerGapPx !== undefined) {
     const charCount = [...seg.text].length;
     const gapCount = seg.fitTextRegionEnd ? Math.max(0, charCount - 1) : charCount;
-    return naturalWidthPx * segGlyphScaleFactor(seg)
+    return naturalWidthPx * charScaleFactor(seg)
       + gapCount * seg.fitTextPerGapPx
       + (seg.fitTextTrailingPadPx ?? 0);
   }
@@ -965,7 +899,7 @@ export function segAdvanceWidth(
     naturalWidthPx,
     seg.text,
     segmentDelta,
-    segGlyphScaleFactor(seg),
+    charScaleFactor(seg),
     charSpacingDeltaPx(seg, scale),
   );
 }
@@ -1957,7 +1891,7 @@ function resolveFitTextSegments(
     let naturalWidthPx = 0;
     let charCount = 0;
     for (const segment of members) {
-      naturalWidthPx += measureNaturalWidthPx(segment) * segGlyphScaleFactor(segment);
+      naturalWidthPx += measureNaturalWidthPx(segment) * charScaleFactor(segment);
       charCount += [...segment.text].length;
     }
 
@@ -2189,22 +2123,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         }
         return;
       }
-      // The harvested profiles describe horizontal hmtx advances. Vertical CJK
-      // uses full-em cells, so it must retain the pre-profile segmentation and
-      // widths. Ruby annotations ride only the first emitted base segment; a
-      // profile split would detach the annotation from the rest of its base, so
-      // ruby-carrying runs intentionally keep the pre-#794 substitute advances.
-      if (environment.verticalCJK || baseRuby) {
-        pushSeg(word, cs, fontFamily);
-        return;
-      }
-      for (const part of splitFontAdvanceRuns(fontFamily, word)) {
-        const start = segs.length;
-        pushSeg(part.text, cs, fontFamily);
-        if (part.scale !== 1) {
-          (segs[start] as LayoutTextSeg).fontAdvanceScaleCandidate = part.scale;
-        }
-      }
+      pushSeg(word, cs, fontFamily);
     };
 
     // A non-complex-script slice still mixes scripts at the CJK boundary: emit
@@ -2822,16 +2741,11 @@ export function layoutLines(
     }
   }
 
-  const queuedTextSegments = queue.filter((seg): seg is LayoutTextSeg => 'text' in seg);
-  // Resolve requested-face advance candidates before fitText derives its natural
-  // width. The resolved stamp is then shared by every measure and paint path.
-  resolveFontAdvanceScaleCandidates(ctx, queuedTextSegments, fontFamilyClasses);
-
   // Resolve §17.3.2.14 from RAW natural advances at this exact layout scale.
   // The resulting per-gap is folded into segAdvanceWidth below, so the line
   // breaker and paint pen use one width authority. Cached w:spacing is ignored.
   resolveFitTextSegments(
-    queuedTextSegments,
+    queue.filter((seg): seg is LayoutTextSeg => 'text' in seg),
     scale,
     (segment) => measureText(segment).width,
   );
@@ -3321,7 +3235,7 @@ export function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), segGlyphScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -3535,7 +3449,7 @@ export function layoutLines(
       const available = availW();
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const allChars = [...s.text];
-      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), segGlyphScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
       if (split < 1) split = 1;
       split = extendThroughTrailingIdeographicSpaces(allChars, split);
       if (split >= allChars.length) {

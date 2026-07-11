@@ -29,11 +29,10 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; rec: Recording } {
     letterSpacing: '0px',
     measureText: (s: string) => {
       const p = px();
-      const advanceEm = s === 'あアかカ' ? 1 : 0.5;
       return {
         // Each code point advances a fixed half-em, so glyph i centre is
         // predictable: penX + (i + 0.5) * p * 0.5.
-        width: [...s].length * p * advanceEm,
+        width: [...s].length * p * 0.5,
         fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
@@ -153,18 +152,6 @@ describe('docx emphasis mark (§17.3.2.12 w:em) draw path', () => {
     const xs = rec.arcs.map((a) => a.cx);
     expect(xs[1] - xs[0]).toBeCloseTo(xs[2] - xs[1], 3);
     expect(xs[1] - xs[0]).toBeGreaterThan(0);
-  });
-
-  it('scales multi-kana mark centres with the condensed glyph draw', async () => {
-    const rec = await render({
-      emphasisMark: 'dot',
-      fontFamily: 'Meiryo UI',
-      fontFamilyEastAsia: 'Meiryo UI',
-    }, 'あい');
-    const xs = rec.arcs.map((a) => a.cx);
-
-    expect(xs).toHaveLength(2);
-    expect(xs[1] - xs[0]).toBeCloseTo(40 * 0.5 * 0.7775, 6);
   });
 
   it('mark radius scales with the run font size (~0.07 em)', async () => {

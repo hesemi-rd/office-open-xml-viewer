@@ -91,14 +91,13 @@ export function buildDocxHighlightLayer(
       const end = Math.min(slice.end, [...run.text].length);
       const pitchedX = extent.x + slice.start * pitch;
       const pitchedWidth = extent.width + Math.max(0, end - slice.start - 1) * pitch;
-      // 縦中横 keeps its established one-em clamp. Ordinary horizontal runs use
-      // the composed Canvas glyph scale reported by the renderer. Applying the
-      // factor after pitch composition preserves the same approximation as the
-      // 縦中横 path: fixed pitch is scaled with the slice rather than modelled as
-      // a second coordinate axis, while offsets and widths remain proportional.
-      const k = run.eastAsianVert
-        ? tateChuYokoOverlayScale(run, measure)
-        : (run.glyphScaleX ?? 1);
+      // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed
+      // into one em cell (`run.w`), so its natural per-glyph extents overshoot the
+      // drawn box. Scale the slice offset + width by `run.w / naturalWidth` so the
+      // highlight lands on the compressed cell (a no-op factor of 1 for every
+      // ordinary run — see tate-chu-yoko-overlay.ts). Applying one factor keeps a
+      // partial match proportional within the cell.
+      const k = tateChuYokoOverlayScale(run, measure);
       const x = pitchedX * k;
       const width = pitchedWidth * k;
       if (width <= 0) continue;

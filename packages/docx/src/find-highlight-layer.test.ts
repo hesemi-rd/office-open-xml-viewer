@@ -192,34 +192,6 @@ describe('buildDocxHighlightLayer', () => {
     expect(layer.children[0].style.width).toBe(`${(14 / 100) * 100}%`);
   });
 
-  it('scales a horizontal run slice offset and width by the composed glyph scale', () => {
-    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
-    const layer = makeEl('div');
-    const runs = [run({ text: 'かな文字', x: 10, glyphScaleX: 0.75 })];
-    const matches: DocxHighlightMatch[] = [
-      { slices: [{ runIndex: 0, start: 1, end: 3 }], active: false },
-    ];
-
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-
-    const box = layer.children[0];
-    expect(box.style.left).toBe(`${((10 + 7 * 0.75) / 100) * 100}%`);
-    expect(box.style.width).toBe(`${((14 * 0.75) / 100) * 100}%`);
-  });
-
-  it('keeps the existing eastAsianVert clamp authoritative over glyphScaleX', () => {
-    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
-    const layer = makeEl('div');
-    const runs = [run({ text: '２９', w: 7, fontSize: 7, eastAsianVert: true, glyphScaleX: 0.25 })];
-    const matches: DocxHighlightMatch[] = [
-      { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },
-    ];
-
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-
-    expect(layer.children[0].style.width).toBe('7.000000000000001%');
-  });
-
   it('clears the layer and skips zero-width slices', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
