@@ -4031,6 +4031,17 @@ export function drawShapeText(
       // shared alphabetic baseline (= lineTop + ascent), so the equation sits
       // on the same baseline as adjacent text. (Pure-text lines keep the
       // simpler 'middle' baseline below.)
+      //
+      // For a lone display equation in a top-anchored box (anchor="t", tIns=0),
+      // line.ascent === seg.ascent, so `baseline - seg.ascent === lineTop` and
+      // the raster is drawn TOP-FLUSH to the box — matching how Excel autofits
+      // the box to the equation and top-anchors it (issue #877). Any residual is
+      // NOT a downward shift: our STIX Two Math typeset is ~17% SHORTER than the
+      // Cambria Math box the file was authored against (measured on sample-28:
+      // MathJax 39.6 px vs the autofit ext cy 48.0 px for the same Fourier
+      // series), so the gap surfaces as unused space at the box BOTTOM while the
+      // top and every baseline sit at or above Excel's. Closing that gap is a
+      // metric-compatible-fallback question (#794), not a positioning fix.
       ctx.textBaseline = 'alphabetic';
       const baseline = lineTop + line.ascent;
       for (const seg of line.segs) {

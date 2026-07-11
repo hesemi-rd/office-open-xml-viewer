@@ -36,6 +36,11 @@ const XLSX_FILES: { name: string; sheetCount: number }[] = [
   { name: 'private/sample-25', sheetCount: 4 },
   { name: 'private/sample-26', sheetCount: 2 },
   { name: 'private/sample-27', sheetCount: 1 },
+  // sample-28: four sheets, each an OMML equation text box (Fourier series,
+  // cone volume, circle area). Adds regression coverage for shape-equation
+  // rendering, which had none (issue #877). References are self-baseline
+  // (renderer output), regenerated locally with UPDATE_REFS — no Excel export.
+  { name: 'private/sample-28', sheetCount: 4 },
 ];
 
 const PIXEL_THRESHOLD = 0.20;
