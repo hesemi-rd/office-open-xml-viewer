@@ -9,7 +9,9 @@ import {
   getDefaultFontSize,
   isGridLineRule,
   layoutLines,
+  lineBelowBaselinePx,
   lineBoxHeight,
+  paragraphMarkBelowBaselinePt,
   paragraphMarkLineHeight,
   type DocGridCtx,
   type LineBoundary,
@@ -120,6 +122,16 @@ export interface MeasuredParagraph {
   readonly uniformRubyAdvancePt: number;
   readonly contentStartYPt: number;
   readonly contentEndYPt: number;
+  /**
+   * ECMA-376 §17.3.1.29 / §17.3.1.33 — the extent (pt) of the LAST line's box that
+   * lies below its baseline (descent + half of any auto/atLeast leading). Word's
+   * page fit is baseline-based: a line whose baseline sits within the text area may
+   * let this below-baseline whitespace extend into the bottom margin. The paginator
+   * uses it (for an empty paragraph, whose mark line paints no ink there) so a
+   * trailing empty paragraph is not pushed to the next page merely because its
+   * invisible mark box grazes past the bottom content edge.
+   */
+  readonly lastLineBelowBaselinePt: number;
   readonly placement: Readonly<ParagraphPlacement>;
 }
 
@@ -213,6 +225,15 @@ export function measureParagraph(
       uniformRubyAdvancePt: 0,
       contentStartYPt: markTopPt,
       contentEndYPt: markTopPt + markAdvancePt,
+      lastLineBelowBaselinePt: paragraphMarkBelowBaselinePt(
+        paragraph,
+        grid,
+        context.hasRuby,
+        environment.documentHasEastAsianText === true,
+        measurer.context,
+        fontFamilyClasses,
+        context.lineSpacing,
+      ),
       placement: recordedPlacement,
     };
   };
@@ -316,6 +337,7 @@ export function measureParagraph(
     cursorPt = topYPt + advancePt;
   }
 
+  const lastLine = measuredLines[measuredLines.length - 1];
   return {
     lines: measuredLines,
     markOnly: false,
@@ -324,6 +346,11 @@ export function measureParagraph(
     uniformRubyAdvancePt,
     contentStartYPt: measuredLines[0].topYPt,
     contentEndYPt: cursorPt,
+    lastLineBelowBaselinePt: lineBelowBaselinePx(
+      lastLine.advancePt,
+      lastLine.layout.ascent,
+      lastLine.layout.descent,
+    ),
     placement: recordedPlacement,
   };
 }

@@ -1077,7 +1077,17 @@ export function correctedLineMetrics(
  * `effectiveLineSpacing` lets resolved paragraph context override the source
  * value; omitting it preserves the existing `para.lineSpacing` behavior.
  */
-export function paragraphMarkLineHeight(
+/** The natural ascent/descent (px) and the resolved line-box advance (px) of an
+ *  empty paragraph's mark line. Shared by {@link paragraphMarkLineHeight} (which
+ *  returns only the advance) and {@link paragraphMarkBelowBaselinePt} (which needs
+ *  the ascent/descent to locate the mark baseline within the box). */
+export interface MarkLineMetrics {
+  readonly advancePx: number;
+  readonly ascentPx: number;
+  readonly descentPx: number;
+}
+
+export function paragraphMarkLineMetrics(
   para: DocParagraph,
   scale: number,
   grid: DocGridCtx | undefined,
@@ -1086,7 +1096,7 @@ export function paragraphMarkLineHeight(
   ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
-): number {
+): MarkLineMetrics {
   const fs = getDefaultFontSize(para);
   const family = getDefaultFontFamily(para, eastAsian);
   let asc: number;
@@ -1119,7 +1129,53 @@ export function paragraphMarkLineHeight(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  return lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian, fs * scale);
+  const advancePx = lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian, fs * scale);
+  return { advancePx, ascentPx: asc, descentPx: desc };
+}
+
+export function paragraphMarkLineHeight(
+  para: DocParagraph,
+  scale: number,
+  grid: DocGridCtx | undefined,
+  paraHasRuby: boolean,
+  eastAsian = false,
+  ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string> = {},
+  effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
+): number {
+  return paragraphMarkLineMetrics(
+    para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
+  ).advancePx;
+}
+
+/**
+ * ECMA-376 §17.3.1.29 / §17.3.1.33 — the extent (px) of an empty paragraph's mark
+ * line that sits BELOW its baseline (descent + half of any auto/atLeast leading).
+ * Word centers the natural line within the box, so the baseline lies at
+ * `top + (advance − (ascent + descent)) / 2 + ascent`; the portion below it is
+ * `(advance − ascent + descent) / 2`. This is the whitespace a trailing empty
+ * paragraph may let overflow the bottom content edge (it paints no ink there),
+ * matching Word's baseline-based page fit. Mirrors {@link drawParagraphLine}'s
+ * `baseline = state.y + (lineH − naturalLineH) / 2 + line.ascent`.
+ */
+export function lineBelowBaselinePx(advancePx: number, ascentPx: number, descentPx: number): number {
+  return Math.max(0, (advancePx - ascentPx + descentPx) / 2);
+}
+
+export function paragraphMarkBelowBaselinePt(
+  para: DocParagraph,
+  grid: DocGridCtx | undefined,
+  paraHasRuby: boolean,
+  eastAsian: boolean,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | undefined,
+  fontFamilyClasses: Record<string, string>,
+  effectiveLineSpacing: LineSpacing | null,
+): number {
+  // Measured at scale 1 so the returned px value is already in points.
+  const m = paragraphMarkLineMetrics(
+    para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
+  );
+  return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }
 
 /**
