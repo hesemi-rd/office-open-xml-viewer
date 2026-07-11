@@ -1082,6 +1082,14 @@ pub struct ShapeRun {
     /// treats as the spec default: overflow visible / no clip).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_autofit: Option<String>,
+    /// Text-body flow direction from `<wps:bodyPr vert>` (ECMA-376 §20.1.10.83
+    /// ST_TextVerticalType): "vert" (all glyphs 90° CW, chars T→B, lines R→L),
+    /// "vert270" (all glyphs 270° CW = 90° CCW, chars B→T, lines L→R), "eaVert"
+    /// (East-Asian upright: CJK stands upright, non-EA rotated 90°). "horz"/absent
+    /// ⇒ None (horizontal). Other values ("mongolianVert", "wordArtVert", …) are
+    /// carried verbatim; the renderer falls them back to horizontal until handled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_vert: Option<String>,
     /// Body-pr text insets in pt (left/top/right/bottom). Default 0 each.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub text_inset_l: f64,

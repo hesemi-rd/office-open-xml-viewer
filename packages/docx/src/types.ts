@@ -942,6 +942,14 @@ export interface ShapeRun {
   textInsetT?: number;  // pt
   textInsetR?: number;  // pt
   textInsetB?: number;  // pt
+  /** ECMA-376 §20.1.10.83 ST_TextVerticalType — the text-body flow direction from
+   *  `<wps:bodyPr vert>` / `<a:bodyPr vert>`. Recognised vertical values:
+   *  "vert" (all glyphs 90° CW, chars T→B, lines R→L), "vert270" (all glyphs 270°
+   *  CW = 90° CCW, chars B→T, lines L→R), and "eaVert" (East-Asian upright: CJK
+   *  stands upright, non-EA rotated 90°, chars T→B, lines R→L). "horz"/absent ⇒
+   *  horizontal (unchanged). Unrecognised values ("mongolianVert", "wordArtVert",
+   *  …) fall back to horizontal until implemented. */
+  textVert?: string | null;
   /** ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text laid on the
    *  shape path (a text watermark). When set the renderer draws this string,
    *  scaled to fill the box (`fitshape`), rotated by {@link ShapeRun.rotation},

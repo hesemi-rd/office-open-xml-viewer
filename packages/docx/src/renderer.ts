@@ -9385,7 +9385,19 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
 
-  if (!isLineGeom && shape.textAutofit === 'sp' && shape.textBlocks && shape.textBlocks.length > 0) {
+  if (
+    !isLineGeom &&
+    shape.textAutofit === 'sp' &&
+    shape.textBlocks &&
+    shape.textBlocks.length > 0 &&
+    // §20.1.10.83 vertical text box: `measureShapeTextAutoFitHeight` grows the
+    // PHYSICAL HEIGHT to fit the horizontal line stack, but a vertical box grows
+    // its PHYSICAL WIDTH (the line-stacking axis is the cross axis after the ±90°
+    // rotation). Re-measuring here would grow the wrong axis, so vertical boxes
+    // keep their declared `<wp:extent>` (correct for the common explicit-extent
+    // case; cross-axis auto-grow is a follow-up — see `verticalTextboxMode`).
+    verticalTextboxMode(shape.textVert) === null
+  ) {
     const fitH = measureShapeTextAutoFitHeight(
       shape,
       w,
@@ -9584,6 +9596,17 @@ function shapeTextHorizontalInsetsPx(shape: ShapeRun, scale: number): { lIns: nu
   };
 }
 
+/** ECMA-376 §20.1.10.83 ST_TextVerticalType — the IMPLEMENTED vertical text-box
+ *  directions (`<wps:bodyPr vert>`), or `null` for horizontal / not-yet-handled
+ *  values. `eaVert` keeps East-Asian glyphs upright (per-glyph UAX#50); `vert`
+ *  and `vert270` rotate EVERY glyph (their spec meaning), so the whole-box ±90°
+ *  rotation already produces them with no per-glyph work. `mongolianVert`
+ *  (top→bottom but lines L→R — not a pure rotation of the R→L frame) and the
+ *  WordArt stacked variants are deferred and treated as horizontal. */
+function verticalTextboxMode(vert: string | null | undefined): 'vert' | 'vert270' | 'eaVert' | null {
+  return vert === 'vert' || vert === 'vert270' || vert === 'eaVert' ? vert : null;
+}
+
 /** Measure a shape text body's fitted height for `<a:spAutoFit/>`.
  *  Returns px, including bodyPr top/bottom insets and paragraph spacing. */
 export function measureShapeTextAutoFitHeight(
@@ -9746,6 +9769,48 @@ export function renderShapeText(
   // runs never produce — so the minimal state is exact for text-box content).
   state?: RenderState,
 ): void {
+  // ECMA-376 §20.1.10.83 `<wps:bodyPr vert>` — a VERTICAL text box. Lay the body
+  // out with the SAME horizontal engine (buildSegments + layoutLines, so
+  // kinsoku/bidi/justify/tabs are reused), rotated ±90° about the box centre with
+  // width/height swapped — the section-level tbRl "rotate-layout" approach,
+  // mirroring pptx `renderTextBody`. `vert`/`vert270` rotate EVERY glyph (their
+  // spec meaning), so a plain draw in the rotated frame already IS that rotation;
+  // `eaVert` additionally counter-rotates East-Asian glyphs per code point so CJK
+  // stands upright (the `eaVertUpright` flag routes text runs through
+  // {@link drawVerticalRun} below). The shape PANEL (fill/stroke) is drawn by the
+  // caller BEFORE this call and stays unrotated; only the body text rotates. The
+  // horizontal path is byte-identical when `vmode === null`.
+  //
+  // The §21.1.2.1.1 bodyPr insets (lIns/tIns/rIns/bIns) travel UNCHANGED into the
+  // rotated frame — lIns bounds the flow-left of the (rotated) text body, not the
+  // physical page left — matching the Word/PowerPoint-verified pptx `renderTextBody`
+  // (packages/pptx/src/renderer.ts, which re-enters the rotated layout with the
+  // body's insets unchanged). This is the DrawingML text-frame semantics: the
+  // insets belong to the text body's own rectangle, which rotates with `vert`.
+  //
+  // Deferred (fall back to the horizontal draw of the affected element): a
+  // shape's own `rotation` is not composed with the text-body rotation (already
+  // true before this change — the panel-rotation restore precedes this call), and
+  // an inline image inside a vertical text-box paragraph rotates with the frame
+  // rather than being uprighted like the section tbRl path — both are follow-ups.
+  const vmode = verticalTextboxMode(shape.textVert);
+  const eaVertUpright = vmode === 'eaVert';
+  if (vmode) {
+    const boxW = w;
+    const boxH = h;
+    ctx.save();
+    ctx.translate(x + boxW / 2, y + boxH / 2);
+    // +90° (vert/eaVert): chars advance T→B (local +x → device +y), lines stack
+    // R→L (local +y → device −x, first line at the right edge). −90° (vert270):
+    // chars B→T, lines L→R (first line at the left edge). The swapped LOGICAL box
+    // — width = physical height (the column length), height = physical width (the
+    // line-stacking extent) — is drawn centred on the pivot.
+    ctx.rotate((vmode === 'vert270' ? -1 : 1) * (Math.PI / 2));
+    x = -boxH / 2;
+    y = -boxW / 2;
+    w = boxH;
+    h = boxW;
+  }
   const effState: RenderState =
     state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
   // Default glyph colour for a run/leader that carries no explicit colour.
@@ -10212,7 +10277,14 @@ export function renderShapeText(
           const markerW = ctx.measureText(markerText).width;
           const lvlJc = block.numbering.jc || 'left';
           const markerShift = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
-          ctx.fillText(markerText, innerX + ind.leftPx + ind.markerFirstPx + markerShift, baseline);
+          const markerX = innerX + ind.leftPx + ind.markerFirstPx + markerShift;
+          if (eaVertUpright) {
+            // §20.1.10.83 eaVert — the list marker stands upright too (mirrors the
+            // body vertical marker path), advancing down the column like its cell.
+            drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0);
+          } else {
+            ctx.fillText(markerText, markerX, baseline);
+          }
         }
 
         if (applyJustify) {
@@ -10294,6 +10366,33 @@ export function renderShapeText(
           // document/theme default (black). A color-less run in a fontRef text
           // box (sample-28's white cover banner) thus draws in the fontRef color.
           ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
+          if (eaVertUpright) {
+            // ECMA-376 §20.1.10.83 eaVert — East-Asian upright vertical text box.
+            // Draw the run's glyphs advancing DOWN the column (local +x) with CJK
+            // counter-rotated UPRIGHT and Latin/digits kept sideways, via the SAME
+            // per-glyph UAX#50 helper the section tbRl body path uses. §17.3.2.43
+            // `w:w` and §17.3.2.35 `w:spacing` pitch are threaded in exactly as the
+            // body does. §17.18.44 justify / kashida slicing (the branches below)
+            // is NOT applied inside an eaVert cell — vertical text boxes flow their
+            // columns start-aligned, the same stage limitation as the body tbRl
+            // path — so the segment advances by its NATURAL `measuredWidth` (the
+            // width drawVerticalRun paints), NOT the justify/kashida-expanded
+            // `internalStretch`, keeping paint==advance. A whole-line center/right
+            // `alignOffset` still applies via the starting `x`. Ruby and inline
+            // images inside an eaVert run are a follow-up (drawVerticalRun paints
+            // base glyphs only; vertical furigana placement is not yet ported).
+            drawVerticalRun(
+              ctx,
+              s.text,
+              x,
+              baseline + yOffset,
+              effSizePx,
+              segLetterSpacingPx(s, 0, scale),
+              s.charScale ?? 1,
+            );
+            x += s.measuredWidth;
+            continue;
+          }
           // Draw the glyphs (§17.18.44). Anchor each justified piece to the
           // WHOLE-string cumulative advance plus accumulated pitch, the SAME core
           // helper the body uses, so contextual CJK packing (約物半角) is honoured
@@ -10415,6 +10514,9 @@ export function renderShapeText(
   }
   if (clipToBox) ctx.restore();
   ctx.direction = 'ltr'; // reset for subsequent draws
+  // Undo the §20.1.10.83 vertical-text-box page rotation (paired with the save at
+  // the top). The `noAutofit` clip (`clipToBox`) restore above is nested inside.
+  if (vmode) ctx.restore();
 }
 
 /**

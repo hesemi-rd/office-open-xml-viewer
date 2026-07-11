@@ -5316,6 +5316,7 @@ fn parse_wsp_shape(
         text_blocks,
         text_anchor,
         text_autofit,
+        text_vert,
         text_inset_l,
         text_inset_t,
         text_inset_r,
@@ -5348,6 +5349,7 @@ fn parse_wsp_shape(
         default_text_color,
         text_anchor,
         text_autofit,
+        text_vert,
         text_inset_l,
         text_inset_t,
         text_inset_r,
@@ -5411,8 +5413,23 @@ fn parse_preset_adj(prst_geom: roxmltree::Node) -> Vec<Option<f64>> {
     out
 }
 
+/// The `<wps:txbx>`/`<wps:bodyPr>` body parsed off a shape:
+/// `(blocks, anchor, autofit, vert, inset_l, inset_t, inset_r, inset_b)`.
+/// `vert` is the ECMA-376 §20.1.10.83 text-flow direction; the four insets are pt.
+type ShapeTextBody = (
+    Vec<ShapeText>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    f64,
+    f64,
+    f64,
+    f64,
+);
+
 /// Extract text blocks and bodyPr from a wsp shape.
-/// Returns (blocks, anchor, inset_l, inset_t, inset_r, inset_b).
+/// Returns a `ShapeTextBody` =
+/// `(blocks, anchor, autofit, vert, inset_l, inset_t, inset_r, inset_b)`.
 ///
 /// Per ECMA-376 §21.1.2.1.1, lIns/tIns/rIns/bIns are the distance from
 /// the rendered (page-space) bounding-box edge to the text, measured in
@@ -5427,15 +5444,7 @@ fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
-) -> (
-    Vec<ShapeText>,
-    Option<String>,
-    Option<String>,
-    f64,
-    f64,
-    f64,
-    f64,
-) {
+) -> ShapeTextBody {
     let txbx = wsp
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "txbx");
@@ -5445,6 +5454,12 @@ fn parse_shape_text_body(
 
     let anchor = body_pr
         .and_then(|b| b.attribute("anchor"))
+        .map(|s| s.to_string());
+    // ECMA-376 §20.1.10.83 `<wps:bodyPr vert>` (ST_TextVerticalType) — the text
+    // body's flow direction. Carried verbatim; the renderer maps the recognised
+    // values (vert / vert270 / eaVert) and falls unknown ones back to horizontal.
+    let vert = body_pr
+        .and_then(|b| b.attribute("vert"))
         .map(|s| s.to_string());
     // ECMA-376 §21.1.2.1.1 auto-fit: the bodyPr's autofit is a CHILD element,
     // one of <a:noAutofit/> / <a:spAutoFit/> / <a:normAutofit/>. Normalize it to
@@ -5495,7 +5510,7 @@ fn parse_shape_text_body(
         })
         .unwrap_or_default();
 
-    (blocks, anchor, autofit, l, t, r, b)
+    (blocks, anchor, autofit, vert, l, t, r, b)
 }
 
 /// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
@@ -14040,15 +14055,7 @@ mod txbx_inline_image_tests {
         wsp: roxmltree::Node,
         theme: &ThemeColors,
         media_map: &HashMap<String, String>,
-    ) -> (
-        Vec<ShapeText>,
-        Option<String>,
-        Option<String>,
-        f64,
-        f64,
-        f64,
-        f64,
-    ) {
+    ) -> super::ShapeTextBody {
         let mut num_map = NumberingMap::default();
         super::parse_shape_text_body(style_map, &mut num_map, wsp, theme, media_map)
     }
@@ -14099,7 +14106,7 @@ mod txbx_inline_image_tests {
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
 
-        let (blocks, _anchor, _autofit, _l, _t, _r, _b) = parse_shape_text_body(
+        let (blocks, _anchor, _autofit, _vert, _l, _t, _r, _b) = parse_shape_text_body(
             &StyleMap::default(),
             doc.root_element(),
             &ThemeColors::default(),
@@ -14175,6 +14182,49 @@ mod txbx_inline_image_tests {
             Some("sp")
         );
         assert_eq!(autofit_of(wsp(r#"<wps:bodyPr/>"#)), None);
+    }
+
+    /// `parse_shape_text_body` carries the `<wps:bodyPr vert>` attribute
+    /// (ECMA-376 §20.1.10.83 ST_TextVerticalType) verbatim; an absent `vert`
+    /// (or an absent bodyPr) ⇒ None (horizontal). The renderer maps the value.
+    #[test]
+    fn parse_shape_text_body_records_vert_direction() {
+        let wsp = |body_pr: &str| {
+            format!(
+                r#"<wps:wsp
+                     xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                     xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                     <wps:txbx><w:txbxContent><w:p><w:r><w:t>x</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                     {body_pr}
+                   </wps:wsp>"#
+            )
+        };
+        let vert_of = |xml: String| {
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_shape_text_body(
+                &StyleMap::default(),
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .3
+        };
+        assert_eq!(
+            vert_of(wsp(r#"<wps:bodyPr vert="eaVert"/>"#)).as_deref(),
+            Some("eaVert")
+        );
+        assert_eq!(
+            vert_of(wsp(r#"<wps:bodyPr vert="vert270"/>"#)).as_deref(),
+            Some("vert270")
+        );
+        assert_eq!(
+            vert_of(wsp(r#"<wps:bodyPr vert="vert"/>"#)).as_deref(),
+            Some("vert")
+        );
+        // Absent vert ⇒ None (horizontal); absent bodyPr ⇒ None.
+        assert_eq!(vert_of(wsp(r#"<wps:bodyPr/>"#)), None);
+        assert_eq!(vert_of(wsp("")), None);
     }
 
     /// An image-only paragraph (empty text) must NOT be dropped — the prior
