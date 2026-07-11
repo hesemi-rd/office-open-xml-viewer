@@ -10699,6 +10699,19 @@ function drawTableRows(
   // neighbour that owns that gridline consults this cell's spec as the opponent.
   const ctx = state.ctx;
   const dpr = state.dpr;
+  // ECMA-376 §17.4.66 (#815) — physical positions of the grid-line boundaries so a
+  // shared interior edge can be SUBDIVIDED at neighbour-cell boundaries: a merged
+  // cell (gridSpan/vMerge) faces several finer neighbours along one edge, and each
+  // sub-segment must be resolved against its OWN opposing cell. colOff/rowOff are
+  // LTR cumulative sizes; colBoundaryX folds the bidiVisual flip (§17.4.1), while
+  // row positions are never mirrored.
+  const colOff: number[] = [0];
+  for (const cw of colWidths) colOff.push(colOff[colOff.length - 1] + cw);
+  const rowOff: number[] = [0];
+  for (const rh of rowHeights) rowOff.push(rowOff[rowOff.length - 1] + rh);
+  const colBoundaryX = (c: number): number =>
+    mirror ? tableX + tableW - colOff[c] : tableX + colOff[c];
+  const rowBoundaryY = (r: number): number => startY + rowOff[r];
   for (const j of jobs) {
     const { x, y, w, h } = j;
     const own = resolveCellEdges(j.cell.borders, table.borders, j.edges, mirror);
@@ -10724,61 +10737,77 @@ function drawTableRows(
       const spec = paintable(own.left?.spec ?? null);
       if (spec) drawBorderLine(ctx, x, y, x, y + h, spec, scale, dpr);
     }
-    // BOTTOM: outer bottom → own spec; interior → resolve vs the below neighbour's
+    // BOTTOM: outer bottom → own spec; interior → resolve vs each below neighbour's
     // top and draw the winner (this ABOVE cell owns the shared horizontal line).
-    {
+    if (j.edges.bottomRow) {
+      // Mid-row page cut (fidelity round, measured ground truth): the cut is
+      // a SHARED horizontal edge between this piece's cell bottom and the
+      // continuation piece's cell top on the next page — resolve it with the
+      // ordinary §17.4.66 conflict against a SYNTHETIC continuation sibling
+      // built from the SAME source-row cell specs, whose top resolves as the
+      // next slice-table's OUTER top (cell.top ?? table.top). This explains
+      // both measured classes: none ∨ single → single (the form label column
+      // with no bottom border still shows the full-width cut rule), and a
+      // borderless table draws nothing. The sibling exists only here — it is
+      // never inserted into pagination, fragments, or occupancy — and the
+      // continuation piece still draws its own outer top on its page.
+      // Row-boundary cuts carry no marker and keep the plain outer bottom.
       let spec: BorderSpec | null;
-      let x1 = x;
-      let x2 = x + w;
-      if (j.edges.bottomRow) {
-        // Mid-row page cut (fidelity round, measured ground truth): the cut is
-        // a SHARED horizontal edge between this piece's cell bottom and the
-        // continuation piece's cell top on the next page — resolve it with the
-        // ordinary §17.4.66 conflict against a SYNTHETIC continuation sibling
-        // built from the SAME source-row cell specs, whose top resolves as the
-        // next slice-table's OUTER top (cell.top ?? table.top). This explains
-        // both measured classes: none ∨ single → single (the form label column
-        // with no bottom border still shows the full-width cut rule), and a
-        // borderless table draws nothing. The sibling exists only here — it is
-        // never inserted into pagination, fragments, or occupancy — and the
-        // continuation piece still draws its own outer top on its page.
-        // Row-boundary cuts carry no marker and keep the plain outer bottom.
-        const cutRow = table.rows[j.lastRi] as DocTableRow & { pageCutBottom?: boolean };
-        if (cutRow?.pageCutBottom === true) {
-          const siblingTop = resolveCellEdges(
-            j.cell.borders,
-            table.borders,
-            { ...j.edges, topRow: true },
-            mirror,
-          ).top;
-          spec = resolveSharedEdge(own.bottom, siblingTop);
-        } else {
-          spec = paintable(own.bottom?.spec ?? null);
-        }
+      const cutRow = table.rows[j.lastRi] as DocTableRow & { pageCutBottom?: boolean };
+      if (cutRow?.pageCutBottom === true) {
+        const siblingTop = resolveCellEdges(
+          j.cell.borders,
+          table.borders,
+          { ...j.edges, topRow: true },
+          mirror,
+        ).top;
+        spec = resolveSharedEdge(own.bottom, siblingTop);
       } else {
-        const below = neighbourJob(jobs, occupancy, j.lastRi + 1, j.ci);
-        const belowEdges = below ? resolveCellEdges(below.cell.borders, table.borders, below.edges, mirror) : null;
-        const winner = resolveBorderConflict(own.bottom, belowEdges?.top ?? null);
-        spec = winner ? paintable(winner.spec) : null;
-        if (winner && below && winner === belowEdges?.top) {
-          x1 = below.x;
-          x2 = below.x + below.w;
-        }
+        spec = paintable(own.bottom?.spec ?? null);
       }
-      if (spec) drawBorderLine(ctx, x1, y + h, x2, y + h, spec, scale, dpr);
+      if (spec) drawBorderLine(ctx, x, y + h, x + w, y + h, spec, scale, dpr);
+    } else {
+      // ECMA-376 §17.4.66 (#815) — the shared horizontal edge below this cell may
+      // face SEVERAL finer below-cells (this cell is wider via gridSpan). Subdivide
+      // the edge at the below-cells' column boundaries and resolve EACH sub-segment
+      // against its OWN below neighbour, drawing a per-segment winner rather than
+      // resolving the whole edge against the span-origin neighbour alone.
+      const belowRi = j.lastRi + 1;
+      let cj = j.ci;
+      while (cj < j.ci + j.span) {
+        const idx = occupancy[belowRi][cj];
+        let cEnd = cj + 1;
+        while (cEnd < j.ci + j.span && occupancy[belowRi][cEnd] === idx) cEnd++;
+        const below = neighbourJob(jobs, occupancy, belowRi, cj);
+        const belowEdges = below
+          ? resolveCellEdges(below.cell.borders, table.borders, below.edges, mirror)
+          : null;
+        const spec = resolveSharedEdge(own.bottom, belowEdges?.top ?? null);
+        if (spec) drawBorderLine(ctx, colBoundaryX(cj), y + h, colBoundaryX(cEnd), y + h, spec, scale, dpr);
+        cj = cEnd;
+      }
     }
     // PHYSICAL RIGHT: outer-right → own spec; interior → resolve vs the physically-
-    // right neighbour's left and draw the winner (this cell owns the shared
-    // vertical line as its physical right edge — so each line is drawn once).
-    {
-      let spec: BorderSpec | null;
-      if (physRightOuter) {
-        spec = paintable(own.right?.spec ?? null);
-      } else {
-        const right = neighbourEdges(jobs, occupancy, j.ri, physRightCi, mirror, table.borders);
-        spec = resolveSharedEdge(own.right, right?.left ?? null);
-      }
+    // right neighbour's left and draw the winner (this cell owns the shared vertical
+    // line as its physical right edge — so each line is drawn once).
+    if (physRightOuter) {
+      const spec = paintable(own.right?.spec ?? null);
       if (spec) drawBorderLine(ctx, x + w, y, x + w, y + h, spec, scale, dpr);
+    } else {
+      // ECMA-376 §17.4.66 (#815) — a vMerge cell's physical-right edge may face
+      // SEVERAL finer right-neighbours down the rows it spans. Subdivide the edge at
+      // those neighbours' row boundaries and resolve EACH sub-segment against its OWN
+      // neighbour's facing (left) edge, drawing a per-segment winner.
+      let rj = j.ri;
+      while (rj <= j.lastRi) {
+        const idx = occupancy[rj][physRightCi];
+        let rEnd = rj;
+        while (rEnd + 1 <= j.lastRi && occupancy[rEnd + 1][physRightCi] === idx) rEnd++;
+        const right = neighbourEdges(jobs, occupancy, rj, physRightCi, mirror, table.borders);
+        const spec = resolveSharedEdge(own.right, right?.left ?? null);
+        if (spec) drawBorderLine(ctx, x + w, rowBoundaryY(rj), x + w, rowBoundaryY(rEnd + 1), spec, scale, dpr);
+        rj = rEnd + 1;
+      }
     }
   }
   return y;
