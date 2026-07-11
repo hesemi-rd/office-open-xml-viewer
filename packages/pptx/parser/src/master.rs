@@ -15,13 +15,13 @@ use crate::text::{
     merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
     read_level_font_sizes, read_level_indents, LevelBullets, LevelFontSizes, LevelIndents,
 };
-use crate::theme::{bake_clr_map, parse_theme_colors};
+use crate::theme::{bake_clr_map, parse_theme_colors, PptxSchemeResolver};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, build_smartart_drawings, child, find_rel_target_by_type,
     note_layout_master_parse, parse_rels, read_zip_str, resolve_path, PptxZip,
 };
-use ooxml_common::blip::{mime_from_ext, parse_src_rect, SrcRect};
+use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, Duotone, SrcRect};
 use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
@@ -127,6 +127,10 @@ pub(crate) struct InheritedBlipFill {
     pub(crate) mime_type: String,
     pub(crate) src_rect: Option<SrcRect>,
     pub(crate) alpha: Option<f64>,
+    /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour on the layout placeholder's
+    /// blipFill, resolved through the theme. Inherited onto the slide picture
+    /// placeholder that omits its own blipFill (see `shape.rs`).
+    pub(crate) duotone: Option<Duotone>,
 }
 
 impl LayoutPlaceholders {
@@ -1171,6 +1175,13 @@ pub(crate) fn parse_layout_placeholders(
                 mime_type,
                 src_rect: parse_src_rect(bf),
                 alpha: parse_blip_alpha(bf),
+                // §20.1.8.23 duotone on the layout placeholder blipFill, resolved
+                // through the theme; inherited onto the slide picture placeholder.
+                duotone: parse_blip_duotone(
+                    bf,
+                    &PptxSchemeResolver { theme },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                ),
             })
         });
 

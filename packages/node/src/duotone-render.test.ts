@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderSlideNode } from './render';
 import type { NodeCanvasFactory } from './render';
-import type { Presentation, Slide, PictureElement } from '@silurus/ooxml-pptx';
+import type { Presentation, Slide, PictureElement, ImageFill } from '@silurus/ooxml-pptx';
 import { loadSkiaForTests } from './test-imports';
 
 // End-to-end pixel check for the DrawingML `<a:duotone>` recolour (§20.1.8.23)
@@ -53,6 +53,28 @@ function buildDuotoneSlide(duotone?: { clr1: string; clr2: string }): Presentati
     ...(duotone ? { duotone } : {}),
   };
   const slide: Slide = { index: 0, slideNumber: 1, background: null, elements: [pic] };
+  return {
+    slideWidth: px(400),
+    slideHeight: px(400),
+    slides: [slide],
+    defaultTextColor: null,
+    majorFont: null,
+    minorFont: null,
+  };
+}
+
+/** A slide whose whole-slide BACKGROUND is a stretched picture fill
+ *  (`Fill::Image`, §20.1.8.14), carrying (or not) a `<a:duotone>` recolour —
+ *  the latent path wired by issue #889. No elements: the background IS the ink. */
+function buildDuotoneBackgroundSlide(duotone?: { clr1: string; clr2: string }): Presentation {
+  const px = (n: number) => Math.round(n * EMU_PER_PX);
+  const background: ImageFill = {
+    fillType: 'image',
+    imagePath: PIC_IMAGE_PATH,
+    mimeType: 'image/png',
+    ...(duotone ? { duotone } : {}),
+  };
+  const slide: Slide = { index: 0, slideNumber: 1, background, elements: [] };
   return {
     slideWidth: px(400),
     slideHeight: px(400),
@@ -143,6 +165,44 @@ describe.skipIf(!skia)('node duotone picture rendering (§20.1.8.23)', () => {
     expect(Math.abs(dd[i + 2] - expected[2])).toBeLessThan(10);
     // Sanity: the recolour actually happened (moved away from neutral grey) and
     // is a pink (red channel dominant), matching the clr2 endpoint hue.
+    expect(dd[i]).toBeGreaterThan(dd[i + 1]);
+    expect(dd[i]).toBeGreaterThan(dd[i + 2]);
+    expect(Math.abs(dd[i] - 128)).toBeGreaterThan(15);
+  });
+
+  it('remaps a picture-FILL background along the luminance ramp (#889)', async () => {
+    // Same ramp math as the picture case, but the duotone rides a shape/background
+    // picture fill (Fill::Image) rather than a <p:pic>. This is the latent path
+    // #889 wires: before the fix the background decoded through the plain cache
+    // and stayed neutral grey.
+    const src = [128, 128, 128];
+    const t = luminance601(src[0], src[1], src[2]);
+    const clr1 = [0x00, 0x00, 0x00]; // black
+    const clr2 = [0xda, 0xb6, 0xba]; // light pink
+    const expected = clr1.map((d, i) => Math.round(d + (clr2[i] - d) * t));
+
+    const pngBytes = await flatPngBytes(16, 16, '#808080');
+    const plain = await renderToRgba(buildDuotoneBackgroundSlide(), pngBytes);
+    const duo = await renderToRgba(
+      buildDuotoneBackgroundSlide({ clr1: '000000', clr2: 'DAB6BA' }),
+      pngBytes,
+    );
+
+    // Sample the slide centre (px 200,200) — covered by the stretched background.
+    const { data: pd, width } = plain;
+    const { data: dd } = duo;
+    const i = (200 * width + 200) * 4;
+
+    // Plain background shows the untouched grey.
+    expect(Math.abs(pd[i] - 128)).toBeLessThan(6);
+    expect(Math.abs(pd[i + 1] - 128)).toBeLessThan(6);
+    expect(Math.abs(pd[i + 2] - 128)).toBeLessThan(6);
+
+    // Duotone background shows the ramp interpolation: a red-dominant pink within
+    // tolerance of the expected duotone value.
+    expect(Math.abs(dd[i] - expected[0])).toBeLessThan(10);
+    expect(Math.abs(dd[i + 1] - expected[1])).toBeLessThan(10);
+    expect(Math.abs(dd[i + 2] - expected[2])).toBeLessThan(10);
     expect(dd[i]).toBeGreaterThan(dd[i + 1]);
     expect(dd[i]).toBeGreaterThan(dd[i + 2]);
     expect(Math.abs(dd[i] - 128)).toBeGreaterThan(15);

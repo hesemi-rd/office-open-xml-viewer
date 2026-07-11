@@ -2,6 +2,7 @@
 // All positions and sizes are in EMUs (English Metric Units).
 
 import type { MathNode } from './math';
+import type { Duotone } from '../image/duotone';
 
 export type PathCmd =
   | { cmd: 'moveTo';     x: number; y: number }
@@ -114,6 +115,14 @@ export interface ImageFill {
   tile?: TileInfo;
   /** `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). Absent = opaque. */
   alpha?: number;
+  /**
+   * ECMA-376 §20.1.8.23 `<a:duotone>` recolour, resolved to its two endpoint
+   * colours (through the slide theme). Absent ⇒ no duotone. When present the
+   * renderer maps the blip's luminance ramp between the two colours (core
+   * `applyDuotone`) — the same recolour a `<p:pic>` duotone applies, wired onto
+   * the picture-FILL path (§20.1.8.14) by issue #889.
+   */
+  duotone?: Duotone;
 }
 
 export interface Shadow {

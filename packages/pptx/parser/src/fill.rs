@@ -8,7 +8,7 @@
 use crate::theme::PptxSchemeResolver;
 use crate::types::*;
 use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec};
-use ooxml_common::blip::mime_from_ext;
+use ooxml_common::blip::{mime_from_ext, parse_blip_duotone};
 use std::collections::HashMap;
 
 /// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node
@@ -167,14 +167,26 @@ pub(crate) fn parse_fill(
 ///
 /// When neither child is present the blip defaults to full-box placement
 /// (stretch with no fillRect).
+///
+/// `theme` resolves the `<a:duotone>` (§20.1.8.23) endpoint colours through the
+/// slide palette (PowerPoint linear tint), so a picture FILL recolours exactly
+/// like a `<p:pic>` picture element does.
 pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     blip_fill: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
     resolve_blip: &mut F,
 ) -> Option<Fill> {
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
     let image_path = resolve_blip(&r_id)?;
     let mime_type = mime_from_ext(&image_path).to_owned();
     let alpha = parse_blip_alpha(blip_fill);
+    // §20.1.8.23 duotone recolour, resolved through the theme with PowerPoint's
+    // linear tint (same call the `<p:pic>` paths use). `None` ⇒ no effect.
+    let duotone = parse_blip_duotone(
+        blip_fill,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
     // §20.1.8.58 tile takes precedence when present (stretch/tile are an
     // either-or choice in CT_BlipFillProperties).
     if let Some(tile_node) = child(blip_fill, "tile") {
@@ -184,6 +196,7 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
             fill_rect: None,
             tile: Some(parse_tile(tile_node)),
             alpha,
+            duotone,
         });
     }
     let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
@@ -193,6 +206,7 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
         fill_rect,
         tile: None,
         alpha,
+        duotone,
     })
 }
 
@@ -560,7 +574,7 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
         // first so the embedded blip is resolved; fall back to the generic
         // solid/gradient/pattern parser for non-image bgPr fills.
         if let Some(blip_fill) = child(bg_pr, "blipFill") {
-            if let Some(fill) = parse_blip_fill(blip_fill, resolve_blip) {
+            if let Some(fill) = parse_blip_fill(blip_fill, theme, resolve_blip) {
                 return Some(fill);
             }
         }

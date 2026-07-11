@@ -1182,9 +1182,13 @@ async function renderBackground(
     try {
       // Size the metafile raster from the fill box (canvasW/H are CSS px;
       // scale is px-per-EMU, so px/scale = EMU, /PT_TO_EMU = pt).
-      const bitmap = await getCachedBitmapByPath(
+      // §20.1.8.23 duotone recolour on the raster blip (issue #889): route
+      // through the shared duotone cache (keyed by path + colours). No duotone ⇒
+      // this is exactly the former `getCachedBitmapByPath` decode, byte-identical.
+      const bitmap = await getCachedDuotoneBitmapByPath(
         fill.imagePath,
         fill.mimeType,
+        fill.duotone,
         fetchImage,
         {
           widthPt: canvasW / scale / PT_TO_EMU,

@@ -1698,13 +1698,11 @@ pub(crate) fn parse_sp_tree_node(
                                     prst_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
-                                    // An inherited layout-placeholder blipFill
-                                    // (LayoutPlaceholders::lookup_blip_fill) does not
-                                    // yet carry a `<a:duotone>`; picture placeholders
-                                    // with a duotone are rare, so None matches prior
-                                    // behaviour (thread it through BlipFill if a
-                                    // sample needs it, alongside svg_image_path above).
-                                    duotone: None,
+                                    // §20.1.8.23 duotone inherited from the layout
+                                    // placeholder's blipFill (resolved through the
+                                    // theme in InheritedBlipFill); the PictureElement
+                                    // render applies it via the shared core cache.
+                                    duotone: bf.duotone,
                                     cust_geom: None,
                                     shadow: None,
                                     inner_shadow: None,

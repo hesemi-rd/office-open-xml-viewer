@@ -686,6 +686,14 @@ pub(crate) enum Fill {
         /// `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). None = opaque.
         #[serde(skip_serializing_if = "Option::is_none")]
         alpha: Option<f64>,
+        /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour effect, resolved to its two
+        /// endpoint colours through the slide theme (PowerPoint linear tint).
+        /// `None` = no duotone. When present the renderer maps the blip's
+        /// luminance ramp between the two colours (core `applyDuotone`), matching
+        /// how a `<p:pic>` duotone recolours — a shared blip effect that a
+        /// picture FILL (§20.1.8.14) may carry just as a picture element can.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duotone: Option<Duotone>,
     },
 }
 

@@ -1787,6 +1787,7 @@ mod tests {
             fill_rect: None,
             tile: None,
             alpha: None,
+            duotone: None,
         };
         let json = serde_json::to_string(&fill).unwrap();
         assert!(
@@ -2288,6 +2289,7 @@ mod tests {
                 fill_rect,
                 tile,
                 alpha,
+                duotone: _,
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");
                 assert_eq!(mime_type, "image/jpeg");
@@ -2297,6 +2299,71 @@ mod tests {
                 assert!(is_zero_f64(&fr.l) && is_zero_f64(&fr.r));
                 assert!(tile.is_none(), "stretch fill must not carry tile");
                 assert!((alpha.expect("alpha") - 0.8).abs() < 1e-6);
+            }
+            other => panic!("expected Fill::Image, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 §20.1.8.23 — a background `<a:blipFill>` whose `<a:blip>` carries
+    /// a `<a:duotone>` surfaces the resolved endpoint colours onto
+    /// `Fill::Image.duotone` (through the theme), so a picture FILL recolours like
+    /// a `<p:pic>`. Guards issue #889 (duotone was latent on the Fill::Image path).
+    #[test]
+    fn test_parse_background_blip_fill_duotone() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <p:bg><p:bgPr>
+                <a:blipFill>
+                    <a:blip r:embed="rId2">
+                        <a:duotone>
+                            <a:prstClr val="black"/>
+                            <a:schemeClr val="accent1"/>
+                        </a:duotone>
+                    </a:blip>
+                    <a:stretch><a:fillRect/></a:stretch>
+                </a:blipFill>
+            </p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = HashMap::new();
+        theme.insert("accent1".to_string(), "4472C4".to_string());
+        let mut resolve = |rid: &str| -> Option<String> {
+            assert_eq!(rid, "rId2");
+            Some("ppt/media/image1.png".to_owned())
+        };
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("blip background should resolve to Fill::Image");
+        match fill {
+            Fill::Image { duotone, .. } => {
+                let duo = duotone.expect("duotone must surface on the Fill::Image");
+                assert_eq!(duo.clr1, "000000", "clr1 = black prstClr");
+                assert_eq!(duo.clr2, "4472C4", "clr2 = accent1 resolved from theme");
+            }
+            other => panic!("expected Fill::Image, got {other:?}"),
+        }
+    }
+
+    /// A background `<a:blipFill>` without a `<a:duotone>` leaves
+    /// `Fill::Image.duotone` None, so non-duotone backgrounds stay byte-identical.
+    #[test]
+    fn test_parse_background_blip_fill_without_duotone_is_none() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <p:bg><p:bgPr>
+                <a:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>
+            </p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut resolve =
+            |_rid: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("blip background should resolve to Fill::Image");
+        match fill {
+            Fill::Image { duotone, .. } => {
+                assert!(duotone.is_none(), "duotone must be None when absent");
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
