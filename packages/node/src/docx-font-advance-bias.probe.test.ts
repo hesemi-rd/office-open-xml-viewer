@@ -1,0 +1,204 @@
+/**
+ * Issue #794 acceptance harness — per-font advance-bias model.
+ *
+ * These five criteria must hold SIMULTANEOUSLY once the model lands (issue #794
+ * implementation brief, 2026-07-11):
+ *   1. sample-15 p1 copyright block wraps to Word's 7 lines (Times small print,
+ *      near-zero bias ⇒ the +2.83px marginal word WRAPS; §17.18.44 justify gate).
+ *   3. sample-10 p1 centred title stays on ONE line (Century substituted ⇒ larger
+ *      bias absorbs the +5.96px overflow).
+ *   4. sample-4 paginates to ONE page (Meiryo UI ≈ per-script condensed advance:
+ *      hiragana ~0.78em / katakana ~0.74em vs the substitute's 1.0em).
+ * (2 = demo/sample-1 fidelity ratchet and 5 = #796 Thai/Korean corpus are checked
+ *  in the Playwright VRT, not here.)
+ *
+ * Environment: fonts are deliberately NOT registered — this is the absent-font
+ * substitute environment the model must correct. macOS-gated (the VRT reference
+ * environment); skia + WASM gated like the other probes.
+ */
+import { describe, it, expect } from 'vitest';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  installImageBitmapShim,
+  installOffscreenCanvasShim,
+  type NodeCanvasFactory,
+} from './render.ts';
+import { importForTests, loadSkiaForTests } from './test-imports';
+
+const skia = await loadSkiaForTests();
+type Skia = typeof import('skia-canvas');
+const { Canvas, loadImage } = (skia ?? {}) as Skia;
+
+const factory: NodeCanvasFactory = {
+  createCanvas: (w, h) =>
+    new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
+  loadImage: (async (buf: ArrayBuffer | Uint8Array | Buffer) =>
+    loadImage(Buffer.from(buf as Uint8Array))) as unknown as NodeCanvasFactory['loadImage'],
+};
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, '../../..');
+const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
+const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
+const rendererMod = skia
+  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
+  : null;
+
+const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
+const have = (n: number) => existsSync(samplePath(n));
+
+interface Run { text: string; x: number; y: number; w: number; h: number; fontSize: number }
+
+interface RendererMod {
+  parseDocxAvailable?: boolean;
+  paginateDocument: (doc: unknown) => unknown[][];
+  renderDocumentToCanvas: (
+    doc: unknown,
+    canvas: unknown,
+    pageIndex: number,
+    opts: Record<string, unknown>,
+  ) => Promise<void>;
+}
+
+function parse(n: number): unknown {
+  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
+  return parseDocx(readFileSync(samplePath(n)));
+}
+
+/** Page count via the pure paginator (needs the OffscreenCanvas shim). */
+function pageCount(n: number, width = 595): number {
+  const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
+  try {
+    const { paginateDocument } = rendererMod as unknown as RendererMod;
+    return paginateDocument(parse(n)).length;
+  } finally {
+    restore.forEach((r) => r());
+  }
+}
+
+/** A recording ctx proxy over a real skia 2D context: forwards every property /
+ *  method to the real ctx (so `measureText`, transforms, fills all behave as in
+ *  production) but captures each `fillText`/`strokeText` call as a drawn text run
+ *  in ABSOLUTE page coordinates (via the live CTM). Unlike `onTextRun` this also
+ *  captures DrawingML textbox (`wps:txbx`) text, which the copyright block
+ *  (sample-15) and centred title (sample-10) live in. */
+function recordingCtx(real: CanvasRenderingContext2D, sink: Run[]): CanvasRenderingContext2D {
+  return new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop === 'fillText' || prop === 'strokeText') {
+        return (text: string, x: number, y: number, maxW?: number) => {
+          if (text) {
+            const m = target.getTransform();
+            const ax = m.a * x + m.c * y + m.e;
+            const ay = m.b * x + m.d * y + m.f;
+            const w = target.measureText(text).width * m.a;
+            sink.push({ text, x: ax, y: ay, w, h: 0, fontSize: 0 });
+          }
+          return (target[prop as 'fillText'] as (t: string, x: number, y: number, mw?: number) => void)
+            .call(target, text, x, y, maxW as number);
+        };
+      }
+      const v = Reflect.get(target, prop, target);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+    set(target, prop, value) {
+      return Reflect.set(target, prop, value, target);
+    },
+  }) as unknown as CanvasRenderingContext2D;
+}
+
+/** Visual lines of page `page` (0-based), top-to-bottom, each the concatenated
+ *  drawn text sharing a baseline y (captured at the fillText level so textbox
+ *  content is included). Column-aware (splits on gutter x-gaps). */
+async function pageLines(n: number, page: number, width = 595): Promise<string[]> {
+  const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
+  try {
+    const { paginateDocument, renderDocumentToCanvas } = rendererMod as unknown as RendererMod;
+    const doc = parse(n);
+    const pages = paginateDocument(doc);
+    const runs: Run[] = [];
+    const canvas = new Canvas(Math.round(width * 1.5), Math.round(width * 2));
+    const realCtx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const recCtx = recordingCtx(realCtx, runs);
+    // Return the recording ctx from getContext (leave native canvas.width/height
+    // setters intact so skia's private fields are untouched by a Proxy).
+    (canvas as unknown as { getContext: () => unknown }).getContext = () => recCtx;
+    await renderDocumentToCanvas(doc, canvas as unknown as never, page, {
+      width,
+      dpr: 1,
+      prebuiltPages: pages,
+      totalPages: pages.length,
+    });
+    // Column-aware line reconstruction: bucket by baseline y, then within a row
+    // split into separate visual lines wherever x jumps by more than ~15% of the
+    // page width (a column gutter). A 2-column paper (sample-15) otherwise merges
+    // its left/right columns into one string per y.
+    const gap = width * 0.15;
+    const byY = new Map<number, Run[]>();
+    for (const r of runs) {
+      const key = Math.round(r.y);
+      let arr = byY.get(key);
+      if (!arr) { arr = []; byY.set(key, arr); }
+      arr.push(r);
+    }
+    const out: { x: number; y: number; text: string }[] = [];
+    for (const [y, rs] of byY) {
+      const sorted = rs.slice().sort((p, q) => p.x - q.x);
+      let cur: Run[] = [];
+      let lastRight = -Infinity;
+      const flush = () => {
+        if (cur.length) out.push({ x: cur[0].x, y, text: cur.map((r) => r.text).join('') });
+        cur = [];
+      };
+      for (const r of sorted) {
+        if (cur.length && r.x - lastRight > gap) flush();
+        cur.push(r);
+        lastRight = r.x + r.w;
+      }
+      flush();
+    }
+    // Order the reconstructed lines by column (x band) then y: left column top→
+    // bottom, then right column. This keeps a paragraph's lines contiguous.
+    return out
+      .sort((a, b) => (a.x < width * 0.5 ? 0 : 1) - (b.x < width * 0.5 ? 0 : 1) || a.y - b.y)
+      .map((l) => l.text);
+  } finally {
+    restore.forEach((r) => r());
+  }
+}
+
+const macos = process.platform === 'darwin';
+const gate = !!skia && !!docxMod && !!rendererMod && macos;
+
+describe.skipIf(!gate)('issue #794 — per-font advance-bias acceptance', () => {
+  it.skipIf(!have(4))('CRITERION 4: sample-4 paginates to 1 page (Meiryo UI condensed advance)', () => {
+    const pages = pageCount(4);
+    // eslint-disable-next-line no-console
+    console.log(`[#794 C4] sample-4 pageCount = ${pages} (Word: 1)`);
+    expect(pages).toBe(1);
+  });
+
+  // CRITERION 1 (sample-15 #698 narrow justified column) is encoded as the
+  // synthetic Word-verified gate in packages/docx/src/justify-shrink-overshoot.test.ts
+  // (the two `INTERIM (#794 pending)` pins flip to 3 tokens / 2 lines). The real
+  // sample-15 copyright block is a page-bottom-anchored <wps:txbx> that this body
+  // render path does not draw, so it cannot be line-counted here; the synthetic
+  // gate + demo/sample-1 VRT ratchet are its acceptance.
+
+  it.skipIf(!have(10))('CRITERION 3: sample-10 p1 centred title stays on one line', async () => {
+    const lines = await pageLines(10, 0, 595);
+    const norm = (l: string) => l.replace(/\s+/g, '');
+    // Word truth (sample-10.pdf p1): the centred main title is one line:
+    //   「第 11 回横幹連合コンファレンスサンプル原稿」
+    // A substituted MS Mincho over-measures the CJK title by ~+5.96px; Word keeps
+    // it on ONE line, so the model must admit that overflow. Failure mode on main:
+    // the tail 「サンプル原稿」 wraps to a second line.
+    const titleLine = lines.find((l) => norm(l).includes('横幹連合コンファレンスサンプル原稿'));
+    // eslint-disable-next-line no-console
+    console.log(`[#794 C3] sample-10 title one-line? ${!!titleLine}\n` +
+      lines.slice(0, 8).map((l, i) => `  ${i}: ${JSON.stringify(l)}`).join('\n'));
+    expect(titleLine, 'full title 第…コンファレンスサンプル原稿 on a single visual line').toBeTruthy();
+  });
+});

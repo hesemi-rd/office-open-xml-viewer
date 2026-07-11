@@ -22,21 +22,36 @@ interface DrawImageCall {
   w: number;
   h: number;
 }
+interface FillTextCall {
+  text: string;
+  x: number;
+  y: number;
+  font: string;
+  fillStyle: string;
+  scaleX: number;
+  translateX: number;
+}
 function makeRecordingCtx(): {
   ctx: CanvasRenderingContext2D;
   drawImageCalls: DrawImageCall[];
-  fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[];
+  fillTextCalls: FillTextCall[];
 } {
   let font = '10px serif';
   let fillStyle = '#000';
+  let letterSpacing = '0px';
+  let scaleX = 1;
+  let translateX = 0;
+  const stack: { scaleX: number; translateX: number }[] = [];
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const drawImageCalls: DrawImageCall[] = [];
-  const fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[] = [];
+  const fillTextCalls: FillTextCall[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
     get fillStyle() { return fillStyle; },
     set fillStyle(v: string) { fillStyle = v; },
+    get letterSpacing() { return letterSpacing; },
+    set letterSpacing(v: string) { letterSpacing = v; },
     measureText: (s: string) => {
       const p = px();
       return {
@@ -47,10 +62,17 @@ function makeRecordingCtx(): {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {},
+    save() { stack.push({ scaleX, translateX }); },
+    restore() {
+      const saved = stack.pop();
+      if (saved) ({ scaleX, translateX } = saved);
+    },
+    scale(sx: number) { scaleX *= sx; },
+    translate(tx: number) { translateX += tx * scaleX; },
+    beginPath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fillRect() {},
     fillText(text: string, x: number, y: number) {
-      fillTextCalls.push({ text, x, y, font, fillStyle });
+      fillTextCalls.push({ text, x, y, font, fillStyle, scaleX, translateX });
     },
     strokeText() {},
     drawImage(bmp: unknown, x: number, y: number, w: number, h: number) {
@@ -447,6 +469,25 @@ describe('textbox rich text — per-run formatting', () => {
     for (const c of fillTextCalls.filter((t) => t.text.trim().length > 0)) {
       expect(c.font).toContain('"Yu Mincho"');
     }
+  });
+
+  it('condenses Meiryo UI kana in a text box to the same edge layout measures', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const shape = richTextbox([
+      {
+        text: 'ひら漢',
+        fontSizePt: 10,
+        fontFamily: 'Meiryo UI',
+        fontFamilyEastAsia: 'Meiryo UI',
+      },
+    ]);
+    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
+
+    const kana = fillTextCalls.find((call) => call.text === 'ひら');
+    const kanji = fillTextCalls.find((call) => call.text === '漢');
+    expect(kana?.scaleX).toBeCloseTo(0.7775, 9);
+    const paintedRight = kana!.translateX + kana!.scaleX * (kana!.x + 2 * 10);
+    expect(paintedRight).toBeCloseTo(kanji!.x + kanji!.translateX, 6);
   });
 });
 

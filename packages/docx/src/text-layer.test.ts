@@ -156,4 +156,29 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     // Ordinary run: no transform at all (horizontal page), so no scaleX sneaks in.
     expect(layer.children[0].style.transform ?? '').toBe('');
   });
+
+  it('scales a horizontal selection span by the composed glyph scale', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'ひら', glyphScaleX: 0.7775 })];
+
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 100, 100);
+
+    expect(layer.children[0].style.transform).toBe('scaleX(0.7775)');
+    expect(layer.children[0].style.cssText).toContain('transform-origin:top left');
+  });
+
+  it('keeps the existing eastAsianVert scale branch authoritative', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({
+      text: '２９', w: 7, fontSize: 7, eastAsianVert: true,
+      transform: 'rotate(90deg)', glyphScaleX: 0.25,
+    })];
+    const measureForFont = () => (s: string) => [...s].length * 7;
+
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 1, 1, undefined, measureForFont);
+
+    expect(layer.children[0].style.transform).toBe('rotate(90deg) scaleX(0.5)');
+  });
 });

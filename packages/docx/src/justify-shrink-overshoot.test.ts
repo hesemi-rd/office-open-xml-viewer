@@ -8,11 +8,13 @@ import type {
   SectionProps,
 } from './types';
 
-// ECMA-376 §17.18.44 (ST_Jc `both`/`distribute`) — the Knuth-Plass space-shrink
-// fit tolerance (`SPACE_SHRINK_RATIO`) ideally must NOT admit an extra word onto
-// a line that the draw pass will JUSTIFY, and must remain available on a line the
-// draw pass treats as non-justified. The per-line gate that mirrored the paint
-// predicate is currently disabled as an interim measure:
+// Word-observed `both`/`distribute` line-fit behavior (issue #698 PDF) — the
+// Knuth-Plass space-shrink drawable-space tolerance (`SPACE_SHRINK_RATIO`) must
+// NOT admit an extra word onto a line that the draw pass will justify, and must
+// remain available on a line the draw pass treats as non-justified. §17.18.44
+// classifies ST_Jc values but does not mandate this fit gate. A separate per-font
+// bias applies exclusively on justified lines; this synthetic `serif` face has
+// zero bias:
 //
 // - A line that WILL justify (a non-final, non-manual-break line of a
 //   `both`/kashida paragraph, or ANY line of `distribute`/`thaiDistribute`)
@@ -24,15 +26,13 @@ import type {
 // - A line the draw pass does NOT justify — the paragraph's true last line and a
 //   line ending at a manual `<w:br/>` (§17.3.3.1) under `both`/kashida, and every
 //   line of a non-justified paragraph — is drawn with the shrink-fit compression
-//   the budget promises (`shrinkFitCompression`), so the measurement-bias
-//   tolerance stays: measure and paint spend the SAME budget (measure==paint).
-// - The current uniform tolerance also compensates for per-font advance bias
-//   between browser measurement and Word. The tracked public Latin demo, whose
-//   `docDefaults` use `w:jc="both"`, matches Word only with that tolerance. Until
-//   issue #794 supplies a per-font advance-bias model, that ground truth cannot
-//   coexist with #698 under one ratio, so the public demo takes interim priority.
-//   Once #794 lands, restore the §17.18.44 gate and the Word-verified expectations
-//   below (3 tokens on the first line, across 2 lines).
+//   the budget promises (`shrinkFitCompression`).
+// - The allowances are exclusive per line: justified lines receive only the
+//   Canvas-vs-Word face bias; non-justified lines receive only drawable trailing-
+//   space shrink. Demo p3/p6 space-collapse evidence shows that adding both
+//   double-counts tolerance and admits words the paint pass cannot fit. Georgia
+//   retains its calibrated bias on justified demo lines; generic `serif` and
+//   Times remain at zero for the #698 natural-fit gate.
 
 const FONT_PX = 12; // linear stub: each code point advances FONT_PX at scale 1
 
@@ -76,11 +76,11 @@ function makeLinearCanvas(): HTMLCanvasElement {
   return canvas as unknown as HTMLCanvasElement;
 }
 
-function textRun(text: string): DocxTextRun {
+function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocxTextRun {
   return {
     text, bold: false, italic: false, underline: false, strikethrough: false,
     fontSize: FONT_PX, color: null, fontFamily: 'serif', isLink: false, background: null,
-    vertAlign: null, hyperlink: null,
+    vertAlign: null, hyperlink: null, ...extra,
   };
 }
 
@@ -151,24 +151,20 @@ const TEXT4 = 'AAAA AAAA AAAA AAAA';      // marginal word is the paragraph-FINA
 const TEXT5 = 'AAAA AAAA AAAA AAAA AAAA'; // marginal word is followed by more content
 const COLUMN = 225;
 
-describe('§17.18.44 — interim uniform space-shrink fit tolerance (#794 pending)', () => {
-  it('INTERIM (#794 pending): admits the marginal word on a line that will justify', async () => {
+describe('§17.18.44 — per-font advance bias and drawable space shrink', () => {
+  it('wraps the marginal word on a line that will justify', async () => {
     // Word PDF ground truth for #698's narrow justified column still shows a
-    // natural-fit break (3 tokens). That cannot currently coexist with the
-    // tracked public Latin demo (`docDefaults w:jc="both"`), whose wrapping
-    // matches Word only with the uniform measurement-bias tolerance. The interim
-    // decision favors the public demo GT, so the tolerance admits token 4. Issue
-    // #794's per-font advance-bias correction will let the §17.18.44 gate return
-    // and this expectation flip back to Word's verified 3 tokens across 2 lines.
+    // natural-fit break (3 tokens). Generic `serif` has no per-font bias, and
+    // this line will justify, so it gets no drawable-space budget either.
     const lines = await renderLines(textPara(TEXT5, 'both'), COLUMN);
     expect(lines.length).toBe(2);
-    expect(tokens(lines[0])).toBe(4);
+    expect(tokens(lines[0])).toBe(3);
   });
 
-  it('keeps the SAME marginal word on a non-justified line (bias tolerance retained)', async () => {
+  it('keeps the SAME marginal word on a non-justified line (drawable shrink retained)', async () => {
     // left/center lines are drawn at (or compressed toward) natural spacing, so
-    // the 3px overflow is absorbed as measurement bias — this is what keeps a
-    // substituted-font centred title on a single row (sample-10 p1 class).
+    // the 3px overflow is absorbed by drawable trailing-space compression. The
+    // same path guards centred single-line titles such as sample-10 p1.
     for (const alignment of ['left', 'center'] as const) {
       const lines = await renderLines(textPara(TEXT5, alignment), COLUMN);
       expect(lines.length, alignment).toBe(2);
@@ -204,22 +200,33 @@ describe('§17.18.44 — interim uniform space-shrink fit tolerance (#794 pendin
     expect(lines[1]).toContain('BBBB');
   });
 
-  it('INTERIM (#794 pending): keeps the uniform budget on a `distribute` last line', async () => {
+  it('wraps the marginal word on a `distribute` last line', async () => {
     // Word PDF ground truth for #698 still requires the natural-fit break here:
     // §17.18.44 `distribute` stretches the final line, yielding 3 tokens across
-    // 2 lines. Under the current single-ratio model that conflicts with the
-    // tracked public Latin demo (`docDefaults w:jc="both"`), whose Word wrapping
-    // requires the uniform measurement-bias tolerance. The interim decision
-    // favors that public demo GT, so all 4 tokens fit on one line. Issue #794's
-    // per-font advance-bias correction is the principled fix; then the justified
-    // per-line gate returns and this flips back to Word's verified 3 / 2 result.
+    // 2 lines. `distribute` stretches even the logical last line, so the
+    // drawable-space budget is suppressed; generic `serif` contributes no bias.
     const lines = await renderLines(textPara(TEXT4, 'distribute'), COLUMN);
-    expect(lines.length).toBe(1);
-    expect(tokens(lines[0])).toBe(4);
+    expect(lines.length).toBe(2);
+    expect(tokens(lines[0])).toBe(3);
   });
 
   it('does not force a wrap when the justified content genuinely fits at natural width', async () => {
     const lines = await renderLines(textPara(TEXT4, 'both'), 240);
     expect(lines.length).toBe(1);
+  });
+
+  it('scales the justified Georgia bias budget by authored w:w', async () => {
+    const el = para(
+      [{
+        type: 'text',
+        ...textRun('AAAA AAAA AAAA AAAA', { fontFamily: 'Georgia', charScale: 0.5 }),
+      } as DocRun],
+      'both',
+    );
+
+    // Natural end = 84px. Correct scaled bias = 0.882px (83 + 0.882 < 84)
+    // so the third token wraps; the old unscaled 1.764px budget over-admitted it.
+    const lines = await renderLines(el, 83);
+    expect(tokens(lines[0])).toBe(2);
   });
 });

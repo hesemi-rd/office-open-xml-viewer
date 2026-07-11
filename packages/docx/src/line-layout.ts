@@ -44,6 +44,8 @@ import {
   parseFieldFormatSwitch,
   formatDateTimePicture,
   parseDateTimePictureSwitch,
+  splitFontAdvanceRuns,
+  fontAdvanceBiasEm,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
@@ -144,6 +146,14 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  under `ctx.scale(charScale, 1)`; decorations follow the scaled extent.
    *  Absent ⇒ 1 (100%). */
   charScale?: number;
+  /** Candidate horizontal advance scale harvested for the requested family.
+   *  {@link layoutLines} resolves it against the host's actual face resolution
+   *  before any width is measured. Absent for vertical CJK and ruby bases. */
+  fontAdvanceScaleCandidate?: number;
+  /** Resolved horizontal font-advance scale. A full-width substitute keeps the
+   *  candidate; an installed condensed face resolves to 1. Paint reads this
+   *  stamp directly, so it never performs a second face-resolution probe. */
+  fontAdvanceScale?: number;
   /** ECMA-376 §17.3.2.14 `<w:fitText>` — target width in TWIPS and optional
    *  link id (wire strings plus numeric synthetic inputs). All segments emitted
    *  from one tab-delimited source-run fragment retain the same fragment/region
@@ -829,6 +839,63 @@ export function charScaleFactor(seg: LayoutTextSeg): number {
   return seg.charScale ?? 1;
 }
 
+/**
+ * Horizontal glyph scale composed from the authored §17.3.2.43 `w:w` value and
+ * the requested face's real per-script advance profile. `buildSegments` splits
+ * tabled fonts into homogeneous scale runs, so one Canvas transform reproduces
+ * the same correction in measure and paint without per-glyph shaping loss.
+ */
+export function segGlyphScaleFactor(seg: LayoutTextSeg): number {
+  return charScaleFactor(seg) * (seg.fontAdvanceScale ?? 1);
+}
+
+const FONT_ADVANCE_PROBE_TEXT = 'あアかカ';
+const FONT_ADVANCE_PROBE_PX = 100;
+const FULL_WIDTH_SUBSTITUTE_MIN_EM = 0.92;
+const fontAdvanceSubstitutionProbeCache = new Map<string, boolean>();
+
+/** Clear host-face probe results. Production callers do not need this; tests
+ *  use it when swapping synthetic measuring contexts in one module instance. */
+export function resetFontAdvanceSubstitutionProbeCache(): void {
+  fontAdvanceSubstitutionProbeCache.clear();
+}
+
+/** Resolve candidate family profiles against the face Canvas actually selected.
+ *  A real Meiryo UI face already exposes condensed kana advances, while its
+ *  common substitute is full-width. Probe once per normalized Canvas font string
+ *  and stamp the result onto the segment before fitText or line measurement. */
+function resolveFontAdvanceScaleCandidates(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  segments: readonly LayoutTextSeg[],
+  fontFamilyClasses: Record<string, string>,
+): void {
+  const previousFont = ctx.font;
+  try {
+    for (const segment of segments) {
+      const candidate = segment.fontAdvanceScaleCandidate;
+      if (candidate === undefined) continue;
+      const probeFont = buildFont(
+        false,
+        false,
+        FONT_ADVANCE_PROBE_PX,
+        segment.fontFamily,
+        fontFamilyClasses,
+      );
+      let fullWidthSubstitute = fontAdvanceSubstitutionProbeCache.get(probeFont);
+      if (fullWidthSubstitute === undefined) {
+        ctx.font = probeFont;
+        const perGlyphEm = ctx.measureText(FONT_ADVANCE_PROBE_TEXT).width
+          / ([...FONT_ADVANCE_PROBE_TEXT].length * FONT_ADVANCE_PROBE_PX);
+        fullWidthSubstitute = perGlyphEm >= FULL_WIDTH_SUBSTITUTE_MIN_EM;
+        fontAdvanceSubstitutionProbeCache.set(probeFont, fullWidthSubstitute);
+      }
+      segment.fontAdvanceScale = fullWidthSubstitute ? candidate : 1;
+    }
+  } finally {
+    ctx.font = previousFont;
+  }
+}
+
 /** Canonical advance formula for a text string in a run: natural glyph width
  *  scaled by ECMA-376 §17.3.2.43 `<w:w>`, plus the §17.6.5 character-grid
  *  delta, plus one ECMA-376 §17.3.2.35 `<w:spacing>` pitch per code point. */
@@ -879,7 +946,7 @@ export function segAdvanceWidth(
   if (seg.fitTextPerGapPx !== undefined) {
     const charCount = [...seg.text].length;
     const gapCount = seg.fitTextRegionEnd ? Math.max(0, charCount - 1) : charCount;
-    return naturalWidthPx * charScaleFactor(seg)
+    return naturalWidthPx * segGlyphScaleFactor(seg)
       + gapCount * seg.fitTextPerGapPx
       + (seg.fitTextTrailingPadPx ?? 0);
   }
@@ -898,7 +965,7 @@ export function segAdvanceWidth(
     naturalWidthPx,
     seg.text,
     segmentDelta,
-    charScaleFactor(seg),
+    segGlyphScaleFactor(seg),
     charSpacingDeltaPx(seg, scale),
   );
 }
@@ -1890,7 +1957,7 @@ function resolveFitTextSegments(
     let naturalWidthPx = 0;
     let charCount = 0;
     for (const segment of members) {
-      naturalWidthPx += measureNaturalWidthPx(segment) * charScaleFactor(segment);
+      naturalWidthPx += measureNaturalWidthPx(segment) * segGlyphScaleFactor(segment);
       charCount += [...segment.text].length;
     }
 
@@ -2122,7 +2189,22 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         }
         return;
       }
-      pushSeg(word, cs, fontFamily);
+      // The harvested profiles describe horizontal hmtx advances. Vertical CJK
+      // uses full-em cells, so it must retain the pre-profile segmentation and
+      // widths. Ruby annotations ride only the first emitted base segment; a
+      // profile split would detach the annotation from the rest of its base, so
+      // ruby-carrying runs intentionally keep the pre-#794 substitute advances.
+      if (environment.verticalCJK || baseRuby) {
+        pushSeg(word, cs, fontFamily);
+        return;
+      }
+      for (const part of splitFontAdvanceRuns(fontFamily, word)) {
+        const start = segs.length;
+        pushSeg(part.text, cs, fontFamily);
+        if (part.scale !== 1) {
+          (segs[start] as LayoutTextSeg).fontAdvanceScaleCandidate = part.scale;
+        }
+      }
     };
 
     // A non-complex-script slice still mixes scripts at the CJK boundary: emit
@@ -2410,6 +2492,12 @@ export function layoutLines(
   // tabs do not trigger the LTR right/center/overflow wrap paths. Default false
   // ⇒ the LTR tab paths run unchanged (byte-identical output).
   baseRtl = false,
+  // ECMA-376 §17.18.44 paragraph classification. The fit budget is gated per
+  // prospective line with the same predicate the paint pass uses.
+  isJustified = false,
+  // `distribute`/`thaiDistribute` stretch the logical last line; `both` and
+  // kashida modes leave true-last/manual-break lines non-justified.
+  stretchLastLine = false,
   startBoundary?: LineBoundary,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
@@ -2424,6 +2512,9 @@ export function layoutLines(
   //      whether a candidate word fits we treat it as if it would become the
   //      final word (its own trailing spaces collapsible).
   let lineTotalTrailingW = 0;
+  // Incremental Canvas-vs-Word bias of the text already committed to this line.
+  // Candidate checks add only the prospective text, avoiding a hot-loop rescan.
+  let lineBiasBudget = 0;
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
@@ -2466,6 +2557,7 @@ export function layoutLines(
   // Word flows a line that cannot start beside a floating object (there is no
   // ECMA-376 §x.x.x for this trigger — see resolveLineFloatWindow / issue #676).
   const startLine = (minWidth: number = 0): void => {
+    lineBiasBudget = 0;
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
     if (!wrapCtx) return;
@@ -2584,6 +2676,7 @@ export function layoutLines(
     currentLine = [];
     currentWidth = 0;
     lineTotalTrailingW = 0;
+    lineBiasBudget = 0;
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
@@ -2593,6 +2686,12 @@ export function layoutLines(
     isFirst = false;
     startLine(minLineStartWidth());
   };
+
+  const biasBudgetContribution = (s: LayoutTextSeg, text: string = s.text): number =>
+    fontAdvanceBiasEm(s.fontFamily)
+      * calcEffectiveFontPx(s, scale)
+      * charScaleFactor(s)
+      * [...text].length;
 
   const addToLine = (
     s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
@@ -2605,6 +2704,9 @@ export function layoutLines(
     currentLine.push(s);
     currentWidth += w;
     lineTotalTrailingW += trailingSpaceW;
+    if ('text' in s) {
+      lineBiasBudget += biasBudgetContribution(s);
+    }
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
@@ -2720,11 +2822,16 @@ export function layoutLines(
     }
   }
 
+  const queuedTextSegments = queue.filter((seg): seg is LayoutTextSeg => 'text' in seg);
+  // Resolve requested-face advance candidates before fitText derives its natural
+  // width. The resolved stamp is then shared by every measure and paint path.
+  resolveFontAdvanceScaleCandidates(ctx, queuedTextSegments, fontFamilyClasses);
+
   // Resolve §17.3.2.14 from RAW natural advances at this exact layout scale.
   // The resulting per-gap is folded into segAdvanceWidth below, so the line
   // breaker and paint pen use one width authority. Cached w:spacing is ignored.
   resolveFitTextSegments(
-    queue.filter((seg): seg is LayoutTextSeg => 'text' in seg),
+    queuedTextSegments,
     scale,
     (segment) => measureText(segment).width,
   );
@@ -3091,14 +3198,27 @@ export function layoutLines(
     // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
     const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
     const wForFit = w - trailingSpaceW;
-    // INTERIM: use one uniform measurement-bias budget even when the paint pass
-    // fully justifies the line. ECMA-376 §17.18.44 and Word-verified issue #698
-    // say those lines should break at natural fit, but the gate cannot coexist
-    // with the tracked public demo under the current single-ratio font metrics.
-    // Re-enable it after issue #794 adds per-font advance-bias correction. The
-    // #934 `isJustified`/`stretchLastLine` layout plumbing is removed meanwhile
-    // to keep the live API minimal; #794 should re-thread it with the real model.
-    const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
+    // The two fit-tolerance roles are EXCLUSIVE per line, mirroring paint's
+    // per-line predicate `isJustified && (!endsLogicalLine || stretchLastLine)`
+    // (`next` is the first segment after the prospective closing candidate):
+    //
+    //  - A line the paint pass will JUSTIFY stretches to the column edge. Word-
+    //    observed issue #698 behavior admits only the backend-agnostic Canvas-vs-
+    //    Word per-font bias there; the trailing-space allowance is suppressed.
+    //  - A line left NON-justified keeps the classic Knuth-Plass trailing-space
+    //    shrink allowance, whose 25 % promise the draw pass actually spends
+    //    (`shrinkFitCompression`). Demo/sample-1 p3/p6 space-collapse evidence
+    //    shows that ADDING the bias double-counts tolerance and admits words the
+    //    non-justified paint path cannot fit.
+    const shrinkBudgetFor = (next: LayoutSeg | undefined, biasBudget: number): number => {
+      const closesLogicalLine = next === undefined || 'lineBreak' in next;
+      const lineWillJustify = isJustified && (!closesLogicalLine || stretchLastLine);
+      return lineWillJustify ? biasBudget : lineTotalTrailingW * SPACE_SHRINK_RATIO;
+    };
+    const shrinkBudget = shrinkBudgetFor(
+      queue[0],
+      lineBiasBudget + biasBudgetContribution(s, trimmed),
+    );
 
     // Atomic glued group: when THIS segment starts a glued group (its followers
     // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
@@ -3129,6 +3249,17 @@ export function layoutLines(
       let groupW = w;
       let groupTrail = trailingSpaceW;
       let groupEnd = 0;
+      let groupBiasBudget = lineBiasBudget;
+      // Keep one pending member so only the final member is trimmed. Committing
+      // each previous member left-to-right preserves the former prospective-array
+      // summation order exactly, without cloning or rescanning the current line.
+      let pendingGroupBiasSeg = s;
+      let pendingGroupBiasText = s.text;
+      const advanceGroupBias = (member: LayoutTextSeg, text: string = member.text): void => {
+        groupBiasBudget += biasBudgetContribution(pendingGroupBiasSeg, pendingGroupBiasText);
+        pendingGroupBiasSeg = member;
+        pendingGroupBiasText = text;
+      };
       for (; groupEnd < queue.length && (queue[groupEnd] as LayoutTextSeg).joinPrev; groupEnd++) {
         const f = queue[groupEnd] as LayoutTextSeg;
         // A CJK-BREAKABLE follower (e.g. "Roman" + "、あるいは…用いる。") is NOT
@@ -3149,7 +3280,9 @@ export function layoutLines(
             // Breakable rest exists past the leading non-starters: glue only the
             // prefix (it may be empty — then "Roman" is effectively unglued and
             // wraps on its own) and end the atomic group here.
-            groupW += strAdvance(f, chars.slice(0, p).join(''));
+            const prefix = chars.slice(0, p).join('');
+            groupW += strAdvance(f, prefix);
+            if (prefix.length > 0) advanceGroupBias(f, prefix);
             groupTrail = 0;
             break;
           }
@@ -3157,10 +3290,18 @@ export function layoutLines(
         }
         const fw = segAdvance(f);
         groupW += fw;
+        advanceGroupBias(f);
         const ft = f.text.replace(/ +$/, '');
         groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
       }
-      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) {
+      groupBiasBudget += biasBudgetContribution(
+        pendingGroupBiasSeg,
+        pendingGroupBiasText.replace(/ +$/, ''),
+      );
+      if (
+        currentWidth + (groupW - groupTrail)
+        > availW() + shrinkBudgetFor(queue[groupEnd], groupBiasBudget)
+      ) {
         flush(undefined, false, s.src);
       }
     }
@@ -3180,7 +3321,7 @@ export function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), segGlyphScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -3394,7 +3535,7 @@ export function layoutLines(
       const available = availW();
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const allChars = [...s.text];
-      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), segGlyphScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
       if (split < 1) split = 1;
       split = extendThroughTrailingIdeographicSpaces(allChars, split);
       if (split >= allChars.length) {

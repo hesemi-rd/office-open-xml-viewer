@@ -38,8 +38,12 @@ import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
  *                         the browser's own navigation can never bypass the
  *                         caller's URL sanitisation. When omitted, link runs are
  *                         rendered exactly like plain runs (no click affordance).
+ * Horizontal runs carrying `glyphScaleX` compose that factor directly into the
+ * span transform so selection follows condensed Canvas glyphs. The existing
+ * §17.3.2.10 縦中横 branch remains authoritative for eastAsianVert runs.
+ *
  * @param measureForFont   optional width-measurer factory (primed with a run's
- *                         `font`), used ONLY to clamp a §17.3.2.10 縦中横
+ *                         `font`), used to clamp a §17.3.2.10 縦中横
  *                         (eastAsianVert) span to its drawn one-em cell (#836):
  *                         the span composes a `scaleX(run.w / naturalWidth)` so
  *                         its selection extent matches the compressed glyphs
@@ -82,6 +86,8 @@ export function buildDocxTextLayer(
     if (measureForFont && run.eastAsianVert) {
       const k = tateChuYokoOverlayScale(run, measureForFont(run.font));
       if (k !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${k})`;
+    } else if (!run.eastAsianVert && run.glyphScaleX !== undefined && run.glyphScaleX !== 1) {
+      transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${run.glyphScaleX})`;
     }
     const transform = transformValue
       ? `transform:${transformValue};transform-origin:top left;`

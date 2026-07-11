@@ -150,6 +150,7 @@ import {
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
   segAdvanceWidth,
+  segGlyphScaleFactor,
   segLetterSpacingPx,
   shapeRenderState,
   shapeRunToDocRun,
@@ -588,6 +589,10 @@ export interface DocxTextRunInfo {
   /** Uniform per-code-point pitch in CSS px used to draw a horizontal run.
    *  Absent when the pitch is zero or the run uses vertical / 縦中横 paint. */
   letterSpacingPx?: number;
+  /** Composed horizontal glyph transform (`w:w` × resolved font advance
+   *  profile). Horizontal selection/find overlays apply the same scale so their
+   *  natural DOM/text metrics do not overrun the Canvas glyphs. */
+  glyphScaleX?: number;
   /** ECMA-376 §17.6.20 (tbRl) — when the page is vertical the canvas is the
    *  physical landscape page rotated +90° at paint, so this run's `x`/`y` are the
    *  PHYSICAL top-left the overlay span must sit at, and `transform` is the CSS
@@ -6865,6 +6870,10 @@ function resolveFrameBox(
           state.kinsoku,
           gridCharDeltaPx(grid, scale),
           state.defaultTabPt,
+          measureW,
+          paragraphContext.baseRtl,
+          paragraphContext.isJustified,
+          paragraphContext.stretchLastLine,
         );
   const contentW =
     lines.length === 0
@@ -7357,9 +7366,9 @@ function renderParagraph(
     : reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
-      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl)
+      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment))
       : rescaleLayoutLines(
-          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1, baseRtl),
+          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment)),
           scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
         );
 
@@ -8085,7 +8094,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // the glyph draw so paint == measure. §17.3.2.19 `<w:kern>` sets
         // `ctx.fontKerning` to match the measure pass exactly (see line-layout's
         // `setSegKerning`); restored after the glyph block.
-        const segCharScale = s.charScale ?? 1;
+        // Compose authored §17.3.2.43 w:w with the requested font's real
+        // per-script horizontal advance. segAdvanceWidth uses this same factor;
+        // every fixed pitch below is divided inside the scaled frame so paint
+        // reproduces the measured box exactly.
+        const segCharScale = segGlyphScaleFactor(s);
         const segCharSpacingPx = s.fitTextPerGapPx ?? (s.charSpacing ?? 0) * scale;
         const prevFontKerning = ctx.fontKerning;
         if (s.kerning != null) {
@@ -8580,7 +8593,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
               : fullyDistributed
                 ? distPerGap
                 : 0;
-          const measureMark = (str: string): number => ctx.measureText(str).width;
+          // Prefix glyph advances live inside the same composed horizontal
+          // transform as the text. Fixed grid/justify pitches remain in
+          // `markPitch`, outside the scale, mirroring the glyph paint path.
+          const measureMark = (str: string): number =>
+            ctx.measureText(str).width * segCharScale;
           const centers = emphasisMarkCenters(s.text, measureMark, x, markPitch);
           // Above marks sit a small gap above the glyph box top (the same
           // ~0.85em ascent the box decorations use); below marks (underDot) sit
@@ -8639,6 +8656,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const letterSpacingPx = !state.verticalCJK && !s.tateChuYoko
             ? segLetterSpacingPx(s, drawGridDeltaPx, scale)
             : 0;
+          const glyphScaleX = !state.verticalCJK && !s.tateChuYoko
+            ? segGlyphScaleFactor(s)
+            : 1;
           state.onTextRun({
             text: s.text,
             x: place ? place.left : x,
@@ -8648,6 +8668,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             fontSize: effSizePx,
             font: ctx.font,
             ...(letterSpacingPx !== 0 ? { letterSpacingPx } : {}),
+            ...(glyphScaleX !== 1 ? { glyphScaleX } : {}),
             transform: place?.transform,
             // IX1 — hand the resolved hyperlink target to the overlay so a link
             // run becomes clickable. Undefined for non-link runs (no payload
@@ -9607,6 +9628,8 @@ export function measureShapeTextAutoFitHeight(
         effState.defaultTabPt,
         ind.paraW,
         baseRtl,
+        jcIsFullyJustified(b.alignment),
+        jcStretchesLastLine(b.alignment),
       );
       contentH += lines.reduce((sum, line) => sum + lineHeightFor(b, line), 0);
     }
@@ -9898,6 +9921,8 @@ export function renderShapeText(
       effState.defaultTabPt,
       ind.paraW, // marginRightPx: block text has no separate right-indent origin
       baseRtl,
+      jcIsFullyJustified(b.alignment),
+      jcStretchesLastLine(b.alignment),
     );
     const metrics = lines.map((line) => lineMetricsFor(b, line));
     return {
@@ -10243,9 +10268,12 @@ export function renderShapeText(
               glyphDrawX = x + rtlWsShiftPx;
             }
           }
+          // Same composed requested-font + authored w:w scale as the body draw
+          // loop and segAdvanceWidth (measure == paint in text boxes). Fixed
+          // spacing stays outside that glyph scale in every branch below.
+          const segCharScale = segGlyphScaleFactor(s);
+          const segCharSpacingPx = segLetterSpacingPx(s, 0, scale);
           if (kashida) {
-            const segCharScale = s.charScale ?? 1;
-            const segCharSpacingPx = segLetterSpacingPx(s, 0, scale);
             const prevKerning = ctx.fontKerning;
             if (s.kerning != null) {
               ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
@@ -10279,19 +10307,50 @@ export function renderShapeText(
             // the rtl-marked EA-punctuation corner where bidi justification is
             // already approximate. Same argument as the body loop.
             const cps = [...s.text];
+            const scaled = segCharScale !== 1;
+            const originX = scaled ? 0 : x;
+            const prevLetterSpacing = ctx.letterSpacing;
+            if (scaled) {
+              ctx.save();
+              ctx.translate(x, 0);
+              ctx.scale(segCharScale, 1);
+            }
             if (stretch.splitBefore.length === cps.length - 1) {
               // Fully distributed (pure-CJK): uniform pitch via letterSpacing so
               // the contextually-shaped run keeps its packing (PR #626 analog).
-              const prevLetterSpacing = ctx.letterSpacing;
-              ctx.letterSpacing = `${distPerGap}px`;
-              ctx.fillText(s.text, x, baseline + yOffset);
-              ctx.letterSpacing = prevLetterSpacing;
+              ctx.letterSpacing = `${(distPerGap + segCharSpacingPx) / segCharScale}px`;
+              ctx.fillText(s.text, originX, baseline + yOffset);
             } else {
               const measure = (str: string): number => ctx.measureText(str).width;
-              for (const { text: piece, dx } of justifiedPiecePositions(cps, stretch.splitBefore, distPerGap, measure)) {
-                ctx.fillText(piece, x + dx, baseline + yOffset);
+              for (const { text: piece, dx } of justifiedPiecePositions(
+                cps,
+                stretch.splitBefore,
+                distPerGap / segCharScale,
+                measure,
+                segCharSpacingPx / segCharScale,
+              )) {
+                ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
+                ctx.fillText(piece, originX + dx, baseline + yOffset);
               }
             }
+            ctx.letterSpacing = prevLetterSpacing;
+            if (scaled) ctx.restore();
+          } else if (segCharScale !== 1) {
+            ctx.save();
+            ctx.translate(glyphDrawX, 0);
+            ctx.scale(segCharScale, 1);
+            const prevLetterSpacing = ctx.letterSpacing;
+            if (segCharSpacingPx !== 0) {
+              ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
+            }
+            ctx.fillText(glyphText, 0, baseline + yOffset);
+            ctx.letterSpacing = prevLetterSpacing;
+            ctx.restore();
+          } else if (segCharSpacingPx !== 0) {
+            const prevLetterSpacing = ctx.letterSpacing;
+            ctx.letterSpacing = `${segCharSpacingPx}px`;
+            ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
+            ctx.letterSpacing = prevLetterSpacing;
           } else {
             ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
           }
