@@ -2,7 +2,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { layoutDocument } from './document-layout.js';
 import { bodyFragmentFor, computePages } from './renderer.js';
 import { buildTableFragment } from './table-fragments.js';
+import * as layoutFragments from './layout-fragments.js';
 import {
+  paragraphFragmentAdvancePt,
   tableFragmentHeightPt,
   flowFragmentAdvancePt,
   type TableFragment,
@@ -205,8 +207,57 @@ describe('buildTableFragment — pure recursion contract', () => {
       buildCellBlocks: () => [],
     });
     expect(frag.rows.map((r) => r.heightPt)).toEqual([15, 25]);
+    expect(frag.rows.map((r) => r.cells[0].boxHeightPt)).toEqual([15, 25]);
     expect(tableFragmentHeightPt(frag)).toBe(40);
     expect(flowFragmentAdvancePt(frag)).toBe(40);
+  });
+
+  it('sums only fragment-owned ranged paragraph advances and nested-table heights', () => {
+    const rangedParagraph = {
+      kind: 'paragraph',
+      source: para('ignored'),
+      measured: {
+        markOnly: false,
+        lines: [
+          { topYPt: 0, advancePt: 10 },
+          { topYPt: 12, advancePt: 10 },
+          { topYPt: 25, advancePt: 10 },
+        ],
+      },
+      lineStart: 1,
+      lineEnd: 3,
+      leadingSpacePt: 2,
+      trailingSpacePt: 4,
+    } as unknown as ParagraphFragment;
+    const nestedTable = {
+      kind: 'table',
+      source: table([], []),
+      columnWidthsPt: [],
+      rows: [
+        { heightPt: 7 },
+        { heightPt: 8 },
+      ],
+      continuesFromPreviousPage: false,
+      continuesOnNextPage: false,
+    } as unknown as TableFragment;
+    const fragment = {
+      source: textCell('ignored'),
+      blocks: [rangedParagraph, nestedTable],
+      verticalMerge: 'none',
+      boxHeightPt: 50,
+    } as CellFragment;
+    const contentHeight = (
+      layoutFragments as unknown as {
+        cellFragmentContentHeightPt?: (cellFragment: CellFragment) => number;
+      }
+    ).cellFragmentContentHeightPt;
+
+    expect(contentHeight).toBeTypeOf('function');
+    if (!contentHeight) return;
+    expect(contentHeight(fragment)).toBe(
+      paragraphFragmentAdvancePt(rangedParagraph) + tableFragmentHeightPt(nestedTable),
+    );
+    expect(contentHeight(fragment)).toBe(44);
   });
 
   it('sums the spanned column widths for a gridSpan cell', () => {

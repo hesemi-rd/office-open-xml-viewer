@@ -170,6 +170,7 @@ import {
   type ParagraphMeasurementEnvironment,
 } from './paragraph-measure.js';
 import {
+  cellFragmentContentHeightPt,
   paragraphFragmentAdvancePt,
   tableFragmentHeightPt,
   type DocumentLayout,
@@ -4095,31 +4096,20 @@ function attachTableFragment(
 }
 
 /** A table (or any table nested in its cells) stays on the LEGACY paint path when it
- *  needs re-measurement or an out-of-flow path the fragment paint does not yet cover:
+ *  needs placement geometry or an out-of-flow path the fragment paint does not cover:
  *   - a negative leading `tblInd` (§17.4.50) on a left-justified table widens the
  *     legacy layout budget from the column band to the page width;
- *   - a `vAlign` of center/bottom re-measures cell content to centre the inked block
- *     (ECMA-376 §17.4.84);
  *   - a nested floating table (§17.4.57 `<w:tblpPr>`) is drawn out of flow;
- *   - a sliced cell paragraph records `[lineStart, lineEnd)` in the fragment contract,
- *     but current cell paint draws the full partition (as legacy does). Until range
- *     painting lands, sliced tables stay on the byte-identical legacy path.
- *  Eligible top-aligned, in-flow, unsliced tables carry no re-measurement and paint
- *  measure-free from their fragment. Recursion covers nested tables (painted from their
- *  own fragment). Tracked: migrate negative-indent layout, vAlign, nested-floating
- *  tables, and sliced-range cell paint in follow-ups. */
+ *  Supported center/bottom cells and sliced cell paragraphs are fragment-paintable:
+ *  their piece-local box height and `[lineStart, lineEnd)` ranges are authoritative,
+ *  so paint neither remeasures nor expands them. Recursion keeps unsupported nested
+ *  placement classes on the legacy path. */
 function tableRequiresLegacyPaint(table: DocTable): boolean {
   if (table.tblInd != null && table.tblInd < 0 && table.jc === 'left') return true;
   for (const row of table.rows) {
     for (const cell of row.cells) {
-      if (cell.vAlign === 'center' || cell.vAlign === 'bottom') return true;
       for (const ce of cell.content) {
-        if (
-          ce.type === 'paragraph' &&
-          (ce as { lineSlice?: unknown }).lineSlice !== undefined
-        ) {
-          return true;
-        } else if (ce.type === 'table') {
+        if (ce.type === 'table') {
           const nested = ce as unknown as DocTable;
           if (nested.tblpPr != null || tableRequiresLegacyPaint(nested)) return true;
         }
@@ -4129,12 +4119,11 @@ function tableRequiresLegacyPaint(table: DocTable): boolean {
   return false;
 }
 
-/** PR 6 — a block table paints from its {@link TableFragment} when the migration gate
- *  holds: the fragment is present, the table is in flow (not a §17.4.57 floating
- *  table), it has no negative leading indent, vAlign-center/bottom re-measurement, or
- *  sliced cell paragraph, the story is horizontal, and this paint's content band
- *  matches the band the fragment was resolved at. Otherwise the legacy `renderTable`
- *  recompute path runs (byte-identical). */
+/** PR 6 — a block table paints from its {@link TableFragment} when the fragment is
+ *  present, the table is in flow, no unsupported nested placement class requires the
+ *  legacy path, the story is horizontal, and this paint's content band matches the
+ *  band the fragment was resolved at. Center/bottom alignment and sliced cell ranges
+ *  are owned by the fragment and therefore do not exclude the whole table. */
 function isFragmentPaintableTable(
   table: DocTable,
   placed: PlacedFragment | undefined,
@@ -6518,8 +6507,8 @@ function renderBodyElements(
       // paragraph BEFORE the table, exactly like a frame paragraph). A block
       // table resets them (it ends the previous spacing context).
       // PR 6 — a migrated block table paints from its stored fragment (geometry +
-      // cell content, no re-layout). Floating / vAlign / band-mismatch tables fall
-      // through to the legacy `renderTable` recompute path.
+      // cell content, no re-layout). Floating, unsupported nested-placement, and
+      // band-mismatch tables fall through to the legacy `renderTable` recompute path.
       const placedTable = bodyFragmentFor(el);
       if (isFragmentPaintableTable(tbl, placedTable, state)) {
         paintTableFragment(placedTable, state);
@@ -10451,8 +10440,8 @@ function computeTableLayout(
   // PR 6 — fragment-geometry reuse. A non-split block table is no longer stamped (the
   // stamp mutated the PARSED DocTable); its paginator-resolved geometry lives on the
   // attached TableFragment (side-table keyed, model untouched). When THIS paint is the
-  // legacy path for such a table (fragment-paint gate exclusions: vAlign centring,
-  // nested floating tables, band mismatch never reaches here since the band gate below
+  // legacy path for such a table (fragment-paint gate exclusions: unsupported nested
+  // placement classes; a band mismatch never reaches here since the band gate below
   // re-verifies), reuse the fragment's scale-1 column widths / row heights exactly as
   // the removed stamp reuse did — same source values, same `× scale`, byte-identical.
   const placedFragment = bodyFlowFragments.get(table as object);
@@ -10980,6 +10969,24 @@ function measureCellParagraphHeight(
   maxWidth: number,
   scale: number,
 ): number {
+  return measureCellParagraphWindow(state, para, maxWidth, scale).heightPx;
+}
+
+/** Slice-aware twin of {@link measureCellParagraphHeight}: measures only the
+ *  `[range.start, range.end)` line window (a mid-row split piece's slice) with
+ *  the SAME real-scale rescale machinery, and reports the paragraph's total
+ *  line count so the caller can tell whether the window covers the paragraph
+ *  end (trailing-spacing ownership). No range ⇒ the full paragraph — byte-
+ *  identical to the historical behavior. The rescale (not a geometric ×scale)
+ *  is the Finding-1 invariant: the vAlign centring height must equal what
+ *  paint actually draws at this scale. */
+function measureCellParagraphWindow(
+  state: RenderState,
+  para: DocParagraph,
+  maxWidth: number,
+  scale: number,
+  range?: { start: number; end: number },
+): { heightPx: number; totalLines: number } {
   {
     const paragraphContext = resolveStateParagraphLayoutContext(state, para);
     const grid = gridForParagraphContext(state, paragraphContext);
@@ -11027,21 +11034,42 @@ function measureCellParagraphHeight(
     // vAlign centring (renderCell) and the content-driven row-height fallback
     // (computeTableLayout → resolveTableRowHeights).
     const scale1ContentHeight = measured.contentEndYPt - measured.placement.startYPt;
-    if (scale === 1) return scale1ContentHeight;
+    const totalLines = measured.markOnly ? 0 : measured.lines.length;
+    const windowStart = range ? Math.max(0, range.start) : 0;
+    const windowEnd = range ? Math.min(totalLines, range.end) : totalLines;
+    if (scale === 1) {
+      if (!range || measured.markOnly || measured.lines.length === 0) {
+        return { heightPx: scale1ContentHeight, totalLines };
+      }
+      // Windowed scale-1 content height: the same per-line extents the
+      // paginator charges (advance + any non-negative gap to the previous
+      // line's bottom; cells carry no wrap oracle, so gaps are zero).
+      let sum = 0;
+      for (let i = windowStart; i < windowEnd; i++) {
+        const line = measured.lines[i];
+        if (i === windowStart) { sum += line.advancePt; continue; }
+        const previous = measured.lines[i - 1];
+        sum += Math.max(0, line.topYPt - (previous.topYPt + previous.advancePt)) + line.advancePt;
+      }
+      return { heightPx: sum, totalLines };
+    }
     const paraHasRuby = paragraphContext.hasRuby;
     const eastAsian = paragraphContext.hasEastAsianText;
     if (measured.markOnly || measured.lines.length === 0) {
       // Empty / anchor-only paragraph mark (§17.3.1.29): renderEmptyMarkParagraph
       // reserves the mark-line height at the PAINT scale, not scale-1 × scale.
-      return paragraphMarkLineHeight(
-        para,
-        scale,
-        grid,
-        paraHasRuby,
-        state.docEastAsian,
-        state.ctx,
-        state.fontFamilyClasses,
-      );
+      return {
+        heightPx: paragraphMarkLineHeight(
+          para,
+          scale,
+          grid,
+          paraHasRuby,
+          state.docEastAsian,
+          state.ctx,
+          state.fontFamilyClasses,
+        ),
+        totalLines,
+      };
     }
     // Rehydrate the scale-1 line PARTITION to the paint scale exactly as
     // renderParagraph does (re-measure every line's glyph geometry), then advance
@@ -11071,7 +11099,10 @@ function measureCellParagraphHeight(
         // §17.6.5 cell rounding is gated by the line's script; a Latin-only line
         // in a CJK paragraph keeps its natural height, matching the text-box path.
         : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false, l.height * scale);
-    return paintedParagraphHeight(paintLines, 0, paintLines.length, 0, lineHForLine);
+    return {
+      heightPx: paintedParagraphHeight(paintLines, windowStart, windowEnd, 0, lineHForLine),
+      totalLines,
+    };
   }
 }
 
@@ -11123,8 +11154,19 @@ function measureCellElementHeight(
     // content clears a drawn bottom border. Mirror it here, or a bordered cell
     // paragraph paints taller than the cell measures (B2: single measurer).
     // renderCellContent never passes a borderMerge, so no suppression term.
-    return measureCellParagraphHeight(state, para, innerWPx, scale)
-      + (para.spaceBefore + Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))) * scale;
+    //
+    // Mid-row split pieces: a sliced cell paragraph (runtime `lineSlice` on the
+    // piece clone) measures ONLY its window — leading spacing belongs to the
+    // slice that starts the paragraph, trailing spacing to the slice that ends
+    // it (the split walk charges them the same way). An unsliced element is
+    // byte-identical to the historical measure.
+    const slice = (ce as CellElement & { lineSlice?: { start: number; end: number } }).lineSlice;
+    const { heightPx, totalLines } = measureCellParagraphWindow(state, para, innerWPx, scale, slice);
+    const leading = !slice || slice.start === 0 ? para.spaceBefore : 0;
+    const trailing = !slice || slice.end >= totalLines
+      ? Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))
+      : 0;
+    return heightPx + (leading + trailing) * scale;
   }
   // Nested table — estimateTableHeight works in pt; convert to px.
   const tbl = ce as unknown as DocTable;
@@ -11140,10 +11182,8 @@ function renderCell(
   h: number,
   state: RenderState,
   clipExact = false,
-  /** PR 6 — when present, this cell's content is painted from its stored
-   *  {@link CellFragment} blocks (measure-free) rather than re-laid-out. Only supplied
-   *  by the fragment paint path, which the migration gate limits to top-aligned tables,
-   *  so the vAlign centring branch below is not reached for a fragment cell. */
+  /** PR 6 — when present, this cell's content and piece-local box geometry are
+   *  painted from its stored {@link CellFragment} without re-layout. */
   cellFragment?: CellFragment,
 ): void {
   const { ctx, scale } = state;
@@ -11214,6 +11254,13 @@ function renderCell(
     // rendering of resume "bar chart" cells. Skip a single trailing empty
     // paragraph after a non-paragraph block.
     const visibleContent = trimTrailingStructuralMarker(cell.content);
+    // ONE vAlign content authority for split and unsplit cells alike: the
+    // slice-aware, real-scale measure (measureCellElementHeight honors a piece
+    // clone's `lineSlice`, so a mid-row piece centres its OWN window — the
+    // Finding-1 invariant keeps the rescale machinery, never a scale-1 sum
+    // × scale). The box is the DRAWN cell box `h` (for a vMerge restart piece
+    // that is the span box on this page, which is exactly what Word centres
+    // against — measured on the split-form ground truth).
     let contentH = visibleContent.reduce(
       (s, ce) => s + measureCellElementHeight(cellState, ce, w - ml - mr, scale), 0);
     // ECMA-376 §17.3.1.33 + §17.4.84 (vAlign): Word collapses the FIRST
@@ -11230,15 +11277,26 @@ function renderCell(
     // contextual / max-overlap rules inside the paint pass).
     const firstEl = visibleContent[0];
     const lastEl = visibleContent[visibleContent.length - 1];
+    const sliceOf = (el: CellElement | undefined) =>
+      (el as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)?.lineSlice;
     // Leading space-before (first paragraph only). Nested table first ⇒ 0.
+    // A continuation slice (start > 0) charged no space-before in the measure,
+    // so there is nothing to trim (and renderParagraph suppresses it too).
+    const firstSlice = sliceOf(firstEl);
     const firstSpaceBefore =
-      firstEl && firstEl.type === 'paragraph'
+      firstEl && firstEl.type === 'paragraph' && (!firstSlice || firstSlice.start === 0)
         ? (firstEl as unknown as DocParagraph).spaceBefore * scale
         : 0;
     contentH -= firstSpaceBefore;
-    // Trailing space-after (last paragraph only). Nested table last ⇒ 0.
+    // Trailing space-after (last paragraph only). Nested table last ⇒ 0. A
+    // NON-final slice charged no space-after in the measure — nothing to trim.
     if (lastEl && lastEl.type === 'paragraph') {
-      contentH -= (lastEl as unknown as DocParagraph).spaceAfter * scale;
+      const lastSlice = sliceOf(lastEl);
+      const lastIsFinal = !lastSlice
+        || lastSlice.end >= measureCellParagraphWindow(
+          cellState, lastEl as unknown as DocParagraph, w - ml - mr, scale, lastSlice,
+        ).totalLines;
+      if (lastIsFinal) contentH -= (lastEl as unknown as DocParagraph).spaceAfter * scale;
     }
     // `renderParagraph` will re-consume the first paragraph's spaceBefore (it
     // unconditionally adds `para.spaceBefore * scale` to `state.y`). Pull
@@ -11310,14 +11368,21 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
   for (const ce of content) {
     if (ce.type === 'paragraph') {
       const para = ce as unknown as DocParagraph;
-      const suppress = contextualSuppressed(prevPara, para);
-      const effBefore = suppress ? 0 : para.spaceBefore;
+      const slice = (ce as CellElement & {
+        lineSlice?: { start: number; end: number; continues?: boolean };
+      }).lineSlice;
+      const continues = slice?.start != null && slice.start > 0;
+      const lineSlice = slice
+        ? { ...slice, ...(continues ? { continues: true as const } : {}) }
+        : undefined;
+      const suppress = !continues && contextualSuppressed(prevPara, para);
+      const effBefore = suppress || continues ? 0 : para.spaceBefore;
       // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
       // set it, BOTH the previous after and this before are dropped (gap = 0), not
       // just collapsed — so e.g. a code listing's lines sit tight.
       const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
-      renderParagraph(para, state, suppress);
+      renderParagraph(para, state, suppress || continues, lineSlice);
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (ce.type === 'table') {
@@ -11371,12 +11436,11 @@ function isFragmentPaintableCellBlock(
  * their stored scale-1 line partition (rescaled through the same bridge body fragment
  * paint uses; measure-free at scale 1), nested-table blocks from their own
  * {@link TableFragment}, with the SAME §17.3.1.9 contextualSpacing / spaceBefore-after
- * overlap collapse. Cell paragraphs are drawn whole (no line slice), identically to
- * `renderCellContent`; sliced tables never reach this function because
- * {@link tableRequiresLegacyPaint} excludes them. A block the per-block gate excludes
- * ({@link isFragmentPaintableCellBlock}) is drawn by the legacy `renderParagraph` —
- * the exact call `renderCellContent` makes — so marker / field / wrap divergences
- * paint byte-identically to the unmigrated path.
+ * overlap collapse. Every paragraph consumes its actual `[lineStart, lineEnd)` range;
+ * continuation ranges also carry the first-slice suppression marker. A block the
+ * per-block gate excludes ({@link isFragmentPaintableCellBlock}) receives the same
+ * range through legacy `renderParagraph`, so marker / field / wrap divergences cannot
+ * expand back to the full paragraph.
  */
 function renderCellContentFragment(cellFragment: CellFragment, state: RenderState): void {
   let prevPara: DocParagraph | null = null;
@@ -11384,8 +11448,25 @@ function renderCellContentFragment(cellFragment: CellFragment, state: RenderStat
   for (const block of cellFragment.blocks) {
     if (block.kind === 'paragraph') {
       const para = block.source;
-      const suppress = contextualSuppressed(prevPara, para);
-      const effBefore = suppress ? 0 : para.spaceBefore;
+      // Mirror renderCellContent's slice semantics EXACTLY: a full-range block
+      // corresponds to an UNSLICED cell element, whose legacy paint passes NO
+      // lineSlice — in particular the gate-excluded fallback below re-lays the
+      // paragraph out (e.g. around an in-cell wrap float) into a partition with
+      // a DIFFERENT line count, and a spurious [0, measuredLen) window would
+      // truncate it. Only a genuine mid-row slice carries its window (plus the
+      // continuation marker for start > 0).
+      const continues = block.lineStart > 0;
+      const fullRange =
+        block.lineStart === 0 && block.lineEnd === block.measured.lines.length;
+      const lineSlice = fullRange
+        ? undefined
+        : {
+            start: block.lineStart,
+            end: block.lineEnd,
+            ...(continues ? { continues: true as const } : {}),
+          };
+      const suppress = !continues && contextualSuppressed(prevPara, para);
+      const effBefore = suppress || continues ? 0 : para.spaceBefore;
       const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       if (isFragmentPaintableCellBlock(block, state)) {
@@ -11393,12 +11474,12 @@ function renderCellContentFragment(cellFragment: CellFragment, state: RenderStat
           para,
           state,
           block.measured.lines.map((line) => line.layout),
-          suppress,
-          undefined,
+          suppress || continues,
+          lineSlice,
           undefined,
         );
       } else {
-        renderParagraph(para, state, suppress);
+        renderParagraph(para, state, suppress || continues, lineSlice);
       }
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
