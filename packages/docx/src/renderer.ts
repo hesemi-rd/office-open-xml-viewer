@@ -10142,6 +10142,46 @@ export function renderShapeText(
           // helper the body uses, so contextual CJK packing (約物半角) is honoured
           // and the painted advance equals the segment box. A non-justified
           // segment is a single fillText.
+          // ECMA-376 §17.3.1.6 <w:bidi> (issue #929) — mirror of the BODY loop's
+          // rtlWsShiftPx fix for Word shape/text-box text (the SECOND
+          // computeLineVisualOrder consumer, explicitly scoped OUT of PR #949).
+          // An RTL segment's TRAILING inter-word space must sit on its physical
+          // LEFT under the RTL visual frame; ctx.direction='rtl' does that in
+          // Chrome but skia-canvas (server/VRT/MCP backend) strands it on the
+          // physical RIGHT, collapsing the gap to the reading-next word. Draw the
+          // whitespace-TRIMMED glyphs (`glyphText`) shifted right by the whitespace
+          // advance (`rtlWsShiftPx`) so the space always falls on the box's LEFT —
+          // backend-identical. The shift is derived from the SAME segAdvanceWidth
+          // authority the layout MEASURE pass used (§17.3.2.43 w:w scale + one
+          // §17.3.2.35 per-code-point pitch), NOT a paint-letterSpacing re-measure,
+          // so measure==paint. Shape text never uses a docGrid ⇒ gridDeltaPx = 0.
+          // Consumed by the plain branch and the kashida sub-branches (w:w /
+          // w:spacing / plain); the §17.18.44 split-piece branch is EXEMPT (see its
+          // note). LTR / whitespace-less segments keep glyphText===drawText and
+          // glyphDrawX===x (byte-identical).
+          let glyphText = drawText;
+          let glyphDrawX = x;
+          let rtlWsShiftPx = 0;
+          if (
+            visual &&
+            visual.rtl[si] === true &&
+            !effState.verticalCJK &&
+            /\s$/u.test(drawText)
+          ) {
+            const trimmed = drawText.replace(/\s+$/u, '');
+            if (trimmed.length > 0) {
+              const prevLetterSpacing = ctx.letterSpacing;
+              ctx.letterSpacing = '0px';
+              const naturalFull = ctx.measureText(drawText).width;
+              const naturalTrimmed = ctx.measureText(trimmed).width;
+              ctx.letterSpacing = prevLetterSpacing;
+              rtlWsShiftPx =
+                segAdvanceWidth({ ...s, text: drawText }, naturalFull, 0, scale) -
+                segAdvanceWidth({ ...s, text: trimmed }, naturalTrimmed, 0, scale);
+              glyphText = trimmed;
+              glyphDrawX = x + rtlWsShiftPx;
+            }
+          }
           if (kashida) {
             const segCharScale = s.charScale ?? 1;
             const segCharSpacingPx = segLetterSpacingPx(s, 0, scale);
@@ -10151,25 +10191,32 @@ export function renderShapeText(
             }
             if (segCharScale !== 1) {
               ctx.save();
-              ctx.translate(x, 0);
+              ctx.translate(glyphDrawX, 0);
               ctx.scale(segCharScale, 1);
               const prevLetterSpacing = ctx.letterSpacing;
               if (segCharSpacingPx !== 0) {
                 ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
               }
-              ctx.fillText(drawText, 0, baseline + yOffset);
+              ctx.fillText(glyphText, 0, baseline + yOffset);
               ctx.letterSpacing = prevLetterSpacing;
               ctx.restore();
             } else if (segCharSpacingPx !== 0) {
               const prevLetterSpacing = ctx.letterSpacing;
               ctx.letterSpacing = `${segCharSpacingPx}px`;
-              ctx.fillText(drawText, x, baseline + yOffset);
+              ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
               ctx.letterSpacing = prevLetterSpacing;
             } else {
-              ctx.fillText(drawText, x, baseline + yOffset);
+              ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
             }
             if (s.kerning != null) ctx.fontKerning = prevKerning;
           } else if (stretch && stretch.splitBefore.length > 0) {
+            // §17.18.44 inter-CJK justify split. EXEMPT from the RTL trailing-
+            // whitespace shift above: `splitBefore` is only non-empty when the
+            // segment carries CJK content with inter-ideograph split points,
+            // which resolves to an even (LTR) bidi level — an RTL-direction
+            // segment (visual.rtl[si]===true) cannot reach this branch outside
+            // the rtl-marked EA-punctuation corner where bidi justification is
+            // already approximate. Same argument as the body loop.
             const cps = [...s.text];
             if (stretch.splitBefore.length === cps.length - 1) {
               // Fully distributed (pure-CJK): uniform pitch via letterSpacing so
@@ -10185,7 +10232,7 @@ export function renderShapeText(
               }
             }
           } else {
-            ctx.fillText(s.text, x, baseline + yOffset);
+            ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
           }
           if (s.ruby) {
             const spanW = s.measuredWidth + internalStretch;
