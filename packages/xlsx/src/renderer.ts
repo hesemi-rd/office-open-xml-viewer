@@ -6,7 +6,7 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, containsSeaScript, seaWordBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -911,7 +911,21 @@ export function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: str
         if (c === ' ' || isCjkBreakChar(p)) break;
         j += p > 0xFFFF ? 2 : 1;
       }
-      tokens.push(paragraph.slice(i, j));
+      const word = paragraph.slice(i, j);
+      // SEA (Thai/Lao/Khmer) dictionary breaking (issue #797): these scripts have
+      // no inter-word spaces, so this whole word-run is one token. Split it at
+      // segmenter word boundaries into sub-word tokens so the greedy fitter below
+      // wraps it at legal points. Wrapped lines re-concatenate into one drawn
+      // string, so this only ADDS break opportunities (measure==paint). Non-SEA
+      // words and SEA words with no usable break stay a single token.
+      const seaBreaks = containsSeaScript(word) ? seaWordBreakOffsets(word) : null;
+      if (seaBreaks && seaBreaks.length > 0) {
+        let s = 0;
+        for (const b of seaBreaks) { tokens.push(word.slice(s, b)); s = b; }
+        tokens.push(word.slice(s));
+      } else {
+        tokens.push(word);
+      }
       i = j;
     }
   }
@@ -1086,6 +1100,36 @@ export function layoutRichTextLines(
     if (font.size > curMaxSize) { curMaxSize = font.size; curMaxFamily = font.name; }
   };
 
+  // Issue #797 — push a SEA (Thai/Lao/Khmer) token, breaking it at segmenter word
+  // boundaries. Unlike the plain `wrapParagraphLines`, the rich draw path paints
+  // every segment separately, so each fitted line-piece is pushed as ONE
+  // contiguous string (via `push`) to keep measure==paint. A single word wider
+  // than the cell falls back to a grapheme-safe emergency split.
+  const pushSeaToken = (text: string, font: CellFont): void => {
+    const seaBreaks = seaWordBreakOffsets(text);
+    if (seaBreaks.length === 0) { push(text, font); return; }
+    ctx.font = buildFont(vertAlignDrawFont(font), cs);
+    const measureSub = (sub: string): number => ctx.measureText(sub).width;
+    const N = text.length;
+    let start = 0;
+    while (start < N) {
+      const avail = maxWidth - curW;
+      let end = fitSeaWordPrefix(text, seaBreaks, start, avail, measureSub);
+      if (end <= start) {
+        if (curW > 0) { flush(); continue; } // wrap first, retry on an empty line
+        const firstWordEnd = seaBreaks.find((b) => b > start) ?? N;
+        const firstWord = text.slice(start, firstWordEnd);
+        const graphemes = graphemeClusterOffsets(firstWord);
+        let g = fitSeaWordPrefix(firstWord, graphemes, 0, avail, measureSub);
+        if (g <= 0) g = graphemes.length > 0 ? graphemes[0] : firstWord.length;
+        end = start + g;
+      }
+      push(text.slice(start, end), font); // the piece fits → append (no re-split)
+      start = end;
+      if (start < N) flush();
+    }
+  };
+
   for (const run of runs) {
     const font = applyRunFont(baseFont, run);
     // Tokenize: runs of non-space latin, spaces, or individual CJK chars
@@ -1123,6 +1167,7 @@ export function layoutRichTextLines(
       // inside `push`) keeps the same index — UAX#9 P1: only a hard break starts
       // a new bidi paragraph.
       if (tok === '\n') { flushRegion(); paraIdx++; }
+      else if (containsSeaScript(tok)) pushSeaToken(tok, font);
       else push(tok, font);
     }
   }

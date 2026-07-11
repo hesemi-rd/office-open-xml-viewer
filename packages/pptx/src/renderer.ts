@@ -62,6 +62,10 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
+  containsSeaScript,
+  seaWordBreakOffsets,
+  fitSeaWordPrefix,
+  graphemeClusterOffsets,
   getCachedSvgImageByPath,
   getCachedBitmapByPath,
   getCachedDuotoneBitmapByPath,
@@ -1114,6 +1118,43 @@ export function layoutParagraph(
           }
           rest = rest.slice(n);
           if (rest.length > 0) newLine();
+        }
+        continue;
+      }
+
+      // SEA (Thai/Lao/Khmer) dictionary line breaking (issue #797). These scripts
+      // have no inter-word spaces, so `token` is a whole run of words; break it
+      // only at a segmenter word boundary. Each fitted line-piece is pushed as
+      // ONE contiguous string — pptx's `push` sums per-call measured widths into
+      // `lineW`, so per-word pushes would drift the wrap width from the merged
+      // paint width (measure==paint). CJK is handled above; a mixed CJK+SEA token
+      // stays on the CJK path (no regression). A SEA token with no dictionary
+      // break (single over-long word / Segmenter unavailable) still routes here
+      // so its emergency split stays grapheme-safe.
+      if (containsSeaScript(token)) {
+        const seaBreaks = seaWordBreakOffsets(token);
+        ctx.font = font;
+        // Match push's advance model: it adds `lsPx * codePointCount` (a:spc), so
+        // the fit measure must too or a spaced run mis-wraps (measure==paint).
+        const measureSub = (sub: string): number => ctx.measureText(sub).width + lsPx * codePointCount(sub);
+        const N = token.length;
+        let start = 0;
+        while (start < N) {
+          const avail = lineMaxW() - lineW;
+          let end = fitSeaWordPrefix(token, seaBreaks, start, avail, measureSub);
+          if (end <= start) {
+            if (lineW > 0) { newLine(); continue; } // wrap first, retry empty line
+            // Empty line, first word wider than the shape: grapheme-safe split.
+            const firstWordEnd = seaBreaks.find((b) => b > start) ?? N;
+            const firstWord = token.slice(start, firstWordEnd);
+            const graphemes = graphemeClusterOffsets(firstWord);
+            let g = fitSeaWordPrefix(firstWord, graphemes, 0, avail, measureSub);
+            if (g <= 0) g = graphemes.length > 0 ? graphemes[0] : firstWord.length;
+            end = start + g;
+          }
+          push(token.slice(start, end), font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+          start = end;
+          if (start < N) newLine();
         }
         continue;
       }

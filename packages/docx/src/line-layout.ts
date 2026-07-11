@@ -30,6 +30,10 @@ import {
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
   isCjkBreakChar,
+  containsSeaScript,
+  seaWordBreakOffsets,
+  fitSeaWordPrefix,
+  graphemeClusterOffsets,
   classifyFontGeneric,
   isComplexScriptCodePoint,
   isSymbolFontFamily,
@@ -176,6 +180,13 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  the horizontally-laid-out run so it fits the line height. Only meaningful
    *  when {@link tateChuYoko} is set. */
   tateChuYokoCompress?: boolean;
+  /** Issue #797 — dictionary word-break offsets (seg-local UTF-16 indices, from
+   *  core `seaWordBreakOffsets`) for a Thai/Lao/Khmer segment, which has no
+   *  inter-word spaces. Populated by {@link layoutLines} for SEA text; the wrap
+   *  path breaks such a segment only at one of these boundaries (never mid-word)
+   *  and re-queues the tail with the offsets rebased. Absent ⇒ not SEA text, or
+   *  Intl.Segmenter unavailable (falls back to grapheme-safe emergency split). */
+  seaBreaks?: readonly number[];
 }
 
 /**
@@ -1264,6 +1275,20 @@ export function hasCJKBreakOpportunity(text: string): boolean {
     i += cp > 0xffff ? 2 : 1;
   }
   return false;
+}
+
+/** Shift a SEA break-offset list (issue #797) onto a suffix that drops the first
+ *  `cut` UTF-16 units: keep offsets strictly greater than `cut` and rebase them.
+ *  Used when a Thai/Lao/Khmer segment is split (line wrap) or resumed at a
+ *  pagination boundary. A non-SEA segment (`offsets === undefined`) stays
+ *  non-SEA; a SEA segment stays SEA-flagged (returns `[]` when no dictionary
+ *  boundary remains, so an over-long FINAL word still takes the SEA path and is
+ *  split grapheme-safely rather than by code point). */
+function rebaseSeaBreaks(offsets: readonly number[] | undefined, cut: number): readonly number[] | undefined {
+  if (offsets === undefined) return undefined;
+  const out: number[] = [];
+  for (const o of offsets) if (o > cut) out.push(o - cut);
+  return out;
 }
 
 /**
@@ -2601,6 +2626,12 @@ export function layoutLines(
   const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
   const sourcedSegs = segs.map((seg, segIndex) => {
     seg.src = { segIndex, charOffset: 0 };
+    // Issue #797 — attach the SEA (Thai/Lao/Khmer) dictionary word-break offsets
+    // ONCE per segment (perf: never per line/char). Only for SEA text; non-SEA
+    // segments keep `seaBreaks` absent so their wrap path is byte-identical.
+    if ('text' in seg && containsSeaScript(seg.text)) {
+      seg.seaBreaks = seaWordBreakOffsets(seg.text);
+    }
     return seg;
   });
   let queue: LayoutSeg[];
@@ -2622,6 +2653,9 @@ export function layoutLines(
                 text,
                 measuredWidth: 0,
                 src: { ...startBoundary },
+                // Rebase the SEA break offsets onto the resumed (sliced) text so
+                // a paginated Thai paragraph still breaks at word boundaries.
+                seaBreaks: rebaseSeaBreaks(first.seaBreaks, startBoundary.charOffset),
               },
               ...sourcedSegs.slice(startBoundary.segIndex + 1),
             ]
@@ -3033,7 +3067,10 @@ export function layoutLines(
       !s.joinPrev &&
       currentLine.length > 0 &&
       (queue[0] as LayoutTextSeg | undefined)?.joinPrev &&
-      !hasCJKBreakOpportunity(s.text)
+      !hasCJKBreakOpportunity(s.text) &&
+      // A SEA (Thai/Lao/Khmer) lead with usable word breaks is NOT atomic — the
+      // run splits at a dictionary boundary (issue #797), mirroring the CJK gate.
+      !(s.seaBreaks && s.seaBreaks.length > 0)
     ) {
       let groupW = w;
       let groupTrail = trailingSpaceW;
@@ -3184,6 +3221,63 @@ export function layoutLines(
               },
             });
           }
+        }
+      }
+    } else if (s.seaBreaks !== undefined) {
+      // SEA (Thai/Lao/Khmer) dictionary line wrap (issue #797). These scripts
+      // have no inter-word spaces, so this ONE segment is a whole run of words;
+      // break it only at a segmenter word boundary (`s.seaBreaks`). Entered for
+      // ANY SEA segment (even one with no dictionary boundary — a single word
+      // wider than the column, or Segmenter unavailable) so the emergency split
+      // below stays GRAPHEME-safe instead of falling to the code-point path.
+      // No kinsoku runs here — SEA scripts have no 行頭/行末禁則 sets and a
+      // dictionary boundary is already a legal break (choosing an earlier legal
+      // offset is the only adjustment, which fitSeaWordPrefix already does). The
+      // run stays one contiguous draw per line (measure==paint); the tail
+      // re-queues with its offsets rebased.
+      const available = availW() - currentWidth;
+      const measureSub = (sub: string): number => strAdvance(s, sub);
+      const split = fitSeaWordPrefix(s.text, s.seaBreaks, 0, available, measureSub);
+      if (split > 0) {
+        const prefix = s.text.slice(0, split);
+        const pw = strAdvance(s, prefix);
+        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        const tail = s.text.slice(split);
+        if (tail) {
+          queue.unshift({
+            ...s,
+            text: tail,
+            measuredWidth: 0,
+            src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + split },
+            seaBreaks: rebaseSeaBreaks(s.seaBreaks, split),
+          });
+        }
+      } else if (currentLine.length > 0) {
+        // No whole dictionary word fits the remaining band — move the run to a
+        // fresh line and re-process (Latin-word style).
+        flush(undefined, false, s.src);
+        queue.unshift(s);
+      } else {
+        // Empty line and the first dictionary word is wider than the whole
+        // column: emergency GRAPHEME-safe split (a code-point split would tear a
+        // base + tone/combining mark, both BMP). Guarantee ≥1 cluster of progress.
+        const firstWordEnd = s.seaBreaks[0] ?? s.text.length;
+        const firstWord = s.text.slice(0, firstWordEnd);
+        const graphemes = graphemeClusterOffsets(firstWord);
+        let gsplit = fitSeaWordPrefix(firstWord, graphemes, 0, available, measureSub);
+        if (gsplit <= 0) gsplit = graphemes.length > 0 ? graphemes[0] : firstWord.length;
+        const prefix = s.text.slice(0, gsplit);
+        const pw = strAdvance(s, prefix);
+        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        const tail = s.text.slice(gsplit);
+        if (tail) {
+          queue.unshift({
+            ...s,
+            text: tail,
+            measuredWidth: 0,
+            src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + gsplit },
+            seaBreaks: rebaseSeaBreaks(s.seaBreaks, gsplit),
+          });
         }
       }
     } else if (currentLine.length === 0) {
