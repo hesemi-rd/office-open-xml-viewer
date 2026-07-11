@@ -102,6 +102,7 @@ import {
   resolveTableRowHeights,
   resolveSingleRowHeight,
 } from './table-geometry.js';
+import { adjustForWidowOrphan, selectLargestFittingEnd } from './line-fit-policy.js';
 import {
   computeSectionColumns as computeColumns,
   enterTableCellStoryContext,
@@ -4567,13 +4568,23 @@ function splitParagraphAcrossPages(
     let cursorY = initialY;
     while (lineIdx < lines.length) {
       const remaining = colBot() - cursorY;
-      let usedH = 0;
       const firstFitting = lineIdx;
-      let lastFitting = lineIdx;
-      while (lastFitting < lines.length && usedH + lineExtents[lastFitting] <= remaining) {
-        usedH += lineExtents[lastFitting];
-        lastFitting++;
-      }
+      // O(n) running accumulation: the policy calls `fitAt` with strictly
+      // increasing `end` (its documented contract), so extending the previous
+      // sum by the newly covered extents reproduces the historical incremental
+      // loop's exact left-to-right float-addition order — bit-identical fit
+      // comparisons without re-summing from the start per candidate.
+      let accumulatedH = 0;
+      let accumulatedEnd = firstFitting;
+      const fitting = selectLargestFittingEnd(firstFitting, lines.length, remaining, (end) => {
+        while (accumulatedEnd < end) {
+          accumulatedH += lineExtents[accumulatedEnd];
+          accumulatedEnd++;
+        }
+        return accumulatedH;
+      });
+      let usedH = fitting.fitValue;
+      let lastFitting = fitting.end;
       if (lastFitting === firstFitting) {
         if (cursorY > 0) {
           newPage(cursorY);
@@ -4585,17 +4596,29 @@ function splitParagraphAcrossPages(
         lastFitting = firstFitting + 1;
         usedH += lineExtents[firstFitting];
       }
-      if (para.widowControl !== false && lastFitting < lines.length) {
-        if (lines.length - lastFitting === 1 && lastFitting - firstFitting >= 2) {
-          lastFitting--;
-          usedH -= lineExtents[lastFitting];
-        }
-        if (firstFitting === 0 && lastFitting - firstFitting === 1 && cursorY > 0) {
-          newPage(cursorY);
-          cursorY = colTop();
-          remeasureBeforeFirstLine();
-          continue;
-        }
+      let widowOrphan = adjustForWidowOrphan({
+        widowControl: para.widowControl !== false,
+        start: firstFitting,
+        end: lastFitting,
+        totalLines: lines.length,
+        canRelocate: cursorY > 0,
+      });
+      if (widowOrphan.kind === 'dropLastLine') {
+        lastFitting--;
+        usedH -= lineExtents[lastFitting];
+        widowOrphan = adjustForWidowOrphan({
+          widowControl: true,
+          start: firstFitting,
+          end: lastFitting,
+          totalLines: lines.length,
+          canRelocate: cursorY > 0,
+        });
+      }
+      if (widowOrphan.kind === 'relocate') {
+        newPage(cursorY);
+        cursorY = colTop();
+        remeasureBeforeFirstLine();
+        continue;
       }
       const isFinalSlice = lastFitting === lines.length;
       if (isFinalSlice) usedH += trailingExtent;
@@ -5350,19 +5373,24 @@ function splitCellContentByHeight(
     }
 
     const splitPara = para ?? ce as unknown as DocParagraph;
-    let endLine = 0;
-    let sliceH = 0;
-    let sliceAddH = 0;
     const sliceStart = currentSlice?.start ?? 0;
     const sliceEnd = currentSlice?.end ?? layout.lines.length;
-    for (let end = sliceStart + 1; end <= sliceEnd; end++) {
-      const h = paragraphLineSliceHeight(splitPara, layout.lineHeights, sliceStart, end);
-      const addH = additionHeight(ce, h, { start: sliceStart, end });
-      if (beforeHeight + addH > maxContentHeightPt) break;
-      endLine = end;
-      sliceH = h;
-      sliceAddH = addH;
-    }
+    const fitting = selectLargestFittingEnd(
+      sliceStart,
+      sliceEnd,
+      maxContentHeightPt,
+      (end) => {
+        const h = paragraphLineSliceHeight(splitPara, layout.lineHeights, sliceStart, end);
+        return beforeHeight + additionHeight(ce, h, { start: sliceStart, end });
+      },
+    );
+    const endLine = fitting.end === sliceStart ? 0 : fitting.end;
+    const sliceH = endLine === 0
+      ? 0
+      : paragraphLineSliceHeight(splitPara, layout.lineHeights, sliceStart, endLine);
+    const sliceAddH = endLine === 0
+      ? 0
+      : additionHeight(ce, sliceH, { start: sliceStart, end: endLine });
     if (endLine === 0) {
       const after = content.slice(i);
       const afterHeight = sumContentHeightForSplit(after);
