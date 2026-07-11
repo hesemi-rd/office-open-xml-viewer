@@ -8126,6 +8126,44 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //   4. Neither: a single fillText (the common path).
         const segmentGridDeltaPx = segmentCharacterGridDeltaPx(s, drawGridDeltaPx);
         const segGridDelta = gridSegDeltaPx(drawText, segmentGridDeltaPx);
+        // ECMA-376 §17.3.1.6 `<w:bidi>` (issue #929) — a segment's TRAILING
+        // whitespace (an inter-word space at its logical end) must sit on the
+        // segment's physical LEFT under an RTL visual frame, toward the next
+        // reading word. Canvas is asked to do this via `ctx.direction='rtl'`, but
+        // that is BACKEND-DEPENDENT: Chrome reorders the trailing space to the
+        // left, whereas skia-canvas (the server/VRT/MCP rendering backend)
+        // left-anchors the logical string and leaves the space on the physical
+        // RIGHT — so the space lands on the wrong (outer) side and the word renders
+        // FLUSH against its reading-next neighbour (the gap collapses; most visible
+        // as a two-word label / table cell where the single inter-word gap is lost).
+        // Position the whitespace EXPLICITLY instead: draw the trailing-whitespace-
+        // TRIMMED glyphs shifted rightward by the whitespace advance so the space
+        // occupies the box's LEFT — identical output in both backends. This mirrors
+        // the fitText region-end RTL pad shift above (`fitDrawX`). LTR segments and
+        // the non-bidi fast path keep `glyphText===drawText` / `glyphDrawX===x`
+        // (byte-identical). Decorations, `onTextRun`, and the pen advance stay on
+        // the untrimmed box (`x` / `spanW`).
+        let glyphText = drawText;
+        let glyphDrawX = x;
+        if (
+          visual &&
+          visual.rtl[si] === true &&
+          !state.verticalCJK &&
+          /\s$/u.test(drawText)
+        ) {
+          const trimmed = drawText.replace(/\s+$/u, '');
+          if (trimmed.length > 0) {
+            const prevLetterSpacing = ctx.letterSpacing;
+            // Measure the trimmed glyphs with the SAME per-glyph pitch the draw
+            // uses (§17.3.2.35 char spacing / §17.3.2.43 w:w) so their right edge
+            // lands exactly on the segment box edge — measure==paint.
+            ctx.letterSpacing = `${segCharSpacingPx}px`;
+            const trimmedAdvance = ctx.measureText(trimmed).width * segCharScale;
+            ctx.letterSpacing = prevLetterSpacing;
+            glyphText = trimmed;
+            glyphDrawX = x + (spanW - trimmedAdvance);
+          }
+        }
         if (state.verticalCJK && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
@@ -8334,13 +8372,13 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // (The docGrid and justify arms above compose the SAME transform when a
           // grid / distributed run also carries w:w — issue #816.)
           ctx.save();
-          ctx.translate(x, 0);
+          ctx.translate(glyphDrawX, 0);
           ctx.scale(segCharScale, 1);
           const prevLetterSpacing = ctx.letterSpacing;
           if (segCharSpacingPx !== 0) {
             ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
           }
-          ctx.fillText(drawText, 0, baseline + yOffset);
+          ctx.fillText(glyphText, 0, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
           ctx.restore();
         } else if (segCharSpacingPx !== 0) {
@@ -8349,10 +8387,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // layout already folded into `s.measuredWidth` (measure==paint).
           const prevLetterSpacing = ctx.letterSpacing;
           ctx.letterSpacing = `${segCharSpacingPx}px`;
-          ctx.fillText(drawText, x, baseline + yOffset);
+          ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
         } else {
-          ctx.fillText(drawText, x, baseline + yOffset);
+          ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
         }
         // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
         // painted (the following ruby / emphasis-mark draws are separate glyphs at
