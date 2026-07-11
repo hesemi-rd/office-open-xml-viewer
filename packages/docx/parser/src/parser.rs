@@ -7788,10 +7788,51 @@ fn normalize_align(s: &str) -> &str {
         // the last line. Legacy "justify" maps to the same behavior as "both".
         "both" | "justify" => "justify",
         "distribute" => "distribute",
+        // ECMA-376 §17.18.44 ST_Jc — the Arabic kashida variants and the Thai
+        // distribute variant are FULL-justification values the renderer handles
+        // (bidi-line.ts resolveAlignEdge/jcIsFullyJustified, plus the kashida
+        // U+0640 tatweel elongation path). Pass them through VERBATIM: collapsing
+        // them to "left" here (the old fallback) stranded a real kashida/Thai
+        // paragraph at left alignment, never reaching justification at all.
+        "lowKashida" | "mediumKashida" | "highKashida" => s,
+        "thaiDistribute" => "thaiDistribute",
         "right" | "end" => "right",
         "center" => "center",
         "start" | "left" => "left",
         _ => "left",
+    }
+}
+
+#[cfg(test)]
+mod normalize_align_tests {
+    use super::normalize_align;
+
+    #[test]
+    fn justify_family_passes_through() {
+        assert_eq!(normalize_align("both"), "justify");
+        assert_eq!(normalize_align("justify"), "justify");
+        assert_eq!(normalize_align("distribute"), "distribute");
+    }
+
+    #[test]
+    fn kashida_and_thai_are_preserved_for_the_renderer() {
+        // ECMA-376 §17.18.44 — these must NOT collapse to "left"; the renderer
+        // resolves them (kashida => U+0640 tatweel elongation; thaiDistribute =>
+        // last-line-stretching justification).
+        assert_eq!(normalize_align("lowKashida"), "lowKashida");
+        assert_eq!(normalize_align("mediumKashida"), "mediumKashida");
+        assert_eq!(normalize_align("highKashida"), "highKashida");
+        assert_eq!(normalize_align("thaiDistribute"), "thaiDistribute");
+    }
+
+    #[test]
+    fn logical_and_unknown_edges() {
+        assert_eq!(normalize_align("start"), "left");
+        assert_eq!(normalize_align("left"), "left");
+        assert_eq!(normalize_align("end"), "right");
+        assert_eq!(normalize_align("right"), "right");
+        assert_eq!(normalize_align("center"), "center");
+        assert_eq!(normalize_align("bogus"), "left");
     }
 }
 
