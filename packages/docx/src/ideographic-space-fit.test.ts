@@ -67,6 +67,18 @@ describe('trailing U+3000 line-end allowance', () => {
     expect(texts.some((t) => [...t].every((c) => c === '　'))).toBe(false);
   });
 
+  it('hangs the trailing U+3000 even when the glyph alone overflows the band (force-fit)', () => {
+    // The real form label's cell content band is NARROWER than one glyph
+    // (21pt cell minus default margins ≈ 10pt < a 12pt glyph): every glyph is
+    // force-fitted alone. The following fullwidth space must ride the SAME
+    // line (hanging) — otherwise it force-fits onto its own line and doubles
+    // the pitch. Width 4 < glyph 5 at the stub metric.
+    const lines = lay([textSeg('申　請　事')], 4);
+    const texts = lineTexts(lines);
+    expect(texts.map((t) => [...t][0])).toEqual(['申', '請', '事']);
+    expect(texts.some((t) => [...t].every((c) => c === '　'))).toBe(false);
+  });
+
   it('keeps interior U+3000 width-bearing (two glyphs + space fit together)', () => {
     const lines = lay([textSeg('申　請')], 16); // 5+5+5=15 <= 16 — one line
     expect(lineTexts(lines)).toEqual(['申　請']);

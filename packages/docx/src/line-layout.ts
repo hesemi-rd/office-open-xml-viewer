@@ -1218,6 +1218,21 @@ export function hasCJKBreakOpportunity(text: string): boolean {
  * Binary-search the longest prefix of `text` whose rendered width fits in `maxWidth`.
  * Used for CJK overflow splitting.
  */
+/** Extend an accepted split point through IMMEDIATELY FOLLOWING IDEOGRAPHIC
+ *  SPACES (U+3000): the fullwidth space belongs to the line it ends, hanging
+ *  past the band (JLReq line-end ideographic-space handling — the same
+ *  allowance fitCJKPrefix's fit predicate applies), so a split must never
+ *  strand it at the head of the next line — including the FORCE-FIT paths
+ *  where the band is narrower than a single glyph (a one-glyph-wide form
+ *  label column). A zero split (whole-run move / kinsoku retraction) is left
+ *  untouched. */
+function extendThroughTrailingIdeographicSpaces(chars: string[], split: number): number {
+  if (split <= 0) return split;
+  let s = split;
+  while (s < chars.length && chars[s] === '\u3000') s++;
+  return s;
+}
+
 export function fitCJKPrefix(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   text: string,
@@ -3023,7 +3038,10 @@ export function layoutLines(
       const allChars = [...s.text];
       const rawSplit = [...rawPrefix].length;
       const minSplit = currentLine.length > 0 ? 0 : 1;
-      const split = kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit);
+      const split = extendThroughTrailingIdeographicSpaces(
+        allChars,
+        kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit),
+      );
       const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {
         // Grid advance for the head piece — the same model as the line box / draw.
@@ -3087,7 +3105,11 @@ export function layoutLines(
         if (retracted) queue.unshift(retracted);
       } else {
         // Empty line and not even one char fits — force-fit one char to guarantee progress
-        const firstChar = [...s.text][0] ?? '';
+        const forcedChars = [...s.text];
+        const forcedSplit = forcedChars.length > 0
+          ? extendThroughTrailingIdeographicSpaces(forcedChars, 1)
+          : 0;
+        const firstChar = forcedChars.slice(0, forcedSplit).join('');
         if (firstChar) {
           const fw = strAdvance(s, firstChar);
           const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fw };
@@ -3120,6 +3142,7 @@ export function layoutLines(
       const allChars = [...s.text];
       let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
       if (split < 1) split = 1;
+      split = extendThroughTrailingIdeographicSpaces(allChars, split);
       if (split >= allChars.length) {
         // The visible glyphs actually fit (only a trailing space pushed it over the
         // fit test) — place the word whole.
