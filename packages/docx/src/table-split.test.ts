@@ -4,15 +4,22 @@ import type { DocTable, DocTableRow, PaginatedBodyElement } from './types';
 
 // Minimal row/table builders — splitTableAcrossPages only reads rows/cells
 // (vMerge, isHeader) and the precomputed rowHs, never measures.
-function row(opts: { isHeader?: boolean; vMergeContinue?: boolean } = {}): DocTableRow {
+function row(
+  opts: {
+    isHeader?: boolean;
+    vMergeContinue?: boolean;
+    vMergeRestart?: boolean;
+    bg?: string | null;
+  } = {},
+): DocTableRow {
   return {
     cells: [
       {
         content: [],
         colSpan: 1,
-        vMerge: opts.vMergeContinue ? false : null,
+        vMerge: opts.vMergeRestart ? true : opts.vMergeContinue ? false : null,
         borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
-        background: null,
+        background: opts.bg ?? null,
         vAlign: 'top',
         widthPt: null,
       },
@@ -129,5 +136,80 @@ describe('splitTableAcrossPages', () => {
     const { pages } = run(t, rowHs, 0, 350);
 
     expect(pages.map((p) => rowsOf(p[0]).length)).toEqual([2, 3]);
+  });
+
+  it('breaks an over-tall vMerge span at a row boundary when it exceeds a fresh page', () => {
+    // A 3-row vMerge span (restart + 2 continue), each row 300pt = 900pt total,
+    // exceeds the 648pt content band even on a FRESH page (private sample-42).
+    // ECMA-376 §17.4.6 (cantSplit default = splittable): the span must break at
+    // whole-row boundaries rather than dumping 900pt onto one page and losing the
+    // continuation rows. Starting 100pt down leaves 548pt: only row 0 fits before
+    // the merge-end rows overflow, so the break lands after row 0.
+    const rows = [row({ vMergeRestart: true }), row({ vMergeContinue: true }), row({ vMergeContinue: true })];
+    const t = table(rows);
+    const rowHs = [300, 300, 300];
+    const { pages } = run(t, rowHs, 100, 648);
+
+    expect(pages.length).toBe(2);
+    expect(pages.map((p) => rowsOf(p[0]).length)).toEqual([1, 2]);
+    // No row lost or duplicated.
+    expect(pages.reduce((s, p) => s + rowsOf(p[0]).length, 0)).toBe(3);
+    // §17.4.85 — the continuation slice re-opens the merged cell so the paint pass
+    // draws its box (a leading `vMerge=continue` cell would otherwise be skipped as
+    // "rendered by its restart partner", which is on the previous page).
+    expect(rowsOf(pages[1][0])[0].cells[0].vMerge).toBe(true);
+    // The re-opened cell carries NO content (the restart content stayed on page 1),
+    // so it draws an empty box rather than duplicating the merged content.
+    expect(rowsOf(pages[1][0])[0].cells[0].content).toEqual([]);
+    // The parsed model is never mutated — only the emitted slice clone is re-opened.
+    expect(t.rows[1].cells[0].vMerge).toBe(false);
+  });
+
+  it('re-opens the merged cell with the RESTART cell presentation, not the continue cell', () => {
+    // §17.4.85 — Word paints the whole merged span from the RESTART cell, so the
+    // continuation box must carry the restart cell's shading/borders, not the
+    // (usually empty) continue cell's. The restart cell here is shaded; the continue
+    // cells are not.
+    const rows = [
+      row({ vMergeRestart: true, bg: 'FFCC00' }),
+      row({ vMergeContinue: true }),
+      row({ vMergeContinue: true }),
+    ];
+    const t = table(rows);
+    const rowHs = [300, 300, 300];
+    const { pages } = run(t, rowHs, 100, 648);
+
+    const reopened = rowsOf(pages[1][0])[0].cells[0];
+    expect(reopened.vMerge).toBe(true);
+    expect(reopened.content).toEqual([]);
+    // Presentation is inherited from the restart cell (shaded), NOT the continue cell.
+    expect(reopened.background).toBe('FFCC00');
+    // Parsed model untouched: restart still shaded, continue still unshaded.
+    expect(t.rows[0].cells[0].background).toBe('FFCC00');
+    expect(t.rows[1].cells[0].background).toBe(null);
+  });
+
+  it('keeps a vMerge span atomic when it fits a fresh page (no internal break)', () => {
+    // The same span structure but each row 100pt = 300pt total fits the 350pt band
+    // on a fresh page, so §17.4.85 atomicity is preserved: it moves whole to the
+    // next page rather than breaking internally. (Contrast the over-tall case
+    // above.) Rows 0..2 are the span; row 3 follows it.
+    const rows = [
+      row({ vMergeRestart: true }),
+      row({ vMergeContinue: true }),
+      row({ vMergeContinue: true }),
+      row(),
+    ];
+    const t = table(rows);
+    const rowHs = Array(4).fill(100);
+    // 350pt page, start at 0: rows 0..2 (300) fit; row 3 (100) overflows and the
+    // break before it (a safe boundary) moves it alone to page 2. The span never
+    // breaks internally.
+    const { pages } = run(t, rowHs, 0, 350);
+    expect(pages.map((p) => rowsOf(p[0]).length)).toEqual([3, 1]);
+    // No continuation slice starts on a vMerge continuation row.
+    for (let i = 1; i < pages.length; i++) {
+      expect(rowsOf(pages[i][0])[0].cells.some((c) => c.vMerge === false)).toBe(false);
+    }
   });
 });

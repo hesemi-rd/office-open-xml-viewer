@@ -5123,10 +5123,74 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
 
 /** A page break before row `ri` is unsafe when `ri` continues a vertical merge
  *  started above (ECMA-376 §17.4.85): splitting there would orphan the merged
- *  cell's continuation. Such a row carries at least one `vMerge=false` cell. */
+ *  cell's continuation. Such a row carries at least one `vMerge=false` cell.
+ *
+ *  When an over-tall vMerge span is broken at an interior boundary (see the
+ *  {@link splitTableAcrossPages} relaxation), the continuation slice re-opens the
+ *  merged cell via {@link reopenMergedCellsInRow} so this rule is re-satisfied for
+ *  the slice as its own table. */
 function tableBreakAllowedBefore(table: DocTable, ri: number): boolean {
   if (ri <= 0) return true;
   return !table.rows[ri].cells.some((c) => c.vMerge === false);
+}
+
+/** The cell whose gridSpan covers logical column `targetCi` in `row`, or `null`.
+ *  Pure grid walk (gridSpan-aware), mirroring {@link findMergeEndRow}'s column
+ *  scan (ECMA-376 §17.4.85). */
+function cellAtGridColumn(row: DocTableRow, targetCi: number): DocTableCell | null {
+  let ci = 0;
+  for (const cell of row.cells) {
+    if (targetCi >= ci && targetCi < ci + cell.colSpan) return cell;
+    ci += cell.colSpan;
+  }
+  return null;
+}
+
+/** ECMA-376 §17.4.85 — re-open a vMerge span that crosses INTO a continuation
+ *  slice. When an over-tall span is broken at an interior row boundary, the
+ *  slice's first body row (`rows[start]`) inherits `vMerge=continue` cells whose
+ *  `restart` sits on an earlier page. {@link drawTableRows} skips a bare continue
+ *  cell ("drawn by its restart partner"), so without this the re-opened cell box
+ *  would not be painted at all. For each such continue cell, walk UP `rows` to its
+ *  owning restart and:
+ *   - if that restart is a REPEATED header row already prepended to this slice
+ *     (`restartRi < headerCount`, and headers repeat), leave the continue cell as
+ *     is — the prepended header restart already spans the body rows, so promoting
+ *     here would draw a SECOND box (review finding, §17.4.78);
+ *   - otherwise promote it to `restart`, cloning the OWNING RESTART cell's
+ *     presentation (background / borders / vAlign) so the continuation box matches
+ *     Word — which paints the whole merged span from the restart cell — rather than
+ *     the continue cell's own (usually empty) properties. Content is dropped: the
+ *     merged content stayed with the restart row on the first piece, so the re-
+ *     opened box is empty (no duplication). The grid footprint (`colSpan`) is kept
+ *     from the continue cell so the row's column math is unchanged.
+ *  Runtime-only clone: the parsed rows/cells are never mutated. */
+function reopenMergedCellsInRow(
+  rows: DocTableRow[],
+  start: number,
+  headerCount: number,
+  headersPrepended: boolean,
+): DocTableRow {
+  const row = rows[start];
+  let ci = 0;
+  const cells = row.cells.map((cell) => {
+    const gridCi = ci;
+    ci += cell.colSpan;
+    if (cell.vMerge !== false) return cell;
+    // Walk up to the restart that owns this continue cell's column.
+    let restartRi = -1;
+    let restartCell: DocTableCell | null = null;
+    for (let r = start - 1; r >= 0; r--) {
+      const above = cellAtGridColumn(rows[r], gridCi);
+      if (!above) break;
+      if (above.vMerge === true) { restartRi = r; restartCell = above; break; }
+      if (above.vMerge !== false) break; // column left the span — malformed; bail
+    }
+    if (!restartCell) return cell; // no restart found (defensive) — leave unchanged
+    if (headersPrepended && restartRi < headerCount) return cell; // header owns it
+    return { ...restartCell, colSpan: cell.colSpan, vMerge: true as const, content: [] };
+  });
+  return { ...row, cells };
 }
 
 /** B2 table stage 1b — stamp a table element (whole table or one page slice) with
@@ -5850,19 +5914,34 @@ export function splitTableAcrossPages(
     const firstRowH = (isContinuation ? headerH : 0) + workRowHs[start];
     const freshAvail = contentH - colTop();
     const rowAvail = avail - (isContinuation ? headerH : 0);
-    // §17.4.85 + §17.4.6 — the UNBREAKABLE group starting at `start`: a restart
-    // row chained to its continue rows admits no internal break, so when the
-    // group as a whole overflows the band the only spec-faithful relief is
-    // splitting its (splittable) HEAD row — the group head is the restart row,
-    // which the relaxed splitter gate accepts; the remainder group then flows
-    // to the next page, where this same check re-splits the re-opened restart
-    // piece if the remaining span STILL exceeds a fresh page (the review's
-    // "re-split the restart piece" requirement). A single-row group reduces to
-    // the historical first-row check, so vMerge-free tables are byte-identical.
+    // The vMerge group starting at `start`: a restart row chained to its continue
+    // rows. This renderer keeps such a group together across page breaks (Word's
+    // observed behavior; ECMA-376 §17.4.85 defines the merge STRUCTURE but does not
+    // itself declare the span page-atomic, and §17.4.6 makes rows splittable by
+    // default). Two reliefs apply when the group overflows:
+    //   • split its (splittable) HEAD row — the group head is the restart row,
+    //     which the relaxed splitter gate accepts (PR #926 mid-row content split);
+    //   • when the group cannot fit even a FULL page's content band
+    //     (`groupH > contentH`), the atomicity invariant is impossible to honor, so
+    //     page breaks at the group's INTERIOR row boundaries are permitted (private
+    //     sample-42: a 900pt span in a 648pt band). Each continuation slice then
+    //     re-opens the merged cell (reopenMergedCellsInRow), and this same check
+    //     re-evaluates the re-opened span against the next full page. A group that
+    //     fits a full page keeps `relaxSpanBreak === false`, so its handling is
+    //     byte-identical to before this change (vMerge-free tables, and spans small
+    //     enough to stay atomic, are unaffected). NB: the threshold is `contentH`
+    //     (the full page/section content band), NOT `freshAvail` (the CURRENT
+    //     column region, which a mid-page continuous section shrinks) — a span that
+    //     merely overflows a short mid-page region still relocates whole to the next
+    //     full page rather than splitting inside the region.
     let groupEnd = start;
     while (groupEnd + 1 < n && !tableBreakAllowedBefore(workTable, groupEnd + 1)) groupEnd++;
     let groupH = isContinuation ? headerH : 0;
     for (let r = start; r <= groupEnd; r++) groupH += workRowHs[r];
+    const relaxSpanBreak = groupH > contentH;
+    const breakAllowedBefore = (ri: number): boolean =>
+      tableBreakAllowedBefore(workTable, ri) ||
+      (relaxSpanBreak && ri > start && ri <= groupEnd);
     if (rowSplit && (firstRowH > avail || groupH > avail) && rowAvail > 0 && start >= headerCount) {
       const split = splitRowForHeight(workTable, workRows[start], rowSplit.colWidthsPt, rowAvail, rowSplit.state);
       if (split && split.heights[0] <= rowAvail) {
@@ -5907,7 +5986,7 @@ export function splitTableAcrossPages(
     while (end < n) {
       const h = workRowHs[end];
       if (end > start && used + h > avail) {
-        if (tableBreakAllowedBefore(workTable, end)) {
+        if (breakAllowedBefore(end)) {
           const remainingForNextRow = avail - used;
           if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
             const split = splitRowForHeight(
@@ -5952,7 +6031,7 @@ export function splitTableAcrossPages(
           break;
         }
       }
-      if (end > start && tableBreakAllowedBefore(workTable, end)) {
+      if (end > start && breakAllowedBefore(end)) {
         lastSafeEnd = end;
         lastSafeUsed = used;
       }
@@ -5961,7 +6040,16 @@ export function splitTableAcrossPages(
     }
 
     const bodyRows = workRows.slice(start, end);
-    const sliceRows = isContinuation ? [...headerRows, ...bodyRows] : bodyRows;
+    // §17.4.85 — a slice that STARTS inside a vMerge span (its first body row is a
+    // `vMerge=continue` row, because an over-tall span was broken at an interior
+    // boundary above) re-opens the merged cell so the paint pass draws its box on
+    // this page. Runtime-only clone; only the leading body row is rewritten, and a
+    // column already re-opened by a prepended repeated header is left untouched.
+    const reopenedBody =
+      start > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
+        ? [reopenMergedCellsInRow(workRows, start, headerCount, isContinuation), ...bodyRows.slice(1)]
+        : bodyRows;
+    const sliceRows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
     const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
     if (colGeom) sliceEl.colGeom = colGeom;
