@@ -3053,7 +3053,11 @@ export class XlsxViewer implements ZoomableViewer {
       `display:flex;align-items:center;flex-shrink:0;gap:2px;` +
       `padding:0 10px;height:100%;color:#555;font-size:12px;user-select:none;`;
 
-    const mkBtn = (glyph: string, label: string, delta: number): HTMLButtonElement => {
+    // The steppers walk the shared IX9 zoom ladder (ZOOM_STEP_LADDER via
+    // zoomIn/zoomOut) so the built-in chrome and a host's own buttons wired to
+    // the ZoomableViewer contract land on identical scales (issue #842).
+    // Pre-IX9 these stepped ±0.1 linearly.
+    const mkBtn = (glyph: string, label: string, step: () => void): HTMLButtonElement => {
       const b = document.createElement('button');
       b.textContent = glyph;
       b.setAttribute('aria-label', label);
@@ -3061,7 +3065,7 @@ export class XlsxViewer implements ZoomableViewer {
       b.style.cssText =
         `width:18px;height:18px;padding:0;border:none;background:transparent;` +
         `color:#555;font-size:14px;line-height:1;cursor:pointer;border-radius:3px;`;
-      b.addEventListener('click', () => this.setScale((this.opts.cellScale ?? 1) + delta));
+      b.addEventListener('click', step);
       return b;
     };
 
@@ -3087,9 +3091,9 @@ export class XlsxViewer implements ZoomableViewer {
     label.textContent = `${Math.round(cur * 100)}%`;
     label.style.cssText = `min-width:42px;margin-left:6px;text-align:right;font-variant-numeric:tabular-nums;`;
 
-    wrap.appendChild(mkBtn('−', 'Zoom out', -0.1));
+    wrap.appendChild(mkBtn('−', 'Zoom out', () => this.zoomOut()));
     wrap.appendChild(slider);
-    wrap.appendChild(mkBtn('+', 'Zoom in', 0.1));
+    wrap.appendChild(mkBtn('+', 'Zoom in', () => this.zoomIn()));
     wrap.appendChild(label);
 
     this.zoomSlider = slider;

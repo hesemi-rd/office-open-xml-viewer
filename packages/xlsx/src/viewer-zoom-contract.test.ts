@@ -358,6 +358,65 @@ describe('XlsxViewer IX9 zoom contract', () => {
 });
 
 /**
+ * Issue #842 — the viewer's OWN +/- chrome must step exactly like the IX9
+ * contract methods: along the shared ladder (`ZOOM_STEP_LADDER` via
+ * `nextZoomStep`/`prevZoomStep`), not the pre-IX9 linear ±0.1. A host wiring
+ * its own buttons to `zoomIn`/`zoomOut` and a user clicking the built-in
+ * buttons now land on the same scales.
+ */
+describe('XlsxViewer built-in +/- buttons follow the shared ladder (issue #842)', () => {
+  function mountWithButtons(opts: ConstructorParameters<typeof XlsxViewer>[1] = {}) {
+    installDom();
+    const container = makeContainer();
+    const v = new XlsxViewer(container as unknown as HTMLElement, opts);
+    const priv = v as unknown as Priv;
+    priv.currentWorksheet = makeSheet();
+    priv.canvasArea.clientWidth = 400;
+    priv.canvasArea.clientHeight = 300;
+    const minus = container.querySelector('button[aria-label="Zoom out"]');
+    const plus = container.querySelector('button[aria-label="Zoom in"]');
+    if (!minus || !plus) throw new Error('built-in zoom buttons not found');
+    return { v, minus, plus };
+  }
+
+  it('the + button steps to the next ladder rung, not +0.1', () => {
+    const { v, plus } = mountWithButtons({ cellScale: 1.25 });
+    plus.dispatch('click');
+    expect(v.getScale()).toBe(1.5); // linear would give 1.35
+    plus.dispatch('click');
+    expect(v.getScale()).toBe(1.75);
+  });
+
+  it('the − button steps to the previous ladder rung, not −0.1', () => {
+    const { v, minus } = mountWithButtons();
+    minus.dispatch('click');
+    expect(v.getScale()).toBe(0.9);
+    minus.dispatch('click');
+    expect(v.getScale()).toBe(0.75); // linear would give 0.8
+  });
+
+  it('an off-ladder (wheel-zoomed) scale snaps onto the ladder', () => {
+    const { v, plus } = mountWithButtons({ cellScale: 1.03 });
+    plus.dispatch('click');
+    expect(v.getScale()).toBe(1.1); // linear would give 1.13
+  });
+
+  it('the − button holds at the bottom rung instead of sliding below it', () => {
+    const { v, minus } = mountWithButtons({ cellScale: 0.25 });
+    minus.dispatch('click');
+    expect(v.getScale()).toBe(0.25); // linear would give 0.15
+  });
+
+  it('button steps and contract zoomIn land on identical scales', () => {
+    const a = mountWithButtons({ cellScale: 1.25 });
+    const b = mountWithButtons({ cellScale: 1.25 });
+    a.plus.dispatch('click');
+    b.v.zoomIn();
+    expect(a.v.getScale()).toBe(b.v.getScale());
+  });
+});
+
+/**
  * Non-regression: the pre-IX9 slider position ↔ scale mapping (PR #315's
  * "100% dead-center piecewise-linear" behaviour) is unchanged. These call the
  * private helpers directly so a future contract change can't silently alter the

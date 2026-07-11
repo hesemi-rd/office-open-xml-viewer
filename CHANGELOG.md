@@ -8,6 +8,16 @@ changes that remain compatible with existing API surfaces.
 
 **Viewers / interaction**
 
+- **XlsxViewer built-in +/- zoom buttons now walk the shared zoom ladder:**
+  the tab-bar steppers step through the IX9 `ZoomableViewer` presets
+  (25 → 33 → 50 → 67 → 75 → 90 → 100 → 110 → 125 → 150 → 175 → 200 → 250 →
+  300 → 400 %), exactly like the contract's `zoomIn()`/`zoomOut()`, instead of
+  the previous linear ±10 %. Behaviour change for existing users of the
+  built-in chrome: from 100 %, "+" still lands on 110 %, but subsequent steps
+  now follow the presets (125 %, 150 %, …) and an off-preset wheel-zoomed scale
+  snaps onto the ladder on the first step. The slider and `setScale` are
+  unchanged. (#842, IX9)
+
 - **Disable hyperlink interactivity:** every hyperlink-supporting viewer
   (`DocxViewer`, `DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`,
   `XlsxViewer`) now accepts an `enableHyperlinks?: boolean` constructor option
