@@ -28,10 +28,9 @@ import type {
 // It currently inherits italic through the `italicCs ?? italic` fallback, but
 // §17.3.2.17 reads as an independent toggle (compare the adjudicated bold-side
 // note above buildSegments' axis docs: absent `bCs` does not inherit `b`), so
-// whether the fallback matches Word is pending adjudication in a follow-up
-// issue (see the PR that added this file). Pinning it here would pre-empt that
-// adjudication. The `rtl` case below pins CURRENT behavior for the same
-// fallback and should be revisited together with that issue.
+// whether the fallback matches Word is pending adjudication in issue #937.
+// Pinning it here would pre-empt that adjudication. The `rtl` case below pins
+// CURRENT behavior for the same fallback and should be revisited with #937.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FONT_PX = 20;
@@ -153,7 +152,7 @@ describe('run italic axis at paint time (§17.3.2.16 w:i / §17.3.2.17 w:iCs)', 
   it('w:rtl run with w:i and absent w:iCs paints italic (current fallback)', async () => {
     // CURRENT behavior pin: the CS axis falls back `italicCs ?? italic` when
     // w:iCs is absent. Whether Word agrees for an absent toggle is pending
-    // adjudication (see file header); revisit this pin with that issue.
+    // adjudication in issue #937; revisit this pin with that issue.
     const fonts = await paintFonts([para([
       textRun('نص', { italic: true, rtl: true, fontSizeCs: FONT_PX, langBidi: 'ar-sa' }),
     ])]);
