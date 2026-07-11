@@ -4147,13 +4147,17 @@ export function drawShapeText(
       // For a lone display equation in a top-anchored box (anchor="t", tIns=0),
       // line.ascent === seg.ascent, so `baseline - seg.ascent === lineTop` and
       // the raster is drawn TOP-FLUSH to the box — matching how Excel autofits
-      // the box to the equation and top-anchors it (issue #877). Any residual is
-      // NOT a downward shift: our STIX Two Math typeset is ~17% SHORTER than the
-      // Cambria Math box the file was authored against (measured on sample-28:
-      // MathJax 39.6 px vs the autofit ext cy 48.0 px for the same Fourier
-      // series), so the gap surfaces as unused space at the box BOTTOM while the
-      // top and every baseline sit at or above Excel's. Closing that gap is a
-      // metric-compatible-fallback question (#794), not a positioning fix.
+      // the box to the equation and top-anchors it (issue #877). Any size
+      // residual against the authored spAutoFit box is NOT a downward shift and
+      // is NOT fixable here: it is a construct-specific difference between the
+      // two math typesetting systems (MathJax + STIX Two Math vs Office +
+      // Cambria Math MATH-table constants — display-operator variant ladders,
+      // limit/fraction shift minima). Measured Office/ours ink-height ratios
+      // even flip sign per construct (~1.17x for a display sum with limits,
+      // ~0.89x for display fractions + radicals, ~1.0x for plain scripts), so
+      // no font-metrics-derived scale factor exists and emulating Cambria
+      // Math's constants is out of policy. Adjudicated won't-fix in #877 — see
+      // the measurement comment there before re-litigating.
       ctx.textBaseline = 'alphabetic';
       const baseline = lineTop + line.ascent;
       for (const seg of line.segs) {
