@@ -2531,6 +2531,51 @@ mod tests {
         ));
     }
 
+    /// §21.1.2.4.4 (buClr) — an explicit `<a:buClr>` sibling of `<a:buAutoNum>`
+    /// colours the auto-number marker, exactly as it does a `<a:buChar>` bullet
+    /// (§21.1.2.4.10 buClrTx is the default only when no buClr is present). The
+    /// child order follows CT_TextParagraphProperties' xsd:sequence: buClr →
+    /// buSzPct → buFont → buAutoNum. Regression: the buAutoNum branch used to drop
+    /// the sibling buClr, forcing the marker onto the inherited first-run colour.
+    #[test]
+    fn test_parse_bullet_autonum_reads_buclr() {
+        let xml = r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <a:buClr><a:srgbClr val="C00000"/></a:buClr>
+            <a:buSzPct val="100000"/>
+            <a:buFont typeface="+mj-lt"/>
+            <a:buAutoNum type="arabicPeriod"/>
+        </a:pPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut resolve = |_: &str| -> Option<String> { None };
+        let bullet = parse_bullet(Some(doc.root_element()), &theme, &mut resolve);
+        let v = serde_json::to_value(&bullet).unwrap();
+        assert_eq!(v["type"], "autoNum");
+        assert_eq!(v["numType"], "arabicPeriod");
+        // The buClr resolves to the srgbClr literal (uppercase hex, no '#').
+        assert_eq!(v["color"], "C00000");
+    }
+
+    /// §21.1.2.4.10 (buClrTx) — with no explicit `<a:buClr>` the auto-number
+    /// marker carries no own colour (`None`), so the renderer falls back to the
+    /// default (the first run's colour). The `color` field must be absent/null,
+    /// not silently defaulted to some literal.
+    #[test]
+    fn test_parse_bullet_autonum_without_buclr_has_no_color() {
+        let xml = r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <a:buAutoNum type="arabicPeriod"/>
+        </a:pPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut resolve = |_: &str| -> Option<String> { None };
+        let bullet = parse_bullet(Some(doc.root_element()), &theme, &mut resolve);
+        let v = serde_json::to_value(&bullet).unwrap();
+        assert_eq!(v["type"], "autoNum");
+        assert_eq!(v["color"], serde_json::Value::Null);
+    }
+
     /// §19.7.10 / §21.1.2.4.2 — a picture bullet declared on a master/list-style
     /// `<a:lvlNpPr>` is captured per level by `read_level_bullets`, so a slide
     /// paragraph at that level inherits the image marker.

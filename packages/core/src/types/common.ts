@@ -245,7 +245,7 @@ export type Bullet =
   | { type: 'none' }
   | { type: 'inherit' }
   | { type: 'char'; char: string; color: string | null; sizePct: number | null; fontFamily: string | null }
-  | { type: 'autoNum'; numType: string; startAt: number | null };
+  | { type: 'autoNum'; numType: string; startAt: number | null; color: string | null };
 
 export interface TabStop {
   /** Position in EMU from the LEADING text-inset edge of the text area —

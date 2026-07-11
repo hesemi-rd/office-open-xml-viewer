@@ -919,7 +919,14 @@ pub(crate) fn parse_bullet<F: FnMut(&str) -> Option<String>>(
     if let Some(bu_auto) = child(p_pr, "buAutoNum") {
         let num_type = attr(&bu_auto, "type").unwrap_or_else(|| "arabicPeriod".into());
         let start_at = attr(&bu_auto, "startAt").and_then(|v| v.parse().ok());
-        return Bullet::AutoNum { num_type, start_at };
+        // §21.1.2.4.4 — a sibling `<a:buClr>` colours the auto-number marker,
+        // exactly as it does a `<a:buChar>` bullet above.
+        let color = child(p_pr, "buClr").and_then(|n| parse_color_node(n, theme));
+        return Bullet::AutoNum {
+            num_type,
+            start_at,
+            color,
+        };
     }
 
     Bullet::Inherit
