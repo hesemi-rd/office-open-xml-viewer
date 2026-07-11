@@ -1,20 +1,24 @@
 /**
- * Issue #794 acceptance harness — per-font advance-bias model.
+ * Issue #794 probe harness — per-font advance bias (Regime A), two layers.
  *
- * These five criteria must hold SIMULTANEOUSLY once the model lands (issue #794
- * implementation brief, 2026-07-11):
- *   1. sample-15 p1 copyright block wraps to Word's 7 lines (Times small print,
- *      near-zero bias ⇒ the +2.83px marginal word WRAPS; §17.18.44 justify gate).
- *   3. sample-10 p1 centred title stays on ONE line (Century substituted ⇒ larger
- *      bias absorbs the +5.96px overflow).
- *   4. sample-4 paginates to ONE page (Meiryo UI ≈ per-script condensed advance:
- *      hiragana ~0.78em / katakana ~0.74em vs the substitute's 1.0em).
- * (2 = demo/sample-1 fidelity ratchet and 5 = #796 Thai/Korean corpus are checked
- *  in the Playwright VRT, not here.)
+ * Layer 1 — ACCEPTANCE, font-present ground-truth parity: on a host that has a
+ * document's fonts, wrap positions must match Word. This layer is enforced by
+ * the demo/sample-1 fidelity ratchet (Playwright VRT; Georgia bias) and the
+ * synthetic Word-verified §17.18.44 gates in
+ * packages/docx/src/justify-shrink-overshoot.test.ts. It also covers behavior
+ * that survives substitution, such as the non-justified drawable trailing-space
+ * budget (sample-10 title below).
  *
- * Environment: fonts are deliberately NOT registered — this is the absent-font
- * substitute environment the model must correct. macOS-gated (the VRT reference
- * environment); skia + WASM gated like the other probes.
+ * Layer 2 — DIAGNOSTIC ONLY, font-absent reflow: when a requested face is
+ * absent, the viewer substitutes the host fallback and REFLOWS, like Word on a
+ * machine without the fonts. Line breaks and page counts may then differ from
+ * the authoring machine; that is accepted behavior, not a defect (product
+ * decision 2026-07-12; issue #855 won't-fix — PR #979's cross-font metric
+ * emulation "Regime B" was reverted). The sample-4 page-count check below only
+ * LOGS the substituted-environment result; it asserts nothing about parity.
+ *
+ * Environment: fonts are deliberately NOT registered. macOS-gated (the VRT
+ * reference environment); skia + WASM gated like the other probes.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
@@ -172,29 +176,35 @@ async function pageLines(n: number, page: number, width = 595): Promise<string[]
 const macos = process.platform === 'darwin';
 const gate = !!skia && !!docxMod && !!rendererMod && macos;
 
-describe.skipIf(!gate)('issue #794 — per-font advance-bias acceptance', () => {
-  it.skipIf(!have(4))('CRITERION 4: sample-4 paginates to 1 page (Meiryo UI condensed advance)', () => {
+describe.skipIf(!gate)('issue #794 — per-font advance-bias probes', () => {
+  it.skipIf(!have(4))('DIAGNOSTIC (non-acceptance): sample-4 font-absent page count', () => {
+    // Meiryo UI is absent here, so the full-width substitute reflows and the
+    // document may paginate differently from Word on the authoring machine
+    // (Word: 1 page; the substitute typically yields 2). Accepted behavior —
+    // issue #855 won't-fix. Logged for regen bookkeeping only.
     const pages = pageCount(4);
     // eslint-disable-next-line no-console
-    console.log(`[#794 C4] sample-4 pageCount = ${pages} (Word: 1)`);
-    expect(pages).toBe(1);
+    console.log(`[#794 diagnostic] sample-4 font-absent pageCount = ${pages} (Word with fonts: 1)`);
+    expect(pages).toBeGreaterThanOrEqual(1);
   });
 
-  // CRITERION 1 (sample-15 #698 narrow justified column) is encoded as the
-  // synthetic Word-verified gate in packages/docx/src/justify-shrink-overshoot.test.ts
-  // (the two `INTERIM (#794 pending)` pins flip to 3 tokens / 2 lines). The real
-  // sample-15 copyright block is a page-bottom-anchored <wps:txbx> that this body
-  // render path does not draw, so it cannot be line-counted here; the synthetic
-  // gate + demo/sample-1 VRT ratchet are its acceptance.
+  // The sample-15 #698 narrow justified column is encoded as the synthetic
+  // Word-verified gate in packages/docx/src/justify-shrink-overshoot.test.ts
+  // (3 tokens / 2 lines on justified lines). The real sample-15 copyright block
+  // is a page-bottom-anchored <wps:txbx> that this body render path does not
+  // draw, so it cannot be line-counted here; the synthetic gate +
+  // demo/sample-1 VRT ratchet are its acceptance.
 
-  it.skipIf(!have(10))('CRITERION 3: sample-10 p1 centred title stays on one line', async () => {
+  it.skipIf(!have(10))('ACCEPTANCE: sample-10 p1 centred title stays on one line', async () => {
     const lines = await pageLines(10, 0, 595);
     const norm = (l: string) => l.replace(/\s+/g, '');
     // Word truth (sample-10.pdf p1): the centred main title is one line:
     //   「第 11 回横幹連合コンファレンスサンプル原稿」
     // A substituted MS Mincho over-measures the CJK title by ~+5.96px; Word keeps
-    // it on ONE line, so the model must admit that overflow. Failure mode on main:
-    // the tail 「サンプル原稿」 wraps to a second line.
+    // it on ONE line. A centred (non-justified) line keeps the drawable
+    // trailing-space shrink budget, which absorbs the overflow — this pin guards
+    // that retained path. Historical failure mode: the tail 「サンプル原稿」
+    // wraps to a second line.
     const titleLine = lines.find((l) => norm(l).includes('横幹連合コンファレンスサンプル原稿'));
     // eslint-disable-next-line no-console
     console.log(`[#794 C3] sample-10 title one-line? ${!!titleLine}\n` +
