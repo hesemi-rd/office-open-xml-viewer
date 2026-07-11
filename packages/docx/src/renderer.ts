@@ -7651,7 +7651,7 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
@@ -7788,6 +7788,10 @@ interface ParagraphLineDrawCtx {
   contentW: number;
   lines: LayoutLine[];
   grid: DocGridCtx;
+  /** Any line in the paragraph carries a ruby annotation → every line uses the
+   *  uniform (max-natural) box height and keeps the centred baseline grid, so the
+   *  lineRule=auto "extra leading below" rule (§17.3.1.33, #990) is not applied. */
+  paraHasRuby: boolean;
   paraX: number;
   firstLineX: number;
   paraW: number;
@@ -7816,7 +7820,7 @@ interface ParagraphLineDrawCtx {
 function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
   const {
     ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses,
-    contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft,
+    contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft,
     indFirst, continuesParagraph, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx,
     picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
     decimalAutoTabPx, drawGridDeltaPx, lineHForLine,
@@ -7832,14 +7836,39 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // Honor wrap-computed line topY (may push past topAndBottom floats).
     if (line.topY !== undefined && line.topY > state.y) state.y = line.topY;
 
-    // Word centers the font's natural line (ascent+descent) within the expanded
-    // line box — extra space from auto/exact/atLeast goes half above and half
-    // below the glyphs. Baseline = top + halfExtra + ascent. For ruby
-    // paragraphs every line uses the same height (the max natural line) so
-    // ruby- and non-ruby-bearing lines share a baseline grid.
+    // Baseline placement inside the line box. §17.3.1.33 defines the box SIZE
+    // (line/lineRule); the placement WITHIN the box below is Word's OBSERVED
+    // behaviour, measured against its PDF export (#990), not an ECMA rule:
+    //   • lineRule="auto" is MULTIPLE spacing — `w:line` is a 240ths-of-a-line
+    //     multiplier. Word pins the baseline at the natural ascent from the box
+    //     top and places the multiplier's extra leading ENTIRELY BELOW the
+    //     glyphs; it does NOT centre the natural line in the enlarged box.
+    //     (Measured in the #981/#990 follow-up: a 2.0× 48pt title was displaced
+    //     ~22pt when centred.) The substituted-font single-line FLOOR
+    //     (intendedSingle) still centres the glyph box within the single design
+    //     line (half-leading), so a Meiryo single-spaced line is byte-for-byte
+    //     unchanged. A sub-single multiplier (0 < value < 1) makes lineH <
+    //     singleBox: the baseline stays pinned at the natural ascent and the
+    //     shortfall is NEGATIVE leading (consecutive lines overlap), matching
+    //     Word's compressed sub-single spacing.
+    //   • exact/atLeast keep the extra space split half above / half below
+    //     (centred). docGrid line rules snap to whole cells and ruby paragraphs
+    //     use a uniform box — both have their own within-box placement, so they
+    //     keep the full-box centring too.
+    // Draw-only: lineHForLine (the box advance) is identical either way, so the
+    // line pitch and pagination are unaffected — this pins only WHERE the glyphs
+    // sit inside the box. (The trailing-empty-mark page-fit reads a SEPARATE
+    // centred below-baseline extent that is deliberately left unchanged; see
+    // lineBelowBaselinePx in line-layout.ts.)
     const lineH = lineHForLine(line);
-    const naturalLineH = line.ascent + line.descent;
-    const baseline = state.y + (lineH - naturalLineH) / 2 + line.ascent;
+    const glyphNatural = line.ascent + line.descent;
+    const autoMultiple =
+      para.lineSpacing?.rule === 'auto' && !paraHasRuby && !isGridLineRule(grid);
+    // For auto multiple spacing, centre the glyph only within the single design-
+    // line box (= max(glyphNatural, intendedSingle), matching lineBoxHeight's
+    // `natural`); the multiplier's extra (lineH − singleBox) then falls below.
+    const centerBox = autoMultiple ? Math.max(glyphNatural, line.intendedSingle) : lineH;
+    const baseline = state.y + (centerBox - glyphNatural) / 2 + line.ascent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
     const lineLeft = paraX + line.xOffset;
@@ -10015,15 +10044,24 @@ export function renderShapeText(
     // Ruby lines reserve real furigana height, so use the measured glyph box,
     // mirroring the body path.
     const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, hasRuby, intended, eastAsian, fontPx);
-    // Word centers the font's GLYPH box within the (possibly expanded) line box
-    // (half-leading): when line-spacing or the design-line floor grows the box
-    // the extra space is split above and below the glyph box, so the baseline is
-    // (lineH − glyphNatural)/2 below the box top plus the ascent. With no
-    // expansion (glyphNatural == lineH) this reduces to c.ascent. This is the
-    // SAME math as the body draw baseline (naturalLineH = ascent+descent, NOT
-    // floor-inflated) — so an inflated box floats the glyphs centered with real
-    // half-leading instead of top-pinning them.
-    const baselineOffset = (lineH - glyphNatural) / 2 + c.ascent;
+    // Baseline placement inside the line box, mirroring the body draw path
+    // (~7859). §17.3.1.33 sizes the box; the placement is Word's OBSERVED
+    // behaviour (#990), not an ECMA rule:
+    //   • lineRule="auto" is MULTIPLE spacing — Word pins the baseline at the
+    //     natural ascent and places the multiplier's extra leading ENTIRELY BELOW
+    //     the glyph box, rather than centring it in the enlarged box (#990). The
+    //     design-line FLOOR (intended > glyphNatural, font substitution) still
+    //     centres the glyph within the single design line (half-leading), so a
+    //     single-spaced Meiryo text box (sample-6's banner) is unchanged.
+    //   • exact/atLeast (and docGrid/ruby, sized separately) keep the full-box
+    //     centring: baseline = (lineH − glyphNatural)/2 below the box top + ascent
+    //     (reduces to c.ascent when the box is not expanded).
+    const autoMultiple = ls?.rule === 'auto' && !hasRuby && !isGridLineRule(grid);
+    // For auto multiple spacing, centre only within the single design-line box
+    // (= max(glyphNatural, intended), matching lineBoxHeight's `natural`); the
+    // multiplier's extra (lineH − singleBox) then falls below.
+    const centerBox = autoMultiple ? Math.max(glyphNatural, intended) : lineH;
+    const baselineOffset = (centerBox - glyphNatural) / 2 + c.ascent;
     return { lineH, baselineOffset };
   };
   // Per-line shape metrics over the line's laid-out segments. The line-box FLOOR

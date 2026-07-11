@@ -1149,14 +1149,24 @@ export function paragraphMarkLineHeight(
 }
 
 /**
- * ECMA-376 §17.3.1.29 / §17.3.1.33 — the extent (px) of an empty paragraph's mark
- * line that sits BELOW its baseline (descent + half of any auto/atLeast leading).
- * Word centers the natural line within the box, so the baseline lies at
- * `top + (advance − (ascent + descent)) / 2 + ascent`; the portion below it is
- * `(advance − ascent + descent) / 2`. This is the whitespace a trailing empty
- * paragraph may let overflow the bottom content edge (it paints no ink there),
- * matching Word's baseline-based page fit. Mirrors {@link drawParagraphLine}'s
- * `baseline = state.y + (lineH − naturalLineH) / 2 + line.ascent`.
+ * §17.3.1.29 / §17.3.1.33 — the extent (px) of a line that sits BELOW its
+ * baseline (descent + half of any auto/atLeast leading), using the HALF-LEADING
+ * (centred) baseline `top + (advance − (ascent + descent)) / 2 + ascent`, so the
+ * portion below it is `(advance − ascent + descent) / 2`.
+ *
+ * Called for BOTH a paragraph's last visible line (paragraph-measure.ts, the
+ * `lastLineBelowBaselinePt` field) and — via {@link paragraphMarkBelowBaselinePt}
+ * — an empty paragraph's mark line. Its ONE consumer (renderer.ts
+ * `trailingMarkOverflow`) reads it only for an inkless trailing MARK: the
+ * whitespace such a paragraph may let overflow the bottom content edge, matching
+ * Word's measured page fit (#981).
+ *
+ * NOTE: this stays the CENTRED baseline even though VISIBLE lineRule=auto content
+ * lines now draw a PINNED baseline ({@link drawParagraphLine} / #990: multiplier
+ * leading placed entirely below the glyphs). The pagination consumer is inkless
+ * (mark-only), so the pinned glyph baseline never reaches it, and the #981 page
+ * fit was verified against Word with this half-leading extent — changing it would
+ * move page boundaries. The pin is therefore intentionally DRAW-ONLY.
  */
 export function lineBelowBaselinePx(advancePx: number, ascentPx: number, descentPx: number): number {
   return Math.max(0, (advancePx - ascentPx + descentPx) / 2);
