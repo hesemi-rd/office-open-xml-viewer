@@ -4073,6 +4073,18 @@ fn parse_inline_drawing(
                                     anchor_y_pt: 0.0,
                                     anchor_x_from_margin: false,
                                     anchor_y_from_para: false,
+                                    // Inline: anchor-only fields absent.
+                                    wrap_mode: None,
+                                    dist_top: 0.0,
+                                    dist_bottom: 0.0,
+                                    dist_left: 0.0,
+                                    dist_right: 0.0,
+                                    wrap_side: None,
+                                    allow_overlap: true,
+                                    anchor_x_align: None,
+                                    anchor_y_align: None,
+                                    anchor_x_relative_from: None,
+                                    anchor_y_relative_from: None,
                                 }))];
                             }
                         }
@@ -4195,9 +4207,9 @@ fn parse_inline_drawing(
     // container is `<wp:anchor>`. Detect it BEFORE the wgp/wsp/blip fallbacks —
     // a chart graphicData has no `<a:blip>`, so without this it would fall all
     // the way through to `resolve_inline_blip` and silently drop (issue #752).
-    // The parsed `pos_x`/`pos_y` + `x_from_margin`/`y_from_para` are carried on
-    // the ChartRun exactly like the anchor ImageRun path, so the renderer draws
-    // the chart at the same absolute page coordinates a floating picture uses.
+    // The ChartRun carries the full position and wrap metadata parsed above,
+    // exactly like the anchor ImageRun path, so the renderer can position the
+    // chart and reserve its text-wrap exclusion band with picture parity.
     if let Some(graphic_data) = container
         .descendants()
         .find(|n| n.tag_name().name() == "graphicData")
@@ -4238,6 +4250,17 @@ fn parse_inline_drawing(
                                 anchor_y_pt: pos_y,
                                 anchor_x_from_margin: x_from_margin,
                                 anchor_y_from_para: y_from_para,
+                                wrap_mode: anchor_meta.wrap_mode.clone(),
+                                dist_top: anchor_meta.dist_top,
+                                dist_bottom: anchor_meta.dist_bottom,
+                                dist_left: anchor_meta.dist_left,
+                                dist_right: anchor_meta.dist_right,
+                                wrap_side: anchor_meta.wrap_side.clone(),
+                                allow_overlap: anchor_meta.allow_overlap,
+                                anchor_x_align: x_align.clone(),
+                                anchor_y_align: y_align.clone(),
+                                anchor_x_relative_from: rel_h.clone(),
+                                anchor_y_relative_from: rel_v.clone(),
                             }))];
                         }
                     }
@@ -12456,6 +12479,90 @@ mod anchor_image_relative_from_tests {
             none.is_empty(),
             "unresolvable anchored chart rId must emit nothing"
         );
+    }
+
+    /// ECMA-376 §20.4.2.3 and §20.4.2.16: anchored charts carry the same
+    /// positioning and text-wrap metadata as anchored pictures. In particular,
+    /// `<wp:align>` must not collapse to a zero offset without preserving the
+    /// alignment, and wrapSquare must retain its exclusion distances and side.
+    #[test]
+    fn anchor_chart_drawing_emits_full_anchor_wrap_metadata() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:r><w:drawing>
+            <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                       xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                       behindDoc="0" distT="91440" distB="45720" distL="114300" distR="114300"
+                       locked="0" layoutInCell="1" allowOverlap="0" relativeHeight="1">
+              <wp:simplePos x="0" y="0"/>
+              <wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH>
+              <wp:positionV relativeFrom="paragraph"><wp:posOffset>457200</wp:posOffset></wp:positionV>
+              <wp:extent cx="5029200" cy="2743200"/>
+              <wp:wrapSquare wrapText="left"/>
+              <wp:docPr id="1" name="Chart 1"/>
+              <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+                <c:chart r:id="rIdChart"/>
+              </a:graphicData></a:graphic>
+            </wp:anchor>
+          </w:drawing></w:r>
+        </w:p>"#;
+        let doc = XmlDoc::parse(xml).unwrap();
+        let drawing = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "drawing")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+
+        let model = parse_docx_chart(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:val><c:numRef><c:numCache><c:ptCount val="1"/>
+                    <c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+                </c:ser><c:axId val="1"/><c:axId val="2"/>
+              </c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+            None,
+            &theme,
+        )
+        .expect("model");
+        let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        chart_map.insert("rIdChart".to_string(), model);
+
+        let runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
+        assert_eq!(runs.len(), 1, "one anchored chart run expected");
+        match &runs[0] {
+            DocRun::Chart(c) => {
+                assert_eq!(c.wrap_mode.as_deref(), Some("square"));
+                assert_eq!(c.wrap_side.as_deref(), Some("left"));
+                assert!((c.dist_top - 7.2).abs() < 1e-6, "dist_top={}", c.dist_top);
+                assert!(
+                    (c.dist_bottom - 3.6).abs() < 1e-6,
+                    "dist_bottom={}",
+                    c.dist_bottom
+                );
+                assert!(
+                    (c.dist_left - 9.0).abs() < 1e-6,
+                    "dist_left={}",
+                    c.dist_left
+                );
+                assert!(
+                    (c.dist_right - 9.0).abs() < 1e-6,
+                    "dist_right={}",
+                    c.dist_right
+                );
+                assert!(!c.allow_overlap);
+                assert_eq!(c.anchor_x_align.as_deref(), Some("right"));
+                assert_eq!(c.anchor_y_align, None);
+                assert_eq!(c.anchor_x_relative_from.as_deref(), Some("margin"));
+                assert_eq!(c.anchor_y_relative_from.as_deref(), Some("paragraph"));
+            }
+            other => panic!("expected DocRun::Chart, got {other:?}"),
+        }
     }
 
     /// CH14 end-to-end — `private/sample-24.docx` has 6 `<w:drawing>` chart
