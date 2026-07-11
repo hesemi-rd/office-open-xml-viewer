@@ -3711,7 +3711,7 @@ fn parse_run_inner(
                 // understood, so the live chartex chart wins and its rendered-PNG
                 // Fallback is correctly NOT re-emitted (no double draw).
                 if let Some(selected) =
-                    select_mce_alternate_content(child, &docx_understands_drawing_ns)
+                    ooxml_common::mce::select_alternate_content(child, &docx_understands_drawing_ns)
                 {
                     for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
@@ -3950,46 +3950,6 @@ fn docx_understands_drawing_ns(ns: &str) -> bool {
         | "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
         | "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
     )
-}
-
-/// Select the active branch of an `<mc:AlternateContent>` per the MCE reference
-/// processing model (ECMA-376 Part 3 §9.3, Step 2):
-///
-/// - A `<mc:Choice>` is selected iff EVERY namespace named by its `Requires`
-///   attribute is understood (`understood`) AND no preceding sibling Choice was
-///   already selected. `Requires` is a whitespace-delimited list of namespace
-///   *prefixes*, resolved to URIs against the element's in-scope xmlns via
-///   `lookup_namespace_uri`. An empty / all-whitespace `Requires` (non-conformant
-///   — the schema requires ≥1 prefix) is treated as not-understood.
-/// - If no Choice is selected, the `<mc:Fallback>` (if present) is selected.
-///
-/// Returns the selected element node, or `None` when there is neither a
-/// selectable Choice nor a Fallback.
-fn select_mce_alternate_content<'a, 'i>(
-    ac: roxmltree::Node<'a, 'i>,
-    understood: &dyn Fn(&str) -> bool,
-) -> Option<roxmltree::Node<'a, 'i>> {
-    for choice in ac
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "Choice")
-    {
-        let requires = choice.attribute("Requires").unwrap_or("");
-        let prefixes: Vec<&str> = requires.split_whitespace().collect();
-        // §9.3(1): each Requires prefix must resolve to an understood namespace.
-        // A conformant Choice has ≥1 prefix; an empty list can never be selected.
-        let all_understood = !prefixes.is_empty()
-            && prefixes.iter().all(|prefix| {
-                choice
-                    .lookup_namespace_uri(Some(*prefix))
-                    .is_some_and(understood)
-            });
-        if all_understood {
-            return Some(choice);
-        }
-    }
-    // §9.3: no Choice selected → the Fallback (if any) is selected.
-    ac.children()
-        .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
 }
 
 fn parse_inline_drawing(

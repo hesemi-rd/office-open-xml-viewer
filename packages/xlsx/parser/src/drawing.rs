@@ -19,6 +19,18 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::io::Cursor;
 
+/// ECMA-376 Part 3 §9.3 "given application configuration" for the xlsx parser:
+/// the Microsoft 2010 drawing extensions (a14 — wraps ordinary shapes/charts and
+/// OMML `a14:m` equations) and the 2009/9 spreadsheet extensions (x14 — slicers
+/// and the OLE `objectPr` image preview). Both have real render paths here.
+pub(crate) fn xlsx_understands_ns(ns: &str) -> bool {
+    matches!(
+        ns,
+        "http://schemas.microsoft.com/office/drawing/2010/main"
+            | "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+    )
+}
+
 /// True when an `<xdr:sp>` / `<xdr:pic>` / `<xdr:grpSp>` (or `<xdr:cxnSp>`)
 /// node's own `<xdr:cNvPr hidden="1">` marks it hidden (ECMA-376 §20.1.2.2.8
 /// `CT_NonVisualDrawingProps@hidden`, `xsd:boolean`, default `false`). Only the
@@ -551,14 +563,11 @@ fn push_math_runs_shape(
                 }
             }
         }
-        // mc:AlternateContent → the a14 `Choice` holds the live equation; the
-        // `Fallback` holds a rasterized picture we must NOT also draw.
         "AlternateContent" => {
-            if let Some(choice) = node
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "Choice")
+            if let Some(sel) =
+                ooxml_common::mce::select_alternate_content(node, &xlsx_understands_ns)
             {
-                for c in choice.children().filter(|n| n.is_element()) {
+                for c in sel.children().filter(|n| n.is_element()) {
                     push_math_runs_shape(c, theme_colors, runs);
                 }
             }
@@ -1324,18 +1333,14 @@ pub(crate) fn parse_shape_anchors(
 
         // Excel wraps a modern shape in an anchor-level `<mc:AlternateContent>`
         // (`<mc:Choice Requires="…">` = the live shape, `<mc:Fallback>` = a
-        // legacy fallback). Unwrap to the Choice's content so the grpSp/sp/pic
-        // lookups below see the real shape; otherwise the whole drawing — and
-        // any equation in it — is silently dropped. (Equations inside the shape
-        // text body are handled separately by `push_math_runs_shape`; this is
-        // the distinct, shape-level wrapper.)
+        // legacy fallback). Per ECMA-376 Part 3 §9.3, unwrap the first understood
+        // Choice or fall through to the Fallback so the grpSp/sp/pic lookups below
+        // see the selected shape. (Equations inside the shape text body are handled
+        // separately by `push_math_runs_shape`; this is the shape-level wrapper.)
         let content = anchor
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "AlternateContent")
-            .and_then(|ac| {
-                ac.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "Choice")
-            })
+            .and_then(|ac| ooxml_common::mce::select_alternate_content(ac, &xlsx_understands_ns))
             .unwrap_or(anchor);
 
         // Two top-level layouts ECMA-376 allows under <xdr:twoCellAnchor>:
@@ -1872,17 +1877,12 @@ pub(crate) fn parse_ole_object_anchors(
         return Vec::new();
     };
 
-    // Collect the (non-Fallback) oleObjects up front so we can decide whether to
-    // read the vmlDrawing at all.
+    // Collect the ECMA-376 Part 3 §9.3-selected oleObjects up front so we can
+    // decide whether to read the vmlDrawing at all.
     let ole_objects: Vec<roxmltree::Node> = doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "oleObject")
-        // Skip the AlternateContent Fallback twin so a Choice+Fallback pair
-        // yields one anchor, not two.
-        .filter(|n| {
-            !n.ancestors()
-                .any(|a| a.is_element() && a.tag_name().name() == "Fallback")
-        })
+        .filter(|n| ole_object_in_selected_mce_branch(*n))
         .collect();
     if ole_objects.is_empty() {
         return Vec::new();
@@ -1983,6 +1983,29 @@ pub(crate) fn parse_ole_object_anchors(
         });
     }
     anchors
+}
+
+/// True when `ole` (an `<oleObject>`) is not wrapped in `<mc:AlternateContent>`,
+/// or lies inside the Choice/Fallback branch that ECMA-376 Part 3 §9.3 selects.
+/// Replaces the old blanket "skip anything under a Fallback" rule so an
+/// un-understood Choice correctly yields the Fallback's oleObject (issue #787).
+fn ole_object_in_selected_mce_branch(ole: roxmltree::Node) -> bool {
+    let Some(ac) = ole
+        .ancestors()
+        .find(|a| a.is_element() && a.tag_name().name() == "AlternateContent")
+    else {
+        return true; // bare oleObject, not under MCE
+    };
+    let branch = ole
+        .ancestors()
+        .find(|a| a.is_element() && matches!(a.tag_name().name(), "Choice" | "Fallback"));
+    match (
+        ooxml_common::mce::select_alternate_content(ac, &xlsx_understands_ns),
+        branch,
+    ) {
+        (Some(sel), Some(b)) => sel == b,
+        _ => false,
+    }
 }
 
 /// Load a sheet's OLE-object preview images (the `<oleObjects>` collection,
@@ -2698,6 +2721,90 @@ mod hidden_tests {
         }
     }
 
+    // ── MCE AlternateContent selection (ECMA-376 Part 3 §9.3) ───────────────
+
+    /// A `<xdr:sp>` with the given solid `fill` colour — used to tell which MCE
+    /// branch the shape-unwrap site selected.
+    fn filled_sp(fill: &str) -> String {
+        format!(
+            r#"<xdr:sp>
+                 <xdr:nvSpPr><xdr:cNvPr id="2" name="S"/><xdr:cNvSpPr/></xdr:nvSpPr>
+                 <xdr:spPr>
+                   <a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                   <a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>
+                 </xdr:spPr>
+               </xdr:sp>"#
+        )
+    }
+
+    /// A `<xdr:twoCellAnchor>` whose `<mc:AlternateContent>` Choice (behind
+    /// `requires`) carries a red-filled shape and whose Fallback carries a
+    /// blue-filled one. The fill colour of the emitted shape reveals the branch.
+    fn alt_content_shape_anchor(requires: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}
+                 xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                 xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"
+                 xmlns:unk="http://example.com/an/extension/we/do/not/understand">
+              <xdr:twoCellAnchor>
+                <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+                <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+                <mc:AlternateContent>
+                  <mc:Choice Requires="{requires}">{choice}</mc:Choice>
+                  <mc:Fallback>{fallback}</mc:Fallback>
+                </mc:AlternateContent>
+                <xdr:clientData/>
+              </xdr:twoCellAnchor></xdr:wsDr>"#,
+            NS = NS,
+            requires = requires,
+            choice = filled_sp("FF0000"),
+            fallback = filled_sp("0000FF"),
+        )
+    }
+
+    /// ECMA-376 Part 3 §9.3(1) — the anchor-level shape wrapper: a Choice whose
+    /// `Requires` names an un-understood namespace must not be selected even
+    /// though its shape would render; the `<mc:Fallback>` shape is drawn instead.
+    /// The old code always unwrapped to the Choice.
+    #[test]
+    fn mce_shape_unhandled_choice_selects_fallback() {
+        let anchors = parse_shape_anchors(
+            &alt_content_shape_anchor("unk"),
+            &theme(),
+            &[6_350],
+            &HashMap::new(),
+        );
+        assert_eq!(anchors.len(), 1, "one anchor");
+        assert_eq!(anchors[0].shapes.len(), 1, "one shape");
+        assert_eq!(
+            anchors[0].shapes[0].fill_color.as_deref(),
+            Some("#0000FF"),
+            "un-understood Choice must yield the Fallback (blue) shape, not the Choice (red)"
+        );
+    }
+
+    /// §9.3(1) — `a14` (drawing 2010) IS understood; the real
+    /// `<mc:Choice Requires="a14">` that Excel wraps ordinary shapes in
+    /// (sample-1 / sample-28) is selected, the Fallback dropped. Guards those
+    /// slides against a regression.
+    #[test]
+    fn mce_shape_understood_a14_choice_selected() {
+        let anchors = parse_shape_anchors(
+            &alt_content_shape_anchor("a14"),
+            &theme(),
+            &[6_350],
+            &HashMap::new(),
+        );
+        assert_eq!(anchors.len(), 1, "one anchor");
+        assert_eq!(anchors[0].shapes.len(), 1, "one shape");
+        assert_eq!(
+            anchors[0].shapes[0].fill_color.as_deref(),
+            Some("#FF0000"),
+            "understood a14 Choice must be selected (red), Fallback dropped"
+        );
+    }
+
     #[test]
     fn hidden_group_elides_children() {
         // A visible group with one hidden and one visible child leaf emits only
@@ -3400,8 +3507,87 @@ mod ole_object_tests {
     const OLE_NS: &str = concat!(
         r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" "#,
         r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#,
-        r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#,
+        r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" "#,
+        // x14 (spreadsheet 2009/9) is the namespace Excel binds on the real
+        // `<mc:Choice Requires="x14">` around an OLE object; unk is a namespace
+        // no parser understands. Declaring both lets `select_alternate_content`
+        // resolve the Requires prefixes to URIs.
+        r#"xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" "#,
+        r#"xmlns:unk="http://example.com/an/extension/we/do/not/understand""#,
     );
+
+    /// A `<mc:AlternateContent>` OLE wrapper whose Choice (behind `requires`) and
+    /// Fallback each carry an `<oleObject>` with a resolvable image `objectPr`
+    /// preview — `rIdChoice` → choice.emf, `rIdFallback` → fallback.emf. Returns
+    /// the emitted anchors so a test can assert WHICH branch was selected.
+    fn ole_alt_content_anchors(requires: &str) -> Vec<ImageAnchor> {
+        let object = |rid_prev: &str| {
+            format!(
+                r#"<oleObject progId="Excel.Sheet.12" shapeId="1025" r:id="rIdData">
+                     <objectPr defaultSize="0" r:id="{rid_prev}">
+                       <anchor moveWithCells="1">
+                         <from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></from>
+                         <to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>7</xdr:row><xdr:rowOff>0</xdr:rowOff></to>
+                       </anchor>
+                     </objectPr>
+                   </oleObject>"#
+            )
+        };
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <mc:AlternateContent>
+                  <mc:Choice Requires="{requires}">{choice}</mc:Choice>
+                  <mc:Fallback>{fallback}</mc:Fallback>
+                </mc:AlternateContent>
+              </oleObjects>
+            </worksheet>"#,
+            ns = OLE_NS,
+            requires = requires,
+            choice = object("rIdChoice"),
+            fallback = object("rIdFallback"),
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rIdChoice".to_string(), "../media/choice.emf".to_string());
+        rels.insert(
+            "rIdFallback".to_string(),
+            "../media/fallback.emf".to_string(),
+        );
+        let mut archive = archive_with(&[
+            ("xl/media/choice.emf", b"emf-c"),
+            ("xl/media/fallback.emf", b"emf-f"),
+        ]);
+        parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive)
+    }
+
+    /// ECMA-376 Part 3 §9.3(1) — an `<oleObject>` Choice whose `Requires` names a
+    /// namespace the parser does NOT understand must not be selected, even though
+    /// its `objectPr` preview resolves; the `<mc:Fallback>`'s (equally drawable)
+    /// oleObject is selected instead. The old collector always took the
+    /// non-Fallback twin, silently dropping a renderable Fallback.
+    #[test]
+    fn ole_unhandled_choice_selects_fallback_preview() {
+        let anchors = ole_alt_content_anchors("unk");
+        assert_eq!(anchors.len(), 1, "exactly one preview anchor");
+        assert_eq!(
+            anchors[0].image_path, "xl/media/fallback.emf",
+            "un-understood Choice must yield the Fallback preview, not the Choice's"
+        );
+    }
+
+    /// §9.3(1) — the `x14` namespace IS understood by the xlsx parser (it drives
+    /// slicers and the OLE `objectPr` preview), so a real
+    /// `<mc:Choice Requires="x14">` is selected and the Fallback dropped. Guards
+    /// against a regression on Excel's canonical OLE output.
+    #[test]
+    fn ole_understood_x14_choice_selected_over_fallback() {
+        let anchors = ole_alt_content_anchors("x14");
+        assert_eq!(anchors.len(), 1, "exactly one preview anchor");
+        assert_eq!(
+            anchors[0].image_path, "xl/media/choice.emf",
+            "understood x14 Choice must be selected, Fallback dropped"
+        );
+    }
 
     /// A worksheet `<oleObjects>` wrapped in `mc:AlternateContent` where the
     /// Choice carries `<oleObject><objectPr r:id><anchor><from>/<to>>` and the

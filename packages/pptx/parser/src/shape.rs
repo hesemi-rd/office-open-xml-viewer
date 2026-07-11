@@ -26,6 +26,17 @@ use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 
+/// ECMA-376 Part 3 §9.3 "given application configuration" for the pptx parser:
+/// the extension namespaces whose `<mc:Choice>` content the parser actually
+/// renders. chartEx (any dated version — the chart path renders them via the
+/// existing `uri.contains("chartex")` gate) and the Microsoft 2010 drawing
+/// extensions (a14) that wrap ordinary `<p:sp>`/`<p:pic>`. Deliberately EXCLUDES
+/// PowerPoint-2010 (`p14`, ink `<p:contentPart>`) and VML (`v`), which we cannot
+/// render, so a Choice requiring them yields the Fallback preview.
+pub(crate) fn pptx_understands_ns(ns: &str) -> bool {
+    ns.contains("chartex") || ns == "http://schemas.microsoft.com/office/drawing/2010/main"
+}
+
 /// Read the chartStyle part (`styleN.xml`) associated with a chart part at
 /// `chart_path` (e.g. `ppt/charts/chart1.xml`), following that part's own
 /// relationships (`ppt/charts/_rels/chart1.xml.rels`) to the
@@ -1805,26 +1816,27 @@ pub(crate) fn parse_sp_tree_node(
             }
         }
         "AlternateContent" => {
-            // mc:AlternateContent wraps modern elements (e.g. chartEx inside grpSp,
-            // or p:contentPart for ink/handwriting). Try Choice first; if it produces
-            // nothing (Choice contains an element we don't render, like contentPart),
-            // fall back to Fallback which usually carries a rasterized p:pic alternative.
             let before = out.len();
-            let choice_node = node
+            // ECMA-376 Part 3 §9.3 — select the first Choice whose Requires namespaces
+            // are all understood, else the Fallback (replaces the old output-emptiness
+            // heuristic that never inspected Requires — issue #787).
+            let selected = ooxml_common::mce::select_alternate_content(node, &pptx_understands_ns);
+            // Ink/handwriting: a `<p:contentPart>` in any Choice is InkML PowerPoint
+            // renders directly and we cannot; its `p14` Choice is not understood, so the
+            // Fallback PNG is selected. Detect it so the PNG is drawn at its natural size
+            // (a few px for empty/single-tap strokes) rather than stretched to the box.
+            let is_ink = node
                 .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "Choice");
-            // Choice contains p:contentPart → ink/handwriting. PowerPoint renders the
-            // InkML directly; the Fallback PNG is a low-resolution rasterization at
-            // the stroke's actual pixel extent. For empty/single-tap strokes the PNG
-            // is only a few pixels and should not be stretched to the bounding box.
-            let is_ink_fallback = choice_node.is_some_and(|c| {
-                c.descendants()
-                    .any(|n| n.is_element() && n.tag_name().name() == "contentPart")
-            });
-            if let Some(choice_node) = choice_node {
-                for child_node in choice_node.children().filter(|n| n.is_element()) {
-                    // `mc:AlternateContent` is a transparent wrapper, not a group
-                    // level — pass `depth` through unchanged.
+                .filter(|n| n.is_element() && n.tag_name().name() == "Choice")
+                .any(|c| {
+                    c.descendants()
+                        .any(|n| n.is_element() && n.tag_name().name() == "contentPart")
+                });
+            let selected_is_fallback = selected.is_some_and(|s| s.tag_name().name() == "Fallback");
+            if let Some(sel) = selected {
+                for child_node in sel.children().filter(|n| n.is_element()) {
+                    // `mc:AlternateContent` is a transparent wrapper, not a group level —
+                    // pass `depth` through unchanged.
                     parse_sp_tree_node(
                         child_node,
                         lph,
@@ -1840,46 +1852,24 @@ pub(crate) fn parse_sp_tree_node(
                     );
                 }
             }
-            if out.len() == before {
-                if let Some(fallback_node) = node
-                    .children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
-                {
-                    for child_node in fallback_node.children().filter(|n| n.is_element()) {
-                        parse_sp_tree_node(
-                            child_node,
-                            lph,
-                            slide_dir,
-                            rels,
-                            smartart_drawings,
-                            zip,
-                            theme,
-                            out,
-                            skip_placeholders,
-                            group_fill,
-                            depth,
-                        );
-                    }
-                }
-                if is_ink_fallback {
-                    // Render the fallback PNG at its natural pixel size centered
-                    // inside the original bounding box, so a 6×6 px empty-stroke
-                    // PNG is drawn as a 6×6 px dot rather than stretched into a
-                    // blocky cross. Visible strokes whose PNG natural size already
-                    // matches the box keep their existing extent.
-                    for el in &mut out[before..] {
-                        if let SlideElement::Picture(p) = el {
-                            if let (Some(nat_w_px), Some(nat_h_px)) =
-                                (p.intrinsic_width_px, p.intrinsic_height_px)
-                            {
-                                let nat_w = (nat_w_px as i64) * EMU_PER_PX_96DPI;
-                                let nat_h = (nat_h_px as i64) * EMU_PER_PX_96DPI;
-                                if nat_w < p.width && nat_h < p.height {
-                                    p.x += (p.width - nat_w) / 2;
-                                    p.y += (p.height - nat_h) / 2;
-                                    p.width = nat_w;
-                                    p.height = nat_h;
-                                }
+            if is_ink && selected_is_fallback {
+                // Render the fallback PNG at its natural pixel size centered
+                // inside the original bounding box, so a 6×6 px empty-stroke
+                // PNG is drawn as a 6×6 px dot rather than stretched into a
+                // blocky cross. Visible strokes whose PNG natural size already
+                // matches the box keep their existing extent.
+                for el in &mut out[before..] {
+                    if let SlideElement::Picture(p) = el {
+                        if let (Some(nat_w_px), Some(nat_h_px)) =
+                            (p.intrinsic_width_px, p.intrinsic_height_px)
+                        {
+                            let nat_w = (nat_w_px as i64) * EMU_PER_PX_96DPI;
+                            let nat_h = (nat_h_px as i64) * EMU_PER_PX_96DPI;
+                            if nat_w < p.width && nat_h < p.height {
+                                p.x += (p.width - nat_w) / 2;
+                                p.y += (p.height - nat_h) / 2;
+                                p.width = nat_w;
+                                p.height = nat_h;
                             }
                         }
                     }
@@ -2518,6 +2508,111 @@ mod ole_tests {
             DepthGuard::root(),
         );
         out
+    }
+
+    // ── MCE AlternateContent selection (ECMA-376 Part 3 §9.3) ───────────────
+    //
+    // A `<p:pic>` whose `<a:blip r:embed>` names `embed`, sized so
+    // `parse_picture` yields a `SlideElement::Picture` with `image_path`
+    // `ppt/media/<embed>.png`. Used to tell which MCE branch was selected.
+    fn mce_pic(embed: &str) -> String {
+        format!(
+            r#"<p:pic>
+                 <p:nvPicPr><p:cNvPr id="7" name="P"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                 <p:blipFill><a:blip r:embed="{embed}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+               </p:pic>"#
+        )
+    }
+
+    /// `<mc:AlternateContent>` whose Choice carries `mce_pic("choice")` behind the
+    /// given `requires` prefix, and whose Fallback carries `mce_pic("fallback")`.
+    /// The `unk`/`a14`/`p14` prefixes are declared so `Requires` resolves. Returns
+    /// the single emitted picture's `image_path` (or a marker string).
+    fn mce_selected_pic_path(requires: &str, choice_inner: &str) -> Vec<SlideElement> {
+        let mut rels = HashMap::new();
+        rels.insert("rIdChoice".to_string(), "../media/choice.png".to_string());
+        rels.insert(
+            "rIdFallback".to_string(),
+            "../media/fallback.png".to_string(),
+        );
+        let mut zip = zip_with(&[
+            ("ppt/media/choice.png", &tiny_png()),
+            ("ppt/media/fallback.png", &tiny_png()),
+        ]);
+        let xml = format!(
+            r#"<mc:AlternateContent {ns}
+                 xmlns:unk="http://example.com/an/extension/we/do/not/understand"
+                 xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"
+                 xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"
+                 xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
+                 <mc:Choice Requires="{requires}">{choice_inner}</mc:Choice>
+                 <mc:Fallback>{fallback}</mc:Fallback>
+               </mc:AlternateContent>"#,
+            ns = ns(),
+            requires = requires,
+            choice_inner = choice_inner,
+            fallback = mce_pic("rIdFallback"),
+        );
+        run(&xml, &mut zip, &rels)
+    }
+
+    fn only_pic_path(out: &[SlideElement]) -> String {
+        let pics: Vec<&String> = out
+            .iter()
+            .filter_map(|e| match e {
+                SlideElement::Picture(p) => Some(&p.image_path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pics.len(), 1, "expected exactly one Picture, got {out:?}");
+        pics[0].clone()
+    }
+
+    /// ECMA-376 Part 3 §9.3(1) — a `<mc:Choice>` is selected only when EVERY
+    /// namespace in its `Requires` is understood. `unk` is a namespace the pptx
+    /// shape walker has no handler for; although the Choice's `<p:pic>` WOULD
+    /// render, the consumer must NOT select an un-understood Choice — it selects
+    /// the `<mc:Fallback>` instead. The old output-emptiness heuristic wrongly
+    /// kept the Choice because its picture produced output; this pins §9.3.
+    #[test]
+    fn mce_unhandled_choice_selects_fallback_picture() {
+        let out = mce_selected_pic_path("unk", &mce_pic("rIdChoice"));
+        assert_eq!(
+            only_pic_path(&out),
+            "ppt/media/fallback.png",
+            "un-understood Choice must yield the Fallback picture, not the Choice's"
+        );
+    }
+
+    /// §9.3(1) — the drawing-2010 (`a14`) namespace IS understood by the pptx
+    /// shape walker (Word/PowerPoint wrap ordinary `<p:sp>`/`<p:pic>` carrying an
+    /// a14 extension in `<mc:Choice Requires="a14">`, e.g. sample-8's 115 such
+    /// choices). The understood Choice must be selected and its picture kept, the
+    /// Fallback dropped — guarding against a regression on those real slides.
+    #[test]
+    fn mce_understood_a14_choice_selected_over_fallback() {
+        let out = mce_selected_pic_path("a14", &mce_pic("rIdChoice"));
+        assert_eq!(
+            only_pic_path(&out),
+            "ppt/media/choice.png",
+            "understood a14 Choice must be selected, Fallback dropped"
+        );
+    }
+
+    /// §9.3 + the "understood = renderable" contract — `p14`
+    /// (PowerPoint-2010, ink `<p:contentPart>`) is NOT rendered by the shape
+    /// walker, so a `Requires="p14"` Choice must not be selected: the Fallback
+    /// preview picture is drawn instead. (Matches sample-3's ink slides.)
+    #[test]
+    fn mce_ink_p14_contentpart_choice_falls_back_to_picture() {
+        let out = mce_selected_pic_path("p14", r#"<p:contentPart r:id="rIdInk"/>"#);
+        assert_eq!(
+            only_pic_path(&out),
+            "ppt/media/fallback.png",
+            "un-rendered ink Choice must yield the Fallback picture"
+        );
     }
 
     /// ECMA-376 §21.1.2.3.5 — a `<p:cNvPr><a:hlinkClick @r:id>` on a shape makes

@@ -13,6 +13,7 @@ pub mod depth;
 pub mod drawing;
 pub mod fill;
 pub mod math;
+pub mod mce;
 pub mod ns;
 pub mod rels;
 pub mod text;
