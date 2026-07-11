@@ -12,16 +12,17 @@ const TATWEEL = 'ـ'; // U+0640 C Join_Causing
 const countTatweel = (s: string): number => [...s].filter((c) => c === TATWEEL).length;
 
 // Mock paint model: every code point is exactly 1px wide, so an inserted tatweel
-// adds exactly 1px. This makes the round-based allocation deterministic and lets
+// adds exactly 1px. This makes the allocation deterministic and lets
 // the tests assert measure==paint (advanceDeltaPx === #tatweels inserted).
 const unitMeasure: MeasureSegmentAdvance = (_si, text) => [...text].length;
 
-// A word of n dual-joining letters has n-1 interior kashida insertion points.
+// A word of n dual-joining letters has n-1 eligible joins, of which the priority
+// model chooses the final one because every join has the same Normal class.
 const behWord = (n: number): string => BEH.repeat(n);
 
-describe('computeKashidaDistribution — round-based allocation', () => {
-  it('fills a single Arabic word with tatweels, one round exhausting the slack', () => {
-    // 4 beh → 3 insertion points (offsets 1,2,3). slack 3 → one tatweel each.
+describe('computeKashidaDistribution — priority allocation', () => {
+  it('fills a single Arabic word at its one priority join', () => {
+    // 4 beh → 3 eligible joins; the word-final Normal tie-break chooses offset 3.
     const d = computeKashidaDistribution([{ text: behWord(4) }], 3, 'high', unitMeasure);
     expect(d).not.toBeNull();
     const plan = d!.perSeg.get(0)!;
@@ -33,38 +34,35 @@ describe('computeKashidaDistribution — round-based allocation', () => {
     expect(plan.advanceDeltaPx).toBe(unitMeasure(0, plan.text) - unitMeasure(0, behWord(4)));
   });
 
-  it('level caps tatweels PER opportunity (low=1, medium=2, high=unbounded)', () => {
+  it('caps tatweels per selected word join (low=1, medium=2, high=unbounded)', () => {
     // 4 beh → 3 points; slack 9 is more than the points can absorb in one round.
     const run = (level: KashidaLevel) =>
       computeKashidaDistribution([{ text: behWord(4) }], 9, level, unitMeasure)!;
     const low = run('low');
     const medium = run('medium');
     const high = run('high');
-    // low: 1 per point → 3 tatweels, 6px residual.
-    expect(low.appliedPx).toBe(3);
-    expect(low.residualPx).toBe(6);
-    expect(countTatweel(low.perSeg.get(0)!.text)).toBe(3);
-    // medium: 2 per point → 6 tatweels, 3px residual.
-    expect(medium.appliedPx).toBe(6);
-    expect(medium.residualPx).toBe(3);
-    expect(countTatweel(medium.perSeg.get(0)!.text)).toBe(6);
+    // low: 1 at the chosen join → 1 tatweel, 8px residual.
+    expect(low.appliedPx).toBe(1);
+    expect(low.residualPx).toBe(8);
+    expect(countTatweel(low.perSeg.get(0)!.text)).toBe(1);
+    // medium: 2 at the same join → 2 tatweels, 7px residual.
+    expect(medium.appliedPx).toBe(2);
+    expect(medium.residualPx).toBe(7);
+    expect(countTatweel(medium.perSeg.get(0)!.text)).toBe(2);
     // high: fill all 9px → 9 tatweels, 0 residual.
     expect(high.appliedPx).toBe(9);
     expect(high.residualPx).toBe(0);
     expect(countTatweel(high.perSeg.get(0)!.text)).toBe(9);
   });
 
-  it('distributes round-robin: a partial round spreads across points left-to-right', () => {
-    // 4 beh → 3 points; slack 2 < points. First two points get one tatweel each.
+  it('puts all elongation for one word at its selected priority join', () => {
+    // Equal Normal candidates tie toward the word end; high can repeat there.
     const d = computeKashidaDistribution([{ text: behWord(4) }], 2, 'high', unitMeasure)!;
     const plan = d!.perSeg.get(0)!;
     expect(d.appliedPx).toBe(2);
-    // Tatweels land before the FIRST two interior boundaries (offsets 1 and 2),
-    // not piled on one point.
     const cps = [...plan.text];
     expect(cps.filter((c) => c === TATWEEL).length).toBe(2);
-    // "ب ـ ب ـ ب ب" — first two gaps filled, last gap empty.
-    expect(plan.text).toBe(BEH + TATWEEL + BEH + TATWEEL + BEH + BEH);
+    expect(plan.text).toBe(BEH + BEH + BEH + TATWEEL.repeat(2) + BEH);
   });
 
   it('spreads across MULTIPLE segments before doubling up (whole-line round-robin)', () => {
@@ -78,6 +76,14 @@ describe('computeKashidaDistribution — round-based allocation', () => {
     expect(countTatweel(d.perSeg.get(2)!.text)).toBe(1);
     // The whitespace segment is never touched.
     expect(d.perSeg.get(1)).toBeUndefined();
+  });
+
+  it('allocates scarce slack to higher-priority classes before textual order', () => {
+    const d = computeKashidaDistribution([{ text: 'بب سب' }], 1, 'high', unitMeasure)!;
+    const plan = d.perSeg.get(0)!;
+
+    expect(plan.insertions).toEqual([{ beforeCp: 4, count: 1 }]);
+    expect(plan.text).toBe('بب سـب');
   });
 
   it('returns null when the line has no eligible Arabic joining point', () => {

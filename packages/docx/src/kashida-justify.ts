@@ -1,4 +1,4 @@
-import { kashidaInsertionPoints } from './arabic-joining.js';
+import { priorityKashidaInsertionCandidates } from './arabic-joining.js';
 
 export type KashidaLevel = 'low' | 'medium' | 'high';
 
@@ -47,15 +47,25 @@ export function computeKashidaDistribution(
 ): KashidaDistribution | null {
   if (slackPx <= 0.5) return null;
 
-  const candidates: Array<{ si: number; beforeCp: number }> = [];
+  const candidates: Array<{
+    si: number;
+    beforeCp: number;
+    priority: number;
+    textOrder: number;
+  }> = [];
   for (let si = 0; si < segments.length; si++) {
     const text = segments[si].text;
     if (text === undefined) continue;
-    for (const beforeCp of kashidaInsertionPoints(text)) {
-      candidates.push({ si, beforeCp });
+    // A bidi layout segment is a shaping island: font/weight/style boundaries
+    // sever Arabic joining (packages/core/src/text/bidi/types.ts), and each
+    // segment is painted by its own fillText call. Ranking per segment therefore
+    // cannot select a kashida at a join that paint renders as disconnected.
+    for (const { beforeCp, priority } of priorityKashidaInsertionCandidates(text)) {
+      candidates.push({ si, beforeCp, priority, textOrder: candidates.length });
     }
   }
   if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.priority - a.priority || a.textOrder - b.textOrder);
 
   const cap = level === 'low' ? 1 : level === 'medium' ? 2 : Infinity;
   const maxRounds = cap;

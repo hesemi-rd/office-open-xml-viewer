@@ -4,6 +4,8 @@ import {
   joinsToFollowing,
   joinsToPreceding,
   kashidaInsertionPoints,
+  priorityKashidaInsertionCandidates,
+  priorityKashidaInsertionPoints,
 } from './arabic-joining.js';
 
 // Arabic letters by Unicode Joining_Type (UCD DerivedJoiningType.txt), spelled
@@ -96,5 +98,33 @@ describe('kashidaInsertionPoints', () => {
     expect(kashidaInsertionPoints('abcd')).toEqual([]);
     expect(kashidaInsertionPoints('')).toEqual([]);
     expect(kashidaInsertionPoints(BEH)).toEqual([]);
+  });
+});
+
+describe('priorityKashidaInsertionPoints', () => {
+  it('chooses one highest-priority join per whitespace-delimited word', () => {
+    expect(priorityKashidaInsertionPoints('السلسلة')).toEqual([5]); // Seen, nearest end
+    expect(priorityKashidaInsertionPoints('بين')).toEqual([1]); // BaRa over final Normal
+    expect(priorityKashidaInsertionPoints('الحروف')).toEqual([3]); // HahDal
+    expect(priorityKashidaInsertionPoints(`${BEH}${BEH} ${BEH}${BEH}`)).toEqual([1, 4]);
+  });
+
+  it('prefers a join after a source tatweel', () => {
+    expect(priorityKashidaInsertionPoints(BEH + TATWEEL + BEH + BEH)).toEqual([2]);
+  });
+
+  it('maps final Tah and Qaf aliases to their documented priority classes', () => {
+    expect(priorityKashidaInsertionPoints('بيط')).toEqual([2]);
+    expect(priorityKashidaInsertionCandidates('بيط')).toEqual([
+      { beforeCp: 2, priority: 10 },
+    ]);
+    expect(priorityKashidaInsertionCandidates(BEH + BEH + 'ق')).toEqual([
+      { beforeCp: 2, priority: 8 },
+    ]);
+  });
+
+  it('does not classify non-BEH joining groups as BaRa predecessors', () => {
+    // NOON->YEH is eligible but both joins are Normal, so the word-end tie-break wins.
+    expect(priorityKashidaInsertionPoints('نيب')).toEqual([2]);
   });
 });
