@@ -3482,7 +3482,8 @@ export function renderTextBody(
     // (the `else` above). Disabled under bidi (visual≠logical order).
     const justifyMode =
       alignment === 'just' || alignment === 'justLow' ? 'just' as const
-      : alignment === 'dist' || alignment === 'thaiDist' ? 'dist' as const
+      : alignment === 'thaiDist' ? 'thaiDist' as const
+      : alignment === 'dist' ? 'dist' as const
       : null;
     // Tab-delimited cells keep their natural widths; the inline gaps provide
     // their stop alignment and must not participate in justification.

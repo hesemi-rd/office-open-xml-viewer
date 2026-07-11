@@ -84,6 +84,13 @@ export type {
  *                       — used for COMPRESSION (negative slack), where shrinking a
  *                       space is legitimate but overlapping two ideographs is not,
  *                       so the renderer passes includeCJK = slack > 0.
+ * @param seaClusterGaps When true (jc=thaiDistribute, §17.18.44 "Thai Language
+ *                       Justification"), a gap ALSO opens at every UAX#29
+ *                       grapheme-cluster boundary interior to a Southeast-Asian
+ *                       span (Thai/Lao/Khmer) whose both sides are SEA, so a
+ *                       space-free Thai line is justified by widening inter-cluster
+ *                       gaps (a combining mark stays glued to its base). Off for
+ *                       `both`/`distribute`, which leave SEA text ragged (Word GT).
  * @returns The distribution, or `null` when nothing stretches.
  */
 export function distributeLineSlack(
@@ -93,11 +100,13 @@ export function distributeLineSlack(
   lastDrawnSi: number,
   minPerGap = -Infinity,
   includeCJK = true,
+  seaClusterGaps = false,
 ): DistributeResult | null {
   return distributeLineSlackCore(segments, slack, {
     firstContentSi,
     lastDrawnSi,
     minPerGap,
+    seaClusterGaps,
     // Compression (includeCJK=false) opens spaces only; never widen an inter-CJK
     // boundary, which would overlap ideographs. The kernel default isGapChar
     // (core.isCjkBreakChar) handles expansion.

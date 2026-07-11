@@ -6,9 +6,13 @@
 // paragraph's LAST line natural (the spec notes it "does not justify
 // sentences which are short"); `dist` and `thaiDist` distribute the same way
 // but justify EVERY line, the last included ("Distributes the text words
-// across an entire text line"). justLow/thaiDist are the low-quality variants
-// — same distribution, only the kashida/glyph-stretch sophistication differs,
-// which Canvas cannot reproduce — so we treat just≡justLow and dist≡thaiDist.
+// across an entire text line"). `just`≡`justLow` (the low-quality variant only
+// changes the Arabic kashida sophistication, which Canvas cannot reproduce).
+// `thaiDist` distributes like `dist` but at a FINER granularity for Thai/Lao/
+// Khmer: the spec says "each character is treated as a word" (§20.1.10.59), so
+// its slack falls at every grapheme-CLUSTER boundary of a space-free SEA span,
+// not only at inter-word spaces / inter-CJK boundaries. It is therefore NOT an
+// alias of `dist` (which leaves such SEA text ragged); see the `thaiDist` mode.
 //
 // `just` and `dist` use the SAME gap selection (inter-word AND inter-CJK) and
 // differ ONLY in the last line (just: natural, dist: filled). This is
@@ -59,7 +63,7 @@ import { distributeLineSlack, isCjkBreakChar, type DistributeSeg } from '@siluru
  *  get the segment back with `jext` (and optionally `splitBefore`/`perGap`). */
 export type JustifySeg = DistributeSeg;
 
-export type JustifyMode = 'just' | 'dist';
+export type JustifyMode = 'just' | 'dist' | 'thaiDist';
 
 /** Justification annotation added to each segment of a line. The renderer reads
  *  these to widen the segment's contribution to the line: `jext` advances the
@@ -94,7 +98,9 @@ const isWsCp = (cp: number): boolean => /\s/.test(String.fromCodePoint(cp));
  *                    renderer disables justification under bidi).
  * @param availWidth  Content width to fill, px.
  * @param naturalWidth Sum of the segments' natural advance widths, px.
- * @param mode        'just' (last line stays natural) or 'dist' (every line).
+ * @param mode        'just' (last line stays natural), 'dist' (every line), or
+ *                    'thaiDist' ('dist' plus Thai/Lao/Khmer grapheme-cluster gaps
+ *                    — §20.1.10.59 "each character is treated as a word").
  * @param isLastLine  Whether this is the paragraph's final line.
  * @returns The same segments (shallow copies) with `jext`/`splitBefore`/`perGap`
  *          added, or `null` when no justification applies (last line under
@@ -128,6 +134,9 @@ export function justifyLine<T extends JustifySeg>(
     lastDrawnSi: segments.length,
     isGapChar: isCjkBreakChar,
     isWhitespace: isWsCp,
+    // `thaiDist` also opens a gap at every Thai/Lao/Khmer grapheme-cluster
+    // boundary, so space-free SEA text is distributed per §20.1.10.59.
+    seaClusterGaps: mode === 'thaiDist',
   });
   if (!dist) return null;
 

@@ -33,6 +33,7 @@
 // and packages/docx/src/text-distribute.ts for the format adapters.
 
 import { isCjkBreakChar } from './cjk-ranges.js';
+import { isSeaScriptCodePoint, isSeaGraphemeExtend } from './sea-break.js';
 
 /** A laid-out segment as the distributor sees it. Only the optional text matters;
  *  an undefined `text` marks a non-text inline atom (image / math / tab) — one
@@ -101,6 +102,16 @@ export interface DistributeOptions {
    *  Whitespace is classified FIRST, so an ideographic space is one inter-word
    *  gap and never reaches `isGapChar`. */
   isWhitespace?: (cp: number) => boolean;
+  /** WordprocessingML `thaiDistribute` (§17.18.44) / DrawingML `thaiDist`
+   *  (§20.1.10.59). When true, a gap ALSO opens at every UAX#29 grapheme-cluster
+   *  boundary INTERIOR to a Southeast-Asian span (Thai/Lao/Khmer), so a line of
+   *  space-free SEA text is justified by widening inter-CLUSTER gaps — a combining
+   *  vowel/tone mark stays glued to its base (no slack inside a cluster). Off by
+   *  default: `both`/`distribute`/`just`/`dist` do NOT distribute SEA text (Word/
+   *  PowerPoint leave it ragged). Only boundaries whose BOTH sides are SEA open
+   *  this way; non-SEA boundaries keep the ordinary space/CJK rules. Verified
+   *  against the Word-exported adjudication fixture (issue #959). */
+  seaClusterGaps?: boolean;
 }
 
 /** Default inter-word whitespace (WordprocessingML): ASCII space + ideographic
@@ -141,6 +152,7 @@ export function distributeLineSlack<T extends DistributeSeg>(
   const minPerGap = opts.minPerGap ?? -Infinity;
   const isGapChar = opts.isGapChar ?? isCjkBreakChar;
   const isWhitespace = opts.isWhitespace ?? defaultIsWhitespace;
+  const seaClusterGaps = opts.seaClusterGaps ?? false;
 
   // Flatten the eligible segments to a code-point stream. Segments before
   // `firstContentSi` (leading indent) are skipped; the rest — INCLUDING the
@@ -184,7 +196,9 @@ export function distributeLineSlack<T extends DistributeSeg>(
   // stretches). Whitespace → one inter-word gap (each space stretches).
   // Non-space → an inter-CJK gap only when the boundary to the next NON-space
   // unit satisfies `isGapChar` on either side; a boundary INTO whitespace is
-  // already counted by that whitespace, so it is not double-counted.
+  // already counted by that whitespace, so it is not double-counted. Under
+  // seaClusterGaps a boundary between two SEA code points ALSO opens when it is a
+  // grapheme-cluster start (never before a combining mark).
   const gapAfter = new Array<boolean>(units.length).fill(false);
   let total = 0;
   for (let k = first; k < last; k++) {
@@ -201,7 +215,18 @@ export function distributeLineSlack<T extends DistributeSeg>(
     const rc = nx.cp;
     if (
       (lc !== undefined && isGapChar(lc)) ||
-      (rc !== undefined && isGapChar(rc))
+      (rc !== undefined && isGapChar(rc)) ||
+      // thaiDistribute: a grapheme-cluster boundary interior to a SEA span. For
+      // two adjacent SEA code points the boundary is a cluster start iff the RIGHT
+      // side is NOT an Extend/SpacingMark (the SEA blocks have no Prepend), so a
+      // base + combining vowel/tone mark is never split. This code-point-local
+      // test needs no `Intl.Segmenter`, so it stays correct on every runtime.
+      (seaClusterGaps &&
+        lc !== undefined &&
+        rc !== undefined &&
+        isSeaScriptCodePoint(lc) &&
+        isSeaScriptCodePoint(rc) &&
+        !isSeaGraphemeExtend(rc))
     ) {
       gapAfter[k] = true;
       total++;

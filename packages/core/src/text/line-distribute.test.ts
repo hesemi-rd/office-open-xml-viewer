@@ -278,3 +278,114 @@ describe('distributeLineSlack — injected whitespace predicate (pptx parity)', 
     expect(r).toBeNull();
   });
 });
+
+// ── SEA grapheme-cluster distribution (thaiDistribute / thaiDist) ─────────────
+//
+// WordprocessingML `thaiDistribute` (§17.18.44 "Thai Language Justification") and
+// DrawingML `thaiDist` (§20.1.10.59, "each character is treated as a word")
+// distribute the line's slack across Thai/Lao/Khmer text at GRAPHEME-CLUSTER
+// granularity, NOT at inter-word spaces (there are none) nor at dictionary word
+// boundaries. `both`/`distribute`/`just`/`dist` do NOT: a SEA line under those
+// values reaches no inter-CJK/space gap and stays natural (ragged).
+//
+// Ground truth (the adjudication fixture, measured with pdftotext/pdfplumber on
+// the Word-exported PDF, narrow 2.5in column, Leelawadee UI 14pt):
+//   • jc=both / distribute over continuous Thai (no spaces): interior glyph gaps
+//     stay at the natural ~0.04pt — no cluster distribution; line ends ragged.
+//   • jc=thaiDistribute over the SAME text: every inter-CLUSTER gap widens
+//     uniformly (0.14–0.29pt on a nearly-full line; 7–13pt on a short line) so the
+//     line reaches the right text margin, while a combining vowel/tone mark stays
+//     glued to its base consonant (no slack inside a cluster).
+// The `seaClusterGaps` option reproduces this: a gap opens at each UAX#29 grapheme
+// boundary interior to a SEA span; a boundary before a combining mark opens none.
+describe('distributeLineSlack — SEA grapheme-cluster gaps (thaiDistribute)', () => {
+  // "กิน" = ก (base) + ◌ิ (U+0E34 above-vowel, combining) + น (base). Extended
+  // grapheme clusters: [กิ][น] — ONE interior boundary, before น (offset 2). The
+  // slack lands at that boundary; NO gap opens before the combining ◌ิ.
+  it('opens a gap at the cluster boundary, never before a combining mark', () => {
+    const r = distributeLineSlack([seg('กิน')], 30, {
+      firstContentSi: 0,
+      lastDrawnSi: 1, // sentinel: do not exclude the sole segment
+      seaClusterGaps: true,
+    });
+    expect(r).not.toBeNull();
+    const s = r!.perSeg.get(0)!;
+    expect(s.splitBefore).toEqual([2]); // before น only — ◌ิ stays glued to ก
+    expect(s.trailingGap).toBe(false);
+    expect(r!.perGap).toBeCloseTo(30, 6);
+    expect(totalStretch(r!)).toBeCloseTo(30, 6);
+  });
+
+  // "เมือง" = เ(U+0E40 leading vowel) ม(base) ◌ื(U+0E37 combining) อ(base) ง(base).
+  // Clusters: [เ][มื][อ][ง] — three interior boundaries before offsets 1, 3, 4.
+  // The leading vowel เ is its OWN cluster (a gap opens after it), and ◌ื stays
+  // glued to ม (no gap before offset 2).
+  it('treats a Thai leading vowel as its own cluster and keeps marks glued', () => {
+    const r = distributeLineSlack([seg('เมือง')], 30, {
+      firstContentSi: 0,
+      lastDrawnSi: 1,
+      seaClusterGaps: true,
+    });
+    expect(r).not.toBeNull();
+    const s = r!.perSeg.get(0)!;
+    expect(s.splitBefore).toEqual([1, 3, 4]); // after เ, after ◌ื, after อ
+    expect(r!.perGap).toBeCloseTo(10, 6); // 30 / 3 gaps
+    expect(totalStretch(r!)).toBeCloseTo(30, 6);
+  });
+
+  // Without seaClusterGaps, the SAME Thai text is NOT distributed: Thai is not
+  // CJK and has no inter-word space, so no gap opens → null. This pins the
+  // adjudication distinction that `both`/`distribute` leave Thai ragged; only
+  // `thaiDistribute` opts into cluster distribution.
+  it('leaves Thai untouched when seaClusterGaps is off (both / distribute)', () => {
+    expect(
+      distributeLineSlack([seg('เมือง')], 30, { firstContentSi: 0, lastDrawnSi: 1 }),
+    ).toBeNull();
+  });
+
+  // Slack distributes ACROSS a colour change: two Thai segments of one phrase get
+  // a cluster gap at the segment boundary too (clustering is evaluated over the
+  // whole line's code-point stream, so a style split mid-phrase does not swallow a
+  // boundary). "กา"|"งาน" — both segments SEA, boundary ก|า is intra… actually
+  // า(U+0E32) is a spacing vowel = its own cluster, so ก|า, า|ง, ง|า, า|น are all
+  // cluster boundaries; the า|ง boundary falls between the two segments.
+  it('opens a cross-segment cluster gap (trailingGap) between SEA segments', () => {
+    const r = distributeLineSlack([seg('กา'), seg('งาน')], 40, {
+      firstContentSi: 0,
+      lastDrawnSi: 2, // sentinel: exclude no segment
+      seaClusterGaps: true,
+    });
+    expect(r).not.toBeNull();
+    const s0 = r!.perSeg.get(0)!;
+    const s1 = r!.perSeg.get(1)!;
+    // seg0 "กา": interior gap before า (offset 1) + trailing gap into seg1.
+    expect(s0.splitBefore).toEqual([1]);
+    expect(s0.trailingGap).toBe(true);
+    // seg1 "งาน": interior gaps before า (1) and น (2); no trailing (line end).
+    expect(s1.splitBefore).toEqual([1, 2]);
+    expect(s1.trailingGap).toBe(false);
+    // 4 gaps total across the two segments.
+    expect(totalStretch(r!)).toBeCloseTo(40, 6);
+    expect(r!.perGap).toBeCloseTo(10, 6);
+  });
+
+  // A non-SEA boundary inside a seaClusterGaps line still follows the ordinary
+  // rules: Latin|Latin opens nothing, so "abค" (Latin a,b then Thai ค) gets ONE
+  // cluster gap — but only at the SEA a… the b|ค boundary is Latin|Thai (mixed),
+  // not both-SEA, so it opens no cluster gap; ค is the last content unit anyway.
+  it('restricts cluster gaps to boundaries where BOTH sides are SEA', () => {
+    // "กขา" is all Thai: ก(base) ข(base) า(spacing vowel). Clusters [ก][ข][า] →
+    // gaps before offsets 1 and 2. Mixed content "ab" prefix (Latin) opens no gap.
+    const r = distributeLineSlack([seg('abกขา')], 30, {
+      firstContentSi: 0,
+      lastDrawnSi: 1,
+      seaClusterGaps: true,
+    });
+    expect(r).not.toBeNull();
+    const s = r!.perSeg.get(0)!;
+    // Only the Thai cluster boundaries (before ข at offset 3, before า at offset 4)
+    // open; a|b and b|ก (Latin|Thai) open nothing.
+    expect(s.splitBefore).toEqual([3, 4]);
+    expect(r!.perGap).toBeCloseTo(15, 6);
+  });
+});

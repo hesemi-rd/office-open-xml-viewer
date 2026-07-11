@@ -379,6 +379,7 @@ export {
   type SeaWordSegmenter,
   type SeaMixedKinsoku,
   isSeaScriptCodePoint,
+  isSeaGraphemeExtend,
   containsSeaScript,
   seaWordBreakOffsets,
   seaTransitionOffsets,

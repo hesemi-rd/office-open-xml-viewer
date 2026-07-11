@@ -250,9 +250,12 @@ export function jcIsFullyJustified(alignment: string | undefined): boolean {
 }
 
 /** ECMA-376 §17.18.44 — whether a `w:jc` value also stretches the paragraph's
- *  LAST line (unlike `both`, whose final line is left as-is). `distribute` and
- *  its Thai optimization `thaiDistribute` both spread every line, including the
- *  last. */
+ *  LAST line. `distribute` fills its final line too (unlike `both`). But
+ *  `thaiDistribute` does NOT: measured against the Word-exported ground truth
+ *  (issue #959 adjudication fixture), a thaiDistribute paragraph's final line is
+ *  left flush-left and ragged — reaching only its natural width — exactly like
+ *  `both`, while its non-final lines are fully justified across the Thai clusters.
+ *  So only `distribute` stretches the last line. */
 export function jcStretchesLastLine(alignment: string | undefined): boolean {
-  return alignment === 'distribute' || alignment === 'thaiDistribute';
+  return alignment === 'distribute';
 }

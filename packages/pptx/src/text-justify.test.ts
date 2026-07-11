@@ -31,6 +31,22 @@ describe('justifyLine', () => {
     expect(annot(r)).toEqual([['日本語', 0, [1, 2], 30]]);
   });
 
+  // §20.1.10.59 thaiDist ("each character is treated as a word"): a space-free
+  // Thai span distributes its slack across every grapheme-cluster boundary, with a
+  // combining mark glued to its base. "เมือง" = [เ][มื][อ][ง] → 3 interior
+  // boundaries before offsets 1, 3, 4 (◌ื at offset 2 stays glued to ม).
+  it("'thaiDist' distributes space-free Thai at grapheme-cluster boundaries", () => {
+    const r = justifyLine<Seg>([{ text: 'เมือง' }], 90, 60, 'thaiDist', false);
+    expect(annot(r)).toEqual([['เมือง', 0, [1, 3, 4], 10]]);
+  });
+
+  // 'dist' (the non-Thai variant) reaches NO gap on the same space-free Thai —
+  // Thai is not CJK and has no inter-word space — so it leaves the line ragged.
+  // This pins that thaiDist is NOT an alias of dist.
+  it("'dist' leaves space-free Thai ragged (no cluster gaps)", () => {
+    expect(justifyLine<Seg>([{ text: 'เมือง' }], 90, 60, 'dist', false)).toBeNull();
+  });
+
   it('pure Latin: widens inter-word spaces (kernel splits before the space-following word)', () => {
     // "Hello world foo": gaps fall before 'w' (code-point 6) and before 'f' (12).
     // slack 100, 2 gaps → perGap 50, no trailing gap.

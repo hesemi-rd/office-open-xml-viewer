@@ -50,6 +50,39 @@ export function isSeaScriptCodePoint(cp: number): boolean {
   );
 }
 
+/**
+ * True when `cp` is a Southeast-Asian (Thai/Lao/Khmer) combining mark that
+ * EXTENDS the preceding grapheme cluster rather than starting a new one — i.e.
+ * its UAX#29 Grapheme_Cluster_Break is `Extend` or `SpacingMark` (above/below
+ * vowel signs, tone marks, the Khmer COENG subscript-former, etc.). These are
+ * exactly the code points a `thaiDistribute` justifier must NOT open a gap
+ * before, so a base consonant keeps its marks glued.
+ *
+ * For a boundary between two SEA code points this predicate is sufficient to
+ * decide grapheme clustering: the SEA blocks contain no `Prepend` characters
+ * (verified against UCD), so a break falls before every SEA code point EXCEPT an
+ * Extend/SpacingMark. Ranges derived from the Unicode Character Database
+ * (Grapheme_Cluster_Break), cross-checked against `Intl.Segmenter` grapheme
+ * output — so this stays correct even where the platform `Intl.Segmenter` is
+ * unavailable (the {@link graphemeClusterOffsets} code-point fallback is NOT
+ * cluster-safe and must not gate SEA distribution).
+ */
+export function isSeaGraphemeExtend(cp: number): boolean {
+  return (
+    // Thai (U+0E00–0E7F): MAI HAN-AKAT; SARA AM..PHINTHU; MAITAIKHU..YAMAKKAN.
+    cp === 0x0e31 ||
+    (cp >= 0x0e33 && cp <= 0x0e3a) ||
+    (cp >= 0x0e47 && cp <= 0x0e4e) ||
+    // Lao (U+0E80–0EFF): MAI KAN; SIGN PALI VIRAMA..semivowel signs; tone marks.
+    cp === 0x0eb1 ||
+    (cp >= 0x0eb3 && cp <= 0x0ebc) ||
+    (cp >= 0x0ec8 && cp <= 0x0ece) ||
+    // Khmer (U+1780–17FF): vowel signs, COENG, robat, signs (17B4–17D3) + ATTHACAN.
+    (cp >= 0x17b4 && cp <= 0x17d3) ||
+    cp === 0x17dd
+  );
+}
+
 /** The SEA script of a code point already known to be SEA (see
  *  {@link isSeaScriptCodePoint}). Used to pick the per-span ICU dictionary. */
 function seaScriptOf(cp: number): SeaScript {

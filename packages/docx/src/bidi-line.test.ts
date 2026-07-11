@@ -81,9 +81,11 @@ describe('jcIsFullyJustified (§17.18.44)', () => {
 });
 
 describe('jcStretchesLastLine (§17.18.44)', () => {
-  it('stretches the last line only for distribute + thaiDistribute', () => {
+  it('stretches the last line only for distribute', () => {
     expect(jcStretchesLastLine('distribute')).toBe(true);
-    expect(jcStretchesLastLine('thaiDistribute')).toBe(true);
+    // thaiDistribute leaves its final line ragged like `both` (Word GT, #959):
+    // only non-final lines get the Thai cluster distribution.
+    expect(jcStretchesLastLine('thaiDistribute')).toBe(false);
     // both/justify/kashida leave the last line as-is.
     for (const jc of ['both', 'justify', 'lowKashida', 'mediumKashida', 'highKashida', 'left', undefined]) {
       expect(jcStretchesLastLine(jc), String(jc)).toBe(false);

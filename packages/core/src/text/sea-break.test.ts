@@ -3,6 +3,7 @@ import {
   containsSeaScript,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
+  isSeaGraphemeExtend,
   isSeaScriptCodePoint,
   resetSeaSegmenterForTest,
   seaMixedBreakOffsets,
@@ -37,6 +38,56 @@ describe('isSeaScriptCodePoint', () => {
       expect(isSeaScriptCodePoint(cp)).toBe(expected);
     });
   }
+});
+
+describe('isSeaGraphemeExtend', () => {
+  const cases: [number, boolean][] = [
+    [0x0e01, false], // THAI CHARACTER KO KAI (base consonant) — cluster start
+    [0x0e31, true], //  THAI MAI HAN-AKAT (above vowel) — extend
+    [0x0e33, true], //  THAI SARA AM — clusters onto its base (UAX#29 non-break)
+    [0x0e34, true], //  THAI SARA I (above vowel) — extend
+    [0x0e3a, true], //  THAI PHINTHU — extend
+    [0x0e3b, false], // unassigned gap between vowel block and currency — not extend
+    [0x0e40, false], // THAI SARA E (leading vowel, spacing) — its own cluster
+    [0x0e48, true], //  THAI MAI EK (tone mark) — extend
+    [0x0e4e, true], //  THAI YAMAKKAN — extend
+    [0x0e50, false], // THAI DIGIT ZERO — cluster start
+    [0x0eb1, true], //  LAO VOWEL SIGN MAI KAN — extend
+    [0x0ec8, true], //  LAO TONE MAI EK — extend
+    [0x17b6, true], //  KHMER VOWEL SIGN AA (spacing mark) — extend
+    [0x17d2, true], //  KHMER SIGN COENG (subscript former) — extend
+    [0x17dd, true], //  KHMER SIGN ATTHACAN — extend
+    [0x1780, false], // KHMER LETTER KA (base) — cluster start
+    [0x0041, false], // Latin A — not SEA, not extend
+  ];
+  for (const [cp, expected] of cases) {
+    it(`U+${cp.toString(16).toUpperCase().padStart(4, '0')} → ${expected}`, () => {
+      expect(isSeaGraphemeExtend(cp)).toBe(expected);
+    });
+  }
+
+  // The predicate must agree with the platform grapheme segmenter for every SEA
+  // code point: for two adjacent SEA code points a UAX#29 grapheme break falls
+  // before the right one iff it is NOT extend (the SEA blocks have no Prepend),
+  // so this is the sole cluster rule the thaiDistribute justifier relies on — and
+  // unlike the segmenter it needs no `Intl.Segmenter`, staying correct in the
+  // graceful-fallback runtimes.
+  it('matches Intl.Segmenter grapheme clustering across all SEA code points', () => {
+    if (typeof Intl?.Segmenter !== 'function') return; // environment lacks the segmenter
+    const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    const clustersOne = (s: string): boolean => [...seg.segment(s)].length === 1;
+    for (const [lo, hi] of [
+      [0x0e00, 0x0e7f],
+      [0x0e80, 0x0eff],
+      [0x1780, 0x17ff],
+    ]) {
+      for (let cp = lo; cp <= hi; cp++) {
+        // "ก" + cp is one cluster exactly when cp extends the preceding base.
+        const segmenterSaysExtend = clustersOne('ก' + String.fromCodePoint(cp));
+        expect(isSeaGraphemeExtend(cp), `U+${cp.toString(16)}`).toBe(segmenterSaysExtend);
+      }
+    }
+  });
 });
 
 describe('containsSeaScript', () => {

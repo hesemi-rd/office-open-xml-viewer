@@ -7465,11 +7465,12 @@ function renderParagraph(
   }
 
   // ECMA-376 §17.18.44 ST_Jc: "both" / "justify" / "distribute" (and the kashida
-  // + thaiDistribute variants) fully justify the line by expanding inter-word
-  // spaces. The last line of a "both" paragraph is traditionally left-aligned
-  // (not stretched); "distribute"/"thaiDistribute" also stretch the last line. We
-  // count whitespace chars in trailing positions of each segment and divide the
-  // slack proportionally across them. (jc classification lives in bidi-line so the
+  // + thaiDistribute variants) fully justify each line by expanding inter-word
+  // spaces (and, for expansion, inter-CJK boundaries; thaiDistribute also opens
+  // Thai grapheme-cluster boundaries). The last line is traditionally left-
+  // aligned (not stretched) for "both"/kashida AND "thaiDistribute" (Word GT,
+  // issue #959); only "distribute" also stretches the last line. The slack is
+  // divided across the eligible gaps. (jc classification lives in bidi-line so the
   // §17.18.44 knowledge stays single-source.)
   const isJustified = jcIsFullyJustified(para.alignment);
   const stretchLastLine = jcStretchesLastLine(para.alignment);
@@ -7964,6 +7965,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         paraNeedsBidi ? lastDrawnSi : segCount,
         minPerGap,
         residualSlack > 0,
+        // §17.18.44 thaiDistribute: on expansion, also open a gap at every Thai/
+        // Lao/Khmer grapheme-cluster boundary so a space-free SEA line justifies
+        // by inter-cluster pitch (Word GT: issue #959). `both`/`distribute` don't.
+        para.alignment === 'thaiDistribute' && residualSlack > 0,
       );
       segStretch = dist ? dist.perSeg : null;
       distPerGap = dist ? dist.perGap : 0;
@@ -9999,7 +10004,7 @@ export function renderShapeText(
       // ruby is carried through the shared line engine and painted above the base
       // glyphs like body text ruby (§17.3.3.25).
       const { lines: lineList, baseRtl, ind } = layout;
-      // 'distribute'/'thaiDistribute' spread every line; 'both'/'justify'/kashida
+      // 'distribute' spreads every line; 'both'/'justify'/kashida/'thaiDistribute'
       // spread all but the logical-last; otherwise resolve the physical edge from
       // the block alignment + base dir. (§17.18.44 classification in bidi-line.)
       const alignEdge = jcIsFullyJustified(layout.alignment)
@@ -10146,6 +10151,9 @@ export function renderShapeText(
             paraNeedsBidi ? lastDrawnSi : segCount,
             minPerGap,
             residualSlack > 0,
+            // §17.18.44 thaiDistribute: open Thai/Lao/Khmer cluster gaps on
+            // expansion so a space-free SEA line justifies (issue #959).
+            layout.alignment === 'thaiDistribute' && residualSlack > 0,
           );
           segStretch = dist ? dist.perSeg : null;
           distPerGap = dist ? dist.perGap : 0;
