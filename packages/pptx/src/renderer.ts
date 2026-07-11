@@ -1418,10 +1418,14 @@ const WARP_STRIP_DEVICE_PX = 8;
 // additionally diverge by up to 2·budget at the ink extremes. Overlapping the
 // clips makes strip i paint the boundary band at FULL coverage before strip
 // i+1's partial-coverage edge lands on top; painting the same opaque colour
-// over itself is idempotent, so the seam vanishes. (For a translucent fill the
-// 2-px band composes twice and darkens slightly — the same trade-off the
-// earlier bitmap overlap had.) The overlap is symmetric, so it does not bias
-// the mapping.
+// over itself is idempotent, so the seam vanishes. That idempotence only holds
+// for an OPAQUE composite: a translucent fill (alpha < 1, from an 8-digit
+// RRGGBBAA run colour or an inherited shape opacity) composes the 2-px band
+// TWICE and darkens it (issue #879 — a visible pinstripe/moiré). The translucent
+// branch of drawWarpedGlyphStrips fixes that by painting the strips OPAQUE into a
+// per-glyph device-resolution layer (where the overlap is idempotent again) and
+// compositing the layer ONCE with the effective alpha. The overlap is symmetric,
+// so it does not bias the mapping.
 const WARP_STRIP_OVERLAP_DEVICE_PX = 1;
 // Max deviation (device px) of any painted slab corner from the EXACT envelope
 // map, enforced by the adaptive loop. Derivation: the true map places the
@@ -1506,6 +1510,7 @@ function drawWarpedGlyphStrips(
   bandFrac: number,
   boxX: number,
   boxY: number,
+  color: string,
 ): void {
   if (chW <= 0) return;
   // Ink extremes about the baseline (css px), from real metrics — this is where
@@ -1514,6 +1519,11 @@ function drawWarpedGlyphStrips(
   const m = ctx.measureText(ch);
   const asc = m.actualBoundingBoxAscent > 0 ? m.actualBoundingBoxAscent : chW;
   const desc = m.actualBoundingBoxDescent > 0 ? m.actualBoundingBoxDescent : chW * 0.25;
+  // Horizontal ink extremes about the pen origin (css px). Used only to bound the
+  // translucent compositing layer (issue #879) tightly around real ink, so
+  // side-bearing overhang on the outward-unbounded end strips still fits.
+  const inkL = m.actualBoundingBoxLeft > 0 ? m.actualBoundingBoxLeft : 0;
+  const inkR = m.actualBoundingBoxRight > 0 ? m.actualBoundingBoxRight : chW;
 
   // ── Adaptive strip count ──────────────────────────────────────────────────
   // Start from the width criterion (one strip per WARP_STRIP_DEVICE_PX of the
@@ -1568,30 +1578,148 @@ function drawWarpedGlyphStrips(
   const ov = WARP_STRIP_OVERLAP_DEVICE_PX / (hScale * devScale);
 
   const last = strips.length - 1;
+  // Glyph-local clip interval [x0, x1] of strip `i` (flat css px, origin at the
+  // strip centre): interior boundaries sit at the shared s0/s1 (± the overlap);
+  // the outer edges of the first/last strips are unbounded so side-bearing
+  // overhang ink is not cut.
+  const stripClipX0 = (i: number, s0: number, centre: number): number =>
+    i === 0 ? -CLIP_Y : s0 - centre - ov;
+  const stripClipX1 = (i: number, s1: number, centre: number): number =>
+    i === last ? CLIP_Y : s1 - centre + ov;
+
+  // Paint the whole strip stack onto `target` in `fillStyle`. The transform
+  // chain per strip is the single-affine per-glyph draw anchored at the STRIP
+  // centre so vScale/shear/angle track this slice's u.
+  const paintStrips = (target: CanvasRenderingContext2D, fillStyle: string): void => {
+    target.fillStyle = fillStyle;
+    for (let i = 0; i <= last; i++) {
+      const { s0, s1, g } = strips[i];
+      const centre = (s0 + s1) / 2;
+      target.save();
+      target.translate(boxX + g.x, boxY + g.y);
+      target.rotate(g.angle);
+      if (g.shear !== 0) target.transform(1, 0, g.shear, 1, 0, 0);
+      if (hScale !== 1 || g.vScale !== 1) target.scale(hScale, g.vScale);
+      target.beginPath();
+      const x0 = stripClipX0(i, s0, centre);
+      const x1 = stripClipX1(i, s1, centre);
+      target.rect(x0, -CLIP_Y, x1 - x0, 2 * CLIP_Y);
+      target.clip();
+      // Pen origin sits at local −centre; the ls/2 shift centres the ink inside
+      // its letter-spaced advance, matching the flat draw's origin convention.
+      target.fillText(ch, -centre + ls / 2, 0);
+      target.restore();
+    }
+  };
+
+  // ── Composite path selection (issue #879) ──────────────────────────────────
+  // The overlapping strip clips are idempotent only for a FULLY OPAQUE composite.
+  // Effective opacity = the fill's own alpha × the inherited ctx.globalAlpha
+  // (shape opacity). When both are 1 the direct draw is exact and byte-identical
+  // to the pre-#879 path — the overwhelmingly common WordArt case, zero
+  // allocation. Otherwise the 1-device-px overlap band would double-compose and
+  // darken, so route through the layer below.
+  const fillAlpha = rgbaAlpha(color);
+  const destAlpha = typeof ctx.globalAlpha === 'number' ? ctx.globalAlpha : 1;
+  if (fillAlpha >= 1 && destAlpha >= 1) {
+    paintStrips(ctx, color);
+    return;
+  }
+  if (fillAlpha <= 0 || destAlpha <= 0) return; // fully transparent — nothing to draw
+
+  // Translucent: paint the strips OPAQUE into a per-glyph device-resolution layer
+  // (so the overlap band is idempotent again) and composite the layer ONCE with
+  // the effective alpha. The layer is rasterised under the SAME device transform
+  // as the live canvas, so there is no re-magnification of any raster — the fix
+  // the issue calls for. Falls back to the direct draw (today's slightly darker
+  // band) when no auxiliary canvas or live transform is available (a headless
+  // mock ctx), which is never pixel-verified anyway.
+  const base = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  if (!base) {
+    paintStrips(ctx, color);
+    return;
+  }
+
+  // Device-space AABB of the actual ink: per strip, the visible ink is the
+  // measured ink rectangle intersected with the strip's clip interval, mapped
+  // through the strip affine and the live (css→device) transform. Bounding by
+  // measured ink — not the ±CLIP_Y clip — keeps the layer glyph-tight.
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
   for (let i = 0; i <= last; i++) {
     const { s0, s1, g } = strips[i];
     const centre = (s0 + s1) / 2;
-    ctx.save();
-    // Same transform chain as the single-affine per-glyph draw, but anchored at
-    // the STRIP centre so vScale/shear/angle track this slice's u.
-    ctx.translate(boxX + g.x, boxY + g.y);
-    ctx.rotate(g.angle);
-    if (g.shear !== 0) ctx.transform(1, 0, g.shear, 1, 0, 0);
-    if (hScale !== 1 || g.vScale !== 1) ctx.scale(hScale, g.vScale);
-    // Strip clip in glyph-local coordinates (origin at the strip centre): the
-    // interior boundaries sit at the shared flat-x values s0/s1 (± the
-    // overlap); the glyph's outer edges are unbounded outward so side-bearing
-    // overhang ink is not cut.
-    const x0 = i === 0 ? -CLIP_Y : s0 - centre - ov;
-    const x1 = i === last ? CLIP_Y : s1 - centre + ov;
-    ctx.beginPath();
-    ctx.rect(x0, -CLIP_Y, x1 - x0, 2 * CLIP_Y);
-    ctx.clip();
-    // Pen origin sits at local −centre; the ls/2 shift centres the ink inside
-    // its letter-spaced advance, matching the flat draw's origin convention.
-    ctx.fillText(ch, -centre + ls / 2, 0);
-    ctx.restore();
+    const textX = -centre + ls / 2;
+    const x0 = Math.max(stripClipX0(i, s0, centre), textX - inkL);
+    const x1 = Math.min(stripClipX1(i, s1, centre), textX + inkR);
+    if (x1 <= x0) continue; // no ink in this strip's clip
+    for (const [lx, ly] of [
+      [x0, -asc],
+      [x1, -asc],
+      [x0, desc],
+      [x1, desc],
+    ] as const) {
+      const p = mapWarpLocalPoint(g, hScale, lx, ly);
+      const cx = boxX + p.x;
+      const cy = boxY + p.y;
+      const dx = base.a * cx + base.c * cy + base.e;
+      const dy = base.b * cx + base.d * cy + base.f;
+      if (dx < minX) minX = dx;
+      if (dx > maxX) maxX = dx;
+      if (dy < minY) minY = dy;
+      if (dy > maxY) maxY = dy;
+    }
   }
+  if (!(maxX > minX && maxY > minY)) return; // no ink mapped — nothing to composite
+
+  const pad = 2; // device px, for AA/rounding slack around the ink AABB
+  const originX = Math.floor(minX - pad);
+  const originY = Math.floor(minY - pad);
+  const layerW = Math.ceil(maxX + pad) - originX;
+  const layerH = Math.ceil(maxY + pad) - originY;
+  const aux = createAuxCanvas(layerW, layerH);
+  const auxCtx = aux ? (aux.getContext('2d') as CanvasRenderingContext2D | null) : null;
+  if (!aux || !auxCtx) {
+    paintStrips(ctx, color);
+    return;
+  }
+  // The layer's own transform is the live transform translated by −origin (a
+  // pure device-space shift, so it just subtracts origin from the base
+  // translation — no DOMMatrix multiply needed), placing device pixels on the
+  // same grid as the main canvas but offset into the layer.
+  auxCtx.font = ctx.font;
+  auxCtx.textAlign = 'left';
+  auxCtx.textBaseline = 'alphabetic';
+  auxCtx.setTransform(base.a, base.b, base.c, base.d, base.e - originX, base.f - originY);
+  paintStrips(auxCtx, opaqueRgba(color));
+
+  // Composite the opaque layer once at the effective alpha, at identity so the
+  // (already device-oriented) layer blits 1:1. save/restore preserves the live
+  // transform, clip, and globalAlpha for the next glyph.
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = destAlpha * fillAlpha;
+  ctx.drawImage(aux, originX, originY);
+  ctx.restore();
+}
+
+/** Alpha (0..1) of an `rgb()/rgba()` colour string. The pptx text pipeline emits
+ *  colours via {@link hexToRgba} (`rgba(r,g,b,a)`); a 3-component `rgb()` or any
+ *  unparseable value is treated as opaque so it never routes into the #879 layer. */
+function rgbaAlpha(color: string): number {
+  const m = /^rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)$/i.exec(color);
+  if (!m) return 1;
+  const a = parseFloat(m[1]);
+  return Number.isFinite(a) ? Math.min(1, Math.max(0, a)) : 1;
+}
+
+/** Drop the alpha channel of an `rgb()/rgba()` colour, yielding an opaque
+ *  `rgb(r,g,b)`. Used to paint the #879 compositing layer at full opacity. */
+function opaqueRgba(color: string): string {
+  const m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(color);
+  return m ? `rgb(${m[1]}, ${m[2]}, ${m[3]})` : color;
 }
 
 /** One strip of a glyph: flat sub-range `[s0, s1]` (css px from the glyph's flat
@@ -1894,6 +2022,7 @@ function renderWarpedText(
             bandFrac,
             boxX,
             boxY,
+            seg.color,
           );
           penW += chW;
           continue;

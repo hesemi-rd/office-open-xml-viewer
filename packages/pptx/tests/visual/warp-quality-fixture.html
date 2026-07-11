@@ -24,13 +24,13 @@
     const BOX_W = 6.2 * 96;
     const BOX_H = 1.5 * 96;
 
-    function slideFor(preset, text, boxH) {
+    function slideFor(preset, text, boxH, color = '1F4E79') {
       const para = {
         alignment: 'ctr', marL: 0, marR: 0, indent: 0, spaceBefore: null, spaceAfter: null,
         spaceLine: null, lvl: 0, bullet: { type: 'none' }, defFontSize: null, defColor: null,
         defBold: null, defItalic: null, defFontFamily: null, tabStops: [], eaLnBrk: true,
         runs: [{ type: 'text', text, bold: true, italic: null, underline: false,
-          strikethrough: false, fontSize: 40, color: '1F4E79', fontFamily: 'Arial' }],
+          strikethrough: false, fontSize: 40, color, fontFamily: 'Arial' }],
       };
       const textBody = {
         verticalAnchor: 'ctr', paragraphs: [para], defaultFontSize: 40,
@@ -55,20 +55,24 @@
     }
 
     const CASES = [
-      // [id, preset (null = flat control), text, box height css px]
+      // [id, preset (null = flat control), text, box height css px, color]
       ['flat', null, 'Inflate', BOX_H],
       ['inflate', 'textInflate', 'Inflate', BOX_H],
       ['deflate', 'textDeflate', 'Deflate', BOX_H],
       ['cascade', 'textCascadeUp', 'Cascade', BOX_H],
       ['wave1', 'textWave1', 'Wave One', BOX_H],
       ['circlepour', 'textCirclePour', 'Round', 3 * 96],
+      // Translucent fills (8-digit RRGGBBAA, alpha 0x80 ≈ 50%) — the strip
+      // overlap must NOT double-compose into a darker band (issue #879).
+      ['inflate_a50', 'textInflate', 'Inflate', BOX_H, '1F4E7980'],
+      ['circlepour_a50', 'textCirclePour', 'Round', 3 * 96, '1F4E7980'],
     ];
 
     try {
       await document.fonts.ready;
       const timings = {};
-      for (const [id, preset, text, boxH] of CASES) {
-        const { slide, w, h } = slideFor(preset, text, boxH);
+      for (const [id, preset, text, boxH, color] of CASES) {
+        const { slide, w, h } = slideFor(preset, text, boxH, color);
         const canvas = document.createElement('canvas');
         canvas.id = id;
         document.body.appendChild(canvas);

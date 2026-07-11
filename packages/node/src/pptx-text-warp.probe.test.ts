@@ -52,7 +52,7 @@ const warpFactory: NodeCanvasFactory | undefined = skia
 const EMU_PER_PX = 9525; // 96 dpi
 const px = (n: number) => Math.round(n * EMU_PER_PX);
 
-function warpShape(preset: string): ShapeElement {
+function warpShape(preset: string, color = '000000'): ShapeElement {
   const para: Paragraph = {
     alignment: 'ctr',
     marL: 0,
@@ -79,7 +79,7 @@ function warpShape(preset: string): ShapeElement {
         underline: false,
         strikethrough: false,
         fontSize: 40,
-        color: '000000',
+        color,
         fontFamily: 'Arial',
       } as Paragraph['runs'][number],
     ],
@@ -126,12 +126,12 @@ function warpShape(preset: string): ShapeElement {
   };
 }
 
-function buildSlide(preset: string): Presentation {
+function buildSlide(preset: string, color = '000000'): Presentation {
   const slide: Slide = {
     index: 0,
     slideNumber: 1,
     background: null,
-    elements: [warpShape(preset)],
+    elements: [warpShape(preset, color)],
   };
   return {
     slideWidth: px(400),
@@ -182,6 +182,70 @@ async function renderInk(preset: string): Promise<{
     return null;
   };
   return { topRow, bottomRow, width: W, height: H };
+}
+
+/**
+ * Luminance histogram of a TRANSLUCENT warped WordArt render (issue #879).
+ *
+ * The paired-edge warp draws each glyph as overlapping strips (a 1-device-px
+ * clip overlap hides the shared-edge AA seam). Painting an opaque colour over
+ * itself in that band is idempotent, but a TRANSLUCENT fill composed twice
+ * DARKENS it: over the slide's opaque white background a single composite of a
+ * fill at alpha `a` yields luminance L1 = 255 − a·(255 − Lfill), while the
+ * double-composed band yields L2 = 255 − a(2−a)·(255 − Lfill) < L1 — a visible
+ * darker pinstripe (Inflate ≈28%, CirclePour ≈71% of ink columns in the issue's
+ * browser measurement). Antialiased glyph edges only ever composite LESS ink, so
+ * they are LIGHTER than L1; the sole source of a pixel darker than L1 is the
+ * double composition. The #879 fix paints the strips opaque into a per-glyph
+ * device layer and composites it once, so every ink pixel lands at L1.
+ *
+ * Renders `<colorHex>` (8-digit RRGGBBAA) at dpr 2 and returns, over the solid
+ * ink pixels, the fraction darker than the L1/L2 midpoint (the double-composed
+ * band fraction) and the darkest ink luminance seen. band ≈ 0 / minLum ≈ L1 when
+ * the composite is uniform; band large / minLum ≈ L2 when the overlap darkens.
+ */
+async function warpTranslucentBand(
+  preset: string,
+  colorHex: string,
+): Promise<{ ink: number; bandFraction: number; minLum: number; l1: number; l2: number }> {
+  const width = 400;
+  const height = 240;
+  const dpr = 2;
+  const canvas = new Canvas(width * dpr, height * dpr);
+  await renderSlideNode(
+    canvas as unknown as Parameters<typeof renderSlideNode>[0],
+    buildSlide(preset, colorHex),
+    0,
+    { width, dpr, factory: warpFactory },
+  );
+  const ctx = canvas.getContext('2d');
+  const W = width * dpr;
+  const H = height * dpr;
+  const data = ctx.getImageData(0, 0, W, H).data as unknown as Uint8ClampedArray;
+  const lumAt = (p: number): number =>
+    0.299 * data[p * 4] + 0.587 * data[p * 4 + 1] + 0.114 * data[p * 4 + 2];
+  // Fill colour + alpha from the 8-digit hex; single (L1) and double (L2)
+  // composite luminance over the white background.
+  const fr = parseInt(colorHex.slice(0, 2), 16);
+  const fg = parseInt(colorHex.slice(2, 4), 16);
+  const fb = parseInt(colorHex.slice(4, 6), 16);
+  const a = parseInt(colorHex.slice(6, 8), 16) / 255;
+  const lFill = 0.299 * fr + 0.587 * fg + 0.114 * fb;
+  const l1 = 255 - a * (255 - lFill); // single composite
+  const l2 = 255 - a * (2 - a) * (255 - lFill); // double composite (band)
+  const bandCut = (l1 + l2) / 2; // darker than this ⇒ double-composed
+  const inkCut = (l1 + 255) / 2; // darker than this ⇒ solid ink (not AA fringe / bg)
+  let ink = 0;
+  let band = 0;
+  let minLum = 255;
+  for (let p = 0; p < W * H; p++) {
+    const l = lumAt(p);
+    if (l >= inkCut) continue; // background or faint AA edge
+    ink++;
+    if (l < minLum) minLum = l;
+    if (l < bandCut) band++;
+  }
+  return { ink, bandFraction: ink > 0 ? band / ink : 0, minLum, l1, l2 };
 }
 
 /** Min top-inked row across a column band [c0, c1). */
@@ -477,6 +541,32 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
       // eslint-disable-next-line no-console
       console.log(`${preset}: inkPx=${inkPx} components=${comps}`);
       expect(comps).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('translucent warp fill lands at a uniform alpha — no strip-overlap band (#879)', async () => {
+    // A 50%-alpha fill (RRGGBBAA = 1F4E7980, alpha byte 0x80) through the strip
+    // overlap band double-composed to ~75% opacity before #879, striping the ink
+    // with higher-opacity pinstripes (Inflate ≈28%, CirclePour ≈71% of ink
+    // columns in the issue's browser measurement). Two presets — a low-curvature
+    // (Inflate) and a high-curvature (CirclePour, many strips ⇒ many seams) —
+    // must now composite to a uniform single-composite alpha: essentially no ink
+    // pixel exceeds the single/double midpoint, and the peak alpha stays near the
+    // single level rather than the doubled one.
+    for (const preset of ['textInflate', 'textCirclePour']) {
+      const { ink, bandFraction, minLum, l1, l2 } = await warpTranslucentBand(preset, '1F4E7980');
+      // eslint-disable-next-line no-console
+      console.log(
+        `${preset}: ink=${ink} band=${(bandFraction * 100).toFixed(2)}% minLum=${minLum.toFixed(1)} (L1=${l1.toFixed(1)} L2=${l2.toFixed(1)})`,
+      );
+      expect(ink, `${preset}: has translucent ink`).toBeGreaterThan(2000);
+      // Double-composed band pixels: a whole-glyph raster would stripe a large
+      // fraction; the layer composite drives this to ~0. A hair of slack absorbs
+      // the odd self-overlapping outline corner.
+      expect(bandFraction, `${preset}: double-composed band fraction`).toBeLessThan(0.01);
+      // Darkest ink stays near the single composite L1, nowhere near the doubled
+      // L2 the overlap band would reach.
+      expect(minLum, `${preset}: darkest ink near single composite`).toBeGreaterThan((l1 + l2) / 2);
     }
   });
 });
