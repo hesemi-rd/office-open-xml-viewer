@@ -2527,6 +2527,13 @@ fn parse_paragraph_cond(
             .keep_next
             .unwrap_or_else(|| base_para.outline_level.is_some()),
         keep_lines: base_para.keep_lines.unwrap_or(false),
+        // ECMA-376 §17.3.1.29 + §17.3.2.41 — the paragraph mark's resolved
+        // `w:vanish`. `mark_run` is the mark-glyph run formatting (style chain +
+        // direct pPr/rPr), the same source that already feeds `default_font_size`
+        // and that the run stripper reads. An inkless paragraph with a vanished
+        // mark is not displayed in the normal/print view, so the renderer
+        // collapses it to zero height.
+        mark_vanish: mark_run.vanish.unwrap_or(false),
         // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
         widow_control: base_para.widow_control.unwrap_or(true),
         borders: base_para.para_borders.clone(),
@@ -9525,6 +9532,34 @@ mod para_mark_rpr_tests {
             t.bold,
             "the webHidden page number still inherits style bold"
         );
+    }
+
+    // ECMA-376 §17.3.1.29 + §17.3.2.41 — a `<w:vanish/>` on the paragraph-mark
+    // rPr is captured on `mark_vanish`, so the renderer can collapse an inkless
+    // vanished-mark paragraph to zero height in the normal/print view (issue
+    // #868: a run of empty vanished ListParagraphs otherwise forced an extra
+    // page). Absent ⇒ false.
+    #[test]
+    fn para_mark_vanish_is_captured() {
+        let sm = style_map();
+        let hidden = parse_p(r#"<w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>"#, &sm);
+        assert!(
+            hidden.mark_vanish,
+            "an empty paragraph's vanished mark is recorded"
+        );
+        assert!(hidden.runs.is_empty(), "the paragraph is inkless");
+
+        let visible = parse_p(r#"<w:pPr/><w:r><w:t>x</w:t></w:r>"#, &sm);
+        assert!(!visible.mark_vanish, "no w:vanish on the mark ⇒ false");
+    }
+
+    // §17.3.2.44 webHidden on the paragraph mark is NOT §17.3.2.41 vanish: it
+    // renders in the normal/print view, so it must NOT set `mark_vanish`.
+    #[test]
+    fn para_mark_web_hidden_does_not_set_vanish() {
+        let sm = style_map();
+        let p = parse_p(r#"<w:pPr><w:rPr><w:webHidden/></w:rPr></w:pPr>"#, &sm);
+        assert!(!p.mark_vanish, "webHidden mark is not vanish");
     }
 }
 

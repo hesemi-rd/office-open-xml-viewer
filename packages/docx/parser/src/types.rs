@@ -592,6 +592,12 @@ pub struct DocParagraph {
     /// Keep all lines of this paragraph on the same page (w:keepLines)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub keep_lines: bool,
+    /// ECMA-376 §17.3.1.29 + §17.3.2.41 — the paragraph MARK's resolved `w:vanish`
+    /// (hidden text). An inkless paragraph whose mark is vanished collapses to zero
+    /// height in the normal/print view (hidden-text off), the same way a hidden run
+    /// is stripped; the renderer's paginator drops it whole.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub mark_vanish: bool,
     /// Widow/orphan control (w:widowControl). Default per spec: true.
     pub widow_control: bool,
     /// Paragraph borders (w:pBdr)
