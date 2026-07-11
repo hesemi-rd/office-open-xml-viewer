@@ -65,6 +65,7 @@ function para(
     spaceBefore?: number;
     spaceAfter?: number;
     indentFirst?: number;
+    markVanish?: boolean;
   } = {},
 ): BodyElement {
   const fontSize = opts.fontSize ?? 20;
@@ -76,6 +77,7 @@ function para(
     widowControl: opts.widowControl,
     keepLines: opts.keepLines,
     keepNext: opts.keepNext,
+    markVanish: opts.markVanish,
   };
   return { type: 'paragraph', ...p } as BodyElement;
 }
@@ -1810,5 +1812,68 @@ describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)'
     const p1 = pages[0].find((e) => textOf(e) === 'p1');
     expect(p1).toBeDefined();
     expect(colOf(p1 as PaginatedBodyElement) ?? 0).toBe(0); // stays in col0
+  });
+});
+
+describe('computePages — vanished (hidden) empty-paragraph mark collapse (§17.3.2.41 / §17.3.1.29)', () => {
+  // ECMA-376 §17.3.1.29: a paragraph's mark has run properties. §17.3.2.41
+  // `w:vanish` hides a run in the normal/print view (hidden-text off, the view a
+  // Word PDF export renders). An INKLESS paragraph whose MARK is vanished is
+  // therefore not displayed at all: it must contribute no mark line and no
+  // paragraph spacing — the mark analogue of the parser stripping hidden runs.
+  // sample-28 (issue #868): a run of empty vanished ListParagraphs otherwise
+  // reserved ~156px and forced one extra page (24 vs Word's 23).
+  //
+  // Content height = pageHeight 140 − margins 40 = 100pt; fontSize 20 → each
+  // single line / empty mark = 20pt (stub font box 0.8/0.2 em, no grid/spacing),
+  // so exactly five single-line paragraphs fill one page.
+  const visible = () => [
+    para({ text: 'a', fontSize: 20 }),
+    para({ text: 'b', fontSize: 20 }),
+    para({ text: 'c', fontSize: 20 }),
+    para({ text: 'd', fontSize: 20 }),
+    para({ text: 'e', fontSize: 20 }),
+  ];
+
+  it('collapses inkless vanished-mark paragraphs to zero height (identical to their absence)', () => {
+    const reference = computePages(
+      [...visible().slice(0, 4), visible()[4]], // 5 visible paragraphs, no empties
+      section(),
+      makeCtx(),
+    );
+    const withVanish = computePages(
+      [
+        ...visible().slice(0, 4),
+        para({ markVanish: true, spaceAfter: 8, fontSize: 20 }),
+        para({ markVanish: true, spaceAfter: 8, fontSize: 20 }),
+        para({ markVanish: true, spaceAfter: 8, fontSize: 20 }),
+        visible()[4],
+      ],
+      section(),
+      makeCtx(),
+    );
+    // The three vanished empties consume nothing: the fifth visible paragraph
+    // lands on the same (single) page it would occupy without them.
+    expect(reference.length).toBe(1);
+    expect(withVanish.length).toBe(reference.length);
+    // The fifth visible paragraph ('e') is on the first (only) page.
+    expect(withVanish[0].some((el) => textOf(el) === 'e')).toBe(true);
+  });
+
+  it('control: ORDINARY empty paragraphs (mark not vanished) still reserve height and add a page', () => {
+    const withOrdinaryEmpties = computePages(
+      [
+        ...visible().slice(0, 4),
+        para({ spaceAfter: 8, fontSize: 20 }),
+        para({ spaceAfter: 8, fontSize: 20 }),
+        para({ spaceAfter: 8, fontSize: 20 }),
+        visible()[4],
+      ],
+      section(),
+      makeCtx(),
+    );
+    // Not a tautology: three non-vanished empties push the fifth visible past the
+    // first page.
+    expect(withOrdinaryEmpties.length).toBeGreaterThan(1);
   });
 });

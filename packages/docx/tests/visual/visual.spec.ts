@@ -28,7 +28,7 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   // sample-27 = continuous section-break page-number restart fixture (US Letter, 612pt).
   { name: 'private/sample-27', pageCount: 2, width: 612 },
   // sample-28 = Arabic RTL long-form (A4).
-  { name: 'private/sample-28', pageCount: 24, width: 595 },
+  { name: 'private/sample-28', pageCount: 23, width: 595 },
   // sample-29 = Thai script (A4).
   { name: 'private/sample-29', pageCount: 14, width: 595 },
   // sample-30 = Korean script (A4).

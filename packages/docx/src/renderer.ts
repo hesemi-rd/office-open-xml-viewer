@@ -2814,6 +2814,21 @@ export function computePages(
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
+      // ECMA-376 §17.3.1.29 + §17.3.2.41: an inkless paragraph whose MARK is
+      // vanished is hidden in the normal/print view (settings hidden-text off) —
+      // it contributes NO mark line, NO spacing, and paints nothing, the mark
+      // analogue of the parser stripping hidden runs. Skip it whole: add no height
+      // and leave prevPara/prevSpaceAfter as the paragraph BEFORE it, so its
+      // neighbours collapse spacing against each other (Word treats it as absent).
+      // Still pushed+stamped so the per-page element sequence is unchanged and the
+      // paint pass mirrors the skip. (sample-28, issue #868: a run of seven
+      // vanished empty ListParagraphs otherwise reserved ~156px and forced one
+      // extra page.)
+      if (isFullyHiddenParagraph(para)) {
+        (el as PaginatedBodyElement).hiddenCollapsed = true;
+        pushTagged(el as PaginatedBodyElement);
+        continue;
+      }
       const suppressBefore = contextual || spacer;
 
       // An empty paragraph that immediately precedes a COLLAPSED continuous spacer
@@ -4358,6 +4373,11 @@ function estimateParagraphHeight(
    *  its bottom edge is suppressed (the box continues) and reserves no extent. */
   nextSharesBottomBorder = false,
 ): number {
+  // ECMA-376 §17.3.1.29 + §17.3.2.41: a fully-hidden paragraph (inkless +
+  // vanished mark) collapses to zero height, so every look-ahead estimate
+  // (keepNext's estimateNextBlockHeight, the inline-image-cluster scan) that
+  // folds one in stays in lockstep with the paginator's whole-skip above.
+  if (isFullyHiddenParagraph(para)) return 0;
   return paragraphHeightFromMeasured(
     measureBodyParagraphAtCursor(state, para, contentWPt, suppressSpaceBefore, paraXPt),
     para,
@@ -6216,6 +6236,22 @@ function isInklessParagraph(p: DocParagraph): boolean {
   });
 }
 
+/**
+ * ECMA-376 §17.3.1.29 + §17.3.2.41 — a paragraph with no visible inline content
+ * whose paragraph MARK is vanished (hidden text). In the normal/print view
+ * (settings hidden-text off — the view a Word PDF export renders) it is not
+ * displayed at all, so it collapses to zero height: no mark line box, no
+ * paragraph spacing, nothing painted. This is the paragraph-mark analogue of the
+ * parser stripping hidden runs (`fmt.vanish` in parser.rs): a run of such empty
+ * vanished paragraphs must not reserve vertical space (sample-28, issue #868 —
+ * seven of them otherwise forced one extra page). A paragraph with VISIBLE
+ * content and a vanished mark is NOT collapsed (it is not inkless): its content
+ * still draws, only the pilcrow is hidden.
+ */
+function isFullyHiddenParagraph(p: DocParagraph): boolean {
+  return p.markVanish === true && isInklessParagraph(p);
+}
+
 function isAnchorOnlyParagraph(p: DocParagraph): boolean {
   let hasAnchor = false;
   for (const r of p.runs ?? []) {
@@ -6510,6 +6546,11 @@ function renderBodyElements(
       // section's first paragraph spaces against that paragraph. Mirrors the
       // paginator's identical skip so fill and paint stay in lockstep.
       if ((el as PaginatedBodyElement).collapsedSpacer) continue;
+      // ECMA-376 §17.3.1.29 + §17.3.2.41: a fully-hidden paragraph (inkless +
+      // vanished mark) the paginator collapsed to zero height paints nothing and
+      // advances y by nothing, leaving prevPara/prevSpaceAfter as the paragraph
+      // BEFORE it — the paint mirror of the paginator's identical skip.
+      if ((el as PaginatedBodyElement).hiddenCollapsed) continue;
       const contextual = contextualSuppressed(prevPara, para);
       // Empty section-break spacer: drop only its own before (see
       // isSectionBreakSpacerAt); contextualSpacing drops the previous after too.

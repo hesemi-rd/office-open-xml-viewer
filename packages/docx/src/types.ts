@@ -438,6 +438,11 @@ export type PaginatedBodyElement = BodyElement & {
    *  paint cannot re-derive the adjacency from its per-page slice. Runtime-only. See
    *  `leadsCollapsedRun` in renderer.ts. */
   leadsCollapsedRun?: boolean;
+  /** ECMA-376 §17.3.1.29 + §17.3.2.41 — a fully-hidden paragraph (inkless AND its
+   *  mark is vanished) that the paginator collapsed to zero height. Stamped so the
+   *  paint pass skips it in lockstep, exactly like `collapsedSpacer`. Runtime-only.
+   *  See `isFullyHiddenParagraph` in renderer.ts. */
+  hiddenCollapsed?: boolean;
   colIndex?: number;
   /** ECMA-376 §17.6.4 — the column geometry of the SECTION this element belongs
    *  to (per-section newspaper columns). Stamped by the paginator so the renderer
@@ -555,6 +560,11 @@ export interface DocParagraph {
   keepNext?: boolean;
   /** Keep all lines of this paragraph on the same page (w:keepLines) */
   keepLines?: boolean;
+  /** ECMA-376 §17.3.1.29 + §17.3.2.41 — the paragraph MARK's resolved `w:vanish`
+   *  (hidden text). An inkless paragraph whose mark is vanished collapses to zero
+   *  height in the normal/print view (hidden-text off), the same way the parser
+   *  strips hidden runs; the paginator drops it whole. Absent = mark is visible. */
+  markVanish?: boolean;
   /** Widow/orphan control (w:widowControl). ECMA-376 default is true. */
   widowControl?: boolean;
   /** Paragraph borders (w:pBdr) */
