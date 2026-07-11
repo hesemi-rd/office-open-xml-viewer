@@ -2320,7 +2320,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     cur.joinPrev = true;
   }
 
-  // ── UAX #14 LB28 — no break between adjacent alphabetics across segments ──
+  // ── UAX #14 no-break pairs (LB14/LB23/LB23a/LB24/LB25/LB28/LB30) ──
   // buildSegments intentionally splits at run / font-script boundaries, but
   // those formatting seams are not line-break opportunities. Mark the following
   // segment so layoutLines' existing atomic-group pre-flush selects the previous

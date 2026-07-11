@@ -110,10 +110,11 @@ Unicode copyright header; not part of the npm tarball):
 - `packages/docx/scripts/DerivedJoiningType.txt` (UCD 17.0.0)
 
 Shipped in `dist/` as UCD-derived data compiled from the above and from
-`LineBreak.txt` / `DerivedGeneralCategory.txt` (fetched at generation time,
-not checked in): the `*.generated.ts` tables under `packages/core/src/text/`
-and `packages/docx/src/` (line-break classes, vertical orientation, bidi
-character data, Arabic joining classes).
+`LineBreak.txt` / `DerivedGeneralCategory.txt` / `EastAsianWidth.txt`
+(fetched at generation time, not checked in): the `*.generated.ts` tables
+under `packages/core/src/text/` and `packages/docx/src/` (line-break
+classes, East Asian width, vertical orientation, bidi character data,
+Arabic joining classes).
 
 The `unicode-ident` Rust crate listed above also carries `Unicode-3.0` in
 its SPDX expression for the same reason (embedded UCD-derived tables).

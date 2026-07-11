@@ -1105,9 +1105,10 @@ export function layoutRichTextLines(
       } else if (
         // SEA (Thai/Lao/Khmer) dictionary tailoring wins over the LB1 SA→AL
         // default on BOTH sides: guard the incoming `text` AND the last segment
-        // that would be retracted, so LB28 never suppresses a SEA word boundary
-        // (mirror the DOCX buildSegments prev/cur guard). Retraction is capped to
-        // the last segment below, so checking it is the precise preceding-side test.
+        // that would be retracted, so the UAX #14 pair predicate never
+        // suppresses a SEA word boundary (mirror the DOCX buildSegments
+        // prev/cur guard). Retraction is capped to the last segment below, so
+        // checking it is the precise preceding-side test.
         !containsSeaScript(text) &&
         !containsSeaScript(cur[cur.length - 1]?.text ?? '') &&
         !/^\s/u.test(text) &&

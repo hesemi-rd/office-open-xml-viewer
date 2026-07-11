@@ -43,6 +43,40 @@ describe('XLSX rich-text UAX #14 LB28 run-boundary glue', () => {
     expect(bracketLine).toContain('شيء');
   });
 
+  it('moves a separate-run currency prefix with the following digits (LB25 PR × NU)', () => {
+    // Seven cells fit: "wwww " + "$" fits, "100" overflows. LB25 (PR × NU)
+    // forbids the $|1 seam, so "$100" wraps down as one unit.
+    const lines = layoutRichTextLines(
+      mockCtx(),
+      [{ text: 'wwww ' }, { text: '$' }, { text: '100' }] as Run[],
+      BASE,
+      1,
+      7 * (11 * 96 / 72),
+    );
+    const texts = lines.map((line) => line.segments.map((segment) => segment.text).join(''));
+    const digitLine = texts.find((text) => text.includes('100'));
+
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('$100');
+  });
+
+  it('never orphans a separate-run opening bracket before digits (LB14 OP × NU)', () => {
+    // Seven cells fit: "wwww " + "(" fits, "2026" overflows. LB14 (OP SP* ×)
+    // forbids any break after "(", so "(2026" wraps down as one unit.
+    const lines = layoutRichTextLines(
+      mockCtx(),
+      [{ text: 'wwww ' }, { text: '(' }, { text: '2026' }] as Run[],
+      BASE,
+      1,
+      7 * (11 * 96 / 72),
+    );
+    const texts = lines.map((line) => line.segments.map((segment) => segment.text).join(''));
+    const digitLine = texts.find((text) => text.includes('2026'));
+
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('(2026');
+  });
+
   it('does NOT retract a preceding Thai (SEA) segment across an AL run boundary', () => {
     // "ภาษา" is Thai (Line_Break SA, resolved to AL by LB1). SEA dictionary
     // tailoring exposes a legal break at the ภาษา|< seam, so LB28 must NOT glue

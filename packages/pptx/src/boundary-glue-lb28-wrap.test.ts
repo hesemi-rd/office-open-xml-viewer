@@ -53,6 +53,36 @@ describe('PPTX UAX #14 LB28 run-boundary glue', () => {
     expect(bracketLine).toContain('شيء');
   });
 
+  it('moves a separate-run currency prefix with the following digits (LB25 PR × NU)', () => {
+    // 7 cells: "wwww " + "$" fits, "100" does not. LB25 (PR × NU) forbids the
+    // $|1 seam, so "$100" wraps down as one unit.
+    const lines = layoutParagraph(
+      mockCtx(),
+      paragraph([run('wwww '), run('$'), run('100')]),
+      70, 20, '000000', 1, 0,
+    );
+    const texts = lines.map(lineText);
+    const digitLine = texts.find((text) => text.includes('100'));
+
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('$100');
+  });
+
+  it('never orphans a separate-run opening bracket before digits (LB14 OP × NU)', () => {
+    // 7 cells: "wwww " + "(" fits, "2026" does not. LB14 (OP SP* ×) forbids any
+    // break after "(", so "(2026" wraps down as one unit.
+    const lines = layoutParagraph(
+      mockCtx(),
+      paragraph([run('wwww '), run('('), run('2026')]),
+      70, 20, '000000', 1, 0,
+    );
+    const texts = lines.map(lineText);
+    const digitLine = texts.find((text) => text.includes('2026'));
+
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('(2026');
+  });
+
   it('does NOT retract a preceding Thai (SEA) word across an AL run boundary', () => {
     // "ภาษา" is Thai (Line_Break SA → AL by LB1). The SEA dictionary tailoring
     // exposes a legal break at the ภาษา|< seam, so LB28 must not glue it:

@@ -1135,9 +1135,11 @@ export function layoutParagraph(
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       } else {
         // UAX #14 segment-boundary glue: LB13 keeps a non-starter with the word
-        // before it; LB28 keeps adjacent alphabetics together across a formatting
-        // run seam. CJK and SEA tokens have already taken their dedicated paths.
-        // Move the trailing word down to the previous real opportunity.
+        // before it; the shared no-break pair predicate (LB14/LB23/LB23a/LB24/
+        // LB25/LB28/LB30) keeps proven no-break seams together across a
+        // formatting run seam. CJK and SEA tokens have already taken their
+        // dedicated paths. Move the trailing word down to the previous real
+        // opportunity.
         const previousText = currentLine.segments.at(-1)?.text ?? '';
         const firstCp = token.codePointAt(0);
         const previousChar = [...previousText].at(-1);
@@ -1151,18 +1153,19 @@ export function layoutParagraph(
           firstCp !== undefined &&
           DEFAULT_KINSOKU_RULES.lineStartForbidden.has(firstCp) &&
           immediateBoundary;
-        // SEA (Thai/Lao/Khmer) tailoring wins over the LB1 SA→AL default on BOTH
-        // sides: a preceding SEA segment exposes a dictionary boundary that LB28
-        // must not suppress (mirror the DOCX buildSegments guard, which checks
-        // prev AND cur). A SEA `token` already took the dedicated SEA branch above.
-        const lb28Glued =
+        // SEA (Thai/Lao/Khmer) tailoring wins over the LB1 SA→AL default on
+        // BOTH sides: a preceding SEA segment exposes a dictionary boundary
+        // that the pair predicate must not suppress (mirror the DOCX
+        // buildSegments guard, which checks prev AND cur). A SEA `token`
+        // already took the dedicated SEA branch above.
+        const uax14Glued =
           prevCp !== undefined &&
           firstCp !== undefined &&
           immediateBoundary &&
           !containsSeaScript(previousText) &&
           !containsSeaScript(token) &&
           isUax14NoBreakPair(prevCp, firstCp);
-        const glued = lb13Glued || lb28Glued;
+        const glued = lb13Glued || uax14Glued;
         if (!(glued && retractTrailingWord())) newLine();
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       }

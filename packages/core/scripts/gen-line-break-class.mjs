@@ -14,6 +14,7 @@ const VERSION = '17.0.0';
 const BASE = `https://www.unicode.org/Public/${VERSION}/ucd`;
 const LINE_BREAK_SOURCE = `${BASE}/LineBreak.txt`;
 const GENERAL_CATEGORY_SOURCE = `${BASE}/extracted/DerivedGeneralCategory.txt`;
+const EAST_ASIAN_WIDTH_SOURCE = `${BASE}/EastAsianWidth.txt`;
 const OUT = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -103,6 +104,60 @@ function buildCombiningMarkTable(text) {
   return mark;
 }
 
+// East_Asian_Width ∈ {F, W, H} membership (UAX #11). UAX #14 LB30 excludes
+// exactly this set from its OP/CP operands. The file's only @missing default is
+// N; the CJK planes' W coverage (unassigned code points included) comes from
+// explicit W data rows, so applying @missing first then rows reproduces it.
+const EAW_VALUES = new Set(['N', 'Na', 'A', 'H', 'W', 'F']);
+const EAW_FWH = new Set(['F', 'W', 'H']);
+
+function eawIsFWH(value, sourceLine) {
+  if (!EAW_VALUES.has(value)) {
+    throw new Error(`unknown East_Asian_Width value: ${sourceLine}`);
+  }
+  return EAW_FWH.has(value) ? 1 : 0;
+}
+
+function buildEastAsianFWHTable(text) {
+  const isFWH = new Uint8Array(MAX_CP);
+
+  for (const sourceLine of text.split('\n')) {
+    const missing = sourceLine.match(
+      /^#\s*@missing:\s*([0-9A-Fa-f]+(?:\.\.[0-9A-Fa-f]+)?)\s*;\s*([A-Za-z]+)\b/,
+    );
+    if (!missing) continue;
+    const { start, end } = parseRange(missing[1]);
+    applyRange(isFWH, start, end, eawIsFWH(missing[2], sourceLine));
+  }
+
+  for (const sourceLine of text.split('\n')) {
+    const line = sourceLine.split('#')[0].trim();
+    if (!line) continue;
+    const match = line.match(/^([0-9A-Fa-f]+(?:\.\.[0-9A-Fa-f]+)?)\s*;\s*([A-Za-z]+)$/);
+    if (!match) throw new Error(`invalid EastAsianWidth.txt row: ${sourceLine}`);
+    const { start, end } = parseRange(match[1]);
+    applyRange(isFWH, start, end, eawIsFWH(match[2], sourceLine));
+  }
+
+  return isFWH;
+}
+
+// Collapse the boolean table into half-open member ranges
+// [starts[i], ends[i]) suitable for binary search.
+function buildMemberRanges(table) {
+  const starts = [];
+  const ends = [];
+  for (let cp = 0; cp < MAX_CP; cp++) {
+    if (table[cp] !== 1) continue;
+    if (ends.length > 0 && ends[ends.length - 1] === cp) ends[ends.length - 1] = cp + 1;
+    else {
+      starts.push(cp);
+      ends.push(cp + 1);
+    }
+  }
+  return { starts, ends };
+}
+
 function resolveClass(rawName, isCombiningMark) {
   switch (rawName) {
     case 'AI':
@@ -152,18 +207,22 @@ function formatArray(values, perLine = 16) {
 }
 
 async function main() {
-  const [lineBreakText, generalCategoryText] = await Promise.all([
+  const [lineBreakText, generalCategoryText, eastAsianWidthText] = await Promise.all([
     fetchText(LINE_BREAK_SOURCE),
     fetchText(GENERAL_CATEGORY_SOURCE),
+    fetchText(EAST_ASIAN_WIDTH_SOURCE),
   ]);
   const raw = buildRawLineBreakTable(lineBreakText);
   const combiningMarks = buildCombiningMarkTable(generalCategoryText);
   const { starts, classes } = buildResolvedRanges(raw, combiningMarks);
+  const eastAsianFWH = buildMemberRanges(buildEastAsianFWHTable(eastAsianWidthText));
 
   const body = `// AUTO-GENERATED from the Unicode Character Database (UCD ${VERSION}).
 // Sources: ${LINE_BREAK_SOURCE}
 //          ${GENERAL_CATEGORY_SOURCE}
-// Property: Line_Break after the default UAX #14 LB1 resolutions.
+//          ${EAST_ASIAN_WIDTH_SOURCE}
+// Properties: Line_Break after the default UAX #14 LB1 resolutions, and
+// East_Asian_Width ∈ {F, W, H} membership (the LB30 \`$EastAsian\` set).
 // DO NOT EDIT — regenerate via packages/core/scripts/gen-line-break-class.mjs
 /* eslint-disable */
 
@@ -183,10 +242,26 @@ ${formatArray(starts)}
 export const LB_RANGE_CLASS: number[] = [
 ${formatArray(classes)}
 ];
+
+/**
+ * East_Asian_Width ∈ {Fullwidth, Wide, Halfwidth} member ranges, half-open:
+ * range i covers [EAW_FWH_STARTS[i], EAW_FWH_ENDS[i]). This is the set UAX #14
+ * LB30 excludes from its OP/CP operands.
+ */
+export const EAW_FWH_STARTS: number[] = [
+${formatArray(eastAsianFWH.starts)}
+];
+
+export const EAW_FWH_ENDS: number[] = [
+${formatArray(eastAsianFWH.ends)}
+];
 `;
 
   await writeFile(OUT, body, 'utf8');
-  console.log(`wrote ${OUT}\n  UCD version: ${VERSION}\n  line-break ranges: ${starts.length}`);
+  console.log(
+    `wrote ${OUT}\n  UCD version: ${VERSION}\n  line-break ranges: ${starts.length}` +
+    `\n  eaw-fwh ranges: ${eastAsianFWH.starts.length}`,
+  );
 }
 
 main().catch((error) => {

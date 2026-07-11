@@ -121,7 +121,7 @@ function lineContaining(lines: { text: string }[][], needle: string): string | u
   return l?.map((x) => x.text).join('');
 }
 
-describe('UAX#14 LB28 — no break at a run boundary between adjacent alphabetics', () => {
+describe('UAX#14 no-break pairs at a run boundary (LB28 + LB14/LB23/LB25/LB30)', () => {
   it('keeps "<" with the Latin word that immediately follows it (own runs, no space)', async () => {
     // 7 cells/line (140px / 20px). Runs: "wwww " (5) | "<" (1) | "xxxx" (4).
     //   "wwww " fills 5 cells; "<" fits (6); "<xxxx" (5) does NOT fit after it.
@@ -156,6 +156,48 @@ describe('UAX#14 LB28 — no break at a run boundary between adjacent alphabetic
     // "<" and the Arabic word share one line (order is bidi-reordered at paint,
     // but they must land in the same line box).
     expect(bracketLine).toContain('شيء');
+  });
+
+  it('keeps letters with the digits that immediately follow them (LB23 AL × NU)', async () => {
+    // 7 cells/line (140px / 20px). Runs: "wwww " (5) | "Ab" (2) | "12" (2).
+    //   "wwww Ab" fills 7 cells; "12" does not fit after it. LB23 forbids the
+    //   AL × NU seam, so "Ab12" wraps down as one unit.
+    const calls = await render(['wwww ', 'Ab', '12'], 140);
+    const lines = linesByY(calls);
+    const digitLine = lineContaining(lines, '12');
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('Ab12');
+  });
+
+  it('keeps a currency prefix with the digits that follow it (LB25 PR × NU)', async () => {
+    // Runs: "wwww " (5) | "$" (1) | "100" (3): "wwww $" = 6 fits, "100" does not.
+    // LB25 (PR × NU) forbids the seam, so "$100" moves down together.
+    const calls = await render(['wwww ', '$', '100'], 140);
+    const lines = linesByY(calls);
+    const digitLine = lineContaining(lines, '100');
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('$100');
+  });
+
+  it('never orphans an opening bracket, whatever follows it (LB14 OP × NU)', async () => {
+    // Runs: "wwww " (5) | "(" (1) | "2026" (4): "wwww (" = 6 fits, "2026" does
+    // not. LB14 (OP SP* ×) forbids any break after "(", so "(2026" wraps as one.
+    const calls = await render(['wwww ', '(', '2026'], 140);
+    const lines = linesByY(calls);
+    const digitLine = lineContaining(lines, '2026');
+    expect(digitLine).toBeDefined();
+    expect(digitLine).toContain('(2026');
+  });
+
+  it('keeps a word with the parenthetical that follows it (LB30 AL × OP)', async () => {
+    // Runs: "www " (4) | "no" (2) | "(s)" (3): "www no" = 6 fits, "(s)" does not
+    // (9 > 7). LB30 (AL × OP, non-East-Asian) forbids the n|( seam, so "no(s)"
+    // moves down as one unit.
+    const calls = await render(['www ', 'no', '(s)'], 140);
+    const lines = linesByY(calls);
+    const parenLine = lineContaining(lines, '(s)');
+    expect(parenLine).toBeDefined();
+    expect(parenLine).toContain('no(s)');
   });
 
   it('still breaks at a real whitespace boundary (does not over-glue)', async () => {
