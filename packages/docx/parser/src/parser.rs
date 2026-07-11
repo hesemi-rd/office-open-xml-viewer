@@ -2332,35 +2332,56 @@ fn parse_paragraph_cond(
             // theme refs. A bare `<w:rFonts w:hint="eastAsia"/>` carries no
             // typeface, so the marker simply inherits the paragraph's ascii (e.g.
             // Times → the auto-number renders serif) and eastAsia (e.g. MS Gothic).
-            let (format, ind_left, tab, suff, lvl_jc, marker_ascii, marker_ea, pic_bullet) =
-                num_map
-                    .get_level(num_id, num_level)
-                    .map(|l| {
-                        let mut marker_fmt = base_run.clone();
-                        apply_direct_run(&mut marker_fmt, &l.rpr);
-                        (
-                            l.format.clone(),
-                            l.indent_left,
-                            l.tab,
-                            l.suff.clone(),
-                            l.lvl_jc.clone(),
-                            theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
-                            theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
-                            l.pic_bullet.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            "decimal".to_string(),
-                            36.0,
-                            18.0,
-                            "tab".to_string(),
-                            "left".to_string(),
-                            theme.resolve_font_ref(base_run.font_family_ascii.clone()),
-                            theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
-                            None,
-                        )
-                    });
+            // §17.9.24 — the level rPr's own `<w:color>` also rides along
+            // (`marker_color` + `marker_color_auto`; parse_run_fmt maps an
+            // explicit auto to None + color_auto, §17.3.2.6). Kept UNMERGED
+            // from the run formatting: the paragraph-mark fallback lives in
+            // `paragraph_mark_color` below and the renderer resolves the
+            // precedence (lvl → mark → default ink; explicit auto stops the
+            // fallback at the default ink).
+            let (
+                format,
+                ind_left,
+                tab,
+                suff,
+                lvl_jc,
+                marker_ascii,
+                marker_ea,
+                marker_color,
+                marker_color_auto,
+                pic_bullet,
+            ) = num_map
+                .get_level(num_id, num_level)
+                .map(|l| {
+                    let mut marker_fmt = base_run.clone();
+                    apply_direct_run(&mut marker_fmt, &l.rpr);
+                    (
+                        l.format.clone(),
+                        l.indent_left,
+                        l.tab,
+                        l.suff.clone(),
+                        l.lvl_jc.clone(),
+                        theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
+                        theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                        l.rpr.color.clone(),
+                        l.rpr.color_auto,
+                        l.pic_bullet.clone(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        "decimal".to_string(),
+                        36.0,
+                        18.0,
+                        "tab".to_string(),
+                        "left".to_string(),
+                        theme.resolve_font_ref(base_run.font_family_ascii.clone()),
+                        theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                        None,
+                        false,
+                        None,
+                    )
+                });
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
             let (
@@ -2392,6 +2413,8 @@ fn parse_paragraph_cond(
                 jc: lvl_jc,
                 font_family: marker_ascii,
                 font_family_east_asia: marker_ea,
+                color: marker_color,
+                color_auto: marker_color_auto,
                 pic_bullet_image_path,
                 pic_bullet_mime_type,
                 pic_bullet_width_pt,
@@ -2557,6 +2580,13 @@ fn parse_paragraph_cond(
             .or_else(|| theme.resolve_font_ref(mark_run.font_family_east_asia.clone())),
         default_font_family_east_asia: theme
             .resolve_font_ref(mark_run.font_family_east_asia.clone()),
+        // §17.3.1.29 — the mark's resolved color from the SAME `mark_run`
+        // chain as `default_font_size` (direct pPr/rPr → pStyle chain →
+        // docDefaults; an explicit auto already collapsed to None). Word
+        // layers the numbering level rPr (§17.9.24) over these mark run
+        // properties, so this is the marker-color fallback when the level
+        // rPr names no color.
+        paragraph_mark_color: mark_run.color.clone(),
         outline_level: base_para.outline_level,
         // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
         // chain + direct pPr. The renderer reads it as the paragraph base
@@ -5733,7 +5763,18 @@ fn extract_simple_paragraph_text(
         }
         let num_level = direct_ind.num_level.or(style_para.num_level).unwrap_or(0);
         let first_fmt = first_run_fmt.clone().unwrap_or_default();
-        let (format, ind_left, tab, suff, lvl_jc, marker_ascii, marker_ea, pic_bullet) = num_map
+        let (
+            format,
+            ind_left,
+            tab,
+            suff,
+            lvl_jc,
+            marker_ascii,
+            marker_ea,
+            marker_color,
+            marker_color_auto,
+            pic_bullet,
+        ) = num_map
             .get_level(num_id, num_level)
             .map(|l| {
                 let mut marker_fmt = first_fmt.clone();
@@ -5746,6 +5787,8 @@ fn extract_simple_paragraph_text(
                     l.lvl_jc.clone(),
                     theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
                     theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                    l.rpr.color.clone(),
+                    l.rpr.color_auto,
                     l.pic_bullet.clone(),
                 )
             })
@@ -5758,6 +5801,8 @@ fn extract_simple_paragraph_text(
                     "left".to_string(),
                     theme.resolve_font_ref(first_fmt.font_family_ascii.clone()),
                     theme.resolve_font_ref(first_fmt.font_family_east_asia.clone()),
+                    None,
+                    false,
                     None,
                 )
             });
@@ -5788,6 +5833,8 @@ fn extract_simple_paragraph_text(
             jc: lvl_jc,
             font_family: marker_ascii,
             font_family_east_asia: marker_ea,
+            color: marker_color,
+            color_auto: marker_color_auto,
             pic_bullet_image_path,
             pic_bullet_mime_type,
             pic_bullet_width_pt,
@@ -16276,6 +16323,226 @@ mod numbering_marker_font_tests {
         assert_eq!(bottom.color.as_deref(), Some("ff0000"));
         // The cell left no insideH inline ⇒ it comes from the firstRow condition (nil).
         assert_eq!(b.inside_h.as_ref().map(|x| x.style.as_str()), Some("nil"));
+    }
+}
+
+#[cfg(test)]
+mod numbering_marker_color_tests {
+    //! ECMA-376 §17.9.24 (Numbering Symbol Run Properties) + §17.3.1.29 (Run
+    //! Properties for the Paragraph Mark). Word formats a numbering marker with
+    //! the level's rPr layered over the PARAGRAPH MARK's run properties — the
+    //! mark's `<w:color>` tints the bullet/number when the level rPr names no
+    //! color (observed Word output; the level rPr itself "affects only the
+    //! numbering text itself, not the remainder of runs in the numbered
+    //! paragraph", §17.9.24). The parser therefore surfaces BOTH sources:
+    //! `NumberingInfo::color` (level rPr) and
+    //! `DocParagraph::paragraph_mark_color` (mark rPr, style-chain resolved).
+    use super::*;
+
+    const NS: &str = " xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+
+    /// numbering.xml with one bullet level whose rPr is `lvl_rpr` (may be "").
+    fn numbering_xml(lvl_rpr: &str) -> String {
+        format!(
+            r#"<w:numbering{NS}>
+              <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  {lvl_rpr}
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            </w:numbering>"#
+        )
+    }
+
+    /// Parse one numbered paragraph against `numbering_xml(lvl_rpr)` and
+    /// `styles_xml`. `ppr_head` sits BEFORE `<w:numPr>` (a `<w:pStyle>`) and
+    /// `ppr_tail` AFTER it (the mark `<w:rPr>`), honoring the CT_PPr sequence
+    /// (pStyle < numPr < rPr).
+    fn bullet_para(
+        lvl_rpr: &str,
+        ppr_head: &str,
+        ppr_tail: &str,
+        styles_xml: &str,
+    ) -> DocParagraph {
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body>
+              <w:p>
+                <w:pPr>
+                  {ppr_head}
+                  <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+                  {ppr_tail}
+                </w:pPr>
+                <w:r><w:t>item</w:t></w:r>
+              </w:p>
+            </w:body></w:document>"#
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse(styles_xml);
+        let mut num_map = NumberingMap::parse(&numbering_xml(lvl_rpr), &HashMap::new());
+        parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .expect("bullet paragraph present")
+    }
+
+    /// §17.9.24 — a concrete `<w:color>` in the level rPr surfaces on
+    /// `NumberingInfo::color` (hex 6, lowercased like run colors).
+    #[test]
+    fn lvl_rpr_color_surfaces_on_numbering_info() {
+        let p = bullet_para(r#"<w:rPr><w:color w:val="FF0000"/></w:rPr>"#, "", "", "");
+        let num = p.numbering.as_ref().expect("numbered paragraph");
+        assert_eq!(num.color.as_deref(), Some("ff0000"));
+        // No mark rPr anywhere ⇒ no paragraph-mark color.
+        assert_eq!(p.paragraph_mark_color, None);
+    }
+
+    /// §17.9.24 + ST_HexColorAuto (§17.18.39) — `val="auto"` names no concrete
+    /// color (`color` stays `None`) but is NOT "unset": it surfaces as
+    /// `color_auto` so the renderer can break the paragraph-mark fallback
+    /// (§17.3.2.6 — an explicit auto overrides an inherited concrete color).
+    /// An absent `<w:color>` is `None` WITHOUT `color_auto` (pure fallback).
+    #[test]
+    fn lvl_rpr_color_auto_and_absent_are_distinct() {
+        let auto = bullet_para(
+            r#"<w:rPr><w:color w:val="auto"/></w:rPr>"#,
+            "",
+            r#"<w:rPr><w:color w:val="FF0000"/></w:rPr>"#,
+            "",
+        );
+        let num = auto.numbering.as_ref().unwrap();
+        assert_eq!(num.color, None);
+        assert!(num.color_auto, "explicit auto must surface");
+        // The mark color still surfaces — suppressing it is the renderer's job.
+        assert_eq!(auto.paragraph_mark_color.as_deref(), Some("ff0000"));
+
+        let absent = bullet_para("", "", "", "");
+        let num = absent.numbering.as_ref().unwrap();
+        assert_eq!(num.color, None);
+        assert!(!num.color_auto, "absent w:color is not auto");
+    }
+
+    /// §17.3.1.29 — the paragraph mark's DIRECT `pPr/rPr` color surfaces as
+    /// `paragraph_mark_color` (the acceptance shape: mark rPr FF0000, level rPr
+    /// without color ⇒ Word draws the bullet red). The content run's own color
+    /// must NOT leak into either field (§17.9.24: marker formatting is separate
+    /// from the paragraph's runs).
+    #[test]
+    fn paragraph_mark_direct_color_surfaces() {
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body>
+              <w:p>
+                <w:pPr>
+                  <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+                  <w:rPr><w:color w:val="FF0000"/></w:rPr>
+                </w:pPr>
+                <w:r><w:rPr><w:color w:val="00B050"/></w:rPr><w:t>item</w:t></w:r>
+              </w:p>
+            </w:body></w:document>"#
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::parse(&numbering_xml(""), &HashMap::new());
+        let p = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(p.paragraph_mark_color.as_deref(), Some("ff0000"));
+        // Level rPr has no color ⇒ the lvl field stays None (the renderer falls
+        // back to the mark color).
+        assert_eq!(p.numbering.as_ref().unwrap().color, None);
+    }
+
+    /// Both sources present: each field carries its own value — precedence
+    /// (lvl over mark) is the renderer's job.
+    #[test]
+    fn lvl_and_mark_colors_surface_independently() {
+        let p = bullet_para(
+            r#"<w:rPr><w:color w:val="00B050"/></w:rPr>"#,
+            "",
+            r#"<w:rPr><w:color w:val="FF0000"/></w:rPr>"#,
+            "",
+        );
+        assert_eq!(
+            p.numbering.as_ref().unwrap().color.as_deref(),
+            Some("00b050")
+        );
+        assert_eq!(p.paragraph_mark_color.as_deref(), Some("ff0000"));
+    }
+
+    /// §17.3.1.29 resolves through the SAME style chain as the mark's other run
+    /// properties (`default_font_size` et al.): a pStyle rPr color reaches
+    /// `paragraph_mark_color` without any direct pPr/rPr.
+    #[test]
+    fn paragraph_mark_color_resolves_through_style_chain() {
+        let styles = format!(
+            r#"<w:styles{NS}>
+              <w:style w:type="paragraph" w:styleId="RedList">
+                <w:name w:val="Red List"/>
+                <w:rPr><w:color w:val="C00000"/></w:rPr>
+              </w:style>
+            </w:styles>"#
+        );
+        let p = bullet_para("", r#"<w:pStyle w:val="RedList"/>"#, "", &styles);
+        assert_eq!(p.paragraph_mark_color.as_deref(), Some("c00000"));
+    }
+
+    /// An explicit `<w:color w:val="auto"/>` on the mark rPr breaks a style
+    /// chain color (§17.3.2.6): the mark color surfaces as None.
+    #[test]
+    fn paragraph_mark_color_auto_breaks_style_color() {
+        let styles = format!(
+            r#"<w:styles{NS}>
+              <w:style w:type="paragraph" w:styleId="RedList">
+                <w:name w:val="Red List"/>
+                <w:rPr><w:color w:val="C00000"/></w:rPr>
+              </w:style>
+            </w:styles>"#
+        );
+        let p = bullet_para(
+            "",
+            r#"<w:pStyle w:val="RedList"/>"#,
+            r#"<w:rPr><w:color w:val="auto"/></w:rPr>"#,
+            &styles,
+        );
+        assert_eq!(p.paragraph_mark_color, None);
     }
 }
 
