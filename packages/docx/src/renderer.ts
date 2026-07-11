@@ -81,6 +81,11 @@ import {
   type SegStretch,
 } from './text-distribute.js';
 import {
+  computeKashidaDistribution,
+  type KashidaLevel,
+  type KashidaSegmentPlan,
+} from './kashida-justify.js';
+import {
   type FrameBox,
   computeFrameBox,
   registerFrameFloat,
@@ -144,6 +149,7 @@ import {
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
+  segAdvanceWidth,
   segLetterSpacingPx,
   shapeRenderState,
   shapeRunToDocRun,
@@ -156,6 +162,7 @@ import type {
   LayoutImageSeg,
   LayoutLine,
   LayoutMathSeg,
+  LayoutSeg,
   LayoutTabSeg,
   LayoutTextSeg,
   WrapLayoutCtx,
@@ -202,6 +209,68 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
   darkYellow: '#808000', darkGray: '#808080', lightGray: '#C0C0C0',
   black: '#000000', white: '#FFFFFF',
 };
+
+function kashidaLevelOf(alignment: string | null | undefined): KashidaLevel | null {
+  if (alignment === 'lowKashida') return 'low';
+  if (alignment === 'mediumKashida') return 'medium';
+  if (alignment === 'highKashida') return 'high';
+  return null;
+}
+
+/**
+ * ECMA-376 §17.18.44 true-kashida allocation shared by body and Word-textbox
+ * lines. The delta form pins the original string to layout's measuredWidth;
+ * inserted tatweels then grow it under the same font, kerning, w:w scale,
+ * character spacing, and character-grid model used by layout and paint.
+ */
+function computeLineKashidaDistribution(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  segments: readonly LayoutSeg[],
+  slackPx: number,
+  level: KashidaLevel,
+  scale: number,
+  fontFamilyClasses: Record<string, string>,
+  gridDeltaPx: number,
+) {
+  const distSegs = segments.map((seg) =>
+    'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
+      ? { text: (seg as LayoutTextSeg).text }
+      : {},
+  );
+  const originalModelAdvance = new Map<number, number>();
+  const modeledAdvance = (si: number, text: string): number => {
+    const s = segments[si] as LayoutTextSeg;
+    ctx.font = buildFont(
+      s.bold,
+      s.italic,
+      calcEffectiveFontPx(s, scale),
+      s.fontFamily,
+      fontFamilyClasses,
+    );
+    const prevKerning = ctx.fontKerning;
+    const prevLetterSpacing = ctx.letterSpacing;
+    if (s.kerning != null) {
+      ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+    }
+    // Layout measures natural glyph advance and folds fixed pitch in itself.
+    ctx.letterSpacing = '0px';
+    const naturalWidth = ctx.measureText(text).width;
+    ctx.letterSpacing = prevLetterSpacing;
+    if (s.kerning != null) ctx.fontKerning = prevKerning;
+    return segAdvanceWidth({ ...s, text }, naturalWidth, gridDeltaPx, scale);
+  };
+  const measureAdvance = (si: number, text: string): number => {
+    const s = segments[si] as LayoutTextSeg;
+    let originalAdvance = originalModelAdvance.get(si);
+    if (originalAdvance === undefined) {
+      originalAdvance = modeledAdvance(si, s.text);
+      originalModelAdvance.set(si, originalAdvance);
+    }
+    if (text === s.text) return s.measuredWidth;
+    return s.measuredWidth + modeledAdvance(si, text) - originalAdvance;
+  };
+  return computeKashidaDistribution(distSegs, slackPx, level, measureAdvance);
+}
 
 /** True if any run in the body (incl. tables) is an OMML equation. */
 export function documentHasMath(body: BodyElement[]): boolean {
@@ -7587,6 +7656,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // not), so there is no double distribution.
     let segStretch: Map<number, SegStretch> | null = null;
     let distPerGap = 0;
+    let kashidaPlan: Map<number, KashidaSegmentPlan> | null = null;
     // First content segment in reading order. Leading-whitespace segments before
     // it (a paragraph's 字下げ indent) are NOT stretched — Word keeps the indent
     // fixed and distributes slack only across the line content (§17.18.44). Only
@@ -7758,9 +7828,29 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           ? { text: (seg as LayoutTextSeg).text }
           : {},
       );
+      // ECMA-376 §17.18.44 low/medium/highKashida first elongate valid
+      // Arabic joins. Only the residual goes through the ordinary space/CJK
+      // distributor; a line with no eligible join falls back to the full-slack
+      // `both` behaviour. Vertical text keeps the established stage-1 path.
+      const kashidaLevel = !state.verticalCJK
+        ? kashidaLevelOf(para.alignment)
+        : null;
+      const kashidaDist = kashidaLevel
+        ? computeLineKashidaDistribution(
+            ctx,
+            line.segments,
+            slack,
+            kashidaLevel,
+            scale,
+            fontFamilyClasses,
+            drawGridDeltaPx,
+          )
+        : null;
+      if (kashidaDist) kashidaPlan = kashidaDist.perSeg;
+      const residualSlack = kashidaDist?.residualPx ?? slack;
       const dist = distributeLineSlack(
         distSegs,
-        slack,
+        residualSlack,
         firstContentSi,
         // §17.18.44 spreads the slack across EVERY inter-CJK boundary on the line,
         // so the visually-last segment must still distribute pitch INTERNALLY when
@@ -7773,7 +7863,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // See the `lastDrawnSi` option doc in core/src/text/line-distribute.ts.
         paraNeedsBidi ? lastDrawnSi : segCount,
         minPerGap,
-        slack > 0,
+        residualSlack > 0,
       );
       segStretch = dist ? dist.perSeg : null;
       distPerGap = dist ? dist.perGap : 0;
@@ -7844,6 +7934,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         continue;
       }
       const s = seg as LayoutTextSeg;
+      const kashida = kashidaPlan?.get(si);
+      const drawText = kashida?.text ?? s.text;
       // Justification stretch for THIS segment (logical index si). `internalStretch`
       // is the px added between the segment's own glyphs (inter-CJK boundaries);
       // `splitBefore` lists the code-point offsets to advance `distPerGap` at while
@@ -7852,13 +7944,20 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       // own widened trailing SPACE so run decorations stay gap-free under `both`.
       // §17.3.2.14 fitText is already a fixed-width cell; paragraph
       // justification must not stretch its internal glyph gaps a second time.
-      const stretch = s.fitTextRegionIndex === undefined ? segStretch?.get(si) : undefined;
+      const distributedStretch = segStretch?.get(si);
+      // An augmented Arabic word must stay in one fillText so the browser keeps
+      // contextual shaping. Ignore any residual distributor splitBefore points
+      // on that segment; trailing-gap ownership remains valid and is read below.
+      const stretch =
+        !kashida && s.fitTextRegionIndex === undefined
+          ? distributedStretch
+          : undefined;
       // A fit region contributes an opaque atom to §17.18.44 distribution. Its
       // INTERNAL pitch stays suppressed above, but a legal boundary AFTER that
       // atom is paragraph slack, not §17.3.2.14 fit pitch, and must still advance
       // the following segment.
-      const trailingDistributionGap = segStretch?.get(si)?.trailingGap ?? false;
-      const internalStretch = stretch?.internalStretch ?? 0;
+      const trailingDistributionGap = distributedStretch?.trailingGap ?? false;
+      const internalStretch = (stretch?.internalStretch ?? 0) + (kashida?.advanceDeltaPx ?? 0);
       if (!dryRun) {
         const effSizePx = calcEffectiveFontPx(s, scale);
         // ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in pt.
@@ -8026,7 +8125,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //      `justifiedPiecePositions` slice-at-gaps path.
         //   4. Neither: a single fillText (the common path).
         const segmentGridDeltaPx = segmentCharacterGridDeltaPx(s, drawGridDeltaPx);
-        const segGridDelta = gridSegDeltaPx(s.text, segmentGridDeltaPx);
+        const segGridDelta = gridSegDeltaPx(drawText, segmentGridDeltaPx);
         if (state.verticalCJK && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
@@ -8036,7 +8135,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // vertCompress fits their height to the cell. See vertical-text.ts.
           drawTateChuYokoRun(
             ctx,
-            s.text,
+            drawText,
             x,
             baseline + yOffset,
             effSizePx,
@@ -8057,7 +8156,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // columns are start-aligned).
           drawVerticalRun(
             ctx,
-            s.text,
+            drawText,
             x,
             baseline + yOffset,
             effSizePx,
@@ -8095,11 +8194,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const prevLetterSpacing = ctx.letterSpacing;
           if (scaled) { ctx.save(); ctx.translate(fitDrawX, 0); ctx.scale(segCharScale, 1); }
           ctx.letterSpacing = `${s.fitTextPerGapPx / segCharScale}px`;
-          ctx.fillText(s.text, scaled ? 0 : fitDrawX, baseline + yOffset);
+          ctx.fillText(drawText, scaled ? 0 : fitDrawX, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
           if (scaled) ctx.restore();
         } else if (segGridDelta !== 0) {
-          const cps = [...s.text]; // code points (handles surrogate pairs)
+          const cps = [...drawText]; // code points (handles surrogate pairs)
           // Draw each CONTIGUOUS piece (sliced only at justify gaps) as ONE
           // contextually-shaped `fillText`, with the per-EA-glyph grid delta
           // applied via `ctx.letterSpacing`. The previous per-code-point loop
@@ -8175,7 +8274,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // their intended un-scaled magnitude. `segCharScale===1` (the common
           // path, and the only one any current fixture hits) keeps the prior draw
           // exactly: no transform, pieces at `x + dx`, pitch un-divided.
-          const cps = [...s.text]; // code points (handles surrogate pairs)
+          const cps = [...drawText]; // code points (handles surrogate pairs)
           const scaled = segCharScale !== 1;
           const originX = scaled ? 0 : x;
           const prevLetterSpacing = ctx.letterSpacing;
@@ -8203,7 +8302,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // so the ×scale frame reproduces their un-scaled magnitude (a no-op
             // divide by 1 on the common non-w:w path).
             ctx.letterSpacing = `${(distPerGap + segCharSpacingPx) / segCharScale}px`;
-            ctx.fillText(s.text, originX, baseline + yOffset);
+            ctx.fillText(drawText, originX, baseline + yOffset);
           } else {
             const measure = (str: string): number => ctx.measureText(str).width;
             // Partial justify split: pass the char-spacing pitch both as the
@@ -8241,7 +8340,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           if (segCharSpacingPx !== 0) {
             ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
           }
-          ctx.fillText(s.text, 0, baseline + yOffset);
+          ctx.fillText(drawText, 0, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
           ctx.restore();
         } else if (segCharSpacingPx !== 0) {
@@ -8250,10 +8349,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // layout already folded into `s.measuredWidth` (measure==paint).
           const prevLetterSpacing = ctx.letterSpacing;
           ctx.letterSpacing = `${segCharSpacingPx}px`;
-          ctx.fillText(s.text, x, baseline + yOffset);
+          ctx.fillText(drawText, x, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
         } else {
-          ctx.fillText(s.text, x, baseline + yOffset);
+          ctx.fillText(drawText, x, baseline + yOffset);
         }
         // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
         // painted (the following ruby / emphasis-mark draws are separate glyphs at
@@ -9790,6 +9889,7 @@ export function renderShapeText(
         // (sample-10 p1's centred text-box title). The two are mutually exclusive.
         let segStretch: Map<number, SegStretch> | null = null;
         let distPerGap = 0;
+        let kashidaPlan: Map<number, KashidaSegmentPlan> | null = null;
         // First content segment (leading 字下げ whitespace is fixed); 0 under bidi.
         let firstContentSi = 0;
         if (!paraNeedsBidi) {
@@ -9861,13 +9961,29 @@ export function renderShapeText(
               ? { text: (seg as LayoutTextSeg).text }
               : {},
           );
+          const kashidaLevel = !effState.verticalCJK
+            ? kashidaLevelOf(layout.alignment)
+            : null;
+          const kashidaDist = kashidaLevel
+            ? computeLineKashidaDistribution(
+                ctx,
+                line.segments,
+                lineSlack,
+                kashidaLevel,
+                scale,
+                fontFamilyClasses,
+                0,
+              )
+            : null;
+          if (kashidaDist) kashidaPlan = kashidaDist.perSeg;
+          const residualSlack = kashidaDist?.residualPx ?? lineSlack;
           const dist = distributeLineSlack(
             distSegs,
-            lineSlack,
+            residualSlack,
             firstContentSi,
             paraNeedsBidi ? lastDrawnSi : segCount,
             minPerGap,
-            lineSlack > 0,
+            residualSlack > 0,
           );
           segStretch = dist ? dist.perSeg : null;
           distPerGap = dist ? dist.perGap : 0;
@@ -9892,8 +10008,14 @@ export function renderShapeText(
             continue;
           }
           const s = seg as LayoutTextSeg;
-          const stretch = segStretch?.get(si);
-          const internalStretch = stretch?.internalStretch ?? 0;
+          const kashida = kashidaPlan?.get(si);
+          const drawText = kashida?.text ?? s.text;
+          const distributedStretch = segStretch?.get(si);
+          // Kashida glyphs must remain one contextually-shaped string; residual
+          // space distribution may still own a trailing inter-segment gap.
+          const stretch = kashida ? undefined : distributedStretch;
+          const internalStretch =
+            (stretch?.internalStretch ?? 0) + (kashida?.advanceDeltaPx ?? 0);
           const effSizePx = calcEffectiveFontPx(s, scale);
           const yOffset = s.vertAlign === 'super'
             ? -s.fontSize * scale * 0.35
@@ -9911,7 +10033,34 @@ export function renderShapeText(
           // helper the body uses, so contextual CJK packing (約物半角) is honoured
           // and the painted advance equals the segment box. A non-justified
           // segment is a single fillText.
-          if (stretch && stretch.splitBefore.length > 0) {
+          if (kashida) {
+            const segCharScale = s.charScale ?? 1;
+            const segCharSpacingPx = segLetterSpacingPx(s, 0, scale);
+            const prevKerning = ctx.fontKerning;
+            if (s.kerning != null) {
+              ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+            }
+            if (segCharScale !== 1) {
+              ctx.save();
+              ctx.translate(x, 0);
+              ctx.scale(segCharScale, 1);
+              const prevLetterSpacing = ctx.letterSpacing;
+              if (segCharSpacingPx !== 0) {
+                ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
+              }
+              ctx.fillText(drawText, 0, baseline + yOffset);
+              ctx.letterSpacing = prevLetterSpacing;
+              ctx.restore();
+            } else if (segCharSpacingPx !== 0) {
+              const prevLetterSpacing = ctx.letterSpacing;
+              ctx.letterSpacing = `${segCharSpacingPx}px`;
+              ctx.fillText(drawText, x, baseline + yOffset);
+              ctx.letterSpacing = prevLetterSpacing;
+            } else {
+              ctx.fillText(drawText, x, baseline + yOffset);
+            }
+            if (s.kerning != null) ctx.fontKerning = prevKerning;
+          } else if (stretch && stretch.splitBefore.length > 0) {
             const cps = [...s.text];
             if (stretch.splitBefore.length === cps.length - 1) {
               // Fully distributed (pure-CJK): uniform pitch via letterSpacing so
@@ -9944,7 +10093,7 @@ export function renderShapeText(
           x += s.measuredWidth + internalStretch;
           // A trailing space this segment OWNS absorbs one inter-word gap on a
           // justified LTR line (the widened advance belongs to this run).
-          if (stretch?.trailingGap && !paraNeedsBidi && /\s$/.test(s.text)) x += distPerGap;
+          if (distributedStretch?.trailingGap && !paraNeedsBidi && /\s$/.test(s.text)) x += distPerGap;
         }
         cursorY += lineH;
       }
