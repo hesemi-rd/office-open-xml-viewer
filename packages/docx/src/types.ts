@@ -747,8 +747,9 @@ export type DocRun =
  *  core `renderChart` consumes (identical to what pptx/xlsx pass), so a docx
  *  chart draws at the same quality through the same code path. `widthPt`/
  *  `heightPt` are the `<wp:extent>` natural size. An inline chart flows as an
- *  inline box of that size; an anchored chart (§20.4.2.3) is painted at its
- *  absolute page box by `renderAnchorImages` — both via `renderChart`. */
+ *  inline box of that size; an anchored chart (§20.4.2.3) is painted via
+ *  `registerAnchorFloats` when it wraps text, or by `renderAnchorImages` for
+ *  wrapNone/no-wrap anchors — all paths use `renderChart`. */
 export interface ChartRun {
   chart: ChartModel;
   widthPt: number;
@@ -760,6 +761,39 @@ export interface ChartRun {
   anchorYPt?: number;
   anchorXFromMargin?: boolean;
   anchorYFromPara?: boolean;
+  /**
+   * Wrap mode for anchored charts (ECMA-376 §20.4.2.16/.17):
+   *   "square" | "topAndBottom" | "none" | "tight" | "through"
+   * Inline charts and undetermined cases leave this undefined. The renderer
+   * treats "tight" and "through" as "square", matching anchored images.
+   */
+  wrapMode?: string;
+  /** Padding top (pt). Anchor-only (ECMA-376 §20.4.2.16/.17). */
+  distTop?: number;
+  /** Padding bottom (pt). Anchor-only (ECMA-376 §20.4.2.16/.17). */
+  distBottom?: number;
+  /** Padding left (pt). Anchor-only (ECMA-376 §20.4.2.16/.17). */
+  distLeft?: number;
+  /** Padding right (pt). Anchor-only (ECMA-376 §20.4.2.16/.17). */
+  distRight?: number;
+  /** wrapText attribute: "bothSides" | "left" | "right" | "largest". */
+  wrapSide?: string;
+  /**
+   * ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap`. The parser omits this
+   * field when true, so renderers must read it as `allowOverlap ?? true`.
+   */
+  allowOverlap?: boolean;
+  /** ECMA-376 §20.4.3.1 wp:align horizontal: "left" | "center" | "right" |
+   *  "inside" | "outside". */
+  anchorXAlign?: string | null;
+  /** Vertical equivalent of anchorXAlign: "top" | "center" | "bottom". */
+  anchorYAlign?: string | null;
+  /**
+   * ECMA-376 §20.4.3.2 `<wp:positionH/@relativeFrom>` / §20.4.3.5
+   * `<wp:positionV/@relativeFrom>` — the raw anchor placement containers.
+   */
+  anchorXRelativeFrom?: string | null;
+  anchorYRelativeFrom?: string | null;
 }
 
 /** ECMA-376 §17.3.3.23 `<w:ptab>` — an absolute-position tab. Advances to a

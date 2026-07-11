@@ -8989,28 +8989,14 @@ function renderAnchorImages(
       continue;
     }
     if (run.type === 'chart') {
-      // ECMA-376 §20.4.2.3 (`<wp:anchor>`) + §21.2 (chart) — a floating chart is
-      // placed at the same absolute page box a floating picture uses, then
-      // painted with the shared core `renderChart` (identical to the inline
-      // chart draw at renderInlineImage). Only `anchor === true` charts reach
-      // here; inline charts flow as segments and are drawn during line layout.
+      // ECMA-376 §20.4.2.3 (`<wp:anchor>`) + §21.2 (chart) — wrap-mode
+      // charts are painted by registerChartFloat after their exclusion rect is
+      // registered. This branch paints only wrapNone/no-wrap anchors through
+      // the same box resolver and core chart renderer.
       const chartRun = run as unknown as ChartRun & { type: 'chart' };
       if (!chartRun.anchor) continue;
-      // resolveAnchorBox reads only the box + anchor-placement fields, all of
-      // which the ChartRun carries (widthPt/heightPt/anchorXPt/anchorYPt/
-      // anchorXFromMargin/anchorYFromPara). The image-specific fields
-      // (align/relativeFrom/dist*/srcRect) are absent → the `?? 0`/`?? null`
-      // defaults inside resolveAnchorBox fall back to the plain offset path,
-      // matching how the parser emits an anchored chart (posOffset only).
-      const boxSrc = {
-        widthPt: chartRun.widthPt,
-        heightPt: chartRun.heightPt,
-        anchorXPt: chartRun.anchorXPt,
-        anchorYPt: chartRun.anchorYPt,
-        anchorXFromMargin: chartRun.anchorXFromMargin,
-        anchorYFromPara: chartRun.anchorYFromPara,
-      } as unknown as ImageRun;
-      const { x: pageX, y: pageY, w, h } = resolveAnchorBox(boxSrc, state, paragraphTopPx);
+      if (isWrapFloat(chartRun.wrapMode)) continue;
+      const { x: pageX, y: pageY, w, h } = resolveAnchorBox(chartRun, state, paragraphTopPx);
       const chart = chartRun.chart;
       if (state.verticalCJK) {
         // §17.6.20 (tbRl) — a chart is a graphic, not text: keep it upright.
@@ -10405,8 +10391,17 @@ function physicalAnchorState(state: RenderState): RenderState {
   };
 }
 
+type AnchorBoxSource = Pick<ImageRun,
+  | 'widthPt' | 'heightPt'
+  | 'anchorXPt' | 'anchorYPt'
+  | 'anchorXFromMargin' | 'anchorYFromPara'
+  | 'anchorXAlign' | 'anchorYAlign'
+  | 'anchorXRelativeFrom' | 'anchorYRelativeFrom'
+  | 'distTop' | 'distBottom' | 'distLeft' | 'distRight'
+>;
+
 function resolveAnchorBox(
-  img: ImageRun,
+  img: AnchorBoxSource,
   state: RenderState,
   paraBaseY: number,
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } {
@@ -10498,15 +10493,15 @@ function isPageLevelAnchorY(rf: string | null | undefined, fromPara: boolean): b
  *  {@link isPageLevelAnchorY}. `isWrapFloat` already filters inline images
  *  (their `wrapMode` is undefined) and non-wrapping anchors, so an extra
  *  `anchor` check is redundant here. */
-function isPageLevelWrapFloat(run: ImageRun | ShapeRun): boolean {
+function isPageLevelWrapFloat(run: ImageRun | ChartRun | ShapeRun): boolean {
   if (!isWrapFloat(run.wrapMode)) return false;
   return isPageLevelAnchorY(run.anchorYRelativeFrom ?? null, run.anchorYFromPara ?? false);
 }
 
-/** Register floats from a paragraph's anchor images and shapes. Anchor images
- *  are drawn immediately; anchor shapes are NOT drawn here (renderAnchorShape
- *  paints them separately) — we only reserve their float-exclusion band so body
- *  text wraps around them (ECMA-376 §20.4.2.16/.17), exactly like images.
+/** Register floats from a paragraph's anchored images, charts, and shapes.
+ *  Images and charts are drawn immediately; anchor shapes are NOT drawn here
+ *  (renderAnchorShape paints them separately) — we reserve their float-exclusion
+ *  bands so body text wraps around them (ECMA-376 §20.4.2.16/.17).
  *
  *  Page-level floats (positionV relativeFrom ∈ {page, margin, *Margin, column},
  *  ECMA-376 §20.4.3.2/§20.4.3.5) are skipped when this paragraph was already
@@ -10525,6 +10520,10 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
       const img = run as unknown as ImageRun;
       if (prescanned && isPageLevelWrapFloat(img)) continue;
       registerImageFloat(img, state, paragraphAnchorY, paraId);
+    } else if (run.type === 'chart') {
+      const chart = run as unknown as ChartRun;
+      if (prescanned && isPageLevelWrapFloat(chart)) continue;
+      registerChartFloat(chart, state, paragraphAnchorY, paraId);
     } else if (run.type === 'shape') {
       const shp = run as unknown as ShapeRun;
       if (prescanned && isPageLevelWrapFloat(shp)) continue;
@@ -10576,6 +10575,8 @@ function preRegisterPageFloats(
     for (const run of para.runs) {
       if (run.type === 'image') {
         if (isPageLevelWrapFloat(run as unknown as ImageRun)) { hasPageLevel = true; break; }
+      } else if (run.type === 'chart') {
+        if (isPageLevelWrapFloat(run as unknown as ChartRun)) { hasPageLevel = true; break; }
       } else if (run.type === 'shape') {
         if (isPageLevelWrapFloat(run as unknown as ShapeRun)) { hasPageLevel = true; break; }
       }
@@ -10591,6 +10592,10 @@ function preRegisterPageFloats(
         const img = run as unknown as ImageRun;
         if (!isPageLevelWrapFloat(img)) continue;
         registerImageFloat(img, state, 0, paraId);
+      } else if (run.type === 'chart') {
+        const chart = run as unknown as ChartRun;
+        if (!isPageLevelWrapFloat(chart)) continue;
+        registerChartFloat(chart, state, 0, paraId);
       } else if (run.type === 'shape') {
         const shp = run as unknown as ShapeRun;
         if (!isPageLevelWrapFloat(shp)) continue;
@@ -10661,6 +10666,52 @@ function registerImageFloat(
         drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
       }
       if (hasAlpha) state.ctx.restore();
+    }
+    rect.drawn = true;
+  }
+}
+
+/** Reserve the float-exclusion rect for one anchored wrap-chart and paint the
+ *  chart at the overlap-resolved box (ECMA-376 §20.4.2.3/.16/.17). */
+function registerChartFloat(
+  chart: ChartRun,
+  state: RenderState,
+  paragraphAnchorY: number,
+  paraId: number,
+): void {
+  if (!chart.anchor || !isWrapFloat(chart.wrapMode)) return;
+
+  const box = resolveAnchorBox(chart, state, paragraphAnchorY);
+  const { w, h, dl, dr, dt, db } = box;
+  if (w <= 0 || h <= 0) return;
+
+  const rect = pushFloatRect(state, {
+    x: box.x,
+    y: box.y,
+    w, h, dl, dr, dt, db,
+    kind: 'shape',
+    mode: chart.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square',
+    side: chart.wrapSide ?? 'bothSides',
+    allowOverlap: chart.allowOverlap ?? true,
+    avoidOverlap: true,
+    paraId,
+    imageKey: '',
+    drawn: false,
+  });
+
+  if (!state.dryRun) {
+    const paint = (x: number, y: number, width: number, height: number): void =>
+      renderChart(
+        state.ctx as CanvasRenderingContext2D,
+        chart.chart,
+        { x, y, w: width, h: height },
+        state.scale,
+      );
+    if (state.verticalCJK) {
+      // ECMA-376 §17.6.20 (tbRl) — a chart is a graphic, so keep it upright.
+      drawUprightBox(state.ctx, rect.imageX, rect.imageY, rect.imageW, rect.imageH, paint);
+    } else {
+      paint(rect.imageX, rect.imageY, rect.imageW, rect.imageH);
     }
     rect.drawn = true;
   }

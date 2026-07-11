@@ -1704,6 +1704,10 @@ fn is_zero_f64(v: &f64) -> bool {
     *v == 0.0
 }
 
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
 /// A DrawingML chart embedded in the run flow (ECMA-376 §21.2). Positioned like
 /// a picture: the `<wp:extent cx/cy>` natural size in points governs the box
 /// the chart is drawn into. The `chart` payload is the shared
@@ -1713,9 +1717,12 @@ fn is_zero_f64(v: &f64) -> bool {
 ///
 /// Both placements are drawn: an inline chart (`anchor == false`) flows with the
 /// text like an inline picture, and an anchored (floating) chart
-/// (`anchor == true`, §20.4.2.3 `<wp:anchor>`) carries the same anchor fields an
-/// `ImageRun` does and is painted at its absolute page box by the renderer's
-/// anchor path (issue #752).
+/// (`anchor == true`, §20.4.2.3 `<wp:anchor>`) carries the same anchor and
+/// text-wrap fields an `ImageRun` does — align/relativeFrom placement
+/// (§20.4.3.x) plus the wrap mode/side, dist* padding, and allowOverlap the
+/// float-exclusion machinery consumes (§20.4.2.16/.17) — so the renderer
+/// positions it and wraps body text around it with picture parity
+/// (issues #752, #788).
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRun {
@@ -1739,6 +1746,61 @@ pub struct ChartRun {
     pub anchor_x_from_margin: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub anchor_y_from_para: bool,
+    /// ECMA-376 §20.4.2.16/.17 text-wrap mode for anchor charts. One of:
+    ///   "square" | "topAndBottom" | "none" | "tight" | "through"
+    /// Inline charts and anchors without an explicit wrap element use "none".
+    /// "tight" and "through" fall back to "square" rendering in the MVP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_mode: Option<String>,
+    /// ECMA-376 §20.4.2.3 distT (top padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_top: f64,
+    /// ECMA-376 §20.4.2.3 distB (bottom padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_bottom: f64,
+    /// ECMA-376 §20.4.2.3 distL (left padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_left: f64,
+    /// ECMA-376 §20.4.2.3 distR (right padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_right: f64,
+    /// ECMA-376 §20.4.2.16/.17 wrapSquare/wrapTight `wrapText` attribute:
+    /// "bothSides" | "left" | "right" | "largest". Defaults to
+    /// "bothSides" (equivalent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_side: Option<String>,
+    /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
+    /// object may overlap other floats. Spec default is true (attribute optional);
+    /// `false` mandates the renderer reposition the object to prevent any overlap.
+    /// Inline charts carry true (the no-constraint value), which is omitted from
+    /// JSON; the TypeScript side reads an absent value with `?? true`.
+    #[serde(skip_serializing_if = "is_true")]
+    pub allow_overlap: bool,
+    /// ECMA-376 §20.4.3.1 wp:align (positionH/wp:align). When present the
+    /// renderer centers / left-aligns / right-aligns the chart within the
+    /// container indicated by `anchor_x_from_margin`. Values: "left",
+    /// "center", "right" (others fall back to "left"). Mirrors
+    /// `ImageRun::anchor_x_align`. `None` for inline charts and offset-based
+    /// anchors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_align: Option<String>,
+    /// Vertical equivalent of anchor_x_align (positionV/wp:align).
+    /// Values: "top", "center", "bottom".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_align: Option<String>,
+    /// ECMA-376 §20.4.3.4 ST_RelFromH / §20.4.3.5 ST_RelFromV raw
+    /// `@relativeFrom` string — names the container the offset or align is
+    /// measured against ("page", "margin", "paragraph", "line",
+    /// "leftMargin", "rightMargin", "topMargin", "bottomMargin",
+    /// "insideMargin", "outsideMargin", "column", "character"). Mirrors
+    /// `ImageRun::anchor_x_relative_from` / `anchor_y_relative_from`. `None`
+    /// for inline charts and for anchors that didn't carry a positionH/V
+    /// (preserve the legacy boolean hints `anchor_x_from_margin` /
+    /// `anchor_y_from_para`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_relative_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_relative_from: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
