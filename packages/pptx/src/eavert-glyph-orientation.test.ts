@@ -38,6 +38,13 @@ const TR_BRACKET_FE = String.fromCodePoint(0xfe35); // ︵
 const TU_COMMA = '、'; // vo=Tu → substitute U+FE11, upright
 const TU_COMMA_FE = String.fromCodePoint(0xfe11);
 const TR_ROTATE = 'ー'; // vo=Tr, no vertical form → rotate 90°
+// vo=Tr punctuation / white lenticular brackets with a U+FE1x form (issue #969).
+const TR_VFORMS: Array<[string, string]> = [
+  ['：', String.fromCodePoint(0xfe13)], // fullwidth colon → ︓
+  ['；', String.fromCodePoint(0xfe14)], // fullwidth semicolon → ︔
+  ['〖', String.fromCodePoint(0xfe17)], // left white lenticular → ︗
+  ['〗', String.fromCodePoint(0xfe18)], // right white lenticular → ︘
+];
 
 interface DrawCall {
   text: string;
@@ -177,6 +184,17 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     expect(fe.length, 'the U+FE11 vertical form is painted').toBe(1);
     expect(norm(fe[0].rot)).toBeCloseTo(UPRIGHT, 5);
   });
+
+  it.each(TR_VFORMS)(
+    'SUBSTITUTES the vo=Tr colon/semicolon/lenticular %s with its U+FE1x vertical form, drawn upright (issue #969)',
+    (orig, fe) => {
+      const calls = renderEaVert(orig);
+      expect(calls.some((c) => c.text === orig), `original ${orig} is not painted`).toBe(false);
+      const sub = calls.filter((c) => c.text === fe);
+      expect(sub.length, `the vertical form ${fe} is painted`).toBe(1);
+      expect(norm(sub[0].rot), 'substituted form is upright').toBeCloseTo(UPRIGHT, 5);
+    },
+  );
 
   it('ROTATES a vo=Tr glyph with no vertical form (ー U+30FC) with the page (+90°)', () => {
     const calls = renderEaVert(TR_ROTATE);

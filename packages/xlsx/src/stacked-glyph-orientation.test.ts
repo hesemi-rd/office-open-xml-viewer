@@ -32,6 +32,15 @@ const TR_BRACKET_FE = String.fromCodePoint(0xfe35); // ︵
 const TU_COMMA = '、';
 const TU_COMMA_FE = String.fromCodePoint(0xfe11);
 const TR_ROTATE = 'ー'; // U+30FC — no vertical form → rotate
+// vo=Tr punctuation / white lenticular brackets with a U+FE1x form (issue #969).
+// XLSX has no Excel ground-truth image; it follows the Word/PowerPoint verdict
+// (docx tbRl + pptx eaVert, PDF-adjudicated) since the classifier is shared.
+const TR_VFORMS: Array<[string, string]> = [
+  ['：', String.fromCodePoint(0xfe13)], // fullwidth colon → ︓
+  ['；', String.fromCodePoint(0xfe14)], // fullwidth semicolon → ︔
+  ['〖', String.fromCodePoint(0xfe17)], // left white lenticular → ︗
+  ['〗', String.fromCodePoint(0xfe18)], // right white lenticular → ︘
+];
 
 interface DrawCall {
   text: string;
@@ -106,6 +115,16 @@ describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, 
     expect(calls[0].text).toBe(TU_COMMA_FE);
     expect(norm(calls[0].rot)).toBeCloseTo(UPRIGHT, 5);
   });
+
+  it.each(TR_VFORMS)(
+    'SUBSTITUTES the vo=Tr colon/semicolon/lenticular %s with its U+FE1x vertical form, upright (issue #969)',
+    (orig, fe) => {
+      const calls = draw(orig);
+      expect(calls.length).toBe(1);
+      expect(calls[0].text, `the vertical form ${fe} replaces ${orig}`).toBe(fe);
+      expect(norm(calls[0].rot)).toBeCloseTo(UPRIGHT, 5);
+    },
+  );
 
   it('ROTATES a vo=Tr glyph with no vertical form (ー) by 90°', () => {
     const calls = draw(TR_ROTATE);
