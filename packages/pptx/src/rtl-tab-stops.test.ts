@@ -68,8 +68,8 @@ function run(text: string, color = '000000'): TextRunData {
   } as TextRunData;
 }
 
-/** A paragraph carrying `tabStops`. The run text must contain a `\t` so layout
- *  switches into tab-stop accumulation mode.
+/** A paragraph carrying `tabStops`. The run text contains a `\t` so layout
+ *  emits an inline tab segment (#916 multi-cell model).
  *
  *  `alignment` follows the PARSER's resolution order (parser/src/text.rs:617):
  *  explicit `pPr@algn` → inherited body/layout/master default (not modelled
@@ -154,16 +154,20 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
     expect(cell.inShapeX).toBeCloseTo(RTL_STOP_X - CELL_W / 2, 6); // 200 − 20 = 180
   });
 
-  // (3) RTL cell glyphs are painted with ctx.direction = 'rtl' so bidi content in
-  //     the cell shapes in reading order (textAlign stays 'left', so the pen X is
-  //     unchanged — only glyph shaping/joining differs).
-  it('draws the RTL tab cell with ctx.direction = rtl', () => {
+  // (3) ITEM-2 CORRECTION (issue #916): tab-cell content now flows through the
+  //     per-segment UAX#9 pass (`computeLineVisualOrder`) instead of a blanket
+  //     `ctx.direction='rtl'` for the whole cell. A DIGITS cell ("12") is
+  //     Bidi_Class EN → even (LTR) level even under an RTL base, so it is drawn
+  //     with ctx.direction='ltr' (digits read left-to-right in Arabic too). The
+  //     old model's unconditional 'rtl' was the item-2 defect; mixed-direction
+  //     cell reordering is pinned by bidi-line.test.ts / pptx-multi-tab.test.ts.
+  it('draws a digits tab cell with ctx.direction = ltr (per-segment bidi, item 2)', () => {
     const { texts } = render(
       bodyWithTab([{ pos: TAB_POS_EMU, algn: 'r' }], [run(`\t${CELL}`)], { rtl: true }),
       BOX_W,
     );
     const cellDraw = texts.find((t) => t.text === CELL)!;
-    expect(cellDraw.direction).toBe('rtl');
+    expect(cellDraw.direction).toBe('ltr');
   });
 
   // (4) An EXPLICIT `pPr@algn="l"` on an rtl="1" paragraph (the parser resolution
@@ -179,16 +183,22 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
     expect(cell.inShapeX).toBeCloseTo(RTL_STOP_X, 6);
   });
 
-  // (5) A start ('l') tab opens NO cell — it advances the PEN inline (the gap is
-  //     not rendered; pre-existing model, both directions). Under an RTL base the
-  //     advance must live in the READING frame (distance from the leading indent,
-  //     = marR), like the stop selection: mixing frames (selection from marR,
-  //     advance from marL) overshoots the pen when marR > marL and a later stop
-  //     becomes unreachable. Stops: start@100px, end@140px; marR=50px; 'A'=20px.
-  //     Reading frame: pen 50→(start tab)→100, +A→120 → the end stop at 140 is
-  //     still ahead ⇒ '\t12' opens the cell, trailing edge on 600−140=460.
-  //     Mixed-frame (the bug): lineW=100−marL(0)=100, +A→120 → selection pen
-  //     50+120=170 > 140 ⇒ no stop ⇒ the tab degrades to a space (no cell).
+  // (5) A start ('l') tab advances the reading-frame pen so a later end stop stays
+  //     reachable. Stops: start@100px, end@140px; marR=50px; 'A'=20px. Reading
+  //     frame (pen from the leading indent = marR): pen 50→(start tab)→100, +A→120
+  //     ⇒ the end stop at 140 is still ahead ⇒ the '\t12' cell EXISTS. This is the
+  //     reachability property case (5) has always verified.
+  //
+  //     ITEM-3 CORRECTION (issue #916): the start-tab gap is now MATERIALISED
+  //     (previously it silently advanced the pen without rendering), so the line
+  //     is laid out cumulatively. The end stop at reading 140 is BEHIND the pen
+  //     (120) once its 40-wide cell is placed (target 140−40 = 100 < 120), so the
+  //     end tab collapses per the no-backward-tab clamp — the same behaviour as
+  //     docx `layoutBidiTabStops`. The cell's trailing (left) edge therefore lands
+  //     at the cumulative pen, not the absolute mirrored stop: content width = 50
+  //     (start gap) + 20 (A) + 0 (collapsed end tab) + 40 (cell) = 110, so the
+  //     RTL-anchored cell sits at (600 − marR − 110) = 440, with 'A' at 480 (the
+  //     rendered start gap pulls it off the leading edge — the visible item-3 fix).
   it('advances a start tab in the reading frame so a later end stop stays reachable', () => {
     const stops: TabStop[] = [
       { pos: 100 * 12700, algn: 'l' },
@@ -200,7 +210,11 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
     );
     const cell = runs.find((r) => r.text === CELL);
     expect(cell, 'end-stop cell exists (start-tab advance did not overshoot)').toBeTruthy();
-    expect(cell!.inShapeX).toBeCloseTo(BOX_W - 140, 6); // 460
+    expect(cell!.inShapeX).toBeCloseTo(440, 6);
+    // The start-tab gap is now rendered: 'A' is pulled off the leading (right)
+    // text edge (was flush at 530 in the pre-fix inline-advance model).
+    const a = runs.find((r) => r.text === 'A')!;
+    expect(a.inShapeX).toBeCloseTo(480, 6);
   });
 
   // (6) A stop past the TRAILING (left) text edge pins the cell at that edge —

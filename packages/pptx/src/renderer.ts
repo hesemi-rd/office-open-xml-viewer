@@ -17,7 +17,6 @@ import type {
   Glow,
   RenderOptions,
   DimOptions,
-  TabStop,
 } from './types';
 import { asBullet } from './types';
 import {
@@ -102,6 +101,7 @@ import { justifyLine, type Justified } from './text-justify';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 import { resolveTableBorderConflict } from './table-border-conflict.js';
 import { isSmartArtFallbackShape, smartArtFallbackTextColor } from './smartart-fallback-contrast';
+import { resolveTabWidths } from './tab-layout.js';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -359,6 +359,10 @@ export async function prepareSlideMath(slide: Slide, math: MathRenderer): Promis
 type LayoutSegment = {
   text: string;
   font: string;
+  /** Inline DrawingML TAB, classified UAX#9 S during visual ordering (#916). */
+  isTab?: true;
+  /** Reading-frame gap resolved against a:tabLst immediately before paint. */
+  tabWidthPx?: number;
   /**
    * Raw (normalized) font-family requested for this segment's glyphs, kept
    * alongside the composed CSS `font` string so the line-height pass can floor
@@ -411,28 +415,6 @@ type LayoutSegment = {
 
 interface LayoutLine {
   segments: LayoutSegment[];
-  /** Segments aligned at a right/centre tab stop (set when the paragraph
-   *  contains a `\t` resolving to an `algn="r"|"ctr"` stop).
-   *
-   *  KNOWN MODEL LIMITS (pre-existing, LTR and RTL alike — follow-up #916):
-   *  - ONE cell slot per line: a second right/centre tab on the same line
-   *    re-assigns this object with empty `segments`, dropping the text
-   *    collected for the first cell.
-   *  - Cell segments bypass the UAX#9 visual reorder (`computeLineVisualOrder`
-   *    applies to `LayoutLine.segments` only): they are drawn sequentially in
-   *    logical order under a single ctx.direction, so mixed-direction cell
-   *    content does not reorder. docx instead models tabs as inline segments
-   *    classified Bidi_Class S — the shape a fix should take.
-   *  - Start ('l') / 'dec' tabs never populate this slot; they advance the
-   *    layout pen inline and the gap is not rendered. */
-  tabStop?: {
-    /** Stop position in px from the LEADING text-inset edge (logical,
-     *  §21.1.2.1): canvas X = bx + lPad + px under LTR, bx + bw − rPad − px
-     *  under an RTL base. */
-    px: number;
-    algn: string;
-    segments: LayoutSegment[];
-  };
   /** ECMA-376 §21.1.2.2.1 — this line is terminated by a MANUAL line break
    *  (`<a:br>`). In a `just` paragraph it is the end of a logical line and is
    *  left-aligned, not stretched — like the paragraph's last line (§20.1.10.59).
@@ -724,20 +706,18 @@ export function layoutParagraph(
   // sample-2 slide-7 stay on one line even though the bbox is tight).
   let hasWhitespaceOnLine = false;
 
-  // Tab stop state: once we hit a \t we switch to collecting tabStop.segments
-  let tabActive = false;
-  let tabStopPx = 0;   // position of tab stop from text area left (px)
+  // Once a line contains a tab, its cells remain unwrapped on that line.
+  let tabSeen = false;
 
   const newLine = (endsWithBreak = false) => {
     if (endsWithBreak) currentLine.endsWithBreak = true;
     lines.push(currentLine);
     currentLine = { segments: [] };
     lineW = 0;
-    tabActive = false; // reset tab state per line
+    tabSeen = false;
     hasWhitespaceOnLine = false;
   };
 
-  // Push to the active segment list (main or tab-stop group)
   const push = (
     text: string,
     font: string,
@@ -782,6 +762,7 @@ export function layoutParagraph(
     // one set / one missing) force a new segment.
     const sameMeta = (a: LayoutSegment) =>
       !a.math &&
+      !a.isTab &&
       a.font === font &&
       a.color === color &&
       a.underline === underline &&
@@ -796,22 +777,12 @@ export function layoutParagraph(
       (a.highlight ?? '') === (highlight ?? '') &&
       (a.fontFamily ?? '') === (fontFamily ?? '') &&
       hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink);
-    if (tabActive && currentLine.tabStop) {
-      const segs = currentLine.tabStop.segments;
-      const last = segs.at(-1);
-      if (last && sameMeta(last)) {
-        last.text += text;
-      } else {
-        segs.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
-      }
+    lineW += w;
+    const last = currentLine.segments.at(-1);
+    if (last && sameMeta(last)) {
+      last.text += text;
     } else {
-      lineW += w;
-      const last = currentLine.segments.at(-1);
-      if (last && sameMeta(last)) {
-        last.text += text;
-      } else {
-        currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
-      }
+      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
     }
   };
 
@@ -978,40 +949,21 @@ export function layoutParagraph(
 
       // ── Tab character ────────────────────────────────────────────────────
       if (/^\t+$/.test(token)) {
-        // Pen position from the LEADING text-inset edge, measured in READING
-        // order: an LTR paragraph advances rightward from the left inset (leading
-        // indent = marL); a BIDI (RTL) paragraph advances leftward from the right
-        // inset (leading indent = marR). Tab stops (§21.1.2.1.x) are logical
-        // distances from that leading edge, so the same "first stop past the pen"
-        // rule selects the stop in either frame (mirrors docx #830 nextTabStopRtl;
-        // the draw pass then mirrors the chosen stop into the RTL frame).
-        const leadIndentPx = para.rtl ? emuToPx(para.marR, scale) : marLPx;
-        const currentAbsW = leadIndentPx + lineW;
-        const ts = (para.tabStops ?? []).find(
-          (t: TabStop) => emuToPx(t.pos, scale) > currentAbsW
-        );
-        if (ts) {
-          tabStopPx = emuToPx(ts.pos, scale);
-          if (ts.algn === 'r' || ts.algn === 'ctr') {
-            // Switch to tab-stop accumulation mode
-            tabActive = true;
-            currentLine.tabStop = { px: tabStopPx, algn: ts.algn, segments: [] };
-          } else {
-            // Start tab ('l'; 'dec' is treated as start — decimal alignment is
-            // unimplemented): advance the READING-order pen to the stop. The pen
-            // is the reading-frame distance from the leading indent, so the
-            // advance is `pos − leadIndentPx` under BOTH bases (LTR:
-            // leadIndentPx === marLPx, byte-identical). No cell group is opened
-            // for start tabs — the gap is not materialized as a drawn segment in
-            // either direction (pre-existing inline-advance model, see the
-            // LayoutLine.tabStop doc); the advance drives wrapping and later
-            // stop selection only.
-            lineW = tabStopPx - leadIndentPx;
-          }
-        } else {
-          // No matching tab stop — treat as a single space
-          push(' ', font, sizePx, color, segUnderline, run.strikethrough, undefined, segExtras);
+        // §21.1.2.1.x: retain every tab inline. Gap resolution is deferred until
+        // paint, when every cell width is known; UAX#9 S then reorders cells.
+        for (const _ of token) {
+          currentLine.segments.push({
+            text: '',
+            isTab: true,
+            font,
+            fontFamily: family,
+            sizePx,
+            color,
+            underline: false,
+            strikethrough: false,
+          });
         }
+        tabSeen = true;
         continue;
       }
 
@@ -1019,8 +971,8 @@ export function layoutParagraph(
       const tokW = ctx.measureText(token).width;
       const isWhitespace = /^\s+$/.test(token);
 
-      // If already in tab mode, collect all text into tabStop.segments (no wrap)
-      if (tabActive) {
+      // Tab-delimited cells stay on one line; tab gaps are resolved as a unit.
+      if (tabSeen) {
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         continue;
       }
@@ -3268,6 +3220,46 @@ export function renderTextBody(
     // line carries strong-RTL characters, so LTR slides keep their exact path.
     const baseRtl = entry.para.rtl === true;
     const paraNeedsBidi = baseRtl || segmentsHaveRtl(line.segments);
+    const hasTab = line.segments.some((seg) => seg.isTab);
+
+    if (hasTab) {
+      // §21.1.2.1.x: resolve every inline tab in the logical READING frame.
+      // UAX#9 L2 later mirrors the resulting cells physically for an RTL base.
+      const marLPxE = emuToPx(entry.para.marL, scale);
+      const marRPxE = emuToPx(entry.para.marR, scale);
+      // The reading pen starts at the leading indent PLUS the draw-side
+      // first-line indent (textXOffset): a stop is an ABSOLUTE distance from the
+      // leading text-inset edge (§21.1.2.1), so the indent moves where content
+      // STARTS, not where a stop sits — omitting it would widen every gap by the
+      // indent and slide the cells past their stops. textXOffset only shifts the
+      // LTR pen (the RTL draw right-anchors and never applies it), so it joins
+      // the LTR frame only.
+      const leadingIndentPx = baseRtl ? marRPxE : marLPxE + textXOffset;
+      const limitPx = textMaxW + marLPxE + marRPxE;
+      const tabFontSeg = line.segments.find((seg) => seg.isTab) as LayoutSegment;
+      ctx.font = tabFontSeg.font;
+      const spaceW = ctx.measureText(' ').width;
+      const items = line.segments.map((seg) => {
+        if (seg.isTab) return { isTab: true, width: 0 };
+        if (seg.math) return { isTab: false, width: seg.math.width };
+        ctx.font = seg.font;
+        const ls = seg.letterSpacingPx ?? 0;
+        return {
+          isTab: false,
+          width: seg.text
+            ? ctx.measureText(seg.text).width + ls * codePointCount(seg.text)
+            : 0,
+        };
+      });
+      const stops = (entry.para.tabStops ?? []).map((stop) => ({
+        pos: emuToPx(stop.pos, scale),
+        algn: stop.algn,
+      }));
+      const widths = resolveTabWidths(items, stops, leadingIndentPx, limitPx, spaceW);
+      for (let i = 0; i < line.segments.length; i++) {
+        if (line.segments[i].isTab) line.segments[i].tabWidthPx = widths[i];
+      }
+    }
 
     // Measure line for alignment AND baseline ascent in one pass.
     // actualBoundingBoxAscent gives the real font ascent for the rendered glyphs,
@@ -3276,6 +3268,10 @@ export function renderTextBody(
     let lineWidth = 0;
     let maxAscent = lineHeight * 0.8; // fallback when no segments
     for (const seg of line.segments) {
+      if (seg.isTab) {
+        lineWidth += seg.tabWidthPx ?? 0;
+        continue;
+      }
       if (seg.math) {
         lineWidth += seg.math.width;
         maxAscent = Math.max(maxAscent, seg.math.ascent);
@@ -3369,16 +3365,24 @@ export function renderTextBody(
 
     const effectiveTextX = textX + textXOffset;
     let penX: number;
-    if (alignment === 'ctr') {
-      penX = effectiveTextX + (textMaxW - textXOffset - lineWidth) / 2;
-    } else if (alignment === 'r') {
-      // Reading-frame (#930): an RTL marker leads at the right edge, so the text
-      // right-aligns to `leadingEdge − markerAdvance` (contiguous with the
-      // marker). `rtlMarkerReservePx` is 0 for non-list / marker-less lines, so
-      // plain RTL paragraphs keep `leadingEdge − lineWidth` (byte-identical).
-      penX = textX + textMaxW - rtlMarkerReservePx - lineWidth;
+    if (hasTab) {
+      // Tab stops are absolute from the leading text-inset edge; paragraph
+      // alignment must not add a second offset (#913/#916).
+      penX = baseRtl
+        ? textX + textMaxW - rtlMarkerReservePx - lineWidth
+        : effectiveTextX;
     } else {
-      penX = effectiveTextX;
+      if (alignment === 'ctr') {
+        penX = effectiveTextX + (textMaxW - textXOffset - lineWidth) / 2;
+      } else if (alignment === 'r') {
+        // Reading-frame (#930): an RTL marker leads at the right edge, so the text
+        // right-aligns to `leadingEdge − markerAdvance` (contiguous with the
+        // marker). `rtlMarkerReservePx` is 0 for non-list / marker-less lines, so
+        // plain RTL paragraphs keep `leadingEdge − lineWidth` (byte-identical).
+        penX = textX + textMaxW - rtlMarkerReservePx - lineWidth;
+      } else {
+        penX = effectiveTextX;
+      }
     }
 
     // Justified alignment (ECMA-376 §20.1.10.59 ST_TextAlignType): just/justLow
@@ -3392,15 +3396,13 @@ export function renderTextBody(
       alignment === 'just' || alignment === 'justLow' ? 'just' as const
       : alignment === 'dist' || alignment === 'thaiDist' ? 'dist' as const
       : null;
-    // A line broken at a right/centre tab stop keeps its pre-tab text natural:
-    // justifying it would spread that text across the whole column and overlap
-    // the tab-aligned remainder drawn after this loop. Skip justify for it.
-    const hasTabStop = !!line.tabStop && line.tabStop.segments.length > 0;
+    // Tab-delimited cells keep their natural widths; the inline gaps provide
+    // their stop alignment and must not participate in justification.
     // A `just` line ended by a manual <a:br> is left-aligned like the last line
     // (§20.1.10.59 + §21.1.2.2.1); `dist` ignores this and fills every line
     // (justifyLine only suppresses the last line for `just`).
     const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
-    const drawSegs = justifyMode && !paraNeedsBidi && !hasTabStop
+    const drawSegs = justifyMode && !paraNeedsBidi && !hasTab
       ? justifyLine(line.segments, textMaxW - textXOffset, lineWidth, justifyMode, endsLogicalLine)
       : null;
     const segs: (LayoutSegment & Partial<Justified>)[] = drawSegs ?? line.segments;
@@ -3417,6 +3419,10 @@ export function renderTextBody(
       const seg = segs[li];
       const segRtl = visual ? visual.rtl[li] : false;
       if (paraNeedsBidi) ctx.direction = segRtl ? 'rtl' : 'ltr';
+      if (seg.isTab) {
+        penX += seg.tabWidthPx ?? 0;
+        continue;
+      }
       // Justification advance after this piece (0 when not justifying). Added to
       // the pen, and folded into the trailing edge of underline / strikethrough
       // and the reported onTextRun width, so decorations and the text layer span
@@ -3632,113 +3638,7 @@ export function renderTextBody(
       penX += segW;
       penX += jext;
     }
-    if (paraNeedsBidi) ctx.direction = 'ltr'; // reset before tab-stop / next line
-
-    // ── Tab-stop segments (right-aligned or centred at tab stop position) ──
-    if (line.tabStop && line.tabStop.segments.length > 0) {
-      let totalTabW = 0;
-      for (const seg of line.tabStop.segments) {
-        ctx.font = seg.font;
-        const ls = seg.letterSpacingPx ?? 0;
-        totalTabW += ctx.measureText(seg.text).width + ls * codePointCount(seg.text);
-      }
-      // ECMA-376 §21.1.2.1.x tab stops are LOGICAL: `pos` is the distance from the
-      // LEADING text-inset edge. LTR base ⇒ leading edge = left inset
-      // (`bx + lPad`), pen advances rightward; BIDI (RTL) base ⇒ leading edge =
-      // right inset (`bx + bw − rPad`), pen advances LEFT, so the stop mirrors and
-      // the trailing cell flips visual side. The LTR-frame math below dropped an
-      // RTL cell on the wrong side (issue #831). This mirrors the docx fix (#830 /
-      // #835: `layoutBidiTabStops` / `nextTabStopRtl` resolve stops against the
-      // leading text margin in the reading frame). DrawingML tabs carry no leader,
-      // so — unlike docx — there is nothing to paint across the gap. Known model
-      // limits (ONE cell per line; cell contents bypass the UAX#9 reorder): see
-      // the LayoutLine.tabStop doc — follow-up #916.
-      let tabPenX: number;
-      if (baseRtl) {
-        const tabAbsX = bx + bw - rPad - line.tabStop.px;
-        // Only 'r'/'ctr' stops reach this block — layoutParagraph opens a tab
-        // cell solely for those two; a start ('l') or 'dec' tab advances the pen
-        // inline (reading frame) and never builds a cell (see the tab token
-        // branch in layoutParagraph).
-        if (line.tabStop.algn === 'ctr') {
-          tabPenX = tabAbsX - totalTabW / 2;
-        } else {
-          // end/trailing (§21.1.2.1: physical `r` = logical end under RTL): the
-          // cell's TRAILING (left) edge sits on the stop, cell extends rightward.
-          tabPenX = tabAbsX;
-        }
-        // A stop past the trailing (left) text edge pins the cell AT that edge —
-        // the docx layoutBidiTabStops clamp (#835: Word never pushes the cell
-        // off the text area). Unclamped, a mirrored stop with pos > the text
-        // width would land at a negative x, drawing outside the shape.
-        const trailingEdgePx = bx + lPad;
-        if (tabPenX < trailingEdgePx) tabPenX = trailingEdgePx;
-      } else {
-        const tabAbsX = bx + lPad + line.tabStop.px;
-        if (line.tabStop.algn === 'r') {
-          tabPenX = tabAbsX - totalTabW;
-        } else if (line.tabStop.algn === 'ctr') {
-          tabPenX = tabAbsX - totalTabW / 2;
-        } else {
-          tabPenX = tabAbsX;
-        }
-      }
-      // Shape the cell's glyphs in reading order under an RTL base (Arabic
-      // joining, digit shaping). `ctx.textAlign` stays 'left' (set once for the
-      // whole body), so tabPenX remains the cell's left edge — only glyph shaping
-      // differs. Reset to 'ltr' after the cell so later lines are unaffected.
-      if (baseRtl) ctx.direction = 'rtl';
-      for (const seg of line.tabStop.segments) {
-        ctx.font = seg.font;
-        ctx.fillStyle = seg.color;
-        const tabLs = seg.letterSpacingPx ?? 0;
-        // Highlight box behind tab-stop-aligned glyphs (ECMA-376 §21.1.2.3.4).
-        // No justification stretch on tab-stop runs, so the advance is just
-        // glyph measure + letter spacing.
-        if (seg.highlight && seg.text) {
-          const hlW = ctx.measureText(seg.text).width + tabLs * codePointCount(seg.text);
-          paintHighlight(ctx, tabPenX, baseline, hlW, seg.sizePx, seg.highlight, seg.color);
-        }
-        if (tabLs > 0 && seg.text.length > 1) {
-          // rPr @spc (§21.1.2.3.x): draw the whole CONTEXTUALLY-shaped string in
-          // ONE fillText with canvas letterSpacing, mirroring drawWithFont (PR
-          // #627) / docGrid (docx #626). The old per-glyph `measure(ch)+tabLs`
-          // summed ISOLATED advances and overran the contextual box `tabSegW` at
-          // 約物半角 punctuation (opening brackets collapse to half-width only in
-          // context), pulling later glyphs into the next tab segment. ctx.
-          // letterSpacing keeps the drawn advance == measure(seg.text)[contextual]
-          // + tabLs·codePointCount == tabSegW.
-          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
-          const prev = lctx.letterSpacing;
-          try { lctx.letterSpacing = `${tabLs}px`; } catch { /* older engines */ }
-          ctx.fillText(seg.text, tabPenX, baseline);
-          try { lctx.letterSpacing = prev; } catch { /* ignore */ }
-        } else {
-          ctx.fillText(seg.text, tabPenX, baseline);
-        }
-        ctx.font = seg.font;
-        const tabSegW = ctx.measureText(seg.text).width + tabLs * codePointCount(seg.text);
-        if (onTextRun && seg.text) {
-          onTextRun({
-            text: seg.text,
-            inShapeX: tabPenX - bx,
-            inShapeY: cursorY - by,
-            w: tabSegW,
-            h: lineHeight,
-            fontSize: seg.sizePx,
-            font: seg.font,
-            shapeX: bx,
-            shapeY: by,
-            shapeW: bw,
-            shapeH: bh,
-            rotation: shapeRotation,
-            hyperlink: seg.hyperlink,
-          });
-        }
-        tabPenX += tabSegW;
-      }
-      if (baseRtl) ctx.direction = 'ltr';
-    }
+    if (paraNeedsBidi) ctx.direction = 'ltr';
 
     cursorY += linePx;
   }

@@ -7,12 +7,13 @@ import type { TextRunData, TabStop } from '@silurus/ooxml-core';
 // TAB-STOP draw path, the pptx analog of PR #627 (drawWithFont) and docx #626
 // (docGrid §17.6.5).
 //
-// A right-/centre-aligned tab stop (pPr > tabLst, §21.1.2.1.x) collects the text
-// after a `\t` into `line.tabStop.segments`. Each tab segment is measured
-// CONTEXTUALLY: `tabSegW = measureText(seg.text) + ls·codePointCount`. The
-// browser's 約物半角 contextual shaping collapses an opening bracket "［" to
-// half-width when it is FOLLOWED by an East-Asian glyph WITHIN the measured
-// string (`measureText("［あ") < measureText("［") + measureText("あ")`).
+// A right-/centre-aligned tab stop (pPr > tabLst, §21.1.2.1.x) places the text
+// after a `\t` at the stop (since #916, as ordinary inline segments after an
+// inline tab segment). Each segment is measured CONTEXTUALLY:
+// `segW = measureText(seg.text) + ls·codePointCount`. The browser's 約物半角
+// contextual shaping collapses an opening bracket "［" to half-width when it is
+// FOLLOWED by an East-Asian glyph WITHIN the measured string
+// (`measureText("［あ") < measureText("［") + measureText("あ")`).
 //
 // The bug: the tab-stop @spc branch painted the segment glyph-by-glyph,
 // advancing the pen by the ISOLATED `measureText(ch) + ls` of each code point.
@@ -105,9 +106,8 @@ function run(text: string, letterSpacing?: number, color = '000000'): TextRunDat
 }
 
 /** A paragraph carrying a right-aligned tab stop at `tabPosEmu` EMU. The runs'
- *  text must contain a leading `\t` so the layout switches into tab-stop
- *  accumulation mode (`currentLine.tabStop`) and collects the following text
- *  into `tabStop.segments`. */
+ *  text carries a leading `\t` so the layout emits an inline tab segment whose
+ *  resolved gap places the following text at the stop (#916 multi-cell model). */
 function bodyWithTab(tabPosEmu: number, algn: string, runs: TextRunData[]): TextBody {
   const tabStops: TabStop[] = [{ pos: tabPosEmu, algn }];
   const para: Paragraph = {

@@ -14,6 +14,7 @@ import {
   hasStrongRtl,
   OBJECT_PLACEHOLDER,
   buildVisualOrder,
+  type BidiClass,
 } from '@silurus/ooxml-core';
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
@@ -23,6 +24,9 @@ const segText = (s: unknown): string | undefined => {
   const t = (s as { text?: unknown }).text;
   return typeof t === 'string' ? t : undefined;
 };
+
+/** A DrawingML tab is UAX#9 Bidi_Class S, not a neutral inline object. */
+const segIsTab = (s: unknown): boolean => 'isTab' in (s as object);
 
 /** Cheap test: does this run of segments contain any strong-RTL character? */
 export function segmentsHaveRtl(segments: readonly unknown[]): boolean {
@@ -60,15 +64,23 @@ export function computeLineVisualOrder(
 
   let full = '';
   const segStart: number[] = new Array(n);
+  let classOverride: (BidiClass | null)[] | undefined;
   for (let i = 0; i < n; i++) {
     segStart[i] = full.length;
     const t = segText(segments[i]) ?? '';
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
+    if (segIsTab(segments[i])) {
+      classOverride ??= [];
+      while (classOverride.length < full.length) classOverride.push(null);
+      classOverride[segStart[i]] = 'S';
+    }
   }
+  if (classOverride) while (classOverride.length < full.length) classOverride.push(null);
 
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full,
     baseRtl ? 'rtl' : 'ltr',
+    classOverride,
   );
 
   const { order, segLevels } = buildVisualOrder(levels, paragraphLevel, segStart);
