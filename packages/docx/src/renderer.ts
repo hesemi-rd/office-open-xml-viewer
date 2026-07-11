@@ -130,6 +130,7 @@ import {
   buildFont,
   buildSegments,
   calcEffectiveFontPx,
+  fontClassesWithPitches,
   getDefaultFontSize,
   gridCharDeltaPx,
   gridSegDeltaPx,
@@ -1216,7 +1217,7 @@ async function renderDocumentToCanvasLeased(
   const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(
     layoutDoc,
     ctx,
-    layoutDoc.fontFamilyClasses ?? {},
+    fontClassesWithPitches(layoutDoc.fontFamilyClasses, layoutDoc.fontFamilyPitches),
     layoutSettings,
     layoutDoc.footnotes ?? [],
   );
@@ -1369,7 +1370,7 @@ async function renderDocumentToCanvasLeased(
     sectionLayout,
     storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
-    fontFamilyClasses: doc.fontFamilyClasses ?? {},
+    fontFamilyClasses: fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -3678,7 +3679,7 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   return paginateWithHeaderFooterReserve(
     layoutDoc,
     ctx,
-    layoutDoc.fontFamilyClasses ?? {},
+    fontClassesWithPitches(layoutDoc.fontFamilyClasses, layoutDoc.fontFamilyPitches),
     layoutSettings,
     layoutDoc.footnotes ?? [],
   );
@@ -3711,7 +3712,7 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
   const pages = paginateWithHeaderFooterReserve(
     layoutDoc,
     ctx,
-    layoutDoc.fontFamilyClasses ?? {},
+    fontClassesWithPitches(layoutDoc.fontFamilyClasses, layoutDoc.fontFamilyPitches),
     layoutSettings,
     layoutDoc.footnotes ?? [],
   );

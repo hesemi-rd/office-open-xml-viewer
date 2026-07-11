@@ -346,7 +346,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
     let font_table_xml = read_zip_string(zip, &font_table_path).unwrap_or_default();
-    let font_family_classes = parse_font_table(&font_table_xml);
+    let (font_family_classes, font_family_pitches) = parse_font_table(&font_table_xml);
     // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
     // through the fontTable part's OWN relationships (`word/_rels/fontTable.xml.rels`
     // when the part is `word/fontTable.xml`): insert `_rels/` before the filename
@@ -412,6 +412,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         major_font,
         minor_font,
         font_family_classes,
+        font_family_pitches,
         embedded_fonts,
         revisions,
         comments,
@@ -1017,7 +1018,7 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
     None
 }
 
-/// Parse `word/fontTable.xml` and build a map from font name to family class.
+/// Parse `word/fontTable.xml` and build maps from font name to family class and pitch.
 ///
 /// ECMA-376 §17.8.3.10 defines `<w:font w:name="…"><w:family w:val="…"/></w:font>`
 /// where val is one of: `roman` (serif), `swiss` (sans-serif), `modern`
@@ -1025,10 +1026,16 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// this map as the primary source of serif/sans-serif classification, falling
 /// back to name-pattern matching only when the font is absent or classified
 /// as `auto`.
-fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
+///
+/// ECMA-376 §17.8.3.29 defines `<w:pitch w:val="…"/>`, whose ST_Pitch value
+/// (§17.18.66) is `fixed` (Fixed Width), `variable` (Proportional Width), or
+/// `default` (no pitch information). An omitted `<w:pitch>` is assumed to be
+/// `default`, so only explicitly declared pitch values are added to the map.
+fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut classes = BTreeMap::new();
+    let mut pitches = BTreeMap::new();
     let Ok(doc) = parse_guarded(xml) else {
-        return map;
+        return (classes, pitches);
     };
     for font in doc.root_element().descendants().filter(|n| {
         n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
@@ -1057,10 +1064,58 @@ fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
                 )
             });
         if let Some(f) = family {
-            map.insert(name.to_string(), f.to_string());
+            classes.insert(name.to_string(), f.to_string());
+        }
+        let pitch = font
+            .children()
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "pitch"
+                    && is_w_ns(n.tag_name().namespace())
+            })
+            .and_then(|n| {
+                attr_ns(
+                    &n,
+                    wordprocessingml::TRANSITIONAL,
+                    wordprocessingml::STRICT,
+                    "val",
+                )
+            });
+        if let Some(p) = pitch {
+            pitches.insert(name.to_string(), p.to_string());
         }
     }
-    map
+    (classes, pitches)
+}
+
+#[cfg(test)]
+mod font_table_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    #[test]
+    fn parses_declared_family_and_pitch_without_synthesizing_omitted_pitch() {
+        let xml = format!(
+            r#"<w:fonts xmlns:w="{W_NS}">
+                 <w:font w:name="Meiryo UI">
+                   <w:family w:val="modern"/>
+                   <w:pitch w:val="variable"/>
+                 </w:font>
+                 <w:font w:name="No Pitch">
+                   <w:family w:val="modern"/>
+                 </w:font>
+               </w:fonts>"#,
+        );
+
+        let (classes, pitches) = parse_font_table(&xml);
+
+        assert_eq!(classes.get("Meiryo UI").map(String::as_str), Some("modern"));
+        assert_eq!(
+            pitches.get("Meiryo UI").map(String::as_str),
+            Some("variable")
+        );
+        assert!(!pitches.contains_key("No Pitch"));
+    }
 }
 
 /// Parse the embedded-font references from `word/fontTable.xml` (ECMA-376

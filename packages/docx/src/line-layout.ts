@@ -495,7 +495,8 @@ export function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
  *  1. `fontFamilyClasses` map (from `word/fontTable.xml` §17.8.3.10):
  *     - "roman"      → serif
  *     - "swiss"      → sans-serif
- *     - "modern"     → monospace
+ *     - "modern"     → monospace only for `pitch="fixed"` (§17.8.3.29), else
+ *                      fall through to step 2
  *     - "script"/"decorative" → sans-serif fallback
  *     - "auto" / absent       → fall through to step 2
  *  2. Name-pattern matching (fallback for fonts absent from fontTable, or
@@ -516,6 +517,34 @@ export function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
  */
 export const fontFamilyNormalizeCache = new WeakMap<Record<string, string>, Map<string, string>>();
 
+/** Companion to {@link fontFamilyNormalizeCache}: maps a `fontFamilyClasses`
+ *  object (stable per-document identity) to the sibling per-font PITCH map
+ *  (ECMA-376 §17.8.3.29 `<w:pitch>`: font name → "fixed" | "variable" |
+ *  "default"). `normalizeFontFamily` reads it to decide whether a
+ *  `family="modern"` (§17.8.3.10) face is genuinely monospace: only "fixed"
+ *  (§17.18.66 Fixed Width) is. Keyed on the classes object so the pitch threads
+ *  for free through every existing `fontFamilyClasses` call site — exactly like
+ *  the normalize cache — with no second map plumbed through the renderer. */
+export const fontFamilyPitchesByClasses = new WeakMap<
+  Record<string, string>,
+  Record<string, string>
+>();
+
+/** Bind the §17.8.3.29 pitch map to the §17.8.3.10 classes object and return the
+ *  classes object (defaulting to `{}`). Call at each renderer site that
+ *  materializes a document's `fontFamilyClasses` for threading, so the classifier
+ *  can read a `modern` face's pitch without a second map plumbed through. */
+export function fontClassesWithPitches(
+  classes: Record<string, string> | undefined,
+  pitches: Record<string, string> | undefined,
+): Record<string, string> {
+  const c = classes ?? {};
+  if (pitches && Object.keys(pitches).length > 0) {
+    fontFamilyPitchesByClasses.set(c, pitches);
+  }
+  return c;
+}
+
 export function normalizeFontFamily(
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
@@ -532,7 +561,13 @@ export function normalizeFontFamily(
   const key = family ?? '\0null';
   const cached = perDoc.get(key);
   if (cached !== undefined) return cached;
-  const result = normalizeFontFamilyUncached(family, fontFamilyClasses);
+  // The pitch map is registered once against this stable per-document classes
+  // identity, so the result remains a pure function of the memo key.
+  const result = normalizeFontFamilyUncached(
+    family,
+    fontFamilyClasses,
+    fontFamilyPitchesByClasses.get(fontFamilyClasses),
+  );
   perDoc.set(key, result);
   return result;
 }
@@ -540,6 +575,7 @@ export function normalizeFontFamily(
 export function normalizeFontFamilyUncached(
   family: string | null,
   fontFamilyClasses: Record<string, string>,
+  fontFamilyPitches: Record<string, string> = {},
 ): string {
   if (!family) return sansTail(null);
 
@@ -587,8 +623,24 @@ export function normalizeFontFamilyUncached(
         return `${head}, ${serifTail(cjk)}`;
       case 'swiss':
         return `${head}, ${sansTail(cjk)}`;
-      case 'modern':
-        return `${head}, "Courier New", monospace`;
+      case 'modern': {
+        // §17.8.3.10 `modern` is the "modern/monospace" typeface family, but the
+        // family value classifies the DESIGN, not the pitch — §17.8.3.29
+        // `<w:pitch>` states the actual pitch. Treat the face as monospace ONLY
+        // when pitch is "fixed" (§17.18.66 Fixed Width). A "variable"
+        // (proportional) modern face — e.g. Meiryo UI (`family="modern"`,
+        // `pitch="variable"`), a condensed ~0.84em CJK sans — must NOT map to
+        // Courier/monospace: that measures its CJK at a full 1.0em and over-wraps
+        // table cells onto a spurious extra page (issue #855). "default" and an
+        // omitted `<w:pitch>` (assumed "default" per §17.8.3.29) are likewise not
+        // a fixed-width guarantee, so they fall through to the name-pattern /
+        // CJK-sans path below. Genuine monospace faces (Courier, Consolas, 等幅)
+        // are still caught there by name.
+        if (fontFamilyPitches[family] === 'fixed') {
+          return `${head}, "Courier New", monospace`;
+        }
+        break;
+      }
       default:
         // script / decorative — fall through to name-pattern matching
         break;
