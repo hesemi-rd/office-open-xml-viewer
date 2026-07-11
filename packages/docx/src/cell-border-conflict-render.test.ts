@@ -285,4 +285,46 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(horizontalAt(strokes, 0)).toHaveLength(1);
     expect(horizontalAt(strokes, 20)).toHaveLength(1);
   });
+  it('§17.4.66 (#815): a colSpan cell resolves EACH below sub-segment against its own neighbour', async () => {
+    // A title cell spanning both columns faces TWO below cells with DIFFERENT
+    // top borders. The shared horizontal edge must be split at the column
+    // boundary: left half → the left neighbour's border, right half → the right
+    // neighbour's border. Before the fix only the span-origin (left) neighbour
+    // was consulted and the right half's border was dropped.
+    const title = cell('title');
+    title.colSpan = 2;
+    const strokes = await render(tableOf([
+      rowOf([title]),
+      rowOf([
+        cell('l', { top: bs({ style: 'single', width: 1, color: '111111' }) }),
+        cell('r', { top: bs({ style: 'thick', width: 4, color: '222222' }) }),
+      ]),
+    ]));
+    const seg = horizontalAt(strokes, 20);
+    const left = seg.filter((s) => Math.min(s.x1, s.x2) < 30);
+    const right = seg.filter((s) => Math.max(s.x1, s.x2) > 90);
+    expect(left.some((s) => s.color.toLowerCase().includes('111111'))).toBe(true);
+    expect(right.some((s) => s.color.toLowerCase().includes('222222'))).toBe(true);
+  });
+
+  it('§17.4.66 (#815): a vMerge cell resolves EACH right sub-segment against its own neighbour', async () => {
+    // A tall cell (vMerge restart) spanning both rows faces TWO right neighbours
+    // with DIFFERENT left borders. Its shared vertical edge must be split at the
+    // row boundary: top half → the upper neighbour's border, bottom half → the
+    // lower neighbour's border. Before the fix only the span-origin (upper)
+    // neighbour was consulted and the bottom half's border was dropped.
+    const tall = cell('tall');
+    tall.vMerge = true;
+    const cont = cell('');
+    cont.vMerge = false;
+    const strokes = await render(tableOf([
+      rowOf([tall, cell('u', { left: bs({ style: 'single', width: 1, color: '111111' }) })]),
+      rowOf([cont, cell('d', { left: bs({ style: 'thick', width: 4, color: '222222' }) })]),
+    ]));
+    const seg = verticalAt(strokes, 60);
+    const top = seg.filter((s) => Math.min(s.y1, s.y2) < 10);
+    const bot = seg.filter((s) => Math.max(s.y1, s.y2) > 30);
+    expect(top.some((s) => s.color.toLowerCase().includes('111111'))).toBe(true);
+    expect(bot.some((s) => s.color.toLowerCase().includes('222222'))).toBe(true);
+  });
 });
