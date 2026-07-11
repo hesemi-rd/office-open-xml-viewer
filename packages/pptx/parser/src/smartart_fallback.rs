@@ -34,6 +34,14 @@
 //! A missing `r:dm` relationship, a missing data part, or unparsable XML emits
 //! **nothing** (same as before this fallback existed): a broken reference is
 //! never turned into spurious output.
+//!
+//! Text colour: the data model rarely carries run colours (the real diagram
+//! derives them from `colors*.xml` / `quickStyle*.xml`, which this fallback
+//! intentionally discards), so runs are emitted with `color: null`. The
+//! renderer gives THIS synthetic shape a contrast-aware default against the
+//! slide background — a documented UX choice, not ECMA-376 semantics (the
+//! spec defines no text colour for a diagram without its drawing part). See
+//! `packages/pptx/src/smartart-fallback-contrast.ts`.
 
 use crate::text::{empty_level_bullets, parse_text_body, ShapeKind};
 use crate::types::*;

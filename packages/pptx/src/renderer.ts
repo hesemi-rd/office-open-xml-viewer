@@ -97,6 +97,7 @@ import { fitCjkLine, type MeasuredChar } from './cjk-wrap.js';
 import { justifyLine, type Justified } from './text-justify';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 import { resolveTableBorderConflict } from './table-border-conflict.js';
+import { isSmartArtFallbackShape, smartArtFallbackTextColor } from './smartart-fallback-contrast';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -114,6 +115,15 @@ export interface RenderContext {
    * `?? 1` fallback (aligns with docx's required `RenderState.dpr`).
    */
   dpr: number;
+  /**
+   * Contrast-aware default text colour for THIS slide's synthetic SmartArt
+   * fallback shape (issue #805), pre-derived by `renderSlide` from the
+   * slide-background luminance via {@link smartArtFallbackTextColor}. Null /
+   * absent = keep the ordinary theme default. Consumed only by
+   * {@link shapeDefaultTextColor} for shapes matching
+   * {@link isSmartArtFallbackShape}; every other shape ignores it.
+   */
+  smartArtFallbackTextColor?: string | null;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1960,6 +1970,23 @@ function presetTextRect(
   }
 }
 
+/**
+ * The shape-level default text colour passed to {@link renderTextBody} (used
+ * by runs whose colour resolves to null). A style-derived `defaultTextColor`
+ * (p:style > fontRef) always wins; the synthetic SmartArt fallback shape —
+ * which never carries one — takes the slide's contrast-aware default from
+ * {@link RenderContext.smartArtFallbackTextColor} so its data-model text is
+ * legible on a dark background (issue #805). All other shapes: null (theme
+ * default applies downstream).
+ */
+function shapeDefaultTextColor(el: ShapeElement, rc: RenderContext): string | null {
+  if (el.defaultTextColor) return hexToRgba(el.defaultTextColor);
+  if (rc.smartArtFallbackTextColor != null && isSmartArtFallbackShape(el)) {
+    return rc.smartArtFallbackTextColor;
+  }
+  return null;
+}
+
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -1979,7 +2006,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       ctx.restore();
     }
     if (el.textBody) {
-      const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
+      const defaultTextColor = shapeDefaultTextColor(el, rc);
       renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc, onTextRun, false, fetchImage);
     }
     return;
@@ -2348,7 +2375,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
-    const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
+    const defaultTextColor = shapeDefaultTextColor(el, rc);
     ctx.save();
     if (el.flipH || el.flipV) {
       const cx = x + w / 2;
@@ -5008,6 +5035,10 @@ async function renderSlideLeased(
     return canvas;
   }
 
+  const themeDefaultColor = opts.defaultTextColor
+    ? `#${opts.defaultTextColor}`
+    : '#000000';
+
   const rc: RenderContext = {
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
@@ -5015,6 +5046,9 @@ async function renderSlideLeased(
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,
+    // Issue #805 — legible default for the synthetic SmartArt fallback shape's
+    // null-colour runs, derived once per slide from the background luminance.
+    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor),
   };
 
   await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);
@@ -5025,10 +5059,6 @@ async function renderSlideLeased(
   // here; without it, equations are skipped and the asset never enters the bundle.
   if (opts.math) await prepareSlideMath(slide, opts.math);
   if (superseded()) return canvas;
-
-  const themeDefaultColor = opts.defaultTextColor
-    ? `#${opts.defaultTextColor}`
-    : '#000000';
 
   const slideNumber = slide.slideNumber;
 

@@ -284,6 +284,14 @@ export interface ShapeElement {
   /** `<a:sp3d>` 3D shape properties (ECMA-376 §20.1.5.12). Parsed but not
    *  rendered in Phase A. */
   sp3d?: Sp3d;
+  /** `<p:nvSpPr><p:cNvPr @id>` — DrawingML cNvPr id. Present for file-authored
+   *  shapes (the attribute is schema-required); absent on parser-synthesized
+   *  shapes such as the SmartArt data-model fallback. */
+  id?: string;
+  /** `<p:nvSpPr><p:cNvPr @name>` — author-visible shape name (e.g. "Title 1").
+   *  The SmartArt data-model fallback synthesizes `name: "SmartArt"` with no
+   *  {@link ShapeElement.id} (see smartart-fallback-contrast.ts). */
+  name?: string;
   /** Shape-level hyperlink target resolved from `<p:cNvPr><a:hlinkClick @r:id>`
    *  via slide _rels (ECMA-376 §21.1.2.3.5). For an external link this is the
    *  URL; for an internal slide jump it is the resolved internal part name.
