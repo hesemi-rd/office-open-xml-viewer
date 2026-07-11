@@ -8,28 +8,30 @@ import type {
   SectionProps,
 } from './types';
 
-// ECMA-376 §17.18.44 (ST_Jc `both`) — the Knuth-Plass space-shrink fit tolerance
-// (`SPACE_SHRINK_RATIO`) must NOT admit an extra word onto a FULLY-JUSTIFIED line.
+// ECMA-376 §17.18.44 (ST_Jc `both`/`distribute`) — the Knuth-Plass space-shrink
+// fit tolerance (`SPACE_SHRINK_RATIO`) must NOT admit an extra word onto a line
+// that the draw pass will JUSTIFY, and MUST keep doing so on a line the draw pass
+// treats as non-justified. The gate is per LINE, mirroring the paint predicate
+// (renderer.ts: `applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)`):
 //
-// Word's line breaker is greedy and identical for justified and non-justified
-// paragraphs; justification redistributes the residual slack by EXPANDING the
-// inter-word spaces, and (in its default mode) never COMPRESSES a line below its
-// natural width to admit one more word. So on a justified line a candidate word
-// whose natural advance overflows the column must wrap — even if the overflow is
-// smaller than the line's total inter-word shrink budget. The shrink tolerance
-// exists only to absorb the Chromium-`measureText` vs Word advance-width bias on
-// a line that will be drawn at (or compressed toward) its natural spacing, i.e. a
-// NON-justified line (e.g. a substituted-font centred title that Word keeps on one
-// row). See issue #698: in sample-15 p1's narrow (8.4 cm) justified copyright
-// column the tolerance pulled "citation" up onto the "…and the full" line, where
-// Word (PDF ground truth) breaks after "full".
+// - A line that WILL justify (a non-final, non-manual-break line of a
+//   `both`/kashida paragraph, or ANY line of `distribute`/`thaiDistribute`)
+//   redistributes its slack by EXPANDING inter-word spaces — it is never drawn
+//   compressed below natural width, so a candidate word whose natural advance
+//   overflows the column must wrap. Observed Word behaviour (issue #698, PDF
+//   ground truth): in a narrow justified column the tolerance pulled one word up
+//   per affected line where Word breaks at natural fit.
+// - A line the draw pass does NOT justify — the paragraph's true last line and a
+//   line ending at a manual `<w:br/>` (§17.3.3.1) under `both`/kashida, and every
+//   line of a non-justified paragraph — is drawn with the shrink-fit compression
+//   the budget promises (`shrinkFitCompression`), so the measurement-bias
+//   tolerance stays: measure and paint spend the SAME budget (measure==paint).
 
 const FONT_PX = 12; // linear stub: each code point advances FONT_PX at scale 1
 
 /** Linear recording canvas: measureText advances FONT_PX per code point (space
  *  included), so a token's trailing-space width is exactly one FONT_PX. This makes
- *  the fit arithmetic explicit: a word overflowing the column by < the old
- *  `SPACE_SHRINK_RATIO · Σspace` budget was silently admitted before the fix. */
+ *  the fit arithmetic explicit — see TEXT4/TEXT5 below. */
 function makeLinearCanvas(): HTMLCanvasElement {
   let font = `${FONT_PX}px serif`;
   let letterSpacing = '0px';
@@ -77,16 +79,20 @@ function textRun(text: string): DocxTextRun {
 
 type DocRun = DocParagraph['runs'][number];
 
-function para(text: string, alignment: DocParagraph['alignment']): BodyElement {
+function para(runs: DocRun[], alignment: DocParagraph['alignment']): BodyElement {
   const p: DocParagraph = {
     alignment,
     indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
-    runs: [{ type: 'text', ...textRun(text) } as DocRun],
+    runs,
     defaultFontSize: FONT_PX, defaultFontFamily: 'serif',
     widowControl: false,
   };
   return { type: 'paragraph', ...p } as BodyElement;
+}
+
+function textPara(text: string, alignment: DocParagraph['alignment']): BodyElement {
+  return para([{ type: 'text', ...textRun(text) } as DocRun], alignment);
 }
 
 function section(pageWidth: number): SectionProps {
@@ -106,41 +112,97 @@ function doc(el: BodyElement, sec: SectionProps): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-/** Render one paragraph and return the number of visual text lines (distinct
- *  baseline y values reported by onTextRun). */
-async function lineCount(text: string, alignment: DocParagraph['alignment'], pageWidth: number): Promise<number> {
+/** Render one paragraph and return its visual lines, top-to-bottom: each line is
+ *  the concatenated text of the onTextRun segments sharing a baseline y. */
+async function renderLines(el: BodyElement, pageWidth: number): Promise<string[]> {
   const runs: DocxTextRunInfo[] = [];
-  await renderDocumentToCanvas(doc(para(text, alignment), section(pageWidth)), makeLinearCanvas(), 0, {
+  await renderDocumentToCanvas(doc(el, section(pageWidth)), makeLinearCanvas(), 0, {
     dpr: 1,
     width: pageWidth, // scale = 1 px/pt
     onTextRun: (r) => { if (r.text && r.text.trim()) runs.push(r); },
   });
-  return new Set(runs.map((r) => Math.round(r.y))).size;
+  const byY = new Map<number, DocxTextRunInfo[]>();
+  for (const r of runs) {
+    const key = Math.round(r.y);
+    let arr = byY.get(key);
+    if (!arr) { arr = []; byY.set(key, arr); }
+    arr.push(r);
+  }
+  return [...byY.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, rs]) => rs.slice().sort((p, q) => p.x - q.x).map((r) => r.text).join(''));
 }
 
-// Four 4-glyph words: natural width = 4·(4·12) + 3·(12) = 192 + 36 = 228 px.
-// Column = 225 px ⇒ the 4th word overflows by 3 px. The line carries 3 trailing
-// spaces (Σspace = 36 px), so the OLD budget = 0.25·36 = 9 px ≥ 3 px admitted it.
-const TEXT = 'AAAA AAAA AAAA AAAA';
+const tokens = (line: string): number => (line.match(/AAAA/g) ?? []).length;
+
+// Fit arithmetic (linear stub): each "AAAA " token advances 5·12 = 60px, the
+// bare word 48px, its trailing space 12px. Testing the 4th word on a line
+// already holding three tokens: currentWidth = 180, wForFit = 48 ⇒ natural end
+// 228. Column = 225 ⇒ overflow 3px. The line carries Σ trailing-space = 36px, so
+// the shrink budget (0.25·36 = 9px) admits the word WHEN the tolerance applies.
+const TEXT4 = 'AAAA AAAA AAAA AAAA';      // marginal word is the paragraph-FINAL word
+const TEXT5 = 'AAAA AAAA AAAA AAAA AAAA'; // marginal word is followed by more content
 const COLUMN = 225;
 
-describe('§17.18.44 — space-shrink fit tolerance is suppressed on justified lines (issue #698)', () => {
-  it('wraps a justified paragraph whose last word overflows the column at natural width', async () => {
-    // Word breaks here (the overflow is a genuine word, not measurement bias);
-    // the shrink budget must not pull it up. RED before the fix: 1 line.
-    expect(await lineCount(TEXT, 'both', COLUMN)).toBe(2);
+describe('§17.18.44 — space-shrink fit tolerance is gated per justified LINE (issue #698)', () => {
+  it('wraps the marginal word off a line that WILL justify (more content follows)', async () => {
+    // Word PDF ground truth (issue #698, narrow justified column): the justified
+    // line breaks at natural fit — the marginal word is not pulled up. Line 1
+    // must hold exactly 3 tokens; the old paragraph-wide tolerance admitted a 4th.
+    const lines = await renderLines(textPara(TEXT5, 'both'), COLUMN);
+    expect(lines.length).toBe(2);
+    expect(tokens(lines[0])).toBe(3);
   });
 
-  it('keeps the SAME overflow on ONE line for a non-justified paragraph (bias tolerance retained)', async () => {
-    // A left-aligned paragraph will be drawn at (or compressed toward) natural
-    // spacing, so the small overflow is absorbed as measurement bias — this is the
-    // behaviour that keeps sample-10 p1's centred title on a single row.
-    expect(await lineCount(TEXT, 'left', COLUMN)).toBe(1);
-    expect(await lineCount(TEXT, 'center', COLUMN)).toBe(1);
+  it('keeps the SAME marginal word on a non-justified line (bias tolerance retained)', async () => {
+    // left/center lines are drawn at (or compressed toward) natural spacing, so
+    // the 3px overflow is absorbed as measurement bias — this is what keeps a
+    // substituted-font centred title on a single row (sample-10 p1 class).
+    for (const alignment of ['left', 'center'] as const) {
+      const lines = await renderLines(textPara(TEXT5, alignment), COLUMN);
+      expect(lines.length, alignment).toBe(2);
+      expect(tokens(lines[0]), alignment).toBe(4); // budget admits the 4th; 5th wraps
+    }
+  });
+
+  it("keeps the budget on a `both` paragraph's TRUE LAST line (paint draws it non-justified)", async () => {
+    // The marginal word is the paragraph's final word: admitting it makes this
+    // the paragraph's last line, which the draw pass does NOT justify
+    // (applyJustify excludes endsLogicalLine for `both`) — it is drawn with the
+    // shrink-fit compression the budget promises. Measure must therefore admit
+    // within the same budget (measure==paint), keeping the old behaviour.
+    const lines = await renderLines(textPara(TEXT4, 'both'), COLUMN);
+    expect(lines.length).toBe(1);
+    expect(tokens(lines[0])).toBe(4);
+  });
+
+  it('keeps the budget on a `both` line ending at a manual <w:br/> (§17.3.3.1)', async () => {
+    // A manual break terminates the logical line, which `both` leaves
+    // non-justified exactly like the paragraph's last line — same budget rule.
+    const el = para(
+      [
+        { type: 'text', ...textRun(TEXT4) } as DocRun,
+        { type: 'break', breakType: 'line' } as DocRun,
+        { type: 'text', ...textRun('BBBB') } as DocRun,
+      ],
+      'both',
+    );
+    const lines = await renderLines(el, COLUMN);
+    expect(lines.length).toBe(2); // "AAAA ×4" ‖ "BBBB" — the break-line keeps its 4th token
+    expect(tokens(lines[0])).toBe(4);
+    expect(lines[1]).toContain('BBBB');
+  });
+
+  it('suppresses the budget on EVERY `distribute` line, including the last (stretchLastLine)', async () => {
+    // §17.18.44 `distribute` stretches every line — the paragraph-final line is
+    // justified too (paint: stretchLastLine), so its marginal word must wrap.
+    const lines = await renderLines(textPara(TEXT4, 'distribute'), COLUMN);
+    expect(lines.length).toBe(2);
+    expect(tokens(lines[0])).toBe(3);
   });
 
   it('does not force a wrap when the justified content genuinely fits at natural width', async () => {
-    // Widen the column past the natural width: no wrap, no spurious break.
-    expect(await lineCount(TEXT, 'both', 240)).toBe(1);
+    const lines = await renderLines(textPara(TEXT4, 'both'), 240);
+    expect(lines.length).toBe(1);
   });
 });

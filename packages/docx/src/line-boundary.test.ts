@@ -205,6 +205,7 @@ function layoutFixture(fixture: Fixture, startBoundary?: LineBoundary): LayoutLi
     fixture.width,
     fixture.baseRtl ?? false,
     false,
+    false,
     startBoundary,
   );
 }

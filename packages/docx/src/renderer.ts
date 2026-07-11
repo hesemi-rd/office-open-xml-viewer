@@ -7226,9 +7226,9 @@ function renderParagraph(
     : reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
-      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl, jcIsFullyJustified(para.alignment))
+      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment))
       : rescaleLayoutLines(
-          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1, baseRtl, jcIsFullyJustified(para.alignment)),
+          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment)),
           scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
         );
 
@@ -9356,6 +9356,7 @@ export function measureShapeTextAutoFitHeight(
         ind.paraW,
         baseRtl,
         jcIsFullyJustified(b.alignment),
+        jcStretchesLastLine(b.alignment),
       );
       contentH += lines.reduce((sum, line) => sum + lineHeightFor(b, line), 0);
     }
@@ -9648,6 +9649,7 @@ export function renderShapeText(
       ind.paraW, // marginRightPx: block text has no separate right-indent origin
       baseRtl,
       jcIsFullyJustified(b.alignment),
+      jcStretchesLastLine(b.alignment),
     );
     const metrics = lines.map((line) => lineMetricsFor(b, line));
     return {
