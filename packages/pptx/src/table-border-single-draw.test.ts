@@ -222,4 +222,39 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     const shared = horizontalAt(strokes, 20).filter((s) => Math.min(s.x1, s.x2) >= 59);
     expect(shared).toHaveLength(1);
   });
+  it('#824: a gridSpan cell resolves EACH below sub-segment against its own neighbour', () => {
+    // A cell spanning both columns (gridSpan=2, no bottom border) faces TWO below
+    // cells with DIFFERENT top borders. The shared horizontal edge must be split at
+    // the column boundary: left half → the left neighbour's border, right half →
+    // the right neighbour's. Before the fix only the span-origin (left) neighbour
+    // was consulted and the right half's border was dropped.
+    const strokes = render(tableOf([
+      [cell({ gridSpan: 2 }), cell({ hMerge: true })],
+      [cell({ borderT: ln({ width: EMU, color: '111111' }) }),
+       cell({ borderT: ln({ width: 3 * EMU, color: '222222' }) })],
+    ], [COL, COL]));
+    const seg = horizontalAt(strokes, 20);
+    const left = seg.filter((s) => Math.min(s.x1, s.x2) < 30);
+    const right = seg.filter((s) => Math.max(s.x1, s.x2) > 90);
+    expect(left.some((s) => s.color === rgba('111111'))).toBe(true);
+    expect(right.some((s) => s.color === rgba('222222'))).toBe(true);
+  });
+
+  it('#824: a rowSpan cell resolves EACH right sub-segment against its own neighbour', () => {
+    // A cell spanning both rows (rowSpan=2, no right border) faces TWO right
+    // neighbours with DIFFERENT left borders. Its shared vertical edge must be split
+    // at the row boundary: top half → the upper neighbour's border, bottom half →
+    // the lower neighbour's. Before the fix only the span-origin (upper) neighbour
+    // was consulted and the bottom half's border was dropped.
+    const strokes = render(tableOf([
+      [cell({ rowSpan: 2 }), cell({ borderL: ln({ width: EMU, color: '111111' }) })],
+      [cell({ vMerge: true }), cell({ borderL: ln({ width: 3 * EMU, color: '222222' }) })],
+    ], [COL, COL]));
+    const seg = verticalAt(strokes, 60);
+    const top = seg.filter((s) => Math.min(s.y1, s.y2) < 10);
+    const bot = seg.filter((s) => Math.max(s.y1, s.y2) > 30);
+    expect(top.some((s) => s.color === rgba('111111'))).toBe(true);
+    expect(bot.some((s) => s.color === rgba('222222'))).toBe(true);
+  });
+
 });

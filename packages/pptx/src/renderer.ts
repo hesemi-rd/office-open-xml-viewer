@@ -4777,41 +4777,58 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
     // BOTTOM: outer bottom → own spec; interior → resolve THIS cell's bottom
     // against the below neighbour's top and draw the single winner.
     {
-      let spec: Stroke | null;
       if (j.lastRi === el.rows.length - 1) {
-        spec = cell.borderB;
+        const spec = cell.borderB;
+        if (spec) strokeSeg(spec, colX, rowY + cellH, colX + cellW, rowY + cellH);
       } else {
-        // KNOWN LATENT LIMITATION: span vs subdivided neighbour with differing
-        // borders resolves only the origin slot — a gridSpan cell whose bottom
-        // faces MULTIPLE below-cells with different borderT specs (e.g.
-        // [thin, thick]) picks the winner from slot (lastRi+1, ci) alone and
-        // strokes the whole span with it, dropping the non-origin slots' specs.
-        // Zero occurrences in the private corpus; segment-wise resolution
-        // tracked in issue #824.
-        const below = jobAt(j.lastRi + 1, j.ci);
-        spec = resolveTableBorderConflict(cell.borderB, below ? below.cell.borderT : null);
+        // #824 — the shared horizontal edge below this cell may face SEVERAL finer
+        // below-cells with differing borderT (this cell is wider via gridSpan).
+        // Subdivide the edge at those cells' column boundaries and resolve EACH
+        // sub-segment against its OWN below neighbour, drawing a per-segment winner
+        // rather than resolving the whole span against the origin slot alone.
+        const belowRi = j.lastRi + 1;
+        const y = rowY + cellH;
+        const cEndMax = Math.min(j.ci + j.span, numCols);
+        let cj = j.ci;
+        while (cj < cEndMax) {
+          const idx = occupancy[belowRi][cj];
+          let cEnd = cj + 1;
+          while (cEnd < cEndMax && occupancy[belowRi][cEnd] === idx) cEnd++;
+          const below = jobAt(belowRi, cj);
+          const spec = resolveTableBorderConflict(cell.borderB, below ? below.cell.borderT : null);
+          if (spec) {
+            const segLeft = spannedLeft(cj, cEnd - cj);
+            const segW = spannedWidth(cj, cEnd - cj);
+            strokeSeg(spec, segLeft, y, segLeft + segW, y);
+          }
+          cj = cEnd;
+        }
       }
-      if (spec) strokeSeg(spec, colX, rowY + cellH, colX + cellW, rowY + cellH);
     }
     // PHYSICAL RIGHT: outer-right → own spec; interior → resolve THIS cell's
     // physical-right line against the physically-right neighbour's facing edge
     // (so each shared vertical line is drawn once).
     {
-      let spec: Stroke | null;
       if (physRightOuter) {
-        spec = physRightSpec;
+        const spec = physRightSpec;
+        if (spec) strokeSeg(spec, colX + cellW, rowY, colX + cellW, rowY + cellH);
       } else {
-        // KNOWN LATENT LIMITATION: span vs subdivided neighbour with differing
-        // borders resolves only the origin slot — a rowSpan cell whose physical-
-        // right edge faces MULTIPLE right-neighbours with different facing specs
-        // picks the winner from slot (ri, physRightNbrCi) alone and strokes the
-        // whole span with it, dropping the non-origin slots' specs. Zero
-        // occurrences in the private corpus; segment-wise resolution tracked in
-        // issue #824.
-        const right = jobAt(j.ri, physRightNbrCi);
-        spec = resolveTableBorderConflict(physRightSpec, right ? nbrPhysLeftSpec(right.cell) : null);
+        // #824 — a rowSpan cell's physical-right edge may face SEVERAL finer
+        // right-neighbours down the rows it spans, with differing facing specs.
+        // Subdivide the edge at those neighbours' row boundaries and resolve EACH
+        // sub-segment against its OWN neighbour's facing (physical-left) edge.
+        const x = colX + cellW;
+        let rj = j.ri;
+        while (rj <= j.lastRi) {
+          const idx = occupancy[rj][physRightNbrCi];
+          let rEnd = rj;
+          while (rEnd + 1 <= j.lastRi && occupancy[rEnd + 1][physRightNbrCi] === idx) rEnd++;
+          const right = jobAt(rj, physRightNbrCi);
+          const spec = resolveTableBorderConflict(physRightSpec, right ? nbrPhysLeftSpec(right.cell) : null);
+          if (spec) strokeSeg(spec, x, rowTop[rj], x, rowTop[rEnd] + rowHeights[rEnd]);
+          rj = rEnd + 1;
+        }
       }
-      if (spec) strokeSeg(spec, colX + cellW, rowY, colX + cellW, rowY + cellH);
     }
 
     // Diagonal borders: top-left→bottom-right and bottom-left→top-right. These
