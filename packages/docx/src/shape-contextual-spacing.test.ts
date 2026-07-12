@@ -4,59 +4,131 @@ import { shapeParagraphGapBefore } from './renderer';
 import type { ShapeText } from './types';
 
 /**
- * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` inside a text box (`<wps:txbx>`).
+ * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — Word-adjudicated PER-SIDE
+ * semantics (issue #1015, fixture sample-57 ground truth).
  *
- * The vertical gap reserved ABOVE text-box paragraph `i` is normally
- * max(prev.spaceAfter, this.spaceBefore) (collapse, not sum). When two ADJACENT
- * paragraphs share a style id and BOTH set contextualSpacing, Word drops the
- * whole gap — the same rule the body renderer applies via `contextualSuppressed`.
- * Before the fix the text-box path lacked this, so a `<w:contextualSpacing/>`
- * ListParagraph list inherited the docDefault `after=160` (8 pt) gap that
- * inflated its line pitch and clipped the trailing line (sample-32).
+ * The inter-paragraph gap decomposes as
+ *   gap = prevContrib + currContrib
+ *   prevContrib = prev.spaceAfter
+ *   currContrib = max(curr.spaceBefore − prev.spaceAfter, 0)
+ * (summing to max(after, before) — the §17.3.1.33 collapse). A paragraph whose
+ * toggle matches a same-style neighbour drops ITS OWN contribution only:
+ *   - prev toggles → gap = max(before − after, 0)   (spec's worked example: 10/12 → 2)
+ *   - curr toggles → gap = after                    (Word measured 10, NOT the
+ *     spec-literal "subtract own before from net" which would give 0)
+ *   - both toggle  → gap = 0
+ * Word applies this identically in body, table cell, and text box (sample-57
+ * measured parity), so this text-box helper carries the same table as the body
+ * and cell paths.
  */
-describe('shapeParagraphGapBefore — §17.3.1.9 contextualSpacing in a text box', () => {
+describe('shapeParagraphGapBefore — §17.3.1.9 contextualSpacing per-side semantics', () => {
   const block = (over: Partial<ShapeText>): ShapeText =>
     ({ text: 'x', fontSizePt: 12, alignment: 'left', ...over }) as ShapeText;
 
-  // 8 pt after / 4 pt before, both scaled ×1 for the table.
-  const spBefore = [0, 4];
-  const spAfter = [8, 0];
+  const pair = (
+    prev: Partial<ShapeText>,
+    curr: Partial<ShapeText>,
+    afterPt: number,
+    beforePt: number,
+  ): number =>
+    shapeParagraphGapBefore(
+      [block(prev), block(curr)],
+      1,
+      [0, beforePt],
+      [afterPt, 0],
+    );
 
   it('reserves only the first block own spaceBefore at i=0 (no previous block)', () => {
     const blocks = [block({ spaceBefore: 6 }), block({})];
     expect(shapeParagraphGapBefore(blocks, 0, [6, 4], [0, 0])).toBe(6);
   });
 
-  it('drops the gap when both blocks share a style id AND both set contextualSpacing', () => {
-    const blocks = [
-      block({ styleId: 'ListParagraph', contextualSpacing: true }),
-      block({ styleId: 'ListParagraph', contextualSpacing: true }),
-    ];
-    expect(shapeParagraphGapBefore(blocks, 1, spBefore, spAfter)).toBe(0);
+  // ── sample-57 adjudication table (after=10 / before=12 unless noted) ──────
+  it('case 1 — PREV-only toggle: gap = max(before − after, 0) = 2 (spec worked example)', () => {
+    expect(
+      pair(
+        { styleId: 'CtxPair', contextualSpacing: true },
+        { styleId: 'CtxPair' },
+        10,
+        12,
+      ),
+    ).toBe(2);
   });
 
-  it('keeps the collapsed gap when the two blocks have DIFFERENT style ids', () => {
-    const blocks = [
-      block({ styleId: 'ListParagraph', contextualSpacing: true }),
-      block({ styleId: 'Body', contextualSpacing: true }),
-    ];
-    // max(spBefore[1]=4, spAfter[0]=8) = 8.
-    expect(shapeParagraphGapBefore(blocks, 1, spBefore, spAfter)).toBe(8);
+  it('case 2 — CURR-only toggle: gap = prev.spaceAfter = 10 (Word; not the literal net-minus-before 0)', () => {
+    expect(
+      pair(
+        { styleId: 'CtxPair' },
+        { styleId: 'CtxPair', contextualSpacing: true },
+        10,
+        12,
+      ),
+    ).toBe(10);
   });
 
-  it('keeps the gap when only ONE of the two same-style blocks sets contextualSpacing', () => {
-    const blocks = [
-      block({ styleId: 'ListParagraph', contextualSpacing: true }),
-      block({ styleId: 'ListParagraph', contextualSpacing: false }),
-    ];
-    expect(shapeParagraphGapBefore(blocks, 1, spBefore, spAfter)).toBe(8);
+  it('case 3a — both toggle: gap = 0', () => {
+    expect(
+      pair(
+        { styleId: 'CtxPair', contextualSpacing: true },
+        { styleId: 'CtxPair', contextualSpacing: true },
+        10,
+        12,
+      ),
+    ).toBe(0);
   });
 
-  it('keeps the gap when the shared style id is missing on either block', () => {
-    const blocks = [
-      block({ contextualSpacing: true }),
-      block({ contextualSpacing: true }),
-    ];
-    expect(shapeParagraphGapBefore(blocks, 1, spBefore, spAfter)).toBe(8);
+  it('case 3b — both toggle, asymmetric 4/12: still 0 (no negative residue)', () => {
+    expect(
+      pair(
+        { styleId: 'CtxPair', contextualSpacing: true },
+        { styleId: 'CtxPair', contextualSpacing: true },
+        4,
+        12,
+      ),
+    ).toBe(0);
+  });
+
+  it('case 4 — both toggle but DIFFERENT styles: no suppression, gap = max = 12', () => {
+    expect(
+      pair(
+        { styleId: 'CtxPair', contextualSpacing: true },
+        { styleId: 'CtxOther', contextualSpacing: true },
+        10,
+        12,
+      ),
+    ).toBe(12);
+  });
+
+  it('case 5 — no toggle: gap collapses to max(after, before) = 12', () => {
+    expect(pair({ styleId: 'CtxPair' }, { styleId: 'CtxPair' }, 10, 12)).toBe(12);
+  });
+
+  // ── direction corners beyond the fixture values ───────────────────────────
+  it('PREV-only toggle with after ≥ before floors at 0 (8/4 → max(4−8,0))', () => {
+    expect(
+      pair(
+        { styleId: 'ListParagraph', contextualSpacing: true },
+        { styleId: 'ListParagraph' },
+        8,
+        4,
+      ),
+    ).toBe(0);
+  });
+
+  it('CURR-only toggle with after ≥ before keeps prev.spaceAfter (8/4 → 8)', () => {
+    expect(
+      pair(
+        { styleId: 'ListParagraph' },
+        { styleId: 'ListParagraph', contextualSpacing: true },
+        8,
+        4,
+      ),
+    ).toBe(8);
+  });
+
+  it('keeps the collapsed gap when the shared style id is missing on either block', () => {
+    expect(
+      pair({ contextualSpacing: true }, { contextualSpacing: true }, 8, 4),
+    ).toBe(8);
   });
 });

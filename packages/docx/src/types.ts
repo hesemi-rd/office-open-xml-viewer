@@ -573,7 +573,10 @@ export interface DocParagraph {
   shading?: string | null;
   /** Force a page break before this paragraph (w:pageBreakBefore) */
   pageBreakBefore?: boolean;
-  /** Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing) */
+  /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — between adjacent SAME-style
+   *  paragraphs, a toggling paragraph drops its OWN contribution to the
+   *  collapsed inter-paragraph gap (per-side, Word-adjudicated — issue #1015;
+   *  see the renderer's `contextualSpacingAdjust`). */
   contextualSpacing?: boolean;
   /** Keep paragraph on same page as the next paragraph (w:keepNext) */
   keepNext?: boolean;
@@ -1080,11 +1083,11 @@ export interface ShapeText {
    *  identical field). */
   bidi?: boolean;
   /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved through the style
-   *  chain in the parser. When set, the renderer suppresses the spaceBefore/
-   *  spaceAfter gap between this text-box paragraph and an ADJACENT paragraph
-   *  that shares its {@link ShapeText.styleId} and also sets the toggle
-   *  (identical to {@link DocParagraph.contextualSpacing} / `contextualSuppressed`).
-   *  Absent ⇒ no suppression. */
+   *  chain in the parser. When set, this text-box paragraph drops its OWN
+   *  contribution to the collapsed gap against an ADJACENT paragraph that
+   *  shares its {@link ShapeText.styleId} (per-side, Word-adjudicated — issue
+   *  #1015; identical to {@link DocParagraph.contextualSpacing} via the
+   *  renderer's `contextualSpacingAdjust`). Absent ⇒ no suppression. */
   contextualSpacing?: boolean;
   /** Resolved paragraph style id of this text-box paragraph — the explicit
    *  `<w:pStyle>`, else the document default paragraph style, else "Normal" (the

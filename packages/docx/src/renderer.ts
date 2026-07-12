@@ -2805,9 +2805,10 @@ export function computePages(
         const p = e as unknown as DocParagraph;
         if (p.pageBreakBefore) return { height: Infinity, terminated: false };
         if (p.framePr) continue; // frame is out of flow (adds no column height)
-        const suppress = contextualSuppressed(prevP, p) || isContinuousSectionSpacer(j);
-        const before = suppress ? 0 : p.spaceBefore;
-        total += estimateParagraphHeight(ms, p, colWPt, suppress, 0) - Math.min(prevAfter, before);
+        const spacer = isContinuousSectionSpacer(j);
+        const adjust = contextualSpacingAdjust(prevP, p, prevAfter, spacer ? 0 : p.spaceBefore);
+        const suppress = adjust.suppressBefore || spacer;
+        total += estimateParagraphHeight(ms, p, colWPt, suppress, 0) - adjust.overlap;
         prevAfter = p.spaceAfter;
         prevP = p;
       } else if (e.type === 'table') {
@@ -3243,13 +3244,12 @@ export function computePages(
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
-      const contextual = contextualSuppressed(prevPara, para);
       // An empty CONTINUOUS-section-break spacer drops only ITS OWN before (gap
       // collapses to prev.after, normally 0) — NOT the previous paragraph's after
-      // (see isSectionBreakSpacerAt). contextualSpacing drops both. Stamp the
-      // element so the paint pass (which gets per-page lists with the sectionBreak
-      // already consumed, so it cannot re-detect the adjacency) applies the same
-      // drop.
+      // (see isSectionBreakSpacerAt). contextualSpacing drops per-side
+      // contributions (contextualSpacingAdjust). Stamp the element so the paint
+      // pass (which gets per-page lists with the sectionBreak already consumed,
+      // so it cannot re-detect the adjacency) applies the same drop.
       const spacer = isContinuousSectionSpacer(i);
       if (spacer) (el as PaginatedBodyElement).sectionBreakSpacer = true;
       // A zero-before continuous-section spacer renders NO mark line box (Word's
@@ -3279,28 +3279,27 @@ export function computePages(
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
-      const suppressBefore = contextual || spacer;
+      // §17.3.1.9 per-side contextualSpacing (contextualSpacingAdjust) over the
+      // §17.3.1.33 max-collapse — a spacer contributes no before of its own, so
+      // the adjustment is computed against 0. Keeps the paginator's fill in
+      // lockstep with the paint pass, which recomputes the same pair.
+      const adjust = contextualSpacingAdjust(prevPara, para, prevSpaceAfter, spacer ? 0 : para.spaceBefore);
+      const suppressBefore = adjust.suppressBefore || spacer;
 
       // An empty paragraph that immediately precedes a COLLAPSED continuous spacer
       // begins the section-break empty run, which Word renders FLUSH below the
       // preceding content (the section transition collapses upward): the previous
       // paragraph's spaceAfter is dropped too (sample-12: "[Format…]"'s 6pt after
       // vanishes, so "1. INTRODUCTION" sits at Word's 446pt rather than ~452pt).
-      // Mirrors contextualSpacing's full drop of the previous after; no-op when the
-      // spacer is NOT collapsed (sample-13, before=22 keeps normal flow).
+      // No-op when the spacer is NOT collapsed (sample-13, before=22 keeps normal
+      // flow).
       const leadsCollapsedRun = isInklessParagraph(para) && isCollapsedContinuousSpacer(i + 1);
       // Stamp it so the paint pass reads the decision here rather than re-deriving it
       // from per-page adjacency: the collapsed spacer this looks ahead to can fall on
       // the NEXT page's element list, where paint could not see it (lockstep).
       if (leadsCollapsedRun) (el as PaginatedBodyElement).leadsCollapsedRun = true;
 
-      // Collapse with the previous paragraph's spaceAfter — Word takes
-      // max(prev.after, this.before) between paragraphs, not the sum.
-      const effectiveBefore = suppressBefore ? 0 : para.spaceBefore;
-      // §17.3.1.9 contextualSpacing: same-style adjacent paragraphs drop BOTH the
-      // previous after and this before (gap = 0), keeping the paginator's fill in
-      // lockstep with the paint pass.
-      const overlap = (contextual || leadsCollapsedRun) ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
+      const overlap = leadsCollapsedRun ? prevSpaceAfter : adjust.overlap;
       y -= overlap;
       measureState.y -= overlap;
 
@@ -6071,12 +6070,13 @@ function splitCellContentByHeight(
     const para = ce as unknown as DocParagraph;
     const continuationSlice = !!slice && slice.start > 0;
     const rawBefore = continuationSlice ? 0 : para.spaceBefore;
-    const suppress = !continuationSlice && contextualSuppressed(prevPara, para);
-    const effBefore = suppress ? 0 : rawBefore;
-    const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+    // §17.3.1.9 per-side suppression (a continuation slice already consumed its
+    // spacing boundary on the previous slice — no adjacency, prev = null).
+    const adjust = contextualSpacingAdjust(
+      continuationSlice ? null : prevPara, para, prevSpaceAfter, rawBefore);
     return rawHeight
-      - (suppress ? rawBefore : 0)
-      - overlap;
+      - (adjust.suppressBefore ? rawBefore : 0)
+      - adjust.overlap;
   };
   const appendBefore = (ce: CellElement, rawHeight: number, slice = cellLineSlice(ce), totalLines?: number): void => {
     before.push(ce);
@@ -6125,10 +6125,9 @@ function splitCellContentByHeight(
       const para = item as unknown as DocParagraph;
       const continuationSlice = !!measured.slice && measured.slice.start > 0;
       const rawBefore = continuationSlice ? 0 : para.spaceBefore;
-      const suppress = !continuationSlice && contextualSuppressed(localPrevPara, para);
-      const effBefore = suppress ? 0 : rawBefore;
-      const overlap = suppress ? localPrevSpaceAfter : Math.min(localPrevSpaceAfter, effBefore);
-      h += measured.rawHeight - (suppress ? rawBefore : 0) - overlap;
+      const adjust = contextualSpacingAdjust(
+        continuationSlice ? null : localPrevPara, para, localPrevSpaceAfter, rawBefore);
+      h += measured.rawHeight - (adjust.suppressBefore ? rawBefore : 0) - adjust.overlap;
       localPrevPara = para;
       localPrevSpaceAfter = !measured.slice || measured.totalLines == null || measured.slice.end >= measured.totalLines
         ? para.spaceAfter
@@ -6958,30 +6957,59 @@ function renderBodyElement(el: BodyElement, state: RenderState): void {
 }
 
 /**
- * ECMA-376 §17.3.1.9 — two ADJACENT paragraphs that share a style id and BOTH set
- * `<w:contextualSpacing>` suppress the spaceBefore/spaceAfter between them. Kept
- * structural (not `DocParagraph`) so the SAME rule drives both the body paragraph
- * path and the text-box path ({@link ShapeText}), which carry the identical
+ * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — Word-adjudicated PER-SIDE
+ * semantics (issue #1015, fixture sample-57 ground truth; identical in body,
+ * table cell, and text box).
+ *
+ * The §17.3.1.33 collapsed inter-paragraph gap decomposes as
+ *   gap = prevContrib + currContrib
+ *   prevContrib = prev.spaceAfter                          (the collapse base)
+ *   currContrib = max(curr.spaceBefore − prev.spaceAfter, 0)   (the excess)
+ * summing to max(after, before). A paragraph whose toggle is set AND whose
+ * neighbour shares its paragraph style drops ITS OWN contribution only:
+ *   - prev toggles → gap = max(before − after, 0)  — matches the spec's worked
+ *     example (after=10pt, before=12pt → 2pt);
+ *   - curr toggles → gap = after — Word renders prev's spaceAfter intact (the
+ *     spec-literal "subtract this paragraph's before from the net" would give
+ *     0; Word measured 10pt on sample-57 case 2);
+ *   - both toggle  → gap = 0 (each side's contribution dropped; the
+ *     decomposition is non-negative so no explicit floor is needed).
+ *
+ * Every gap site uses the effBefore/overlap form
+ *   gap = prevAfter + (suppressBefore ? 0 : spaceBefore) − overlap
+ * so this helper returns that pair. Kept structural (not `DocParagraph`) so the
+ * SAME rule drives the body paragraph path, the cell paths, and the text-box
+ * path ({@link ShapeText}), which carry the identical
  * `contextualSpacing`/`styleId` pair.
  */
-function contextualSuppressed(
+function contextualSpacingAdjust(
   prev: { contextualSpacing?: boolean; styleId?: string | null } | null,
   curr: { contextualSpacing?: boolean; styleId?: string | null },
-): boolean {
-  return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
+  prevAfter: number,
+  spaceBefore: number,
+): { suppressBefore: boolean; overlap: number } {
+  const sameStyle = !!(prev?.styleId && prev.styleId === curr.styleId);
+  const dropPrev = !!(sameStyle && prev?.contextualSpacing);
+  const dropCurr = !!(sameStyle && curr.contextualSpacing);
+  if (dropPrev && dropCurr) return { suppressBefore: true, overlap: prevAfter };
+  // gap = prevAfter: curr's before-excess contribution is dropped whole.
+  if (dropCurr) return { suppressBefore: true, overlap: 0 };
+  // gap = max(before − after, 0): prev's spaceAfter contribution is dropped.
+  if (dropPrev) return { suppressBefore: false, overlap: prevAfter + Math.min(prevAfter, spaceBefore) };
+  // No suppression — the plain §17.3.1.33 max-collapse.
+  return { suppressBefore: false, overlap: Math.min(prevAfter, spaceBefore) };
 }
 
 /**
  * ECMA-376 §17.3.1.33 + §17.3.1.9 — the vertical gap reserved ABOVE text-box
  * paragraph `i`. The first paragraph reserves only its own spaceBefore; between
  * two paragraphs the gap collapses to max(prev.spaceAfter, this.spaceBefore) — NOT
- * their sum — UNLESS the two are the same style and BOTH set contextualSpacing, in
- * which case Word drops the whole gap (the identical rule the body path applies via
- * {@link contextualSuppressed}). Without the suppression a `<w:contextualSpacing/>`
- * ListParagraph list inside a fixed box kept inheriting the docDefault `after=160`
- * (8 pt) gap, which inflated its line pitch and clipped the trailing line
- * (sample-32). Shared by the render pass and the auto-fit height measurement so the
- * two never disagree.
+ * their sum — minus any {@link contextualSpacingAdjust} per-side suppression
+ * (the identical rule the body path applies). Without the suppression a
+ * `<w:contextualSpacing/>` ListParagraph list inside a fixed box kept inheriting
+ * the docDefault `after=160` (8 pt) gap, which inflated its line pitch and
+ * clipped the trailing line (sample-32). Shared by the render pass and the
+ * auto-fit height measurement so the two never disagree.
  */
 export function shapeParagraphGapBefore(
   blocks: ReadonlyArray<{ contextualSpacing?: boolean; styleId?: string | null }>,
@@ -6990,8 +7018,8 @@ export function shapeParagraphGapBefore(
   spAfter: readonly number[],
 ): number {
   if (i <= 0) return spBefore[i];
-  if (contextualSuppressed(blocks[i - 1], blocks[i])) return 0;
-  return Math.max(spBefore[i], spAfter[i - 1]);
+  const adjust = contextualSpacingAdjust(blocks[i - 1], blocks[i], spAfter[i - 1], spBefore[i]);
+  return spAfter[i - 1] + (adjust.suppressBefore ? 0 : spBefore[i]) - adjust.overlap;
 }
 
 /**
@@ -7095,10 +7123,9 @@ function isSectionBreakSpacerAt(body: ArrayLike<{ type?: string }>, i: number): 
  * sizing equals the height it actually paints. Two collapse rules apply
  * (mirroring the paint pass):
  *
- *   - ECMA-376 §17.3.1.33 `<w:contextualSpacing>`: a paragraph whose
- *     contextualSpacing toggle matches the previous paragraph's AND shares its
- *     styleId emits zero spaceBefore (the toggle suppresses spacing between
- *     same-style siblings).
+ *   - ECMA-376 §17.3.1.9 `<w:contextualSpacing>`: a same-style toggling
+ *     paragraph drops its OWN contribution to the inter-paragraph gap
+ *     ({@link contextualSpacingAdjust} — per-side, Word-adjudicated).
  *   - Adjacent-paragraph spacing OVERLAP: the gap between two paragraphs is
  *     `max(prevSpaceAfter, currSpaceBefore)`, not their sum. We subtract the
  *     overlap `min(prevSpaceAfter, effBefore)` so a 12pt space-after followed
@@ -7128,15 +7155,13 @@ export function sumCellContentHeight(
   for (const ce of content) {
     if (ce.type === 'paragraph') {
       const para = ce as unknown as DocParagraph;
-      const suppress = contextualSuppressed(prevPara, para);
-      const effBefore = suppress ? 0 : para.spaceBefore;
-      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
-      // set it, BOTH the previous after and this before are dropped (gap = 0), not
-      // just collapsed — so e.g. a code listing's lines sit tight.
-      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 per-side contextualSpacing (contextualSpacingAdjust) over the
+      // §17.3.1.33 max-collapse — a same-style toggle drops the toggling
+      // paragraph's own contribution to the gap.
+      const adjust = contextualSpacingAdjust(prevPara, para, prevSpaceAfter, para.spaceBefore);
       h += perElementHeight(ce)
-        - (suppress ? para.spaceBefore : 0) * spaceScale
-        - overlap * spaceScale;
+        - (adjust.suppressBefore ? para.spaceBefore : 0) * spaceScale
+        - adjust.overlap * spaceScale;
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else {
@@ -7322,25 +7347,22 @@ function renderBodyElements(
       // advances y by nothing, leaving prevPara/prevSpaceAfter as the paragraph
       // BEFORE it — the paint mirror of the paginator's identical skip.
       if ((el as PaginatedBodyElement).hiddenCollapsed) continue;
-      const contextual = contextualSuppressed(prevPara, para);
       // Empty section-break spacer: drop only its own before (see
-      // isSectionBreakSpacerAt); contextualSpacing drops the previous after too.
+      // isSectionBreakSpacerAt); §17.3.1.9 per-side contextualSpacing
+      // (contextualSpacingAdjust) drops each toggling side's own contribution.
       // The adjacency was detected during pagination and stamped (the sectionBreak
-      // marker is gone from this per-page list), so read the tag here.
+      // marker is gone from this per-page list), so read the tag here. Mirrors the
+      // paginator's identical computation (lockstep).
       const spacer = !!(el as PaginatedBodyElement).sectionBreakSpacer;
-      const suppress = contextual || spacer;
+      const adjust = contextualSpacingAdjust(prevPara, para, prevSpaceAfter, spacer ? 0 : para.spaceBefore);
+      const suppress = adjust.suppressBefore || spacer;
       // An empty paragraph immediately before a COLLAPSED continuous spacer begins the
       // section-break empty run; Word renders it FLUSH below the preceding content,
       // dropping the previous paragraph's spaceAfter too. Read the paginator-stamped
       // flag rather than looking ahead in this per-page slice: the collapsed spacer can
       // sit on the next page, where `elements[elIdx + 1]` would be undefined.
       const leadsCollapsedRun = !!(el as PaginatedBodyElement).leadsCollapsedRun;
-      // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
-      const effBefore = suppress ? 0 : para.spaceBefore;
-      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
-      // set it, BOTH the previous after and this before are dropped (gap = 0), not
-      // just collapsed — so e.g. a code listing's lines sit tight.
-      const overlap = (contextual || leadsCollapsedRun) ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      const overlap = leadsCollapsedRun ? prevSpaceAfter : adjust.overlap;
       state.y -= overlap * state.scale;
       // Continuation slices (slice.start > 0) suppress spaceBefore: the
       // earlier slice already consumed it on the previous page. Likewise
@@ -7415,10 +7437,11 @@ function renderParaList(paras: DocParagraph[], state: RenderState): void {
   let prevSpaceAfter = 0;
   for (let i = 0; i < paras.length; i++) {
     const para = paras[i];
-    const suppress = contextualSuppressed(prevPara, para);
-    const effBefore = suppress ? 0 : para.spaceBefore;
-    const overlap = Math.min(prevSpaceAfter, effBefore);
-    state.y -= overlap * state.scale;
+    // §17.3.1.9 per-side contextualSpacing over the §17.3.1.33 max-collapse —
+    // the same contextualSpacingAdjust pair every other flow applies.
+    const adjust = contextualSpacingAdjust(prevPara, para, prevSpaceAfter, para.spaceBefore);
+    const suppress = adjust.suppressBefore;
+    state.y -= adjust.overlap * state.scale;
     // ECMA-376 §17.3.1.7 paragraph-border merge. This list is a single flow (a
     // note or a table cell), so adjacency is just consecutive list members; a
     // frame paragraph (§17.3.1.11) is out of flow and breaks the run. `framePr`
@@ -12168,8 +12191,8 @@ function measureCellContentHeightPx(
   const measured = trimTrailingStructuralMarker(cell.content);
   // measureCellElementHeight always includes paragraph spaceBefore plus
   // max(spaceAfter, bottom-border extent) — the same trailing advance the paint
-  // pass emits (§17.3.1.7); sumCellContentHeight folds in contextualSuppressed
-  // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap collapse to match the
+  // pass emits (§17.3.1.7); sumCellContentHeight folds in contextualSpacingAdjust
+  // (§17.3.1.9) and the prevSpaceAfter/spaceBefore overlap collapse to match the
   // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
     measured,
@@ -13120,14 +13143,13 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
       const lineSlice = slice
         ? { ...slice, ...(continues ? { continues: true as const } : {}) }
         : undefined;
-      const suppress = !continues && contextualSuppressed(prevPara, para);
-      const effBefore = suppress || continues ? 0 : para.spaceBefore;
-      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
-      // set it, BOTH the previous after and this before are dropped (gap = 0), not
-      // just collapsed — so e.g. a code listing's lines sit tight.
-      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
-      state.y -= overlap * state.scale;
-      renderParagraph(para, state, suppress || continues, lineSlice);
+      // §17.3.1.9 per-side contextualSpacing (contextualSpacingAdjust) over the
+      // §17.3.1.33 max-collapse — a continuation slice consumed its spacing
+      // boundary on the previous slice (no adjacency, prev = null).
+      const adjust = contextualSpacingAdjust(
+        continues ? null : prevPara, para, prevSpaceAfter, continues ? 0 : para.spaceBefore);
+      state.y -= adjust.overlap * state.scale;
+      renderParagraph(para, state, adjust.suppressBefore || continues, lineSlice);
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (ce.type === 'table') {
@@ -13210,21 +13232,21 @@ function renderCellContentFragment(cellFragment: CellFragment, state: RenderStat
             end: block.lineEnd,
             ...(continues ? { continues: true as const } : {}),
           };
-      const suppress = !continues && contextualSuppressed(prevPara, para);
-      const effBefore = suppress || continues ? 0 : para.spaceBefore;
-      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
-      state.y -= overlap * state.scale;
+      // Mirror renderCellContent's §17.3.1.9 per-side adjustment EXACTLY.
+      const adjust = contextualSpacingAdjust(
+        continues ? null : prevPara, para, prevSpaceAfter, continues ? 0 : para.spaceBefore);
+      state.y -= adjust.overlap * state.scale;
       if (isFragmentPaintableCellBlock(block, state)) {
         renderBodyParagraphLines(
           para,
           state,
           block.measured.lines.map((line) => line.layout),
-          suppress || continues,
+          adjust.suppressBefore || continues,
           lineSlice,
           undefined,
         );
       } else {
-        renderParagraph(para, state, suppress || continues, lineSlice);
+        renderParagraph(para, state, adjust.suppressBefore || continues, lineSlice);
       }
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
