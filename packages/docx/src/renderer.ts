@@ -1142,12 +1142,15 @@ function verticalLayoutSection(phys: SectionProps): SectionProps {
   };
 }
 
-/** Return a shallow copy of `doc` with its body-level section (and any per-body
- *  sectionBreak geometry) swapped to the vertical LOGICAL geometry, so the
- *  pagination + layout engine — which reads `doc.section` and per-element
- *  `sectionGeom` — organises the page as a rotated horizontal page. Only invoked
- *  when the body section is vertical; horizontal docs are returned untouched
- *  (referential identity), keeping the horizontal path byte-identical. */
+/** Return a shallow copy of `doc` with its BODY-LEVEL section swapped to the
+ *  vertical LOGICAL geometry, so the pagination + layout engine — which reads
+ *  `doc.section` — organises the page as a rotated horizontal page. Per-body
+ *  SectionBreak `geom`s are NOT swapped: per-section geometry/text-direction
+ *  inside a vertical document is the #988 ① per-section follow-up, so vertical
+ *  layout is body-section uniform today and consumers must not mix a mid-body
+ *  section geom into the swapped frame. Only invoked when the body section is
+ *  vertical; horizontal docs are returned untouched (referential identity),
+ *  keeping the horizontal path byte-identical. */
 function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
   if (!isVerticalSection(doc.section)) return doc;
   return { ...doc, section: verticalLayoutSection(doc.section) };
@@ -2128,17 +2131,20 @@ export function computePages(
   // textDirection preserved — a block table is an UPRIGHT block: its cells lay
   // out horizontally at the PHYSICAL content width, and it advances the flow by
   // its PHYSICAL WIDTH (the paint pass's renderTable vertical branch). The
-  // paginator must charge that same footprint. The physical band comes from the
-  // ACTIVE section's geometry (`currentSectionGeom`, reassigned at every break —
-  // TDZ-safe like bodyTopPt above), un-swapped by physicalLayoutSection, so a
-  // vertical section with per-section page geometry stamps the same band the
-  // paint pass derives from its page's `verticalPhys`. Horizontal sections are
-  // untouched (`verticalUpright` false).
+  // paginator must charge that same footprint, so resolve the physical content
+  // band from the BODY-LEVEL swapped section — the one frame-consistent source
+  // today: `verticalLayoutDoc` swaps only `doc.section`, so a mid-body
+  // SectionBreak's `geom` still carries PHYSICAL page geometry and must not be
+  // fed through `physicalLayoutSection` (it would double-invert). Per-section
+  // geometry/text-direction inside a vertical document is the #988 ①
+  // per-section follow-up; until it lands, vertical layout is body-section
+  // uniform (measure `verticalPhys` in buildMeasureState is seeded from the
+  // same body-level section, and the paint pass resolves the same geometry for
+  // every page). Horizontal sections are untouched (`verticalUpright` false).
   const verticalUpright = isVerticalSection(section);
-  const uprightTableBandPt = (): number => {
-    const phys = physicalLayoutSection({ ...section, ...currentSectionGeom });
-    return phys.pageWidth - phys.marginLeft - phys.marginRight;
-  };
+  const uprightPhysSection = verticalUpright ? physicalLayoutSection(section) : section;
+  const uprightTableBandPt = (): number =>
+    uprightPhysSection.pageWidth - uprightPhysSection.marginLeft - uprightPhysSection.marginRight;
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -4121,6 +4127,10 @@ function buildMeasureState(
     // physicalLayoutSection; `cssWidthPx` at the paginator's scale 1 is the
     // physical page width in pt. `verticalCJK` stays UNSET: the measure pass
     // keeps its horizontal glyph metrics (only anchor geometry re-frames).
+    // Seeded from the BODY-LEVEL section, the single frame-consistent source —
+    // vertical layout is body-section uniform until the #988 ① per-section
+    // follow-up (see verticalLayoutDoc), and the paint pass resolves the same
+    // geometry for every vertical page.
     verticalPhys: isVerticalSection(section)
       ? (() => {
           const phys = physicalLayoutSection(section);
