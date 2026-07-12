@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnGeom, ColumnsSpec, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -1100,16 +1100,24 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *                                 same +90° vertical path as `tbRl`. (The per-
  *                                 SECTION mixing that fixture also exercises —
  *                                 a `btLr` non-final section beside a horizontal
- *                                 final section — needs per-section text-direction
- *                                 surfacing and remains a follow-up; a document
- *                                 whose body section is `btLr` renders vertically
- *                                 here already.)
+ *                                 final section — is surfaced per-section: the
+ *                                 SectionBreak marker carries `textDirection`,
+ *                                 the paginator stamps it in lockstep with the
+ *                                 section geometry, and each page rotates by its
+ *                                 OWN direction. Issue #1000.)
  *  Two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
  *    - `lrTb`  (≡ Strict `tb`, the default) — dropped to null by the parser.
  *    - `lrTbV` (≡ Strict `tbV`) — horizontal, EA glyphs rotated 270°; still a
  *                                 horizontal flow, so not this vertical path. */
 function isVerticalSection(s: SectionProps): boolean {
-  const td = s.textDirection;
+  return isVerticalTextDirection(s.textDirection);
+}
+
+/** The raw-token predicate behind {@link isVerticalSection}, for the PER-SECTION
+ *  carriers that hold a bare `textDirection` value (a SectionBreak marker's
+ *  `textDirection`, an element's stamped `sectionTextDirection`) rather than a
+ *  full SectionProps (issue #1000). `null`/`undefined`/unknown ⇒ horizontal. */
+function isVerticalTextDirection(td: string | null | undefined): boolean {
   return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV' || td === 'btLr';
 }
 
@@ -1145,12 +1153,12 @@ function verticalLayoutSection(phys: SectionProps): SectionProps {
 /** Return a shallow copy of `doc` with its BODY-LEVEL section swapped to the
  *  vertical LOGICAL geometry, so the pagination + layout engine — which reads
  *  `doc.section` — organises the page as a rotated horizontal page. Per-body
- *  SectionBreak `geom`s are NOT swapped: per-section geometry/text-direction
- *  inside a vertical document is the #988 ① per-section follow-up, so vertical
- *  layout is body-section uniform today and consumers must not mix a mid-body
- *  section geom into the swapped frame. Only invoked when the body section is
- *  vertical; horizontal docs are returned untouched (referential identity),
- *  keeping the horizontal path byte-identical. */
+ *  SectionBreak `geom`s are NOT swapped here: the paginator resolves each
+ *  mid-body section's own logical frame (swapped iff THAT section is vertical)
+ *  through `sectionFrameFrom` (issue #1000 per-section text direction), so a
+ *  marker's `geom` stays the PHYSICAL geometry the parser emitted. Only invoked
+ *  when the body section is vertical; horizontal docs are returned untouched
+ *  (referential identity), keeping the horizontal path byte-identical. */
 function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
   if (!isVerticalSection(doc.section)) return doc;
   return { ...doc, section: verticalLayoutSection(doc.section) };
@@ -1175,22 +1183,115 @@ function physicalLayoutSection(logical: SectionProps): SectionProps {
   };
 }
 
-/** Map a page's stamped `sectionGeom` width/height back to PHYSICAL page size.
- *  Pagination for a vertical (tbRl) section runs on the SWAPPED logical geometry
- *  (`verticalLayoutDoc`), so a page's stamped `pageWidth`/`pageHeight` are the
- *  LOGICAL dims (width = physical height). Callers that report the visible page
- *  box (e.g. `DocxDocument.pageSize`, the worker's `pageSizes` meta, a scroll
- *  viewer's spacer) want the PHYSICAL size, so this un-swaps for vertical sections
- *  and is identity for horizontal ones. `section` is the body-level section (its
- *  `textDirection` decides the flow); `w`/`h` are the page's stamped dims. */
-export function physicalPageSizePt(
+/** The geometry projection of {@link verticalLayoutSection} on a bare
+ *  {@link SectionGeom}: physical → SWAPPED LOGICAL (quarter-turn; margins rotate
+ *  L←T, T←R, R←B, B←L; header/footer distances preserved). Used by the paginator
+ *  to lay a vertical MID-BODY section out in its own logical frame (issue #1000)
+ *  — the body-level section keeps going through `verticalLayoutDoc`. */
+function logicalGeomOf(phys: SectionGeom): SectionGeom {
+  return {
+    pageWidth: phys.pageHeight,
+    pageHeight: phys.pageWidth,
+    marginLeft: phys.marginTop,
+    marginTop: phys.marginRight,
+    marginRight: phys.marginBottom,
+    marginBottom: phys.marginLeft,
+    headerDistance: phys.headerDistance,
+    footerDistance: phys.footerDistance,
+  };
+}
+
+/** Inverse of {@link logicalGeomOf} — the geometry projection of
+ *  {@link physicalLayoutSection}: SWAPPED LOGICAL → physical (margins rotate
+ *  T←L, R←T, B←R, L←B). `physicalGeomOf(logicalGeomOf(g)) === g`. */
+function physicalGeomOf(logical: SectionGeom): SectionGeom {
+  return {
+    pageWidth: logical.pageHeight,
+    pageHeight: logical.pageWidth,
+    marginTop: logical.marginLeft,
+    marginRight: logical.marginTop,
+    marginBottom: logical.marginRight,
+    marginLeft: logical.marginBottom,
+    headerDistance: logical.headerDistance,
+    footerDistance: logical.footerDistance,
+  };
+}
+
+/** Per-PAGE frame metadata the paginator records for every physical page it
+ *  opens (keyed by the page's element-array identity, so prebuilt pages carry it
+ *  into the paint pass without any API change — mirrors the `bodyFlowFragments`
+ *  WeakMap pattern). It duplicates the first element's `sectionGeom` /
+ *  `sectionTextDirection` stamps, and is the ONLY carrier for an EMPTY page
+ *  (§17.18.79 oddPage/evenPage parity padding), whose direction and physical
+ *  size are observable even though it has no elements — the incoming section
+ *  (the paginator's transition model) owns it. Scope note (issue #1000): the
+ *  metadata carries the page FRAME only (geometry + direction); header/footer
+ *  and page-number resolution for empty pages keep their existing body-level
+ *  fallback (documented residual). */
+interface PageFrameMeta {
+  /** The owning section's LOGICAL page geometry (swapped for a vertical section). */
+  geom: SectionGeom;
+  /** The owning section's `textDirection` (`null` ⇒ horizontal). */
+  textDirection: string | null;
+}
+const pageFrameMeta = new WeakMap<object, PageFrameMeta>();
+
+/** A section resolved to the LOGICAL frame the paginator lays it out in (issue
+ *  #1000 per-section text direction): a vertical (tbRl ≡ btLr, §17.6.20 + the
+ *  #988 batch-3 adjudication ①) section's `geom` is its PHYSICAL page geometry
+ *  quarter-turned by {@link logicalGeomOf}; a horizontal section's `geom` is
+ *  physical verbatim. `textDirection` is the owning section's raw token
+ *  (`null` ⇒ horizontal) and `vertical` its {@link isVerticalTextDirection}
+ *  projection — carried separately so consumers never re-derive it against the
+ *  wrong section. `columnsSpec` is the owning section's `<w:cols>` (§17.6.4). */
+interface ResolvedSectionFrame {
+  geom: SectionGeom;
+  textDirection: string | null;
+  vertical: boolean;
+  columnsSpec: ColumnsSpec | null;
+}
+
+/** Resolve a page's `textDirection` (issue #1000 per-section mixing): the first
+ *  element's stamped `sectionTextDirection`, else the page's {@link PageFrameMeta}
+ *  (empty pages), else the body-level `section.textDirection` (legacy / manually
+ *  constructed test pages — the pre-per-section behaviour). `null` ⇒ horizontal.
+ *  NOTE: `sectionTextDirection` stamps `null` explicitly for horizontal sections,
+ *  so only `undefined` (no stamp) falls through. */
+function pageTextDirection(
+  pages: PaginatedBodyElement[][],
+  pageIndex: number,
   section: SectionProps,
-  w: number,
-  h: number,
+): string | null {
+  const page = pages[pageIndex];
+  const stamped = page?.[0]?.sectionTextDirection;
+  if (stamped !== undefined) return stamped;
+  const meta = page ? pageFrameMeta.get(page) : undefined;
+  if (meta) return meta.textDirection;
+  return section.textDirection ?? null;
+}
+
+/** The PHYSICAL page box of page `pageIndex` — the single page-size resolver
+ *  shared by `DocxDocument.pageSize` (main mode) and the render worker's
+ *  `pageSizes` meta, so the two can never drift (issue #1000). The stamped
+ *  `sectionGeom` is the owning section's LOGICAL geometry (swapped for a
+ *  vertical section), so it is un-swapped by the PAGE's OWN direction — not the
+ *  body-level one, which a per-section mixed document would misreport. An empty
+ *  (parity-padding) page resolves through its {@link PageFrameMeta}; a page with
+ *  no stamp at all (legacy callers) reports the body-level section's verbatim —
+ *  PHYSICAL — pgSz box. `section` is the body-level section as parsed
+ *  (physical, unswapped). */
+export function physicalPageSizeForPage(
+  pages: PaginatedBodyElement[][],
+  pageIndex: number,
+  section: SectionProps,
 ): { widthPt: number; heightPt: number } {
-  return isVerticalSection(section)
-    ? { widthPt: h, heightPt: w }
-    : { widthPt: w, heightPt: h };
+  const page = pages[pageIndex];
+  const meta = page ? pageFrameMeta.get(page) : undefined;
+  const g = page?.[0]?.sectionGeom ?? meta?.geom;
+  if (g == null) return { widthPt: section.pageWidth, heightPt: section.pageHeight };
+  return isVerticalTextDirection(pageTextDirection(pages, pageIndex, section))
+    ? { widthPt: g.pageHeight, heightPt: g.pageWidth }
+    : { widthPt: g.pageWidth, heightPt: g.pageHeight };
 }
 
 /**
@@ -1307,11 +1408,11 @@ async function renderDocumentToCanvasLeased(
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   // ECMA-376 §17.6.20 — for a vertical (tbRl) section the page is laid out in a
   // SWAPPED logical space (logical width = physical page height) and rotated +90°
-  // into physical space at paint. `layoutDoc` carries the swapped geometry through
-  // pagination + per-page section resolution; horizontal docs get `doc` unchanged
-  // (referential identity ⇒ byte-identical). The vertical flag is read from the
-  // ORIGINAL section (the swap preserves textDirection).
-  const vertical = isVerticalSection(doc.section);
+  // into physical space at paint. `layoutDoc` carries the swapped BODY-level
+  // geometry through pagination + per-page section resolution; horizontal docs
+  // get `doc` unchanged (referential identity ⇒ byte-identical). Text direction
+  // is PER-SECTION (issue #1000), so the `vertical` flag is resolved per PAGE
+  // below, after the stamped page frame is merged.
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const kinsoku = layoutSettings.kinsoku;
@@ -1343,12 +1444,23 @@ async function renderDocumentToCanvasLeased(
   // single-section document `geom` equals `doc.section`, so `sec === doc.section` in
   // value — byte-identical output.
   // `sec` is the LOGICAL section the body/header/footer are laid out in: for a
-  // vertical page that is the swapped geometry (from `layoutDoc`), for horizontal
-  // it equals the physical section. All RenderState geometry below (contentX/W,
-  // margins, pageWidth, docGrid) reads `sec`, so the entire layout is expressed
-  // in logical coordinates and the page transform maps it to physical space.
+  // vertical page that is the swapped geometry (the paginator stamps a vertical
+  // section's SWAPPED logical geom), for horizontal it equals the physical
+  // section. All RenderState geometry below (contentX/W, margins, pageWidth,
+  // docGrid) reads `sec`, so the entire layout is expressed in logical
+  // coordinates and the page transform maps it to physical space.
+  //
+  // Issue #1000 — `textDirection` is merged per PAGE too (the stamped
+  // `sectionTextDirection`, in lockstep with the stamped geom; body-level
+  // fallback for unstamped legacy pages), and `vertical` — which keys the
+  // physical canvas box, the +90° page rotation, `verticalCJK`, `verticalPhys`
+  // and the horizontal header/footer branch below — is derived from the MERGED
+  // section, so a vertical non-final section and a horizontal final section
+  // each paint in their own orientation.
   const pageGeom = resolvePageSection(pages, pageIndex, layoutDoc).geom;
-  const sec: SectionProps = { ...layoutDoc.section, ...pageGeom };
+  const pageTd = pageTextDirection(pages, pageIndex, layoutDoc.section);
+  const sec: SectionProps = { ...layoutDoc.section, ...pageGeom, textDirection: pageTd };
+  const vertical = isVerticalSection(sec);
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, sec);
 
   // The CANVAS is sized to the PHYSICAL page (visible landscape page for tbRl):
@@ -2127,24 +2239,25 @@ export function computePages(
     documentSettings,
   );
   // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): in a
-  // vertical (tbRl) section — `section` here is the SWAPPED logical geometry,
-  // textDirection preserved — a block table is an UPRIGHT block: its cells lay
+  // vertical (tbRl) section a block table is an UPRIGHT block: its cells lay
   // out horizontally at the PHYSICAL content width, and it advances the flow by
   // its PHYSICAL WIDTH (the paint pass's renderTable vertical branch). The
-  // paginator must charge that same footprint, so resolve the physical content
-  // band from the BODY-LEVEL swapped section — the one frame-consistent source
-  // today: `verticalLayoutDoc` swaps only `doc.section`, so a mid-body
-  // SectionBreak's `geom` still carries PHYSICAL page geometry and must not be
-  // fed through `physicalLayoutSection` (it would double-invert). Per-section
-  // geometry/text-direction inside a vertical document is the #988 ①
-  // per-section follow-up; until it lands, vertical layout is body-section
-  // uniform (measure `verticalPhys` in buildMeasureState is seeded from the
-  // same body-level section, and the paint pass resolves the same geometry for
-  // every page). Horizontal sections are untouched (`verticalUpright` false).
-  const verticalUpright = isVerticalSection(section);
-  const uprightPhysSection = verticalUpright ? physicalLayoutSection(section) : section;
-  const uprightTableBandPt = (): number =>
-    uprightPhysSection.pageWidth - uprightPhysSection.marginLeft - uprightPhysSection.marginRight;
+  // paginator must charge that same footprint. Text direction is PER-SECTION
+  // (issue #1000), so these are closures over the ACTIVE section's resolved
+  // frame (`currentSectionFrame`, reassigned at every SectionBreak): the
+  // physical band is the quarter-turn un-swap of the current LOGICAL geometry.
+  // For a single-section vertical document the frame is the body-level swapped
+  // section throughout — value-identical to the previous body-pinned band.
+  // Horizontal sections are untouched (`verticalUpright()` false).
+  // (TDZ note: `currentSectionFrame` is declared below; these arrows only close
+  // over it and first run during the element loop, after its `let` init.)
+  const verticalUpright = (): boolean => currentSectionFrame.vertical;
+  const uprightTableBandPt = (): number => {
+    const g = currentSectionFrame.vertical
+      ? physicalGeomOf(currentSectionFrame.geom)
+      : currentSectionFrame.geom;
+    return g.pageWidth - g.marginLeft - g.marginRight;
+  };
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -2163,18 +2276,19 @@ export function computePages(
     for (let j = startIdx; j < body.length; j++) {
       const e = body[j];
       if (e.type === 'sectionBreak') {
-        // Resolve this section's cols by swapping in its ColumnsSpec AND its page
-        // GEOMETRY. `computeColumns` derives the text band from
-        // pageWidth/marginLeft/marginRight (ECMA-376 §17.6.13 pgSz + §17.6.11
-        // pgMar), which are PER-SECTION — the ending section's geometry lives on
-        // this same SectionBreak marker (`e.geom`, from `sectionGeomFrom`). Spread
-        // it over the body-level `section` so the band width and x-origin come from
-        // the owning section, not the body-level one. `SectionGeom`'s field names
-        // and semantics match `SectionProps` (see the SectionGeom warning comment),
-        // so this only overrides the page-box fields. A `geom`-less marker (an
-        // inheriting section) falls back to the body-level geometry, matching
-        // `sectionGeomFrom`'s `?? bodySectionGeom`.
-        return computeColumns({ ...section, ...(e.geom ?? {}), columns: e.columns ?? null });
+        // Resolve this section's cols by swapping in its ColumnsSpec AND its
+        // resolved LOGICAL page geometry. `computeColumns` derives the text band
+        // from pageWidth/marginLeft/marginRight (ECMA-376 §17.6.13 pgSz +
+        // §17.6.11 pgMar), which are PER-SECTION — and for a VERTICAL section
+        // (issue #1000) the band lives in the SWAPPED logical frame, so this
+        // consumes the same `markerFrame` the geometry rail stamps (never the
+        // raw physical `e.geom`). Spread over the body-level `section` so only
+        // the page-box fields are overridden (`SectionGeom`'s names/semantics
+        // match `SectionProps` — see the SectionGeom warning comment). For a
+        // horizontal marker `markerFrame(e).geom` is `e.geom` verbatim (or the
+        // body-level physical geometry for a `geom`-less inheriting marker,
+        // §17.18.77) — value-identical to the pre-#1000 spread.
+        return computeColumns({ ...section, ...markerFrame(e).geom, columns: e.columns ?? null });
       }
     }
     return computeColumns(section);
@@ -2266,22 +2380,52 @@ export function computePages(
     return undefined;
   };
 
-  // ECMA-376 §17.6.13 / §17.6.11 — the page geometry (size + margins) of the
-  // section that OWNS the content starting at body index `startIdx`. Mirrors
-  // `sectionColumnsFrom` / `sectionHFFrom`: the owning section's geometry is on the
-  // NEXT `SectionBreak` marker's `geom` at/after `startIdx` (the marker ENDS that
-  // section); if there is none, the content belongs to the FINAL (body-level)
-  // section whose geometry lives on `section`. A `geom`-less marker (a section that
-  // inherits pgSz/pgMar) also falls back to the body-level geometry. For a
-  // single-section document there are no markers, so every element gets the
-  // body-level geometry — behaviour-neutral.
+  // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — the resolved LOGICAL frame of the
+  // section that OWNS the content starting at body index `startIdx`: its page
+  // geometry (size + margins), its `textDirection`, and the derived vertical
+  // flag (issue #1000 per-section mixing). Mirrors `sectionColumnsFrom` /
+  // `sectionHFFrom`: the owning section is on the NEXT `SectionBreak` marker
+  // at/after `startIdx` (the marker ENDS that section); if there is none, the
+  // content belongs to the FINAL (body-level) section.
+  //
+  // Frame convention: `section` (the computePages parameter) is the LOGICAL
+  // body-level section — `verticalLayoutDoc` already swapped it when the BODY
+  // section is vertical — while a mid-body marker's `e.geom` is the PHYSICAL
+  // geometry the parser emitted. So a marker section's logical geometry is its
+  // physical geometry quarter-turned (`logicalGeomOf`) when THAT section is
+  // vertical, verbatim otherwise; a `geom`-less marker (a section inheriting
+  // pgSz/pgMar, §17.18.77) inherits the body-level PHYSICAL geometry — un-swap
+  // the logical body geometry first when the body is vertical, else the
+  // quarter-turn would double-apply. For a single-section document there are no
+  // markers, so every element gets the body-level frame — behaviour-neutral
+  // (the geom object is `bodySectionGeom` itself, identical to the pre-#1000
+  // stamps).
   const bodySectionGeom: SectionGeom = sectionGeomOf(section);
-  const sectionGeomFrom = (startIdx: number): SectionGeom => {
+  const bodyVertical = isVerticalSection(section);
+  const bodyPhysGeom: SectionGeom = bodyVertical ? physicalGeomOf(bodySectionGeom) : bodySectionGeom;
+  const bodyFrame: ResolvedSectionFrame = {
+    geom: bodySectionGeom,
+    textDirection: section.textDirection ?? null,
+    vertical: bodyVertical,
+    columnsSpec: section.columns ?? null,
+  };
+  const markerFrame = (e: Extract<BodyElement, { type: 'sectionBreak' }>): ResolvedSectionFrame => {
+    const textDirection = e.textDirection ?? null;
+    const vertical = isVerticalTextDirection(textDirection);
+    const phys = e.geom ?? bodyPhysGeom;
+    return {
+      geom: vertical ? logicalGeomOf(phys) : phys,
+      textDirection,
+      vertical,
+      columnsSpec: e.columns ?? null,
+    };
+  };
+  const sectionFrameFrom = (startIdx: number): ResolvedSectionFrame => {
     for (let j = startIdx; j < body.length; j++) {
       const e = body[j];
-      if (e.type === 'sectionBreak') return e.geom ?? bodySectionGeom;
+      if (e.type === 'sectionBreak') return markerFrame(e);
     }
-    return bodySectionGeom;
+    return bodyFrame;
   };
 
   // ECMA-376 §17.6.12 `<w:pgNumType>` — the page-numbering settings (start / fmt)
@@ -2317,16 +2461,76 @@ export function computePages(
   // on each element so the renderer picks the active section's header/footer per
   // page. `undefined` for the final section ⇒ the renderer's body-level fallback.
   let currentSectionHF = sectionHFFrom(0);
-  // ECMA-376 §17.6.13 / §17.6.11 — the active section's page geometry, tracked in
-  // lockstep with `columns`/`currentSectionHF` (reassigned at every SectionBreak).
-  // Stamped on each element so the renderer sizes each page from its own section.
-  // For a single-section document this stays the body-level geometry throughout.
-  let currentSectionGeom = sectionGeomFrom(0);
+  // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — the active section's resolved
+  // LOGICAL frame (geometry + text direction + vertical flag; issue #1000),
+  // tracked in lockstep with `columns`/`currentSectionHF` (reassigned at every
+  // SectionBreak). `currentSectionGeom` aliases `currentSectionFrame.geom` (the
+  // many geometry readers keep their name); both are stamped on each element so
+  // the renderer sizes AND orients each page from its own section. For a
+  // single-section document this stays the body-level frame throughout.
+  let currentSectionFrame = sectionFrameFrom(0);
+  let currentSectionGeom = currentSectionFrame.geom;
   // ECMA-376 §17.6.12 — the active section's page-numbering settings, tracked in
   // lockstep with `currentSectionGeom` (reassigned at every SectionBreak). Stamped
   // on each element so `computePageNumbering` resolves each physical page's owning
   // section's restart/format. `null` for a section with no `<w:pgNumType>`.
   let currentSectionPageNumType = sectionPageNumTypeFrom(0);
+  // Issue #1000 — is this document DIRECTION-MIXED (some section's rendered
+  // orientation differs from the body's)? Only then does the measure state's
+  // logical frame need per-section re-seeding: a NON-mixed document keeps the
+  // exact pre-#1000 body-level measure seed (byte-identical for every
+  // horizontal document and for the all-vertical single-frame path), including
+  // its documented residual — per-section page SIZE differences measure
+  // header/footer/anchor content at the body-level width.
+  const directionMixed = body.some(
+    (e) =>
+      e.type === 'sectionBreak' &&
+      isVerticalTextDirection(e.textDirection ?? null) !== bodyVertical,
+  );
+  // Issue #1000 — re-seed the measure state's LOGICAL frame from the ACTIVE
+  // section's resolved frame (called at init and at every SectionBreak): page
+  // box, margins, base content band, the per-section `verticalPhys` physical
+  // frame DrawingML anchors resolve against (§20.4.3.x — a vertical section's
+  // anchors key their physical branch on it; a horizontal section must CLEAR
+  // it), and the frame-derived SectionLayoutContext (its geometry / columns /
+  // textDirection; docGrid, line numbering and vAlign stay body-level — the
+  // existing single-section residual, documented in the PR). No-op for a
+  // non-direction-mixed document (see `directionMixed`).
+  const syncMeasureFrame = (): void => {
+    if (!directionMixed) return;
+    const g = currentSectionGeom;
+    measureState.pageWidth = g.pageWidth;
+    measureState.pageH = g.pageHeight; // scale 1 (pt)
+    measureState.marginLeft = g.marginLeft;
+    measureState.marginRight = g.marginRight;
+    measureState.marginTop = bodyMarginInsetPt(g.marginTop);
+    measureState.marginBottom = bodyMarginInsetPt(g.marginBottom);
+    measureState.contentX = g.marginLeft;
+    measureState.contentW = g.pageWidth - g.marginLeft - g.marginRight;
+    if (currentSectionFrame.vertical) {
+      const phys = physicalGeomOf(g);
+      measureState.verticalPhys = {
+        pageWidth: phys.pageWidth,
+        pageHeight: phys.pageHeight,
+        marginLeft: phys.marginLeft,
+        marginRight: phys.marginRight,
+        marginTop: bodyMarginInsetPt(phys.marginTop),
+        marginBottom: bodyMarginInsetPt(phys.marginBottom),
+        cssWidthPx: phys.pageWidth,
+      };
+    } else {
+      measureState.verticalPhys = undefined;
+    }
+    const frameSection: SectionProps = {
+      ...section,
+      ...g,
+      textDirection: currentSectionFrame.textDirection,
+      columns: currentSectionFrame.columnsSpec,
+    };
+    measureState.sectionLayout = resolveSectionLayoutContext(documentSettings, frameSection);
+    measureState.docGrid = toLegacyDocGridContext(measureState.sectionLayout);
+  };
+  syncMeasureFrame();
   // ECMA-376 §17.6.4 / §17.18.79 — the CURRENT multi-column region's vertical
   // extent on the current page, in content-relative pt (0 = page content top,
   // i.e. the same frame as `y`). A region tiled into N newspaper columns is a
@@ -2381,6 +2585,20 @@ export function computePages(
   };
 
   const pages: PaginatedBodyElement[][] = [[]];
+  // Issue #1000 — record the CURRENT (incoming) section's frame as the page's
+  // {@link PageFrameMeta} whenever a page opens. It duplicates the per-element
+  // stamps for content pages and is the only frame carrier for an EMPTY page
+  // (§17.18.79 parity padding): the incoming section — the paginator's
+  // transition model — owns it, so its physical size and direction resolve
+  // consistently (Word GT for parity-blank ownership is unverified; this pins
+  // the model's deterministic choice).
+  const stampPageMeta = (): void => {
+    pageFrameMeta.set(pages[pages.length - 1], {
+      geom: currentSectionGeom,
+      textDirection: currentSectionFrame.textDirection,
+    });
+  };
+  stampPageMeta();
   let y = 0;
   let prevPara: DocParagraph | null = null;
   // Word collapses the gap between two paragraphs to max(prev.spaceAfter,
@@ -2453,6 +2671,9 @@ export function computePages(
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
     pageNoteIds = new Set<string>();
+    // Issue #1000 — every page open records its owning section's frame (see
+    // stampPageMeta; called after every pages.push, including parity blanks).
+    stampPageMeta();
   };
   /** Open a new page (no-op when the current one is empty). `pageStartIdx`
    *  is the body index that becomes the new page's first laid-out item — the
@@ -2598,7 +2819,7 @@ export function computePages(
     // so the horizontal keep-on-page displacement below does not map. (The
     // physical-axis analogue — a float overflowing the physical bottom — is
     // un-adjudicated and left to the anchor clamp.)
-    if (verticalUpright) return 0;
+    if (verticalUpright()) return 0;
     let maxBottom = 0;
     for (const run of para.runs) {
       if (run.type === 'image') {
@@ -2649,7 +2870,7 @@ export function computePages(
     if (nxt.type === 'table') {
       // §17.6.20 + #988 ④ — an upright vertical-section table's flow footprint
       // is its PHYSICAL WIDTH, not the sum of its row heights.
-      if (verticalUpright) {
+      if (verticalUpright()) {
         return resolveColumnWidths(
           nxt as unknown as DocTable, uprightTableBandPt(), measureState,
         ).reduce((s, w) => s + w, 0);
@@ -2691,6 +2912,11 @@ export function computePages(
     el.sectionHF = currentSectionHF;
     el.sectionGeom = currentSectionGeom;
     el.sectionPageNumType = currentSectionPageNumType;
+    // Issue #1000 — the owning section's text direction, in lockstep with
+    // `sectionGeom` (which is that section's SWAPPED logical geometry when this
+    // is a vertical value). Explicitly `null` for horizontal sections so
+    // consumers can distinguish "stamped horizontal" from "no stamp".
+    el.sectionTextDirection = currentSectionFrame.textDirection;
     pages[pages.length - 1].push(el);
   };
 
@@ -2782,17 +3008,36 @@ export function computePages(
       // ECMA-376 §17.10.1 — the section starting at i+1 owns the following pages'
       // headers/footers (resolved from the NEXT marker, or the body-level set).
       currentSectionHF = sectionHFFrom(i + 1);
-      // ECMA-376 §17.6.13 / §17.6.11 — and its page geometry (size + margins).
-      currentSectionGeom = sectionGeomFrom(i + 1);
+      // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — and its resolved LOGICAL frame
+      // (geometry + text direction; issue #1000). The outgoing frame is kept for
+      // the direction-change promotion below.
+      const prevFrame = currentSectionFrame;
+      currentSectionFrame = sectionFrameFrom(i + 1);
+      currentSectionGeom = currentSectionFrame.geom;
       // ECMA-376 §17.6.12 — and its page-numbering settings (start / fmt).
       currentSectionPageNumType = sectionPageNumTypeFrom(i + 1);
+      // Issue #1000 — keep the measure state's logical frame in lockstep for a
+      // direction-mixed document (no-op otherwise; see syncMeasureFrame).
+      syncMeasureFrame();
       // The break is governed by the UPCOMING section's start type (§17.6.22),
       // not this marker's own kind (the section it closes). See sectionKindFrom.
       // The sample-5 cover overprint that prompted the 0.66.1 hotfix is now fixed
       // at its real root: the parser emits a PageBreak after a "Cover Pages"
       // building block, so the continuous body after the cover lands on page 2
       // without forcing every nextPage→continuous boundary to break a page.
-      const upcomingKind = sectionKindFrom(i + 1);
+      //
+      // Issue #1000 — a CONTINUOUS boundary whose RENDERED ORIENTATION changes
+      // (vertical ⇄ horizontal, compared via the frames' `vertical` flags — NOT
+      // raw tokens, so tbRl→btLr stays continuous) is promoted to a page break:
+      // the paint model rotates a whole physical page, so one direction per page
+      // is a hard renderer constraint (a documented model constraint — Word's
+      // behaviour at such a boundary has no fixture yet, so this pins the
+      // constraint, not a Word claim). Horizontal-only documents never differ.
+      const upcomingKindRaw = sectionKindFrom(i + 1);
+      const upcomingKind =
+        upcomingKindRaw === 'continuous' && currentSectionFrame.vertical !== prevFrame.vertical
+          ? 'nextPage'
+          : upcomingKindRaw;
       if (upcomingKind === 'continuous') {
         // ECMA-376 §17.18.77 (ST_SectionMark) / §17.6.22 (type) — geometry residual:
         // reassigning `currentSectionGeom` above activates the incoming section's
@@ -3267,6 +3512,7 @@ export function computePages(
           () => currentSectionHF,
           () => currentSectionGeom,
           () => currentSectionPageNumType,
+          () => currentSectionFrame.textDirection,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -3589,7 +3835,7 @@ export function computePages(
       // that does not fit the remaining flow advances to the next column/page
       // whole, and one wider than a full column overflows like a too-tall
       // horizontal row.
-      if (verticalUpright) {
+      if (verticalUpright()) {
         const bandPt = uprightTableBandPt();
         const { colWidthsPt, rowHeightsPt } =
           computeTablePtLayout(measureState, tbl, bandPt);
@@ -3675,6 +3921,7 @@ export function computePages(
                 sourceRowIndexOf: meta.sourceRowIndexOf,
               },
             ),
+          () => currentSectionFrame.textDirection,
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -3823,17 +4070,22 @@ const MIN_MARGIN_OVERFLOW_PT = 0.5;
 function computeFooterReserves(
   pages: PaginatedBodyElement[][],
   doc: DocxDocumentModel,
-  measure: RenderState,
+  measureFor: (pageIdx: number) => RenderState,
 ): number[] {
   return pages.map((_unused, pageIdx) => {
+    // Issue #1000 (§17.6.20 + §17.10.1, #988): a VERTICAL page's footer draws
+    // horizontally at the physical bottom margin with NO body reserve (the paint
+    // branch never reserves there) — reserve 0 so pagination and paint agree.
+    if (isVerticalTextDirection(pageTextDirection(pages, pageIdx, doc.section))) return 0;
     const footer = resolvePageFooter(pages, pageIdx, doc);
     if (!footer) return 0;
-    const footerH = measureHeaderFooterHeight(footer, measure); // pt (measure is scale 1)
+    const footerH = measureHeaderFooterHeight(footer, measureFor(pageIdx)); // pt (measure is scale 1)
     // ECMA-376 §17.6.11 — margins/distances are PER-SECTION: read this page's stamped
-    // geometry (body-level fallback only for a truly empty page). Residual: footer
-    // CONTENT is still measured at the body-level width (`measure` is built once from
-    // doc.section); per-section measure width is a follow-up — it matters only when
-    // mixed page WIDTHS meet a wrapping footer.
+    // geometry (body-level fallback only for a truly empty page). Residual: in a
+    // horizontal-body document footer CONTENT is still measured at the body-level
+    // width (`measureFor` returns the one shared measure); per-section measure
+    // width is a follow-up — it matters only when mixed page WIDTHS meet a
+    // wrapping footer.
     const g = pages[pageIdx]?.[0]?.sectionGeom;
     return footerOverflowPt(
       footerH,
@@ -3855,17 +4107,22 @@ function computeFooterReserves(
 function computeHeaderReserves(
   pages: PaginatedBodyElement[][],
   doc: DocxDocumentModel,
-  measure: RenderState,
+  measureFor: (pageIdx: number) => RenderState,
 ): number[] {
   return pages.map((_unused, pageIdx) => {
+    // Issue #1000 (§17.6.20 + §17.10.1, #988): a VERTICAL page's header draws
+    // horizontally at the physical top margin with NO body reserve (the paint
+    // branch never reserves there) — reserve 0 so pagination and paint agree.
+    if (isVerticalTextDirection(pageTextDirection(pages, pageIdx, doc.section))) return 0;
     const header = resolvePageHeader(pages, pageIdx, doc);
     if (!header) return 0;
-    const headerH = measureHeaderFooterHeight(header, measure); // pt (measure is scale 1)
+    const headerH = measureHeaderFooterHeight(header, measureFor(pageIdx)); // pt (measure is scale 1)
     // ECMA-376 §17.6.11 — margins/distances are PER-SECTION: read this page's stamped
-    // geometry (body-level fallback only for a truly empty page). Residual: header
-    // CONTENT is still measured at the body-level width (`measure` is built once from
-    // doc.section); per-section measure width is a follow-up — it matters only when
-    // mixed page WIDTHS meet a wrapping header.
+    // geometry (body-level fallback only for a truly empty page). Residual: in a
+    // horizontal-body document header CONTENT is still measured at the body-level
+    // width (`measureFor` returns the one shared measure); per-section measure
+    // width is a follow-up — it matters only when mixed page WIDTHS meet a
+    // wrapping header.
     const g = pages[pageIdx]?.[0]?.sectionGeom;
     return headerOverflowPt(
       headerH,
@@ -3922,16 +4179,42 @@ function paginateWithHeaderFooterReserve(
   );
   // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
   // header/footer out HORIZONTALLY in physical space with NO body reserve (see the
-  // paint path, which sets headerReservePx/footerReservePx = 0). `doc` here is the
-  // SWAPPED logical doc, so measuring a header against its logical marginTop/Bottom
-  // (physical right/left) and reserving on the logical `y` axis would mismatch the
-  // paint. Skip the reserve entirely for vertical sections so pagination and paint
-  // agree. (Physical-axis body-push for an over-margin vertical header/footer is a
-  // documented follow-up, matching the paint path's TODO.)
-  if (isVerticalSection(doc.section)) return pass1;
+  // paint path, which sets headerReservePx/footerReservePx = 0). For a vertical
+  // page the stamped section is the SWAPPED logical frame, so measuring a header
+  // against its logical marginTop/Bottom (physical right/left) and reserving on
+  // the logical `y` axis would mismatch the paint — the reserve is skipped for
+  // vertical PAGES (per-section text direction, issue #1000; the per-page skip
+  // lives in computeHeader/FooterReserves). When EVERY section is vertical there
+  // is nothing to reserve at all — the pre-#1000 early return, byte-identical
+  // for the existing all-vertical documents. (Physical-axis body-push for an
+  // over-margin vertical header/footer is a documented follow-up, matching the
+  // paint path's TODO.)
+  const bodyVertical = isVerticalSection(doc.section);
+  const anyHorizontalSection =
+    !bodyVertical ||
+    doc.body.some(
+      (e) => e.type === 'sectionBreak' && !isVerticalTextDirection(e.textDirection ?? null),
+    );
+  if (!anyHorizontalSection) return pass1;
   const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, layoutSettings);
-  const footerReserves = computeFooterReserves(pass1, doc, measure);
-  const headerReserves = computeHeaderReserves(pass1, doc, measure);
+  // Issue #1000 — a horizontal page's header/footer must be measured against its
+  // OWN frame: in a vertical-body mixed document the body-level `measure` is the
+  // SWAPPED logical frame, which would wrap header/footer content at the wrong
+  // width. Horizontal-body documents keep the single shared `measure` verbatim
+  // (byte-identical, including the documented per-section-width residual).
+  const measureFor = bodyVertical
+    ? (pageIdx: number): RenderState => {
+        const g = pass1[pageIdx]?.[0]?.sectionGeom;
+        return buildMeasureState(
+          ctx,
+          { ...doc.section, ...(g ?? {}), textDirection: null },
+          fontFamilyClasses,
+          layoutSettings,
+        );
+      }
+    : (): RenderState => measure;
+  const footerReserves = computeFooterReserves(pass1, doc, measureFor);
+  const headerReserves = computeHeaderReserves(pass1, doc, measureFor);
   const overflows = (rs: number[]): boolean => rs.some((r) => r > MIN_MARGIN_OVERFLOW_PT);
   if (!overflows(footerReserves) && !overflows(headerReserves)) return pass1;
   const pageReserves = pass1.map((_unused, i): PageReserve => ({
@@ -4025,8 +4308,17 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
     const firstEl = elements[0] as PaginatedBodyElement | undefined;
     const geomOverride = firstEl?.sectionGeom;
+    // Issue #1000 — merge the page's OWN text direction alongside its geometry
+    // (stamped in lockstep), so `LayoutPage.section.textDirection` reports the
+    // page's direction, not the body's, in a per-section mixed document.
+    // Undefined (unstamped legacy pages) keeps the body-level value.
+    const tdOverride = firstEl?.sectionTextDirection;
     const sectionProps: SectionProps = geomOverride
-      ? { ...layoutDoc.section, ...geomOverride }
+      ? {
+          ...layoutDoc.section,
+          ...geomOverride,
+          ...(tdOverride !== undefined ? { textDirection: tdOverride } : {}),
+        }
       : layoutDoc.section;
     const resolvedSection = resolveSectionLayoutContext(layoutSettings, sectionProps);
     // M-2 — the paginator stamped the resolved §17.6.4 column geometry active at this
@@ -4127,10 +4419,10 @@ function buildMeasureState(
     // physicalLayoutSection; `cssWidthPx` at the paginator's scale 1 is the
     // physical page width in pt. `verticalCJK` stays UNSET: the measure pass
     // keeps its horizontal glyph metrics (only anchor geometry re-frames).
-    // Seeded from the BODY-LEVEL section, the single frame-consistent source —
-    // vertical layout is body-section uniform until the #988 ① per-section
-    // follow-up (see verticalLayoutDoc), and the paint pass resolves the same
-    // geometry for every vertical page.
+    // Seeded from the section this measure state is BUILT from (the body-level
+    // one in computePages); a direction-MIXED document then re-seeds it per
+    // section via computePages' `syncMeasureFrame` rail (issue #1000), so a
+    // mid-body section's anchors resolve against ITS OWN physical frame.
     verticalPhys: isVerticalSection(section)
       ? (() => {
           const phys = physicalLayoutSection(section);
@@ -4735,6 +5027,10 @@ function splitParagraphAcrossPages(
    *  sees the section's restart/format on EVERY physical page a spilled paragraph
    *  lands on (not only the section's first page). Omitted ⇒ `null` (continue). */
   tagSectionPageNumType?: () => PageNumType | null,
+  /** ECMA-376 §17.6.20 — the active SECTION's text direction (issue #1000),
+   *  stamped in lockstep with `tagSectionGeom` (constant across a paragraph's
+   *  slices). Omitted ⇒ no stamp (the renderer's body-level fallback). */
+  tagSectionTextDirection?: () => string | null,
 ): { endY: number } {
   const colTop = columnTop ?? (() => 0);
   const colBot = columnBottom ?? (() => contentH);
@@ -4760,6 +5056,7 @@ function splitParagraphAcrossPages(
     if (tagSectionHF) el.sectionHF = tagSectionHF();
     if (tagSectionGeom) el.sectionGeom = tagSectionGeom();
     if (tagSectionPageNumType) el.sectionPageNumType = tagSectionPageNumType();
+    if (tagSectionTextDirection) el.sectionTextDirection = tagSectionTextDirection();
     return el;
   };
   {
@@ -6139,6 +6436,10 @@ export function splitTableAcrossPages(
       sourceRowIndexOf: (fragmentRowIndex: number) => number;
     },
   ) => void,
+  /** ECMA-376 §17.6.20 — the active SECTION's text direction (issue #1000),
+   *  stamped in lockstep with `tagSectionGeom` (constant across the split).
+   *  Omitted ⇒ no stamp (the renderer's body-level fallback). */
+  tagSectionTextDirection?: () => string | null,
 ): number {
   const colTop = columnTop ?? (() => 0);
   let workTable = table;
@@ -6310,6 +6611,7 @@ export function splitTableAcrossPages(
     if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
     if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
     if (tagSectionPageNumType) sliceEl.sectionPageNumType = tagSectionPageNumType();
+    if (tagSectionTextDirection) sliceEl.sectionTextDirection = tagSectionTextDirection();
     // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
     // prepended on continuations, matching `sliceRows`) so the paint pass reuses
     // them 1:1 instead of re-measuring the slice.

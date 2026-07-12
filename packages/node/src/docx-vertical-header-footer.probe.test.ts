@@ -164,11 +164,10 @@ function verticalHeaderFooterDocx(opts: DocxOpts): Uint8Array {
 
 interface Run { t: string; x: number; y: number; w: number; h: number; tr?: string }
 
-async function renderRuns(): Promise<{ runs: Run[]; physW: number; physH: number }> {
+async function renderRuns(): Promise<{ runs: Run[] }> {
   const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-  const { renderDocumentToCanvas, physicalPageSizePt } = rendererMod as Any;
+  const { renderDocumentToCanvas } = rendererMod as Any;
   const doc = parseDocx(verticalHeaderFooterDocx({ hf: true }));
-  const phys = physicalPageSizePt(doc.section, doc.section.pageWidth, doc.section.pageHeight);
   // Physical letter portrait: width 612 (=pageWidth), height 792 (=pageHeight).
   const canvas = new Canvas(Math.round(doc.section.pageWidth), Math.round(doc.section.pageHeight));
   const runs: Run[] = [];
@@ -185,7 +184,7 @@ async function renderRuns(): Promise<{ runs: Run[]; physW: number; physH: number
     restoreOff();
     restoreImg();
   }
-  return { runs, physW: phys.widthPt, physH: phys.heightPt };
+  return { runs };
 }
 
 describe.skipIf(!skia || !docxMod || !rendererMod)(

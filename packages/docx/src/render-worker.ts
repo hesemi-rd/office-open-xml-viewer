@@ -16,7 +16,7 @@ import {
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { paginateDocument, renderDocumentToCanvas, physicalPageSizeForPage, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -114,20 +114,16 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         });
       }
       pages = paginateDocument(doc);
-      // ECMA-376 §17.6.13 / §17.6.11 — per-page size from each page's first
-      // element's stamped `sectionGeom` (body-level fallback for an empty page).
+      // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — per-page size from each page's
+      // stamped frame (its page-meta for an empty parity page). A vertical
+      // section paginates on the SWAPPED logical geometry, so
+      // `physicalPageSizeForPage` — the resolver shared with
+      // `DocxDocument.pageSize` — un-swaps the stamped dims by the PAGE's OWN
+      // direction (per-section, issue #1000) back to the PHYSICAL page box the
+      // meta reports (identity for horizontal pages).
       const model = doc;
-      const pageSizes = pages.map((els) => {
-        const g = els[0]?.sectionGeom;
-        // A vertical (tbRl) section paginates on the SWAPPED logical geometry, so
-        // un-swap the stamped dims back to the PHYSICAL page box the meta reports
-        // (identity for horizontal docs).
-        return physicalPageSizePt(
-          model.section,
-          g?.pageWidth ?? model.section.pageWidth,
-          g?.pageHeight ?? model.section.pageHeight,
-        );
-      });
+      const paginated = pages;
+      const pageSizes = paginated.map((_els, i) => physicalPageSizeForPage(paginated, i, model.section));
       const meta: DocumentMeta = {
         pageCount: pages.length,
         comments: doc.comments ?? [],

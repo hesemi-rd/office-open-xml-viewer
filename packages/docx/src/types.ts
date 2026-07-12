@@ -494,6 +494,17 @@ export type PaginatedBodyElement = BodyElement & {
    *  format. `null` ⇒ the section has no `<w:pgNumType>` (numbering continues;
    *  decimal). Runtime-only — never emitted by the parser. */
   sectionPageNumType?: PageNumType | null;
+  /** ECMA-376 §17.6.20 — the flow direction of the SECTION this element belongs
+   *  to (same enum as {@link SectionProps.textDirection}; `null` ⇒ horizontal).
+   *  Stamped by the paginator (from the upcoming `SectionBreak`'s
+   *  `textDirection`, or the body-level section) IN LOCKSTEP with `sectionGeom`:
+   *  when this is a vertical value the stamped `sectionGeom` is that section's
+   *  SWAPPED LOGICAL geometry (see `verticalLayoutSection`), and the renderer
+   *  rotates the page +90° at paint (issue #1000 per-section mixing). Kept as a
+   *  SIBLING of `sectionGeom` — `SectionGeom` stays pure page-box geometry
+   *  mirroring the Rust struct. Absent (undefined) ⇒ legacy pages fall back to
+   *  the body-level `doc.section.textDirection`. Runtime-only. */
+  sectionTextDirection?: string | null;
   /** B2 table stage 1b — compute-once table layout for the LEGACY paint path
    *  (floating tables, and the fallback for a block table the fragment-paint gate does
    *  not cover). When this element is a table, the paginator stamps the per-grid-column

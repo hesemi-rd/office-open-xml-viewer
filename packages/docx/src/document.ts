@@ -14,7 +14,7 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizePt, type DocxTextRunInfo } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizeForPage, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -401,15 +401,13 @@ export class DocxDocument {
     if (!this._document) return { widthPt: 0, heightPt: 0 };
     const pages = this._getPages();
     const clamped = Math.max(0, Math.min(pageIndex, pages.length - 1));
-    const g = pages[clamped]?.[0]?.sectionGeom;
-    // The stamped `sectionGeom` is in LOGICAL dims for a vertical (tbRl) section
-    // (pagination runs on the swapped page); `physicalPageSizePt` un-swaps it so
-    // this reports the visible PHYSICAL page box (identity for horizontal docs).
-    return physicalPageSizePt(
-      this._document.section,
-      g?.pageWidth ?? this._document.section.pageWidth,
-      g?.pageHeight ?? this._document.section.pageHeight,
-    );
+    // The stamped `sectionGeom` is in LOGICAL dims for a vertical section
+    // (pagination runs on the swapped frame); `physicalPageSizeForPage` — the
+    // resolver shared with the render worker's `pageSizes` meta — un-swaps it
+    // by the PAGE's OWN stamped direction (§17.6.20 is per-section, issue
+    // #1000), so this reports the visible PHYSICAL page box (identity for
+    // horizontal pages).
+    return physicalPageSizeForPage(pages, clamped, this._document.section);
   }
 
   renderPage(
