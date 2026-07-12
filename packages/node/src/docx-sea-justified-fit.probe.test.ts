@@ -176,8 +176,11 @@ const macos = process.platform === 'darwin';
 const havePdftotext = (() => {
   try { execFileSync('pdftotext', ['-v'], { stdio: 'ignore' }); return true; } catch { return false; }
 })();
-const gate = !!skia && !!docxMod && !!rendererMod && macos && havePdftotext
-  && !!SAMPLE && !!PDF && existsSync(SAMPLE!) && existsSync(PDF!);
+const havePdfinfo = (() => {
+  try { execFileSync('pdfinfo', ['-v'], { stdio: 'ignore' }); return true; } catch { return false; }
+})();
+const baseGate = !!skia && !!docxMod && !!rendererMod && macos && havePdftotext;
+const gate = baseGate && !!SAMPLE && !!PDF && existsSync(SAMPLE!) && existsSync(PDF!);
 
 describe.skipIf(!gate)('issue #991 — SEA justified line-fit adjudication', () => {
   it('per-page line-break divergence report', async () => {
@@ -260,4 +263,61 @@ describe.skipIf(!gate)('issue #991 — SEA justified line-fit adjudication', () 
     if (process.env.DOCX_FIT_OUT) writeFileSync(process.env.DOCX_FIT_OUT, summary);
     expect(ourTotal).toBeGreaterThan(0);
   });
+});
+
+// ── Fixture pins (private corpus, local-only — CI has no private fixtures) ────
+// Word-parity ACCEPTANCE for the issue #991 fix: on a host that has the private
+// fixtures AND their real fonts installed, our per-page visible-line counts must
+// equal the Word reference PDF's. sample-29 is the Thai corpus document (Word
+// emits 221 lines; the pre-fix engine emitted 219) and sample-55 is the #991
+// calibration fixture (21-paragraph overflow sweep + 8 no-space-run placements,
+// adjudication-manifest-4.md). Line-content divergences inside an equal-count
+// page (e.g. interleaved narrow table-cell headers that pdftotext flattens in a
+// different order) are reconstruction artifacts, so the pin is count-based.
+const privatePair = (name: string): { docx: string; pdf: string } | null => {
+  const dir = resolve(ROOT, 'packages/docx/public/private');
+  const docx = resolve(dir, `${name}.docx`);
+  const pdf = resolve(dir, `${name}.pdf`);
+  return existsSync(docx) && existsSync(pdf) ? { docx, pdf } : null;
+};
+
+// Requires `pdfinfo` (poppler, alongside pdftotext) for the trailing-page
+// emptiness check below.
+describe.skipIf(!baseGate || !havePdfinfo)('issue #991 — private fixture line-count pins', () => {
+  for (const name of ['sample-29', 'sample-55']) {
+    const pair = privatePair(name);
+    it.skipIf(!pair)(`${name}: per-page visible-line counts match the Word PDF`, async () => {
+      const doc = parse(pair!.docx);
+      const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
+      let pages: unknown[][];
+      try { pages = (rendererMod as unknown as RendererMod).paginateDocument(doc); }
+      finally { restore.forEach((r) => r()); }
+      let ourTotal = 0;
+      let wordTotal = 0;
+      for (let p = 0; p < pages.length; p++) {
+        const our = await ourPageLines(doc, pages, p, 595);
+        const word = wordPageLines(pair!.pdf, p);
+        ourTotal += our.length;
+        wordTotal += word.length;
+        expect(our.length, `${name} page ${p + 1} visible-line count`).toBe(word.length);
+      }
+      // Word may paginate onto MORE pages than we do (e.g. the Thai corpus
+      // document renders 11 pages under the #989-adjudicated grazing fit while
+      // Word emits a 12th, empty, page). Any PDF page beyond our page count
+      // must then carry NO text — otherwise the per-page loop above silently
+      // skipped real Word content and the equal totals would be a lie.
+      const pdfInfo = execFileSync('pdfinfo', [pair!.pdf], { encoding: 'utf8' });
+      const pdfPages = Number(/^Pages:\s+(\d+)$/m.exec(pdfInfo)?.[1] ?? '0');
+      expect(pdfPages, `${name} pdfinfo page count`).toBeGreaterThan(0);
+      for (let p = pages.length; p < pdfPages; p++) {
+        expect(
+          wordPageLines(pair!.pdf, p).length,
+          `${name} Word PDF page ${p + 1} exceeds our pagination and must be empty`,
+        ).toBe(0);
+      }
+      // eslint-disable-next-line no-console
+      console.log(`[#991 pin] ${name}: ${ourTotal} lines == Word ${wordTotal} (our ${pages.length} pages, PDF ${pdfPages})`);
+      expect(ourTotal).toBe(wordTotal);
+    });
+  }
 });

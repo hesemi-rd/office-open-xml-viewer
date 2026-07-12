@@ -153,6 +153,30 @@ export function isGraphemeFillText(text: string): boolean {
   return false;
 }
 
+/**
+ * True when `text` carries dictionary-SEA (Thai/Lao/Khmer) content and NO
+ * grapheme-fill (Myanmar/Tibetan) content. Unlike {@link isGraphemeFillText}
+ * this scans EVERY code point, so a rare single run mixing both SEA families
+ * is excluded rather than classified by its first span.
+ *
+ * Introduced for the issue #991 Word-verified fit rules (zero trailing-space
+ * shrink on Thai lines; whole-chunk movement of a full-line-fitting no-space
+ * run): they apply exactly to pure dictionary-SEA segments. Grapheme-fill
+ * scripts keep the per-cluster greedy fill (#961), and a mixed-family segment
+ * falls back to the pre-#991 greedy path so a grapheme-fill span is never
+ * moved as part of an atomic chunk.
+ */
+export function isDictionarySeaText(text: string): boolean {
+  let hasDict = false;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (!isSeaScriptCodePoint(cp)) continue;
+    if (isGraphemeFillScript(seaScriptOf(cp))) return false;
+    hasDict = true;
+  }
+  return hasDict;
+}
+
 // ── Segmenter plumbing (cached + test-injectable) ────────────────────────────
 
 /** Minimal shape of one `Intl.Segments` entry we rely on. */
