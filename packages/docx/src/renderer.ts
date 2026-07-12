@@ -1089,18 +1089,28 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *  approximates the `V` variants' non-EA rotation the same as `tbRl`, which the
  *  glyph path already draws Latin sideways for).
  *
- *  Two values are VERTICAL but NOT handled by this stage-1 path, so they return
- *  false (parsed and carried, but rendered as horizontal until implemented):
- *    - `btLr`  (≡ Strict `lr`)  — vertical, but lines flow LEFT→RIGHT and glyphs
- *                                 stack BOTTOM→TOP: needs the opposite page
- *                                 rotation/flow, a separate follow-up.
- *  And two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
+ *    - `btLr`  (≡ Strict `lr`)  — its NOMINAL semantics are bottom-to-top /
+ *                                 left-to-right, but Word ground truth (issue #988
+ *                                 batch-3 adjudication ①) shows Word renders a
+ *                                 SECTION-level `btLr` IDENTICALLY to `tbRl`:
+ *                                 CJK upright stacked top→bottom, Latin/digits
+ *                                 rotated 90° CW (sideways), columns right→left —
+ *                                 it does NOT honor the literal bottom-to-top /
+ *                                 left-to-right flow. So it routes through the
+ *                                 same +90° vertical path as `tbRl`. (The per-
+ *                                 SECTION mixing that fixture also exercises —
+ *                                 a `btLr` non-final section beside a horizontal
+ *                                 final section — needs per-section text-direction
+ *                                 surfacing and remains a follow-up; a document
+ *                                 whose body section is `btLr` renders vertically
+ *                                 here already.)
+ *  Two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
  *    - `lrTb`  (≡ Strict `tb`, the default) — dropped to null by the parser.
  *    - `lrTbV` (≡ Strict `tbV`) — horizontal, EA glyphs rotated 270°; still a
  *                                 horizontal flow, so not this vertical path. */
 function isVerticalSection(s: SectionProps): boolean {
   const td = s.textDirection;
-  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV';
+  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV' || td === 'btLr';
 }
 
 /** Map a vertical (tbRl) section's PHYSICAL page geometry to the SWAPPED LOGICAL
