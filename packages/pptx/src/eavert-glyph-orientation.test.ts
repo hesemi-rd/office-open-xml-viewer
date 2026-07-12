@@ -56,6 +56,9 @@ interface DrawCall {
   /** Accumulated translate-x in effect at draw time — the along-column cell
    *  centre for an upright glyph (translate(cx, …) precedes its fillText). */
   tx: number;
+  /** Net scale-y in effect at draw time. −1 for a reflected Tr long-stroke mark
+   *  (ー 〜 ～ → `scale(1, -1)`); +1 otherwise. */
+  sy: number;
 }
 
 /** Normalise an angle to (−π, π] so 0 (upright) and π/2 (sideways) compare cleanly. */
@@ -75,7 +78,8 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   let textBaseline: CanvasTextBaseline = 'alphabetic';
   let rotation = 0;
   let tx = 0;
-  const stack: { rotation: number; tx: number }[] = [];
+  let sy = 1;
+  const stack: { rotation: number; tx: number; sy: number }[] = [];
   const px = (): number => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
   const calls: DrawCall[] = [];
   const metricsFor = (s: string): TextMetrics => {
@@ -99,13 +103,13 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     get textAlign() { return textAlign; }, set textAlign(v: CanvasTextAlign) { textAlign = v; },
     get textBaseline() { return textBaseline; }, set textBaseline(v: CanvasTextBaseline) { textBaseline = v; },
     measureText: (s: string) => metricsFor(s),
-    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx }),
-    strokeText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx }),
-    save: () => { stack.push({ rotation, tx }); },
-    restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; tx = s.tx; } },
+    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy }),
+    strokeText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy }),
+    save: () => { stack.push({ rotation, tx, sy }); },
+    restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; tx = s.tx; sy = s.sy; } },
     translate: (x: number) => { tx += x; },
     rotate: (a: number) => { rotation += a; },
-    scale: () => {},
+    scale: (_sx: number, syArg: number) => { sy *= syArg; },
     beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, stroke: () => {},
     clip: () => {}, rect: () => {}, fillRect: () => {}, drawImage: () => {},
     setLineDash: () => {}, closePath: () => {}, arc: () => {},
@@ -216,11 +220,28 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     expect(norm(mark[0].rot), '； stays upright (the FE14 fallback)').toBeCloseTo(UPRIGHT, 5);
   });
 
-  it('ROTATES a vo=Tr glyph with no vertical form (ー U+30FC) with the page (+90°)', () => {
-    const calls = renderEaVert(TR_ROTATE);
-    const mark = calls.filter((c) => c.text === TR_ROTATE);
-    expect(mark.length, 'ー is painted as its own glyph').toBe(1);
-    expect(norm(mark[0].rot), 'ー rotates 90° (the Tr fallback)').toBeCloseTo(SIDEWAYS, 5);
+  // The long-stroke Tr marks whose designed vertical form is the horizontal MIRROR of
+  // the +90° rotation (core verticalTrMirrorFallback): ー and the wave dash / tilde.
+  it.each(['ー', '〜', '～'])(
+    'ROTATES + REFLECTS the vo=Tr long-stroke mark %s — page +90° plus scale(1,-1)',
+    (mk) => {
+      // These ride the page +90° rotation like the colon, but their font-designed
+      // vertical form is the HORIZONTAL MIRROR of that rotation (Word/PowerPoint +
+      // font `vert` glyph verified — a plain rotation of ー bulges LEFT, the designed
+      // form bulges RIGHT). So they also reflect via `scale(1, -1)`.
+      const mark = renderEaVert(mk).filter((c) => c.text === mk);
+      expect(mark.length, `${mk} is painted as its own glyph`).toBe(1);
+      expect(norm(mark[0].rot), `${mk} rotates 90° (the Tr fallback)`).toBeCloseTo(SIDEWAYS, 5);
+      expect(mark[0].sy, `${mk} is reflected (scale-y = −1)`).toBe(-1);
+    },
+  );
+
+  it('does NOT reflect the vo=Tr colon ： (rotation matches its designed vertical form)', () => {
+    // The colon's FE13 side-by-side dots fall out of the plain rotation (symmetric
+    // under the mirror), so it must NOT get the scale(1,-1) reflection.
+    const mark = renderEaVert('：').filter((c) => c.text === '：');
+    expect(mark.length).toBe(1);
+    expect(mark[0].sy, '： is not reflected (scale-y = +1)').toBe(1);
   });
 
   it('orients a mixed column: CJK upright, Latin sideways, bracket substituted, comma substituted, ー rotated', () => {
@@ -233,6 +254,7 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     expect(at(TU_COMMA_FE), 'comma substituted').toBeTruthy();
     expect(norm(at(TU_COMMA_FE)!.rot)).toBeCloseTo(UPRIGHT, 5);
     expect(norm(at(TR_ROTATE)!.rot)).toBeCloseTo(SIDEWAYS, 5);
+    expect(at(TR_ROTATE)!.sy, 'ー is reflected in the mixed column too').toBe(-1);
   });
 });
 
@@ -281,10 +303,14 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     expect(runHelper(TU_COMMA)[0].text).toBe(TU_COMMA_FE);
     expect(norm(runHelper(TU_COMMA)[0].rot)).toBeCloseTo(-Math.PI / 2, 5);
   });
-  it('leaves vo=Tr ー rotated with the page (no counter-rotation, no substitution)', () => {
+  it('leaves vo=Tr ー rotated with the page but REFLECTS it (scale-y −1, no counter-rotation, no substitution)', () => {
     const calls = runHelper(TR_ROTATE);
     expect(calls[0].text).toBe(TR_ROTATE);
     expect(norm(calls[0].rot)).toBeCloseTo(0, 5);
+    // The reflection (core verticalTrMirrorFallback) is the helper's own scale(1,-1);
+    // the +90° page rotation is added by renderTextBody (not installed in this helper
+    // test), so here only the reflection is observable.
+    expect(calls[0].sy, 'ー is reflected').toBe(-1);
   });
   it('advances each cell by measure + letterSpacingPx (the justification pitch)', () => {
     const { ctx: c0, calls: k0 } = mockCtx();

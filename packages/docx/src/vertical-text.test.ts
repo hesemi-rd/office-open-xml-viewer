@@ -223,15 +223,52 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fills.map((f) => f.x)).toEqual([0, 14]);
   });
 
-  it('rotates a Tr glyph WITHOUT a vertical form (ー) with the page — centred, NOT counter-rotated', () => {
+  it('reflects a Tr long-stroke mark (ー) about the column — rotate fallback + horizontal mirror, NOT counter-rotated', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, 'ー', 100, 200, 12, 0);
-    // ー (U+30FC) has no U+FE3x vertical form, so it keeps the rotate fallback:
-    // the page rotation only (no −90° counter-rotation), centred on the column at
-    // the cell centre (105, 200) with center/middle alignment.
+    // ー (U+30FC) has no U+FE3x vertical form, so it takes the ROTATE fallback — but
+    // its font-designed vertical form is the HORIZONTAL REFLECTION of the +90° page
+    // rotation, not the rotation (verticalTrMirrorFallback; Word/PDF + font `vert`
+    // glyph verified). In the +90° page frame that reflection is `scale(1, -1)` about
+    // the cell centre: translate to (cx, baseline)=(105, 200), scale(1, -1), then a
+    // center/middle fillText at the local origin. No −90° counter-rotation (it is not
+    // upright) and no page-frame rotate op is recorded.
     expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+    const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translate).toEqual({ op: 'translate', x: 105, y: 200 });
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale).toEqual({ op: 'scale', sx: 1, sy: -1 });
     const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
-    expect(fill).toMatchObject({ text: 'ー', x: 105, y: 200, align: 'center', baseline: 'middle' });
+    expect(fill).toMatchObject({ text: 'ー', x: 0, y: 0, align: 'center', baseline: 'middle' });
+  });
+
+  it('reflects the wave dash / fullwidth tilde (〜 ～) like ー', () => {
+    // 〜 (U+301C) and ～ (U+FF5E) share ー's reflection (their designed vertical form
+    // is an S-curve = mirror of the +90° rotation's reverse-S). Same scale(1, -1).
+    for (const ch of ['〜', '～']) {
+      const { ctx, ops } = mockCtx();
+      drawVerticalRun(ctx, ch, 0, 0, 12, 0);
+      expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+      const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+      expect(scale).toEqual({ op: 'scale', sx: 1, sy: -1 });
+      const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+      expect(fill).toMatchObject({ text: ch, x: 0, y: 0, align: 'center', baseline: 'middle' });
+    }
+  });
+
+  it('does NOT reflect a Tr rotate glyph whose vertical form is a pure rotation (quotes “ ”)', () => {
+    // The double quotes are vo=Tr rotate-fallback, but their designed vertical form IS
+    // the +90° rotation (font-verified), so they must NOT reflect — they keep the plain
+    // fillText in the page frame at the cell centre, with NO scale and NO translate.
+    for (const ch of ['“', '”']) {
+      const { ctx, ops } = mockCtx();
+      drawVerticalRun(ctx, ch, 100, 200, 12, 0);
+      expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+      expect(ops.some((o) => o.op === 'scale')).toBe(false);
+      expect(ops.some((o) => o.op === 'translate')).toBe(false);
+      const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+      expect(fill).toMatchObject({ text: ch, x: 105, y: 200, align: 'center', baseline: 'middle' });
+    }
   });
 
   it('substitutes a Tr bracket with its vertical form (（→︵, ）→︶) and draws it UPRIGHT', () => {

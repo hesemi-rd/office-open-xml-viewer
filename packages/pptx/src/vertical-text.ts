@@ -22,11 +22,13 @@
 //     form (core `verticalBracketFormSubstitute`) present in the substitute fonts;
 //     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
 //     we substitute and draw them upright (Word/PowerPoint-verified, #969). Tr code
-//     points with no substituted form take a geometric fallback: ROTATE (the ー
-//     prolonged sound mark, the quotes “”, and the colon ：→ FE13's side-by-side
-//     dots) or UPRIGHT (the semicolon ；→ FE14's dot-over-comma; issue #969
-//     follow-up, core `verticalTrUprightFallback`) — FE13/FE14 are absent from most
-//     render fonts, so those two take the geometric path.
+//     points with no substituted form take a geometric fallback: ROTATE (the quotes
+//     “” and the colon ：→ FE13's side-by-side dots), ROTATE + REFLECT (the long-
+//     stroke marks ー 〜 ～ whose designed vertical form is a horizontal mirror of the
+//     rotation, not the rotation — core `verticalTrMirrorFallback`; `scale(1, -1)`),
+//     or UPRIGHT (the semicolon ；→ FE14's dot-over-comma; issue #969 follow-up, core
+//     `verticalTrUprightFallback`) — FE13/FE14 are absent from most render fonts, so
+//     those take the geometric path.
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied" look.
 //
@@ -41,6 +43,7 @@ import {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
+  verticalTrMirrorFallback,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -182,14 +185,30 @@ export function drawEaVertRun(
       ctx.restore();
     } else if (vo === 'Tr') {
       // vo=Tr with NO substituted vertical form and NOT the upright-fallback
-      // semicolon: ー (U+30FC), quotes “”, and the colon ：(FF1A). The Tr fallback is
-      // to ROTATE 90° CW — a plain draw in the +90° page frame IS that rotation;
-      // centre it on the column. For the colon this reproduces FE13's design (the
-      // vertically-stacked dots become side by side), Word-verified (issue #969).
+      // semicolon: ー (U+30FC), the wave dash / tilde 〜 ～, quotes “”, and the colon
+      // ：(FF1A). The Tr fallback is to ROTATE 90° CW — a plain draw in the +90° page
+      // frame IS that rotation; centre it on the column. For the colon this reproduces
+      // FE13's design (the vertically-stacked dots become side by side) and for the
+      // quotes it matches the font's designed vertical form, both Word-verified (#969).
+      //
+      // The long-stroke marks ー and 〜 ～ (core `verticalTrMirrorFallback`) are the
+      // EXCEPTION: their font-designed vertical form is the HORIZONTAL REFLECTION of
+      // the +90° rotation, not the rotation (Word PDF + font `vert` glyph verified — a
+      // plain rotation of ー bulges LEFT, Word bulges RIGHT). A Canvas cannot reach the
+      // `vert` glyph, so reflect via `scale(1, -1)` about the cell centre (the on-screen
+      // horizontal mirror in the +90° page frame). Same fix as docx `drawVerticalRun`.
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      draw(ch, cx, crossCenterY);
+      if (verticalTrMirrorFallback(cp)) {
+        ctx.save();
+        ctx.translate(cx, crossCenterY);
+        ctx.scale(1, -1);
+        draw(ch, 0, 0);
+        ctx.restore();
+      } else {
+        draw(ch, cx, crossCenterY);
+      }
     } else {
       // vo=R (Latin/digits): stay SIDEWAYS (rotated with the page). Draw at the
       // alphabetic baseline; its ink already centres on the column centreline the

@@ -4,6 +4,7 @@ import {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
+  verticalTrMirrorFallback,
 } from './vertical-orientation.js';
 
 const cp = (ch: string): number => ch.codePointAt(0) ?? 0;
@@ -167,6 +168,30 @@ describe('verticalBracketFormSubstitute (UAX #50 Tr code points → U+FE1x/FE3x 
     expect(verticalTrUprightFallback(0x30fc)).toBe(false); // ー
     expect(verticalTrUprightFallback(0x300c)).toBe(false); // 「 (substituted, not fallback)
     expect(verticalTrUprightFallback(cp('漢'))).toBe(false); // ideograph
+  });
+
+  it('verticalTrMirrorFallback: the long-stroke Tr marks reflect; quotes/colon do NOT', () => {
+    // The prolonged sound mark ー and the wave dash / fullwidth tilde 〜／～ are vo=Tr
+    // with NO Unicode vertical form, so they take the ROTATE fallback — but their
+    // font-DESIGNED vertical glyph is the HORIZONTAL REFLECTION of the +90° rotation,
+    // not the rotation (a documented Japanese typographic convention: 起筆/curvature
+    // flip left-right between orientations). Verified against the Word PDF (sample-47,
+    // Yu Mincho) and the font's own `vert` glyph (Hiragino cid07891 for ー): the
+    // rotated horizontal glyph bulges to the OPPOSITE side of the designed vertical.
+    expect(verticalTrMirrorFallback(0x30fc)).toBe(true); // ー prolonged sound mark
+    expect(verticalTrMirrorFallback(0x301c)).toBe(true); // 〜 wave dash
+    expect(verticalTrMirrorFallback(0xff5e)).toBe(true); // ～ fullwidth tilde
+    // The double quotes ARE Tr rotate-fallback too, but their designed vertical form
+    // IS the +90° rotation (font-verified), so they must NOT reflect — reflecting them
+    // would swap the comma-hook direction. The colon ： is symmetric (side-by-side
+    // dots) so it needs no reflection; it stays on the plain rotate path.
+    expect(verticalTrMirrorFallback(0x201c)).toBe(false); // “ left double quote
+    expect(verticalTrMirrorFallback(0x201d)).toBe(false); // ” right double quote
+    expect(verticalTrMirrorFallback(0xff1a)).toBe(false); // ： fullwidth colon
+    expect(verticalTrMirrorFallback(0xff1b)).toBe(false); // ； fullwidth semicolon (upright fallback)
+    expect(verticalTrMirrorFallback(0x300c)).toBe(false); // 「 (substituted bracket, not rotate)
+    expect(verticalTrMirrorFallback(cp('漢'))).toBe(false); // ideograph
+    expect(verticalTrMirrorFallback(cp('A'))).toBe(false); // Latin (sideways)
   });
 
   it('returns null for non-bracket code points (Tu punctuation, ideographs, Latin)', () => {

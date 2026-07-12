@@ -48,6 +48,9 @@ interface DrawCall {
   y: number;
   /** Net canvas rotation in effect at draw time, normalised to (−π, π]. */
   rot: number;
+  /** Net scale-y in effect at draw time. −1 for a reflected Tr long-stroke mark
+   *  (ー 〜 ～ → `scale(1, -1)`); +1 otherwise. */
+  sy: number;
 }
 
 function norm(a: number): number {
@@ -59,18 +62,20 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   let textAlign: CanvasTextAlign = 'center';
   let textBaseline: CanvasTextBaseline = 'top';
   let rotation = 0;
-  const stack: number[] = [];
+  let sy = 1;
+  const stack: Array<{ rotation: number; sy: number }> = [];
   const calls: DrawCall[] = [];
   const ctx = {
     get font() { return font; }, set font(v: string) { font = v; },
     get textAlign() { return textAlign; }, set textAlign(v: CanvasTextAlign) { textAlign = v; },
     get textBaseline() { return textBaseline; }, set textBaseline(v: CanvasTextBaseline) { textBaseline = v; },
     measureText: (s: string) => ({ width: [...s].length * 20 }) as TextMetrics,
-    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation }),
-    save: () => { stack.push(rotation); },
-    restore: () => { rotation = stack.pop() ?? rotation; },
+    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, sy }),
+    save: () => { stack.push({ rotation, sy }); },
+    restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; sy = s.sy; } },
     translate: () => {},
     rotate: (a: number) => { rotation += a; },
+    scale: (_sx: number, syArg: number) => { sy *= syArg; },
     fillStyle: '#000',
   };
   return { ctx: ctx as unknown as CanvasRenderingContext2D, calls };
@@ -144,10 +149,27 @@ describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, 
     expect(norm(calls[0].rot), '； stays upright').toBeCloseTo(UPRIGHT, 5);
   });
 
-  it('ROTATES a vo=Tr glyph with no vertical form (ー) by 90°', () => {
-    const calls = draw(TR_ROTATE);
-    expect(calls.length).toBe(1);
-    expect(calls[0].text).toBe(TR_ROTATE);
-    expect(norm(calls[0].rot), 'ー is rotated to a vertical bar').toBeCloseTo(ROTATED, 5);
+  // The long-stroke Tr marks whose designed vertical form is the horizontal MIRROR of
+  // the rotation (core verticalTrMirrorFallback): ー and the wave dash / tilde.
+  it.each(['ー', '〜', '～'])(
+    'ROTATES + REFLECTS the vo=Tr long-stroke mark %s by 90° plus scale(1,-1)',
+    (mk) => {
+      // These rotate 90° like the colon, but their font-designed vertical form is the
+      // HORIZONTAL MIRROR of that rotation (Word/PowerPoint + font `vert` glyph
+      // verified — a plain rotation of ー bulges LEFT, the designed form bulges RIGHT).
+      // So they also reflect via `scale(1, -1)`.
+      const calls = draw(mk);
+      expect(calls.length).toBe(1);
+      expect(calls[0].text).toBe(mk);
+      expect(norm(calls[0].rot), `${mk} is rotated to a vertical bar`).toBeCloseTo(ROTATED, 5);
+      expect(calls[0].sy, `${mk} is reflected (scale-y = −1)`).toBe(-1);
+    },
+  );
+
+  it('does NOT reflect the vo=Tr colon ： (rotation already matches its designed form)', () => {
+    // The colon's FE13 side-by-side dots fall out of the plain rotation (symmetric
+    // under the mirror), so it must NOT get the scale(1,-1) reflection.
+    const calls = draw('：');
+    expect(calls[0].sy, '： is not reflected (scale-y = +1)').toBe(1);
   });
 });
