@@ -22,11 +22,9 @@
 //     form (core `verticalBracketFormSubstitute`) present in the substitute fonts;
 //     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
 //     we substitute and draw them upright (Word/PowerPoint-verified, #969). Tr code
-//     points with no substituted form take a geometric fallback: ROTATE (the quotes
-//     “” and the colon ：→ FE13's side-by-side dots), ROTATE + REFLECT (the long-
-//     stroke marks ー 〜 ～ whose designed vertical form is a horizontal mirror of the
-//     rotation, not the rotation — core `verticalTrMirrorFallback`; `scale(1, -1)`),
-//     or UPRIGHT (the semicolon ；→ FE14's dot-over-comma; issue #969 follow-up, core
+//     points with no substituted form take a geometric fallback: plain ROTATE (the
+//     quotes, colon, and unreachable long marks ー 〜 ～), or UPRIGHT (the semicolon
+//     ；→ FE14's dot-over-comma; issue #969 follow-up, core
 //     `verticalTrUprightFallback`) — FE13/FE14 are absent from most render fonts, so
 //     those take the geometric path.
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation stay
@@ -43,10 +41,9 @@ import {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
-  verticalTrMirrorFallback,
-  verticalVertFeatureSupported,
+  verticalTrLongMark,
+  verticalVertGlyphReachable,
   withVertFeature,
-  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -165,7 +162,7 @@ export function drawEaVertRunWithCapability(
     const bracketCp = vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;
     const uprightFallback = vo === 'Tr' && bracketCp === null && verticalTrUprightFallback(cp);
     const upright = vo === 'U' || vo === 'Tu' || bracketCp !== null || uprightFallback;
-    const vertGlyphSupported = verticalTrMirrorFallback(cp) && vertCapability(cp);
+    const vertGlyphSupported = verticalTrLongMark(cp) && vertCapability(cp);
     if (vertGlyphSupported) {
       const cx = x + ax + adv / 2;
       ctx.save();
@@ -207,27 +204,12 @@ export function drawEaVertRunWithCapability(
       // FE13's design (the vertically-stacked dots become side by side) and for the
       // quotes it matches the font's designed vertical form, both Word-verified (#969).
       //
-      // The long-stroke marks ー and 〜 ～ (core `verticalTrMirrorFallback`) are the
-      // EXCEPTION: their font-designed vertical form is the HORIZONTAL REFLECTION of
-      // the +90° rotation, not the rotation (Word PDF + font `vert` glyph verified — a
-      // plain rotation of ー bulges LEFT, Word bulges RIGHT). When the element/CSS
-      // route or this glyph's `vert` coverage is unavailable, reflect about the cell
-      // centre (the on-screen horizontal mirror in the +90° page frame). For U+30FC
-      // only, the shared runtime
-      // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
-      // the designed wave-mark drift remains untouched. Same fix as docx.
+      // Unreachable `ー〜～` deliberately use the same plain rotation. Their DOM
+      // `vert` design cannot be inferred portably in worker/skia environments.
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (verticalTrMirrorFallback(cp)) {
-        ctx.save();
-        ctx.translate(cx, crossCenterY);
-        ctx.transform(1, verticalFallbackShearCoefficient(ctx, cp), 0, -1, 0, 0);
-        draw(ch, 0, 0);
-        ctx.restore();
-      } else {
-        draw(ch, cx, crossCenterY);
-      }
+      draw(ch, cx, crossCenterY);
     } else {
       // vo=R (Latin/digits): stay SIDEWAYS (rotated with the page). Draw at the
       // alphabetic baseline; its ink already centres on the column centreline the
@@ -260,6 +242,6 @@ export function drawEaVertRun(
     fontPx,
     letterSpacingPx,
     paint,
-    (cp) => verticalVertFeatureSupported(ctx, cp),
+    (cp) => verticalVertGlyphReachable(ctx, cp),
   );
 }

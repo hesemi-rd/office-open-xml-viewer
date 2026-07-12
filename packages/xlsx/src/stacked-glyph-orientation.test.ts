@@ -147,11 +147,10 @@ describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, 
     }
   });
 
-  it('records the complete fallback shear matrix with a positive b component', () => {
+  it('does not install a fallback mirror or shear matrix', () => {
     const { ctx, transforms } = mockCtx(0.125);
     drawStackedVerticalChar(ctx, 'ー', CENTER_X, CELL_TOP, CHAR_H);
-    expect(transforms).toEqual([{ a: 1, b: 0.125, c: 0, d: -1, e: 0, f: 0 }]);
-    expect(transforms[0].b).toBeGreaterThan(0);
+    expect(transforms).toEqual([]);
   });
 
   it('keeps punctuation and brackets on their manual paths when vert is supported', () => {
@@ -227,20 +226,14 @@ describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, 
     expect(norm(calls[0].rot), '； stays upright').toBeCloseTo(UPRIGHT, 5);
   });
 
-  // The long-stroke Tr marks whose designed vertical form is the horizontal MIRROR of
-  // the rotation (core verticalTrMirrorFallback): ー and the wave dash / tilde.
   it.each(['ー', '〜', '～'])(
-    'ROTATES + REFLECTS the vo=Tr long-stroke mark %s by 90° plus scale(1,-1)',
+    'plain-rotates the unreachable vo=Tr long-stroke mark %s by 90°',
     (mk) => {
-      // These rotate 90° like the colon, but their font-designed vertical form is the
-      // HORIZONTAL MIRROR of that rotation (Word/PowerPoint + font `vert` glyph
-      // verified — a plain rotation of ー bulges LEFT, the designed form bulges RIGHT).
-      // So they also reflect via `scale(1, -1)`.
       const calls = draw(mk);
       expect(calls.length).toBe(1);
       expect(calls[0].text).toBe(mk);
       expect(norm(calls[0].rot), `${mk} is rotated to a vertical bar`).toBeCloseTo(ROTATED, 5);
-      expect(calls[0].sy, `${mk} is reflected (scale-y = −1)`).toBe(-1);
+      expect(calls[0].sy, `${mk} is not reflected`).toBe(1);
     },
   );
 
