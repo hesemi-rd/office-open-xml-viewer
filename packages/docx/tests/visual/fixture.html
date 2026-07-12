@@ -22,6 +22,12 @@
 
   try {
     const doc = await DocxDocument.load('/' + file);
+    // Report the renderer's REAL page count so the VRT spec can assert the
+    // requested page index is in range. renderPage() silently clamps an
+    // out-of-range index back to page 0 (renderer.ts: `pages[pageIndex] ??
+    // pages[0]`), so without this the harness cannot tell a genuine page from a
+    // duplicated first page (see the #993 Thai-sample regression).
+    document.body.dataset.pageCount = String(doc.pageCount);
     await doc.renderPage(canvas, page, { width, dpr: 1 });
     document.body.dataset.status = 'ready';
   } catch (e) {

@@ -105,6 +105,32 @@ test.describe('docx visual regression', () => {
           throw new Error(`Fixture error on ${name} page ${pageNum}: ${msg}`);
         }
 
+        // Loud out-of-range page guard. `i` is the requested page index and
+        // `pageCount` above is this VRT's DECLARED count; the fixture reports the
+        // renderer's REAL page count via dataset.pageCount. renderPage() silently
+        // clamps an out-of-range index back to page 0 (renderer.ts:
+        // `pages[pageIndex] ?? pages[0]`), so a stale declared count that exceeds
+        // the real pagination keeps snapshotting duplicate first pages under a
+        // green status — the #993 regression, where a private sample dropped
+        // 14→11 pages yet ~15 PRs of VRT stayed green on triplicated page-0 refs.
+        // Fail the moment a requested index is out of range. This runs BEFORE the
+        // UPDATE_REFS branch below on purpose: the silent duplication happened
+        // during reference refreshes, so the guard must fire there too.
+        const actualPageCount = Number(await page.evaluate(() => document.body.dataset.pageCount));
+        if (!Number.isInteger(actualPageCount) || actualPageCount <= 0) {
+          throw new Error(
+            `${name}: fixture did not report a valid page count (got "${actualPageCount}")`
+          );
+        }
+        if (i >= actualPageCount) {
+          throw new Error(
+            `${name}: requested page index ${i} (page ${pageNum}) is out of range — the renderer ` +
+            `produced only ${actualPageCount} page(s). renderPage() would clamp it back to page 0 ` +
+            `and snapshot a duplicate first page. Lower the DOCX_FILES pageCount for ${name} to ` +
+            `${actualPageCount}.`
+          );
+        }
+
         await page.waitForTimeout(200);
 
         const dataUrl = await page.evaluate(() => {
