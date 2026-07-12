@@ -51,6 +51,7 @@ interface DrawCall {
   /** Net scale-y in effect at draw time. −1 for a reflected Tr long-stroke mark
    *  (ー 〜 ～ → `scale(1, -1)`); +1 otherwise. */
   sy: number;
+  feature: string;
 }
 
 function norm(a: number): number {
@@ -65,12 +66,14 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   let sy = 1;
   const stack: Array<{ rotation: number; sy: number }> = [];
   const calls: DrawCall[] = [];
+  const style = { fontFeatureSettings: 'normal' };
   const ctx = {
+    canvas: { style },
     get font() { return font; }, set font(v: string) { font = v; },
     get textAlign() { return textAlign; }, set textAlign(v: CanvasTextAlign) { textAlign = v; },
     get textBaseline() { return textBaseline; }, set textBaseline(v: CanvasTextBaseline) { textBaseline = v; },
     measureText: (s: string) => ({ width: [...s].length * 20 }) as TextMetrics,
-    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, sy }),
+    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, sy, feature: style.fontFeatureSettings }),
     save: () => { stack.push({ rotation, sy }); },
     restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; sy = s.sy; } },
     translate: () => {},
@@ -93,6 +96,35 @@ const UPRIGHT = 0;
 const ROTATED = Math.PI / 2;
 
 describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, issue #790)', () => {
+  it('draws mirror-fallback marks upright with a per-glyph vert feature', () => {
+    for (const ch of ['ー', '〜', '～']) {
+      const { ctx, calls } = mockCtx();
+      drawStackedVerticalChar(ctx, ch, CENTER_X, CELL_TOP, CHAR_H, true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].text).toBe(ch);
+      expect(norm(calls[0].rot)).toBe(UPRIGHT);
+      expect(calls[0].sy).toBe(1);
+      expect(calls[0].feature).toBe('"vert" 1');
+    }
+  });
+
+  it('keeps punctuation and brackets on their manual paths when vert is supported', () => {
+    const expected: Array<[string, string, number]> = [
+      ['、', '︑', UPRIGHT], ['。', '︒', UPRIGHT],
+      ['：', '：', ROTATED], ['；', '；', UPRIGHT],
+      ['「', '﹁', UPRIGHT], ['」', '﹂', UPRIGHT],
+      ['“', '“', ROTATED], ['”', '”', ROTATED],
+    ];
+    for (const [ch, text, rotation] of expected) {
+      const { ctx, calls } = mockCtx();
+      drawStackedVerticalChar(ctx, ch, CENTER_X, CELL_TOP, CHAR_H, true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].text).toBe(text);
+      expect(norm(calls[0].rot)).toBeCloseTo(rotation, 5);
+      expect(calls[0].feature).toBe('normal');
+    }
+  });
+
   it('keeps vo=U CJK upright (unchanged)', () => {
     const calls = draw(U_CJK);
     expect(calls.length).toBe(1);

@@ -70,6 +70,8 @@ import {
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
   verticalTrMirrorFallback,
+  verticalVertFeatureSupported,
+  withVertFeature,
 } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
@@ -327,17 +329,29 @@ function verticalRotateInkGeometry(
  * @param ctx  2D context with the run's font selected.
  * @param text The run's text.
  */
-export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+export function verticalRunInkExtraPxWithCapability(
+  ctx: Ctx2D,
+  text: string,
+  vertCapable: boolean,
+): number {
   let extra = 0;
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     if (!isVerticalRotateFallback(cp)) continue;
+    // A real vert long-stroke glyph is upright in its ordinary one-em cell. All
+    // other rotate-fallback glyphs (notably quotes and the colon) still use the
+    // geometric path and therefore retain #1014/#1019 ink growth.
+    if (vertCapable && verticalTrMirrorFallback(cp)) continue;
     const geom = verticalRotateInkGeometry(ctx, ch);
     if (geom === null) continue;
     const advance = ctx.measureText(ch).width;
     if (geom.extentPx > advance) extra += geom.extentPx - advance;
   }
   return extra;
+}
+
+export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+  return verticalRunInkExtraPxWithCapability(ctx, text, verticalVertFeatureSupported(ctx));
 }
 
 /**
@@ -374,7 +388,7 @@ export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
  *                         keeps the advance-sized, advance-centred draw byte-identical
  *                         (markers and unwired vertical text boxes).
  */
-export function drawVerticalRun(
+export function drawVerticalRunWithCapability(
   ctx: Ctx2D,
   text: string,
   x: number,
@@ -383,6 +397,7 @@ export function drawVerticalRun(
   letterSpacingPx: number,
   charScale = 1,
   growTrRotateInk = false,
+  vertCapable = false,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -432,7 +447,13 @@ export function drawVerticalRun(
     // for the geometric rotate branch (substituted/upright Tr glyphs keep their path).
     let cellNaturalPx = ctx.measureText(ch).width;
     let rotateInkShiftPx = 0;
-    if (growTrRotateInk && mode === 'rotate' && bracketCp === null && !uprightFallback) {
+    if (
+      !(vertCapable && verticalTrMirrorFallback(cp)) &&
+      growTrRotateInk &&
+      mode === 'rotate' &&
+      bracketCp === null &&
+      !uprightFallback
+    ) {
       const geom = verticalRotateInkGeometry(ctx, ch);
       if (geom !== null && geom.extentPx > cellNaturalPx) {
         cellNaturalPx = geom.extentPx;
@@ -440,7 +461,20 @@ export function drawVerticalRun(
       }
     }
     const adv = cellNaturalPx * charScale + letterSpacingPx;
-    if (mode === 'upright' || bracketCp !== null || uprightFallback) {
+    if (vertCapable && verticalTrMirrorFallback(cp)) {
+      // The font's `vert` table supplies the designed upright form for the three
+      // long-stroke marks whose geometric fallback otherwise needs reflection.
+      // Keep every other glyph on its Word-adjudicated manual path below.
+      const cx = x + ax + adv / 2;
+      ctx.save();
+      ctx.translate(cx, baseline);
+      ctx.rotate(-Math.PI / 2);
+      if (scaled) ctx.scale(1, charScale);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVertFeature(ctx, () => ctx.fillText(ch, 0, 0));
+      ctx.restore();
+    } else if (mode === 'upright' || bracketCp !== null || uprightFallback) {
       // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would otherwise lay on
       // its side) stands upright. For corner-hanging Tu punctuation with a Unicode
@@ -565,6 +599,30 @@ export function drawVerticalRun(
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;
+}
+
+export function drawVerticalRun(
+  ctx: Ctx2D,
+  text: string,
+  x: number,
+  baseline: number,
+  fontPx: number,
+  letterSpacingPx: number,
+  charScale = 1,
+  growTrRotateInk = false,
+): void {
+  const vertCapable = verticalVertFeatureSupported(ctx);
+  drawVerticalRunWithCapability(
+    ctx,
+    text,
+    x,
+    baseline,
+    fontPx,
+    letterSpacingPx,
+    charScale,
+    growTrRotateInk,
+    vertCapable,
+  );
 }
 
 /**

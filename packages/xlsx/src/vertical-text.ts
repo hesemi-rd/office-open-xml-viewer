@@ -33,6 +33,7 @@ import {
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
   verticalTrMirrorFallback,
+  withVertFeature,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -62,9 +63,20 @@ export function drawStackedVerticalChar(
   centerX: number,
   cellTopY: number,
   charH: number,
+  vertCapable = false,
 ): void {
   const cp = ch.codePointAt(0) ?? 0;
   const vo = verticalOrientation(cp);
+
+  if (vertCapable && verticalTrMirrorFallback(cp)) {
+    ctx.save();
+    ctx.translate(centerX, cellTopY + charH / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    withVertFeature(ctx, () => ctx.fillText(ch, 0, 0));
+    ctx.restore();
+    return;
+  }
 
   if (vo === 'Tr') {
     // Substitute-first: a fullwidth bracket or white lenticular bracket 〖〗 (#969)

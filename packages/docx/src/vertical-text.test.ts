@@ -5,11 +5,13 @@ import {
   verticalGlyphOffset,
   splitVerticalOrientationRuns,
   drawVerticalRun,
+  drawVerticalRunWithCapability,
   drawTateChuYokoRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
   verticalTextLayerPlacement,
   verticalRunInkExtraPx,
+  verticalRunInkExtraPxWithCapability,
 } from './vertical-text.js';
 
 // ECMA-376 §17.6.20 vertical writing (tbRl). These are the pure classification
@@ -116,7 +118,7 @@ type Op =
   | { op: 'translate'; x: number; y: number }
   | { op: 'rotate'; a: number }
   | { op: 'scale'; sx: number; sy: number }
-  | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string }
+  | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string; feature: string }
   | { op: 'draw'; dx: number; dy: number; dw: number; dh: number };
 
 // Optional metrics the mock returns from `measureText`, keyed by the metric it
@@ -142,7 +144,10 @@ interface MockMetrics {
 
 function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
   const ops: Op[] = [];
+  const style = { fontFeatureSettings: 'normal' };
   const ctx: any = {
+    canvas: { style },
+    font: '12px serif',
     textAlign: 'start',
     textBaseline: 'alphabetic',
     letterSpacing: '0px',
@@ -181,13 +186,33 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
       return m;
     },
     fillText(text: string, x: number, y: number) {
-      ops.push({ op: 'fillText', text, x, y, align: this.textAlign, baseline: this.textBaseline });
+      ops.push({
+        op: 'fillText', text, x, y, align: this.textAlign,
+        baseline: this.textBaseline, feature: style.fontFeatureSettings,
+      });
     },
   };
   return { ctx, ops };
 }
 
 describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin sideways)', () => {
+  it('uses vert only for mirror-fallback marks and keeps other glyphs on manual paths', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRunWithCapability(ctx, 'ー〜～、。：；「」“”A', 0, 0, 12, 0, 1, true, true);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.text)).toEqual([
+      'ー', '〜', '～', '︑', '︒', '：', '；', '﹁', '﹂', '“', '”', 'A',
+    ]);
+    expect(fills.map((fill) => fill.feature)).toEqual([
+      '"vert" 1', '"vert" 1', '"vert" 1',
+      'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal',
+    ]);
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(8);
+    expect(rotates.every((rotate) => rotate.a === -Math.PI / 2)).toBe(true);
+    expect(ops.some((op) => op.op === 'scale' && op.sy === -1)).toBe(false);
+  });
+
   it('counter-rotates every upright glyph −90° about its cell centre', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, '富士', 100, 200, 12, 0);
@@ -413,6 +438,30 @@ describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-cent
     expect(verticalRunInkExtraPx(ctx, 'ー')).toBeCloseTo(19, 6);
     expect(verticalRunInkExtraPx(ctx, '話ー')).toBeCloseTo(19, 6);
     expect(verticalRunInkExtraPx(ctx, '話A ')).toBe(0);
+  });
+
+  it('skips growth only for vert-rendered mirror marks and keeps quote/colon growth', () => {
+    const { ctx } = mockCtx({
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '“': { left: 5, right: 24 },
+        '：': { left: 5, right: 24 },
+      },
+    });
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー“：', true)).toBeCloseTo(38, 6);
+  });
+
+  it('applies the same per-glyph growth gate while painting', () => {
+    const { ctx, ops } = mockCtx({
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '“': { left: 5, right: 24 },
+        '：': { left: 5, right: 24 },
+      },
+    });
+    drawVerticalRunWithCapability(ctx, 'ー“：話', 0, 0, 12, 0, 1, true, true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates.map((op) => op.x)).toEqual([5, 24.5, 53.5, 73]);
   });
 
   it('verticalRunInkExtraPx is 0 when the ink fits the advance (all real fonts) or metrics are absent', () => {

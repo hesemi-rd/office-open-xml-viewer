@@ -1,0 +1,147 @@
+type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+interface ProbeState {
+  canvas: HTMLCanvasElement;
+  cache: Map<string, boolean>;
+  epoch: number;
+}
+
+const PROBE_SIZE_PX = 256;
+const PROBE_FONT_PX = 200;
+const probeStates = new WeakMap<Document, ProbeState>();
+
+function canvasElementFor(ctx: Ctx2D): HTMLCanvasElement | null {
+  if (typeof HTMLCanvasElement === 'undefined') return null;
+  return ctx.canvas instanceof HTMLCanvasElement ? ctx.canvas : null;
+}
+
+function replaceFontSize(font: string, replacement: string): string {
+  return font.replace(
+    /(^|\s)\d*\.?\d+(?:px|pt|pc|in|cm|mm|q|em|rem|%)(?:\/[^\s]+)?(?=\s)/i,
+    `$1${replacement}`,
+  );
+}
+
+function probeState(doc: Document): ProbeState {
+  const existing = probeStates.get(doc);
+  if (existing) return existing;
+
+  const canvas = doc.createElement('canvas');
+  canvas.width = PROBE_SIZE_PX;
+  canvas.height = PROBE_SIZE_PX;
+  canvas.setAttribute('aria-hidden', 'true');
+  Object.assign(canvas.style, {
+    position: 'fixed',
+    left: '-99999px',
+    top: '0',
+    opacity: '0',
+    pointerEvents: 'none',
+  });
+  const state: ProbeState = { canvas, cache: new Map(), epoch: 0 };
+  const invalidate = () => {
+    state.epoch += 1;
+    state.cache.clear();
+  };
+  doc.fonts?.addEventListener?.('loadingdone', invalidate);
+  doc.fonts?.addEventListener?.('loadingerror', invalidate);
+  probeStates.set(doc, state);
+  return state;
+}
+
+function inkBounds(ctx: CanvasRenderingContext2D): { width: number; height: number } | null {
+  const { width, height } = ctx.canvas;
+  const data = ctx.getImageData(0, 0, width, height).data;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  return maxX >= minX && maxY >= minY
+    ? { width: maxX - minX + 1, height: maxY - minY + 1 }
+    : null;
+}
+
+function rasterizeProbe(
+  ctx: CanvasRenderingContext2D,
+  featureSettings: string,
+): { width: number; height: number } | null {
+  const canvas = ctx.canvas;
+  canvas.style.fontFeatureSettings = featureSettings;
+  ctx.font = ctx.font;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillText('ー', canvas.width / 2, canvas.height / 2);
+  return inkBounds(ctx);
+}
+
+/**
+ * Whether this main-thread canvas/font can paint the font's OpenType `vert`
+ * glyphs. Results are cached by family/weight/style shorthand and invalidated
+ * whenever the document FontFaceSet completes or fails a load.
+ */
+export function verticalVertFeatureSupported(ctx: Ctx2D): boolean {
+  const target = canvasElementFor(ctx);
+  if (target === null || typeof document === 'undefined') return false;
+
+  const doc = target.ownerDocument ?? document;
+  const state = probeState(doc);
+  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}`;
+  const cached = state.cache.get(key);
+  if (cached !== undefined) return cached;
+
+  let supported = false;
+  const parent = doc.body ?? doc.documentElement;
+  if (!parent) return false;
+  const wasAttached = state.canvas.isConnected;
+  if (!wasAttached) parent.appendChild(state.canvas);
+  const probe = state.canvas.getContext('2d', { willReadFrequently: true });
+  if (probe !== null) {
+    const previousFeature = state.canvas.style.fontFeatureSettings;
+    try {
+      probe.font = replaceFontSize(ctx.font, `${PROBE_FONT_PX}px`);
+      probe.fillStyle = '#000';
+      probe.textAlign = 'center';
+      probe.textBaseline = 'middle';
+      const plain = rasterizeProbe(probe, 'normal');
+      const vert = rasterizeProbe(probe, '"vert" 1');
+      supported =
+        plain !== null &&
+        vert !== null &&
+        plain.width > plain.height &&
+        vert.height > vert.width;
+    } catch {
+      supported = false;
+    } finally {
+      state.canvas.style.fontFeatureSettings = previousFeature;
+      probe.font = probe.font;
+      probe.clearRect(0, 0, state.canvas.width, state.canvas.height);
+      if (!wasAttached) state.canvas.remove();
+    }
+  }
+  state.cache.set(key, supported);
+  return supported;
+}
+
+/** Enable the element's `vert` feature, refont, draw, then restore and refont. */
+export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
+  const canvas = ctx.canvas as HTMLCanvasElement;
+  const style = canvas?.style;
+  if (!style) return draw();
+
+  const previous = style.fontFeatureSettings;
+  style.fontFeatureSettings = '"vert" 1';
+  ctx.font = ctx.font;
+  try {
+    return draw();
+  } finally {
+    style.fontFeatureSettings = previous;
+    ctx.font = ctx.font;
+  }
+}

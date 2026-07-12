@@ -44,6 +44,8 @@ import {
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
   verticalTrMirrorFallback,
+  verticalVertFeatureSupported,
+  withVertFeature,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -124,7 +126,7 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  *                         common path.
  * @param paint            `'fill'` or `'stroke'` (run outline, rPr > a:ln).
  */
-export function drawEaVertRun(
+export function drawEaVertRunWithCapability(
   ctx: Ctx2D,
   text: string,
   x: number,
@@ -132,6 +134,7 @@ export function drawEaVertRun(
   fontPx: number,
   letterSpacingPx: number,
   paint: 'fill' | 'stroke' = 'fill',
+  vertCapable = false,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -159,7 +162,16 @@ export function drawEaVertRun(
     const bracketCp = vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;
     const uprightFallback = vo === 'Tr' && bracketCp === null && verticalTrUprightFallback(cp);
     const upright = vo === 'U' || vo === 'Tu' || bracketCp !== null || uprightFallback;
-    if (upright) {
+    if (vertCapable && verticalTrMirrorFallback(cp)) {
+      const cx = x + ax + adv / 2;
+      ctx.save();
+      ctx.translate(cx, crossCenterY);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVertFeature(ctx, () => draw(ch, 0, 0));
+      ctx.restore();
+    } else if (upright) {
       // vo=U / vo=Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would lay on its side)
       // stands upright. Corner-hanging Tu punctuation (、。， → U+FE10–FE12) and Tr
@@ -222,4 +234,26 @@ export function drawEaVertRun(
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;
+}
+
+export function drawEaVertRun(
+  ctx: Ctx2D,
+  text: string,
+  x: number,
+  baseline: number,
+  fontPx: number,
+  letterSpacingPx: number,
+  paint: 'fill' | 'stroke' = 'fill',
+): void {
+  const vertCapable = verticalVertFeatureSupported(ctx);
+  drawEaVertRunWithCapability(
+    ctx,
+    text,
+    x,
+    baseline,
+    fontPx,
+    letterSpacingPx,
+    paint,
+    vertCapable,
+  );
 }
