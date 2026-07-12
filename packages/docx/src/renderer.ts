@@ -10045,35 +10045,26 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
 
-  if (
-    !isLineGeom &&
-    shape.textAutofit === 'sp' &&
-    shape.textBlocks &&
-    shape.textBlocks.length > 0 &&
-    // §20.1.10.83 vertical text box: `measureShapeTextAutoFitHeight` grows the
-    // PHYSICAL HEIGHT to fit the horizontal line stack, but a vertical box's
-    // block-progression (line-stacking) axis is the CROSS axis (physical WIDTH)
-    // after the ±90° rotation — that is the axis `<a:spAutoFit/>` resizes, NOT the
-    // height (Word-verified: the batch-3 GT / issue #988 shows the column-length
-    // = physical height stays the fixed wrap dimension). Re-measuring height here
-    // would grow the wrong axis. The GT also shows Word placing the columns at the
-    // box's AUTHORED `<wp:extent>` edges (a shrink-to-content cross fit would move
-    // the reading-start edge), so vertical boxes keep their declared extent — this
-    // reproduces the fixture exactly. Cross-axis auto-GROW for a box whose content
-    // overflows its authored cross extent remains a verify-only follow-up (needs a
-    // fixture that overflows AND carries a panel to disambiguate the anchored edge).
-    verticalTextboxMode(shape.textVert) === null
-  ) {
-    const fitH = measureShapeTextAutoFitHeight(
+  if (!isLineGeom) {
+    // §21.1.2.1.1 `<a:spAutoFit/>` — resize the box to its content, keeping the
+    // authored top-left anchor fixed. A HORIZONTAL box grows the physical HEIGHT
+    // (line-stacking axis, top edge fixed); a VERTICAL box (§20.1.10.83, #1000)
+    // grows/shrinks the physical WIDTH (the column-stacking cross axis after the
+    // ±90° rotate-layout, LEFT edge fixed) — Word-verified against the autofit
+    // adjudication fixture. `resolveShapeAutofitBox` picks the axis by `vert`.
+    const fit = resolveShapeAutofitBox(
       shape,
-      w,
+      { x, y, w, h },
       ctx as CanvasRenderingContext2D,
       scale,
       state.fontFamilyClasses,
       state.images,
       state,
     );
-    if (Number.isFinite(fitH) && fitH > 0) h = fitH;
+    x = fit.x;
+    y = fit.y;
+    w = fit.w;
+    h = fit.h;
   }
 
   // ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt text watermark. It
@@ -10404,6 +10395,64 @@ export function measureShapeTextAutoFitHeight(
   } finally {
     ctx.restore();
   }
+}
+
+/** ECMA-376 §21.1.2.1.1 `<a:spAutoFit/>` — resize a text box's bounding box to
+ *  fit its laid-out content, keeping the authored TOP-LEFT anchor (`<a:off>`)
+ *  fixed. Returns the box unchanged for a non-spAutoFit box or one with no text.
+ *
+ *  HORIZONTAL box (`vert` absent): the block-progression (line-stacking) axis is
+ *  the physical HEIGHT, so the height grows/shrinks to the line stack — the TOP
+ *  edge (`off.y`) stays fixed, the BOTTOM edge moves. (Existing behaviour.)
+ *
+ *  VERTICAL box (§20.1.10.83 `vert`/`vert270`/`eaVert`/`mongolianVert`, issue
+ *  #1000): after the ±90° rotate-layout the block-progression (column-stacking)
+ *  axis is the physical WIDTH — the column length (= physical HEIGHT) is the
+ *  FIXED wrap dimension (#988B). spAutoFit resizes THAT cross axis to the column
+ *  stack: GROW on overflow, SHRINK on underflow, keeping the authored LEFT edge
+ *  (`positionH` posOffset / `off.x`) fixed and moving the RIGHT edge — the SAME
+ *  top-left bbox anchor the horizontal branch keeps. Word GT (the autofit
+ *  adjudication fixture, measured from the Word PDF): an overflowing `eaVert` box
+ *  grows +1.37in RIGHTWARD and an underflowing one shrinks −1.45in from the
+ *  right, its authored LEFT edge fixed in both; a `noAutofit` twin keeps the
+ *  authored extent and clips. The cross extent is measured by the SAME line
+ *  engine, but with the wrap width = physical HEIGHT (the swapped column-length
+ *  axis): `measureShapeTextAutoFitHeight` maps lIns/rIns onto the wrap axis and
+ *  tIns/bIns onto the stack axis exactly as the vertical draw does, so its
+ *  returned "height" IS the physical WIDTH the columns require (insets included).
+ *
+ *  A vertical box carrying an inline-image block keeps its authored extent: an
+ *  upright image reserves its cross extent by physical WIDTH, which the
+ *  horizontal line measurement cannot size, so growing/shrinking is skipped
+ *  (pre-#1000 behaviour) rather than sized from a wrong measurement.
+ *
+ *  Exported for unit testing the grow/shrink/anchor contract. */
+export function resolveShapeAutofitBox(
+  shape: ShapeRun,
+  box: { x: number; y: number; w: number; h: number },
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+  fontFamilyClasses: Record<string, string> = {},
+  images: Map<string, DecodedImage> = new Map(),
+  state?: RenderState,
+): { x: number; y: number; w: number; h: number } {
+  const { x, y, w, h } = box;
+  if (shape.textAutofit !== 'sp' || !shape.textBlocks || shape.textBlocks.length === 0) {
+    return { x, y, w, h };
+  }
+  const vmode = verticalTextboxMode(shape.textVert);
+  if (vmode === null) {
+    // HORIZONTAL: grow/shrink the physical HEIGHT (line-stacking axis) to the
+    // laid-out content; the TOP edge (y) stays fixed.
+    const fitH = measureShapeTextAutoFitHeight(shape, w, ctx, scale, fontFamilyClasses, images, state);
+    return Number.isFinite(fitH) && fitH > 0 ? { x, y, w, h: fitH } : { x, y, w, h };
+  }
+  // VERTICAL (§20.1.10.83, #1000): resize the physical WIDTH (cross / column-
+  // stacking axis) to the content, LEFT edge (x) fixed. An upright inline image's
+  // cross extent is not line-measurable ⇒ keep the authored extent.
+  if (shape.textBlocks.some((b) => b.imagePath)) return { x, y, w, h };
+  const fitW = measureShapeTextAutoFitHeight(shape, h, ctx, scale, fontFamilyClasses, images, state);
+  return Number.isFinite(fitW) && fitW > 0 ? { x, y, w: fitW, h } : { x, y, w, h };
 }
 
 /** Render a shape's body text inside its bounding box, honoring lIns/tIns/
