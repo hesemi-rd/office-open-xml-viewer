@@ -1089,18 +1089,28 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *  approximates the `V` variants' non-EA rotation the same as `tbRl`, which the
  *  glyph path already draws Latin sideways for).
  *
- *  Two values are VERTICAL but NOT handled by this stage-1 path, so they return
- *  false (parsed and carried, but rendered as horizontal until implemented):
- *    - `btLr`  (≡ Strict `lr`)  — vertical, but lines flow LEFT→RIGHT and glyphs
- *                                 stack BOTTOM→TOP: needs the opposite page
- *                                 rotation/flow, a separate follow-up.
- *  And two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
+ *    - `btLr`  (≡ Strict `lr`)  — its NOMINAL semantics are bottom-to-top /
+ *                                 left-to-right, but Word ground truth (issue #988
+ *                                 batch-3 adjudication ①) shows Word renders a
+ *                                 SECTION-level `btLr` IDENTICALLY to `tbRl`:
+ *                                 CJK upright stacked top→bottom, Latin/digits
+ *                                 rotated 90° CW (sideways), columns right→left —
+ *                                 it does NOT honor the literal bottom-to-top /
+ *                                 left-to-right flow. So it routes through the
+ *                                 same +90° vertical path as `tbRl`. (The per-
+ *                                 SECTION mixing that fixture also exercises —
+ *                                 a `btLr` non-final section beside a horizontal
+ *                                 final section — needs per-section text-direction
+ *                                 surfacing and remains a follow-up; a document
+ *                                 whose body section is `btLr` renders vertically
+ *                                 here already.)
+ *  Two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
  *    - `lrTb`  (≡ Strict `tb`, the default) — dropped to null by the parser.
  *    - `lrTbV` (≡ Strict `tbV`) — horizontal, EA glyphs rotated 270°; still a
  *                                 horizontal flow, so not this vertical path. */
 function isVerticalSection(s: SectionProps): boolean {
   const td = s.textDirection;
-  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV';
+  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV' || td === 'btLr';
 }
 
 /** Map a vertical (tbRl) section's PHYSICAL page geometry to the SWAPPED LOGICAL
@@ -1141,6 +1151,25 @@ function verticalLayoutSection(phys: SectionProps): SectionProps {
 function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
   if (!isVerticalSection(doc.section)) return doc;
   return { ...doc, section: verticalLayoutSection(doc.section) };
+}
+
+/** Inverse of {@link verticalLayoutSection}: map a vertical section's SWAPPED
+ *  LOGICAL geometry back to its PHYSICAL page geometry. Used to render a vertical
+ *  section's header/footer, which — per Word ground truth (issue #988) — stay
+ *  HORIZONTAL at the physical top/bottom margins and do NOT rotate with the tbRl
+ *  body. Applying `verticalLayoutSection` then this returns the original section
+ *  (a quarter-turn each way): physical margin{Top,Right,Bottom,Left} =
+ *  logical margin{Left,Top,Right,Bottom}; header/footer distances are preserved. */
+function physicalLayoutSection(logical: SectionProps): SectionProps {
+  return {
+    ...logical,
+    pageWidth: logical.pageHeight,
+    pageHeight: logical.pageWidth,
+    marginTop: logical.marginLeft,
+    marginRight: logical.marginTop,
+    marginBottom: logical.marginRight,
+    marginLeft: logical.marginBottom,
+  };
 }
 
 /** Map a page's stamped `sectionGeom` width/height back to PHYSICAL page size.
@@ -1486,33 +1515,83 @@ async function renderDocumentToCanvasLeased(
   // the SAME resolvers as the reserve pass (computeHeaderReserves / computeFooterReserves)
   // so the body's start/end can never drift from the gap pagination reserved.
 
-  // Header: top of page, starting at headerDistance. A header taller than its
-  // top-margin allowance (§17.6.11) overflows the content area downward; the body
-  // was already paginated to clear it (paginateWithHeaderFooterReserve), and its
-  // start y is pushed down by the same overflow so no body line sits over the header.
   const header = resolvePageHeader(pages, pageIndex, doc);
-  let headerReservePx = 0;
-  if (header) {
-    const headerHeight = measureHeaderFooterHeight(header, baseState);
-    renderHeaderFooter(header, sec.headerDistance * scale, baseState);
-    // §17.6.11 overflow in device px (headerHeight is at canvas scale), via the shared
-    // formula so the body start matches the pagination reserve exactly.
-    headerReservePx = headerOverflowPt(headerHeight, sec.marginTop * scale, sec.headerDistance * scale);
-  }
-
-  // Footer: anchored from bottom, rising by its measured height. A footer taller
-  // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
-  // was already paginated to clear it (paginateWithHeaderFooterReserve), and the same
-  // overflow raises the footnote block below so notes clear it too.
   const footer = resolvePageFooter(pages, pageIndex, doc);
+  let headerReservePx = 0;
   let footerReservePx = 0;
-  if (footer) {
-    const footerHeight = measureHeaderFooterHeight(footer, baseState);
-    const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
-    renderHeaderFooter(footer, footerTopY, baseState);
-    // §17.6.11 overflow in device px (footerHeight is at canvas scale), via the shared
-    // formula so the footnote clearance matches the pagination reserve exactly.
-    footerReservePx = footerOverflowPt(footerHeight, sec.marginBottom * scale, sec.footerDistance * scale);
+
+  if (vertical) {
+    // ECMA-376 §17.6.20 + §17.10.1 (issue #988 batch-3 adjudication): a vertical
+    // (tbRl) section's header/footer stay HORIZONTAL at the PHYSICAL top/bottom
+    // margins — Word does NOT rotate them with the body. The body is laid out in
+    // the swapped logical `sec` under the +90° page paint (applied above); the
+    // header/footer are drawn back in the physical page frame recovered by
+    // `physicalLayoutSection`, with the ctx transform reset to physical (no +90°)
+    // and a horizontal (`verticalCJK: false`) state.
+    //
+    // The reserves stay 0: the header/footer occupy the physical top/bottom band,
+    // which maps to the LOGICAL flow-start (column top) axis rather than the
+    // logical `y` the horizontal reserve shifts, and Word's fixtures fit them
+    // within their margins. Pushing the vertical body for an OVER-margin
+    // header/footer is a documented follow-up.
+    if (header || footer) {
+      // The header/footer are drawn HORIZONTALLY, so the layout context they use is
+      // horizontal — clear `textDirection` on the physical section (else the derived
+      // SectionLayoutContext would carry the body's `tbRl`, contradicting the
+      // `verticalCJK: false` state below).
+      const physSec: SectionProps = { ...physicalLayoutSection(sec), textDirection: null };
+      const physSectionLayout = resolveSectionLayoutContext(layoutSettings, physSec);
+      const physBaseState: RenderState = {
+        ...baseState,
+        contentX: physSec.marginLeft * scale,
+        contentW: (physPageWidth - physSec.marginLeft - physSec.marginRight) * scale,
+        marginLeft: physSec.marginLeft,
+        marginRight: physSec.marginRight,
+        marginTop: bodyMarginInsetPt(physSec.marginTop),
+        marginBottom: bodyMarginInsetPt(physSec.marginBottom),
+        pageWidth: physPageWidth,
+        pageH: physPageHeight * scale,
+        docGrid: toLegacyDocGridContext(physSectionLayout),
+        sectionLayout: physSectionLayout,
+        verticalCJK: false,
+        verticalPhys: undefined,
+      };
+      ctx.save();
+      // Drop the +90° page paint so the header/footer land in physical space.
+      ctx.setTransform(effectiveDpr, 0, 0, effectiveDpr, 0, 0);
+      if (header) renderHeaderFooter(header, physSec.headerDistance * scale, physBaseState);
+      if (footer) {
+        const footerHeight = measureHeaderFooterHeight(footer, physBaseState);
+        const footerTopY = cssHeight - physSec.footerDistance * scale - footerHeight;
+        renderHeaderFooter(footer, footerTopY, physBaseState);
+      }
+      ctx.restore();
+    }
+  } else {
+    // Header: top of page, starting at headerDistance. A header taller than its
+    // top-margin allowance (§17.6.11) overflows the content area downward; the body
+    // was already paginated to clear it (paginateWithHeaderFooterReserve), and its
+    // start y is pushed down by the same overflow so no body line sits over the header.
+    if (header) {
+      const headerHeight = measureHeaderFooterHeight(header, baseState);
+      renderHeaderFooter(header, sec.headerDistance * scale, baseState);
+      // §17.6.11 overflow in device px (headerHeight is at canvas scale), via the shared
+      // formula so the body start matches the pagination reserve exactly.
+      headerReservePx = headerOverflowPt(headerHeight, sec.marginTop * scale, sec.headerDistance * scale);
+    }
+
+    // Footer: anchored from bottom, rising by its measured height. A footer taller
+    // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
+    // was already paginated to clear it (paginateWithHeaderFooterReserve), and the same
+    // overflow raises the footnote block below so notes clear it too.
+    if (footer) {
+      const footerHeight = measureHeaderFooterHeight(footer, baseState);
+      const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
+      renderHeaderFooter(footer, footerTopY, baseState);
+      // §17.6.11 overflow in device px (footerHeight is at canvas scale), via the shared
+      // formula so the footnote clearance matches the pagination reserve exactly.
+      footerReservePx = footerOverflowPt(footerHeight, sec.marginBottom * scale, sec.footerDistance * scale);
+    }
   }
 
   // Body. ECMA-376 §17.6.4: lay out body text in EACH section's newspaper columns
@@ -3775,6 +3854,15 @@ function paginateWithHeaderFooterReserve(
     doc.settings,
     layoutSettings,
   );
+  // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
+  // header/footer out HORIZONTALLY in physical space with NO body reserve (see the
+  // paint path, which sets headerReservePx/footerReservePx = 0). `doc` here is the
+  // SWAPPED logical doc, so measuring a header against its logical marginTop/Bottom
+  // (physical right/left) and reserving on the logical `y` axis would mismatch the
+  // paint. Skip the reserve entirely for vertical sections so pagination and paint
+  // agree. (Physical-axis body-push for an over-margin vertical header/footer is a
+  // documented follow-up, matching the paint path's TODO.)
+  if (isVerticalSection(doc.section)) return pass1;
   const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, layoutSettings);
   const footerReserves = computeFooterReserves(pass1, doc, measure);
   const headerReserves = computeHeaderReserves(pass1, doc, measure);
@@ -10650,6 +10738,14 @@ export const __test_resolveAnchorBox = (
   paraBaseY: number,
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } =>
   resolveAnchorBox(img, state, paraBaseY);
+
+/** Exported for the vertical header/footer test (ECMA-376 §17.6.20 + §17.10.1,
+ *  issue #988): pins the inverse-of-`verticalLayoutSection` page/margin mapping a
+ *  vertical section's HORIZONTAL header/footer are laid out in. */
+export const __test_physicalLayoutSection = (logical: SectionProps): SectionProps =>
+  physicalLayoutSection(logical);
+export const __test_verticalLayoutSection = (phys: SectionProps): SectionProps =>
+  verticalLayoutSection(phys);
 
 /** Exported for the page-anchor pre-scan test (ECMA-376 §20.4.3.2/§20.4.3.5):
  *  drives {@link preRegisterPageFloats} from a unit test against a stub
