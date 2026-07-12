@@ -5650,18 +5650,33 @@ fn extract_simple_paragraph_text(
                 let Some(rb) = child_w(ruby_node, "rubyBase") else {
                     continue;
                 };
+                // Walk the rubyBase runs IN DOCUMENT ORDER, emitting `<w:t>` text
+                // and a horizontal tab for each `<w:tab>` (§17.3.3.32). Previously
+                // this scanned only `<w:t>`, so an in-base `<w:tab/>` collapsed to
+                // nothing (issue #1012). Word GT (`sample-59.pdf`) honors the tab
+                // as a real tab, so the base is split at tabs below — parity with
+                // the body path (`parse_run_inner`), which emits Text|Tab|Text.
+                // Match by WordprocessingML NAMESPACE (not bare local name) so an
+                // embedded graphic's DrawingML `<a:tab>`/`<a:t>` cannot leak in,
+                // mirroring the non-ruby shape run walk above.
                 let mut base_text = String::new();
                 let mut base_fmt: Option<RunFmt> = None;
                 for rb_run in rb
                     .children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "r")
                 {
-                    for t in rb_run
+                    for n in rb_run
                         .descendants()
-                        .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                        .filter(|n| n.is_element() && is_w_ns(n.tag_name().namespace()))
                     {
-                        if let Some(text_node) = t.text() {
-                            base_text.push_str(text_node);
+                        match n.tag_name().name() {
+                            "t" => {
+                                if let Some(text_node) = n.text() {
+                                    base_text.push_str(text_node);
+                                }
+                            }
+                            "tab" => base_text.push('\t'),
+                            _ => {}
                         }
                     }
                     if base_fmt.is_none() {
@@ -5686,7 +5701,26 @@ fn extract_simple_paragraph_text(
                         font_size_pt,
                     })
                 };
-                out.push((base_text, fmt, ruby));
+                // §17.3.3.25 + §17.3.3.32 — split the base at tabs so the shared
+                // line engine resolves each `\t` against the paragraph tab stops
+                // (§17.3.1.37), exactly as the body path does. The ruby annotation
+                // rides the FIRST EMITTED piece only: the body path
+                // (`parse_run_inner`) attaches it to the first `DocRun::Text` — and
+                // its `<w:tab/>` is itself a `Text("\t")` run — so a base that opens
+                // with a tab attaches ruby to that tab run there too. Mirror that
+                // exactly (`ruby_slot.take()` on whichever piece is emitted first,
+                // text or tab) so the two paths never diverge. With no tab this is a
+                // single run, so the common `漢字` case is unchanged.
+                let mut ruby_slot = ruby;
+                let parts: Vec<&str> = base_text.split('\t').collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if !part.is_empty() {
+                        out.push((part.to_string(), fmt.clone(), ruby_slot.take()));
+                    }
+                    if i + 1 < parts.len() {
+                        out.push(("\t".to_string(), fmt.clone(), ruby_slot.take()));
+                    }
+                }
             }
             return out;
         }
@@ -18098,5 +18132,130 @@ mod lvl_override_full_lvl_tests {
             "formatting-only override continues the shared count (its lvlText applies); \
              only startOverride restarts (§17.9.27)"
         );
+    }
+}
+
+#[cfg(test)]
+mod ruby_tab_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    /// Reduce a `<w:p>` (text-box paragraph) to its `ShapeText` via the shape
+    /// text path (`extract_simple_paragraph_text` → `collect_run_node`).
+    fn parse_shape_para(body: &str) -> Option<ShapeText> {
+        let xml = format!(r#"<w:p xmlns:w="{ns}">{body}</w:p>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        extract_simple_paragraph_text(&style_map, &mut num_map, doc.root_element(), &theme, &media)
+    }
+
+    /// ECMA-376 §17.3.3.25 (`w:ruby`) + §17.3.3.32 (`w:tab`) — a `<w:tab/>` inside
+    /// a rubyBase run must survive the TEXT-BOX parse path (issue #1012). Word GT
+    /// (`sample-59.pdf`) honors the in-base tab as a real tab, so the shape path
+    /// must mirror the body path (`parse_run_inner`): base `漢<tab>字` becomes the
+    /// run sequence [漢(ruby), \t, 字], with the ruby annotation riding the FIRST
+    /// (pre-tab) piece only.
+    #[test]
+    fn ruby_base_internal_tab_is_preserved_in_textbox_path() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rubyPr><w:rubyAlign w:val="center"/><w:hps w:val="12"/></w:rubyPr>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t xml:space="preserve">漢</w:t><w:tab/><w:t xml:space="preserve">字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["漢", "\t", "字"],
+            "in-base <w:tab/> is preserved and splits the base like the body path",
+        );
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+            "ruby annotation rides the first (pre-tab) base piece",
+        );
+        assert!(st.runs[1].ruby.is_none(), "the tab piece carries no ruby");
+        assert!(
+            st.runs[2].ruby.is_none(),
+            "the post-tab piece carries no ruby"
+        );
+    }
+
+    /// A rubyBase WITHOUT an internal tab is unchanged: one run carrying the whole
+    /// base text with the ruby attached (no spurious split).
+    #[test]
+    fn ruby_base_without_tab_is_a_single_run() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rubyPr><w:rubyAlign w:val="center"/><w:hps w:val="12"/></w:rubyPr>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t xml:space="preserve">漢字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["漢字"], "no tab ⇒ no split");
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+        );
+    }
+
+    /// Consecutive `<w:tab/>` in the base each survive as their own `\t` piece
+    /// (`split('\t')` keeps the empty middle part, which is skipped, but the tab
+    /// pieces between parts are still emitted) — parity with the body path, which
+    /// emits one `Text("\t")` per `<w:tab/>`.
+    #[test]
+    fn ruby_base_consecutive_tabs_each_survive() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t xml:space="preserve">漢</w:t><w:tab/><w:tab/><w:t xml:space="preserve">字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["漢", "\t", "\t", "字"], "both tabs preserved");
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+            "ruby rides the first (pre-tab) glyph",
+        );
+        assert!(st.runs[1..].iter().all(|r| r.ruby.is_none()));
+    }
+
+    /// A base that OPENS with a tab attaches the ruby to that first (tab) piece —
+    /// exactly what the body path does, since its `<w:tab/>` is a `Text("\t")` run
+    /// and the ruby attaches to the first `DocRun::Text`. Locks the two paths to
+    /// the same edge-case behavior (the annotation is not silently relocated onto
+    /// the post-tab glyph in the shape path).
+    #[test]
+    fn ruby_base_leading_tab_matches_body_first_emitted_piece() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:tab/><w:t xml:space="preserve">字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["\t", "字"],
+            "leading tab preserved, base not lost"
+        );
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+            "ruby rides the first EMITTED piece (the tab), mirroring the body path",
+        );
+        assert!(st.runs[1].ruby.is_none());
     }
 }
