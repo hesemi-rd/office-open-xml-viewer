@@ -17,12 +17,47 @@
  *
  * TABLE 1's border box lands at its natural flow position and matches the PDF
  * on BOTH axes, so it is asserted exactly (±2.5 pt). TABLE 2's physical
- * placement is Word-IDIOSYNCRATIC (Word pins it before the flow start,
- * overhanging the right margin at x [504.5, 577] instead of following the
- * right→left block flow) — the adjudication flags block placement as a partial
- * won't-fix candidate — so for it only the spec-grounded invariants are
- * asserted: physical width, top-margin pinning, and auto GROWTH well past the
- * 144.5 pt exact height.
+ * placement is Word-IDIOSYNCRATIC (see the RE-ADJUDICATION below) — so for it
+ * only the spec-grounded invariants are asserted: physical width, top-margin
+ * pinning, and auto GROWTH well past the 144.5 pt exact height.
+ *
+ * ── RE-ADJUDICATION (2026-07-12, issue #988 follow-up) ──────────────────────
+ * The user re-observed sample-52 and reported (1) "cells still vertical / cut
+ * off" and (2) "Word keeps vertical text BELOW the table, we put it beside it".
+ *
+ * (1) does NOT reproduce. Cell text renders HORIZONTAL/upright in BOTH the node
+ * (skia-canvas) render AND the browser (Chromium via Storybook) — verified with
+ * onTextRun (transform:undefined, 5-char w≈60 runs advancing downward), the
+ * cell-glyph ctm (identity — the +90° page rotation is un-done), and a pixel
+ * band analysis. The earlier report was a STALE Storybook build predating #999
+ * (merge 6e2a2cc); the low line-pitch of a substituted CJK face makes stacked
+ * horizontal lines LOOK like vertical columns until magnified. So #999's
+ * horizontal-cell behaviour is CORRECT and is regression-guarded below.
+ *
+ * (2) is real but NON-CAUSAL, so it stays a won't-fix (narrowed & measured).
+ * Word GT (red-border boxes + pdftotext -bbox), physical page x[72,540] y[72,720]:
+ *   • T1 (exact) box x[417,489] y[72,216]  — top-anchored, LEFT.
+ *   • T2 (auto)  box x[504,576] y[72,365]  — top-anchored, RIGHT, OVERHANGS the
+ *     right content margin (576 > 540).
+ *   • p0 heading col x[519,531] y[366,563] and p1 col x[497,510] y[366,621]
+ *     resume BELOW T2 (start at T2's bottom, in T2's x-band).
+ *   • p4 col x[449,462] y[217,516] and p6 col x[425,438] y[217,620] resume
+ *     BELOW T1 (start at T1's bottom, in T1's x-band).
+ * So Word DOES flow vertical text below each top-anchored table. BUT the pairing
+ * is non-causal: text BEFORE T1 (p0,p1) sits under the LATER table T2, and text
+ * after T1 (p4,p6) sits under the EARLIER table T1 — text-segment i is capped by
+ * table (n+1−i), the tables progress LEFT→RIGHT (reverse of the RTL text), and
+ * T2 overhangs the margin. A later table displacing earlier text cannot arise in
+ * a single forward layout pass; reproducing it needs a page-level place-all-
+ * tables → register-exclusions → reflow model, and even that leaves the reversed
+ * pairing + overhang undocumented. §17.6.20/§17.4.80 say nothing about it and a
+ * plain block table has no wrapTopAndBottom, so a forward-only "text-below-table"
+ * approximation would be sample-fitting (spec-first violation) AND a *different*
+ * wrong layout (it would put p6 under T2, not T1). Independent review (Codex
+ * gpt-5.6-sol) concurred. Decision: keep the renderer's RTL block-flow placement,
+ * assert only the spec-grounded invariants, and CHARACTERIZE the residual (our
+ * T2 lands LEFT of T1, the reverse of Word) so a future adjudication sweep on a
+ * purpose-built fixture matrix notices any change.
  *
  * CI-safe: gated on docx WASM + skia-canvas + the PRIVATE sample + a macOS JP
  * font; skips when any is absent.
@@ -160,6 +195,16 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !havePrereqs)(
       expect(Math.abs(autoBox!.x1 - autoBox!.x0 - 72.5), 'auto physical width').toBeLessThanOrEqual(2.5);
       expect(Math.abs(autoBox!.y0 - 72), 'auto pinned at the top margin').toBeLessThanOrEqual(2.5);
       expect(autoBox!.y1 - autoBox!.y0, 'auto row grew past the exact 144.5').toBeGreaterThan(250);
+      // Both tables share the SAME physical top edge (top content margin) — the
+      // top-anchoring the RE-ADJUDICATION confirms matches Word for BOTH tables.
+      expect(Math.abs(exactBox!.y0 - autoBox!.y0), 'both tables top-anchored together').toBeLessThanOrEqual(2.5);
+      // CHARACTERIZATION of the documented won't-fix residual (see the header
+      // RE-ADJUDICATION): our RTL block flow lays the LATER auto table entirely
+      // to the LEFT of the earlier exact table. Word GT is the REVERSE (auto at
+      // x[504,576], right of exact at x[417,489], overhanging the margin). If a
+      // future change reproduces Word's page-level exclusion/reflow model this
+      // flips and must be re-adjudicated on a purpose-built fixture matrix.
+      expect(autoBox!.x1, 'residual: auto table lands LEFT of exact (reverse of Word)').toBeLessThan(exactBox!.x0);
 
       // ── Clip: no cell ink below TABLE 1's exact bottom border ───────────
       let inkBelow = 0;

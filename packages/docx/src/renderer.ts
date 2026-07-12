@@ -12582,6 +12582,17 @@ function renderTable(table: DocTable, state: RenderState): void {
   // placement along the flow axis and row-splitting across vertical pages are
   // un-adjudicated follow-ups; the paginator charges the same tableW footprint
   // (computePages' vertical table branch) so pagination and paint agree.
+  //
+  // WON'T-FIX (narrowed, issue #988 re-adjudication 2026-07-12; measurements in
+  // docx-vertical-table-cells.probe.test.ts): Word additionally flows the
+  // vertical text BELOW each top-anchored table and places a MULTI-table run in
+  // a page-level order that is NON-CAUSAL for a single forward pass — a later
+  // table displaces earlier text, tables progress left→right (reverse of the RTL
+  // text), and an auto table can overhang the right margin. §17.6.20/§17.4.80 do
+  // not define this and a plain block table has no wrapTopAndBottom, so we keep
+  // the causal RTL block-flow placement here rather than sample-fit a Word quirk
+  // (independently reviewed). Reproducing it would need a place-all-tables →
+  // register-exclusions → reflow pass, gated on a purpose-built fixture matrix.
   if (state.verticalPhys) {
     const cssW = state.verticalPhys.cssWidthPx;
     const physState = verticalPhysicalContentState(state);
