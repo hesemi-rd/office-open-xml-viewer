@@ -396,6 +396,14 @@ export type BodyElement =
        *  separately from `geom` because a section may inherit its geometry yet
        *  still restart / re-format its page numbers. */
       pageNumType?: PageNumType | null;
+      /** ECMA-376 §17.6.20 `<w:textDirection w:val>` — this ENDING section's
+       *  flow direction (TRANSITIONAL ST_TextDirection, same enum and semantics
+       *  as {@link SectionProps.textDirection}), so a vertical (tbRl/btLr)
+       *  non-final section can coexist with a horizontal final section (issue
+       *  #1000). Absent ⇒ horizontal ("lrTb" is collapsed by the parser).
+       *  Carried separately from `geom` (like `pageNumType`) because a section
+       *  may inherit its page geometry yet still set its own flow direction. */
+      textDirection?: string | null;
     };
 
 /** A BodyElement annotated with a line range to render. Set when the

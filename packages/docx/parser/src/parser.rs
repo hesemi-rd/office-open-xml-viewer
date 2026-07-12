@@ -1593,6 +1593,25 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
         .find_map(|n| attr_w(n, "val"))
 }
 
+/// ECMA-376 §17.6.20 `<w:textDirection w:val>` — read a sectPr's flow direction.
+/// Word writes the TRANSITIONAL ST_TextDirection enum (Part 4 §14.11.7):
+/// `lrTb`|`tbRl`|`btLr`|`lrTbV`|`tbLrV`|`tbRlV` — NOT the Part 1 §17.18.93
+/// Strict set (`tb`|`rl`|`lr`|…). The default "lrTb" (horizontal, left→right /
+/// top→bottom) is dropped to `None` so horizontal documents serialize exactly
+/// as before (both carriers are `skip_serializing_if = "Option::is_none"`);
+/// any other value (most commonly "tbRl" for vertical Japanese) is carried
+/// through verbatim so the renderer decides which are vertical (see
+/// `isVerticalSection`). The parser does not validate the enum — an unknown
+/// value is carried and the renderer treats it as horizontal, the safe
+/// default. Single extraction source for BOTH the body-level
+/// `SectionProps.text_direction` and the per-terminating-section
+/// `SectionBreak.text_direction` (issue #1000).
+fn read_text_direction(sect_pr: roxmltree::Node) -> Option<String> {
+    child_w(sect_pr, "textDirection")
+        .and_then(|n| attr_w(n, "val"))
+        .filter(|td| td != "lrTb")
+}
+
 /// ECMA-376 §17.6.12 `<w:pgNumType>` — parse a section's page-numbering settings.
 /// Returns `None` when the sectPr has no `<w:pgNumType>` OR the element carries
 /// neither `@w:start` nor `@w:fmt` (only chapter attributes, which are out of
@@ -1794,6 +1813,9 @@ fn section_break_element(
         geom: section_geom(sect_pr),
         // ECMA-376 §17.6.12 — this ending section's page-numbering restart/format.
         page_num_type: parse_pgnum_type(sect_pr),
+        // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
+        // per-section mixing); lrTb/absent ⇒ None, others verbatim.
+        text_direction: read_text_direction(sect_pr),
     }
 }
 
@@ -2085,21 +2107,10 @@ fn parse_section(
     // paginator needs the final section's here to resolve the boundary INTO it.
     props.section_start = read_section_break_type(sp);
 
-    // ECMA-376 §17.6.20 `<w:textDirection w:val>`. Word writes the TRANSITIONAL
-    // ST_TextDirection enum (Part 4 §14.11.7): `lrTb`|`tbRl`|`btLr`|`lrTbV`|
-    // `tbLrV`|`tbRlV` — NOT the Part 1 §17.18.93 Strict set (`tb`|`rl`|`lr`|…).
-    // The default "lrTb" (horizontal, left→right / top→bottom) is dropped to
-    // `None` so horizontal documents serialize exactly as before (the field is
-    // `skip_serializing_if = "Option::is_none"`); any other value (most commonly
-    // "tbRl" for vertical Japanese) is carried through verbatim so the renderer
-    // decides which are vertical (see `isVerticalSection`). The parser does not
-    // validate the enum — an unknown value is carried and the renderer treats it
-    // as horizontal, which is the safe default.
-    if let Some(td) = child_w(sp, "textDirection").and_then(|n| attr_w(n, "val")) {
-        if td != "lrTb" {
-            props.text_direction = Some(td);
-        }
-    }
+    // ECMA-376 §17.6.20 `<w:textDirection w:val>` — shared extraction (see
+    // `read_text_direction`); also carried per-terminating-section on the
+    // `SectionBreak` marker (issue #1000 per-section mixing).
+    props.text_direction = read_text_direction(sp);
 
     // ECMA-376 §17.6.5 w:docGrid. When @type=lines|linesAndChars with a
     // linePitch, Word renders each line of text at intervals of linePitch
@@ -13872,6 +13883,73 @@ mod column_tests {
         assert_eq!(g.margin_left, 72.0);
         assert_eq!(g.header_distance, 36.0);
         assert_eq!(g.footer_distance, 36.0);
+    }
+
+    /// ECMA-376 §17.6.20 `<w:textDirection w:val>` — a mid-body section break
+    /// carries its ENDING section's text direction on `text_direction`, exactly
+    /// like `columns`/`page_num_type` (issue #1000 per-section mixing: a
+    /// vertical non-final section beside a horizontal final section). Same
+    /// TRANSITIONAL ST_TextDirection handling as the body-level SectionProps
+    /// parse: the default "lrTb" (and an absent element) collapse to `None`;
+    /// any other token is carried verbatim so the renderer decides which flow
+    /// vertically.
+    #[test]
+    fn section_break_carries_text_direction() {
+        // Extract the SectionBreak's text_direction from a body whose FIRST
+        // section ends with `sect_pr_xml` inside a pPr-owned sectPr.
+        let td_of = |sect_pr_xml: &str| -> Option<String> {
+            let body = body_from(&format!(
+                r#"
+                <w:p>
+                  <w:pPr>
+                    <w:sectPr>
+                      <w:type w:val="nextPage"/>
+                      {sect_pr_xml}
+                    </w:sectPr>
+                  </w:pPr>
+                </w:p>
+                <w:p><w:r><w:t>body</w:t></w:r></w:p>
+                "#,
+            ));
+            body.iter()
+                .find_map(|e| match e {
+                    BodyElement::SectionBreak { text_direction, .. } => {
+                        Some(text_direction.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a SectionBreak marker")
+        };
+        // Vertical tokens are carried verbatim (§17.6.20 / Part 4 §14.11.7).
+        assert_eq!(
+            td_of(r#"<w:textDirection w:val="tbRl"/>"#).as_deref(),
+            Some("tbRl"),
+        );
+        assert_eq!(
+            td_of(r#"<w:textDirection w:val="btLr"/>"#).as_deref(),
+            Some("btLr"),
+        );
+        // The default "lrTb" collapses to None (horizontal serialization
+        // unchanged), as does an absent <w:textDirection>.
+        assert_eq!(td_of(r#"<w:textDirection w:val="lrTb"/>"#), None);
+        assert_eq!(td_of(""), None);
+
+        // A LOOSE mid-body sectPr (not pPr-owned) carries it too.
+        let body = body_from(
+            r#"
+            <w:p><w:r><w:t>sec1</w:t></w:r></w:p>
+            <w:sectPr><w:type w:val="nextPage"/><w:textDirection w:val="tbRl"/></w:sectPr>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            "#,
+        );
+        let td = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::SectionBreak { text_direction, .. } => Some(text_direction.clone()),
+                _ => None,
+            })
+            .expect("a SectionBreak marker");
+        assert_eq!(td.as_deref(), Some("tbRl"));
     }
 
     /// ECMA-376 §17.6.11 — `w:top` / `w:bottom` are ST_SignedTwipsMeasure and MAY

@@ -537,6 +537,17 @@ pub enum BodyElement {
         /// `headers` are carried per-terminating-section.
         #[serde(skip_serializing_if = "Option::is_none")]
         page_num_type: Option<PageNumType>,
+        /// ECMA-376 §17.6.20 `<w:textDirection w:val>` — this ENDING section's
+        /// flow direction (TRANSITIONAL ST_TextDirection, Part 4 §14.11.7), so a
+        /// vertical (tbRl/btLr) non-final section can coexist with a horizontal
+        /// final section (issue #1000 per-section mixing). Same handling as
+        /// `SectionProps.text_direction`: the default "lrTb" (and an absent
+        /// element) collapse to `None`; other tokens are carried verbatim.
+        /// Carried SEPARATELY from `geom` (like `page_num_type`) because a
+        /// section may inherit its page geometry yet still set its own flow
+        /// direction. `None` ⇒ horizontal (lrTb).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text_direction: Option<String>,
     },
 }
 
