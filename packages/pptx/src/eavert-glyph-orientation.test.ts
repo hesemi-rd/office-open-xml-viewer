@@ -262,19 +262,13 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     expect(norm(mark[0].rot), '； stays upright (the FE14 fallback)').toBeCloseTo(UPRIGHT, 5);
   });
 
-  // The long-stroke Tr marks whose designed vertical form is the horizontal MIRROR of
-  // the +90° rotation (core verticalTrMirrorFallback): ー and the wave dash / tilde.
   it.each(['ー', '〜', '～'])(
-    'ROTATES + REFLECTS the vo=Tr long-stroke mark %s — page +90° plus scale(1,-1)',
+    'plain-rotates the unreachable vo=Tr long-stroke mark %s',
     (mk) => {
-      // These ride the page +90° rotation like the colon, but their font-designed
-      // vertical form is the HORIZONTAL MIRROR of that rotation (Word/PowerPoint +
-      // font `vert` glyph verified — a plain rotation of ー bulges LEFT, the designed
-      // form bulges RIGHT). So they also reflect via `scale(1, -1)`.
       const mark = renderEaVert(mk).filter((c) => c.text === mk);
       expect(mark.length, `${mk} is painted as its own glyph`).toBe(1);
       expect(norm(mark[0].rot), `${mk} rotates 90° (the Tr fallback)`).toBeCloseTo(SIDEWAYS, 5);
-      expect(mark[0].sy, `${mk} is reflected (scale-y = −1)`).toBe(-1);
+      expect(mark[0].sy, `${mk} is not reflected`).toBe(1);
     },
   );
 
@@ -296,7 +290,7 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     expect(at(TU_COMMA_FE), 'comma substituted').toBeTruthy();
     expect(norm(at(TU_COMMA_FE)!.rot)).toBeCloseTo(UPRIGHT, 5);
     expect(norm(at(TR_ROTATE)!.rot)).toBeCloseTo(SIDEWAYS, 5);
-    expect(at(TR_ROTATE)!.sy, 'ー is reflected in the mixed column too').toBe(-1);
+    expect(at(TR_ROTATE)!.sy, 'ー is not reflected in the mixed column').toBe(1);
   });
 });
 
@@ -329,7 +323,7 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     drawEaVertRun(ctx, text, 0, 100, FONT_PX, 0, 'fill');
     return calls;
   }
-  it('uses vert only for mirror-fallback marks and keeps other glyphs on manual paths', () => {
+  it('uses vert only for long marks and keeps other glyphs on manual paths', () => {
     const { ctx, calls } = mockCtx();
     drawEaVertRunWithCapability(
       ctx,
@@ -354,7 +348,7 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     expect(calls.slice(9).every((call) => norm(call.rot) === 0)).toBe(true);
     expect(calls.every((call) => call.sy === 1)).toBe(true);
   });
-  it('keeps a glyph without vert coverage on the reflected geometric fallback', () => {
+  it('keeps a glyph without vert coverage on the plain geometric fallback', () => {
     const { ctx, calls } = mockCtx();
     drawEaVertRunWithCapability(
       ctx,
@@ -367,13 +361,12 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
       (cp) => cp === 0x30fc,
     );
     expect(calls.map((call) => call.feature)).toEqual(['"vert" 1', 'normal']);
-    expect(calls.map((call) => call.sy)).toEqual([1, -1]);
+    expect(calls.map((call) => call.sy)).toEqual([1, 1]);
   });
-  it('records the complete fallback shear matrix with a positive b component', () => {
+  it('does not install a fallback mirror or shear matrix', () => {
     const { ctx, transforms } = mockCtx(0.125);
     drawEaVertRun(ctx, 'ー', 0, 100, FONT_PX, 0, 'fill');
-    expect(transforms).toEqual([{ a: 1, b: 0.125, c: 0, d: -1, e: 0, f: 0 }]);
-    expect(transforms[0].b).toBeGreaterThan(0);
+    expect(transforms).toEqual([]);
   });
   it('counter-rotates vo=U glyphs by −90° (upright in the +90° page frame)', () => {
     const calls = runHelper(U_CJK);
@@ -391,14 +384,11 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     expect(runHelper(TU_COMMA)[0].text).toBe(TU_COMMA_FE);
     expect(norm(runHelper(TU_COMMA)[0].rot)).toBeCloseTo(-Math.PI / 2, 5);
   });
-  it('leaves vo=Tr ー rotated with the page but REFLECTS it (scale-y −1, no counter-rotation, no substitution)', () => {
+  it('leaves vo=Tr ー plain-rotated with the page (no local transform or substitution)', () => {
     const calls = runHelper(TR_ROTATE);
     expect(calls[0].text).toBe(TR_ROTATE);
     expect(norm(calls[0].rot)).toBeCloseTo(0, 5);
-    // The reflection (core verticalTrMirrorFallback) is the helper's own scale(1,-1);
-    // the +90° page rotation is added by renderTextBody (not installed in this helper
-    // test), so here only the reflection is observable.
-    expect(calls[0].sy, 'ー is reflected').toBe(-1);
+    expect(calls[0].sy, 'ー is not reflected').toBe(1);
   });
   it('advances each cell by measure + letterSpacingPx (the justification pitch)', () => {
     const { ctx: c0, calls: k0 } = mockCtx();

@@ -177,7 +177,32 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       const tbrl = await renderDoc(docxWith(VERT_SECTPR('tbRl')));
       expect(btlr.runs.length, 'btLr produced runs').toBeGreaterThan(0);
       expect(btlr.runs.every((r) => /rotate/.test(r.tr)), 'btLr runs are on the rotated page').toBe(true);
-      expect(btlr.runs).toEqual(tbrl.runs);
+      expect(btlr.runs).toHaveLength(tbrl.runs.length);
+      for (let i = 0; i < btlr.runs.length; i += 1) {
+        const rotated = btlr.runs[i];
+        const upright = tbrl.runs[i];
+        // The page-frame claim pins positions, heights, and transforms exactly.
+        // Width is paint-model-specific: btLr is one contextually measured and
+        // painted horizontal run, while tbRl sums the independent per-glyph cells
+        // its vertical painter advances. Font kern pairs may differ by one pixel.
+        expect({
+          t: rotated.t,
+          x: rotated.x,
+          y: rotated.y,
+          h: rotated.h,
+          tr: rotated.tr,
+        }).toEqual({
+          t: upright.t,
+          x: upright.x,
+          y: upright.y,
+          h: upright.h,
+          tr: upright.tr,
+        });
+        expect(
+          Math.abs(rotated.w - upright.w),
+          `advance-model width delta for run ${JSON.stringify(rotated.t)}`,
+        ).toBeLessThanOrEqual(1);
+      }
     });
 
     it('GLYPHS: the btLr raster equals the quarter-turned horizontal render rotated +90° CW', async () => {

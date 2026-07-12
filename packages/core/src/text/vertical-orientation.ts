@@ -64,15 +64,15 @@ export function verticalOrientation(cp: number): VerticalOrientation {
  * "Vertical Forms" presentation glyph to paint instead of `cp`, or `null` when
  * there is none to apply.
  *
- * UAX #50 §5 ("Glyph Changes for Vertical Orientation") describes the Tu/Tr
- * transform as substituting a vertical glyph variant. A Canvas cannot invoke the
- * font's `vert`/`vrt2` OpenType feature, so for the CORNER-HANGING Tu punctuation
- * that has a dedicated Unicode presentation form we substitute the code point
- * itself and let the font supply the pre-positioned glyph (upper-right cell
- * corner). The caller then draws it em-box-centred (NO ink re-centring), so the
- * font's designed corner offset is preserved — that is what places 、。 in the
- * cell's upper-right the way Word does (PDF-verified on sample-26: 、 ink at
- * −0.32em along-column, +0.33em cross-axis).
+ * UAX #50 §5 ("Glyph Changes for Vertical Orientation") defines the Tu/Tr
+ * glyph-orientation contract: use a vertical glyph variant when available, with
+ * an upright Tu fallback. A DOM canvas can reach the font's `vert` feature only
+ * through the probed element/CSS route used by the DOCX renderer. On hosts where
+ * that route or this glyph is unreachable, this map supplies the manual fallback
+ * for CORNER-HANGING Tu punctuation that has a Unicode vertical presentation
+ * form. Drawing that form em-box-centred preserves its upper-right placement.
+ * ECMA-376 §17.6.20 governs the containing text flow; UAX #50 and the documented
+ * Office adjudications govern this per-glyph choice.
  *
  * NOTE: this map is a rendering mapping (fullwidth/CJK source → vertical form),
  * NOT the strict inverse of UnicodeData's `<vertical>` compatibility
@@ -80,8 +80,8 @@ export function verticalOrientation(cp: number): VerticalOrientation {
  * (U+002C) — but vertical Japanese text carries the FULLWIDTH comma, so the map
  * keys on that. Only FE11 (← 3001 、) and FE12 (← 3002 。) are exact inverses.
  *
- * Every key is vo=Tu, i.e. actually reaches the renderers' upright/substitute
- * draw branch. Deliberately NOT in the map:
+ * Every key is vo=Tu and reaches the upright/substitute branch when `vert` is
+ * unreachable. Deliberately NOT in the map:
  *   • ！ FF01 (→ FE15) and ？ FF1F (→ FE16) — although vo=Tu, the exclamation /
  *     question marks stand UPRIGHT and HORIZONTALLY CENTRED in a vertical line,
  *     unlike the corner-hanging comma / full stop. The original fullwidth ！／？
@@ -100,12 +100,13 @@ export function verticalOrientation(cp: number): VerticalOrientation {
  *   • … U+2026 is vo=R — the sideways branch rotates it 90° with the page, so
  *     its three dots already stack vertically, visually equivalent to Word's
  *     vertical ellipsis; no substitution is needed.
- *   • Small kana (vo=Tu) have no U+FExx presentation form — a true vertical
- *     variant needs the font's `vert` feature — so they draw upright unchanged.
+ *   • Small kana (vo=Tu) have no U+FExx presentation form. A reachable DOM font
+ *     uses its probed `vert` glyph; unreachable hosts draw them upright unchanged.
  *
  * Renderers apply this ONLY at glyph-draw time (glyph selection): the text model,
- * advance/width (kept at 1 em), selection, and find/highlight all continue to use
- * the ORIGINAL code point, so searching for 。 still matches a substituted 。.
+ * selection, and find/highlight continue to use the ORIGINAL code point, so
+ * searching for 。 still matches a substituted 。. Reachable DOM glyphs use
+ * their feature-state cell metric; manual fallbacks use the original advance.
  *
  * @param cp A Unicode scalar value.
  * @returns The vertical presentation-form code point, or null.
@@ -147,10 +148,11 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  *     block, issue #969), which the common substitute fonts DO contain.
  *
  * NOTE: the fullwidth colon ： / semicolon ； (→ FE13/FE14) were REMOVED from this
- * map (issue #969 follow-up). Those forms are absent from most render fonts and a
- * Canvas cannot invoke the font's `vert` feature, so substituting reached a
- * mispositioned system-fallback glyph. They now take a GEOMETRIC fallback in the
- * renderers (colon rotate, semicolon upright per {@link verticalTrUprightFallback}).
+ * map (issue #969 follow-up). Those forms are absent from most render fonts, so an
+ * unreachable host would substitute a mispositioned system-fallback glyph. The
+ * manual path instead uses the adjudicated geometric fallbacks (colon rotate,
+ * semicolon upright per {@link verticalTrUprightFallback}); a reachable DOCX DOM
+ * path uses the original code point under `vert`.
  *
  * WHY this is separate from {@link verticalFormSubstitute} (the Tu map): the two
  * fallbacks differ. A Tu code point with no vertical form draws UPRIGHT; a Tr
@@ -162,12 +164,11 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  *
  * WHY substitute a Tr bracket at all: UAX #50 §5 defines the Tr transform as
  * "substitute a vertical glyph variant; ROTATE only as the fallback when none is
- * available." A Canvas cannot reach the font's `vert`/`vrt2` OpenType feature via
- * `fillText`, but the Unicode "Presentation Forms For Vertical" block supplies a
- * dedicated, already-vertical code point for every fullwidth bracket, and those
- * code points ARE reachable. Drawing the vertical form UPRIGHT (rather than
- * rotating the horizontal bracket) is both closer to Word (which uses the same
- * `vert` glyphs) and — critically — measurable: an upright glyph's along-column
+ * available." The probed DOCX DOM route uses the font's real `vert` glyph. Other
+ * hosts use the Unicode "Presentation Forms For Vertical" block, which supplies
+ * a dedicated, already-vertical code point for every fullwidth bracket. Drawing
+ * that fallback form UPRIGHT is both closer to Word and — critically — measurable:
+ * an upright glyph's along-column
  * position is governed by its VERTICAL ink extent (`actualBoundingBoxAscent/
  * Descent`, which a Canvas exposes), whereas a ROTATED bracket's along-column
  * position is governed by its HORIZONTAL ink offset inside the advance box, which
@@ -175,7 +176,7 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  * box). So substitution is what makes metric-driven cell-centring possible.
  *
  * Deliberately NOT here (they are vo=Tr but have no Unicode vertical presentation
- * form, so the renderer keeps the rotate fallback):
+ * form, so an unreachable renderer keeps the rotate fallback):
  *   • ー U+30FC prolonged sound mark
  *   • “ ” U+201C/201D double quotation marks
  *
@@ -183,9 +184,10 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  * of the U+FE10 and U+FE30 blocks (each vertical form decomposes to its horizontal
  * source). FE17/FE18 decompose exactly to 〖/〗.
  *
- * Renderers apply this ONLY at glyph-draw time (glyph selection): the advance/
- * width, text model, selection, and find/highlight all keep the ORIGINAL code
- * point, so searching for （ or ： still matches a substituted （ / ：.
+ * Renderers apply this ONLY at glyph-draw time (glyph selection): the text model,
+ * selection, and find/highlight keep the ORIGINAL code point, so searching for （
+ * or ： still matches a substituted glyph. Reachable DOM glyphs use their
+ * feature-state cell metric; manual fallbacks use the original advance.
  *
  * @param cp A Unicode scalar value.
  * @returns The U+FE1x/FE3x vertical presentation-form code point, or null.
@@ -212,9 +214,10 @@ export function verticalBracketFormSubstitute(cp: number): number | null {
 //      dot-over-comma; see verticalTrUprightFallback). FE17/FE18 decompose to
 //      the white lenticular brackets 3016/3017 exactly.
 //
-// ー (30FC) and the double quotes (201C/201D) are vo=Tr with NO vertical form and are
-// absent, so the renderer rotates them. The fullwidth colon ：(FF1A) rotates too
-// (→ FE13's side-by-side dots); the semicolon ；(FF1B) is upright (→ FE14) — see
+// ー (30FC) and the double quotes (201C/201D) are vo=Tr with NO Unicode vertical
+// presentation form and are absent. A reachable DOCX DOM font may supply them via
+// `vert`; otherwise they rotate. The fullwidth colon ：(FF1A) rotates too (→ FE13's
+// side-by-side dots); the semicolon ；(FF1B) is upright (→ FE14) — see
 // verticalTrUprightFallback.
 const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
   [0xff08, 0xfe35], // （ fullwidth left parenthesis  → ︵
@@ -236,9 +239,9 @@ const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, n
   // vo=Tr white lenticular brackets in the U+FE1x block (issue #969). The
   // fullwidth colon ： / semicolon ； (→ FE13/FE14) were REMOVED here (issue #969
   // follow-up): their U+FE13/FE14 forms are absent from most render fonts
-  // (e.g. Hiragino Mincho ProN, macOS's Yu Mincho substitute) and a Canvas
-  // cannot reach the font's `vert` OpenType feature, so substituting the code
-  // point reaches the system fallback cascade and paints a DIFFERENT font's glyph
+  // (e.g. Hiragino Mincho ProN, macOS's Yu Mincho substitute). On an unreachable
+  // host, substituting the code point reaches the system fallback cascade and
+  // paints a DIFFERENT font's glyph
   // positioned wrong (measured: FE13/FE14 ink lands ~0.25em RIGHT of the column
   // centre in both skia AND Chrome). They now take a GEOMETRIC fallback that
   // reproduces each vertical form's design directly — colon rotates (→ FE13's
@@ -279,51 +282,20 @@ export function verticalTrUprightFallback(cp: number): boolean {
   return VERTICAL_TR_UPRIGHT_FALLBACK.has(cp);
 }
 
-// The vo=Tr code points whose no-vertical-form ROTATE fallback must additionally be
-// HORIZONTALLY REFLECTED (mirrored) to reproduce Word. These are the long horizontal
-// STROKE marks — the katakana-hiragana prolonged sound mark ー and the wave dash /
-// fullwidth tilde 〜／～ — whose font-DESIGNED vertical form is a reflection of the
-// +90° rotation of the horizontal glyph, NOT the rotation itself. In vertical Japanese
-// typography the 起筆 (brush entry / uroko) and the stroke's curvature flip left↔right
-// between the horizontal and vertical orientations; a type designer draws the vertical
-// glyph accordingly (the horizontal and vertical forms are mirror images across the
-// stroke axis). A Canvas cannot invoke the font's `vert`/`vrt2` feature to reach that
-// designed glyph, so the renderers rotate AND reflect the horizontal glyph to match.
-//
-// Ground truth (font actual-form, not sample-fitting): the designed `vert` glyph in
-// Hiragino Mincho ProN (ー: horizontal cid00660 → vertical cid07891; 〜: cid00665 →
-// cid07894) bulges to the OPPOSITE side of the +90° CW rotation of the horizontal
-// glyph, and the Word PDF (sample-47, Yu Mincho) renders ー with its head at the TOP
-// bulging RIGHT while a plain +90° rotation bulges LEFT — a left-right mirror.
-//
-// Deliberately EXCLUDED (they are vo=Tr rotate-fallback too, but must NOT reflect):
-//   • “ ” U+201C/201D double quotes — their designed vertical form IS the +90° rotation
-//     (font-verified: the comma-hooks match the rotation exactly); reflecting them would
-//     reverse the hook direction. They stay on the plain rotate path.
-//   • ： FF1A fullwidth colon — its vertical form is two dots side by side, symmetric
-//     under a horizontal mirror, so reflection is a visual no-op; kept off this set so
-//     the plain rotate path (which already reproduces FE13, issue #969) is unchanged.
-//   • ゠ U+30A0 double hyphen — two vertical bars, likewise symmetric (no-op).
-// The halfwidth ｰ (FF70) and the em dash / horizontal bar (2014/2015) are vo=R, so they
-// take the SIDEWAYS branch, not this rotate fallback.
-const VERTICAL_TR_MIRROR_FALLBACK: ReadonlySet<number> = new Set<number>([
-  0x30fc, // ー katakana-hiragana prolonged sound mark → vertical form is a reflection
-  0x301c, // 〜 wave dash                              → vertical form is a reflection
-  0xff5e, // ～ fullwidth tilde (same glyph as 〜)      → vertical form is a reflection
+// The three Tr long marks initially wired to the DOM `vert` capability probe by
+// #1023. This is a routing class only: it makes no claim about the inaccessible
+// vertical design and must never select a geometric mirror/shear approximation.
+const VERTICAL_TR_LONG_MARKS: ReadonlySet<number> = new Set<number>([
+  0x30fc, // ー katakana-hiragana prolonged sound mark
+  0x301c, // 〜 wave dash
+  0xff5e, // ～ fullwidth tilde
 ]);
 
 /**
- * True when a vo=Tr code point with NO substituted vertical form must be
- * HORIZONTALLY REFLECTED (in addition to the ROTATE fallback) to match Word — the
- * long-stroke marks ー and 〜／～ whose font-designed vertical glyph is a mirror of
- * the +90° rotation, not the rotation. The double quotes “ ” and colon ： return
- * false (their rotate fallback needs no reflection — quotes rotate exactly, the
- * colon is symmetric). This overrides the informative UAX #50 Tr fallback the way a
- * layout application may; the renderers implement the reflection geometrically
- * (a Canvas cannot reach the font's `vert` OpenType glyph).
- *
- * @param cp A Unicode scalar value.
+ * Whether `cp` is one of the three Tr long marks whose reachable `vert` glyph was
+ * enabled by #1023. If `vert` is unreachable, UAX #50's plain rotated fallback is
+ * used without fabricating the glyph's unknown design.
  */
-export function verticalTrMirrorFallback(cp: number): boolean {
-  return VERTICAL_TR_MIRROR_FALLBACK.has(cp);
+export function verticalTrLongMark(cp: number): boolean {
+  return VERTICAL_TR_LONG_MARKS.has(cp);
 }

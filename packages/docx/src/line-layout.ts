@@ -2890,8 +2890,15 @@ export function layoutLines(
   // (`!verticalRun`), and every font that does not under-report — byte-identical
   // common path. The run's font must already be selected on `ctx` (the callers
   // select it via measureText / setMeasureFont immediately before).
-  const verticalInkExtra = (s: LayoutTextSeg, text: string): number =>
-    s.verticalRun ? verticalRunInkExtraPx(ctx, text) : 0;
+  const verticalInkExtra = (s: LayoutTextSeg, text: string): number => {
+    if (!s.verticalRun) return 0;
+    const prevKern = setSegKerning(s);
+    try {
+      return verticalRunInkExtraPx(ctx, text);
+    } finally {
+      restoreKerning(prevKern);
+    }
+  };
 
   const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
   const sourcedSegs = segs.map((seg, segIndex) => {
@@ -3518,8 +3525,14 @@ export function layoutLines(
       //  separate: it sums per-char advances, whereas this path uses substring
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
-      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true) : '';
+      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+      const prevKern = setSegKerning(s);
+      let rawPrefix = '';
+      try {
+        rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true) : '';
+      } finally {
+        restoreKerning(prevKern);
+      }
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -3731,9 +3744,15 @@ export function layoutLines(
       // already one space-delimited word (splitTextForLayout), so this never
       // breaks where a space could have wrapped.
       const available = availW();
-      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
       const allChars = [...s.text];
-      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true)].length : 0;
+      const prevKern = setSegKerning(s);
+      let split = 0;
+      try {
+        split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true)].length : 0;
+      } finally {
+        restoreKerning(prevKern);
+      }
       if (split < 1) split = 1;
       split = extendThroughTrailingIdeographicSpaces(allChars, split);
       if (split >= allChars.length) {
@@ -3816,17 +3835,31 @@ export function rescaleLayoutLines(
 ): LayoutLine[] {
   if (scale === 1) return lines;
 
+  const withSegKerning = <T>(s: LayoutTextSeg, measure: () => T): T => {
+    if (s.kerning == null) return measure();
+    const previous = ctx.fontKerning;
+    ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+    try {
+      return measure();
+    } finally {
+      ctx.fontKerning = previous;
+    }
+  };
+
+  const naturalWidth = (s: LayoutTextSeg, text: string): number =>
+    withSegKerning(s, () =>
+      ctx.measureText(text).width + (s.verticalRun ? verticalRunInkExtraPx(ctx, text) : 0));
+
   // Per-text-segment measurement at the PAINT scale — the SAME model layoutLines
   // uses (segAdvance + the text-segment metric block), so measure == draw.
   const measureTextSeg = (s: LayoutTextSeg): { advance: number; asc: number; desc: number; intended: number } => {
     const effPx = calcEffectiveFontPx(s, scale);
     ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
-    const m = ctx.measureText(s.text);
+    const m = withSegKerning(s, () => ctx.measureText(s.text));
     // #1014 — fold in the vo=Tr rotate-fallback ink-extent deficit for a vertical
     // run so the rescaled box matches the ink-sized cell (measure == draw); 0 on
     // horizontal pages and non-under-reporting fonts. `ctx.font` is set above.
-    const natural = m.width + (s.verticalRun ? verticalRunInkExtraPx(ctx, s.text) : 0);
-    const advance = segAdvanceWidth(s, natural, gridDeltaPx, scale);
+    const advance = segAdvanceWidth(s, naturalWidth(s, s.text), gridDeltaPx, scale);
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.
@@ -3871,10 +3904,7 @@ export function rescaleLayoutLines(
         ctx.font = buildFont(segment.bold, segment.italic, effPx, segment.fontFamily, fontFamilyClasses);
         // #1014 — include the vo=Tr ink deficit so the rescaled fitText gap stays
         // measure==paint against the ink-grown cell; 0 for non-under-reporting runs.
-        return (
-          ctx.measureText(segment.text).width +
-          (segment.verticalRun ? verticalRunInkExtraPx(ctx, segment.text) : 0)
-        );
+        return naturalWidth(segment, segment.text);
       },
     );
     const segments = scaledSource.map((s) => {

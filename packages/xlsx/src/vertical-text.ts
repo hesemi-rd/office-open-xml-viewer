@@ -18,11 +18,9 @@
 //     SUBSTITUTE that form (core `verticalBracketFormSubstitute`), drawn upright
 //     (UAX#50 §5 "substitute a vertical glyph, rotate only as fallback"). XLSX has
 //     no Excel ground-truth image, so 〖〗 follow the Word/PowerPoint verdict.
-//   • vo=Tr with NO substituted form → a geometric fallback: ROTATE 90° CW (the
-//     quotes “” and the colon ： — a rotation turns the base ：'s stacked dots into
-//     FE13's side-by-side dots), ROTATE + REFLECT (the long-stroke marks ー 〜 ～,
-//     whose font-designed vertical form is a horizontal mirror of the rotation, not
-//     the rotation — core `verticalTrMirrorFallback`; add `scale(1, -1)`), or UPRIGHT
+//   • vo=Tr with NO substituted form → a geometric fallback: plain ROTATE 90° CW
+//     (quotes, colon, and unreachable long marks ー 〜 ～; a rotation turns the base
+//     colon's stacked dots into FE13's side-by-side dots), or UPRIGHT
 //     (the semicolon ；, whose FE14 form is an upright dot-over-comma, not a rotation;
 //     core `verticalTrUprightFallback`). FE13/FE14 are absent from most render fonts,
 //     so ：；take this geometric path rather than substitution (issue #969 follow-up).
@@ -32,9 +30,8 @@ import {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
-  verticalTrMirrorFallback,
+  verticalTrLongMark,
   withVertFeature,
-  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -69,7 +66,7 @@ export function drawStackedVerticalChar(
   const cp = ch.codePointAt(0) ?? 0;
   const vo = verticalOrientation(cp);
 
-  if (vertCapable && verticalTrMirrorFallback(cp)) {
+  if (vertCapable && verticalTrLongMark(cp)) {
     ctx.save();
     ctx.translate(centerX, cellTopY + charH / 2);
     ctx.textAlign = 'center';
@@ -101,20 +98,12 @@ export function drawStackedVerticalChar(
     // → rotate 90° CW, centred in the cell slot. save/restore also restores the
     // caller's textAlign/textBaseline.
     //
-    // The long-stroke marks ー and 〜 ～ (core `verticalTrMirrorFallback`) additionally
-    // REFLECT: their font-designed vertical form is the HORIZONTAL MIRROR of the +90°
-    // rotation, not the rotation (Word/PowerPoint + font `vert` glyph verified — a plain
-    // rotation of ー bulges LEFT, the designed form bulges RIGHT). After the +90° rotate,
-    // y'=−y is the on-screen horizontal mirror. For U+30FC only, the shared
-    // runtime coefficient adds y'=m·x−y to cancel the horizontal glyph's measured
-    // drift. The wave marks keep their designed drift; quotes and colon do not
-    // reflect. Same fix as docx `drawVerticalRun` / pptx `drawEaVertRun`.
+    // Unreachable `ー〜～` use this plain rotation too. The worker/skia fallback
+    // cannot verify the font's inaccessible vertical design, so it adds no mirror
+    // or shear approximation.
     ctx.save();
     ctx.translate(centerX, cellTopY + charH / 2);
     ctx.rotate(Math.PI / 2);
-    if (verticalTrMirrorFallback(cp)) {
-      ctx.transform(1, verticalFallbackShearCoefficient(ctx, cp), 0, -1, 0, 0);
-    }
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(ch, 0, 0);
