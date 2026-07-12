@@ -27,13 +27,22 @@
 //     form (core `verticalBracketFormSubstitute`) present in the substitute fonts;
 //     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
 //     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). Tr code
-//     points with NO substituted form take a geometric fallback: ROTATE — the ー
-//     prolonged sound mark, the quotes “”, and the fullwidth colon ：(whose FE13
-//     form is absent from most render fonts, so a 90° rotation of the base reproduces
-//     FE13's side-by-side dots) — drawn CENTRED on the column axis via a plain
-//     `fillText` in the +90° page frame; or UPRIGHT — the fullwidth semicolon ；,
-//     whose FE14 form is an upright dot-over-comma, not a rotation (issue #969
-//     follow-up; see core `verticalTrUprightFallback`).
+//     points with NO substituted form take a geometric fallback, one of three:
+//       – ROTATE (plain): the quotes “” and the fullwidth colon ：— drawn CENTRED on
+//         the column via a plain `fillText` in the +90° page frame. The rotation IS
+//         the font's designed vertical form for these (font-verified: the quotes'
+//         comma-hooks match, and the colon's FE13 side-by-side dots fall out of the
+//         base rotation since its FE13 form is absent from most render fonts).
+//       – ROTATE + REFLECT: the long-stroke marks ー (prolonged sound mark) and 〜 ～
+//         (wave dash / tilde) — core `verticalTrMirrorFallback`. Their font-DESIGNED
+//         vertical glyph is the HORIZONTAL REFLECTION of the +90° rotation, not the
+//         rotation (the 起筆/curvature flips left↔right between orientations — a
+//         documented Japanese typographic convention; Word PDF sample-47 + font `vert`
+//         glyph verified). A Canvas cannot reach the `vert` glyph, so we rotate AND
+//         reflect via `scale(1, -1)` about the cell centre (the on-screen horizontal
+//         mirror in the +90° page frame).
+//       – UPRIGHT: the fullwidth semicolon ；, whose FE14 form is an upright dot-over-
+//         comma, not a rotation (issue #969 follow-up; core `verticalTrUprightFallback`).
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied"
 //     appearance — drawn as an ordinary contextual `fillText` at the alphabetic
@@ -60,6 +69,7 @@ import {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
+  verticalTrMirrorFallback,
 } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
@@ -364,21 +374,37 @@ export function drawVerticalRun(
       ctx.restore();
     } else if (mode === 'rotate') {
       // vo=Tr with NO substituted vertical form and NOT the upright-fallback
-      // semicolon: ー (U+30FC), the double quotes “”, and the fullwidth colon ：
-      // (FF1A). UAX#50's Tr fallback (no vertical glyph reachable on a Canvas) is
-      // to ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame IS
-      // that rotation; centre it on the column with `center`/`middle` at the cell
-      // centre. For the colon this reproduces FE13's design directly (the two
-      // vertically-stacked dots become side by side), Word-verified (issue #969
-      // follow-up). (The substituted bracket forms never reach here — they were
-      // drawn upright above; a rotated bracket's ink offset is not Canvas-measurable.)
+      // semicolon: ー (U+30FC), the wave dash / tilde 〜 ～, the double quotes “”,
+      // and the fullwidth colon ：(FF1A). UAX#50's Tr fallback (no vertical glyph
+      // reachable on a Canvas) is to ROTATE the glyph 90° CW; a plain `fillText` in
+      // the +90° page frame IS that rotation, centred on the column with
+      // `center`/`middle` at the cell centre. For the colon this reproduces FE13's
+      // design directly (the two vertically-stacked dots become side by side),
+      // Word-verified (issue #969 follow-up); for the quotes the rotation matches the
+      // font's designed vertical form exactly (font-verified).
+      //
+      // The long-stroke marks ー and 〜 ～ (verticalTrMirrorFallback) are the
+      // EXCEPTION: their font-DESIGNED vertical form is the HORIZONTAL REFLECTION of
+      // that +90° rotation, not the rotation — the 起筆/curvature flips left↔right
+      // between orientations (Word PDF sample-47 + font `vert` glyph verified: a plain
+      // rotation of ー bulges LEFT, Word/the designed glyph bulge RIGHT). Since a
+      // Canvas cannot invoke the font's `vert` OpenType glyph, we reproduce it by
+      // reflecting: in the +90° page frame the on-screen horizontal mirror is
+      // `scale(1, -1)` about the cell centre. Advance/measure and the column centring
+      // are unchanged (the em box is symmetric about the cell centre), so only the
+      // glyph's chirality flips. (Substituted bracket forms never reach here — they
+      // were drawn upright above; a rotated bracket's ink offset is not measurable.)
       const cx = x + ax + adv / 2;
+      const mirror = verticalTrMirrorFallback(cp);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (scaled) {
+      if (mirror || scaled) {
         ctx.save();
         ctx.translate(cx, baseline);
-        ctx.scale(charScale, 1);
+        // `scale(1, -1)` is the on-screen horizontal mirror in the +90° page frame
+        // (screen −x ↔ page-frame +y); combine with the §17.3.2.43 `w:w` width
+        // compression on the line axis. Non-mirror glyphs keep sy=+1.
+        ctx.scale(charScale, mirror ? -1 : 1);
         ctx.fillText(ch, 0, 0);
         ctx.restore();
       } else {

@@ -18,18 +18,21 @@
 //     SUBSTITUTE that form (core `verticalBracketFormSubstitute`), drawn upright
 //     (UAX#50 §5 "substitute a vertical glyph, rotate only as fallback"). XLSX has
 //     no Excel ground-truth image, so 〖〗 follow the Word/PowerPoint verdict.
-//   • vo=Tr with NO substituted form → a geometric fallback: ROTATE 90° CW (ー U+30FC,
-//     quotes “”, and the colon ： — a rotation turns the base ：'s stacked dots into
-//     FE13's side-by-side dots) or UPRIGHT (the semicolon ；, whose FE14 form is an
-//     upright dot-over-comma, not a rotation; core `verticalTrUprightFallback`).
-//     FE13/FE14 are absent from most render fonts, so ：；take this geometric path
-//     rather than substitution (issue #969 follow-up).
+//   • vo=Tr with NO substituted form → a geometric fallback: ROTATE 90° CW (the
+//     quotes “” and the colon ： — a rotation turns the base ：'s stacked dots into
+//     FE13's side-by-side dots), ROTATE + REFLECT (the long-stroke marks ー 〜 ～,
+//     whose font-designed vertical form is a horizontal mirror of the rotation, not
+//     the rotation — core `verticalTrMirrorFallback`; add `scale(1, -1)`), or UPRIGHT
+//     (the semicolon ；, whose FE14 form is an upright dot-over-comma, not a rotation;
+//     core `verticalTrUprightFallback`). FE13/FE14 are absent from most render fonts,
+//     so ：；take this geometric path rather than substitution (issue #969 follow-up).
 
 import {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
+  verticalTrMirrorFallback,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -81,11 +84,21 @@ export function drawStackedVerticalChar(
       ctx.fillText(ch, centerX, cellTopY);
       return;
     }
-    // Fallback: no vertical form (ー U+30FC, quotes, colon ：) → rotate 90° CW, centred
-    // in the cell slot. save/restore also restores the caller's textAlign/textBaseline.
+    // Fallback: no vertical form (ー U+30FC, wave dash / tilde 〜 ～, quotes, colon ：)
+    // → rotate 90° CW, centred in the cell slot. save/restore also restores the
+    // caller's textAlign/textBaseline.
+    //
+    // The long-stroke marks ー and 〜 ～ (core `verticalTrMirrorFallback`) additionally
+    // REFLECT: their font-designed vertical form is the HORIZONTAL MIRROR of the +90°
+    // rotation, not the rotation (Word/PowerPoint + font `vert` glyph verified — a plain
+    // rotation of ー bulges LEFT, the designed form bulges RIGHT). After the +90° rotate,
+    // `scale(1, -1)` is the on-screen horizontal mirror. The quotes and colon do NOT
+    // reflect (their rotation matches the designed form; the colon is symmetric). Same
+    // fix as docx `drawVerticalRun` / pptx `drawEaVertRun`.
     ctx.save();
     ctx.translate(centerX, cellTopY + charH / 2);
     ctx.rotate(Math.PI / 2);
+    if (verticalTrMirrorFallback(cp)) ctx.scale(1, -1);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(ch, 0, 0);
