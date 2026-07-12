@@ -6957,8 +6957,41 @@ function renderBodyElement(el: BodyElement, state: RenderState): void {
   }
 }
 
-function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): boolean {
+/**
+ * ECMA-376 §17.3.1.9 — two ADJACENT paragraphs that share a style id and BOTH set
+ * `<w:contextualSpacing>` suppress the spaceBefore/spaceAfter between them. Kept
+ * structural (not `DocParagraph`) so the SAME rule drives both the body paragraph
+ * path and the text-box path ({@link ShapeText}), which carry the identical
+ * `contextualSpacing`/`styleId` pair.
+ */
+function contextualSuppressed(
+  prev: { contextualSpacing?: boolean; styleId?: string | null } | null,
+  curr: { contextualSpacing?: boolean; styleId?: string | null },
+): boolean {
   return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
+}
+
+/**
+ * ECMA-376 §17.3.1.33 + §17.3.1.9 — the vertical gap reserved ABOVE text-box
+ * paragraph `i`. The first paragraph reserves only its own spaceBefore; between
+ * two paragraphs the gap collapses to max(prev.spaceAfter, this.spaceBefore) — NOT
+ * their sum — UNLESS the two are the same style and BOTH set contextualSpacing, in
+ * which case Word drops the whole gap (the identical rule the body path applies via
+ * {@link contextualSuppressed}). Without the suppression a `<w:contextualSpacing/>`
+ * ListParagraph list inside a fixed box kept inheriting the docDefault `after=160`
+ * (8 pt) gap, which inflated its line pitch and clipped the trailing line
+ * (sample-32). Shared by the render pass and the auto-fit height measurement so the
+ * two never disagree.
+ */
+export function shapeParagraphGapBefore(
+  blocks: ReadonlyArray<{ contextualSpacing?: boolean; styleId?: string | null }>,
+  i: number,
+  spBefore: readonly number[],
+  spAfter: readonly number[],
+): number {
+  if (i <= 0) return spBefore[i];
+  if (contextualSuppressed(blocks[i - 1], blocks[i])) return 0;
+  return Math.max(spBefore[i], spAfter[i - 1]);
 }
 
 /**
@@ -10416,8 +10449,7 @@ export function measureShapeTextAutoFitHeight(
 
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
   const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
-  const gapBefore = (i: number): number =>
-    i > 0 ? Math.max(spBefore[i], spAfter[i - 1]) : spBefore[i];
+  const gapBefore = (i: number): number => shapeParagraphGapBefore(blocks, i, spBefore, spAfter);
 
   ctx.save();
   try {
@@ -10931,8 +10963,7 @@ export function renderShapeText(
   // totalH used for ctr/bottom anchoring).
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
   const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
-  const gapBefore = (i: number): number =>
-    i > 0 ? Math.max(spBefore[i], spAfter[i - 1]) : spBefore[i];
+  const gapBefore = (i: number): number => shapeParagraphGapBefore(blocks, i, spBefore, spAfter);
   const totalH = layouts.reduce((s, l, i) => s + gapBefore(i) + blockHeight(l), 0);
 
   const anchor = shape.textAnchor ?? 't';

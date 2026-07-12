@@ -1079,6 +1079,19 @@ export interface ShapeText {
    *  base direction for the UAX#9 reordering pass (the body renderer reads the
    *  identical field). */
   bidi?: boolean;
+  /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved through the style
+   *  chain in the parser. When set, the renderer suppresses the spaceBefore/
+   *  spaceAfter gap between this text-box paragraph and an ADJACENT paragraph
+   *  that shares its {@link ShapeText.styleId} and also sets the toggle
+   *  (identical to {@link DocParagraph.contextualSpacing} / `contextualSuppressed`).
+   *  Absent ⇒ no suppression. */
+  contextualSpacing?: boolean;
+  /** Resolved paragraph style id of this text-box paragraph — the explicit
+   *  `<w:pStyle>`, else the document default paragraph style, else "Normal" (the
+   *  same stable id {@link DocParagraph.styleId} carries). Paired with
+   *  {@link ShapeText.contextualSpacing} to group adjacent same-style paragraphs
+   *  for §17.3.1.9. */
+  styleId?: string | null;
   /** Zip path of an inline image inside this text-box paragraph
    *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
    *  Absent for a text-only paragraph. */

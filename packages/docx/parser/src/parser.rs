@@ -5692,12 +5692,29 @@ fn extract_simple_paragraph_text(
         }
 
         let mut run_text = String::new();
-        for t in r
+        // Walk the run's descendants IN DOCUMENT ORDER, emitting `<w:t>` text and a
+        // horizontal tab for each `<w:tab>` (§17.3.3.32). The body path emits the
+        // same `\t` for its run-content `w:tab` (~parser.rs:3401); the shape path
+        // previously scanned only `<w:t>`, so a text-box `<w:tab/>` collapsed to
+        // nothing and tabbed layouts (sample-32's course grid:
+        // "Course<tab><tab>(0.5)<tab>□") lost their column alignment. The `\t`
+        // reaches the SAME line engine, which resolves it against the paragraph's
+        // tab stops + the default-tab grid (`effState.defaultTabPt`, §17.15.1.25).
+        // Match by WordprocessingML NAMESPACE, not bare local name: an embedded
+        // graphic under the same `<w:r>` can carry DrawingML `<a:tab>`/`<a:t>`,
+        // which are NOT run content and must not leak into the paragraph text.
+        for n in r
             .descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+            .filter(|n| n.is_element() && is_w_ns(n.tag_name().namespace()))
         {
-            if let Some(text_node) = t.text() {
-                run_text.push_str(text_node);
+            match n.tag_name().name() {
+                "t" => {
+                    if let Some(text_node) = n.text() {
+                        run_text.push_str(text_node);
+                    }
+                }
+                "tab" => run_text.push('\t'),
+                _ => {}
             }
         }
         let fmt = resolve_run_fmt(child_w(r, "rPr"));
@@ -5922,6 +5939,29 @@ fn extract_simple_paragraph_text(
         .clone()
         .or_else(|| style_para.line_spacing_rule.clone());
 
+    // ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved with the SAME
+    // §17.7.2 precedence as the spacing above (direct `<w:pPr>` via `direct_ind`
+    // wins, else the style-chain-resolved `style_para`, which folds in the
+    // paragraph style + docDefaults). Paired with the resolved paragraph style id
+    // so the renderer can drop the inter-paragraph gap between two adjacent
+    // same-style paragraphs that both set the toggle — the identical rule the body
+    // path applies (`contextual_spacing`/`style_id`; renderer `contextualSuppressed`).
+    // Without this a `<w:contextualSpacing/>` ListParagraph list inside a fixed box
+    // kept the docDefault `after=160` (8 pt) gap that inflated its line pitch and
+    // clipped the trailing line (sample-32).
+    let contextual_spacing = direct_ind
+        .contextual_spacing
+        .or(style_para.contextual_spacing)
+        .unwrap_or(false);
+    // Expose the SAME stable style id the body path stamps (parser.rs ~2578):
+    // the explicit `<w:pStyle>`, else the document default paragraph style
+    // (locale ids like "a"/"標準"), else "Normal", so grouping survives templates
+    // that never name the default style explicitly.
+    let resolved_style_id = style_id
+        .clone()
+        .or_else(|| style_map.default_para_style_id().map(str::to_string))
+        .or_else(|| Some("Normal".to_string()));
+
     // ECMA-376 §17.3.1.37 tab stops and §17.3.1.6 bidi — resolved with the SAME
     // §17.7.2 precedence as the indent/spacing above (direct `<w:pPr>` via
     // `direct_ind` = `parse_para_fmt`, else the style-chain-resolved `style_para`).
@@ -5994,6 +6034,8 @@ fn extract_simple_paragraph_text(
         indent_first,
         tab_stops,
         bidi,
+        contextual_spacing,
+        style_id: resolved_style_id,
         image_path,
         mime_type,
         svg_image_path,
@@ -14668,6 +14710,77 @@ mod txbx_inline_image_tests {
         assert!((block2.space_after - 18.0).abs() < 1e-6);
     }
 
+    /// ECMA-376 §17.3.1.9 — a text-box paragraph surfaces its resolved
+    /// `contextualSpacing` toggle AND its style id so the renderer can group
+    /// adjacent same-style paragraphs and drop the inter-paragraph gap (the body
+    /// path already does this via `contextual_spacing`/`style_id`; the text-box
+    /// path previously dropped both, so a `<w:contextualSpacing/>` ListParagraph
+    /// list kept the docDefault `after=160` gap that clipped its trailing line —
+    /// sample-32). Direct `<w:contextualSpacing/>` wins; an absent one inherits
+    /// from the paragraph style; a style id is exposed for grouping.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_contextual_spacing_and_style_id() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="ListParagraph">
+                <w:name w:val="List Paragraph"/>
+                <w:pPr><w:contextualSpacing/><w:spacing w:after="160"/></w:pPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="Plain">
+                <w:name w:val="Plain"/>
+                <w:pPr><w:spacing w:after="160"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &styles,
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+
+        // (a) The toggle is INHERITED from the paragraph style (no direct one),
+        // and the explicit pStyle is exposed as the block's style id.
+        let inherited = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            inherited.contextual_spacing,
+            "contextualSpacing must inherit from the paragraph style"
+        );
+        assert_eq!(inherited.style_id.as_deref(), Some("ListParagraph"));
+
+        // (b) A style WITHOUT contextualSpacing ⇒ false; its id is still exposed.
+        let plain = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Plain"/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            !plain.contextual_spacing,
+            "a style without contextualSpacing ⇒ false"
+        );
+        assert_eq!(plain.style_id.as_deref(), Some("Plain"));
+
+        // (c) A DIRECT `<w:contextualSpacing/>` sets the toggle even over a style
+        // that lacks it.
+        let direct = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Plain"/><w:contextualSpacing/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            direct.contextual_spacing,
+            "direct contextualSpacing must win over a style that lacks it"
+        );
+    }
+
     /// ECMA-376 §17.3.1.12 — a text-box paragraph surfaces its own `<w:ind>`
     /// left/right/first-line indent (twips→pt). first-line is SIGNED:
     /// `w:firstLine` is positive, `w:hanging` is negative. Absent ⇒ all 0.
@@ -15137,6 +15250,67 @@ mod txbx_inline_image_tests {
                   <w:r><w:t>x</w:t></w:r></w:p>"#,
         );
         assert!(none.tab_stops.is_empty());
+    }
+
+    /// ECMA-376 §17.3.3.32 — a `<w:tab/>` inside a text-box run must surface as a
+    /// literal `\t` in the block/run text so the line engine can advance to the
+    /// next tab stop (or the default-tab grid). The parser previously scanned only
+    /// `<w:t>`, so a tab-only run collapsed to nothing and a tabbed course grid
+    /// (sample-32: "Course<tab><tab>(0.5)<tab>□") lost its column alignment. The
+    /// `\t` must sit in DOCUMENT ORDER between the surrounding text runs.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_tab_characters() {
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:r><w:t>Arabic 2250</w:t></w:r>
+                 <w:r><w:tab/></w:r>
+                 <w:r><w:tab/><w:t>(1.0)</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        // Two tabs surface; the mid run interleaves its tab BEFORE its text.
+        assert_eq!(block.text, "Arabic 2250\t\t(1.0)");
+        // The tab-only run is preserved as its own rich run carrying just "\t"
+        // (not dropped as empty), so per-run layout keeps the advance.
+        let run_texts: Vec<&str> = block.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(run_texts, vec!["Arabic 2250", "\t", "\t(1.0)"]);
+    }
+
+    /// The run-content walk matches `t`/`tab` by WordprocessingML NAMESPACE, not
+    /// bare local name: a DrawingML `<a:tab>` (e.g. in an embedded graphic's
+    /// `<a:tabLst>`) or `<a:t>` living under the same `<w:r>` must NOT leak into
+    /// the paragraph text as a `\t` / text fragment — only §17.3.3.32 `<w:tab/>`
+    /// and §17.3.3.31 `<w:t>` are WordprocessingML run content.
+    #[test]
+    fn extract_simple_paragraph_text_ignores_foreign_namespace_tab_and_t() {
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <w:r>
+                   <w:t>A</w:t>
+                   <a:tabLst><a:tab/></a:tabLst>
+                   <a:t>ignored</a:t>
+                   <w:tab/>
+                   <w:t>B</w:t>
+                 </w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(block.text, "A\tB");
     }
 
     /// ECMA-376 §17.3.1.37 — a text-box paragraph's tab stops resolve through the

@@ -1608,6 +1608,24 @@ pub struct ShapeText {
     /// reordering pass (the body renderer reads the identical field).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi: Option<bool>,
+    /// ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved through the style
+    /// chain (direct `<w:pPr>` wins, else the paragraph style incl. docDefaults).
+    /// When set, Word suppresses `space_before`/`space_after` between this
+    /// text-box paragraph and an ADJACENT paragraph that shares its `style_id`
+    /// and also sets the toggle — identical to the body paragraph's
+    /// `contextual_spacing` (parser.rs `resolve_para` / renderer `contextualSuppressed`).
+    /// Without it a `<w:contextualSpacing/>` ListParagraph list inside a fixed
+    /// text box kept inheriting the docDefault `after=160` (8 pt) gap, which
+    /// inflated its line pitch and clipped the trailing line (sample-32).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub contextual_spacing: bool,
+    /// Resolved paragraph style id of this text-box paragraph: the explicit
+    /// `<w:pStyle w:val>` when present, else the document default paragraph style
+    /// (`w:default="1"`), else "Normal" — the SAME stable id the body path stamps
+    /// (parser.rs ~2578) so §17.3.1.9 `contextual_spacing` can group adjacent
+    /// same-style paragraphs even under locale-specific default style ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_id: Option<String>,
     /// Embedded zip path of an inline image living inside this text-box
     /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
     /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved
