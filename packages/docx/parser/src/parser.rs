@@ -5692,12 +5692,29 @@ fn extract_simple_paragraph_text(
         }
 
         let mut run_text = String::new();
-        for t in r
+        // Walk the run's descendants IN DOCUMENT ORDER, emitting `<w:t>` text and a
+        // horizontal tab for each `<w:tab>` (§17.3.3.32). The body path emits the
+        // same `\t` for its run-content `w:tab` (~parser.rs:3401); the shape path
+        // previously scanned only `<w:t>`, so a text-box `<w:tab/>` collapsed to
+        // nothing and tabbed layouts (sample-32's course grid:
+        // "Course<tab><tab>(0.5)<tab>□") lost their column alignment. The `\t`
+        // reaches the SAME line engine, which resolves it against the paragraph's
+        // tab stops + the default-tab grid (`effState.defaultTabPt`, §17.15.1.25).
+        // Match by WordprocessingML NAMESPACE, not bare local name: an embedded
+        // graphic under the same `<w:r>` can carry DrawingML `<a:tab>`/`<a:t>`,
+        // which are NOT run content and must not leak into the paragraph text.
+        for n in r
             .descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+            .filter(|n| n.is_element() && is_w_ns(n.tag_name().namespace()))
         {
-            if let Some(text_node) = t.text() {
-                run_text.push_str(text_node);
+            match n.tag_name().name() {
+                "t" => {
+                    if let Some(text_node) = n.text() {
+                        run_text.push_str(text_node);
+                    }
+                }
+                "tab" => run_text.push('\t'),
+                _ => {}
             }
         }
         let fmt = resolve_run_fmt(child_w(r, "rPr"));
@@ -15233,6 +15250,67 @@ mod txbx_inline_image_tests {
                   <w:r><w:t>x</w:t></w:r></w:p>"#,
         );
         assert!(none.tab_stops.is_empty());
+    }
+
+    /// ECMA-376 §17.3.3.32 — a `<w:tab/>` inside a text-box run must surface as a
+    /// literal `\t` in the block/run text so the line engine can advance to the
+    /// next tab stop (or the default-tab grid). The parser previously scanned only
+    /// `<w:t>`, so a tab-only run collapsed to nothing and a tabbed course grid
+    /// (sample-32: "Course<tab><tab>(0.5)<tab>□") lost its column alignment. The
+    /// `\t` must sit in DOCUMENT ORDER between the surrounding text runs.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_tab_characters() {
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:r><w:t>Arabic 2250</w:t></w:r>
+                 <w:r><w:tab/></w:r>
+                 <w:r><w:tab/><w:t>(1.0)</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        // Two tabs surface; the mid run interleaves its tab BEFORE its text.
+        assert_eq!(block.text, "Arabic 2250\t\t(1.0)");
+        // The tab-only run is preserved as its own rich run carrying just "\t"
+        // (not dropped as empty), so per-run layout keeps the advance.
+        let run_texts: Vec<&str> = block.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(run_texts, vec!["Arabic 2250", "\t", "\t(1.0)"]);
+    }
+
+    /// The run-content walk matches `t`/`tab` by WordprocessingML NAMESPACE, not
+    /// bare local name: a DrawingML `<a:tab>` (e.g. in an embedded graphic's
+    /// `<a:tabLst>`) or `<a:t>` living under the same `<w:r>` must NOT leak into
+    /// the paragraph text as a `\t` / text fragment — only §17.3.3.32 `<w:tab/>`
+    /// and §17.3.3.31 `<w:t>` are WordprocessingML run content.
+    #[test]
+    fn extract_simple_paragraph_text_ignores_foreign_namespace_tab_and_t() {
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <w:r>
+                   <w:t>A</w:t>
+                   <a:tabLst><a:tab/></a:tabLst>
+                   <a:t>ignored</a:t>
+                   <w:tab/>
+                   <w:t>B</w:t>
+                 </w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(block.text, "A\tB");
     }
 
     /// ECMA-376 §17.3.1.37 — a text-box paragraph's tab stops resolve through the
