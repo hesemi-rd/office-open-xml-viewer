@@ -208,13 +208,39 @@ describe('lineBoxHeight — docGrid line-cell rounding (East Asian vs Latin)', (
   it('snaps a sub-pitch EA line to ONE cell of the grid pitch', () => {
     expect(lineBoxHeight(null, 12 * YU_ASC, 12 * YU_DESC, 1, grid18, false, 12 * YU, true)).toBe(18);
   });
+  it('does NOT let a substitute box a hair over the pitch add a cell — grid-count height governs (sample-52)', () => {
+    // Font-substitution artifact: Hiragino Mincho ProN stands in for Yu Mincho
+    // and its 12pt Canvas box measures 18.0+px — a HAIR OVER the 18pt pitch —
+    // while Yu Mincho's design single-line height is 17.19px, UNDER the pitch.
+    // Word counts grid cells from the REAL font's design height (1 cell here),
+    // never from the substituted Canvas box, so when the caller supplies the
+    // line's design grid-count height (arg 9 = 12*YU) the over-tall box must not
+    // inflate the count to two cells. Counting from the box mis-widths every
+    // tbRl column and shifts vertical-section block tables 36pt (issue:
+    // sample-52 vertical-table probe, exact table left 417→381pt).
+    const boxAsc = 18.02 * 0.8; // substitute box 18.02px > the 18pt pitch
+    const boxDesc = 18.02 * 0.2;
+    expect(lineBoxHeight(null, boxAsc, boxDesc, 1, grid18, false, 12 * YU, true, 12 * YU)).toBe(18);
+  });
+  it('still counts a tall UNTABLED run on a mixed line — grid-count height keeps its box', () => {
+    // A mixed docGrid line: a small 12pt tabled Yu Mincho run (design 17.19px,
+    // the intendedSingle floor) plus a larger untabled CJK run whose measured
+    // box is 30px. The line's grid-count height (arg 9) is the max over runs of
+    // (tabled design | untabled box) = max(17.19, 30) = 30, so the untabled run
+    // still claims its two cells — the design-height rule must not UNDER-count
+    // a genuinely tall untabled run (independent review, Codex gpt-5.6-sol).
+    expect(lineBoxHeight(null, 24, 6, 1, grid18, false, 12 * YU, true, 30)).toBe(36);
+  });
   it('rounds a 20pt EA line on a 20pt pitch UP to two cells (sample-9)', () => {
     // design box 28.65px → ceil(28.65/20) = 2 cells = 40.
     expect(lineBoxHeight(null, 20 * YU_ASC, 20 * YU_DESC, 1, grid20, false, 20 * YU, true)).toBe(40);
   });
-  it('guards the cell count against an UNCORRECTED over-tall glyph box via max()', () => {
-    // A substitute box (24+6=30px) taller than the design floor (20pt design =
-    // 28.65px): natural = max(30, 28.65) = 30 → still 2 cells on a 20pt pitch.
+  it('falls back to natural when no grid-count height is supplied (box 30 → 2 cells)', () => {
+    // With no arg-9 grid-count height, the count falls back to `natural` =
+    // max(box 24+6=30, design floor 20*YU=28.65) = 30 → ceil(30/20) = 2 cells =
+    // 40 on a 20pt pitch. Both the box and the design floor land in the same
+    // cell here, so the pre-existing callers (which supply no arg 9) are
+    // unaffected. Callers that need the substitution-robust count pass arg 9.
     expect(lineBoxHeight(null, 24, 6, 1, grid20, false, 20 * YU, true)).toBe(40);
   });
   it('keeps a Latin line at natural height (one-cell floor), NOT cell-rounded', () => {

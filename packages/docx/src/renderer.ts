@@ -7679,6 +7679,7 @@ function resolveFrameBox(
         // §17.6.5 cell rounding follows this line's script, matching text boxes;
         // ruby paragraphs retain their established uniform paragraph resolver.
         paraHasRuby ? paragraphContext.hasEastAsianText : (l.eastAsian ?? false),
+        l.gridCountSingle,
       ),
     0,
   );
@@ -8017,7 +8018,7 @@ function renderParagraph(
     columnXPt: contentX,
     columnWidthPt: contentW,
     floats: state.floats,
-    lineBoxH: (a, d, _h, is, ea) => lineBoxHeight(
+    lineBoxH: (a, d, _h, is, ea, gc) => lineBoxHeight(
       para.lineSpacing,
       a,
       d,
@@ -8028,6 +8029,7 @@ function renderParagraph(
       // §17.6.5 cell rounding follows this line's script, matching text boxes;
       // ruby paragraphs retain their established uniform paragraph resolver.
       paraHasRuby ? paragraphContext.hasEastAsianText : (ea ?? false),
+      gc,
     ),
     pageH: state.pageH,
   } : undefined;
@@ -8223,7 +8225,7 @@ function renderParagraph(
       ? uniformLineH
       // §17.6.5 cell rounding is gated by the line's script; a Latin-only line
       // in a CJK paragraph keeps its natural height, matching the text-box path.
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false);
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false, l.gridCountSingle);
 
   // Slice bounds — when the paginator split this paragraph across pages,
   // only render lines in [sliceStart, sliceEnd). The first line we paint
@@ -12955,7 +12957,7 @@ function measureCellParagraphWindow(
         ? uniformLineH
         // §17.6.5 cell rounding is gated by the line's script; a Latin-only line
         // in a CJK paragraph keeps its natural height, matching the text-box path.
-        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false);
+        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false, l.gridCountSingle);
     return {
       heightPx: paintedParagraphHeight(paintLines, windowStart, windowEnd, 0, lineHForLine),
       totalLines,

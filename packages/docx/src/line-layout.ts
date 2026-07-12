@@ -316,6 +316,12 @@ export interface LayoutLine {
    *  font's win line-height ratio × em), for fonts whose substituted Canvas
    *  metrics understate Word's line spacing. 0 when no segment needs it. */
   intendedSingle: number;
+  /** px — DESIGN grid-count height: the max over segments of each run's
+   *  Word-faithful single-line height (a tabled run's design height, an
+   *  untabled run's measured box). Feeds docGrid cell counting so a substituted
+   *  face's over-tall box does not inflate the cell count while a genuinely tall
+   *  untabled run still counts its real extent (§17.6.5; sample-52). */
+  gridCountSingle: number;
   /** Additional horizontal offset (px) from paraX, caused by wrap-around floats. */
   xOffset: number;
   /** Effective available width (px) for this line after float exclusion. */
@@ -372,8 +378,10 @@ export interface WrapLayoutCtx {
     xOffsetPt: number;
     maximumWidthPt: number;
   };
-  /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
-  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean) => number;
+  /** Per-line box-height resolver (line natural ascent+descent → total px box height).
+   *  `gridCountSinglePx` (the line's design grid-count height) keeps the
+   *  float-wrap advance consistent with the final render's docGrid cell count. */
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean, gridCountSinglePx?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -991,6 +999,16 @@ export function lineBoxHeight(
   hasRuby?: boolean,
   intendedSinglePx = 0,
   eastAsian = false,
+  // px — the line's DESIGN grid-count height: the max over segments of each
+  // run's Word-faithful single-line height (a tabled run's design height, an
+  // untabled run's measured box). Used ONLY to count docGrid cells for East
+  // Asian lines, so a substituted face whose Canvas box overshoots the real
+  // font's design height does not add a spurious cell (see gridSingleCell).
+  // When omitted, the count falls back to `natural` (the substituted glyph
+  // box floored by the design height) — the pre-existing behaviour, which the
+  // callers that pre-correct their metrics (correctLineMetrics) already resolve
+  // correctly.
+  gridCountSinglePx?: number,
 ): number {
   const glyphNatural = ascentPx + descentPx;
   // For `auto`/single spacing the multiplier applies to the intended font's
@@ -1012,9 +1030,12 @@ export function lineBoxHeight(
   // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
   //
   // A single-spaced line on a docGrid snaps to whole grid CELLS in East Asian
-  // text. The number of cells is derived from the line's resolved single-line
-  // height (`natural` — the design line height, per the sample-58 adjudication
-  // of issue #1013); see docGridLineCells for the rule and Word measurements.
+  // text. The number of cells is derived from the line's DESIGN single-line
+  // height (`gridCountSinglePx` — what Word measures: each run's real-font
+  // single-line height), per the sample-58 adjudication of issue #1013; the
+  // substituted Canvas glyph box is NOT used for the count (it can overstate a
+  // tabled font's design height and add a spurious cell). See gridSingleCell and
+  // docGridLineCells for the rule and measurements.
   // A Latin-only line is NOT cell-rounded — it keeps its natural height above
   // a one-cell floor (demo/sample-1: an 18pt heading on an 18pt pitch stays
   // ~20.7px, not 36). ECMA-376 Part 1 only defines the natural ≤ pitch case
@@ -1026,7 +1047,21 @@ export function lineBoxHeight(
     // glyph box so the annotation is not clipped. Plain EA lines snap their
     // design single-line height to whole cells.
     if (hasRuby) return Math.max(pitchPx, Math.ceil(glyphNatural / pitchPx) * pitchPx);
-    return docGridLineCells(natural, pitchPx) * pitchPx;
+    // Word counts grid cells from the run's DESIGN single-line height (the real
+    // font's metrics — §17.6.5), NOT the substituted Canvas glyph box, which can
+    // overstate that height. A substitute face whose box lands a hair over the
+    // pitch (e.g. Hiragino Mincho ProN standing in for Yu Mincho: an 18.17px box
+    // vs Yu's 17.19px design height at 12pt on an 18pt pitch) must not push the
+    // line into an extra cell — that mis-widths every tbRl column and shifts
+    // vertical-section block tables by whole cells (sample-52). Prefer the
+    // per-line design grid-count height when the caller supplies it — it is the
+    // max over runs of each run's Word-faithful single-line height (design for a
+    // tabled run, measured box for an untabled one), so a mixed tabled+untabled
+    // line still counts the untabled run's real extent. Callers that pre-correct
+    // their metrics (correctLineMetrics) omit it and fall back to `natural`,
+    // which is already the design height for them.
+    const cellCountHeight = gridCountSinglePx ?? natural;
+    return docGridLineCells(cellCountHeight, pitchPx) * pitchPx;
   };
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
@@ -2552,6 +2587,7 @@ export function layoutLines(
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
   let lineIntendedSingle = 0; // px — max intended single-line height on the line
+  let lineGridCountSingle = 0; // px — max over segments of (tabled design height | untabled box)
   let isFirst = true;
   // Effective width/offset for the current line after float exclusion.
   let lineMaxWidth = maxWidth;
@@ -2707,6 +2743,9 @@ export function layoutLines(
       ascent: asc,
       descent: desc,
       intendedSingle: lineIntendedSingle,
+      // Empty/synthetic lines carry no per-segment count, so fall back to the
+      // synthesized box (== the old `natural` for an untabled line).
+      gridCountSingle: lineGridCountSingle || (asc + desc),
       xOffset: lineXOffset,
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
@@ -2716,7 +2755,7 @@ export function layoutLines(
       consumedEnd: nextStart ?? queue[0]?.src ?? endBoundary,
     });
     if (wrapCtx) {
-      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, lineEastAsian);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, lineEastAsian, lineGridCountSingle || (asc + desc));
     }
     currentLine = [];
     currentWidth = 0;
@@ -2726,6 +2765,7 @@ export function layoutLines(
     lineAscent = 0;
     lineDescent = 0;
     lineIntendedSingle = 0;
+    lineGridCountSingle = 0;
     lineHasRuby = false;
     lineEastAsian = false;
     lineHasSea = false;
@@ -2756,6 +2796,13 @@ export function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
+    // Grid-count height for docGrid cell allocation (§17.6.5). Only East Asian
+    // TEXT (and tall inline objects) drives the count — a Latin run keeps its
+    // natural height and is NOT cell-rounded, so it must not contribute (its
+    // substituted Canvas box would otherwise inflate the count). An EA text run
+    // counts from its DESIGN height when tabled, else its measured box; an
+    // image/math object counts its measured box. The line's value is the max.
+    let segGridCount = 0;
     if (!('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
@@ -2775,7 +2822,14 @@ export function layoutLines(
       const segScriptHint = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
       const intended = intendedSingleLinePx(ts.fontFamily, intendedEm, segScriptHint);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
+      // Only East Asian text is cell-rounded; a tabled EA run counts from its
+      // design height, an untabled EA run from its measured box.
+      if (segScriptHint) segGridCount = intended > 0 ? intended : asc + desc;
+    } else if (!('isTab' in s)) {
+      // Image/math object: a tall inline object sizes the line's cells too.
+      segGridCount = asc + desc;
     }
+    if (segGridCount > lineGridCountSingle) lineGridCountSingle = segGridCount;
   };
 
   const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
@@ -3803,6 +3857,7 @@ export function rescaleLayoutLines(
     let asc = 0;
     let desc = 0;
     let intended = 0;
+    let gridCount = 0; // px — max over segments of (tabled design | measured box)
     let hasText = false;
     const scaledSource = l.segments.map((segment) => ({ ...segment })) as LayoutSeg[];
     // Recompute the region gap from paint-scale natural metrics. Reusing the
@@ -3843,6 +3898,7 @@ export function rescaleLayoutLines(
         copy.mathDescent *= scale;
         asc = Math.max(asc, copy.mathAscent, s.fontSize * scale * 0.8);
         desc = Math.max(desc, copy.mathDescent, s.fontSize * scale * 0.2);
+        gridCount = Math.max(gridCount, copy.mathAscent + copy.mathDescent);
         return copy;
       }
       const t = s as LayoutTextSeg;
@@ -3851,6 +3907,13 @@ export function rescaleLayoutLines(
       if (mm.asc > asc) asc = mm.asc;
       if (mm.desc > desc) desc = mm.desc;
       if (mm.intended > intended) intended = mm.intended;
+      // Only East Asian text is cell-rounded (§17.6.5); a Latin run keeps its
+      // natural height and must not contribute its (substituted) box to the
+      // grid-count height. A tabled EA run counts from its design height, an
+      // untabled EA run from its measured box.
+      if (EAST_ASIAN_RE.test(t.text) && !t.ruby) {
+        gridCount = Math.max(gridCount, mm.intended > 0 ? mm.intended : mm.asc + mm.desc);
+      }
       return { ...t, measuredWidth: mm.advance };
     });
     // Empty/synthetic line (no text/math contributing metrics): fall back to the
@@ -3859,6 +3922,7 @@ export function rescaleLayoutLines(
       asc = l.ascent * scale;
       desc = l.descent * scale;
       intended = l.intendedSingle * scale;
+      gridCount = l.gridCountSingle * scale;
     }
     return {
       ...l,
@@ -3866,6 +3930,7 @@ export function rescaleLayoutLines(
       ascent: asc,
       descent: desc,
       intendedSingle: intended,
+      gridCountSingle: gridCount || (asc + desc),
       // Pure page geometry — scale-linear (no glyph hinting).
       xOffset: l.xOffset * scale,
       availWidth: l.availWidth * scale,
