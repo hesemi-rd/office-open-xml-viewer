@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   layoutLines,
+  rescaleLayoutLines,
   type LayoutSeg,
   type LayoutLine,
   type LayoutTextSeg,
@@ -155,6 +156,76 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     );
     expect(horizontal[0].segments[0].measuredWidth).toBe(40);
     expect(vertical[0].segments[0].measuredWidth).toBe(50);
+  });
+
+  it('measures a vertical cell sum under the run kerning state', () => {
+    const text = '、。「」ー';
+    let fontKerning: CanvasFontKerning = 'auto';
+    const ctx = {
+      font: '10px serif',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(value: string) {
+        const charCount = [...value].length;
+        return {
+          // Isolated glyph cells are 10px in every state. Only the contextual
+          // whole run changes: the inherited state compresses it more than the
+          // run's explicit `normal` kerning state.
+          width: charCount === 1 ? 10 : fontKerning === 'normal' ? 40 : 30,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+
+    const lines = layoutLines(
+      ctx,
+      [textSeg(text, 10, { verticalRun: true, kerning: 1 })],
+      200,
+      0,
+      1,
+    );
+
+    expect(lines[0].segments[0].measuredWidth).toBe(50);
+    expect(ctx.fontKerning).toBe('auto');
+  });
+
+  it('remeasures a vertical run under its kerning state at paint scale', () => {
+    const text = '、。「」ー';
+    let fontKerning: CanvasFontKerning = 'auto';
+    const measuredStates: CanvasFontKerning[] = [];
+    const ctx = {
+      font: '10px serif',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(value: string) {
+        measuredStates.push(fontKerning);
+        return {
+          width: [...value].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const stamp = layoutLines(
+      ctx,
+      [textSeg(text, 10, { verticalRun: true, kerning: 1 })],
+      200,
+      0,
+      1,
+    );
+    measuredStates.length = 0;
+
+    rescaleLayoutLines(stamp, 2, ctx, {}, 0);
+
+    expect(new Set(measuredStates)).toEqual(new Set<CanvasFontKerning>(['normal']));
+    expect(ctx.fontKerning).toBe('auto');
   });
 
   it('plain Latin wrap: every px field scales ×s, structure invariant', () => {

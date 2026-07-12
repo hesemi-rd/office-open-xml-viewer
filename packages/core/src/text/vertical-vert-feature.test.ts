@@ -16,12 +16,19 @@ interface ProbeFixture {
   variants: Map<number, 'wide-to-tall' | 'placement' | 'tall-to-wide' | 'outline' | 'metrics'>;
 }
 
-function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
+function fakeHtmlCanvasProbe(
+  initialFeature = 'normal',
+  options: { computedFeature?: string; jitter?: boolean } = {},
+): ProbeFixture {
   const listeners = new Map<string, Listener>();
   const variants = new Map<number, 'wide-to-tall' | 'placement' | 'tall-to-wide' | 'outline' | 'metrics'>();
   const featuresAtPaint: string[] = [];
   let paints = 0;
   let fontAssignments = 0;
+  let rasterReads = 0;
+
+  const effectiveFeature = (canvas: FakeCanvas): string =>
+    canvas.style.fontFeatureSettings || options.computedFeature || 'normal';
 
   class FakeCanvas {
     width = 1;
@@ -42,14 +49,14 @@ function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
       if (this.context !== null) return this.context;
       const canvas = this;
       let font = '';
-      let resolvedFeature = canvas.style.fontFeatureSettings;
+      let resolvedFeature = effectiveFeature(canvas);
       let drawnCp = 0;
       this.context = {
         canvas,
         get font() { return font; },
         set font(value: string) {
           font = value;
-          resolvedFeature = canvas.style.fontFeatureSettings;
+          resolvedFeature = effectiveFeature(canvas);
           fontAssignments += 1;
         },
         fillStyle: '#000',
@@ -93,7 +100,9 @@ function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
                 : variant === 'outline'
                   ? 9
                   : 3;
-          const xOffset = featured && variant === 'placement' ? 4 : 0;
+          const xOffset = (featured && variant === 'placement' ? 4 : 0)
+            + (options.jitter ? rasterReads : 0);
+          rasterReads += 1;
           for (let y = 0; y < inkHeight; y += 1) {
             for (let x = 0; x < inkWidth; x += 1) {
               if (featured && variant === 'outline' && x === 4 && y === 4) continue;
@@ -120,6 +129,9 @@ function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
   } as unknown as Document;
   vi.stubGlobal('HTMLCanvasElement', FakeCanvas);
   vi.stubGlobal('document', fakeDocument);
+  vi.stubGlobal('getComputedStyle', (element: FakeCanvas) => ({
+    fontFeatureSettings: effectiveFeature(element),
+  }));
 
   const canvas = new FakeCanvas(fakeDocument);
   let sourceFont = '16px "Probe Mincho", serif';
@@ -167,22 +179,57 @@ describe('vertical OpenType vert feature', () => {
     expect(verticalVertGlyphReachable(fixture.ctx, 0xff01)).toBe(false);
   });
 
+  it('forces vert off and on when the source already enables it', () => {
+    const fixture = fakeHtmlCanvasProbe('"kern" 1, "vert" 1, "ss01" 1');
+    fixture.variants.set(0x30fc, 'wide-to-tall');
+
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(true);
+    expect(fixture.featuresAtPaint).toEqual([
+      '"kern" 1, "ss01" 1, "vert" 0',
+      '"kern" 1, "ss01" 1, "vert" 0',
+      '"kern" 1, "ss01" 1, "vert" 1',
+      '"kern" 1, "ss01" 1, "vert" 1',
+    ]);
+  });
+
+  it('uses computed feature settings as the probe source', () => {
+    const fixture = fakeHtmlCanvasProbe('', {
+      computedFeature: '"kern" 1, "vert" 1',
+    });
+    fixture.variants.set(0x300c, 'tall-to-wide');
+
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x300c)).toBe(true);
+    expect(fixture.featuresAtPaint).toEqual([
+      '"kern" 1, "vert" 0',
+      '"kern" 1, "vert" 0',
+      '"kern" 1, "vert" 1',
+      '"kern" 1, "vert" 1',
+    ]);
+  });
+
+  it('rejects raster jitter when vert produces no repeatable change', () => {
+    const fixture = fakeHtmlCanvasProbe('normal', { jitter: true });
+
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(false);
+  });
+
   it('probes the requested glyph, refonts after each feature change, and caches per code point', () => {
     const fixture = fakeHtmlCanvasProbe('"kern" 1, "ss01" 1');
     fixture.variants.set(0x30fc, 'wide-to-tall');
 
     expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(true);
     expect(fixture.featuresAtPaint).toEqual([
-      '"kern" 1, "ss01" 1',
-      '"kern" 1, "ss01" 1',
+      '"kern" 1, "ss01" 1, "vert" 0',
+      '"kern" 1, "ss01" 1, "vert" 0',
+      '"kern" 1, "ss01" 1, "vert" 1',
       '"kern" 1, "ss01" 1, "vert" 1',
     ]);
     expect(fixture.fontAssignments()).toBeGreaterThanOrEqual(4);
     expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(true);
-    expect(fixture.paints()).toBe(3);
+    expect(fixture.paints()).toBe(4);
 
     expect(verticalVertGlyphReachable(fixture.ctx, 0x301c)).toBe(false);
-    expect(fixture.paints()).toBe(6);
+    expect(fixture.paints()).toBe(8);
   });
 
   it('invalidates each glyph result after the FontFace epoch changes', () => {
@@ -191,11 +238,11 @@ describe('vertical OpenType vert feature', () => {
     expect(verticalVertGlyphReachable(fixture.ctx, 0xff5e)).toBe(false);
     fixture.variants.set(0xff5e, 'wide-to-tall');
     expect(verticalVertGlyphReachable(fixture.ctx, 0xff5e)).toBe(false);
-    expect(fixture.paints()).toBe(3);
+    expect(fixture.paints()).toBe(4);
 
     fixture.listeners.get('loadingdone')?.();
     expect(verticalVertGlyphReachable(fixture.ctx, 0xff5e)).toBe(true);
-    expect(fixture.paints()).toBe(6);
+    expect(fixture.paints()).toBe(8);
   });
 
   it('keeps the featured advance origin fixed when designed ink pokes before the cell', () => {
@@ -286,6 +333,27 @@ describe('vertical OpenType vert feature', () => {
       'feature:"kern" 1',
       'font:italic 700 16px "Hiragino Mincho ProN"',
     ]);
+  });
+
+  it('preserves computed features while restoring the exact inline value', () => {
+    let font = '16px serif';
+    const style = { fontFeatureSettings: '' };
+    const ownerDocument = {
+      defaultView: {
+        getComputedStyle: () => ({ fontFeatureSettings: '"kern" 1, "ss01" 1' }),
+      },
+    } as unknown as Document;
+    const ctx = {
+      canvas: { style, ownerDocument },
+      get font() { return font; },
+      set font(value: string) { font = value; },
+    } as unknown as CanvasRenderingContext2D;
+
+    withVertFeature(ctx, () => {
+      expect(style.fontFeatureSettings).toBe('"kern" 1, "ss01" 1, "vert" 1');
+    });
+
+    expect(style.fontFeatureSettings).toBe('');
   });
 
   it('restores the prior feature and refonts when drawing throws', () => {

@@ -36,11 +36,31 @@ function replaceFontSize(font: string, replacement: string): string {
   );
 }
 
-function composeVertFeature(featureSettings: string): string {
+function composeVertFeature(featureSettings: string, enabled = true): string {
   const normalized = featureSettings.trim();
-  return normalized === '' || normalized.toLowerCase() === 'normal'
-    ? '"vert" 1'
-    : `${featureSettings}, "vert" 1`;
+  const preserved = normalized === '' || normalized.toLowerCase() === 'normal'
+    ? []
+    : normalized
+      .split(',')
+      .map((feature) => feature.trim())
+      .filter((feature) => !/^(["'])vert\1(?:\s+(?:on|off|\d+))?$/i.test(feature));
+  return [...preserved, `"vert" ${enabled ? 1 : 0}`].join(', ');
+}
+
+function sourceFeatureSettings(target: HTMLCanvasElement): string {
+  try {
+    const view = target.ownerDocument?.defaultView;
+    const computed = view?.getComputedStyle
+      ? view.getComputedStyle(target)
+      : typeof getComputedStyle === 'function'
+        ? getComputedStyle(target)
+        : null;
+    if (computed?.fontFeatureSettings) return computed.fontFeatureSettings;
+  } catch {
+    // Detached/cross-realm canvases can reject computed-style lookup. The inline
+    // value is still an exact, restorable feature source for the DOM route.
+  }
+  return target.style.fontFeatureSettings;
 }
 
 function probeState(doc: Document): ProbeState {
@@ -133,17 +153,32 @@ function arrayDifference(a: ArrayLike<number>, b: ArrayLike<number>): number {
 }
 
 function rasterChanged(
-  plain: RasterSnapshot,
-  plainRepeat: RasterSnapshot,
-  featured: RasterSnapshot,
+  offFirst: RasterSnapshot,
+  offSecond: RasterSnapshot,
+  onFirst: RasterSnapshot,
+  onSecond: RasterSnapshot,
 ): boolean {
-  const rasterNoise = arrayDifference(plain.alpha, plainRepeat.alpha);
-  const rasterSignal = arrayDifference(plain.alpha, featured.alpha);
-  const geometryNoise = arrayDifference(plain.geometry, plainRepeat.geometry);
-  const geometrySignal = arrayDifference(plain.geometry, featured.geometry);
-  const metricNoise = arrayDifference(plain.metrics, plainRepeat.metrics);
-  const metricSignal = arrayDifference(plain.metrics, featured.metrics);
-  return rasterSignal > rasterNoise || geometrySignal > geometryNoise || metricSignal > metricNoise;
+  const changed = (
+    offA: ArrayLike<number>,
+    offB: ArrayLike<number>,
+    onA: ArrayLike<number>,
+    onB: ArrayLike<number>,
+  ): boolean => {
+    const noise = Math.max(
+      arrayDifference(offA, offB),
+      arrayDifference(onA, onB),
+    );
+    const signal = Math.min(
+      arrayDifference(offA, onA),
+      arrayDifference(offA, onB),
+      arrayDifference(offB, onA),
+      arrayDifference(offB, onB),
+    );
+    return signal > noise;
+  };
+  return changed(offFirst.alpha, offSecond.alpha, onFirst.alpha, onSecond.alpha)
+    || changed(offFirst.geometry, offSecond.geometry, onFirst.geometry, onSecond.geometry)
+    || changed(offFirst.metrics, offSecond.metrics, onFirst.metrics, onSecond.metrics);
 }
 
 /**
@@ -158,7 +193,7 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
 
   const doc = target.ownerDocument ?? document;
   const state = probeState(doc);
-  const sourceFeature = target.style.fontFeatureSettings;
+  const sourceFeature = sourceFeatureSettings(target);
   const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}`;
   const cached = state.cache.get(key);
   if (cached !== undefined) return cached;
@@ -176,14 +211,18 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
       probe.fillStyle = '#000';
       probe.textAlign = 'center';
       probe.textBaseline = 'middle';
-      const plain = rasterizeProbe(probe, cp, sourceFeature);
-      const plainRepeat = rasterizeProbe(probe, cp, sourceFeature);
-      const vert = rasterizeProbe(probe, cp, composeVertFeature(sourceFeature));
+      const vertOff = composeVertFeature(sourceFeature, false);
+      const vertOn = composeVertFeature(sourceFeature, true);
+      const offFirst = rasterizeProbe(probe, cp, vertOff);
+      const offSecond = rasterizeProbe(probe, cp, vertOff);
+      const onFirst = rasterizeProbe(probe, cp, vertOn);
+      const onSecond = rasterizeProbe(probe, cp, vertOn);
       supported =
-        plain !== null &&
-        plainRepeat !== null &&
-        vert !== null &&
-        rasterChanged(plain, plainRepeat, vert);
+        offFirst !== null &&
+        offSecond !== null &&
+        onFirst !== null &&
+        onSecond !== null &&
+        rasterChanged(offFirst, offSecond, onFirst, onSecond);
     } catch {
       supported = false;
     } finally {
@@ -204,7 +243,7 @@ export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
   if (!style) return draw();
 
   const previous = style.fontFeatureSettings;
-  style.fontFeatureSettings = composeVertFeature(previous);
+  style.fontFeatureSettings = composeVertFeature(sourceFeatureSettings(canvas));
   ctx.font = ctx.font;
   try {
     return draw();

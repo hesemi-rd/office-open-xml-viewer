@@ -64,6 +64,11 @@ import {
   withVertFeature,
 } from '@silurus/ooxml-core';
 
+// Browser acceptance tests load this source module through Vite's `/src` bridge;
+// re-export the exact production probe so they exercise the same capability gate
+// as drawVerticalRun instead of maintaining a test-local approximation.
+export { verticalVertGlyphReachable } from '@silurus/ooxml-core';
+
 /** How a code point is painted inside the +90°-rotated vertical page:
  *   - `upright`  — counter-rotated −90° to stand up (vo=U, and vo=Tu).
  *   - `rotate`   — left rotated with the page but CENTRED on the column axis,
@@ -351,8 +356,11 @@ function routedVerticalGlyphCell(
  * segment's natural advance (`segAdvanceWidth`'s `naturalWidthPx`) so the grown
  * cell {@link drawVerticalRun} paints is matched by the measured box — measure ==
  * paint (wrapping, the next run's position, and the selection overlay all track
- * the drawn cell). Returns 0 when neither route changes a cell and when required
- * ink metrics are unavailable.
+ * the drawn cell). The value is the per-glyph cell sum minus the whole-string
+ * `measureText`: exactly 0 when neither route changes a cell AND the font applies
+ * no horizontal kern to the run (the common byte-identical path), and nonzero
+ * where the whole-string measure was kern-compressed but the vertical cells are
+ * not (issue #1024).
  *
  * The caller must set `ctx.font` (and any kerning state) for the run before
  * calling, exactly as it does for the `measureText` that produces `naturalWidthPx`.

@@ -13,6 +13,7 @@ interface InkSignature {
 interface GlyphComparison {
   ch: string;
   changedByVert: boolean;
+  reachableByProbe: boolean;
   subject: InkSignature;
   reference: InkSignature;
   pixelDifferenceRatio: number;
@@ -28,7 +29,7 @@ async function compareRendererWithFontVert(
     await document.fonts.ready;
     if (!document.fonts.check(`200px "${family}"`)) return null;
 
-    const { drawVerticalRun } = await import('/src/vertical-text.ts');
+    const { drawVerticalRun, verticalVertGlyphReachable } = await import('/src/vertical-text.ts');
     const subject = document.querySelector('#subject') as HTMLCanvasElement;
     const reference = document.querySelector('#reference') as HTMLCanvasElement;
     const size = 420;
@@ -123,6 +124,7 @@ async function compareRendererWithFontVert(
       for (let i = 0; i < plainAlpha.length; i += 1) {
         probeDifference += Math.abs(plainAlpha[i] - vertProbeAlpha[i]);
       }
+      const reachableByProbe = verticalVertGlyphReachable(probe, ch.codePointAt(0) ?? 0);
 
       const subjectCtx = prepare(subject);
       const cell = featuredCell(subjectCtx, ch);
@@ -146,6 +148,7 @@ async function compareRendererWithFontVert(
       comparisons.push({
         ch,
         changedByVert: probeDifference > 0,
+        reachableByProbe,
         subject: signature(subjectAlpha),
         reference: signature(referenceAlpha),
         pixelDifferenceRatio: pixelDifference / Math.max(1, referenceWeight),
@@ -347,16 +350,24 @@ test('layer A: the document font keeps Word-adjudicated vertical relationships',
   }
 });
 
-test('layer A/B: reachable glyphs reproduce each installed font own vert design', async ({ page }) => {
-  const repertoire = 'ー〜～、。「」（）：；！';
-  for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
-    const comparisons = await compareRendererWithFontVert(page, family, repertoire);
+const VERT_REPERTOIRE = 'ー〜～、。「」（）：；！';
+for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
+  test(`layer A/B: ${family} reachable glyphs reproduce the font own vert design`, async ({ page }) => {
+    const comparisons = await compareRendererWithFontVert(page, family, VERT_REPERTOIRE);
     test.skip(comparisons === null, `${family} is required for this host layer`);
-    if (comparisons === null) continue;
+    if (comparisons === null) return;
     const changed = comparisons.filter((comparison) => comparison.changedByVert);
     expect(changed.length, `${family} exposes representative vert substitutions`).toBeGreaterThanOrEqual(9);
     expect(changed.map((comparison) => comparison.ch)).not.toContain('；');
     expect(changed.map((comparison) => comparison.ch)).not.toContain('！');
+    for (const comparison of comparisons) {
+      expect(
+        comparison.reachableByProbe,
+        `${family} production probe agrees with its direct vert raster for ${comparison.ch}`,
+      ).toBe(comparison.changedByVert);
+    }
+    expect(comparisons.find((comparison) => comparison.ch === '；')?.reachableByProbe).toBe(false);
+    expect(comparisons.find((comparison) => comparison.ch === '！')?.reachableByProbe).toBe(false);
     for (const comparison of changed) {
       expect(comparison.subject.centroidX).toBeCloseTo(comparison.reference.centroidX, 0);
       expect(comparison.subject.centroidY).toBeCloseTo(comparison.reference.centroidY, 0);
@@ -370,8 +381,8 @@ test('layer A/B: reachable glyphs reproduce each installed font own vert design'
       );
       expect(comparison.pixelDifferenceRatio).toBeLessThan(0.08);
     }
-  }
-});
+  });
+}
 
 test('forced unreachable keeps FE/upright fallbacks and plain-rotates long marks', async ({ page }) => {
   await page.goto('/tests/visual/vertical-vert-feature.html');
