@@ -54,6 +54,7 @@ import {
   resolveLineFloatWindow,
   wordMinLineStartPx,
 } from './float-layout.js';
+import { verticalRunInkExtraPx } from './vertical-text.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -184,6 +185,14 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  the horizontally-laid-out run so it fits the line height. Only meaningful
    *  when {@link tateChuYoko} is set. */
   tateChuYokoCompress?: boolean;
+  /** issue #1014 — set by {@link buildSegments} when this segment is drawn by the
+   *  per-glyph upright-vertical (tbRl) path (`environment.verticalCJK`, and NOT a
+   *  縦中横 cell). It gates the vo=Tr rotate-fallback INK-extent advance correction
+   *  (`verticalRunInkExtraPx`) in the measure passes so the layout advance matches
+   *  the ink-sized cell `drawVerticalRun` paints — measure == draw. Inert (0
+   *  correction) for every font that does not under-report a rotate mark's advance,
+   *  which is all of them except a Chrome substitute; absent on horizontal pages. */
+  verticalRun?: boolean;
   /** Issue #797 — dictionary word-break offsets (seg-local UTF-16 indices, from
    *  core `seaWordBreakOffsets`) for a Thai/Lao/Khmer segment, which has no
    *  inter-word spaces. Populated by {@link layoutLines} for SEA text; the wrap
@@ -1409,6 +1418,12 @@ export function fitCJKPrefix(
   // model uses (measure==paint). Default (1, 0) reproduces the prior behaviour.
   charScale = 1,
   charSpacingPx = 0,
+  // issue #1014 — a vertical (tbRl) run whose segment is flagged `verticalRun`:
+  // fold the vo=Tr rotate-fallback ink deficit into the fit predicate too, so the
+  // wrap chooses a prefix whose CORRECTED advance (the same the line box measures)
+  // fits — not one that only fits by the under-reported raw width. 0 for horizontal
+  // / non-under-reporting runs, so the split is byte-identical there.
+  verticalRun = false,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
   // Trailing IDEOGRAPHIC SPACE (U+3000) line-end allowance: a candidate that
@@ -1429,7 +1444,7 @@ export function fitCJKPrefix(
     const prefix = chars.slice(0, visibleEnd).join('');
     if (prefix.length === 0) return true;
     const advance = textAdvanceWidth(
-      ctx.measureText(prefix).width,
+      ctx.measureText(prefix).width + (verticalRun ? verticalRunInkExtraPx(ctx, prefix) : 0),
       prefix,
       gridDeltaPx,
       charScale,
@@ -2176,6 +2191,11 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           environment.verticalCJK && r.eastAsianVert === true && r.eastAsianVertCompress === true
             ? true
             : undefined,
+        // #1014 — an upright-vertical (tbRl) per-glyph segment (NOT a 縦中横 cell,
+        // which is one drawTateChuYokoRun cell). Marks the segment for the vo=Tr
+        // rotate-fallback ink-extent advance correction in the measure passes.
+        verticalRun:
+          environment.verticalCJK && r.eastAsianVert !== true ? true : undefined,
       });
       firstSeg = false;
       gluePending = false; // glue applies only to a piece's FIRST segment
@@ -2790,6 +2810,18 @@ export function layoutLines(
     restoreKerning(prevKern);
     return m;
   };
+  // #1014 — extra along-column advance a vertical (tbRl) run needs so a vo=Tr
+  // rotate-fallback mark (ー 〜 “” ：) whose substitute font UNDER-REPORTS its
+  // advance via measureText keeps its ink inside the ink-sized cell
+  // `drawVerticalRun` paints. Added to the natural advance at EVERY site that
+  // measures a vertical text seg's advance (the main commit, the tab forced-commit
+  // paths, the fitText gap resolver, and the wrap/split look-ahead) so the measured
+  // box tracks the drawn cell (measure == draw). 0 for horizontal runs, 縦中横 cells
+  // (`!verticalRun`), and every font that does not under-report — byte-identical
+  // common path. The run's font must already be selected on `ctx` (the callers
+  // select it via measureText / setMeasureFont immediately before).
+  const verticalInkExtra = (s: LayoutTextSeg, text: string): number =>
+    s.verticalRun ? verticalRunInkExtraPx(ctx, text) : 0;
 
   const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
   const sourcedSegs = segs.map((seg, segIndex) => {
@@ -2843,10 +2875,13 @@ export function layoutLines(
   // Resolve §17.3.2.14 from RAW natural advances at this exact layout scale.
   // The resulting per-gap is folded into segAdvanceWidth below, so the line
   // breaker and paint pen use one width authority. Cached w:spacing is ignored.
+  // #1014 — the natural width includes the vo=Tr ink deficit so the resolved gap
+  // (target − natural)/n, plus the ink-grown cell the paint draws, still sums to
+  // the fitText target (measure == paint); 0 for non-under-reporting runs.
   resolveFitTextSegments(
     queue.filter((seg): seg is LayoutTextSeg => 'text' in seg),
     scale,
-    (segment) => measureText(segment).width,
+    (segment) => measureText(segment).width + verticalInkExtra(segment, segment.text),
   );
 
   // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
@@ -2856,8 +2891,10 @@ export function layoutLines(
   // tab measurement uses it so line wrapping packs the grid's char count and the
   // box matches what is drawn (measure==paint). `kerning` (§17.3.2.19) is applied
   // via `ctx.fontKerning` inside `withSegKerning`, wrapping the measureText call.
+  // The #1014 vo=Tr ink deficit (`verticalInkExtra`, defined above) is folded into
+  // the natural width so measure == paint on an under-reporting vertical run.
   const segAdvance = (s: LayoutTextSeg): number =>
-    segAdvanceWidth(s, measureText(s).width, gridDeltaPx, scale);
+    segAdvanceWidth(s, measureText(s).width + verticalInkExtra(s, s.text), gridDeltaPx, scale);
   // Grid advance of an arbitrary substring under a segment's font (for split
   // prefixes/tails). Selects the font (and the run's kerning state), then applies
   // the same width model as a whole segment BUT with the substring's own
@@ -2868,7 +2905,7 @@ export function layoutLines(
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
     restoreKerning(prevKern);
-    return segAdvanceWidth({ ...s, text }, natural, gridDeltaPx, scale);
+    return segAdvanceWidth({ ...s, text }, natural + verticalInkExtra(s, text), gridDeltaPx, scale);
   };
 
   // Width of a queued segment, for right/center tab look-ahead.
@@ -2988,7 +3025,8 @@ export function layoutLines(
               addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
             } else {
               const m = measureText(q);
-              const w = segAdvanceWidth(q, m.width, gridDeltaPx, scale);
+              // #1014 — fold the vo=Tr ink deficit into the committed advance too.
+              const w = segAdvanceWidth(q, m.width + verticalInkExtra(q, q.text), gridDeltaPx, scale);
               q.measuredWidth = w;
               const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
               const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
@@ -3041,7 +3079,8 @@ export function layoutLines(
             addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
           } else {
             const m = measureText(q);
-            const w = segAdvanceWidth(q, m.width, gridDeltaPx, scale);
+            // #1014 — fold the vo=Tr ink deficit into the committed advance too.
+            const w = segAdvanceWidth(q, m.width + verticalInkExtra(q, q.text), gridDeltaPx, scale);
             q.measuredWidth = w;
             const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
             const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
@@ -3134,7 +3173,11 @@ export function layoutLines(
     const m = measureText(s);
     // Advance = natural width + character-grid delta (the SINGLE model shared
     // with the draw paths; 0 unless an active grid AND a pure-EA segment).
-    const w = segAdvanceWidth(s, m.width, gridDeltaPx, scale);
+    // #1014 — plus the vo=Tr rotate-fallback ink deficit for a vertical run, so
+    // this MAIN commit path (the segment's stored measuredWidth and the pen advance
+    // to the next segment) matches the ink-sized cell `drawVerticalRun` paints
+    // (measure == paint); 0 for horizontal / non-under-reporting runs.
+    const w = segAdvanceWidth(s, m.width + verticalInkExtra(s, s.text), gridDeltaPx, scale);
     // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
@@ -3406,7 +3449,7 @@ export function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale)) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -3620,7 +3663,7 @@ export function layoutLines(
       const available = availW();
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const allChars = [...s.text];
-      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale))].length : 0;
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true)].length : 0;
       if (split < 1) split = 1;
       split = extendThroughTrailingIdeographicSpaces(allChars, split);
       if (split >= allChars.length) {
@@ -3709,7 +3752,11 @@ export function rescaleLayoutLines(
     const effPx = calcEffectiveFontPx(s, scale);
     ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
     const m = ctx.measureText(s.text);
-    const advance = segAdvanceWidth(s, m.width, gridDeltaPx, scale);
+    // #1014 — fold in the vo=Tr rotate-fallback ink-extent deficit for a vertical
+    // run so the rescaled box matches the ink-sized cell (measure == draw); 0 on
+    // horizontal pages and non-under-reporting fonts. `ctx.font` is set above.
+    const natural = m.width + (s.verticalRun ? verticalRunInkExtraPx(ctx, s.text) : 0);
+    const advance = segAdvanceWidth(s, natural, gridDeltaPx, scale);
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.
@@ -3749,7 +3796,12 @@ export function rescaleLayoutLines(
       (segment) => {
         const effPx = calcEffectiveFontPx(segment, scale);
         ctx.font = buildFont(segment.bold, segment.italic, effPx, segment.fontFamily, fontFamilyClasses);
-        return ctx.measureText(segment.text).width;
+        // #1014 — include the vo=Tr ink deficit so the rescaled fitText gap stays
+        // measure==paint against the ink-grown cell; 0 for non-under-reporting runs.
+        return (
+          ctx.measureText(segment.text).width +
+          (segment.verticalRun ? verticalRunInkExtraPx(ctx, segment.text) : 0)
+        );
       },
     );
     const segments = scaledSource.map((s) => {

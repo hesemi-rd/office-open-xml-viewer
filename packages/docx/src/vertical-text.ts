@@ -249,6 +249,98 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
 }
 
 /**
+ * True for a vo=Tr code point that takes the GEOMETRIC ROTATE fallback in
+ * {@link drawVerticalRun} — i.e. `mode==='rotate'` with NO substituted vertical
+ * bracket form and NOT the upright-fallback semicolon. These are the marks drawn
+ * by a plain (optionally reflected) `fillText` in the +90° page frame: ー 〜 ～,
+ * the quotes “”, and the colon ：. This is the SINGLE predicate shared by the
+ * paint path and the {@link verticalRunInkExtraPx} measure path (issue #1014), so
+ * the two agree on which glyphs get the ink-sized cell.
+ *
+ * @param cp A Unicode scalar value.
+ */
+function isVerticalRotateFallback(cp: number): boolean {
+  return (
+    verticalDrawMode(cp) === 'rotate' &&
+    verticalBracketFormSubstitute(cp) === null &&
+    !verticalTrUprightFallback(cp)
+  );
+}
+
+/**
+ * Along-column ink geometry of a vo=Tr rotate-fallback glyph (issue #1014). The
+ * glyph is painted by a plain `fillText` in the +90°-rotated page frame, so its
+ * HORIZONTAL ink extent maps onto the ALONG-COLUMN axis (the advance axis). Read
+ * the tight horizontal ink box with a `center`/`middle` alignment:
+ *   - `extentPx` = actualBoundingBoxLeft + actualBoundingBoxRight — the ink width
+ *     along the column (used to size the cell so the ink cannot spill past it).
+ *   - `shiftPx`  = (actualBoundingBoxLeft − actualBoundingBoxRight)/2 — the local
+ *     along-column shift that re-centres the ink on the (grown) cell, since a
+ *     `center` draw centres the glyph's ADVANCE and an under-reported advance is
+ *     off-centre from the ink.
+ * Returns `null` when the Canvas does not report `actualBoundingBox*` (older
+ * engines / node mocks) so callers degrade to the advance-sized, advance-centred
+ * draw exactly as before this metric existed.
+ */
+function verticalRotateInkGeometry(
+  ctx: Ctx2D,
+  ch: string,
+): { extentPx: number; shiftPx: number } | null {
+  const prevAlign = ctx.textAlign;
+  const prevBaseline = ctx.textBaseline;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const m = ctx.measureText(ch);
+  ctx.textAlign = prevAlign;
+  ctx.textBaseline = prevBaseline;
+  const l = m.actualBoundingBoxLeft;
+  const r = m.actualBoundingBoxRight;
+  if (
+    typeof l !== 'number' ||
+    typeof r !== 'number' ||
+    !Number.isFinite(l) ||
+    !Number.isFinite(r)
+  ) {
+    return null;
+  }
+  return { extentPx: l + r, shiftPx: (l - r) / 2 };
+}
+
+/**
+ * ECMA-376 §17.6.20 (tbRl) + issue #1014 — the EXTRA along-column advance (px, at
+ * the run's current font, BEFORE the §17.3.2.43 `w:w` scale and §17.3.2.35 pitch)
+ * that a vertical run needs so its vo=Tr rotate-fallback glyphs' INK fits inside
+ * their cells. For each rotate-fallback glyph whose along-column ink extent
+ * exceeds its `measureText` advance (a substitute font UNDER-REPORTING the
+ * advance — Chrome-only; skia and normal fonts report ink ≤ advance), this adds
+ * the deficit `max(0, inkExtent − advance)`. The layout folds this into the
+ * segment's natural advance (`segAdvanceWidth`'s `naturalWidthPx`) so the grown
+ * cell {@link drawVerticalRun} paints is matched by the measured box — measure ==
+ * paint (wrapping, the next run's position, and the selection overlay all track
+ * the drawn cell). Returns 0 for a run with no such glyph, for every font that
+ * does not under-report (the common path — byte-identical), and when ink metrics
+ * are unavailable.
+ *
+ * The caller must set `ctx.font` (and any kerning state) for the run before
+ * calling, exactly as it does for the `measureText` that produces `naturalWidthPx`.
+ *
+ * @param ctx  2D context with the run's font selected.
+ * @param text The run's text.
+ */
+export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+  let extra = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (!isVerticalRotateFallback(cp)) continue;
+    const geom = verticalRotateInkGeometry(ctx, ch);
+    if (geom === null) continue;
+    const advance = ctx.measureText(ch).width;
+    if (geom.extentPx > advance) extra += geom.extentPx - advance;
+  }
+  return extra;
+}
+
+/**
  * Draw one run's glyphs in vertical mode. The context is assumed to already be
  * in the page's SWAPPED logical frame (the +90° page rotation is installed by
  * `renderDocumentToCanvas`), so an ordinary `fillText` advances DOWN the line.
@@ -271,6 +363,16 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  *                         delta + §17.3.2.35 `w:spacing` pitch (the layout's
  *                         `segLetterSpacingPx`); 0 for the common path.
  * @param charScale        ECMA-376 §17.3.2.43 `w:w` fraction; 1 by default.
+ * @param growTrRotateInk  issue #1014 — when true, a vo=Tr GEOMETRIC rotate-fallback
+ *                         glyph (ー 〜 ～ “” ：) whose substitute font under-reports
+ *                         its advance is sized to its along-column INK extent (and
+ *                         ink-centred) so its ink cannot spill past the cell into the
+ *                         next run. MUST be set ONLY where the layout advance was
+ *                         grown by the SAME deficit ({@link verticalRunInkExtraPx},
+ *                         gated on `LayoutTextSeg.verticalRun`) so paint == measure;
+ *                         the caller passes `s.verticalRun === true`. Default false
+ *                         keeps the advance-sized, advance-centred draw byte-identical
+ *                         (markers and unwired vertical text boxes).
  */
 export function drawVerticalRun(
   ctx: Ctx2D,
@@ -280,6 +382,7 @@ export function drawVerticalRun(
   fontPx: number,
   letterSpacingPx: number,
   charScale = 1,
+  growTrRotateInk = false,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -301,9 +404,6 @@ export function drawVerticalRun(
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     const mode = verticalDrawMode(cp);
-    // Advance/width uses the ORIGINAL code point (measure == draw, and the text
-    // model / selection / find keep the original character — see the module doc).
-    const adv = ctx.measureText(ch).width * charScale + letterSpacingPx;
     // A vo=Tr code point with a substituted Unicode vertical presentation form — the
     // brackets （）「」〈〉… and the white lenticular 〖〗 (#969) — is SUBSTITUTED and
     // drawn upright, exactly like the upright cells — UAX#50 §5 Tr means "substitute a
@@ -319,6 +419,27 @@ export function drawVerticalRun(
     // like the vo=U / vo=Tu cells; the colon ：is NOT here (its FE13 form IS a 90°
     // rotation, so it takes the rotate branch below → side-by-side dots).
     const uprightFallback = mode === 'rotate' && bracketCp === null && verticalTrUprightFallback(cp);
+    // Advance/width uses the ORIGINAL code point (measure == draw, and the text
+    // model / selection / find keep the original character — see the module doc).
+    // #1014: a vo=Tr GEOMETRIC rotate-fallback glyph (ー 〜 ～ “” ：) is painted by a
+    // plain `fillText` in the +90° page frame, so its HORIZONTAL ink maps onto the
+    // along-column (advance) axis. When a substitute font UNDER-REPORTS the advance
+    // (Chrome), that ink spills PAST the advance-sized cell into the next run. Size
+    // the cell to the along-column INK extent instead so the ink is contained; the
+    // SAME per-glyph deficit is folded into the layout advance by
+    // `verticalRunInkExtraPx` (measure == draw). NO-OP unless the ink exceeds the
+    // advance (every real font here reports ink ≤ advance ⇒ byte-identical), and only
+    // for the geometric rotate branch (substituted/upright Tr glyphs keep their path).
+    let cellNaturalPx = ctx.measureText(ch).width;
+    let rotateInkShiftPx = 0;
+    if (growTrRotateInk && mode === 'rotate' && bracketCp === null && !uprightFallback) {
+      const geom = verticalRotateInkGeometry(ctx, ch);
+      if (geom !== null && geom.extentPx > cellNaturalPx) {
+        cellNaturalPx = geom.extentPx;
+        rotateInkShiftPx = geom.shiftPx;
+      }
+    }
+    const adv = cellNaturalPx * charScale + letterSpacingPx;
     if (mode === 'upright' || bracketCp !== null || uprightFallback) {
       // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would otherwise lay on
@@ -398,14 +519,20 @@ export function drawVerticalRun(
       const mirror = verticalTrMirrorFallback(cp);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (mirror || scaled) {
+      // #1014: `rotateInkShiftPx` (glyph-space, non-zero ONLY when the cell was grown
+      // to the ink extent above) re-centres the ink on the grown cell — a `center`
+      // draw centres the glyph's ADVANCE, and an under-reported advance is off-centre
+      // from the ink. It rides the local frame so it composes with the §17.3.2.43
+      // `w:w` scale and the reflection; 0 (the common path) leaves today's advance-
+      // centred draw byte-identical.
+      if (mirror || scaled || rotateInkShiftPx !== 0) {
         ctx.save();
         ctx.translate(cx, baseline);
         // `scale(1, -1)` is the on-screen horizontal mirror in the +90° page frame
         // (screen −x ↔ page-frame +y); combine with the §17.3.2.43 `w:w` width
         // compression on the line axis. Non-mirror glyphs keep sy=+1.
         ctx.scale(charScale, mirror ? -1 : 1);
-        ctx.fillText(ch, 0, 0);
+        ctx.fillText(ch, rotateInkShiftPx, 0);
         ctx.restore();
       } else {
         ctx.fillText(ch, cx, baseline);

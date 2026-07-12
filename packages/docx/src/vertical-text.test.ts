@@ -9,6 +9,7 @@ import {
   drawUprightBox,
   physicalToLogicalAnchorBox,
   verticalTextLayerPlacement,
+  verticalRunInkExtraPx,
 } from './vertical-text.js';
 
 // ECMA-376 §17.6.20 vertical writing (tbRl). These are the pure classification
@@ -129,6 +130,14 @@ interface MockMetrics {
   fontBoundingBoxDescent?: number;
   // Per-glyph tight ink extent under a `middle` textBaseline, by draw glyph.
   inkMiddle?: Record<string, { asc: number; desc: number }>;
+  // Per-glyph HORIZONTAL tight ink bounds relative to the advance CENTRE (the
+  // values a `textAlign='center'` measureText reports as
+  // actualBoundingBoxLeft/Right), by glyph. Used by the vo=Tr rotate-fallback
+  // ink-overrun path (#1014): after the +90° page rotation the glyph's HORIZONTAL
+  // ink maps onto the along-column axis, so left+right is the along-column ink
+  // extent. Returned regardless of the current textAlign (the values are already
+  // centre-relative).
+  inkLR?: Record<string, { left: number; right: number }>;
 }
 
 function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
@@ -163,6 +172,11 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
       if (ink && this.textBaseline === 'middle') {
         m.actualBoundingBoxAscent = ink.asc;
         m.actualBoundingBoxDescent = ink.desc;
+      }
+      const lr = metrics.inkLR?.[s];
+      if (lr) {
+        m.actualBoundingBoxLeft = lr.left;
+        m.actualBoundingBoxRight = lr.right;
       }
       return m;
     },
@@ -377,6 +391,88 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(rotates).toHaveLength(2);
     expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
+  });
+});
+
+// issue #1014 — a vo=Tr rotate-fallback mark (ー, 〜, quotes, colon) whose
+// substitute font UNDER-REPORTS its advance via measureText draws with ink that
+// spills PAST the advance-sized cell into the following sideways run (Chrome).
+// The fix sizes the rotate cell to the along-column INK extent (a NO-OP unless
+// the ink exceeds the advance) and ink-centres the glyph in the grown cell, so
+// the mark stays inside its own cell and the next run clears it. measure==paint:
+// the SAME per-glyph deficit is added to the layout advance via
+// verticalRunInkExtraPx.
+describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-centring)', () => {
+  // A `middle`/`center` measureText for ー reports advance 10 (mock: 1 cp × 10)
+  // but a HORIZONTAL ink of left+right = 5+24 = 29 > 10 — the under-report.
+  const underReport = { inkLR: { ー: { left: 5, right: 24 } } };
+
+  it('verticalRunInkExtraPx sums the per-glyph ink deficit over Tr rotate glyphs only', () => {
+    const { ctx } = mockCtx(underReport);
+    // ー: max(0, 29 − 10) = 19. Upright 話 and sideways A/space contribute 0.
+    expect(verticalRunInkExtraPx(ctx, 'ー')).toBeCloseTo(19, 6);
+    expect(verticalRunInkExtraPx(ctx, '話ー')).toBeCloseTo(19, 6);
+    expect(verticalRunInkExtraPx(ctx, '話A ')).toBe(0);
+  });
+
+  it('verticalRunInkExtraPx is 0 when the ink fits the advance (all real fonts) or metrics are absent', () => {
+    const fits = mockCtx({ inkLR: { ー: { left: 3, right: 4 } } }); // extent 7 ≤ 10
+    expect(verticalRunInkExtraPx(fits.ctx, 'ー')).toBe(0);
+    const noMetrics = mockCtx(); // no actualBoundingBox* → graceful 0
+    expect(verticalRunInkExtraPx(noMetrics.ctx, 'ー')).toBe(0);
+  });
+
+  it('grows the ー cell to its ink extent so the FOLLOWING glyph clears the ink', () => {
+    const { ctx, ops } = mockCtx(underReport);
+    // ー (grown cell 29) then upright 話 (advance 10). Without the fix 話 would
+    // centre at 10 + 5 = 15 (inside the ー ink); with the ink-sized cell it
+    // centres at 29 + 5 = 34. `growTrRotateInk=true` = the body path (whose layout
+    // advance was grown by the same deficit — measure==paint).
+    drawVerticalRun(ctx, 'ー話', 0, 0, 12, 0, 1, true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    // First translate = ー cell centre (29/2 = 14.5); second = 話 cell centre 34.
+    expect(translates[0].x).toBeCloseTo(14.5, 6);
+    expect(translates[1].x).toBeCloseTo(34, 6);
+  });
+
+  it('ink-centres the grown ー (shift by (left − right)/2) so its ink fills the grown cell', () => {
+    const { ctx, ops } = mockCtx(underReport);
+    drawVerticalRun(ctx, 'ー', 0, 0, 12, 0, 1, true);
+    // Mirror path (ー reflects): translate to cell centre 14.5, scale(1,-1), then a
+    // center/middle fillText shifted by (5 − 24)/2 = −9.5 so the ink centres on the
+    // cell. Ink then spans [14.5 − 9.5 − 5, 14.5 − 9.5 + 24] = [0, 29] = the cell.
+    const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translate?.x).toBeCloseTo(14.5, 6);
+    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
+    expect(scale).toEqual({ op: 'scale', sx: 1, sy: -1 });
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', y: 0, align: 'center', baseline: 'middle' });
+    expect(fill?.x).toBeCloseTo(-9.5, 6);
+  });
+
+  it('is a NO-OP (byte-identical) when the ink fits the advance — no growth, no shift', () => {
+    // extent 7 ≤ advance 10 → the ー draws exactly as today even with grow enabled:
+    // cell 10, centre 5, mirror scale(1,-1), fillText at the local origin.
+    const { ctx, ops } = mockCtx({ inkLR: { ー: { left: 3, right: 4 } } });
+    drawVerticalRun(ctx, 'ー', 100, 200, 12, 0, 1, true);
+    const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translate).toEqual({ op: 'translate', x: 105, y: 200 });
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', x: 0, y: 0 });
+  });
+
+  it('does NOT grow when growTrRotateInk is false (marker / unwired text box) — paint stays coupled to the measure', () => {
+    // The same under-reporting ー, but growTrRotateInk defaults to false: the cell
+    // stays advance-sized (10) and advance-centred (cx=5), byte-identical to the
+    // pre-#1014 draw. Callers whose LAYOUT advance was NOT grown (no s.verticalRun —
+    // list markers, eaVert text boxes) pass false so paint never exceeds measure.
+    const { ctx, ops } = mockCtx(underReport);
+    drawVerticalRun(ctx, 'ー話', 0, 0, 12, 0); // 7 args → growTrRotateInk = false
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates[0].x).toBeCloseTo(5, 6);  // ー cell centre at advance/2, NOT ink/2
+    expect(translates[1].x).toBeCloseTo(15, 6); // 話 at 10 + 5, NOT 29 + 5
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill?.x).toBe(0); // no ink-centre shift
   });
 });
 

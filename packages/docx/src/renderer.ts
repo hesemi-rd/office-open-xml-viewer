@@ -9160,6 +9160,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             effSizePx,
             segLetterSpacingPx(s, drawGridDeltaPx, scale),
             segCharScale,
+            // #1014 — grow a vo=Tr rotate mark's cell to its ink ONLY when the layout
+            // advance was grown by the same deficit (`s.verticalRun`), so paint==measure.
+            s.verticalRun === true,
           );
         } else if (s.fitTextPerGapPx !== undefined) {
           // ECMA-376 §17.3.2.14 Manual Run Width. Same draw model as the
@@ -11348,6 +11351,12 @@ export function renderShapeText(
               effSizePx,
               segLetterSpacingPx(s, 0, scale),
               s.charScale ?? 1,
+              // #1014 — couple the ink-grow to the measure exactly as the body path:
+              // `s.verticalRun` is unset here (the eaVert text box builds segments with
+              // a non-tbRl-page `verticalCJK`), so paint stays advance-sized and matches
+              // its (un-grown) measured advance. A follow-up that wires the text box's
+              // vertical measure would flip this on automatically.
+              s.verticalRun === true,
             );
             // ECMA-376 §17.3.3.25 ruby (furigana) on a vertical text-box run. Word
             // sets the annotation on the RIGHT side of the vertical base column
