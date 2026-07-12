@@ -12,35 +12,25 @@
 //   • vo=U  (upright): CJK ideographs, kana, Hangul, fullwidth forms. Drawn with
 //     a local −90° counter-rotation about the glyph's own centre, cancelling the
 //     page rotation so it stands UPRIGHT while still advancing down the line.
-//   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. UAX#50
-//     substitutes a vertical presentation glyph. For the CORNER-HANGING comma/full
-//     stop (、。， → U+FE10–FE12, core `verticalFormSubstitute`) we draw THAT code
-//     point upright and em-box-centred so the font's designed upper-right ink
-//     placement lands the punctuation in the cell corner as Word does. ！？ are
-//     NOT substituted — they stand upright and CENTRED, so the original fullwidth
-//     mark drawn upright is the correct vertical form (the FE15/FE16 forms are
-//     corner-designed in many fonts and would shift ！？ off-column). Where no
-//     form exists (．, small kana) we draw the original upright unchanged (．
-//     keeps a corner-nudge fallback).
+//   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. When
+//     this DOM canvas/font proves that `vert` changes the code point, the original
+//     character is drawn with its featured A/D placement. Otherwise the existing
+//     FE10–FE12 / centred-upright / corner-nudge machinery remains the fallback.
 //   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】… and
 //     the white lenticular brackets 〖〗 have a U+FE1x/FE3x vertical presentation
 //     form (core `verticalBracketFormSubstitute`) present in the substitute fonts;
 //     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
-//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). Tr code
-//     points with NO substituted form take a geometric fallback, one of three:
+//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). A
+//     reachable Tr code point instead uses its original `vert` glyph and featured
+//     cell. Unreachable Tr points keep the substitution/geometric fallbacks:
 //       – ROTATE (plain): the quotes “” and the fullwidth colon ：— drawn CENTRED on
 //         the column via a plain `fillText` in the +90° page frame. The rotation IS
 //         the font's designed vertical form for these (font-verified: the quotes'
 //         comma-hooks match, and the colon's FE13 side-by-side dots fall out of the
 //         base rotation since its FE13 form is absent from most render fonts).
-//       – ROTATE + REFLECT: the long-stroke marks ー (prolonged sound mark) and 〜 ～
-//         (wave dash / tilde) — core `verticalTrMirrorFallback`. Their font-DESIGNED
-//         vertical glyph is the HORIZONTAL REFLECTION of the +90° rotation, not the
-//         rotation (the 起筆/curvature flips left↔right between orientations — a
-//         documented Japanese typographic convention; Word PDF sample-47 + font `vert`
-//         glyph verified). When the element/CSS route or this glyph's `vert` coverage
-//         is unavailable, we rotate AND reflect via `scale(1, -1)` about the cell
-//         centre (the on-screen horizontal mirror in the +90° page frame).
+//       – ROTATE (plain): unreachable long-stroke marks ー 〜 ～ use the UAX #50 Tr
+//         fallback with no mirror/shear. Main-thread and worker/skia output may differ
+//         because only the DOM path can verify the font's real `vert` design.
 //       – UPRIGHT: the fullwidth semicolon ；, whose FE14 form is an upright dot-over-
 //         comma, not a rotation (issue #969 follow-up; core `verticalTrUprightFallback`).
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
@@ -69,10 +59,9 @@ import {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
-  verticalTrMirrorFallback,
-  verticalVertFeatureSupported,
+  measureVerticalVertGlyph,
+  verticalVertGlyphReachable,
   withVertFeature,
-  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
@@ -257,7 +246,7 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  * True for a vo=Tr code point that takes the GEOMETRIC ROTATE fallback in
  * {@link drawVerticalRun} — i.e. `mode==='rotate'` with NO substituted vertical
  * bracket form and NOT the upright-fallback semicolon. These are the marks drawn
- * by a plain (optionally reflected) `fillText` in the +90° page frame: ー 〜 ～,
+ * by a plain `fillText` in the +90° page frame: ー 〜 ～,
  * the quotes “”, and the colon ：. This is the SINGLE predicate shared by the
  * paint path and the {@link verticalRunInkExtraPx} measure path (issue #1014), so
  * the two agree on which glyphs get the ink-sized cell.
@@ -270,6 +259,14 @@ function isVerticalRotateFallback(cp: number): boolean {
     verticalBracketFormSubstitute(cp) === null &&
     !verticalTrUprightFallback(cp)
   );
+}
+
+/** Only UAX #50 transform classes may replace the manual fallback with a
+ * feature-selected glyph. U and R remain byte-identical regardless of what a
+ * capability callback reports. */
+function isVerticalVertCandidate(cp: number): boolean {
+  const vo = verticalOrientation(cp);
+  return vo === 'Tu' || vo === 'Tr';
 }
 
 /**
@@ -311,20 +308,51 @@ function verticalRotateInkGeometry(
   return { extentPx: l + r, shiftPx: (l - r) / 2 };
 }
 
+interface RoutedVerticalGlyphCell {
+  naturalPx: number;
+  vert: ReturnType<typeof measureVerticalVertGlyph> | null;
+  rotateInkShiftPx: number;
+}
+
+/** The single cell router shared by layout measurement and paint. */
+function routedVerticalGlyphCell(
+  ctx: Ctx2D,
+  ch: string,
+  cp: number,
+  vertCapability: VertCapability,
+  growRotateInk: boolean,
+): RoutedVerticalGlyphCell {
+  const plainAdvance = ctx.measureText(ch).width;
+  if (isVerticalVertCandidate(cp) && vertCapability(cp)) {
+    const vert = measureVerticalVertGlyph(ctx, ch);
+    return { naturalPx: vert.cellAdvancePx, vert, rotateInkShiftPx: 0 };
+  }
+  if (growRotateInk && isVerticalRotateFallback(cp)) {
+    const geom = verticalRotateInkGeometry(ctx, ch);
+    if (geom !== null && geom.extentPx > plainAdvance) {
+      return {
+        naturalPx: geom.extentPx,
+        vert: null,
+        rotateInkShiftPx: geom.shiftPx,
+      };
+    }
+  }
+  return { naturalPx: plainAdvance, vert: null, rotateInkShiftPx: 0 };
+}
+
 /**
- * ECMA-376 §17.6.20 (tbRl) + issue #1014 — the EXTRA along-column advance (px, at
- * the run's current font, BEFORE the §17.3.2.43 `w:w` scale and §17.3.2.35 pitch)
- * that a vertical run needs so its vo=Tr rotate-fallback glyphs' INK fits inside
- * their cells. For each rotate-fallback glyph whose along-column ink extent
- * exceeds its `measureText` advance (a substitute font UNDER-REPORTING the
- * advance — Chrome-only; skia and normal fonts report ink ≤ advance), this adds
- * the deficit `max(0, inkExtent − advance)`. The layout folds this into the
+ * ECMA-376 §17.6.20 (tbRl), issues #1014/#1024 — the along-column cell delta
+ * (px, before §17.3.2.43 `w:w` scaling and §17.3.2.35 pitch) beyond ordinary
+ * `measureText`. Reachable Tu/Tr glyphs contribute their feature advances;
+ * unreachable glyphs contribute their manual per-glyph advances, with the
+ * positive #1014 ink-overrun growth where needed. Subtracting the whole-string
+ * width also removes horizontal kern pairs that do not apply to vertical cells.
+ * Layout folds this into the
  * segment's natural advance (`segAdvanceWidth`'s `naturalWidthPx`) so the grown
  * cell {@link drawVerticalRun} paints is matched by the measured box — measure ==
  * paint (wrapping, the next run's position, and the selection overlay all track
- * the drawn cell). Returns 0 for a run with no such glyph, for every font that
- * does not under-report (the common path — byte-identical), and when ink metrics
- * are unavailable.
+ * the drawn cell). Returns 0 when neither route changes a cell and when required
+ * ink metrics are unavailable.
  *
  * The caller must set `ctx.font` (and any kerning state) for the run before
  * calling, exactly as it does for the `measureText` that produces `naturalWidthPx`.
@@ -337,27 +365,24 @@ export function verticalRunInkExtraPxWithCapability(
   text: string,
   vertCapability: VertCapability,
 ): number {
-  let extra = 0;
+  let routedWidth = 0;
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
-    if (!isVerticalRotateFallback(cp)) continue;
-    // A real vert long-stroke glyph is upright in its ordinary one-em cell. All
-    // other rotate-fallback glyphs (notably quotes and the colon) still use the
-    // geometric path and therefore retain #1014/#1019 ink growth.
-    if (verticalTrMirrorFallback(cp) && vertCapability(cp)) continue;
-    const geom = verticalRotateInkGeometry(ctx, ch);
-    if (geom === null) continue;
-    const advance = ctx.measureText(ch).width;
-    if (geom.extentPx > advance) extra += geom.extentPx - advance;
+    const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, true);
+    routedWidth += routed.naturalPx;
   }
-  return extra;
+  // Canvas whole-string measurement may apply horizontal JIS punctuation kern
+  // pairs (for example 。「), but vertical paint advances independent cells.
+  // Subtract the SAME whole width the caller adds so their sum is exactly the
+  // routed per-glyph width at every layout call site.
+  return routedWidth - ctx.measureText(text).width;
 }
 
 export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
   return verticalRunInkExtraPxWithCapability(
     ctx,
     text,
-    (cp) => verticalVertFeatureSupported(ctx, cp),
+    (cp) => verticalVertGlyphReachable(ctx, cp),
   );
 }
 
@@ -441,7 +466,6 @@ export function drawVerticalRunWithCapability(
     // like the vo=U / vo=Tu cells; the colon ：is NOT here (its FE13 form IS a 90°
     // rotation, so it takes the rotate branch below → side-by-side dots).
     const uprightFallback = mode === 'rotate' && bracketCp === null && verticalTrUprightFallback(cp);
-    const vertGlyphSupported = verticalTrMirrorFallback(cp) && vertCapability(cp);
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
     // #1014: a vo=Tr GEOMETRIC rotate-fallback glyph (ー 〜 ～ “” ：) is painted by a
@@ -453,27 +477,17 @@ export function drawVerticalRunWithCapability(
     // `verticalRunInkExtraPx` (measure == draw). NO-OP unless the ink exceeds the
     // advance (every real font here reports ink ≤ advance ⇒ byte-identical), and only
     // for the geometric rotate branch (substituted/upright Tr glyphs keep their path).
-    let cellNaturalPx = ctx.measureText(ch).width;
-    let rotateInkShiftPx = 0;
-    if (
-      !vertGlyphSupported &&
-      growTrRotateInk &&
-      mode === 'rotate' &&
-      bracketCp === null &&
-      !uprightFallback
-    ) {
-      const geom = verticalRotateInkGeometry(ctx, ch);
-      if (geom !== null && geom.extentPx > cellNaturalPx) {
-        cellNaturalPx = geom.extentPx;
-        rotateInkShiftPx = geom.shiftPx;
-      }
-    }
+    const routedCell = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, growTrRotateInk);
+    const vertCell = routedCell.vert;
+    const cellNaturalPx = routedCell.naturalPx;
+    const rotateInkShiftPx = routedCell.rotateInkShiftPx;
     const adv = cellNaturalPx * charScale + letterSpacingPx;
-    if (vertGlyphSupported) {
-      // The font's `vert` table supplies the designed upright form for the three
-      // long-stroke marks whose geometric fallback otherwise needs reflection.
-      // Keep every other glyph on its Word-adjudicated manual path below.
-      const cx = x + ax + adv / 2;
+    if (vertCell !== null) {
+      // Preserve the feature glyph's asymmetric A/D placement by keeping its
+      // origin at the nominal half-advance measured under the same composed
+      // `vert` state as paint. Designed ink may poke into a neighbour cell;
+      // letter spacing follows the cell and does not move the origin.
+      const cx = x + ax + vertCell.originInCellPx * charScale;
       ctx.save();
       ctx.translate(cx, baseline);
       ctx.rotate(-Math.PI / 2);
@@ -546,36 +560,23 @@ export function drawVerticalRunWithCapability(
       // Word-verified (issue #969 follow-up); for the quotes the rotation matches the
       // font's designed vertical form exactly (font-verified).
       //
-      // The long-stroke marks ー and 〜 ～ (verticalTrMirrorFallback) are the
-      // EXCEPTION: their font-DESIGNED vertical form is the HORIZONTAL REFLECTION of
-      // that +90° rotation, not the rotation — the 起筆/curvature flips left↔right
-      // between orientations (Word PDF sample-47 + font `vert` glyph verified: a plain
-      // rotation of ー bulges LEFT, Word/the designed glyph bulge RIGHT). Since
-      // this glyph lacks verified `vert` coverage, we reproduce it by reflecting
-      // about the cell centre. For U+30FC only, the shared runtime
-      // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
-      // the designed wave-mark drift remains untouched. Because x'=s·x is independent
-      // of y, advance/measure and along-column centring are unchanged.
+      // An unreachable `ー〜～` uses this same plain UAX #50 Tr rotation. The removed
+      // #1017/#1023 mirror/shear extrapolated an inaccessible glyph design from two
+      // Mincho fonts; worker/skia may therefore differ visibly from the real DOM
+      // `vert` path, which is a documented limitation rather than a fabricated form.
       const cx = x + ax + adv / 2;
-      const mirror = verticalTrMirrorFallback(cp);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       // #1014: `rotateInkShiftPx` (glyph-space, non-zero ONLY when the cell was grown
       // to the ink extent above) re-centres the ink on the grown cell — a `center`
       // draw centres the glyph's ADVANCE, and an under-reported advance is off-centre
       // from the ink. It is applied separately on the advance OUTPUT axis before
-      // the §17.3.2.43 `w:w` + mirror/shear matrix, avoiding an m·shift cross-axis
-      // displacement. Zero (the common path) leaves advance centring unchanged.
-      if (mirror || scaled || rotateInkShiftPx !== 0) {
+      // the §17.3.2.43 `w:w` matrix. Zero leaves advance centring unchanged.
+      if (scaled || rotateInkShiftPx !== 0) {
         ctx.save();
         ctx.translate(cx, baseline);
-        // Keep the #1014 ink shift on the advance OUTPUT axis. Folding it into
-        // the shear matrix would introduce an m·shift cross-axis displacement.
         if (rotateInkShiftPx !== 0) ctx.translate(charScale * rotateInkShiftPx, 0);
-        const shear = verticalFallbackShearCoefficient(ctx, cp);
-        // x'=charScale·x preserves along-column extent; y'=shear·x−y mirrors
-        // chirality and cancels the horizontal glyph's measured stroke drift.
-        ctx.transform(charScale, shear, 0, mirror ? -1 : 1, 0, 0);
+        ctx.transform(charScale, 0, 0, 1, 0, 0);
         ctx.fillText(ch, 0, 0);
         ctx.restore();
       } else {
@@ -630,7 +631,7 @@ export function drawVerticalRun(
     letterSpacingPx,
     charScale,
     growTrRotateInk,
-    (cp) => verticalVertFeatureSupported(ctx, cp),
+    (cp) => verticalVertGlyphReachable(ctx, cp),
   );
 }
 

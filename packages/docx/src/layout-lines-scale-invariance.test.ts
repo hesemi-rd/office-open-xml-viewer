@@ -129,6 +129,34 @@ function assertScaleLinear(a: LayoutLine[], b: LayoutLine[], s: number, tol = 1e
 const SCALES = [1.5, 2, 3];
 
 describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, the algorithm is scale-clean', () => {
+  it('removes horizontal kern compression only for a vertical run', () => {
+    const text = '、。「」ー';
+    const makeCtx = (): CanvasRenderingContext2D => ({
+      font: '10px serif',
+      letterSpacing: '0px',
+      measureText(value: string) {
+        return {
+          width: value === text ? 40 : [...value].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+
+    const horizontal = layoutLines(makeCtx(), [textSeg(text)], 200, 0, 1);
+    const vertical = layoutLines(
+      makeCtx(),
+      [textSeg(text, 10, { verticalRun: true })],
+      200,
+      0,
+      1,
+    );
+    expect(horizontal[0].segments[0].measuredWidth).toBe(40);
+    expect(vertical[0].segments[0].measuredWidth).toBe(50);
+  });
+
   it('plain Latin wrap: every px field scales ×s, structure invariant', () => {
     // 40 single-letter "words" so the breaker has many wrap points; W=100pt.
     const segs = () => [textSeg(Array.from({ length: 40 }, () => 'w').join(' '))];
