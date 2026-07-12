@@ -3,6 +3,7 @@ import {
   containsSeaScript,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
+  isDictionarySeaText,
   isGraphemeFillText,
   isSeaGraphemeExtend,
   isSeaScriptCodePoint,
@@ -474,6 +475,26 @@ describe('isGraphemeFillText (#961)', () => {
     expect(isGraphemeFillText('Hello world')).toBe(false);
     expect(isGraphemeFillText('日本語')).toBe(false);
     expect(isGraphemeFillText('')).toBe(false);
+  });
+});
+
+describe('isDictionarySeaText (#991)', () => {
+  it('true only for pure dictionary-SEA (Thai/Lao/Khmer) content', () => {
+    expect(isDictionarySeaText('ภาษาไทย')).toBe(true);
+    expect(isDictionarySeaText('ພາສາລາວ')).toBe(true);
+    expect(isDictionarySeaText('ភាសាខ្មែរ')).toBe(true);
+    expect(isDictionarySeaText('Hello ไทย 123')).toBe(true); // non-SEA is ignored
+  });
+  it('false for grapheme-fill scripts, mixed SEA families, and non-SEA text', () => {
+    expect(isDictionarySeaText('မြန်မာ')).toBe(false); // Myanmar
+    expect(isDictionarySeaText('བོད་ཡིག')).toBe(false); // Tibetan
+    // A single run mixing both families is excluded REGARDLESS of which span
+    // comes first (isGraphemeFillText would classify by the first span only).
+    expect(isDictionarySeaText('ไทยမြန်မာ')).toBe(false);
+    expect(isDictionarySeaText('မြန်မာไทย')).toBe(false);
+    expect(isDictionarySeaText('Hello world')).toBe(false);
+    expect(isDictionarySeaText('日本語')).toBe(false);
+    expect(isDictionarySeaText('')).toBe(false);
   });
 });
 

@@ -33,6 +33,7 @@ import {
   isUax14NoBreakPair,
   containsSeaScript,
   isGraphemeFillText,
+  isDictionarySeaText,
   seaMixedBreakOffsets,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
@@ -2626,6 +2627,18 @@ export function layoutLines(
 
   let lineHasRuby = false;
   let lineEastAsian = false;
+  // Whether any committed token on the current line carries DICTIONARY-SEA
+  // (Thai/Lao/Khmer) text — `seaBreaks` marks all SEA segments; the
+  // grapheme-fill scripts (Myanmar/Tibetan, #961) are excluded because the
+  // issue #991 ground truth covers only the dictionary scripts and their
+  // Word-verified wrap is per-cluster greedy. Gates the trailing-space shrink
+  // budget: Word-observed (issue #991 — the calibration fixture's
+  // 21-paragraph overflow sweep at 5/9/13 inter-phrase spaces) shows Word
+  // wraps such a line's final word at natural fit for EVERY overflow > 0,
+  // i.e. it never compresses inter-word spaces on Thai lines, while the Latin
+  // demo evidence for SPACE_SHRINK_RATIO (sample-1 p3/p6) and the CJK centred
+  // title (sample-10) keep the 25% drawable budget.
+  let lineHasSea = false;
   const flush = (
     forceHeight?: number,
     brTerminated = false,
@@ -2668,6 +2681,7 @@ export function layoutLines(
     lineIntendedSingle = 0;
     lineHasRuby = false;
     lineEastAsian = false;
+    lineHasSea = false;
     isFirst = false;
     startLine(minLineStartWidth());
   };
@@ -2698,6 +2712,7 @@ export function layoutLines(
     if (!('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
+      if (ts.seaBreaks !== undefined && isDictionarySeaText(ts.text)) lineHasSea = true;
       if (!lineEastAsian && EAST_ASIAN_RE.test(ts.text)) lineEastAsian = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
       // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
@@ -3190,10 +3205,26 @@ export function layoutLines(
     //    (`shrinkFitCompression`). Demo/sample-1 p3/p6 space-collapse evidence
     //    shows that ADDING the bias double-counts tolerance and admits words the
     //    non-justified paint path cannot fit.
+    // Dictionary-SEA candidate (Thai/Lao/Khmer; grapheme-fill Myanmar/Tibetan
+    // excluded — their Word-verified wrap is per-cluster greedy, #961, and the
+    // #991 ground truth covers only the dictionary scripts). Per-codepoint
+    // scan: a rare segment mixing both SEA families is NOT dictionary-SEA, so
+    // it keeps the pre-#991 greedy path instead of moving a grapheme-fill span
+    // inside an atomic chunk.
+    const sDictSea = s.seaBreaks !== undefined && isDictionarySeaText(s.text);
     const shrinkBudgetFor = (next: LayoutSeg | undefined, biasBudget: number): number => {
       const closesLogicalLine = next === undefined || 'lineBreak' in next;
       const lineWillJustify = isJustified && (!closesLogicalLine || stretchLastLine);
-      return lineWillJustify ? biasBudget : lineTotalTrailingW * SPACE_SHRINK_RATIO;
+      if (lineWillJustify) return biasBudget;
+      // Word-observed (issue #991 calibration sweep): a line carrying
+      // dictionary-SEA text never compresses its inter-word spaces — Word
+      // wraps at natural fit for every overflow > 0 regardless of how many
+      // spaces the line holds. The candidate counts too: admitting it would
+      // make the line SEA, so the same zero-shrink fit applies (the sweep's
+      // committed tokens were all Thai; mixed-script GT is uncollected — this
+      // takes the wrap conservatively). The 25% drawable budget below is the
+      // Latin/CJK-verified behavior.
+      return lineHasSea || sDictSea ? 0 : lineTotalTrailingW * SPACE_SHRINK_RATIO;
     };
     const shrinkBudget = shrinkBudgetFor(
       queue[0],
@@ -3281,6 +3312,60 @@ export function layoutLines(
       if (
         currentWidth + (groupW - groupTrail)
         > availW() + shrinkBudgetFor(queue[groupEnd], groupBiasBudget)
+      ) {
+        flush(undefined, false, s.src);
+      }
+    }
+
+    // No-space SEA chunk placement — ECMA-376 prescribes no SEA line-breaking
+    // algorithm; Word-observed (issue #991, calibration fixture parts II/II-D):
+    // the dictionary boundaries inside a no-space Thai/Lao/Khmer chunk are
+    // SECONDARY break opportunities. A chunk that does not fit the remaining
+    // width of a non-empty line moves to the next line WHOLE when it fits a
+    // full line by itself — Word never splits it mid-chunk to fill the current
+    // line (invariant across remaining widths, across the chunk being authored
+    // as several glued `w:r`, and with/without a leading tab). Only a chunk
+    // wider than a full line breaks at the dictionary boundaries (part II-D;
+    // ordinary spaceless Thai paragraphs wrap this way on every line), which
+    // is the greedy SEA branch below, kept unchanged.
+    //
+    // Judged only at chunk START: if the previously committed token is a text
+    // segment glued to `s` (no trailing space), the whole chunk already passed
+    // this judgment when its head was placed, so a mid-chunk segment never
+    // needs it. The chunk spans `s` plus following queue segments while they
+    // stay dictionary-SEA text glued without intervening spaces. Grapheme-fill
+    // scripts (Myanmar/Tibetan) are excluded: their Word-verified wrap fills
+    // per cluster (#961), so a fitting chunk must NOT move whole.
+    if (
+      sDictSea &&
+      currentLine.length > 0 &&
+      (() => {
+        const last = currentLine[currentLine.length - 1];
+        return !('text' in last) || (last as LayoutTextSeg).text.endsWith(' ');
+      })()
+    ) {
+      let chunkW = w;
+      let chunkTrail = trailingSpaceW;
+      let chunkEnd = 0;
+      let chunkBias = lineBiasBudget + biasBudgetContribution(s, trimmed);
+      if (!s.text.endsWith(' ')) {
+        for (; chunkEnd < queue.length; chunkEnd++) {
+          const f = queue[chunkEnd];
+          if (!('text' in f) || (f as LayoutTextSeg).seaBreaks === undefined) break;
+          if (!isDictionarySeaText((f as LayoutTextSeg).text)) break;
+          const ft = f as LayoutTextSeg;
+          const fw = segAdvance(ft);
+          const fTrim = ft.text.replace(/ +$/, '');
+          chunkW += fw;
+          chunkTrail = ft.text.endsWith(' ') ? fw - strAdvance(ft, fTrim) : 0;
+          chunkBias += biasBudgetContribution(ft, fTrim);
+          if (ft.text.endsWith(' ')) { chunkEnd++; break; } // a space ends the chunk
+        }
+      }
+      const chunkWForFit = chunkW - chunkTrail;
+      if (
+        currentWidth + chunkWForFit > availW() + shrinkBudgetFor(queue[chunkEnd], chunkBias) &&
+        chunkWForFit <= lineMaxWidth
       ) {
         flush(undefined, false, s.src);
       }

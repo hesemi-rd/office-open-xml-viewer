@@ -382,6 +382,7 @@ export {
   isSeaGraphemeExtend,
   containsSeaScript,
   isGraphemeFillText,
+  isDictionarySeaText,
   seaWordBreakOffsets,
   seaTransitionOffsets,
   seaMixedBreakOffsets,
