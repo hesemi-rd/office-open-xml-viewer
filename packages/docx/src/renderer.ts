@@ -9576,11 +9576,17 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     shape.textBlocks &&
     shape.textBlocks.length > 0 &&
     // §20.1.10.83 vertical text box: `measureShapeTextAutoFitHeight` grows the
-    // PHYSICAL HEIGHT to fit the horizontal line stack, but a vertical box grows
-    // its PHYSICAL WIDTH (the line-stacking axis is the cross axis after the ±90°
-    // rotation). Re-measuring here would grow the wrong axis, so vertical boxes
-    // keep their declared `<wp:extent>` (correct for the common explicit-extent
-    // case; cross-axis auto-grow is a follow-up — see `verticalTextboxMode`).
+    // PHYSICAL HEIGHT to fit the horizontal line stack, but a vertical box's
+    // block-progression (line-stacking) axis is the CROSS axis (physical WIDTH)
+    // after the ±90° rotation — that is the axis `<a:spAutoFit/>` resizes, NOT the
+    // height (Word-verified: the batch-3 GT / issue #988 shows the column-length
+    // = physical height stays the fixed wrap dimension). Re-measuring height here
+    // would grow the wrong axis. The GT also shows Word placing the columns at the
+    // box's AUTHORED `<wp:extent>` edges (a shrink-to-content cross fit would move
+    // the reading-start edge), so vertical boxes keep their declared extent — this
+    // reproduces the fixture exactly. Cross-axis auto-GROW for a box whose content
+    // overflows its authored cross extent remains a verify-only follow-up (needs a
+    // fixture that overflows AND carries a panel to disambiguate the anchored edge).
     verticalTextboxMode(shape.textVert) === null
   ) {
     const fitH = measureShapeTextAutoFitHeight(
@@ -9785,11 +9791,18 @@ function shapeTextHorizontalInsetsPx(shape: ShapeRun, scale: number): { lIns: nu
  *  directions (`<wps:bodyPr vert>`), or `null` for horizontal / not-yet-handled
  *  values. `eaVert` keeps East-Asian glyphs upright (per-glyph UAX#50); `vert`
  *  and `vert270` rotate EVERY glyph (their spec meaning), so the whole-box ±90°
- *  rotation already produces them with no per-glyph work. `mongolianVert`
- *  (top→bottom but lines L→R — not a pure rotation of the R→L frame) and the
- *  WordArt stacked variants are deferred and treated as horizontal. */
-function verticalTextboxMode(vert: string | null | undefined): 'vert' | 'vert270' | 'eaVert' | null {
-  return vert === 'vert' || vert === 'vert270' || vert === 'eaVert' ? vert : null;
+ *  rotation already produces them with no per-glyph work. `mongolianVert` shares
+ *  `eaVert`'s per-glyph orientation (CJK upright, Latin sideways) but stacks its
+ *  columns LEFT→RIGHT instead of right→left (Word-verified, the batch-3
+ *  adjudication fixtures / issue #988) — the renderer draws it exactly like
+ *  `eaVert` and then reflects each line's cross-position within the box (see
+ *  `mongolianLineFlip`). The WordArt stacked variants remain deferred (horizontal). */
+function verticalTextboxMode(
+  vert: string | null | undefined,
+): 'vert' | 'vert270' | 'eaVert' | 'mongolianVert' | null {
+  return vert === 'vert' || vert === 'vert270' || vert === 'eaVert' || vert === 'mongolianVert'
+    ? vert
+    : null;
 }
 
 /** Measure a shape text body's fitted height for `<a:spAutoFit/>`.
@@ -9975,22 +9988,34 @@ export function renderShapeText(
   //
   // Deferred (fall back to the horizontal draw of the affected element): a
   // shape's own `rotation` is not composed with the text-body rotation (already
-  // true before this change — the panel-rotation restore precedes this call), and
-  // an inline image inside a vertical text-box paragraph rotates with the frame
-  // rather than being uprighted like the section tbRl path — both are follow-ups.
+  // true before this change — the panel-rotation restore precedes this call).
   const vmode = verticalTextboxMode(shape.textVert);
-  const eaVertUpright = vmode === 'eaVert';
+  // §20.1.10.83 — East-Asian upright per-glyph orientation (CJK upright, non-EA
+  // rotated 90°): both `eaVert` and `mongolianVert`. They differ ONLY in the
+  // column-stacking direction, handled by `mongolianLineFlip` below.
+  const eaVertUpright = vmode === 'eaVert' || vmode === 'mongolianVert';
+  // §20.1.10.83 `mongolianVert` stacks columns LEFT→RIGHT — the MIRROR of the
+  // `eaVert`/`vert` R→L frame. It is not a pure rotation of that frame (chars stay
+  // top→bottom while lines reverse), so it reuses the +90° CW eaVert draw and then
+  // reflects each line's cross-position within the inner box (see the draw loop).
+  const mongolianLineFlip = vmode === 'mongolianVert';
+  // Sign of the page rotation: +1 for the +90° CW frames (vert/eaVert/
+  // mongolianVert), −1 for vert270's −90° frame. An UPRIGHT inline image must
+  // counter-rotate by `-rotSign * 90°` to cancel it (drawing it with the shared
+  // +90°-only `drawUprightBox` would leave a vert270 image at −180°, upside down).
+  const rotSign = vmode === 'vert270' ? -1 : 1;
   if (vmode) {
     const boxW = w;
     const boxH = h;
     ctx.save();
     ctx.translate(x + boxW / 2, y + boxH / 2);
-    // +90° (vert/eaVert): chars advance T→B (local +x → device +y), lines stack
-    // R→L (local +y → device −x, first line at the right edge). −90° (vert270):
-    // chars B→T, lines L→R (first line at the left edge). The swapped LOGICAL box
-    // — width = physical height (the column length), height = physical width (the
-    // line-stacking extent) — is drawn centred on the pivot.
-    ctx.rotate((vmode === 'vert270' ? -1 : 1) * (Math.PI / 2));
+    // +90° (vert/eaVert/mongolianVert): chars advance T→B (local +x → device +y),
+    // lines stack R→L (local +y → device −x, first line at the right edge; for
+    // mongolianVert the per-line cross reflection re-stacks them L→R). −90°
+    // (vert270): chars B→T, lines L→R (first line at the left edge). The swapped
+    // LOGICAL box — width = physical height (the column length), height = physical
+    // width (the line-stacking extent) — is drawn centred on the pivot.
+    ctx.rotate(rotSign * (Math.PI / 2));
     x = -boxH / 2;
     y = -boxW / 2;
     w = boxH;
@@ -10019,6 +10044,17 @@ export function renderShapeText(
   const innerW = Math.max(0, w - lIns - rIns);
   const innerY = y + tIns;
   const innerH = Math.max(0, h - tIns - bIns);
+
+  // §20.1.10.83 `mongolianVert` — reflect a block that occupies the cross-axis
+  // (line-stacking) interval `[top, top + extent]` about the inner box's cross
+  // centre, so its columns stack LEFT→RIGHT (device) instead of the eaVert R→L.
+  // The reflection moves ONLY the cross position; each line's own glyphs (drawn
+  // upright/sideways by drawVerticalRun, inline axis = local +x) are untouched, so
+  // the reading order within a column and the glyph orientation stay identical to
+  // eaVert — the batch-3 GT shows the label column at the box's physical LEFT and
+  // later columns to its right. Identity for every non-mongolian mode.
+  const flipBlockTop = (top: number, extent: number): number =>
+    mongolianLineFlip ? 2 * innerY + innerH - top - extent : top;
 
   // ECMA-376 §17.3.1.12 — per-paragraph indent (px). `leftPx`/`rightPx` shrink
   // the text column from the inner box edges; `firstPx` is the SIGNED first-line
@@ -10050,8 +10086,14 @@ export function renderShapeText(
   // line-box height + centred baseline (PR #640 discipline, computed over the
   // line's segments), and `baseRtl` is the paragraph base direction (§17.3.1.6
   // `<w:bidi>` when set, else first-strong of the block text).
+  // For a HORIZONTAL box `fitW`/`fitH` are the image's draw width/height and it
+  // reserves `fitH` down the block flow. For a VERTICAL box (§20.1.10.83) the
+  // image is drawn UPRIGHT (a graphic keeps its physical orientation — the
+  // batch-3 GT / issue #988), so `fitW`/`fitH` stay the PHYSICAL width/height and
+  // `crossExtent` (= physical width) is what it reserves along the column-stacking
+  // axis; the along-column placement uses `fitH` (physical height).
   type BlockLayout =
-    | { kind: 'image'; fitW: number; fitH: number; ind: BlockIndent }
+    | { kind: 'image'; fitW: number; fitH: number; crossExtent?: number; ind: BlockIndent }
     | {
         kind: 'text';
         lines: LayoutLine[];
@@ -10204,6 +10246,18 @@ export function renderShapeText(
   const layouts: BlockLayout[] = blocks.map((b) => {
     const ind = indentOf(b);
     if (b.imagePath) {
+      if (vmode) {
+        // §20.1.10.83 vertical box — draw the image UPRIGHT. The along-column
+        // available space is `firstLineW` (= the column-length axis in the swapped
+        // frame), so the image's PHYSICAL HEIGHT is fitted to it; the physical
+        // WIDTH is the cross (line-stacking) extent it reserves. `fitShapeImage`
+        // fits its first arg to the constraint, so pass (heightPt, widthPt) and
+        // read the fitted physical height/width back.
+        const fit = fitShapeImage(b.imageHeightPt ?? 0, b.imageWidthPt ?? 0, ind.firstLineW, scale);
+        const physH = fit.w; // fitted physical height (≤ column length)
+        const physW = fit.h; // physical width (cross extent)
+        return { kind: 'image', fitW: physW, fitH: physH, crossExtent: physW, ind };
+      }
       // The image occupies the FIRST line, so it fits to firstLineW (= paraW −
       // signed first-line indent), not the full inner width.
       const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, ind.firstLineW, scale);
@@ -10266,7 +10320,9 @@ export function renderShapeText(
     };
   });
   const blockHeight = (l: BlockLayout): number => {
-    if (l.kind === 'image') return l.fitH;
+    // A vertical box's upright image reserves its CROSS extent (physical width)
+    // along the column-stacking axis, not its `fitH` (physical height).
+    if (l.kind === 'image') return l.crossExtent ?? l.fitH;
     return l.lineHeights.reduce((s, h) => s + h, 0);
   };
   // ECMA-376 §17.3.1.33 — each text-box paragraph's own spaceBefore/After is
@@ -10334,6 +10390,37 @@ export function renderShapeText(
       const regionLeft = innerX + ind.leftPx + ind.firstPx;
       const regionW = ind.firstLineW;
       const bmp = block.imagePath ? images.get(imageKey(block.imagePath)) : undefined;
+      if (vmode) {
+        // §20.1.10.83 vertical box — draw the image UPRIGHT (a graphic keeps its
+        // physical orientation, matching the section-level tbRl image path and the
+        // batch-3 GT / issue #988). The image occupies one column: `fitH` is the
+        // physical height placed DOWN the column (along-column, local +x from
+        // regionLeft) and `crossExtent` (= physical width) is its extent across the
+        // stacking axis (local +y, reflected for mongolianVert). `drawUprightBox`
+        // counter-rotates −90° about the box centre so the +90° page rotation is
+        // cancelled and the raster paints in its native orientation.
+        const crossExt = layout.crossExtent ?? fitW;
+        const alongExt = fitH;
+        // Centre the image along its column region (paragraph alignment collapses
+        // to centred for a lone figure, matching the horizontal default).
+        let alongStart = regionLeft + Math.max(0, (regionW - alongExt) / 2);
+        if (block.alignment === 'left' || block.alignment === 'both') alongStart = regionLeft;
+        else if (block.alignment === 'right') alongStart = regionLeft + Math.max(0, regionW - alongExt);
+        const crossTop = flipBlockTop(cursorY, crossExt);
+        if (bmp) {
+          // Counter-rotate about the image-column centre by `-rotSign*90°` to
+          // cancel the page frame (drawUprightBox hardcodes −90°, correct only for
+          // the +90° modes; vert270 needs +90°). In the cancelled frame the image
+          // is upright with physical width = crossExt and physical height = alongExt.
+          ctx.save();
+          ctx.translate(alongStart + alongExt / 2, crossTop + crossExt / 2);
+          ctx.rotate((-rotSign * Math.PI) / 2);
+          ctx.drawImage(bmp, -crossExt / 2, -alongExt / 2, crossExt, alongExt);
+          ctx.restore();
+        }
+        cursorY += crossExt;
+        continue;
+      }
       if (bmp) {
         let drawX = regionLeft + Math.max(0, (regionW - fitW) / 2); // default: centered
         if (block.alignment === 'left' || block.alignment === 'both') {
@@ -10374,7 +10461,11 @@ export function renderShapeText(
         const isFirstLine = li === 0;
         const isLastLine = li === lineList.length - 1;
         const lineH = layout.lineHeights[li];
-        const baseline = cursorY + layout.baselineOffsets[li];
+        // §20.1.10.83 mongolianVert reflects the line's cross (stacking) position
+        // within the inner box (L→R columns); no-op for every other mode. The
+        // baseline keeps its offset from the (reflected) line top, so the glyphs
+        // sit inside the line box exactly as eaVert draws them.
+        const baseline = flipBlockTop(cursorY, lineH) + layout.baselineOffsets[li];
         // Per-line indented region (§17.3.1.12): content-left = innerX + leftPx,
         // shifted by the signed first-line indent on the first line; width =
         // firstLineW (first) / paraW (continuation).
@@ -10572,9 +10663,7 @@ export function renderShapeText(
             // path — so the segment advances by its NATURAL `measuredWidth` (the
             // width drawVerticalRun paints), NOT the justify/kashida-expanded
             // `internalStretch`, keeping paint==advance. A whole-line center/right
-            // `alignOffset` still applies via the starting `x`. Ruby and inline
-            // images inside an eaVert run are a follow-up (drawVerticalRun paints
-            // base glyphs only; vertical furigana placement is not yet ported).
+            // `alignOffset` still applies via the starting `x`.
             drawVerticalRun(
               ctx,
               s.text,
@@ -10584,6 +10673,46 @@ export function renderShapeText(
               segLetterSpacingPx(s, 0, scale),
               s.charScale ?? 1,
             );
+            // ECMA-376 §17.3.3.25 ruby (furigana) on a vertical text-box run. Word
+            // sets the annotation on the RIGHT side of the vertical base column
+            // (the batch-3 GT / issue #988): in the +90° CW frame the physical
+            // RIGHT is device +x, i.e. a SMALLER local +y than the base baseline.
+            // The GT cross offset (base-column centre → ruby-column centre) is
+            // effSize/2 + rubySize (≈ one base em when ruby is the usual half size).
+            // Each ruby glyph stands upright (kana ⇒ UAX#50 vo=U) and advances DOWN
+            // the column, distributed over the base segment's along-column span
+            // (rubyAlign="distributeSpace"); when the ruby run is wider than the
+            // base it is centred. Ruby shares the base glyph colour.
+            //
+            // MONORUBY em-cell model (JIS X 4051 §4): each ruby CODE POINT occupies
+            // one `rubyPx` cell along the column. This is exact for the furigana
+            // this path serves (upright kana, one square cell each) and matches
+            // Word's distributeSpace cell layout; it does not attempt per-advance
+            // shaping for the rare non-kana / proportional / combining-mark ruby
+            // (those would need measured advances — a follow-up, not seen in the GT).
+            if (s.ruby && s.ruby.text.length > 0) {
+              const rubyPx = s.ruby.fontSizePt * scale;
+              const rubyChars = [...s.ruby.text];
+              const spanAlong = s.measuredWidth;
+              const rubyCross = baseline + yOffset - (effSizePx / 2 + rubyPx);
+              const natural = rubyChars.length * rubyPx;
+              const along0 = natural <= spanAlong ? x : x + (spanAlong - natural) / 2;
+              const step = natural <= spanAlong ? spanAlong / rubyChars.length : rubyPx;
+              // ctx.save()/restore() preserves font/textAlign/textBaseline.
+              ctx.save();
+              ctx.font = buildFont(s.bold, s.italic, rubyPx, s.fontFamily, fontFamilyClasses);
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              for (let ri = 0; ri < rubyChars.length; ri++) {
+                const alongCenter = along0 + step * (ri + 0.5);
+                ctx.save();
+                ctx.translate(alongCenter, rubyCross);
+                ctx.rotate(-Math.PI / 2);
+                ctx.fillText(rubyChars[ri], 0, 0);
+                ctx.restore();
+              }
+              ctx.restore();
+            }
             x += s.measuredWidth;
             continue;
           }

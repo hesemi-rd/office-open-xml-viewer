@@ -26,11 +26,26 @@ interface GlyphCall {
   devY: number;
 }
 
+interface ImageCall {
+  /** Net rotation of the drawn image in device space, degrees (atan2(b,a)). */
+  angleDeg: number;
+  /** Device-space position of the draw origin (local (x,y) mapped by the CTM). */
+  devX: number;
+  devY: number;
+  /** Local draw width/height (before the CTM). */
+  w: number;
+  h: number;
+}
+
 /** Recording 2D context that tracks the full affine CTM (a,b,c,d,e,f) across
  *  save/restore/translate/rotate/scale, so a glyph's net orientation is
  *  recoverable at fillText time. measureText gives every code point the current
  *  font px as advance (1 em / CJK), with symmetric font/ink boxes. */
-function makeMatrixCtx(): { ctx: CanvasRenderingContext2D; glyphs: GlyphCall[] } {
+function makeMatrixCtx(): {
+  ctx: CanvasRenderingContext2D;
+  glyphs: GlyphCall[];
+  images: ImageCall[];
+} {
   let m = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
   const stack: (typeof m)[] = [];
   let font = '10px serif';
@@ -41,6 +56,7 @@ function makeMatrixCtx(): { ctx: CanvasRenderingContext2D; glyphs: GlyphCall[] }
   let direction = 'ltr';
   let fontKerning = 'auto';
   const glyphs: GlyphCall[] = [];
+  const images: ImageCall[] = [];
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const ctx = {
     get font() { return font; },
@@ -99,9 +115,14 @@ function makeMatrixCtx(): { ctx: CanvasRenderingContext2D; glyphs: GlyphCall[] }
       glyphs.push({ text, angleDeg, devX, devY });
     },
     strokeText() {},
-    drawImage() {},
+    drawImage(_bmp: unknown, x: number, y: number, w: number, h: number) {
+      const angleDeg = (Math.atan2(m.b, m.a) * 180) / Math.PI;
+      const devX = m.a * x + m.c * y + m.e;
+      const devY = m.b * x + m.d * y + m.f;
+      images.push({ angleDeg, devX, devY, w, h });
+    },
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, glyphs };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, glyphs, images };
 }
 
 function richTextbox(
@@ -233,5 +254,142 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     // right of centre, line 2 left. vert270: L→R, mirrored.
     expect(gv[0].devX).toBeGreaterThan(gv[gv.length - 1].devX);
     expect(g270[0].devX).toBeLessThan(g270[g270.length - 1].devX);
+  });
+
+  // ── (a) mongolianVert (§20.1.10.83) ──────────────────────────────────────
+  // GT (batch-3 adjudication): identical per-glyph orientation to eaVert (CJK
+  // UPRIGHT, Latin sideways 90° CW), but the line/column progression is the
+  // MIRROR of eaVert — columns advance LEFT→RIGHT instead of right→left.
+  it('mongolianVert: CJK upright (0°) while Latin stays sideways (+90°) — same as eaVert', () => {
+    const { ctx, glyphs } = makeMatrixCtx();
+    renderShapeText(richTextbox([run(CJK), run(LAT)], 'mongolianVert'), 0, 0, 200, 100, ctx, 1, {});
+    const cjk = glyphs.find((g) => g.text.includes(CJK));
+    const lat = glyphs.find((g) => g.text.includes(LAT));
+    expect(cjk, 'CJK glyph drawn').toBeDefined();
+    expect(lat, 'Latin glyph drawn').toBeDefined();
+    expect(NEAR(norm(cjk!.angleDeg), 0), `CJK @${cjk!.angleDeg}`).toBe(true);
+    expect(NEAR(norm(lat!.angleDeg), 90), `Latin @${lat!.angleDeg}`).toBe(true);
+  });
+
+  it('mongolianVert stacks columns LEFT→RIGHT (mirror of eaVert R→L)', () => {
+    // Two blocks (two columns). eaVert puts the first column on the RIGHT and the
+    // second to its left; mongolianVert mirrors it — first column on the LEFT,
+    // second to its right.
+    const twoCols = (v: string) => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const block2: ShapeText = { text: CJK, fontSizePt: 10, alignment: 'left', runs: [run(CJK)] };
+      const shape = richTextbox([run(CJK)], v);
+      (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(block2);
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      return glyphs;
+    };
+    const ea = twoCols('eaVert');
+    const mn = twoCols('mongolianVert');
+    // eaVert: first column right of the last. mongolianVert: first column LEFT.
+    expect(ea[0].devX).toBeGreaterThan(ea[ea.length - 1].devX);
+    expect(mn[0].devX, `mongolianVert first col @${mn[0].devX} < last @${mn[mn.length - 1].devX}`)
+      .toBeLessThan(mn[mn.length - 1].devX);
+  });
+
+  // ── (b) eaVert + ruby (§17.3.3.25) ───────────────────────────────────────
+  // GT: furigana sits on the RIGHT side of the vertical base column, upright,
+  // running top→bottom. In the +90° CW frame the physical RIGHT is device +x.
+  it('eaVert ruby draws furigana upright on the device-RIGHT of the base column', () => {
+    const { ctx, glyphs } = makeMatrixCtx();
+    const baseRun: ShapeTextRun = {
+      text: '漢字',
+      fontSizePt: 10,
+      fontFamily: 'NotInMetrics',
+      ruby: { text: 'かんじ', fontSizePt: 5 },
+    };
+    renderShapeText(richTextbox([baseRun], 'eaVert'), 0, 0, 200, 100, ctx, 1, {});
+    const base = glyphs.filter((g) => /[漢字]/.test(g.text));
+    const ruby = glyphs.filter((g) => /[かんじ]/.test(g.text));
+    expect(base.length, 'base glyphs drawn').toBeGreaterThan(0);
+    expect(ruby.length, 'ruby glyphs drawn').toBe(3);
+    // Ruby stands upright (net 0°), like the upright CJK base cells.
+    for (const r of ruby) expect(NEAR(norm(r.angleDeg), 0), `ruby ${r.text}@${r.angleDeg}`).toBe(true);
+    // Physical RIGHT = device +x: every ruby glyph is right of every base glyph.
+    const baseMaxX = Math.max(...base.map((g) => g.devX));
+    const rubyMinX = Math.min(...ruby.map((g) => g.devX));
+    expect(rubyMinX, `ruby minX ${rubyMinX} > base maxX ${baseMaxX}`).toBeGreaterThan(baseMaxX);
+    // Exact cross offset: base fontSize 10 (cell centred on the column baseline),
+    // ruby fontSize 5 ⇒ ruby column centre = baseline − (effSize/2 + rubySize) =
+    // baseline − 10, which maps to device +10 (the physical right). Base and ruby
+    // sit on constant device-x per column, so the mean difference isolates the
+    // cross offset.
+    const meanBaseX = base.reduce((s, g) => s + g.devX, 0) / base.length;
+    const meanRubyX = ruby.reduce((s, g) => s + g.devX, 0) / ruby.length;
+    expect(meanRubyX - meanBaseX, `cross offset ${meanRubyX - meanBaseX} ≈ effSize/2+rubySize=10`)
+      .toBeCloseTo(10, 0);
+  });
+
+  // ── (c) vert + inline image: image stays UPRIGHT ─────────────────────────
+  // GT: the inline raster keeps its physical orientation (a graphic is not text),
+  // even though the surrounding `vert` glyphs rotate 90° CW.
+  it('vert inline image is drawn UPRIGHT (net 0°), not rotated with the text frame', () => {
+    const { ctx, images } = makeMatrixCtx();
+    const imgBlock: ShapeText = {
+      text: '', fontSizePt: 10, alignment: 'left',
+      imagePath: 'word/media/image1.png', imageWidthPt: 24, imageHeightPt: 36,
+    } as unknown as ShapeText;
+    const shape = richTextbox([{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'vert');
+    (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(imgBlock);
+    const fakeBmp = { width: 24, height: 36 } as unknown as ImageBitmap;
+    const imgs = new Map<string, ImageBitmap>([['word/media/image1.png', fakeBmp]]);
+    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
+    expect(images.length, 'one image drawn').toBe(1);
+    // Upright: the net rotation cancels the +90° page frame → 0°.
+    expect(NEAR(norm(images[0].angleDeg), 0), `image @${images[0].angleDeg}`).toBe(true);
+    // Portrait aspect preserved (physical 24×36, not swapped to 36×24). The draw
+    // dimensions in the upright local frame are width=physical-width,
+    // height=physical-height (the callback receives dw=cross, dh=along).
+    expect(Math.abs(images[0].w)).toBeCloseTo(24, 3);
+    expect(Math.abs(images[0].h)).toBeCloseTo(36, 3);
+  });
+
+  it('vert270 inline image is ALSO drawn upright (net 0°), not −180° (counter-rotation sign)', () => {
+    // vert270's page frame is −90°, so the image counter-rotation must be +90°
+    // (not the −90° the +90° modes use) — otherwise the raster is flipped 180°.
+    const { ctx, images } = makeMatrixCtx();
+    const imgBlock: ShapeText = {
+      text: '', fontSizePt: 10, alignment: 'left',
+      imagePath: 'word/media/image1.png', imageWidthPt: 24, imageHeightPt: 36,
+    } as unknown as ShapeText;
+    const shape = richTextbox([{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'vert270');
+    (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(imgBlock);
+    const fakeBmp = { width: 24, height: 36 } as unknown as ImageBitmap;
+    const imgs = new Map<string, ImageBitmap>([['word/media/image1.png', fakeBmp]]);
+    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
+    expect(images.length).toBe(1);
+    expect(NEAR(norm(images[0].angleDeg), 0), `vert270 image @${images[0].angleDeg}`).toBe(true);
+  });
+
+  it('vertical inline image reserves its physical WIDTH (crossExtent), not its height, along the column stack', () => {
+    // Two CJK text columns sandwich the image column; their cross (device-x)
+    // separation = text-line-box + the image's reserved cross extent. A tall-thin
+    // image (10 wide × 90 tall) reserves its physical WIDTH 10 (crossExtent) — the
+    // fitH-vs-crossExtent bug would instead reserve its 90-tall height, pushing the
+    // trailing column ~80px further, so the separation cleanly distinguishes them.
+    const { ctx, glyphs } = makeMatrixCtx();
+    const imgBlock: ShapeText = {
+      text: '', fontSizePt: 10, alignment: 'left',
+      imagePath: 'word/media/image1.png', imageWidthPt: 10, imageHeightPt: 90,
+    } as unknown as ShapeText;
+    const shape = richTextbox([{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'vert');
+    const tb = shape as unknown as { textBlocks: ShapeText[] };
+    tb.textBlocks.push(imgBlock);
+    tb.textBlocks.push({ text: CJK, fontSizePt: 10, alignment: 'left', runs: [run(CJK)] } as ShapeText);
+    const fakeBmp = { width: 10, height: 90 } as unknown as ImageBitmap;
+    const imgs = new Map<string, ImageBitmap>([['word/media/image1.png', fakeBmp]]);
+    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
+    const cjk = glyphs.filter((g) => g.text.includes(CJK));
+    const firstCol = cjk[0].devX;
+    const lastCol = cjk[cjk.length - 1].devX;
+    const sep = Math.abs(firstCol - lastCol);
+    // Separation ≈ one text line box (~10-14) + image cross 10 ≈ 20-30. With the
+    // bug (reserving the 90 height) it would exceed 90. Assert well below 90.
+    expect(sep, `two-column separation ${sep} reflects image cross 10, not height 90`).toBeLessThan(45);
+    expect(sep, `columns are actually separated ${sep}`).toBeGreaterThan(12);
   });
 });
