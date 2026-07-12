@@ -149,6 +149,7 @@ import {
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
+  rubyAscentReservePx,
   segAdvanceWidth,
   segLetterSpacingPx,
   shapeRenderState,
@@ -10382,6 +10383,12 @@ function shapeTextHorizontalInsetsPx(shape: ShapeRun, scale: number): { lIns: nu
   };
 }
 
+function shapeLineSpacingOf(b: ShapeText): LineSpacing | null {
+  return b.lineSpacingRule
+    ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
+    : null;
+}
+
 /** ECMA-376 §20.1.10.83 ST_TextVerticalType — the IMPLEMENTED vertical text-box
  *  directions (`<wps:bodyPr vert>`), or `null` for horizontal / not-yet-handled
  *  values. `eaVert` keeps East-Asian glyphs upright (per-glyph UAX#50); `vert`
@@ -10400,6 +10407,26 @@ function verticalTextboxMode(
     : null;
 }
 
+function verticalRubyLineMetrics(
+  line: LayoutLine,
+  lineSpacing: LineSpacing | null,
+  scale: number,
+  grid?: DocGridCtx,
+): { lineH: number; baselineOffset: number } {
+  const glyphNatural = line.ascent + line.descent;
+  const lineH = lineBoxHeight(
+    lineSpacing,
+    line.ascent,
+    line.descent,
+    scale,
+    grid,
+    true,
+    line.intendedSingle,
+    line.eastAsian ?? false,
+  );
+  return { lineH, baselineOffset: (lineH - glyphNatural) / 2 + line.ascent };
+}
+
 /** Measure a shape text body's fitted height for `<a:spAutoFit/>`.
  *  Returns px, including bodyPr top/bottom insets and paragraph spacing. */
 export function measureShapeTextAutoFitHeight(
@@ -10413,6 +10440,7 @@ export function measureShapeTextAutoFitHeight(
 ): number {
   const effState = state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
   const blocks = shape.textBlocks ?? [];
+  const vmode = verticalTextboxMode(shape.textVert);
   const { lIns, rIns } = shapeTextHorizontalInsetsPx(shape, scale);
   const tIns = (shape.textInsetT ?? 0) * scale;
   const bIns = (shape.textInsetB ?? 0) * scale;
@@ -10429,6 +10457,9 @@ export function measureShapeTextAutoFitHeight(
   };
 
   const lineHeightFor = (b: ShapeText, line: LayoutLine): number => {
+    if (vmode && line.hasRuby) {
+      return verticalRubyLineMetrics(line, shapeLineSpacingOf(b), scale, effState.docGrid).lineH;
+    }
     let tallest: LayoutTextSeg | null = null;
     let tallestEa = false;
     let floorPx = 0;
@@ -10710,16 +10741,16 @@ export function renderShapeText(
   const innerY = y + tIns;
   const innerH = Math.max(0, h - tIns - bIns);
 
-  // §20.1.10.83 `mongolianVert` — reflect a block that occupies the cross-axis
-  // (line-stacking) interval `[top, top + extent]` about the inner box's cross
-  // centre, so its columns stack LEFT→RIGHT (device) instead of the eaVert R→L.
-  // The reflection moves ONLY the cross position; each line's own glyphs (drawn
-  // upright/sideways by drawVerticalRun, inline axis = local +x) are untouched, so
-  // the reading order within a column and the glyph orientation stay identical to
-  // eaVert — the batch-3 GT shows the label column at the box's physical LEFT and
-  // later columns to its right. Identity for every non-mongolian mode.
+  // §20.1.10.83 `mongolianVert` — `flipBlockTop` keeps its historical name, but
+  // this mapping is not a pure reflection about the inner-box centre. It first
+  // reflects the cross-axis interval `[top, top + extent]`, then `+ bIns - lIns`
+  // re-homes the reflected stack so the FIRST column starts at the physical LEFT
+  // inset `lIns` (§21.1.2.1.1 names insets by physical bounding-rectangle edge).
+  // This helper positions the line band only; the draw site mirrors each line's
+  // centerline within that band and keeps ruby reservation on the band-interior /
+  // physical-right side. Identity for every non-mongolian mode.
   const flipBlockTop = (top: number, extent: number): number =>
-    mongolianLineFlip ? 2 * innerY + innerH - top - extent : top;
+    mongolianLineFlip ? 2 * innerY + innerH - top - extent + bIns - lIns : top;
 
   // ECMA-376 §17.3.1.12 — per-paragraph indent (px). `leftPx`/`rightPx` shrink
   // the text column from the inner box edges; `firstPx` is the SIGNED first-line
@@ -10872,6 +10903,9 @@ export function renderShapeText(
   // TALLEST text segment. A line with no text segment (e.g. only a tab) falls
   // back to the block's own font.
   const lineMetricsFor = (b: ShapeText, line: LayoutLine): { lineH: number; baselineOffset: number } => {
+    if (vmode && line.hasRuby) {
+      return verticalRubyLineMetrics(line, shapeLineSpacingOf(b), scale, effState.docGrid);
+    }
     let tallest: LayoutTextSeg | null = null;
     let tallestEa = false;
     let floorPx = 0;
@@ -11142,9 +11176,20 @@ export function renderShapeText(
         const lineH = layout.lineHeights[li];
         // §20.1.10.83 mongolianVert reflects the line's cross (stacking) position
         // within the inner box (L→R columns); no-op for every other mode. The
-        // baseline keeps its offset from the (reflected) line top, so the glyphs
-        // sit inside the line box exactly as eaVert draws them.
-        const baseline = flipBlockTop(cursorY, lineH) + layout.baselineOffsets[li];
+        // reflection mirrors the line CENTERLINE within its band too. Ruby grows
+        // `baselineOffset` on its ascent side, so add that same reservation back
+        // only in the mongolian arm: the base keeps its non-ruby centerline and
+        // the furigana occupies the band-interior / physical-right side.
+        const baselineOffset = layout.baselineOffsets[li];
+        const rubyReserve = mongolianLineFlip
+          ? line.segments.reduce((reserve, seg) => {
+              if (!('text' in seg) || !seg.ruby) return reserve;
+              return Math.max(reserve, rubyAscentReservePx(seg.ruby.fontSizePt, scale));
+            }, 0)
+          : 0;
+        const baseline =
+          flipBlockTop(cursorY, lineH) +
+          (mongolianLineFlip ? lineH - baselineOffset + rubyReserve : baselineOffset);
         // Per-line indented region (§17.3.1.12): content-left = innerX + leftPx,
         // shifted by the signed first-line indent on the first line; width =
         // firstLineW (first) / paraW (continuation).

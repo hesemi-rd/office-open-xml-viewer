@@ -202,6 +202,11 @@ export interface LayoutTextSeg extends LayoutSegSource {
   seaBreaks?: readonly number[];
 }
 
+/** ECMA-376 §17.3.3.25 ruby annotation ascent reserved above its base text. */
+export function rubyAscentReservePx(rubySizePt: number, scale: number): number {
+  return rubySizePt * scale * 1.5;
+}
+
 /**
  * Horizontal tab. Width is resolved during layout against paragraph tab stops
  * (or the default 36pt interval if no explicit stop is configured).
@@ -3218,7 +3223,7 @@ export function layoutLines(
     // snap actually picks the next pitch slot. 1.5× rt-size is enough for
     // any rt size that fits in one extra pitch above the base.
     if (s.ruby) {
-      asc = asc + s.ruby.fontSizePt * scale * 1.5;
+      asc = asc + rubyAscentReservePx(s.ruby.fontSizePt, scale);
     }
 
     // ECMA-376 §17.3.2.14: a fit region is an atomic fixed-width cell. The
@@ -3773,7 +3778,9 @@ export function rescaleLayoutLines(
     const segScriptHint = EAST_ASIAN_RE.test(s.text) && !s.ruby;
     const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, segScriptHint);
     // §17.3.3.25 — ruby reserves extra ascent room (rt size × 1.5), same as layoutLines.
-    const asc = s.ruby ? corrected.ascent + s.ruby.fontSizePt * scale * 1.5 : corrected.ascent;
+    const asc = s.ruby
+      ? corrected.ascent + rubyAscentReservePx(s.ruby.fontSizePt, scale)
+      : corrected.ascent;
     // Intended single-line floor (font-metrics.ts) — small caps keep the FULL run
     // size here too (addToLine's intendedEm).
     const intendedEm = s.smallCaps && !s.vertAlign ? fullPx : effPx;

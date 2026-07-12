@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderShapeText } from './renderer';
+import { measureShapeTextAutoFitHeight, renderShapeText } from './renderer';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §20.1.10.83 ST_TextVerticalType — a DrawingML text-box body direction
@@ -391,5 +391,155 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     // bug (reserving the 90 height) it would exceed 90. Assert well below 90.
     expect(sep, `two-column separation ${sep} reflects image cross 10, not height 90`).toBeLessThan(45);
     expect(sep, `columns are actually separated ${sep}`).toBeGreaterThan(12);
+  });
+
+  // ── cross-axis spacing (sample-53 class regressions) ─────────────────────
+  // GT (Word PDF): a ruby-bearing line's COLUMN is widened by the ruby
+  // reservation (the same `ruby.fontSizePt × 1.5` ascent bump layoutLines()
+  // already computes for the section body), so the base column clears the
+  // previous column instead of the furigana overprinting it.
+  it('eaVert ruby line widens its column advance by the ruby reservation (§17.3.3.25)', () => {
+    const advance = (withRuby: boolean): number => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const labelBlock: ShapeText = {
+        text: CJK, fontSizePt: 10, alignment: 'left',
+        runs: [{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }],
+      };
+      const baseRun: ShapeTextRun = {
+        text: '漢', fontSizePt: 10, fontFamily: 'NotInMetrics',
+        ...(withRuby ? { ruby: { text: 'かん', fontSizePt: 5 } } : {}),
+      };
+      const baseBlock: ShapeText = { text: '漢', fontSizePt: 10, alignment: 'left', runs: [baseRun] };
+      const shape = richTextbox([{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'eaVert');
+      (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [labelBlock, baseBlock];
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      const label = glyphs.find((g) => g.text.includes(CJK));
+      const base = glyphs.find((g) => g.text.includes('漢'));
+      expect(label, 'label glyph drawn').toBeDefined();
+      expect(base, 'base glyph drawn').toBeDefined();
+      // eaVert stacks columns R→L: the base column sits LEFT of the label column.
+      return label!.devX - base!.devX;
+    };
+    const plain = advance(false);
+    const withRuby = advance(true);
+    // layoutLines() reserves ruby.fontSizePt × 1.5 = 7.5 of extra ascent; the
+    // ruby-bearing column must advance by exactly that much more.
+    expect(withRuby - plain, `ruby advance ${withRuby} vs plain ${plain}`).toBeCloseTo(7.5, 5);
+  });
+
+  // GT (Word PDF): mongolianVert's first column is the exact MIRROR of the
+  // eaVert first column (sample-53: flow-start-edge → label glyph-box gap is
+  // preserved within 0.5pt). Reflecting only the band ORIGIN keeps the baseline
+  // measured from the band's physical RIGHT edge, so asymmetric leading (line
+  // box taller than the glyph em box) shoves the mongolian line toward the
+  // physical left — the centerline inside the band must be reflected too.
+  it('mongolianVert mirrors the line centerline within its cross-axis band', () => {
+    const firstColumnCenterX = (mode: 'eaVert' | 'mongolianVert'): number => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const shape = richTextbox([{ text: CJK, fontSizePt: 11, fontFamily: 'NotInMetrics' }], mode);
+      const [block] = (shape as unknown as { textBlocks: ShapeText[] }).textBlocks;
+      // Exact 20pt line box > the 11pt glyph box → asymmetric leading exposes a
+      // non-mirrored centerline (natural == lineH would accidentally pass).
+      (block as unknown as { lineSpacingRule: string; lineSpacingVal: number }).lineSpacingRule = 'exact';
+      (block as unknown as { lineSpacingRule: string; lineSpacingVal: number }).lineSpacingVal = 20;
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      const glyph = glyphs.find((g) => g.text.includes(CJK));
+      expect(glyph, 'first-column glyph drawn').toBeDefined();
+      // Upright CJK cells draw centred on the column centerline, so devX IS the
+      // centerline's cross position.
+      return glyph!.devX;
+    };
+    const eaX = firstColumnCenterX('eaVert');
+    const mongolianX = firstColumnCenterX('mongolianVert');
+    // Equal glyphs have equal cross extents, so mirrored centerlines imply equal
+    // flow-start-edge → glyph-box gaps (box spans x ∈ [0, 200], insets 0).
+    expect(mongolianX, `mongolian centerline ${mongolianX} mirrors eaVert ${eaX}`).toBeCloseTo(200 - eaX, 5);
+  });
+
+  // mongolianVert + ruby: the furigana keeps its orientation side (physical
+  // RIGHT of the base column, like eaVert) — so the mirror must keep the BASE
+  // cell at its non-ruby mirrored position and spend the ruby reservation on
+  // the band's interior (right) side. Mirroring the ruby-inflated baseline
+  // offset naively would shove the base toward the band's right edge and paint
+  // the furigana on top of the NEXT column.
+  it('mongolianVert ruby line keeps its base column mirrored and reserves toward the next column', () => {
+    const render = (withRuby: boolean) => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const rubyBlock: ShapeText = {
+        text: '漢', fontSizePt: 10, alignment: 'left',
+        runs: [{
+          text: '漢', fontSizePt: 10, fontFamily: 'NotInMetrics',
+          ...(withRuby ? { ruby: { text: 'かん', fontSizePt: 5 } } : {}),
+        }],
+      };
+      const nextBlock: ShapeText = {
+        text: CJK, fontSizePt: 10, alignment: 'left',
+        runs: [{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }],
+      };
+      const shape = richTextbox([{ text: '漢', fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'mongolianVert');
+      (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [rubyBlock, nextBlock];
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      const base = glyphs.find((g) => g.text.includes('漢'));
+      const next = glyphs.find((g) => g.text.includes(CJK));
+      const ruby = glyphs.filter((g) => /[かん]/.test(g.text));
+      expect(base, 'base glyph drawn').toBeDefined();
+      expect(next, 'next-column glyph drawn').toBeDefined();
+      if (withRuby) expect(ruby.length, 'ruby glyphs drawn').toBe(2);
+      return { baseX: base!.devX, nextX: next!.devX, rubyXs: ruby.map((g) => g.devX) };
+    };
+    const plain = render(false);
+    const withRuby = render(true);
+    // The base column does NOT move: the reservation goes to the ruby side
+    // (band interior), not the flow-start edge.
+    expect(withRuby.baseX, `base ${withRuby.baseX} unmoved from ${plain.baseX}`).toBeCloseTo(plain.baseX, 5);
+    // The NEXT column (to the right, L→R) advances by the ruby reservation.
+    expect(withRuby.nextX - plain.nextX, 'next column pushed by the reservation').toBeCloseTo(7.5, 5);
+    // The furigana sits BETWEEN its base column and the next column — physical
+    // right of the base (orientation preserved), clear of the next column.
+    for (const rx of withRuby.rubyXs) {
+      expect(rx, `ruby ${rx} right of base ${withRuby.baseX}`).toBeGreaterThan(withRuby.baseX);
+      expect(rx, `ruby ${rx} clears next column ${withRuby.nextX}`).toBeLessThan(withRuby.nextX - 5);
+    }
+  });
+
+  // Autofit (spAutoFit) shares the same line resolver: a ruby-bearing vertical
+  // line must widen the fitted cross extent by the same reservation, or the
+  // grown box would clip the furigana (sample-53 box (d) class).
+  it('eaVert spAutoFit measurement grows by the ruby reservation', () => {
+    const measure = (withRuby: boolean): number => {
+      const { ctx } = makeMatrixCtx();
+      const shape = richTextbox([{
+        text: '漢', fontSizePt: 10, fontFamily: 'NotInMetrics',
+        ...(withRuby ? { ruby: { text: 'かん', fontSizePt: 5 } } : {}),
+      }], 'eaVert');
+      return measureShapeTextAutoFitHeight(shape, 200, ctx, 1, {});
+    };
+    expect(measure(true) - measure(false), 'fitted extent grows by ruby.fontSizePt × 1.5').toBeCloseTo(7.5, 5);
+  });
+
+  // GT (Word PDF): §21.1.2.1.1 names the insets by PHYSICAL bounding-box edge
+  // (lIns = left inset, default 91440 EMU = 7.2pt; bIns = bottom, 45720 EMU) —
+  // reflecting the column stack for mongolianVert's L→R flow must not hand the
+  // physical LEFT edge to bIns.
+  it('mongolianVert first column origin honors lIns (physical left), not bIns (§21.1.2.1.1)', () => {
+    const firstColX = (lIns: number, bIns: number): number => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const shape = richTextbox([{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'mongolianVert');
+      const s = shape as unknown as {
+        textInsetL: number; textInsetT: number; textInsetR: number; textInsetB: number;
+      };
+      s.textInsetL = lIns;
+      s.textInsetT = 3;
+      s.textInsetR = 7;
+      s.textInsetB = bIns;
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      const g = glyphs.find((gl) => gl.text.includes(CJK));
+      expect(g, 'glyph drawn').toBeDefined();
+      return g!.devX;
+    };
+    // +12pt of lIns moves the first (leftmost) column +12pt right.
+    expect(firstColX(17, 3) - firstColX(5, 3), 'lIns owns the physical-left origin').toBeCloseTo(12, 5);
+    // bIns must NOT move the physical-left first column.
+    expect(firstColX(7, 20), 'bIns does not own the physical-left origin').toBeCloseTo(firstColX(7, 3), 5);
   });
 });
