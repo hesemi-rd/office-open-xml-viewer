@@ -2123,6 +2123,10 @@ export function computePages(
     fontFamilyClasses,
     documentSettings,
   );
+  // ECMA-376 §17.6.20 — whether this pagination lays out a vertical (tbRl)
+  // section (`section` here is the SWAPPED logical geometry, textDirection
+  // preserved). Horizontal sections are untouched (`verticalUpright` false).
+  const verticalUpright = isVerticalSection(section);
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -2570,6 +2574,13 @@ export function computePages(
   // are pinned regardless of which page the anchor lands on, so they never
   // trigger a break). Measured at scale 1 (pt), matching the paginator's `y`.
   const anchoredFloatBottomOffset = (para: DocParagraph): number => {
+    // §17.6.20 + #988 ② — in a vertical section positionV offsets live on the
+    // PHYSICAL vertical axis (the column-length axis), not the flow axis: a
+    // paragraph-anchored float never extends the logical flow by its offset,
+    // so the horizontal keep-on-page displacement below does not map. (The
+    // physical-axis analogue — a float overflowing the physical bottom — is
+    // un-adjudicated and left to the anchor clamp.)
+    if (verticalUpright) return 0;
     let maxBottom = 0;
     for (const run of para.runs) {
       if (run.type === 'image') {
@@ -4050,6 +4061,31 @@ function buildMeasureState(
     balanceSingleByteDoubleByteWidth:
       layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     showTrackChanges: false,
+    // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②, Codex review F1): for a
+    // vertical (tbRl) section — `section` is the SWAPPED logical geometry — the
+    // measure pass must resolve DrawingML anchors against the same PHYSICAL
+    // page the paint pass uses (`resolveAnchorBox`/`resolveShapeBox` key their
+    // physical branch on `verticalPhys`), otherwise a wrapped shape's exclusion
+    // band is reserved at the raw logical rectangle during pagination while the
+    // paint wraps around the physical projection — diverging page assignment.
+    // Mirrors the paint-state seed (renderDocumentToCanvas), un-swapping via
+    // physicalLayoutSection; `cssWidthPx` at the paginator's scale 1 is the
+    // physical page width in pt. `verticalCJK` stays UNSET: the measure pass
+    // keeps its horizontal glyph metrics (only anchor geometry re-frames).
+    verticalPhys: isVerticalSection(section)
+      ? (() => {
+          const phys = physicalLayoutSection(section);
+          return {
+            pageWidth: phys.pageWidth,
+            pageHeight: phys.pageHeight,
+            marginLeft: phys.marginLeft,
+            marginRight: phys.marginRight,
+            marginTop: bodyMarginInsetPt(phys.marginTop),
+            marginBottom: bodyMarginInsetPt(phys.marginBottom),
+            cssWidthPx: phys.pageWidth,
+          };
+        })()
+      : undefined,
   };
 }
 
@@ -9411,6 +9447,28 @@ function resolveShapeBox(
   state: RenderState,
   paragraphTopPx: number,
 ): { x: number; y: number; w: number; h: number } {
+  // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 batch-3 adjudication ②): on a
+  // vertical (tbRl) page an anchored shape's positionH/V resolve against the
+  // PHYSICAL (un-rotated) page — the drawing layer is independent of the
+  // section text direction, exactly like the image path (resolveAnchorBox).
+  // Resolve in the physical frame, then project into the swapped logical
+  // layout frame (w↔h swapped) so the float-exclusion band and the flow all
+  // share one geometry. A `paragraph`/`line`-relative positionV anchors from
+  // the PHYSICAL TOP of the anchor paragraph's COLUMN (Word GT: margin-top +
+  // posOffset for a single-column body) — that physical y is the column
+  // band's logical x start (`state.contentX`, since physical y = logical x
+  // under the +90° page paint), NOT the paragraph's logical flow
+  // `paragraphTopPx`, which lies on the column-progression axis.
+  if (state.verticalPhys) {
+    const phys = resolveShapeBox(
+      shape,
+      verticalPhysicalContentState(state),
+      state.contentX,
+    );
+    return physicalToLogicalAnchorBox(
+      phys.x, phys.y, phys.w, phys.h, state.verticalPhys.cssWidthPx,
+    );
+  }
   const { scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
@@ -9531,6 +9589,29 @@ export function drawWatermarkTextPath(
 }
 
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
+  // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 batch-3 adjudication ②): on a
+  // vertical (tbRl) page an anchored shape stays UPRIGHT at its physical-page
+  // position — the drawing layer does not rotate with the text flow, and a
+  // horizontal (`vert="horz"`) text body keeps horizontal labels. Undo the +90°
+  // page paint (its exact inverse: rotate −90° then translate(−cssW, 0), the
+  // same physical frame the header/footer path re-enters) and re-run this
+  // renderer with the PHYSICAL state view: `resolveShapeBox` then resolves the
+  // physical box directly, text draws horizontally (verticalCJK off), and the
+  // overlay geometry is emitted unrotated at physical coordinates. The physical
+  // paragraph base for a `paragraph`-relative positionV is the column's
+  // physical top = the column band's logical x (`state.contentX`), matching
+  // resolveShapeBox's logical-projection branch so the float band (registered
+  // from the LOGICAL projection) and the painted shape share one geometry.
+  if (state.verticalPhys) {
+    const cssW = state.verticalPhys.cssWidthPx;
+    const { ctx } = state;
+    ctx.save();
+    ctx.rotate(-Math.PI / 2);
+    ctx.translate(-cssW, 0);
+    renderAnchorShape(shape, verticalPhysicalContentState(state), state.contentX);
+    ctx.restore();
+    return;
+  }
   const { ctx, scale } = state;
   let { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
   // Line/connector presets (ECMA-376 §20.1.9.18) are valid with a degenerate
@@ -10868,6 +10949,16 @@ export const __test_resolveAnchorBox = (
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } =>
   resolveAnchorBox(img, state, paraBaseY);
 
+/** Exported for the vertical shape-anchor test (ECMA-376 §17.6.20 + §20.4.3.x,
+ *  issue #988 ②): pins the physical-page resolution (and logical projection) of
+ *  an anchored SHAPE's positionH/V on a vertical (tbRl) page. */
+export const __test_resolveShapeBox = (
+  shape: ShapeRun,
+  state: RenderState,
+  paragraphTopPx: number,
+): { x: number; y: number; w: number; h: number } =>
+  resolveShapeBox(shape, state, paragraphTopPx);
+
 /** Exported for the vertical header/footer test (ECMA-376 §17.6.20 + §17.10.1,
  *  issue #988): pins the inverse-of-`verticalLayoutSection` page/margin mapping a
  *  vertical section's HORIZONTAL header/footer are laid out in. */
@@ -10991,6 +11082,32 @@ function physicalAnchorState(state: RenderState): RenderState {
   };
 }
 
+/** ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②/④) — a RenderState view whose
+ *  geometry AND text flags are PHYSICAL, for content that stays UPRIGHT inside a
+ *  vertical (tbRl) section: anchored shapes and block tables. Word resolves and
+ *  paints these against the un-rotated physical page — cell/label text is
+ *  horizontal — so on top of {@link physicalAnchorState}'s page/margin un-swap
+ *  this view also re-points the content band at the physical margins and clears
+ *  the vertical flags (no per-glyph counter-rotation, no +90° text-layer
+ *  transform, `resolveShapeBox`/`resolveAnchorBox` take their horizontal path).
+ *  `floats` is fresh: the live float set is in LOGICAL flow coordinates and must
+ *  not leak into a physical-frame layout (and vice-versa). `deferFront` is
+ *  cleared so a nested front float paints in place, inside the counter-rotated
+ *  physical frame its geometry was resolved in. */
+function verticalPhysicalContentState(state: RenderState): RenderState {
+  const p = state.verticalPhys;
+  if (!p) return state;
+  return {
+    ...physicalAnchorState(state),
+    contentX: p.marginLeft * state.scale,
+    contentW: (p.pageWidth - p.marginLeft - p.marginRight) * state.scale,
+    verticalCJK: false,
+    verticalPhys: undefined,
+    floats: [],
+    deferFront: null,
+  };
+}
+
 type AnchorBoxSource = Pick<ImageRun,
   | 'widthPt' | 'heightPt'
   | 'anchorXPt' | 'anchorYPt'
@@ -11031,18 +11148,20 @@ function resolveAnchorBox(
     // relative (the drawing layer is not rotated with the text flow). Resolve
     // the box in physical space, then project it into the swapped logical layout
     // frame the body text flows in — so the float-exclusion band and the
-    // (drawUprightBox-un-swapped) painted image share one geometry. paraBaseY is
-    // a LOGICAL flow coordinate and only feeds paragraph-relative positionV; the
-    // vertical samples in scope anchor page/margin-relative, so it is not
-    // physical-mapped here (paragraph-relative vertical anchors in tbRl are a
-    // follow-up — see the vertical-text stage-1 scope note).
+    // (drawUprightBox-un-swapped) painted image share one geometry. A
+    // `paragraph`/`line`-relative positionV anchors from the PHYSICAL TOP of
+    // the anchor paragraph's COLUMN (issue #988 batch-3 adjudication ②: Word GT
+    // = margin-top + posOffset for a single-column body). That physical y is
+    // the column band's logical x start (`state.contentX`; physical y =
+    // logical x under the +90° page paint) — NOT the logical flow `paraBaseY`,
+    // which lies on the column-progression axis and would rotate the offset.
     const phys = physicalAnchorState(state);
     const px = resolveAnchorX(
       img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, phys,
       img.anchorXRelativeFrom ?? null, null, null,
     );
     const py = resolveAnchorY(
-      img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, phys,
+      img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, state.contentX, phys,
       img.anchorYRelativeFrom ?? null, null, null,
     );
     const box = physicalToLogicalAnchorBox(px, py, w, h, state.verticalPhys.cssWidthPx);
@@ -11343,10 +11462,20 @@ function registerShapeFloat(
     shape.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
   const scale = state.scale;
-  const dl = (shape.distLeft   ?? 0) * scale;
-  const dr = (shape.distRight  ?? 0) * scale;
-  const dt = (shape.distTop    ?? 0) * scale;
-  const db = (shape.distBottom ?? 0) * scale;
+  const pdl = (shape.distLeft   ?? 0) * scale;
+  const pdr = (shape.distRight  ?? 0) * scale;
+  const pdt = (shape.distTop    ?? 0) * scale;
+  const pdb = (shape.distBottom ?? 0) * scale;
+  // §17.6.20 — on a vertical page the box above is the LOGICAL projection of the
+  // physically-resolved shape (resolveShapeBox), so rotate the dist* labels one
+  // quarter-turn with it, exactly like the image path (resolveAnchorBox):
+  // physical top/bottom ↦ logical left/right, physical right/left ↦ logical
+  // top/bottom (logical y runs opposite physical x).
+  const vertical = !!state.verticalPhys;
+  const dl = vertical ? pdt : pdl;
+  const dr = vertical ? pdb : pdr;
+  const dt = vertical ? pdr : pdt;
+  const db = vertical ? pdl : pdb;
 
   // Overlap avoidance, kept consistent with the image path. Shapes carry no
   // parsed allowOverlap field; the spec default is true (§20.4.2.3), so
