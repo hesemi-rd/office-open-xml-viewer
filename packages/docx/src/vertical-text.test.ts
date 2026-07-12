@@ -5,11 +5,13 @@ import {
   verticalGlyphOffset,
   splitVerticalOrientationRuns,
   drawVerticalRun,
+  drawVerticalRunWithCapability,
   drawTateChuYokoRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
   verticalTextLayerPlacement,
   verticalRunInkExtraPx,
+  verticalRunInkExtraPxWithCapability,
 } from './vertical-text.js';
 
 // ECMA-376 §17.6.20 vertical writing (tbRl). These are the pure classification
@@ -116,7 +118,8 @@ type Op =
   | { op: 'translate'; x: number; y: number }
   | { op: 'rotate'; a: number }
   | { op: 'scale'; sx: number; sy: number }
-  | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string }
+  | { op: 'transform'; a: number; b: number; c: number; d: number; e: number; f: number }
+  | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string; feature: string }
   | { op: 'draw'; dx: number; dy: number; dw: number; dh: number };
 
 // Optional metrics the mock returns from `measureText`, keyed by the metric it
@@ -138,11 +141,38 @@ interface MockMetrics {
   // extent. Returned regardless of the current textAlign (the values are already
   // centre-relative).
   inkLR?: Record<string, { left: number; right: number }>;
+  shearSlope?: number;
 }
 
 function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
   const ops: Op[] = [];
+  const style = { fontFeatureSettings: 'normal' };
+  class ScratchCanvas {
+    width: number;
+    height: number;
+    style = style;
+    constructor(width: number, height: number) { this.width = width; this.height = height; }
+    getContext() {
+      const canvas = this;
+      return {
+        canvas,
+        font: '', fillStyle: '#000', textAlign: 'center', textBaseline: 'middle',
+        clearRect() {}, fillText() {},
+        getImageData() {
+          const data = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+          const slope = metrics.shearSlope ?? 0;
+          for (let x = 128; x <= 384; x++) {
+            const y = Math.round(256 + slope * (x - 256));
+            data[(y * canvas.width + x) * 4 + 3] = 255;
+          }
+          return { data };
+        },
+      };
+    }
+  }
   const ctx: any = {
+    canvas: metrics.shearSlope === undefined ? { style } : new ScratchCanvas(1, 1),
+    font: '12px serif',
     textAlign: 'start',
     textBaseline: 'alphabetic',
     letterSpacing: '0px',
@@ -160,6 +190,9 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
     },
     scale(sx: number, sy: number) {
       ops.push({ op: 'scale', sx, sy });
+    },
+    transform(a: number, b: number, c: number, d: number, e: number, f: number) {
+      ops.push({ op: 'transform', a, b, c, d, e, f });
     },
     measureText(s: string) {
       // Every code point is 10px wide.
@@ -181,13 +214,43 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
       return m;
     },
     fillText(text: string, x: number, y: number) {
-      ops.push({ op: 'fillText', text, x, y, align: this.textAlign, baseline: this.textBaseline });
+      ops.push({
+        op: 'fillText', text, x, y, align: this.textAlign,
+        baseline: this.textBaseline, feature: style.fontFeatureSettings,
+      });
     },
   };
   return { ctx, ops };
 }
 
 describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin sideways)', () => {
+  it('uses vert only for mirror-fallback marks and keeps other glyphs on manual paths', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRunWithCapability(
+      ctx,
+      'ー〜～、。：；「」“”A',
+      0,
+      0,
+      12,
+      0,
+      1,
+      true,
+      () => true,
+    );
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.text)).toEqual([
+      'ー', '〜', '～', '︑', '︒', '：', '；', '﹁', '﹂', '“', '”', 'A',
+    ]);
+    expect(fills.map((fill) => fill.feature)).toEqual([
+      '"vert" 1', '"vert" 1', '"vert" 1',
+      'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal',
+    ]);
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(8);
+    expect(rotates.every((rotate) => rotate.a === -Math.PI / 2)).toBe(true);
+    expect(ops.some((op) => op.op === 'scale' && op.sy === -1)).toBe(false);
+  });
+
   it('counter-rotates every upright glyph −90° about its cell centre', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, '富士', 100, 200, 12, 0);
@@ -250,8 +313,8 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(ops.some((o) => o.op === 'rotate')).toBe(false);
     const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
     expect(translate).toEqual({ op: 'translate', x: 105, y: 200 });
-    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
-    expect(scale).toEqual({ op: 'scale', sx: 1, sy: -1 });
+    const transform = ops.find((o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform');
+    expect(transform).toEqual({ op: 'transform', a: 1, b: 0, c: 0, d: -1, e: 0, f: 0 });
     const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
     expect(fill).toMatchObject({ text: 'ー', x: 0, y: 0, align: 'center', baseline: 'middle' });
   });
@@ -263,8 +326,8 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
       const { ctx, ops } = mockCtx();
       drawVerticalRun(ctx, ch, 0, 0, 12, 0);
       expect(ops.some((o) => o.op === 'rotate')).toBe(false);
-      const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
-      expect(scale).toEqual({ op: 'scale', sx: 1, sy: -1 });
+      const transform = ops.find((o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform');
+      expect(transform).toEqual({ op: 'transform', a: 1, b: 0, c: 0, d: -1, e: 0, f: 0 });
       const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
       expect(fill).toMatchObject({ text: ch, x: 0, y: 0, align: 'center', baseline: 'middle' });
     }
@@ -415,6 +478,52 @@ describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-cent
     expect(verticalRunInkExtraPx(ctx, '話A ')).toBe(0);
   });
 
+  it('skips growth only for vert-rendered mirror marks and keeps quote/colon growth', () => {
+    const { ctx } = mockCtx({
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '“': { left: 5, right: 24 },
+        '：': { left: 5, right: 24 },
+      },
+    });
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー“：', () => true)).toBeCloseTo(38, 6);
+  });
+
+  it('uses the same per-code-point vert gate for measurement and painting', () => {
+    const metrics = {
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '〜': { left: 5, right: 24 },
+      },
+    };
+    const supported = (cp: number) => cp === 0x30fc;
+    const { ctx } = mockCtx(metrics);
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー〜', supported)).toBeCloseTo(19, 6);
+
+    const painted = mockCtx(metrics);
+    drawVerticalRunWithCapability(painted.ctx, 'ー〜', 0, 0, 12, 0, 1, true, supported);
+    const fills = painted.ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.feature)).toEqual(['"vert" 1', 'normal']);
+    const transforms = painted.ops.filter(
+      (o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform',
+    );
+    expect(transforms).toHaveLength(1);
+    expect(transforms[0].d).toBe(-1);
+  });
+
+  it('applies the same per-glyph growth gate while painting', () => {
+    const { ctx, ops } = mockCtx({
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '“': { left: 5, right: 24 },
+        '：': { left: 5, right: 24 },
+      },
+    });
+    drawVerticalRunWithCapability(ctx, 'ー“：話', 0, 0, 12, 0, 1, true, () => true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates.map((op) => op.x)).toEqual([5, 24.5, -9.5, 53.5, -9.5, 73]);
+  });
+
   it('verticalRunInkExtraPx is 0 when the ink fits the advance (all real fonts) or metrics are absent', () => {
     const fits = mockCtx({ inkLR: { ー: { left: 3, right: 4 } } }); // extent 7 ≤ 10
     expect(verticalRunInkExtraPx(fits.ctx, 'ー')).toBe(0);
@@ -430,24 +539,43 @@ describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-cent
     // advance was grown by the same deficit — measure==paint).
     drawVerticalRun(ctx, 'ー話', 0, 0, 12, 0, 1, true);
     const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
-    // First translate = ー cell centre (29/2 = 14.5); second = 話 cell centre 34.
+    // First translate = ー cell centre (29/2 = 14.5); second is its separate
+    // output-axis ink shift; third = 話 cell centre 34.
     expect(translates[0].x).toBeCloseTo(14.5, 6);
-    expect(translates[1].x).toBeCloseTo(34, 6);
+    expect(translates[1].x).toBeCloseTo(-9.5, 6);
+    expect(translates[2].x).toBeCloseTo(34, 6);
   });
 
   it('ink-centres the grown ー (shift by (left − right)/2) so its ink fills the grown cell', () => {
     const { ctx, ops } = mockCtx(underReport);
     drawVerticalRun(ctx, 'ー', 0, 0, 12, 0, 1, true);
-    // Mirror path (ー reflects): translate to cell centre 14.5, scale(1,-1), then a
-    // center/middle fillText shifted by (5 − 24)/2 = −9.5 so the ink centres on the
+    // Mirror path (ー reflects): translate to cell centre 14.5, then translate the
+    // output advance axis by (5 − 24)/2 = −9.5 before the mirror/shear matrix so
+    // the ink centres on the
     // cell. Ink then spans [14.5 − 9.5 − 5, 14.5 − 9.5 + 24] = [0, 29] = the cell.
     const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
     expect(translate?.x).toBeCloseTo(14.5, 6);
-    const scale = ops.find((o): o is Extract<Op, { op: 'scale' }> => o.op === 'scale');
-    expect(scale).toEqual({ op: 'scale', sx: 1, sy: -1 });
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates[1]?.x).toBeCloseTo(-9.5, 6);
+    const transform = ops.find((o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform');
+    expect(transform).toEqual({ op: 'transform', a: 1, b: 0, c: 0, d: -1, e: 0, f: 0 });
     const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
     expect(fill).toMatchObject({ text: 'ー', y: 0, align: 'center', baseline: 'middle' });
-    expect(fill?.x).toBeCloseTo(-9.5, 6);
+    expect(fill?.x).toBe(0);
+  });
+
+  it('separates charScale and rotateInkShiftPx from the measured shear matrix', () => {
+    const { ctx, ops } = mockCtx({ ...underReport, shearSlope: 0.125 });
+    drawVerticalRun(ctx, 'ー', 0, 0, 12, 0, 0.5, true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates).toEqual([
+      { op: 'translate', x: 7.25, y: 0 },
+      { op: 'translate', x: -4.75, y: 0 },
+    ]);
+    const transform = ops.find((o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform');
+    expect(transform).toMatchObject({ a: 0.5, b: 0.125, c: 0, d: -1, e: 0, f: 0 });
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', x: 0, y: 0 });
   });
 
   it('is a NO-OP (byte-identical) when the ink fits the advance — no growth, no shift', () => {

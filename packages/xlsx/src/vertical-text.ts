@@ -33,6 +33,8 @@ import {
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
   verticalTrMirrorFallback,
+  withVertFeature,
+  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -62,9 +64,20 @@ export function drawStackedVerticalChar(
   centerX: number,
   cellTopY: number,
   charH: number,
+  vertCapable = false,
 ): void {
   const cp = ch.codePointAt(0) ?? 0;
   const vo = verticalOrientation(cp);
+
+  if (vertCapable && verticalTrMirrorFallback(cp)) {
+    ctx.save();
+    ctx.translate(centerX, cellTopY + charH / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    withVertFeature(ctx, () => ctx.fillText(ch, 0, 0));
+    ctx.restore();
+    return;
+  }
 
   if (vo === 'Tr') {
     // Substitute-first: a fullwidth bracket or white lenticular bracket 〖〗 (#969)
@@ -92,13 +105,16 @@ export function drawStackedVerticalChar(
     // REFLECT: their font-designed vertical form is the HORIZONTAL MIRROR of the +90°
     // rotation, not the rotation (Word/PowerPoint + font `vert` glyph verified — a plain
     // rotation of ー bulges LEFT, the designed form bulges RIGHT). After the +90° rotate,
-    // `scale(1, -1)` is the on-screen horizontal mirror. The quotes and colon do NOT
-    // reflect (their rotation matches the designed form; the colon is symmetric). Same
-    // fix as docx `drawVerticalRun` / pptx `drawEaVertRun`.
+    // y'=−y is the on-screen horizontal mirror. For U+30FC only, the shared
+    // runtime coefficient adds y'=m·x−y to cancel the horizontal glyph's measured
+    // drift. The wave marks keep their designed drift; quotes and colon do not
+    // reflect. Same fix as docx `drawVerticalRun` / pptx `drawEaVertRun`.
     ctx.save();
     ctx.translate(centerX, cellTopY + charH / 2);
     ctx.rotate(Math.PI / 2);
-    if (verticalTrMirrorFallback(cp)) ctx.scale(1, -1);
+    if (verticalTrMirrorFallback(cp)) {
+      ctx.transform(1, verticalFallbackShearCoefficient(ctx, cp), 0, -1, 0, 0);
+    }
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(ch, 0, 0);

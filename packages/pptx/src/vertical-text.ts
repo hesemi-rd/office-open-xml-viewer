@@ -44,9 +44,14 @@ import {
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
   verticalTrMirrorFallback,
+  verticalVertFeatureSupported,
+  withVertFeature,
+  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type VertCapability = (cp: number) => boolean;
+const NO_VERT_CAPABILITY: VertCapability = () => false;
 
 /**
  * Cross-axis (column-thickness) offset, in px, from the alphabetic baseline to
@@ -124,7 +129,7 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  *                         common path.
  * @param paint            `'fill'` or `'stroke'` (run outline, rPr > a:ln).
  */
-export function drawEaVertRun(
+export function drawEaVertRunWithCapability(
   ctx: Ctx2D,
   text: string,
   x: number,
@@ -132,6 +137,7 @@ export function drawEaVertRun(
   fontPx: number,
   letterSpacingPx: number,
   paint: 'fill' | 'stroke' = 'fill',
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -159,7 +165,17 @@ export function drawEaVertRun(
     const bracketCp = vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;
     const uprightFallback = vo === 'Tr' && bracketCp === null && verticalTrUprightFallback(cp);
     const upright = vo === 'U' || vo === 'Tu' || bracketCp !== null || uprightFallback;
-    if (upright) {
+    const vertGlyphSupported = verticalTrMirrorFallback(cp) && vertCapability(cp);
+    if (vertGlyphSupported) {
+      const cx = x + ax + adv / 2;
+      ctx.save();
+      ctx.translate(cx, crossCenterY);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVertFeature(ctx, () => draw(ch, 0, 0));
+      ctx.restore();
+    } else if (upright) {
       // vo=U / vo=Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would lay on its side)
       // stands upright. Corner-hanging Tu punctuation (、。， → U+FE10–FE12) and Tr
@@ -194,16 +210,19 @@ export function drawEaVertRun(
       // The long-stroke marks ー and 〜 ～ (core `verticalTrMirrorFallback`) are the
       // EXCEPTION: their font-designed vertical form is the HORIZONTAL REFLECTION of
       // the +90° rotation, not the rotation (Word PDF + font `vert` glyph verified — a
-      // plain rotation of ー bulges LEFT, Word bulges RIGHT). A Canvas cannot reach the
-      // `vert` glyph, so reflect via `scale(1, -1)` about the cell centre (the on-screen
-      // horizontal mirror in the +90° page frame). Same fix as docx `drawVerticalRun`.
+      // plain rotation of ー bulges LEFT, Word bulges RIGHT). When the element/CSS
+      // route or this glyph's `vert` coverage is unavailable, reflect about the cell
+      // centre (the on-screen horizontal mirror in the +90° page frame). For U+30FC
+      // only, the shared runtime
+      // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
+      // the designed wave-mark drift remains untouched. Same fix as docx.
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       if (verticalTrMirrorFallback(cp)) {
         ctx.save();
         ctx.translate(cx, crossCenterY);
-        ctx.scale(1, -1);
+        ctx.transform(1, verticalFallbackShearCoefficient(ctx, cp), 0, -1, 0, 0);
         draw(ch, 0, 0);
         ctx.restore();
       } else {
@@ -222,4 +241,25 @@ export function drawEaVertRun(
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;
+}
+
+export function drawEaVertRun(
+  ctx: Ctx2D,
+  text: string,
+  x: number,
+  baseline: number,
+  fontPx: number,
+  letterSpacingPx: number,
+  paint: 'fill' | 'stroke' = 'fill',
+): void {
+  drawEaVertRunWithCapability(
+    ctx,
+    text,
+    x,
+    baseline,
+    fontPx,
+    letterSpacingPx,
+    paint,
+    (cp) => verticalVertFeatureSupported(ctx, cp),
+  );
 }

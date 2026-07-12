@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderTextBody } from './renderer.js';
-import { drawEaVertRun } from './vertical-text.js';
+import { drawEaVertRun, drawEaVertRunWithCapability } from './vertical-text.js';
 import type { TextBody, Paragraph } from './types';
 import type { TextRunData } from '@silurus/ooxml-core';
 
@@ -59,6 +59,16 @@ interface DrawCall {
   /** Net scale-y in effect at draw time. −1 for a reflected Tr long-stroke mark
    *  (ー 〜 ～ → `scale(1, -1)`); +1 otherwise. */
   sy: number;
+  feature: string;
+}
+
+interface TransformMatrix {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
 }
 
 /** Normalise an angle to (−π, π] so 0 (upright) and π/2 (sideways) compare cleanly. */
@@ -69,7 +79,11 @@ function norm(a: number): number {
 /** Recording 2D context that tracks the accumulated rotation through a
  *  save/restore stack, so each fillText records the NET rotation the glyph is
  *  painted under — 0 ≈ upright, +π/2 ≈ sideways/rotated. */
-function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
+function mockCtx(shearSlope?: number): {
+  ctx: CanvasRenderingContext2D;
+  calls: DrawCall[];
+  transforms: TransformMatrix[];
+} {
   let font = `${FONT_PX}px serif`;
   let fillStyle = '';
   let letterSpacing = '0px';
@@ -82,6 +96,29 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   const stack: { rotation: number; tx: number; sy: number }[] = [];
   const px = (): number => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
   const calls: DrawCall[] = [];
+  const transforms: TransformMatrix[] = [];
+  const style = { fontFeatureSettings: 'normal' };
+  class ScratchCanvas {
+    width: number;
+    height: number;
+    style = style;
+    constructor(width: number, height: number) { this.width = width; this.height = height; }
+    getContext() {
+      const canvas = this;
+      return {
+        canvas, font: '', fillStyle: '#000', textAlign: 'center', textBaseline: 'middle',
+        clearRect() {}, fillText() {},
+        getImageData() {
+          const data = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+          for (let x = 128; x <= 384; x += 1) {
+            const y = Math.round(256 + (shearSlope ?? 0) * (x - 256));
+            data[(y * canvas.width + x) * 4 + 3] = 255;
+          }
+          return { data };
+        },
+      };
+    }
+  }
   const metricsFor = (s: string): TextMetrics => {
     const p = px();
     // Full-width EA glyphs advance one em; ASCII ~half em.
@@ -96,6 +133,7 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     } as TextMetrics;
   };
   const ctx = {
+    canvas: shearSlope === undefined ? { style } : new ScratchCanvas(1, 1),
     get font() { return font; }, set font(v: string) { font = v; },
     get fillStyle() { return fillStyle; }, set fillStyle(v: string) { fillStyle = v; },
     get letterSpacing() { return letterSpacing; }, set letterSpacing(v: string) { letterSpacing = v; },
@@ -103,19 +141,23 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     get textAlign() { return textAlign; }, set textAlign(v: CanvasTextAlign) { textAlign = v; },
     get textBaseline() { return textBaseline; }, set textBaseline(v: CanvasTextBaseline) { textBaseline = v; },
     measureText: (s: string) => metricsFor(s),
-    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy }),
-    strokeText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy }),
+    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy, feature: style.fontFeatureSettings }),
+    strokeText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy, feature: style.fontFeatureSettings }),
     save: () => { stack.push({ rotation, tx, sy }); },
     restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; tx = s.tx; sy = s.sy; } },
     translate: (x: number) => { tx += x; },
     rotate: (a: number) => { rotation += a; },
     scale: (_sx: number, syArg: number) => { sy *= syArg; },
+    transform: (a: number, b: number, c: number, d: number, e: number, f: number) => {
+      transforms.push({ a, b, c, d, e, f });
+      sy *= d;
+    },
     beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, stroke: () => {},
     clip: () => {}, rect: () => {}, fillRect: () => {}, drawImage: () => {},
     setLineDash: () => {}, closePath: () => {}, arc: () => {},
     strokeStyle: '#000', lineWidth: 1, lineJoin: 'miter' as CanvasLineJoin,
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, calls };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, calls, transforms };
 }
 
 function run(text: string): TextRunData {
@@ -287,6 +329,52 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     drawEaVertRun(ctx, text, 0, 100, FONT_PX, 0, 'fill');
     return calls;
   }
+  it('uses vert only for mirror-fallback marks and keeps other glyphs on manual paths', () => {
+    const { ctx, calls } = mockCtx();
+    drawEaVertRunWithCapability(
+      ctx,
+      'ー〜～、。：；「」“”A',
+      0,
+      100,
+      FONT_PX,
+      0,
+      'fill',
+      () => true,
+    );
+    expect(calls.map((call) => call.text)).toEqual([
+      'ー', '〜', '～', '︑', '︒', '：', '；', '﹁', '﹂', '“', '”', 'A',
+    ]);
+    expect(calls.map((call) => call.feature)).toEqual([
+      '"vert" 1', '"vert" 1', '"vert" 1',
+      'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal',
+    ]);
+    expect(calls.slice(0, 5).every((call) => norm(call.rot) === -Math.PI / 2)).toBe(true);
+    expect(norm(calls[5].rot)).toBe(0);
+    expect(calls.slice(6, 9).every((call) => norm(call.rot) === -Math.PI / 2)).toBe(true);
+    expect(calls.slice(9).every((call) => norm(call.rot) === 0)).toBe(true);
+    expect(calls.every((call) => call.sy === 1)).toBe(true);
+  });
+  it('keeps a glyph without vert coverage on the reflected geometric fallback', () => {
+    const { ctx, calls } = mockCtx();
+    drawEaVertRunWithCapability(
+      ctx,
+      'ー〜',
+      0,
+      100,
+      FONT_PX,
+      0,
+      'fill',
+      (cp) => cp === 0x30fc,
+    );
+    expect(calls.map((call) => call.feature)).toEqual(['"vert" 1', 'normal']);
+    expect(calls.map((call) => call.sy)).toEqual([1, -1]);
+  });
+  it('records the complete fallback shear matrix with a positive b component', () => {
+    const { ctx, transforms } = mockCtx(0.125);
+    drawEaVertRun(ctx, 'ー', 0, 100, FONT_PX, 0, 'fill');
+    expect(transforms).toEqual([{ a: 1, b: 0.125, c: 0, d: -1, e: 0, f: 0 }]);
+    expect(transforms[0].b).toBeGreaterThan(0);
+  });
   it('counter-rotates vo=U glyphs by −90° (upright in the +90° page frame)', () => {
     const calls = runHelper(U_CJK);
     expect(norm(calls[0].rot)).toBeCloseTo(-Math.PI / 2, 5);

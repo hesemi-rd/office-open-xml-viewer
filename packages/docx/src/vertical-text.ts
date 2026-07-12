@@ -38,9 +38,9 @@
 //         vertical glyph is the HORIZONTAL REFLECTION of the +90° rotation, not the
 //         rotation (the 起筆/curvature flips left↔right between orientations — a
 //         documented Japanese typographic convention; Word PDF sample-47 + font `vert`
-//         glyph verified). A Canvas cannot reach the `vert` glyph, so we rotate AND
-//         reflect via `scale(1, -1)` about the cell centre (the on-screen horizontal
-//         mirror in the +90° page frame).
+//         glyph verified). When the element/CSS route or this glyph's `vert` coverage
+//         is unavailable, we rotate AND reflect via `scale(1, -1)` about the cell
+//         centre (the on-screen horizontal mirror in the +90° page frame).
 //       – UPRIGHT: the fullwidth semicolon ；, whose FE14 form is an upright dot-over-
 //         comma, not a rotation (issue #969 follow-up; core `verticalTrUprightFallback`).
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
@@ -70,6 +70,9 @@ import {
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
   verticalTrMirrorFallback,
+  verticalVertFeatureSupported,
+  withVertFeature,
+  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
@@ -88,8 +91,8 @@ export type VerticalDrawMode = 'upright' | 'rotate' | 'sideways';
  *   Tu → upright   (draw upright; the caller substitutes a vertical form glyph
  *                   via {@link verticalFormSubstitute} when one exists so the
  *                   comma/full stop land in the upper-right of the cell)
- *   Tr → rotate    (rotate 90° CW — the fallback when no vertical glyph is
- *                   reachable on a Canvas — centred on the column)
+ *   Tr → rotate    (rotate 90° CW — the fallback when the element/CSS route or
+ *                   that glyph's vertical coverage is unavailable — centred)
  *   R  → sideways  (leave rotated with the page: Latin/digits)
  *
  * @param cp A Unicode scalar value (e.g. from `String.prototype.codePointAt`).
@@ -184,6 +187,8 @@ export function splitVerticalOrientationRuns(
 }
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type VertCapability = (cp: number) => boolean;
+const NO_VERT_CAPABILITY: VertCapability = () => false;
 
 /**
  * Cross-axis (column-thickness) offset, in px, from the alphabetic baseline to
@@ -327,17 +332,33 @@ function verticalRotateInkGeometry(
  * @param ctx  2D context with the run's font selected.
  * @param text The run's text.
  */
-export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+export function verticalRunInkExtraPxWithCapability(
+  ctx: Ctx2D,
+  text: string,
+  vertCapability: VertCapability,
+): number {
   let extra = 0;
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     if (!isVerticalRotateFallback(cp)) continue;
+    // A real vert long-stroke glyph is upright in its ordinary one-em cell. All
+    // other rotate-fallback glyphs (notably quotes and the colon) still use the
+    // geometric path and therefore retain #1014/#1019 ink growth.
+    if (verticalTrMirrorFallback(cp) && vertCapability(cp)) continue;
     const geom = verticalRotateInkGeometry(ctx, ch);
     if (geom === null) continue;
     const advance = ctx.measureText(ch).width;
     if (geom.extentPx > advance) extra += geom.extentPx - advance;
   }
   return extra;
+}
+
+export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+  return verticalRunInkExtraPxWithCapability(
+    ctx,
+    text,
+    (cp) => verticalVertFeatureSupported(ctx, cp),
+  );
 }
 
 /**
@@ -374,7 +395,7 @@ export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
  *                         keeps the advance-sized, advance-centred draw byte-identical
  *                         (markers and unwired vertical text boxes).
  */
-export function drawVerticalRun(
+export function drawVerticalRunWithCapability(
   ctx: Ctx2D,
   text: string,
   x: number,
@@ -383,6 +404,7 @@ export function drawVerticalRun(
   letterSpacingPx: number,
   charScale = 1,
   growTrRotateInk = false,
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -419,6 +441,7 @@ export function drawVerticalRun(
     // like the vo=U / vo=Tu cells; the colon ：is NOT here (its FE13 form IS a 90°
     // rotation, so it takes the rotate branch below → side-by-side dots).
     const uprightFallback = mode === 'rotate' && bracketCp === null && verticalTrUprightFallback(cp);
+    const vertGlyphSupported = verticalTrMirrorFallback(cp) && vertCapability(cp);
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
     // #1014: a vo=Tr GEOMETRIC rotate-fallback glyph (ー 〜 ～ “” ：) is painted by a
@@ -432,7 +455,13 @@ export function drawVerticalRun(
     // for the geometric rotate branch (substituted/upright Tr glyphs keep their path).
     let cellNaturalPx = ctx.measureText(ch).width;
     let rotateInkShiftPx = 0;
-    if (growTrRotateInk && mode === 'rotate' && bracketCp === null && !uprightFallback) {
+    if (
+      !vertGlyphSupported &&
+      growTrRotateInk &&
+      mode === 'rotate' &&
+      bracketCp === null &&
+      !uprightFallback
+    ) {
       const geom = verticalRotateInkGeometry(ctx, ch);
       if (geom !== null && geom.extentPx > cellNaturalPx) {
         cellNaturalPx = geom.extentPx;
@@ -440,7 +469,20 @@ export function drawVerticalRun(
       }
     }
     const adv = cellNaturalPx * charScale + letterSpacingPx;
-    if (mode === 'upright' || bracketCp !== null || uprightFallback) {
+    if (vertGlyphSupported) {
+      // The font's `vert` table supplies the designed upright form for the three
+      // long-stroke marks whose geometric fallback otherwise needs reflection.
+      // Keep every other glyph on its Word-adjudicated manual path below.
+      const cx = x + ax + adv / 2;
+      ctx.save();
+      ctx.translate(cx, baseline);
+      ctx.rotate(-Math.PI / 2);
+      if (scaled) ctx.scale(1, charScale);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVertFeature(ctx, () => ctx.fillText(ch, 0, 0));
+      ctx.restore();
+    } else if (mode === 'upright' || bracketCp !== null || uprightFallback) {
       // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would otherwise lay on
       // its side) stands upright. For corner-hanging Tu punctuation with a Unicode
@@ -497,8 +539,8 @@ export function drawVerticalRun(
       // vo=Tr with NO substituted vertical form and NOT the upright-fallback
       // semicolon: ー (U+30FC), the wave dash / tilde 〜 ～, the double quotes “”,
       // and the fullwidth colon ：(FF1A). UAX#50's Tr fallback (no vertical glyph
-      // reachable on a Canvas) is to ROTATE the glyph 90° CW; a plain `fillText` in
-      // the +90° page frame IS that rotation, centred on the column with
+      // available through the element/CSS route) is to ROTATE the glyph 90° CW;
+      // a plain `fillText` in the +90° page frame IS that rotation, centred with
       // `center`/`middle` at the cell centre. For the colon this reproduces FE13's
       // design directly (the two vertically-stacked dots become side by side),
       // Word-verified (issue #969 follow-up); for the quotes the rotation matches the
@@ -508,13 +550,12 @@ export function drawVerticalRun(
       // EXCEPTION: their font-DESIGNED vertical form is the HORIZONTAL REFLECTION of
       // that +90° rotation, not the rotation — the 起筆/curvature flips left↔right
       // between orientations (Word PDF sample-47 + font `vert` glyph verified: a plain
-      // rotation of ー bulges LEFT, Word/the designed glyph bulge RIGHT). Since a
-      // Canvas cannot invoke the font's `vert` OpenType glyph, we reproduce it by
-      // reflecting: in the +90° page frame the on-screen horizontal mirror is
-      // `scale(1, -1)` about the cell centre. Advance/measure and the column centring
-      // are unchanged (the em box is symmetric about the cell centre), so only the
-      // glyph's chirality flips. (Substituted bracket forms never reach here — they
-      // were drawn upright above; a rotated bracket's ink offset is not measurable.)
+      // rotation of ー bulges LEFT, Word/the designed glyph bulge RIGHT). Since
+      // this glyph lacks verified `vert` coverage, we reproduce it by reflecting
+      // about the cell centre. For U+30FC only, the shared runtime
+      // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
+      // the designed wave-mark drift remains untouched. Because x'=s·x is independent
+      // of y, advance/measure and along-column centring are unchanged.
       const cx = x + ax + adv / 2;
       const mirror = verticalTrMirrorFallback(cp);
       ctx.textAlign = 'center';
@@ -522,17 +563,20 @@ export function drawVerticalRun(
       // #1014: `rotateInkShiftPx` (glyph-space, non-zero ONLY when the cell was grown
       // to the ink extent above) re-centres the ink on the grown cell — a `center`
       // draw centres the glyph's ADVANCE, and an under-reported advance is off-centre
-      // from the ink. It rides the local frame so it composes with the §17.3.2.43
-      // `w:w` scale and the reflection; 0 (the common path) leaves today's advance-
-      // centred draw byte-identical.
+      // from the ink. It is applied separately on the advance OUTPUT axis before
+      // the §17.3.2.43 `w:w` + mirror/shear matrix, avoiding an m·shift cross-axis
+      // displacement. Zero (the common path) leaves advance centring unchanged.
       if (mirror || scaled || rotateInkShiftPx !== 0) {
         ctx.save();
         ctx.translate(cx, baseline);
-        // `scale(1, -1)` is the on-screen horizontal mirror in the +90° page frame
-        // (screen −x ↔ page-frame +y); combine with the §17.3.2.43 `w:w` width
-        // compression on the line axis. Non-mirror glyphs keep sy=+1.
-        ctx.scale(charScale, mirror ? -1 : 1);
-        ctx.fillText(ch, rotateInkShiftPx, 0);
+        // Keep the #1014 ink shift on the advance OUTPUT axis. Folding it into
+        // the shear matrix would introduce an m·shift cross-axis displacement.
+        if (rotateInkShiftPx !== 0) ctx.translate(charScale * rotateInkShiftPx, 0);
+        const shear = verticalFallbackShearCoefficient(ctx, cp);
+        // x'=charScale·x preserves along-column extent; y'=shear·x−y mirrors
+        // chirality and cancels the horizontal glyph's measured stroke drift.
+        ctx.transform(charScale, shear, 0, mirror ? -1 : 1, 0, 0);
+        ctx.fillText(ch, 0, 0);
         ctx.restore();
       } else {
         ctx.fillText(ch, cx, baseline);
@@ -565,6 +609,29 @@ export function drawVerticalRun(
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;
+}
+
+export function drawVerticalRun(
+  ctx: Ctx2D,
+  text: string,
+  x: number,
+  baseline: number,
+  fontPx: number,
+  letterSpacingPx: number,
+  charScale = 1,
+  growTrRotateInk = false,
+): void {
+  drawVerticalRunWithCapability(
+    ctx,
+    text,
+    x,
+    baseline,
+    fontPx,
+    letterSpacingPx,
+    charScale,
+    growTrRotateInk,
+    (cp) => verticalVertFeatureSupported(ctx, cp),
+  );
 }
 
 /**

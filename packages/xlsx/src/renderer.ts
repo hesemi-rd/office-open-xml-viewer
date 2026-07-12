@@ -6,7 +6,7 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrMirrorFallback, verticalVertFeatureSupported, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -2658,7 +2658,10 @@ function renderQuadrant(
           // UAX#50 per-glyph orientation (issue #790): CJK/Latin stay upright,
           // 、。 substitute their vertical form, fullwidth brackets substitute
           // their U+FE3x form, and ー rotates 90° to a vertical bar.
-          drawStackedVerticalChar(ctx, ch, cx + cellW / 2, charY, charH);
+          const cp = ch.codePointAt(0) ?? 0;
+          const vertCapable =
+            verticalTrMirrorFallback(cp) && verticalVertFeatureSupported(ctx, cp);
+          drawStackedVerticalChar(ctx, ch, cx + cellW / 2, charY, charH, vertCapable);
           charY += charH;
         }
         ctx.restore();

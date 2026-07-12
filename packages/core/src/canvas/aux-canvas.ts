@@ -13,6 +13,11 @@
 export type AuxCanvas = HTMLCanvasElement | OffscreenCanvas;
 /** The 2D context type of an {@link AuxCanvas}. */
 export type AuxContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type SourceContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+function dimensions(w: number, h: number): [number, number] {
+  return [Math.max(1, Math.ceil(w)), Math.max(1, Math.ceil(h))];
+}
 
 /**
  * Allocate an auxiliary canvas. Prefers OffscreenCanvas (no DOM pollution, works
@@ -21,8 +26,7 @@ export type AuxContext = CanvasRenderingContext2D | OffscreenCanvasRenderingCont
  * Dimensions are clamped to >=1 to avoid zero-size canvas errors.
  */
 export function createAuxCanvas(w: number, h: number): AuxCanvas | null {
-  const cw = Math.max(1, Math.ceil(w));
-  const ch = Math.max(1, Math.ceil(h));
+  const [cw, ch] = dimensions(w, h);
   if (typeof OffscreenCanvas !== 'undefined') {
     return new OffscreenCanvas(cw, ch);
   }
@@ -33,4 +37,44 @@ export function createAuxCanvas(w: number, h: number): AuxCanvas | null {
     return c;
   }
   return null;
+}
+
+/**
+ * Allocate a scratch canvas for a specific live context. The final constructor
+ * fallback supports Canvas-compatible node implementations such as skia-canvas;
+ * it intentionally runs after browser/worker strategies because constructing an
+ * HTMLCanvasElement directly throws. Every strategy is isolated so draw callers
+ * can safely degrade when allocation is unavailable.
+ */
+export function createAuxCanvasForContext(
+  ctx: SourceContext,
+  w: number,
+  h: number,
+): AuxCanvas | null {
+  const [cw, ch] = dimensions(w, h);
+  if (typeof OffscreenCanvas !== 'undefined') {
+    try {
+      return new OffscreenCanvas(cw, ch);
+    } catch {
+      // Continue to the DOM canvas strategy.
+    }
+  }
+  if (typeof document !== 'undefined') {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = cw;
+      canvas.height = ch;
+      return canvas;
+    } catch {
+      // Continue to the context-compatible constructor strategy.
+    }
+  }
+  try {
+    const constructor = ctx.canvas?.constructor;
+    if (typeof constructor !== 'function') return null;
+    const CanvasConstructor = constructor as new (width: number, height: number) => AuxCanvas;
+    return new CanvasConstructor(cw, ch);
+  } catch {
+    return null;
+  }
 }

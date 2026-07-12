@@ -5,6 +5,7 @@ import {
   applyReflection,
   createAuxCanvas,
 } from './effects';
+import { createAuxCanvasForContext } from '../canvas/aux-canvas';
 import type { Shadow, SoftEdge, Reflection } from '../types/common';
 
 /**
@@ -95,6 +96,29 @@ describe('createAuxCanvas', () => {
     vi.stubGlobal('OffscreenCanvas', undefined);
     vi.stubGlobal('document', undefined);
     expect(createAuxCanvas(10, 10)).toBeNull();
+  });
+
+  it('uses the live context canvas constructor last in a headless skia-like environment', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('document', undefined);
+    class SkiaLikeCanvas {
+      constructor(public width: number, public height: number) {}
+    }
+    const ctx = { canvas: new SkiaLikeCanvas(20, 20) } as unknown as CanvasRenderingContext2D;
+
+    const aux = createAuxCanvasForContext(ctx, 10.1, 0) as unknown as SkiaLikeCanvas;
+
+    expect(aux).toBeInstanceOf(SkiaLikeCanvas);
+    expect([aux.width, aux.height]).toEqual([11, 1]);
+  });
+
+  it('returns null when every ctx-aware allocation strategy throws', () => {
+    vi.stubGlobal('OffscreenCanvas', class { constructor() { throw new Error('offscreen'); } });
+    vi.stubGlobal('document', { createElement: () => { throw new Error('dom'); } });
+    class BrokenCanvas { constructor() { throw new Error('constructor'); } }
+    const ctx = { canvas: Object.create(BrokenCanvas.prototype) } as unknown as CanvasRenderingContext2D;
+
+    expect(createAuxCanvasForContext(ctx, 10, 10)).toBeNull();
   });
 });
 

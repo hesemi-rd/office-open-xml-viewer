@@ -26,6 +26,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { loadSkiaForTests, importForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
@@ -72,7 +73,7 @@ describe.skipIf(!skia || !vtMod || !haveFont)('docx vertical prolonged sound mar
    * to the glyph's own ink-bbox width (0 = left edge, 1 = right edge). Also the whole-
    * glyph cross centroid for the column-centring sanity check.
    */
-  function head(data: Uint8ClampedArray): { topNorm: number; wholeCx: number } {
+  function head(data: Uint8ClampedArray): { topNorm: number; wholeCx: number; x0: number; x1: number } {
     const py0 = logX + cellW, py1 = logX + 2 * cellW;
     let x0 = W, x1 = 0, sxAll = 0, swAll = 0;
     for (let py = py0; py < py1; py++) for (let px = 0; px < W; px++) {
@@ -86,8 +87,47 @@ describe.skipIf(!skia || !vtMod || !haveFont)('docx vertical prolonged sound mar
       if (w > 40) { sx += px * w; sw += w; }
     }
     const topCx = sw > 0 ? sx / sw : NaN;
-    return { topNorm: (topCx - x0) / (x1 - x0), wholeCx: swAll > 0 ? sxAll / swAll : NaN };
+    return { topNorm: (topCx - x0) / (x1 - x0), wholeCx: swAll > 0 ? sxAll / swAll : NaN, x0, x1 };
   }
+
+  /** Robust physical cross-axis drift over every ink-bearing along-column row. */
+  function strokeAngleDeg(data: Uint8ClampedArray): number {
+    const py0 = logX + cellW, py1 = logX + 2 * cellW;
+    const centroids: Array<{ along: number; cross: number }> = [];
+    for (let py = py0; py < py1; py++) {
+      let sx = 0, sw = 0;
+      for (let px = 0; px < W; px++) {
+        const w = ink(data, (py * W + px) * 4);
+        if (w > 0) { sx += px * w; sw += w; }
+      }
+      if (sw > 0) centroids.push({ along: py, cross: sx / sw });
+    }
+    const slopes: number[] = [];
+    for (let i = 0; i < centroids.length; i++) {
+      for (let j = i + 1; j < centroids.length; j++) {
+        slopes.push(
+          (centroids[j].cross - centroids[i].cross) /
+          (centroids[j].along - centroids[i].along),
+        );
+      }
+    }
+    slopes.sort((a, b) => a - b);
+    const middle = Math.floor(slopes.length / 2);
+    const slope = slopes.length % 2 === 0
+      ? (slopes[middle - 1] + slopes[middle]) / 2
+      : slopes[middle];
+    return Math.atan(slope) * 180 / Math.PI;
+  }
+
+  it('straightens the non-vert fallback ー stroke to within 0.8 degrees', () => {
+    const angle = strokeAngleDeg(render('ー'));
+    expect(Math.abs(angle)).toBeLessThanOrEqual(0.8);
+  });
+
+  it.each(['〜', '～'])('keeps the fallback %s waveform byte-identical', (mark) => {
+    const digest = createHash('sha256').update(render(mark)).digest('hex');
+    expect(digest).toBe('c3c484be6ea34f4283a70bf4aef9b07e62efdd0c2141772074f581e16842c60b');
+  });
 
   it('ー head leans to the physical RIGHT of its own axis (Word topology), the reflected form', () => {
     const m = head(render('ー'));
@@ -99,5 +139,9 @@ describe.skipIf(!skia || !vtMod || !haveFont)('docx vertical prolonged sound mar
     // Sanity: the mark still centres on the column (the reflection is about the cell
     // centre, so the advance/centring is unchanged) — within 0.1em of the centreline.
     expect(Math.abs(m.wholeCx - centerline)).toBeLessThanOrEqual(0.1 * fontPx);
+    // The shear grows only the cross-axis bbox and the result remains inside its
+    // one-em column band, so an authored textbox clip does not cut the stroke.
+    expect(m.x0).toBeGreaterThan(centerline - fontPx / 2);
+    expect(m.x1).toBeLessThan(centerline + fontPx / 2);
   });
 });
