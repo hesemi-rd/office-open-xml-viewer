@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  verticalVertFeatureSupported,
+  measureVerticalVertGlyph,
+  verticalVertGlyphReachable,
   withVertFeature,
 } from './vertical-vert-feature.js';
 
@@ -12,12 +13,12 @@ interface ProbeFixture {
   fontAssignments: () => number;
   paints: () => number;
   listeners: Map<string, Listener>;
-  supported: Set<number>;
+  variants: Map<number, 'wide-to-tall' | 'placement' | 'tall-to-wide' | 'outline' | 'metrics'>;
 }
 
 function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
   const listeners = new Map<string, Listener>();
-  const supported = new Set<number>();
+  const variants = new Map<number, 'wide-to-tall' | 'placement' | 'tall-to-wide' | 'outline' | 'metrics'>();
   const featuresAtPaint: string[] = [];
   let paints = 0;
   let fontAssignments = 0;
@@ -60,14 +61,43 @@ function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
           featuresAtPaint.push(resolvedFeature);
           paints += 1;
         },
+        measureText() {
+          const featured = resolvedFeature.includes('"vert" 1');
+          const metricsChanged = featured && variants.get(drawnCp) === 'metrics';
+          return {
+            width: 200,
+            actualBoundingBoxLeft: 20,
+            actualBoundingBoxRight: 20,
+            actualBoundingBoxAscent: metricsChanged ? 90 : 80,
+            actualBoundingBoxDescent: metricsChanged ? -30 : -20,
+          } as TextMetrics;
+        },
         getImageData() {
           const data = new Uint8ClampedArray(canvas.width * canvas.height * 4);
-          const vert = resolvedFeature.includes('"vert" 1') && supported.has(drawnCp);
-          const inkWidth = vert ? 3 : 9;
-          const inkHeight = vert ? 9 : 3;
+          const featured = resolvedFeature.includes('"vert" 1');
+          const variant = variants.get(drawnCp);
+          const tallToWide = variant === 'tall-to-wide';
+          const inkWidth = featured && variant === 'wide-to-tall'
+            ? 3
+            : featured && tallToWide
+              ? 9
+              : tallToWide
+                ? 3
+                : 9;
+          const inkHeight = featured && variant === 'wide-to-tall'
+            ? 9
+            : featured && tallToWide
+              ? 3
+              : tallToWide
+                ? 9
+                : variant === 'outline'
+                  ? 9
+                  : 3;
+          const xOffset = featured && variant === 'placement' ? 4 : 0;
           for (let y = 0; y < inkHeight; y += 1) {
             for (let x = 0; x < inkWidth; x += 1) {
-              data[(y * canvas.width + x) * 4 + 3] = 255;
+              if (featured && variant === 'outline' && x === 4 && y === 4) continue;
+              data[(y * canvas.width + x + xOffset) * 4 + 3] = 255;
             }
           }
           return { data } as ImageData;
@@ -104,7 +134,7 @@ function fakeHtmlCanvasProbe(initialFeature = 'normal'): ProbeFixture {
     fontAssignments: () => fontAssignments,
     paints: () => paints,
     listeners,
-    supported,
+    variants,
   };
 }
 
@@ -117,37 +147,106 @@ describe('vertical OpenType vert feature', () => {
       font: '16px serif',
     } as unknown as OffscreenCanvasRenderingContext2D;
 
-    expect(verticalVertFeatureSupported(ctx, 0x30fc)).toBe(false);
+    expect(verticalVertGlyphReachable(ctx, 0x30fc)).toBe(false);
+  });
+
+  it('detects placement-only, tall-to-wide, wide-to-tall, and same-box outline alternates', () => {
+    const fixture = fakeHtmlCanvasProbe();
+    fixture.variants.set(0x3001, 'placement');
+    fixture.variants.set(0x300c, 'tall-to-wide');
+    fixture.variants.set(0x30fc, 'wide-to-tall');
+    fixture.variants.set(0x3041, 'outline');
+    fixture.variants.set(0x3002, 'metrics');
+
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x3001)).toBe(true);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x300c)).toBe(true);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(true);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x3041)).toBe(true);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x3002)).toBe(true);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0xff1b)).toBe(false);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0xff01)).toBe(false);
   });
 
   it('probes the requested glyph, refonts after each feature change, and caches per code point', () => {
     const fixture = fakeHtmlCanvasProbe('"kern" 1, "ss01" 1');
-    fixture.supported.add(0x30fc);
+    fixture.variants.set(0x30fc, 'wide-to-tall');
 
-    expect(verticalVertFeatureSupported(fixture.ctx, 0x30fc)).toBe(true);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(true);
     expect(fixture.featuresAtPaint).toEqual([
+      '"kern" 1, "ss01" 1',
       '"kern" 1, "ss01" 1',
       '"kern" 1, "ss01" 1, "vert" 1',
     ]);
-    expect(fixture.fontAssignments()).toBeGreaterThanOrEqual(3);
-    expect(verticalVertFeatureSupported(fixture.ctx, 0x30fc)).toBe(true);
-    expect(fixture.paints()).toBe(2);
+    expect(fixture.fontAssignments()).toBeGreaterThanOrEqual(4);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x30fc)).toBe(true);
+    expect(fixture.paints()).toBe(3);
 
-    expect(verticalVertFeatureSupported(fixture.ctx, 0x301c)).toBe(false);
-    expect(fixture.paints()).toBe(4);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0x301c)).toBe(false);
+    expect(fixture.paints()).toBe(6);
   });
 
   it('invalidates each glyph result after the FontFace epoch changes', () => {
     const fixture = fakeHtmlCanvasProbe();
 
-    expect(verticalVertFeatureSupported(fixture.ctx, 0xff5e)).toBe(false);
-    fixture.supported.add(0xff5e);
-    expect(verticalVertFeatureSupported(fixture.ctx, 0xff5e)).toBe(false);
-    expect(fixture.paints()).toBe(2);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0xff5e)).toBe(false);
+    fixture.variants.set(0xff5e, 'wide-to-tall');
+    expect(verticalVertGlyphReachable(fixture.ctx, 0xff5e)).toBe(false);
+    expect(fixture.paints()).toBe(3);
 
     fixture.listeners.get('loadingdone')?.();
-    expect(verticalVertFeatureSupported(fixture.ctx, 0xff5e)).toBe(true);
-    expect(fixture.paints()).toBe(4);
+    expect(verticalVertGlyphReachable(fixture.ctx, 0xff5e)).toBe(true);
+    expect(fixture.paints()).toBe(6);
+  });
+
+  it('keeps the featured advance origin fixed when designed ink pokes before the cell', () => {
+    let font = '10px "Probe Mincho"';
+    let feature = 'normal';
+    const ctx = {
+      canvas: { style: { get fontFeatureSettings() { return feature; }, set fontFeatureSettings(v: string) { feature = v; } } },
+      get font() { return font; },
+      set font(value: string) { font = value; },
+      textAlign: 'left',
+      textBaseline: 'alphabetic',
+      measureText() {
+        return {
+          width: 10,
+          actualBoundingBoxAscent: feature.includes('"vert" 1') ? 8 : 2,
+          actualBoundingBoxDescent: feature.includes('"vert" 1') ? 5 : 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(measureVerticalVertGlyph(ctx, 'ー')).toEqual({
+      advancePx: 10,
+      inkBeforePx: 8,
+      inkAfterPx: 5,
+      cellAdvancePx: 10,
+      originInCellPx: 5,
+    });
+    expect(ctx.textAlign).toBe('left');
+    expect(ctx.textBaseline).toBe('alphabetic');
+    expect(feature).toBe('normal');
+  });
+
+  it('falls back to the featured advance when A/D metrics are unavailable', () => {
+    let font = '10px serif';
+    const style = { fontFeatureSettings: '' };
+    const ctx = {
+      canvas: { style },
+      get font() { return font; },
+      set font(value: string) { font = value; },
+      textAlign: 'left',
+      textBaseline: 'alphabetic',
+      measureText: () => ({ width: 12 }) as TextMetrics,
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(measureVerticalVertGlyph(ctx, '「')).toEqual({
+      advancePx: 12,
+      inkBeforePx: 0,
+      inkAfterPx: 0,
+      cellAdvancePx: 12,
+      originInCellPx: 6,
+    });
   });
 
   it('sets the canvas feature before refonting and restores both after drawing', () => {

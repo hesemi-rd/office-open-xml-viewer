@@ -10,6 +10,20 @@ const PROBE_SIZE_PX = 256;
 const PROBE_FONT_PX = 200;
 const probeStates = new WeakMap<Document, ProbeState>();
 
+interface RasterSnapshot {
+  alpha: Uint8ClampedArray;
+  geometry: number[];
+  metrics: number[];
+}
+
+export interface VerticalGlyphCellMetrics {
+  advancePx: number;
+  inkBeforePx: number;
+  inkAfterPx: number;
+  cellAdvancePx: number;
+  originInCellPx: number;
+}
+
 function canvasElementFor(ctx: Ctx2D): HTMLCanvasElement | null {
   if (typeof HTMLCanvasElement === 'undefined') return null;
   return ctx.canvas instanceof HTMLCanvasElement ? ctx.canvas : null;
@@ -55,47 +69,90 @@ function probeState(doc: Document): ProbeState {
   return state;
 }
 
-function inkBounds(ctx: CanvasRenderingContext2D): { width: number; height: number } | null {
+function rasterSnapshot(ctx: CanvasRenderingContext2D, text: string): RasterSnapshot | null {
   const { width, height } = ctx.canvas;
   const data = ctx.getImageData(0, 0, width, height).data;
+  const alpha = new Uint8ClampedArray(width * height);
   let minX = width;
   let minY = height;
   let maxX = -1;
   let maxY = -1;
+  let alphaSum = 0;
+  let weightedX = 0;
+  let weightedY = 0;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      if (data[(y * width + x) * 4 + 3] === 0) continue;
+      const a = data[(y * width + x) * 4 + 3];
+      alpha[y * width + x] = a;
+      if (a === 0) continue;
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
       maxY = Math.max(maxY, y);
+      alphaSum += a;
+      weightedX += x * a;
+      weightedY += y * a;
     }
   }
-  return maxX >= minX && maxY >= minY
-    ? { width: maxX - minX + 1, height: maxY - minY + 1 }
-    : null;
+  if (maxX < minX || maxY < minY || alphaSum === 0) return null;
+  const m = ctx.measureText(text);
+  const finite = (value: number | undefined): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return {
+    alpha,
+    geometry: [minX, minY, maxX, maxY, weightedX / alphaSum, weightedY / alphaSum],
+    metrics: [
+      finite(m.width),
+      finite(m.actualBoundingBoxLeft),
+      finite(m.actualBoundingBoxRight),
+      finite(m.actualBoundingBoxAscent),
+      finite(m.actualBoundingBoxDescent),
+    ],
+  };
 }
 
 function rasterizeProbe(
   ctx: CanvasRenderingContext2D,
   cp: number,
   featureSettings: string,
-): { width: number; height: number } | null {
+): RasterSnapshot | null {
   const canvas = ctx.canvas;
   canvas.style.fontFeatureSettings = featureSettings;
   ctx.font = ctx.font;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillText(String.fromCodePoint(cp), canvas.width / 2, canvas.height / 2);
-  return inkBounds(ctx);
+  const text = String.fromCodePoint(cp);
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  return rasterSnapshot(ctx, text);
+}
+
+function arrayDifference(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  let difference = 0;
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i += 1) difference += Math.abs(a[i] - b[i]);
+  return difference;
+}
+
+function rasterChanged(
+  plain: RasterSnapshot,
+  plainRepeat: RasterSnapshot,
+  featured: RasterSnapshot,
+): boolean {
+  const rasterNoise = arrayDifference(plain.alpha, plainRepeat.alpha);
+  const rasterSignal = arrayDifference(plain.alpha, featured.alpha);
+  const geometryNoise = arrayDifference(plain.geometry, plainRepeat.geometry);
+  const geometrySignal = arrayDifference(plain.geometry, featured.geometry);
+  const metricNoise = arrayDifference(plain.metrics, plainRepeat.metrics);
+  const metricSignal = arrayDifference(plain.metrics, featured.metrics);
+  return rasterSignal > rasterNoise || geometrySignal > geometryNoise || metricSignal > metricNoise;
 }
 
 /**
- * Whether this main-thread canvas/font can paint the requested code point with
- * a wide-to-tall OpenType `vert` substitution. Results are cached by code point,
- * feature settings, and family/weight/style shorthand, and invalidated whenever
- * the document FontFaceSet completes or fails a load.
+ * Whether this main-thread canvas/font demonstrably paints a different glyph or
+ * placement for `cp` after composing the OpenType `vert` feature. Results are
+ * cached by code point, feature settings, and family/weight/style shorthand, and
+ * invalidated whenever the document FontFaceSet completes or fails a load.
  */
-export function verticalVertFeatureSupported(ctx: Ctx2D, cp: number): boolean {
+export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
   const target = canvasElementFor(ctx);
   if (target === null || typeof document === 'undefined') return false;
 
@@ -120,12 +177,13 @@ export function verticalVertFeatureSupported(ctx: Ctx2D, cp: number): boolean {
       probe.textAlign = 'center';
       probe.textBaseline = 'middle';
       const plain = rasterizeProbe(probe, cp, sourceFeature);
+      const plainRepeat = rasterizeProbe(probe, cp, sourceFeature);
       const vert = rasterizeProbe(probe, cp, composeVertFeature(sourceFeature));
       supported =
         plain !== null &&
+        plainRepeat !== null &&
         vert !== null &&
-        plain.width > plain.height &&
-        vert.height > vert.width;
+        rasterChanged(plain, plainRepeat, vert);
     } catch {
       supported = false;
     } finally {
@@ -154,4 +212,40 @@ export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
     style.fontFeatureSettings = previous;
     ctx.font = ctx.font;
   }
+}
+
+/**
+ * Measure one glyph under the exact composed `vert` feature state used by paint.
+ * The feature advance defines the vertical cell and its origin stays at the
+ * nominal half-advance. A/D are reported for diagnostics, but designed ink pokes
+ * may cross a neighbour cell and must not displace the font's glyph origin.
+ */
+export function measureVerticalVertGlyph(ctx: Ctx2D, ch: string): VerticalGlyphCellMetrics {
+  return withVertFeature(ctx, () => {
+    const previousAlign = ctx.textAlign;
+    const previousBaseline = ctx.textBaseline;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    try {
+      const m = ctx.measureText(ch);
+      const advancePx = Number.isFinite(m.width) ? Math.max(0, m.width) : 0;
+      const hasInkMetrics =
+        typeof m.actualBoundingBoxAscent === 'number' &&
+        Number.isFinite(m.actualBoundingBoxAscent) &&
+        typeof m.actualBoundingBoxDescent === 'number' &&
+        Number.isFinite(m.actualBoundingBoxDescent);
+      const inkBeforePx = hasInkMetrics ? m.actualBoundingBoxAscent : 0;
+      const inkAfterPx = hasInkMetrics ? m.actualBoundingBoxDescent : 0;
+      return {
+        advancePx,
+        inkBeforePx,
+        inkAfterPx,
+        cellAdvancePx: advancePx,
+        originInCellPx: advancePx / 2,
+      };
+    } finally {
+      ctx.textAlign = previousAlign;
+      ctx.textBaseline = previousBaseline;
+    }
+  });
 }

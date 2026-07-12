@@ -398,18 +398,16 @@ export {
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
   verticalTrUprightFallback,
-  verticalTrMirrorFallback,
+  verticalTrLongMark,
   VO_UNICODE_VERSION,
 } from './text/vertical-orientation';
 export type { VerticalOrientation } from './text/vertical-orientation';
 export {
-  verticalVertFeatureSupported,
+  measureVerticalVertGlyph,
+  verticalVertGlyphReachable,
   withVertFeature,
 } from './text/vertical-vert-feature';
-export {
-  verticalFallbackShearCoefficient,
-  verticalFallbackShearEnabled,
-} from './text/vertical-fallback-shear';
+export type { VerticalGlyphCellMetrics } from './text/vertical-vert-feature';
 // Shared Excel serial-date → UTC `Date` conversion (ECMA-376 §18.17.4.1),
 // with the 1900 Lotus leap-year-bug compat and 1900/1904 date-system select.
 // Used by the xlsx cell formatter and the core chart date formatter.
