@@ -4,8 +4,9 @@ import type { CellElement, DocParagraph } from './types.js';
 
 // `sumCellContentHeight` is the shared measure-side spacing-collapse helper
 // that mirrors `renderCellContent`'s paint-side spacing rules:
-//   * ECMA-376 §17.3.1.33 contextualSpacing (same styleId siblings suppress
-//     spaceBefore between them).
+//   * ECMA-376 §17.3.1.9 contextualSpacing — a same-style toggling paragraph
+//     drops its OWN contribution to the collapsed gap (per-side, Word-
+//     adjudicated: issue #1015 / sample-57).
 //   * Adjacent-paragraph spacing OVERLAP: the gap between two paragraphs is
 //     max(prevSpaceAfter, currSpaceBefore), not their sum.
 // Both rules were applied in the paint loop (`renderCellContent`) but the
@@ -74,6 +75,35 @@ describe('sumCellContentHeight — spacing collapse mirrors renderCellContent', 
     ];
     // 2nd paragraph's spaceBefore is suppressed: 20 + 0 + 20 + 0 = 40
     // (no spaceBefore for the suppressed paragraph, no overlap to subtract).
+    expect(sumCellContentHeight(content, fullHeight(20), 1)).toBe(40);
+  });
+
+  // §17.3.1.9 per-side semantics (issue #1015, sample-57 ground truth): a
+  // same-style toggle drops the TOGGLING paragraph's own contribution to the
+  // collapsed gap — prev's spaceAfter, or curr's before-excess max(before−after,0).
+  it('PREV-only contextualSpacing leaves gap = max(before − after, 0) (sample-57 case 1: 10/12 → 2)', () => {
+    const content = [
+      para({ styleId: 'CtxPair', contextualSpacing: true, spaceAfter: 10 }),
+      para({ styleId: 'CtxPair', spaceBefore: 12 }),
+    ];
+    // gap = max(12 − 10, 0) = 2 → total = 20 + 2 + 20 = 42.
+    expect(sumCellContentHeight(content, fullHeight(20), 1)).toBe(42);
+  });
+
+  it('CURR-only contextualSpacing leaves gap = prev.spaceAfter (sample-57 case 2: 10/12 → 10)', () => {
+    const content = [
+      para({ styleId: 'CtxPair', spaceAfter: 10 }),
+      para({ styleId: 'CtxPair', contextualSpacing: true, spaceBefore: 12 }),
+    ];
+    // gap = prev.spaceAfter = 10 → total = 20 + 10 + 20 = 50.
+    expect(sumCellContentHeight(content, fullHeight(20), 1)).toBe(50);
+  });
+
+  it('both-toggle asymmetric spacing still drops the whole gap (sample-57 case 3b: 4/12 → 0)', () => {
+    const content = [
+      para({ styleId: 'CtxPair', contextualSpacing: true, spaceAfter: 4 }),
+      para({ styleId: 'CtxPair', contextualSpacing: true, spaceBefore: 12 }),
+    ];
     expect(sumCellContentHeight(content, fullHeight(20), 1)).toBe(40);
   });
 
