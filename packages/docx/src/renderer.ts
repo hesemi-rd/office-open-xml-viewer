@@ -2123,10 +2123,22 @@ export function computePages(
     fontFamilyClasses,
     documentSettings,
   );
-  // ECMA-376 §17.6.20 — whether this pagination lays out a vertical (tbRl)
-  // section (`section` here is the SWAPPED logical geometry, textDirection
-  // preserved). Horizontal sections are untouched (`verticalUpright` false).
+  // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): in a
+  // vertical (tbRl) section — `section` here is the SWAPPED logical geometry,
+  // textDirection preserved — a block table is an UPRIGHT block: its cells lay
+  // out horizontally at the PHYSICAL content width, and it advances the flow by
+  // its PHYSICAL WIDTH (the paint pass's renderTable vertical branch). The
+  // paginator must charge that same footprint. The physical band comes from the
+  // ACTIVE section's geometry (`currentSectionGeom`, reassigned at every break —
+  // TDZ-safe like bodyTopPt above), un-swapped by physicalLayoutSection, so a
+  // vertical section with per-section page geometry stamps the same band the
+  // paint pass derives from its page's `verticalPhys`. Horizontal sections are
+  // untouched (`verticalUpright` false).
   const verticalUpright = isVerticalSection(section);
+  const uprightTableBandPt = (): number => {
+    const phys = physicalLayoutSection({ ...section, ...currentSectionGeom });
+    return phys.pageWidth - phys.marginLeft - phys.marginRight;
+  };
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -2629,6 +2641,13 @@ export function computePages(
       return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, colW(), false);
     }
     if (nxt.type === 'table') {
+      // §17.6.20 + #988 ④ — an upright vertical-section table's flow footprint
+      // is its PHYSICAL WIDTH, not the sum of its row heights.
+      if (verticalUpright) {
+        return resolveColumnWidths(
+          nxt as unknown as DocTable, uprightTableBandPt(), measureState,
+        ).reduce((s, w) => s + w, 0);
+      }
       return estimateTableHeight(measureState, nxt as unknown as DocTable, colW());
     }
     return 0;
@@ -3521,12 +3540,6 @@ export function computePages(
         continue;
       }
 
-      // Tables in a multi-column section are sized to the column width, not the
-      // full content band. Resolve columns + row heights together (one min-content
-      // scan) so both can be stamped for the paint pass (B2 table stage 1b).
-      const tblContentWPt = colW();
-      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
-        computeTablePtLayout(measureState, tbl, tblContentWPt);
       // ECMA-376 §17.11.10 — a footnote referenced from inside a table cell is
       // drawn at the bottom of the page holding the table, so the body area must
       // shrink by the note height just as it does for a body-paragraph reference
@@ -3534,7 +3547,8 @@ export function computePages(
       // their height into BOTH the fit decision and the committed page reserve.
       // (A row-split table reserves on the page where it ends — the same
       // approximation a split footnote-bearing paragraph uses above; §17.11.10's
-      // per-row placement across a split is a documented residual.)
+      // per-row placement across a split is a documented residual.) Shared by
+      // the upright-vertical and horizontal block-table paths below.
       let tblNewRefIds: string[] = [];
       let tblReservePt = 0;
       if (haveFootnotes) {
@@ -3546,6 +3560,51 @@ export function computePages(
         }
         tblReservePt = sumReserve(tblNewRefIds);
       }
+      const commitTableReserve = () => {
+        if (!haveFootnotes || tblNewRefIds.length === 0) return;
+        // Re-filter against the landing page (a split may have advanced pages, so
+        // the separator region is charged only if that page had no note yet).
+        tblNewRefIds = tblNewRefIds.filter((id) => !pageNoteIds.has(id));
+        const addPt = sumReserve(tblNewRefIds);
+        const idx = pages.length - 1;
+        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
+        for (const id of tblNewRefIds) pageNoteIds.add(id);
+      };
+
+      // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): a
+      // block table in a vertical (tbRl) section is an UPRIGHT block — resolve
+      // its layout at the PHYSICAL content width and charge its PHYSICAL WIDTH
+      // as the flow footprint (the paint pass advances by the same tableW, so
+      // pagination and paint agree). Stamp the physical scale-1 layout so the
+      // paint pass's computeTableLayout reuses it at the same physical band.
+      // Rows stack along the physical vertical axis (the column-length axis),
+      // NOT the flow axis, so the table is atomic: no row-splitting across
+      // columns/pages (a follow-up if a fixture ever adjudicates it) — a table
+      // that does not fit the remaining flow advances to the next column/page
+      // whole, and one wider than a full column overflows like a too-tall
+      // horizontal row.
+      if (verticalUpright) {
+        const bandPt = uprightTableBandPt();
+        const { colWidthsPt, rowHeightsPt } =
+          computeTablePtLayout(measureState, tbl, bandPt);
+        const h = colWidthsPt.reduce((s, w) => s + w, 0);
+        const tableEl = { ...tbl, type: 'table' } as PaginatedBodyElement;
+        stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
+        if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+        pushTagged(tableEl);
+        y += h;
+        measureState.y += h;
+        commitTableReserve();
+        prevPara = null;
+        continue;
+      }
+
+      // Tables in a multi-column section are sized to the column width, not the
+      // full content band. Resolve columns + row heights together (one min-content
+      // scan) so both can be stamped for the paint pass (B2 table stage 1b).
+      const tblContentWPt = colW();
+      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
+        computeTablePtLayout(measureState, tbl, tblContentWPt);
       // effContentH() respects any reserve already accumulated on this page; the
       // table's own footnote reserve is subtracted on top so the note clears the
       // table content.
@@ -3562,16 +3621,6 @@ export function computePages(
       const sourceRowIndexByRow = splitRows?.sourceRowIndexByRow;
       const tableEl = { ...pageTable, type: 'table' } as PaginatedBodyElement;
       const h = rowHs.reduce((s, x) => s + x, 0);
-      const commitTableReserve = () => {
-        if (!haveFootnotes || tblNewRefIds.length === 0) return;
-        // Re-filter against the landing page (a split may have advanced pages, so
-        // the separator region is charged only if that page had no note yet).
-        tblNewRefIds = tblNewRefIds.filter((id) => !pageNoteIds.has(id));
-        const addPt = sumReserve(tblNewRefIds);
-        const idx = pages.length - 1;
-        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
-        for (const id of tblNewRefIds) pageNoteIds.add(id);
-      };
       const overflowsCurrentColumn = y + h > tableContentH;
       if (h > tableContentH || (!wantsBalanceBreak(h) && overflowsCurrentColumn)) {
         // Split row-by-row so overflow continues into the next column / page
@@ -12048,6 +12097,42 @@ function renderTable(table: DocTable, state: RenderState): void {
   // path before the normal block layout (which would advance state.y).
   if (table.tblpPr) {
     renderFloatTable(table, state);
+    return;
+  }
+
+  // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): a block
+  // table inside a vertical (tbRl) section renders UPRIGHT — its cells do NOT
+  // inherit the section text direction (cell text is horizontal), a fixed
+  // `tcW` is a PHYSICAL width, and `trHeight` exact/auto clip/grow along the
+  // physical vertical axis. Lay the table out with the PHYSICAL state view and
+  // paint it inside the inverse of the +90° page transform (the same physical
+  // frame the header/footer and anchored-shape paths re-enter). Its placement
+  // in the vertical flow: the physical TOP edge sits at the column axis start
+  // (the logical x band start, contentX ⇒ the physical top content margin —
+  // matching Word GT, both fixture tables pinned at the top margin) and the
+  // block advances the flow by its PHYSICAL WIDTH (logical Δy = tableW; the
+  // physical box spans x ∈ [cssW − y − tableW, cssW − y]). `w:jc`/`w:tblInd`
+  // placement along the flow axis and row-splitting across vertical pages are
+  // un-adjudicated follow-ups; the paginator charges the same tableW footprint
+  // (computePages' vertical table branch) so pagination and paint agree.
+  if (state.verticalPhys) {
+    const cssW = state.verticalPhys.cssWidthPx;
+    const physState = verticalPhysicalContentState(state);
+    const { colWidths, tableW, rowHeights } = computeTableLayout(
+      table, physState.contentW, physState,
+    );
+    const physX = cssW - state.y - tableW;
+    // The column axis start: the LOGICAL band start (state.contentX) images the
+    // physical top of the current column (physical y = logical x under the +90°
+    // page paint) — the top content margin for a single-column body.
+    const physY = state.contentX;
+    const { ctx } = state;
+    ctx.save();
+    ctx.rotate(-Math.PI / 2);
+    ctx.translate(-cssW, 0);
+    drawTableRows(table, colWidths, tableW, rowHeights, physX, physY, physState);
+    ctx.restore();
+    state.y += tableW;
     return;
   }
 
