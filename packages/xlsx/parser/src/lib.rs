@@ -266,6 +266,13 @@ fn parse_sheet_with(
     ws.charts = load_sheet_charts(
         archive,
         &sheet_path,
+        Some(ChartReferenceContext {
+            sheet_xml: &sheet_xml,
+            sheet_name: name,
+            sheets: &shared.sheets,
+            workbook_rels: &rels_doc,
+            shared_strings: &shared.shared_strings,
+        }),
         theme_colors,
         (
             shared.theme_fonts.0.as_deref(),

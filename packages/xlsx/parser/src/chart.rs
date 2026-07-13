@@ -1,8 +1,146 @@
 use crate::types::*;
+use crate::worksheet_reference::{resolve_worksheet_reference, ReferencedCellValue};
 use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
+use std::collections::HashMap;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ChartReferenceContext<'a, 'input> {
+    pub(crate) sheet_xml: &'a str,
+    pub(crate) sheet_name: &'a str,
+    pub(crate) sheets: &'a [SheetMeta],
+    pub(crate) workbook_rels: &'a roxmltree::Document<'input>,
+    pub(crate) shared_strings: &'a [SharedString],
+}
+
+fn reference_formula_without_authored_data(
+    series: roxmltree::Node<'_, '_>,
+    field_name: &str,
+) -> Option<String> {
+    let field = series
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == field_name)?;
+    if field.descendants().any(|node| {
+        node.is_element()
+            && matches!(
+                node.tag_name().name(),
+                "strCache" | "numCache" | "strLit" | "numLit"
+            )
+    }) {
+        return None;
+    }
+    field
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "f")
+        .and_then(|node| node.text())
+        .map(str::trim)
+        .filter(|formula| !formula.is_empty())
+        .map(str::to_owned)
+}
+
+fn text_values(values: Vec<ReferencedCellValue>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| match value {
+            ReferencedCellValue::Text(text) => text,
+            ReferencedCellValue::Number(number) => number.to_string(),
+            ReferencedCellValue::Empty => String::new(),
+        })
+        .collect()
+}
+
+fn numeric_values(values: Vec<ReferencedCellValue>) -> Vec<Option<f64>> {
+    values
+        .into_iter()
+        .map(|value| match value {
+            ReferencedCellValue::Number(number) => Some(number),
+            _ => None,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hydrate_legacy_chart_references(
+    archive: &mut crate::XlsxZip,
+    chart_root: roxmltree::Node<'_, '_>,
+    chart: &mut ooxml_common::chart::ChartModel,
+    sheet_xml: &str,
+    sheet_name: &str,
+    sheets: &[SheetMeta],
+    workbook_rels: &roxmltree::Document<'_>,
+    shared_strings: &[SharedString],
+) {
+    // ECMA-376 chart schemas make CT_StrRef.strCache and CT_NumRef.numCache
+    // optional. XLSX can therefore carry only worksheet formulas; resolve those
+    // here, where workbook sheets are available, without teaching the shared
+    // chart parser about SpreadsheetML packages.
+    let Some(plot_area) = chart_root
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "plotArea")
+    else {
+        return;
+    };
+    let source_series: Vec<_> = plot_area
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "ser")
+        .collect();
+    let mut xml_cache: HashMap<String, Option<String>> = HashMap::new();
+
+    for (source, target) in source_series.into_iter().zip(chart.series.iter_mut()) {
+        if let Some(formula) = reference_formula_without_authored_data(source, "tx") {
+            let values = resolve_worksheet_reference(
+                archive,
+                &formula,
+                sheet_xml,
+                sheet_name,
+                sheets,
+                workbook_rels,
+                shared_strings,
+                &mut xml_cache,
+            );
+            if let Some(name) = text_values(values).into_iter().next() {
+                target.name = name;
+            }
+        }
+
+        if let Some(formula) = reference_formula_without_authored_data(source, "cat") {
+            let categories = text_values(resolve_worksheet_reference(
+                archive,
+                &formula,
+                sheet_xml,
+                sheet_name,
+                sheets,
+                workbook_rels,
+                shared_strings,
+                &mut xml_cache,
+            ));
+            if !categories.is_empty() {
+                if chart.categories.is_empty() {
+                    chart.categories = categories.clone();
+                }
+                target.categories = Some(categories);
+            }
+        }
+
+        if let Some(formula) = reference_formula_without_authored_data(source, "val") {
+            let values = numeric_values(resolve_worksheet_reference(
+                archive,
+                &formula,
+                sheet_xml,
+                sheet_name,
+                sheets,
+                workbook_rels,
+                shared_strings,
+                &mut xml_cache,
+            ));
+            if !values.is_empty() {
+                target.values = values;
+            }
+        }
+    }
+}
 
 /// Read the chartStyle part (`styleN.xml`) associated with a chart part at
 /// `chart_path` (e.g. `xl/charts/chart1.xml`), following that part's own
@@ -25,6 +163,7 @@ fn load_chart_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Optio
 pub(crate) fn load_sheet_charts(
     archive: &mut crate::XlsxZip,
     sheet_path: &str,
+    reference_context: Option<ChartReferenceContext<'_, '_>>,
     theme_colors: &[String],
     theme_fonts: (Option<&str>, Option<&str>),
 ) -> Vec<ChartAnchor> {
@@ -252,9 +391,23 @@ pub(crate) fn load_sheet_charts(
             } else {
                 ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &resolver)
             };
-            let Some(chart) = chart_opt else {
+            let Some(mut chart) = chart_opt else {
                 continue;
             };
+            if !is_chartex {
+                if let Some(context) = reference_context {
+                    hydrate_legacy_chart_references(
+                        archive,
+                        chart_doc.root_element(),
+                        &mut chart,
+                        context.sheet_xml,
+                        context.sheet_name,
+                        context.sheets,
+                        context.workbook_rels,
+                        context.shared_strings,
+                    );
+                }
+            }
 
             all_charts.push(ChartAnchor {
                 from_col,
@@ -537,6 +690,7 @@ mod hidden_tests {
             let charts = load_sheet_charts(
                 &mut archive,
                 "worksheets/sheet1.xml",
+                None,
                 &theme(),
                 (None, None),
             );
@@ -551,11 +705,145 @@ mod hidden_tests {
             let charts = load_sheet_charts(
                 &mut archive,
                 "worksheets/sheet1.xml",
+                None,
                 &theme(),
                 (None, None),
             );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
+    }
+}
+
+#[cfg(test)]
+mod worksheet_reference_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    const DASHBOARD_XML: &str = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+    const DATA_XML: &str = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="C1" t="inlineStr"><is><t>المبيعات</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>أحمد</t></is></c><c r="C2"><v>5000</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>سارة</t></is></c><c r="C3"><v>6200</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>خالد</t></is></c><c r="C4"><v>7500</v></c></row></sheetData></worksheet>"#;
+
+    fn chart_xml(with_cache: bool) -> String {
+        let name_cache = if with_cache {
+            r#"<c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Cached</c:v></c:pt></c:strCache>"#
+        } else {
+            ""
+        };
+        let category_cache = if with_cache {
+            r#"<c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Cached category</c:v></c:pt></c:strCache>"#
+        } else {
+            ""
+        };
+        let value_cache = if with_cache {
+            r#"<c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>99</c:v></c:pt></c:numCache>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>'التقرير'!C1</c:f>{name_cache}</c:strRef></c:tx><c:cat><c:strRef><c:f>'التقرير'!$A$2:$A$4</c:f>{category_cache}</c:strRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f>{value_cache}</c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:barChart><c:catAx><c:axId val="10"/><c:axPos val="b"/></c:catAx><c:valAx><c:axId val="100"/><c:axPos val="l"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+        )
+    }
+
+    fn archive_with_data_sheet() -> crate::XlsxZip {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer
+                .start_file("xl/worksheets/sheet2.xml", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(DATA_XML.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(bytes)).unwrap()
+    }
+
+    fn sheets() -> Vec<SheetMeta> {
+        vec![
+            SheetMeta {
+                name: "Dashboard".into(),
+                sheet_id: 1,
+                r_id: "rDashboard".into(),
+                tab_color: None,
+                visibility: SheetVisibility::Visible,
+            },
+            SheetMeta {
+                name: "التقرير".into(),
+                sheet_id: 2,
+                r_id: "rData".into(),
+                tab_color: None,
+                visibility: SheetVisibility::Visible,
+            },
+        ]
+    }
+
+    fn workbook_rels_xml() -> &'static str {
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDashboard" Target="worksheets/sheet1.xml"/><Relationship Id="rData" Target="worksheets/sheet2.xml"/></Relationships>"#
+    }
+
+    fn parse_model(xml: &str) -> (roxmltree::Document<'_>, ooxml_common::chart::ChartModel) {
+        let document = parse_guarded(xml).unwrap();
+        let theme = vec!["#4472C4".into(); 12];
+        let resolver = XlsxColorResolver {
+            theme_colors: &theme,
+            theme_major_font_latin: None,
+            theme_minor_font_latin: None,
+        };
+        let chart = ooxml_common::chart::parse_chart_part(document.root_element(), &resolver)
+            .expect("chart parses");
+        (document, chart)
+    }
+
+    #[test]
+    fn cacheless_unicode_chart_resolves_cross_sheet_series() {
+        let xml = chart_xml(false);
+        let (document, mut chart) = parse_model(&xml);
+        let mut archive = archive_with_data_sheet();
+        let rels = parse_guarded(workbook_rels_xml()).unwrap();
+
+        hydrate_legacy_chart_references(
+            &mut archive,
+            document.root_element(),
+            &mut chart,
+            DASHBOARD_XML,
+            "Dashboard",
+            &sheets(),
+            &rels,
+            &[],
+        );
+
+        assert_eq!(chart.series[0].name, "المبيعات");
+        assert_eq!(chart.categories, vec!["أحمد", "سارة", "خالد"]);
+        assert_eq!(
+            chart.series[0].categories,
+            Some(vec!["أحمد".into(), "سارة".into(), "خالد".into()]),
+        );
+        assert_eq!(
+            chart.series[0].values,
+            vec![Some(5000.0), Some(6200.0), Some(7500.0)],
+        );
+    }
+
+    #[test]
+    fn authored_chart_caches_take_precedence_over_live_cells() {
+        let xml = chart_xml(true);
+        let (document, mut chart) = parse_model(&xml);
+        let mut archive = archive_with_data_sheet();
+        let rels = parse_guarded(workbook_rels_xml()).unwrap();
+
+        hydrate_legacy_chart_references(
+            &mut archive,
+            document.root_element(),
+            &mut chart,
+            DASHBOARD_XML,
+            "Dashboard",
+            &sheets(),
+            &rels,
+            &[],
+        );
+
+        assert_eq!(chart.series[0].name, "Cached");
+        assert_eq!(chart.categories, vec!["Cached category"]);
+        assert_eq!(chart.series[0].values, vec![Some(99.0)]);
     }
 }
 
@@ -679,6 +967,7 @@ mod chartex_tests {
         let charts = load_sheet_charts(
             &mut archive,
             "worksheets/sheet1.xml",
+            None,
             &theme(),
             (None, None),
         );
