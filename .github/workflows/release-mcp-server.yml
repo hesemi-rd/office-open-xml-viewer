@@ -109,7 +109,7 @@ jobs:
           cat "${{ matrix.asset }}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: staging/*
@@ -132,7 +132,7 @@ jobs:
             echo "name=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
