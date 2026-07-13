@@ -4,19 +4,93 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
-## Unreleased
+## 0.72.0 — 2026-07-13
+
+Minor. A large docx fidelity cycle centered on **vertical writing (縦書き)** and
+**line-layout correctness**: full tbRl/btLr section support with per-section text
+direction, vertical text boxes and vertical ruby, UAX#50 vertical glyph forms
+routed through the font's real `vert` glyphs, and Word-adjudicated docGrid /
+`contextualSpacing` / table pagination. International text gains dictionary line
+breaking for Thai/Lao/Khmer, grapheme-fill breaking for Myanmar/Tibetan, an
+extended UAX#14 no-break predicate, and true kashida justification. A per-font
+advance model closes the Canvas-vs-Word measurement gap, and the viewers add an
+`enableHyperlinks` switch and a shared zoom ladder on the xlsx chrome. ~140 merged
+PRs since 0.71.0.
+
+**docx — vertical writing (縦書き, §17.6.20 / §20.1.10.83)**
+
+- **Full vertical-section support.** Section-level `tbRl` and `btLr` now paginate
+  and paint through a single vertical path with per-section text direction and
+  per-page rotation, mixed vertical + final-horizontal sections, physical-margin
+  horizontal headers/footers (§17.10.1), upright block tables with horizontal
+  cells (§17.4.80), and physical-page anchor resolution (§20.4.3.x).
+- **Vertical text boxes.** `<wps:bodyPr vert>` parses into `ShapeRun.textVert`;
+  `vert` / `vert270` / `eaVert` text boxes render with the correct orientation,
+  including mongolianVert (column left→right), vertical ruby on the right half,
+  upright inline images, and cross-axis autofit grow/shrink for eaVert `spAutoFit`
+  boxes (#988, #1000).
+- **Real vertical glyphs.** The full Tu/Tr repertoire (brackets, long-vowel ー,
+  wave dashes, ：；〖〗) is drawn from the font's OpenType `vert` glyphs when the
+  surface can reach the feature, with measure == paint; the earlier manual
+  rotate/mirror/shear approximations are dropped where real glyphs exist (#969).
+
+**docx — line layout & pagination fidelity**
+
+- **docGrid cell counting (§17.6.5).** Character-grid line pitch is counted from
+  a deterministic design height rather than the substituted font's measured box,
+  fixing environment-dependent and scale-unstable page breaks (untabled East
+  Asian faces use the Word FE 1.3 × em design height); run character-grid
+  participation and the table line-grid compatibility setting are honored.
+- **`contextualSpacing` (§17.3.1.9).** Per-side subtraction semantics between
+  same-style paragraphs, now also honored inside text boxes.
+- **`fitText` (§17.3.2.14).** Parsed as a composite spec and laid out as fit
+  regions, with justify/overlay propagation and RTL residual-pad placement.
+- **Tables.** Over-tall `vMerge` spans split across pages with per-fragment
+  vAlign (§17.4.6/§17.4.85); shared and mid-row page-cut borders resolve as
+  §17.4.66 conflicts drawn at the winning cell extent; cell fragments become the
+  paint authority for sliced pieces.
+- Ruby carries uniform line height into continuations and honors
+  `w:rubyPr/w:hpsRaise` (§17.3.3); vanished-mark paragraphs collapse to zero
+  height (§17.3.2.41); a trailing empty paragraph grazing the bottom margin is
+  kept (#981); numbering markers color from the level and paragraph-mark rPr.
+
+**International text & line breaking**
+
+- **Dictionary line breaking** for Thai/Lao/Khmer, plus breaks at no-space
+  SEA ↔ Latin/CJK/digit transitions and mixed CJK+SEA runs (#959, #960).
+- **Grapheme-fill breaking** for Myanmar and Tibetan (#961).
+- The **UAX#14 no-break pair predicate** is extended beyond LB28 (#966).
+- **Kashida justification** via U+0640 tatweel insertion with a Word-parity
+  insertion-priority model (§17.18.44, #954, #724); `thaiDistribute` spreads
+  across Thai grapheme clusters and Word's SEA justified line fit is matched
+  (#991).
+- RTL fixes: independent `bCs`/`iCs` complex-script toggles (#937), numbered
+  hanging first line at the start indent, and trailing-whitespace placement.
+
+**Fonts & list numbering**
+
+- **Per-font advance model** — condensed-face profiles plus a Canvas-vs-Word
+  bias correction, closing measurement drift for present fonts (#794, #698).
+- **Cross-font metric emulation reverted** (PR #979 "Regime B"): a missing font
+  now falls back to a substitute with natural reflow (page counts may differ from
+  the authoring host, by design); the same-font Canvas-vs-Word bias correction
+  ("Regime A") is kept.
+- `decimalEnclosedCircle` and `aiueo(FullWidth)` list numbering formats.
+
+**pptx**
+
+- Absolute bullet size `buSzPts` (§21.1.2.4.10); bullet sub-properties cascade
+  property-wise, including `buClr` on auto-numbered bullets (§21.1.2.4.4).
+- UAX#50 vertical glyph orientation in the `eaVert` / stacked paths.
+- Duotone applied to picture-fill blips (§20.1.8.23, #889); RTL `tabLst` mirroring
+  (#831).
+
+**xlsx**
+
+- UAX#50 vertical glyph orientation in stacked cells; formula vertical-position
+  fix (#877); shared image cache across sheets (#781).
 
 **Viewers / interaction**
-
-- **XlsxViewer built-in +/- zoom buttons now walk the shared zoom ladder:**
-  the tab-bar steppers step through the IX9 `ZoomableViewer` presets
-  (25 → 33 → 50 → 67 → 75 → 90 → 100 → 110 → 125 → 150 → 175 → 200 → 250 →
-  300 → 400 %), exactly like the contract's `zoomIn()`/`zoomOut()`, instead of
-  the previous linear ±10 %. Behaviour change for existing users of the
-  built-in chrome: from 100 %, "+" still lands on 110 %, but subsequent steps
-  now follow the presets (125 %, 150 %, …) and an off-preset wheel-zoomed scale
-  snaps onto the ladder on the first step. The slider and `setScale` are
-  unchanged. (#842, IX9)
 
 - **Disable hyperlink interactivity:** every hyperlink-supporting viewer
   (`DocxViewer`, `DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`,
@@ -29,6 +103,23 @@ changes that remain compatible with existing API surfaces.
   scattering flag checks through the hit-test/click paths, so the existing
   `onHyperlinkClick` behaviour is unchanged when the option is omitted or `true`.
   (#891, IX1)
+
+- **XlsxViewer built-in +/- zoom buttons now walk the shared zoom ladder:**
+  the tab-bar steppers step through the IX9 `ZoomableViewer` presets
+  (25 → 33 → 50 → 67 → 75 → 90 → 100 → 110 → 125 → 150 → 175 → 200 → 250 →
+  300 → 400 %), exactly like the contract's `zoomIn()`/`zoomOut()`, instead of
+  the previous linear ±10 %. Behaviour change for existing users of the
+  built-in chrome: from 100 %, "+" still lands on 110 %, but subsequent steps
+  now follow the presets (125 %, 150 %, …) and an off-preset wheel-zoomed scale
+  snaps onto the ladder on the first step. The slider and `setScale` are
+  unchanged. (#842, IX9)
+
+- find / hyperlink / selection overlays track the canvas's actual CSS size for
+  responsive layouts.
+
+**Tooling & packaging**
+
+- The markdown package resolves its standalone WASM asset correctly (#730).
 
 ## 0.71.0 — 2026-07-06
 
